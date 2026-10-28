@@ -542,10 +542,7 @@ async def test_download_headers_never_render(cf):
     png = await _call("GET", "/files/SITE_FILES/object", params={"key": 'x/a bé".png'})
     assert png.headers["content-type"] == "image/png"
     disposition = png.headers["content-disposition"]
-    assert (
-        disposition
-        == "attachment; filename=\"a_b_.png\"; filename*=UTF-8''a%20b%C3%A9%22.png"
-    )
+    assert disposition == "attachment; filename=\"a_b_.png\"; filename*=UTF-8''a%20b%C3%A9%22.png"
     missing = await _call("GET", "/files/SITE_FILES/object", params={"key": "nope"})
     assert missing.status_code == 404
 
@@ -914,6 +911,14 @@ async def test_inventory_store_hints_and_dashboard_urls(cf, site_doc):
             "google_sheets",
             {
                 "spreadsheet_url": "https://docs.google.com.evil.com/spreadsheets/d/"
+                + "A" * 44
+                + "/edit"
+            },
+        ),
+        (
+            "google_sheets",
+            {
+                "spreadsheet_url": "https://evil.com/?u=https://docs.google.com/spreadsheets/d/"
                 + "A" * 44
                 + "/edit"
             },

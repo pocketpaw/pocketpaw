@@ -84,13 +84,14 @@ def check_file_key(key: str | None) -> str:
         raise _bad_file_key("Give the file a name.")
     if len(key.encode("utf-8")) > MAX_FILE_KEY_BYTES:
         raise _bad_file_key("That file name is too long (1,024 bytes at most).")
-    if key.startswith("/"):
-        raise _bad_file_key("A file name can't start with “/”.")
     if "\\" in key or _CONTROL.search(key):
         raise _bad_file_key("A file name can't contain “\\” or control characters.")
     for segment in key.split("/"):
         if segment in ("", ".", ".."):
-            raise _bad_file_key("A file name can't have empty, “.” or “..” folders.")
+            # Also refuses a leading "/", a trailing one and "//".
+            raise _bad_file_key(
+                "A file name can't start with “/” or have empty, “.” or “..” folders."
+            )
     return key
 
 

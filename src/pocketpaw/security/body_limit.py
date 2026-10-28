@@ -173,9 +173,8 @@ def _is_site_data_csv(scope: Scope) -> bool:
 
 def _is_site_data_file(scope: Scope) -> bool:
     """True for the Sites Data file upload."""
-    if scope.get("method") != "PUT":
-        return False
-    return bool(_SITE_DATA_FILE_PATH_RE.match(scope.get("path", "") or ""))
+    path = scope.get("path", "") or ""
+    return scope.get("method") == "PUT" and bool(_SITE_DATA_FILE_PATH_RE.match(path))
 
 
 def _is_relay_part(scope: Scope) -> bool:

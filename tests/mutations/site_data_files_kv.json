@@ -1,0 +1,241 @@
+[
+  {
+    "label": "file keys may have . / .. segments",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "        if segment in (\"\", \".\", \"..\"):",
+    "replace": "        if segment in (\"\",):",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_bad_file_keys_are_422_before_any_call"
+    ]
+  },
+  {
+    "label": "file keys may hold backslashes or control characters",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if \"\\\\\" in key or _CONTROL.search(key):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_bad_file_keys_are_422_before_any_call"
+    ]
+  },
+  {
+    "label": "file keys may exceed 1,024 bytes",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if len(key.encode(\"utf-8\")) > MAX_FILE_KEY_BYTES:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_bad_file_keys_are_422_before_any_call"
+    ]
+  },
+  {
+    "label": "the client sends R2 keys with dot segments (httpx resolves them to another URL)",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "    if not key or _dot_segment(key):",
+    "replace": "    if not key:",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client_r2_kv.py::test_r2_keys_with_dot_segments_never_reach_the_wire"
+    ]
+  },
+  {
+    "label": "the client percent-encodes slashes in R2 keys",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "    return quote(key, safe=\"/\")",
+    "replace": "    return quote(key, safe=\"\")",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client_r2_kv.py::test_r2_object_keys_keep_slashes_literal_and_encode_the_rest"
+    ]
+  },
+  {
+    "label": "the client sends . / .. KV keys",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "    if key in (\"\", \".\", \"..\"):",
+    "replace": "    if key == \"\":",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client_r2_kv.py::test_kv_dot_keys_never_reach_the_wire"
+    ]
+  },
+  {
+    "label": "a risky extension keeps its declared type on upload",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if risky_extension(key):\n        return OCTET\n    mime = _base_type(declared)",
+    "replace": "    mime = _base_type(declared)",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_stored_content_type",
+      "tests/ee/sites/test_site_data_files_kv.py::test_move_renames_and_retypes_by_the_new_name"
+    ]
+  },
+  {
+    "label": "an HTML content type is stored as declared",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "        or \"html\" in sub\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_stored_content_type"
+    ]
+  },
+  {
+    "label": "a risky stored type is stored as declared",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if mime == OCTET or risky_type(mime):",
+    "replace": "    if mime == OCTET:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_stored_content_type",
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_stores_risky_files_as_octet_stream"
+    ]
+  },
+  {
+    "label": "downloads are served with any stored type",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if mime in INLINE_TYPES and not risky_extension(key):",
+    "replace": "    if mime:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_download_content_type",
+      "tests/ee/sites/test_site_data_files_kv.py::test_download_headers_never_render"
+    ]
+  },
+  {
+    "label": "downloads drop nosniff",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "    \"X-Content-Type-Options\": \"nosniff\",\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_download_headers_never_render"
+    ]
+  },
+  {
+    "label": "downloads render inline",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    return f\"attachment; filename=",
+    "replace": "    return f\"inline; filename=",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_download_headers_never_render"
+    ]
+  },
+  {
+    "label": "a file binding not on the Site is used as a bucket name",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    bucket = target.r2.get(binding) if isinstance(binding, str) else None",
+    "replace": "    bucket = target.r2.get(binding) or binding",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_a_binding_not_on_the_site_is_404_before_any_call"
+    ]
+  },
+  {
+    "label": "a KV binding not on the Site is used as a namespace id",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    namespace = target.kv.get(binding) if isinstance(binding, str) else None",
+    "replace": "    namespace = target.kv.get(binding) or binding",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_a_binding_not_on_the_site_is_404_before_any_call"
+    ]
+  },
+  {
+    "label": "uploads skip sites.data_write",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "    key: str = Query(..., max_length=4096),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n    __: object = Depends(_WRITE),\n) -> FileObjectOut:",
+    "replace": "    key: str = Query(..., max_length=4096),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n) -> FileObjectOut:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_member_cannot_write",
+      "tests/ee/sites/test_site_data_files_kv.py::test_every_files_kv_route_is_guarded"
+    ]
+  },
+  {
+    "label": "file and KV writes skip the pocket edit check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if edit:\n        return await _editable_target(",
+    "replace": "    if False:\n        return await _editable_target(",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_read_only_pocket_cannot_write"
+    ]
+  },
+  {
+    "label": "a credential-named KV value is returned",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if masked:\n        return out.model_copy(update={\"value\": files_kv.MASK})\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_list_and_masking"
+    ]
+  },
+  {
+    "label": "a credential-named KV key's metadata is listed",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        metadata=None if masked else row.get(\"metadata\"),",
+    "replace": "        metadata=row.get(\"metadata\"),",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_list_and_masking"
+    ]
+  },
+  {
+    "label": "a credential-named KV key can be overwritten",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if files_kv.masked_kv_key(key):\n        raise Forbidden(",
+    "replace": "    if False:\n        raise Forbidden(",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_list_and_masking"
+    ]
+  },
+  {
+    "label": "the file upload body ceiling is dropped",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "        if _is_site_data_file(scope):\n            return _SITE_DATA_FILE_BYTES",
+    "replace": "        if False:\n            return _SITE_DATA_FILE_BYTES",
+    "tests": [
+      "tests/test_body_size_limit.py::TestSiteDataFileUploadCeiling::test_an_oversized_upload_is_refused_before_the_app"
+    ]
+  },
+  {
+    "label": "a streamed upload past 50 MB is spooled anyway",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            if size > limit:\n                raise _too_large()",
+    "replace": "            if False:\n                raise _too_large()",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_streamed_past_the_cap_is_413",
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_over_the_cap_is_413"
+    ]
+  },
+  {
+    "label": "move overwrites an existing file",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not overwrite:\n        found = await cf.r2_list(",
+    "replace": "    if False:\n        found = await cf.r2_list(",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_move_refuses_to_overwrite"
+    ]
+  },
+  {
+    "label": "a KV TTL under 60 s is sent",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if expiration_ttl is not None and expiration_ttl < files_kv.MIN_TTL:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_put_limits"
+    ]
+  },
+  {
+    "label": "file and KV changes are audited as database changes (restore would count them)",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "_STORE_AUDIT_TARGET = \"site_store\"",
+    "replace": "_STORE_AUDIT_TARGET = \"site_data\"",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_stores_risky_files_as_octet_stream"
+    ]
+  },
+  {
+    "label": "a dashboard link is built from an unchecked Airtable id",
+    "file": "ee/pocketpaw_ee/integrations/providers/airtable.py",
+    "find": "        return f\"https://airtable.com/{base_id}\" if _BASE_ID.fullmatch(base_id) else None",
+    "replace": "        return f\"https://airtable.com/{base_id}\" if base_id else None",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_dashboard_url_refuses_bad_ids"
+    ]
+  },
+  {
+    "label": "a dashboard link is built from any Sheets URL",
+    "file": "ee/pocketpaw_ee/integrations/providers/google_sheets.py",
+    "find": "            found = _DASH_SHEET_URL.fullmatch(",
+    "replace": "            found = _DASH_SHEET_URL.search(",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_dashboard_url_refuses_bad_ids"
+    ]
+  }
+]

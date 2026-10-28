@@ -4013,9 +4013,16 @@ answers `available: false` with `reason` `live_on_cloudflare_only` (local mode) 
 
 - `GET /sites/by-pocket/{pocket_id}/data/inventory` →
   `{pocket_id, available, reason, tables: [{name, row_count, editable, read_only_reason}],
-  files: [{binding, label}], kv: [{binding, label}], connectors: [{provider, status,
-  dashboard_url}], can_write, can_restore}`. `can_write` / `can_restore` are the
-  caller's `sites.data_write` / `sites.data_restore` (both admin).
+  files: [{binding, label, writable}], kv: [{binding, label, writable}],
+  connectors: [{provider, status, dashboard_url}], can_write, can_restore}`.
+  `can_write` / `can_restore` are the caller's `sites.data_write` /
+  `sites.data_restore` (both admin); a store is `writable` when `can_write` and it
+  is reachable (not local mode). `dashboard_url` is the provider's own page for the
+  binding, built only from stored non-secret ids checked against a strict pattern:
+  Supabase `https://supabase.com/dashboard/project/<ref>`, Airtable
+  `https://airtable.com/<baseId>`, Google Sheets
+  `https://docs.google.com/spreadsheets/d/<id>`, Notion `https://www.notion.so/<id>`;
+  `null` for every other provider or an id that doesn't check out.
 - `GET /sites/by-pocket/{pocket_id}/data/tables/{table}` →
   `{pocket_id, name, available, reason, columns, key, editable, insertable,
   read_only_reason, row_count}`. `insertable` is false on read-only tables and on
@@ -4263,6 +4270,101 @@ restore, older than 24 hours, or already undone); `409`
 `sites.data_restore_busy` (`error.details.retry_after`) past 3 restores per database
 per 10 minutes, and `sites.data_busy` when the dashboard's Cloudflare budget is
 spent. A restore drops every cached schema and row count of the database.
+
+#### Files (R2) and key-values (KV)
+
+A site's R2 buckets and KV namespaces, addressed by their **binding** name. The
+binding must be one the Site records (the inventory's `files` / `kv`), else `404`
+before any Cloudflare call, so no request can reach another site's bucket or
+namespace. In local mode the list routes answer `available: false` with `reason`
+`live_on_cloudflare_only` and every other route is a `409` `sites.data_unavailable`;
+R2 and KV don't depend on the database being published. Reads need `fabric.read`;
+writes need `sites.data_write` and edit access to the pocket, like row writes. Every
+call spends the dashboard's Cloudflare budget (R2 calls also spend the R2 bucket;
+`429` `sites.data_busy`).
+
+Files:
+
+- `GET …/data/files/{binding}?prefix=&cursor=` → one folder, 200 objects a page:
+
+  ```json
+  {
+    "pocket_id": "pk1", "binding": "SITE_FILES", "available": true, "reason": "",
+    "prefix": "img/", "folders": ["img/thumbs/"],
+    "objects": [{"key": "img/a.png", "name": "a.png", "size": 1204,
+                 "content_type": "image/png", "modified": "2026-10-28T10:00:00Z"}],
+    "cursor": null
+  }
+  ```
+
+  `folders` are full prefixes ending in `/` (R2's `delimited`); pass `cursor` back
+  for the next page (`null` on the last).
+- `GET …/data/files/{binding}/object?key=<key>` → the object, streamed. Always
+  `Content-Disposition: attachment` (ASCII `filename` plus UTF-8 `filename*`),
+  `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
+  sandbox` and `Cache-Control: no-store`. `Content-Type` is the stored type only for
+  PNG / JPEG / GIF / WebP / AVIF / BMP / ICO, PDF and `text/plain` with a harmless
+  extension; everything else (HTML, SVG, XML, JS, unknown) is
+  `application/octet-stream`. `404` when there is no such object.
+- `PUT …/data/files/{binding}/object?key=<key>` with the raw file as the body (at
+  most 50 MB: `413` `sites.data_file_too_large`; the request-body ceiling for this
+  path is 51 MiB) → `{"object": {key, name, size, content_type, modified}}`.
+  Replaces any object at `key`. The stored type is the request's `Content-Type`, else
+  the extension's; a script-capable type (HTML, XHTML, SVG, XML, JavaScript, Flash,
+  multipart …) or extension (`.html`, `.htm`, `.svg`, `.xml`, `.js`, `.mjs`, …) is
+  stored as `application/octet-stream`, so a bucket served publicly can't host a
+  page or a script. Audited as `site_data.file_put`.
+- `POST …/data/files/{binding}/object:move` `{"from": "a.txt", "to": "dir/b.txt",
+  "overwrite": false}` → `{"object"}`. Copy then delete (at most 50 MB); the copy is
+  retyped by its new name. An existing `to` is a `409` `sites.data_file_exists`
+  unless `overwrite: true`. Audited as `site_data.file_move` (`from`, `to`).
+- `DELETE …/data/files/{binding}/object?key=<key>` → `204` (a missing object too).
+  Files can't be restored. Audited as `site_data.file_delete`.
+
+A file key is 1 to 1,024 UTF-8 bytes with no leading `/`, no empty, `.` or `..`
+segment, no backslash and no control character; anything else is a `422`
+`sites.data_bad_file_key`.
+
+Key-values:
+
+- `GET …/data/kv/{binding}/keys?prefix=&cursor=` → `{pocket_id, binding, available,
+  reason, prefix, keys: [{name, expiration, metadata, masked}], cursor}`, 200 keys a
+  page. `expiration` is epoch seconds or `null`.
+- `GET …/data/kv/{binding}/keys/{key}` (the key URL-encoded; it may contain `/`) →
+
+  ```json
+  {
+    "binding": "CACHE", "name": "cfg/site", "value": "{\"plan\": \"pro\"}",
+    "value_base64": null, "size": 15, "is_json": true, "metadata": {"v": 1},
+    "expiration": 1767225600, "masked": false, "too_large": false, "editable": true
+  }
+  ```
+
+  A UTF-8 value up to 1 MB comes back as `value` (`is_json` when it parses as an
+  object or array) and is `editable`; a binary one up to 1 MB as `value_base64`;
+  anything larger has `too_large: true` and neither. `404` for a missing key.
+- `PUT …/data/kv/{binding}/keys/{key}` `{"value": "on", "metadata": {"by": "owner"},
+  "expiration_ttl": 3600}` → `{"key": {name, expiration, metadata, masked},
+  "size": 2, "propagation_note": true}`. A PUT is the whole key: no `metadata`
+  clears it and no `expiration_ttl` means it never expires. `value` at most 1 MB
+  (`413` `sites.data_kv_value_too_large`), `expiration_ttl` at least 60
+  (`422` `sites.data_bad_kv_ttl`), `metadata` at most 1,024 bytes as JSON (`422`
+  `sites.data_bad_kv_metadata`). KV is eventually consistent: a change can take up
+  to a minute to reach the live site, which `propagation_note` tells the UI to say.
+  Audited as `site_data.kv_put` (size, TTL, whether metadata was set).
+- `DELETE …/data/kv/{binding}/keys/{key}` → `204`. Audited as `site_data.kv_delete`.
+
+KV key names are 1 to 512 UTF-8 bytes and not `.` or `..` (`422`
+`sites.data_bad_kv_key`). **Masking:** key names and R2 object names are never
+masked, but a KV key whose NAME looks like a credential (password, passwd, secret,
+token, private key, api key, backup codes, `hash` / `*_hash`; camelCase counts)
+has `masked: true`: its value reads `"•••"`, its metadata is `null`, and a PUT is a
+`403` `sites.data_masked_key` (a DELETE still works). A secret stored under a
+harmless name is not detected.
+
+File and KV audit events use target type `site_store` (target
+`<pocket_id>:<binding>:<key>`), so a database restore's `changes_since` never counts
+them, and carry keys, sizes and types, never values or file contents.
 
 ### Project builds — `/sites/by-pocket/{pocket_id}/builds`
 
