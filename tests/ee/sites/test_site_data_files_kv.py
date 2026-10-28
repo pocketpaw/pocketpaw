@@ -651,6 +651,21 @@ async def test_upload_streamed_past_the_cap_is_413(cf, monkeypatch):
     assert "a.bin" not in cf.r2["bkt-1"]
 
 
+def test_the_kv_and_move_caps_and_the_body_ceilings_agree():
+    from pocketpaw_ee.sites import data_router
+
+    from pocketpaw.security import body_limit
+
+    assert data_router.MAX_KV_BODY == body_limit._SITE_DATA_KV_BYTES
+    assert body_limit._SITE_DATA_MOVE_BYTES == 64 * 1024
+    assert body_limit._SITE_DATA_KV_PATH_RE.match(
+        "/api/v1/sites/by-pocket/pk1/data/kv/CACHE/keys/a%2Fb"
+    )
+    assert body_limit._SITE_DATA_MOVE_PATH_RE.match(
+        "/api/v1/sites/by-pocket/pk1/data/files/SITE_FILES/object:move"
+    )
+
+
 def test_the_file_cap_and_the_body_ceiling_agree():
     from pocketpaw.security import body_limit
 

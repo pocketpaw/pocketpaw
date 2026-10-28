@@ -414,7 +414,46 @@ class TestSiteDataFileUploadCeiling:
         for method, path in [
             ("POST", self._PATH),
             ("PUT", "/api/v1/sites/by-pocket/pk_1/data/files/a/b/object"),
-            ("PUT", "/api/v1/sites/by-pocket/pk_1/data/kv/CACHE/keys/object"),
+            ("PUT", "/api/v1/sites/by-pocket/pk_1/data/files/SITE_FILES/object:move"),
         ]:
             scope = _scope([(b"content-length", b"50")], method=method, path=path)
             assert _status(await _drive(mw, scope, [b"x" * 50])) == 413, f"{method} {path}"
+
+
+class TestSiteDataKvAndMoveCeilings:
+    """The Sites Data KV write (``PUT …/data/kv/{binding}/keys/{key}``, a 1 MB value
+    as JSON) gets 3 MiB, and a file move (``POST …/data/files/{binding}/object:move``,
+    two keys) gets 64 KiB, instead of the global ceiling.
+
+    Mutations: tests/mutations/site_data_files_kv.json.
+    """
+
+    _KV = "/api/v1/sites/by-pocket/pk_1/data/kv/CACHE/keys/a/b"
+    _MOVE = "/api/v1/sites/by-pocket/pk_1/data/files/SITE_FILES/object:move"
+
+    async def _status_for(self, method, path, size, *, max_bytes=10**10):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=max_bytes)
+        scope = _scope([(b"content-length", str(size).encode())], method=method, path=path)
+        return _status(await _drive(mw, scope, [b"x" * size])), app
+
+    async def test_an_oversized_kv_write_is_refused(self):
+        status, app = await self._status_for("PUT", self._KV, 3 * 1024 * 1024 + 1)
+        assert status == 413 and app.called is False
+
+    async def test_a_three_mib_kv_write_reaches_the_app(self):
+        status, _ = await self._status_for("PUT", self._KV, 3 * 1024 * 1024, max_bytes=10)
+        assert status == 200
+
+    async def test_an_oversized_move_is_refused(self):
+        status, app = await self._status_for("POST", self._MOVE, 64 * 1024 + 1)
+        assert status == 413 and app.called is False
+
+    async def test_a_small_move_reaches_the_app(self):
+        status, _ = await self._status_for("POST", self._MOVE, 2048, max_bytes=10)
+        assert status == 200
+
+    async def test_other_methods_keep_the_global_ceiling(self):
+        for method, path in [("GET", self._KV), ("PUT", self._MOVE), ("DELETE", self._KV)]:
+            status, _ = await self._status_for(method, path, 50, max_bytes=10)
+            assert status == 413, f"{method} {path}"
