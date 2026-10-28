@@ -599,9 +599,7 @@ async def test_upload_stores_risky_files_as_octet_stream(cf, audit):
 async def test_download_headers_never_render(cf):
     cf.r2["bkt-1"]["x/page.html"] = (b"<script>1</script>", "text/html")
     cf.r2["bkt-1"]['x/a bé".png'] = (b"\x89PNG", "image/png")
-    html = await _call(
-        "GET", "/files/SITE_FILES/object", role="member", params={"key": "x/page.html"}
-    )
+    html = await _call("GET", "/files/SITE_FILES/object", params={"key": "x/page.html"})
     assert html.status_code == 200 and html.content == b"<script>1</script>"
     assert html.headers["content-type"] == "application/octet-stream"
     assert html.headers["x-content-type-options"] == "nosniff"
@@ -757,7 +755,7 @@ async def test_kv_list_and_masking(cf):
             "session:abc": (b"{}", None, 1767225600),
         }
     )
-    resp = await _call("GET", "/kv/CACHE/keys", role="member")
+    resp = await _call("GET", "/kv/CACHE/keys")
     assert resp.status_code == 200, resp.text
     assert resp.json() == {
         "pocket_id": "pk1",
@@ -767,15 +765,16 @@ async def test_kv_list_and_masking(cf):
         "prefix": "",
         "keys": [
             {"name": "greeting", "expiration": None, "metadata": {"lang": "en"}, "masked": False},
-            {"name": "session:abc", "expiration": 1767225600, "metadata": None, "masked": False},
+            {"name": "session:abc", "expiration": 1767225600, "metadata": None, "masked": True},
             {"name": "stripe_api_key", "expiration": None, "metadata": None, "masked": True},
         ],
         "cursor": None,
     }
-    secret = await _call("GET", "/kv/CACHE/keys/stripe_api_key", role="member")
+    secret = await _call("GET", "/kv/CACHE/keys/stripe_api_key")
     body = secret.json()
     assert body["value"] == files_kv.MASK and body["value_base64"] is None
     assert body["masked"] is True and body["editable"] is False and body["metadata"] is None
+    assert body["size"] is None  # a size hints at the secret's shape
     assert "sk_live" not in secret.text
     refused = await _call("PUT", "/kv/CACHE/keys/stripe_api_key", json={"value": "x"})
     assert refused.status_code == 403 and _code(refused) == "sites.data_masked_key"
@@ -791,7 +790,7 @@ async def test_kv_text_json_binary_and_large_values(cf, monkeypatch):
             "big": (b"x" * 20, None, None),
         }
     )
-    text = await _call("GET", "/kv/CACHE/keys/a%2Fb", role="member")
+    text = await _call("GET", "/kv/CACHE/keys/a%2Fb")
     assert text.status_code == 200, text.text
     assert text.json() == {
         "binding": "CACHE",
@@ -872,7 +871,7 @@ async def test_kv_put_value_over_1_mb_is_413(cf):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("key", [".", "..", "k" * 513])
+@pytest.mark.parametrize("key", [".", "..", "k" * 513, "a/..", "../x", "a/./b"])
 async def test_kv_bad_keys(cf, key):
     resp = await _call("PUT", "/kv/CACHE/keys/" + key.replace(".", "%2E"), json={"value": "x"})
     assert resp.status_code in (404, 422), resp.text
@@ -895,8 +894,89 @@ def test_every_files_kv_route_is_guarded():
         guards = {getattr(d.call, "__name__", "") for d in route.dependant.dependencies}
         assert "require_action_fabric_read" in guards, route.path
         writes = bool(getattr(route, "methods", set()) & {"POST", "PUT", "DELETE"})
-        assert ("require_action_sites_data_write" in guards) == writes, route.path
+        # Reading KV (key names hold session tokens) or a file's contents is a write-level
+        # read; only the file LISTING stays on fabric.read.
+        admin_read = route.path.endswith(("/kv/{binding}/keys", "/keys/{key:path}", "/object"))
+        assert ("require_action_sites_data_write" in guards) == (writes or admin_read), route.path
+        if not (writes or admin_read):
+            assert route.path.endswith("/files/{binding}"), route.path
     assert seen == 9
+
+
+_ADMIN_READS = [
+    ("GET", "/kv/CACHE/keys", {}),
+    ("GET", "/kv/CACHE/keys/greeting", {}),
+    ("GET", "/files/SITE_FILES/object", {"params": {"key": "a.txt"}}),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "path", "kw"), _ADMIN_READS)
+async def test_member_cannot_read_kv_or_download(cf, method, path, kw):
+    cf.kv["ns-1"]["greeting"] = (b"hi", None, None)
+    cf.r2["bkt-1"]["a.txt"] = (b"A", "text/plain")
+    resp = await _call(method, path, role="member", **kw)
+    assert resp.status_code == 403 and _code(resp) == "sites.data_write_forbidden"
+    denied = await _call(method, path, can_edit=False, **kw)
+    assert denied.status_code == 403 and _code(denied) == "pocket.access_denied"
+    assert cf.calls == []
+    ok = await _call(method, path, **kw)
+    assert ok.status_code == 200, ok.text
+
+
+@pytest.mark.asyncio
+async def test_member_can_still_list_files(cf):
+    cf.r2["bkt-1"]["a.txt"] = (b"A", "text/plain")
+    resp = await _call("GET", "/files/SITE_FILES", role="member", can_edit=False)
+    assert resp.status_code == 200 and resp.json()["objects"][0]["key"] == "a.txt"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "stripe_api_key",
+        "password",
+        "credentials",
+        "credential:x",
+        "aws_access_key",
+        "accessKey",
+        "session:9f8e7d",
+        "sessions/abc",
+        "better-auth:session:tok",
+        "jwt_cache",
+        "cookie:abc",
+        "passphrase",
+        "auth:abc",
+        "oauth_state",
+        "refresh_token",
+    ],
+)
+def test_kv_names_that_look_like_credentials_are_masked(name):
+    assert files_kv.masked_kv_key(name) is True
+
+
+@pytest.mark.parametrize("name", ["greeting", "cfg/site", "page_views", "cache:home", "a/b"])
+def test_ordinary_kv_names_are_not_masked(name):
+    assert files_kv.masked_kv_key(name) is False
+
+
+@pytest.mark.asyncio
+async def test_kv_audit_hashes_token_like_or_long_names(cf, audit):
+    cf.kv["ns-1"]["session:tok123"] = (b"{}", None, None)
+    gone = await _call("DELETE", "/kv/CACHE/keys/session%3Atok123")
+    assert gone.status_code == 204
+    long_name = "k" * 65
+    put = await _call("PUT", "/kv/CACHE/keys/" + long_name, json={"value": "x"})
+    assert put.status_code == 200, put.text
+    ok = await _call("PUT", "/kv/CACHE/keys/cfg", json={"value": "x"})
+    assert ok.status_code == 200
+    deleted, long_put, plain = audit[-3:]
+    for event, name in ((deleted, "session:tok123"), (long_put, long_name)):
+        hidden = event["metadata"]["key"]
+        assert hidden.startswith("sha256:") and len(hidden) == len("sha256:") + 16
+        assert event["target_id"] == f"pk1:CACHE:{hidden}"
+        assert name not in repr(event)
+    assert plain["metadata"]["key"] == "cfg" and plain["target_id"] == "pk1:CACHE:cfg"
 
 
 # --------------------------------------------------------------------------- budget
@@ -946,8 +1026,8 @@ async def test_inventory_store_hints_and_dashboard_urls(cf, site_doc):
         inv = await data_service.get_inventory(
             workspace_id="ws1", user_id="u1", pocket_id="pk1", can_write=True
         )
-    assert [(s.binding, s.writable) for s in inv.files] == [("SITE_FILES", True)]
-    assert [(s.binding, s.writable) for s in inv.kv] == [("CACHE", True)]
+    assert [(s.binding, s.writable, s.readable) for s in inv.files] == [("SITE_FILES", True, True)]
+    assert [(s.binding, s.writable, s.readable) for s in inv.kv] == [("CACHE", True, True)]
     assert {c.provider: c.dashboard_url for c in inv.connectors} == {
         "supabase": "https://supabase.com/dashboard/project/abcdefghijklmnopqrst",
         "airtable": "https://airtable.com/appABCDEFGHIJKLMN",
@@ -960,6 +1040,9 @@ async def test_inventory_store_hints_and_dashboard_urls(cf, site_doc):
             workspace_id="ws1", user_id="u1", pocket_id="pk1", can_write=False
         )
     assert [s.writable for s in reader.files + reader.kv] == [False, False]
+    # A reader sees the stores but can't open KV ("Ask an admin"); file listing still works.
+    assert [s.readable for s in reader.files] == [True]
+    assert [s.readable for s in reader.kv] == [False]
 
 
 @pytest.mark.parametrize(

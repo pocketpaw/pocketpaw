@@ -298,6 +298,7 @@ async def get_inventory(
                     )
                 )
     store_writable = can_write and not _store_reason(target)
+    # KV names can be session tokens: only writers open a KV store at all.
     return DataInventory(
         pocket_id=pocket_id,
         available=not target.reason,
@@ -307,7 +308,8 @@ async def get_inventory(
             StoreRef(binding=b, label=_label(b), writable=store_writable) for b in sorted(target.r2)
         ],
         kv=[
-            StoreRef(binding=b, label=_label(b), writable=store_writable) for b in sorted(target.kv)
+            StoreRef(binding=b, label=_label(b), writable=store_writable, readable=can_write)
+            for b in sorted(target.kv)
         ],
         connectors=await _connectors(workspace_id, user_id, pocket_id),
         can_write=can_write,
@@ -1420,7 +1422,8 @@ async def restore_undo(
 # ``sites.data_unavailable``. Writes need edit access to the pocket. Their audit
 # events use their own target type (``site_store``, target ``<pocket>:<binding>:<key>``)
 # so a database restore never counts a file or key change, and carry the key, size and
-# content type, never a value or file bytes.
+# content type, never a value or file bytes (a token-like KV name is hashed). Reading
+# KV and downloading a file need edit access like writes; listing files doesn't.
 
 _STORE_AUDIT_TARGET = "site_store"
 _FILE_PAGE = 200
@@ -1559,7 +1562,7 @@ async def download_file(
         workspace_id=workspace_id,
         user_id=user_id,
         pocket_id=pocket_id,
-        edit=False,
+        edit=True,
         _cloudflare=_cloudflare,
     )
     bucket = _bucket(target, binding)
@@ -1767,7 +1770,7 @@ async def list_kv_keys(
         workspace_id=workspace_id,
         user_id=user_id,
         pocket_id=pocket_id,
-        edit=False,
+        edit=True,
         _cloudflare=_cloudflare,
     )
     namespace = _namespace(target, binding)
@@ -1815,7 +1818,7 @@ async def get_kv_key(
         workspace_id=workspace_id,
         user_id=user_id,
         pocket_id=pocket_id,
-        edit=False,
+        edit=True,
         _cloudflare=_cloudflare,
     )
     namespace = _namespace(target, binding)
@@ -1832,14 +1835,16 @@ async def get_kv_key(
     out = KvKeyValue(
         binding=binding,
         name=key,
-        size=got.size,
         expiration=row.get("expiration"),
         masked=masked,
-        too_large=got.truncated,
     )
     if masked:
         return out.model_copy(update={"value": files_kv.MASK})
-    update: dict[str, Any] = {"metadata": row.get("metadata")}
+    update: dict[str, Any] = {
+        "metadata": row.get("metadata"),
+        "size": got.size,
+        "too_large": got.truncated,
+    }
     if not got.truncated:
         if got.text is not None:
             update.update(value=got.text, is_json=_is_json(got.text), editable=True)
@@ -1899,7 +1904,7 @@ async def put_kv_key(
         user_id,
         "site_data.kv_put",
         binding,
-        key,
+        files_kv.audit_kv_name(key),
         {"size": len(raw), "expiration_ttl": expiration_ttl, "has_metadata": metadata is not None},
     )
     expiration = int(time.time()) + expiration_ttl if expiration_ttl else None
@@ -1928,4 +1933,6 @@ async def delete_kv_key(
     if reason := _store_reason(target):
         raise writes.unavailable(reason)
     await _client(target, _cloudflare).kv_delete(namespace, key)
-    await _store_audit(target, user_id, "site_data.kv_delete", binding, key, {})
+    await _store_audit(
+        target, user_id, "site_data.kv_delete", binding, files_kv.audit_kv_name(key), {}
+    )

@@ -34,7 +34,10 @@
 # ``sites.data_write`` (ADMIN, overridable per member) and refuses a body over
 # 1 MB (413 ``sites.data_body_too_large``; a CSV upload is capped at 5 MB, 413
 # ``sites.data_csv_too_large``). The three restore routes require
-# ``sites.data_restore`` (ADMIN) instead. ``can_write`` /
+# ``sites.data_restore`` (ADMIN) instead. Three reads are guarded like writes
+# (``sites.data_write`` plus edit access): the KV key list, one KV key, and a file
+# download, because KV names can be session tokens and uploads can be private; the
+# file LISTING stays on ``fabric.read``. ``can_write`` /
 # ``can_restore`` on the inventory come from the non-raising checks. ``{key}`` is
 # the row's ``__key`` (or the KV key), URL-encoded; it may contain ``/``. A file
 # upload streams its raw body (413 ``sites.data_file_too_large`` past 50 MB; the body
@@ -458,6 +461,7 @@ async def site_data_file_download(
     key: str = Query(..., max_length=4096),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
 ) -> StreamingResponse:
     """The object as a download (never rendered inline)."""
     got = await data_service.download_file(
@@ -561,6 +565,7 @@ async def site_data_kv_keys(
     cursor: str | None = Query(None, max_length=2048),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
 ) -> KvKeyList:
     """A page of keys (200) under ``prefix``; credential-named keys are ``masked``."""
     return await data_service.list_kv_keys(
@@ -580,6 +585,7 @@ async def site_data_kv_key(
     key: str,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
 ) -> KvKeyValue:
     """One key's value, metadata and expiry."""
     return await data_service.get_kv_key(

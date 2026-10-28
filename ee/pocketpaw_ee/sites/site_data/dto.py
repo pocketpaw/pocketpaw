@@ -65,6 +65,10 @@ class StoreRef(BaseModel):
     label: str
     # The caller may upload / edit / delete here (``can_write`` and a reachable store).
     writable: bool = False
+    # The caller may open the store: always for files (listing; a download needs
+    # ``can_write``), only with ``can_write`` for KV (key names can be session tokens).
+    # False is the UI's "Ask an admin".
+    readable: bool = True
 
 
 class ConnectorRef(BaseModel):
@@ -308,7 +312,7 @@ class KvKeyValue(BaseModel):
     name: str
     value: str | None = None  # UTF-8 text (``MASK`` when masked); null for binary / too large
     value_base64: str | None = None  # a binary value up to 1 MB
-    size: int
+    size: int | None = None  # null when masked
     is_json: bool = False  # ``value`` parses as a JSON object or array
     metadata: Any = None
     expiration: int | None = None

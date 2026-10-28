@@ -15,19 +15,24 @@
 #     type (``download_content_type``); the router always adds ``attachment``,
 #     ``nosniff`` and a sandboxing CSP. ``download_filename`` is the key's last
 #     segment, made header-safe like the CSV export's name.
-#   * KV keys (``check_kv_key``): 1-512 UTF-8 bytes, not "." or "..". A key named like
-#     a credential (``project_data.is_credential``: password, secret, token, api key
-#     …) is masked: its value reads ``MASK``, its metadata is hidden, and it can't be
-#     written here (it can still be deleted). Key names themselves are never masked.
+#   * KV keys (``check_kv_key``): 1-512 UTF-8 bytes, no "." / ".." segment. A key named
+#     like a credential or a session (``KV_CREDENTIAL``: the shared credential words
+#     plus credentials, access key, session, jwt, cookie, passphrase, auth) is masked:
+#     its value reads ``MASK``, its size and metadata are hidden, and it can't be
+#     written here (it can still be deleted). Key names themselves are shown (only to
+#     callers with write access), but an audit row keeps a name only when it isn't
+#     token-like: a masked or over-64-character name is stored as ``sha256:<16 hex>``
+#     (``audit_kv_name``).
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 import posixpath
 import re
 from urllib.parse import quote
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
-from pocketpaw_ee.sites.project_data import MASK, is_credential
+from pocketpaw_ee.sites.project_data import CREDENTIAL, MASK
 
 # Read at call time so tests can shrink them.
 MAX_FILE_BYTES = 50 * 1024 * 1024  # one upload or move through the API (v1)
@@ -38,6 +43,14 @@ MAX_FILE_KEY_BYTES = 1024
 MAX_KV_KEY_BYTES = 512
 
 OCTET = "application/octet-stream"
+# KV names: the shared credential words plus what sites keep sessions and tokens
+# under (better-auth's secondaryStorage writes ``session:<token>``). Matched on the
+# snake_case, lowercased name.
+KV_CREDENTIAL = re.compile(
+    CREDENTIAL.pattern + r"|credentials?|access_?key|session|jwt|cookie|passphrase|auth"
+)
+_CAMEL = re.compile(r"(?<=[a-z0-9])([A-Z])")
+MAX_AUDIT_NAME = 64
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _MIME = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$")
 
@@ -192,7 +205,7 @@ def content_disposition(key: str) -> str:
 
 def check_kv_key(key: str | None) -> str:
     """``key`` when Cloudflare can address it, else 422 ``sites.data_bad_kv_key``."""
-    if not isinstance(key, str) or key in ("", ".", ".."):
+    if not isinstance(key, str) or not key or any(s in (".", "..") for s in key.split("/")):
         raise ValidationError("sites.data_bad_kv_key", "That key name can't be used.")
     if len(key.encode("utf-8")) > MAX_KV_KEY_BYTES:
         raise ValidationError("sites.data_bad_kv_key", "A key name is at most 512 bytes.")
@@ -200,8 +213,17 @@ def check_kv_key(key: str | None) -> str:
 
 
 def masked_kv_key(name: str) -> bool:
-    """Whether a KV key's value is hidden (its name looks like a credential's)."""
-    return is_credential(name)
+    """Whether a KV key's value is hidden (its name looks like a credential's or a
+    session's)."""
+    return bool(KV_CREDENTIAL.search(_CAMEL.sub(r"_\1", name).lower()))
+
+
+def audit_kv_name(name: str) -> str:
+    """``name`` as an audit row may keep it: as is, unless it is masked or longer
+    than 64 characters (likely a token), then ``sha256:`` + 16 hex digits."""
+    if masked_kv_key(name) or len(name) > MAX_AUDIT_NAME:
+        return "sha256:" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    return name
 
 
 __all__ = [
@@ -210,9 +232,11 @@ __all__ = [
     "MAX_KV_EDIT_BYTES",
     "MAX_KV_METADATA_BYTES",
     "MIN_TTL",
+    "KV_CREDENTIAL",
     "OCTET",
     "RISKY_EXTENSIONS",
     "SAFE_TYPES",
+    "audit_kv_name",
     "check_file_key",
     "check_kv_key",
     "check_prefix",
