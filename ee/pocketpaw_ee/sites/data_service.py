@@ -27,26 +27,14 @@
 #
 # Restore (``restore_status`` / ``restore`` / ``restore_undo``) needs edit access
 # here and ``sites.data_restore`` in the router; a ``production`` D1, a moment inside
-# ``PAW_CF_D1_TT_DAYS`` (default 30), ``confirm_name`` equal to the site's name (case
-# and spaces ignored), and at most 3 restores per database per 10 minutes. Each
-# restore is audited (target ``<pocket>``) with its ``previous_bookmark`` and database
-# id. Instead of ``at`` a restore can name a ``restore_point``: only one this
-# site's own import / bulk delete event recorded for this database inside the
-# window. Undo takes the confirm name too and only the newest restore event's bookmark,
-# within 24 h and once (a ``budget.claim_once`` marker). A moment before the
-# database's ``created_at`` or its history (Cloudflare 7400) is out of window. A
-# restore drops every cache of the database.
+# ``PAW_CF_D1_TT_DAYS`` (default 30) and after the database's history begins,
+# ``confirm_name`` equal to the site's name, at most 3 restores per database per 10
+# minutes. Instead of ``at`` it can name a ``restore_point`` one of this site's own
+# import / bulk delete / console write events recorded. Undo takes only the newest
+# restore's bookmark, within 24 h and once. A restore drops every cache of the database.
 #
-# SQL console (``run_sql``): ``site_data.console`` classifies the one statement and
-# builds what D1 runs (credentials masked at the source). Reads need what reading rows
-# needs; writes need ``sites.data_write`` (passed in by the router), edit access, a
-# ``confirm`` (``unbounded`` for an UPDATE / DELETE with no WHERE), and take a restore
-# point first. One run per user at a time (``budget.claim_once``, 35 s TTL, 429
-# ``sites.data_sql_busy``); D1's own error is 422 ``sites.data_sql_error`` with ids
-# stripped. Every run that reaches D1 records ``site_data.sql`` (target ``<pocket>``,
-# the SQL text cut at 2 KB, changes, restore point, database id), so a console
-# write's restore point is one ``restore`` accepts. ``get_schema`` is the read-only
-# schema view: columns, indexes (``PRAGMA index_list`` / ``index_info``), CREATE text.
+# SQL console (``run_sql``, ``get_schema``): ``site_data.console`` decides what one
+# statement may do and builds what D1 runs; the section header below has the rules.
 #
 # Files (R2) and key-values (KV): see the section header below. A store is named by a
 # binding the Site doc records (else 404), files are typed so they can't run as a page
@@ -1020,7 +1008,13 @@ async def import_commit(
 
 
 async def _audit_event(
-    target: DataTarget, user_id: str, action: str, target_id: str, metadata: dict[str, Any]
+    target: DataTarget,
+    user_id: str,
+    action: str,
+    target_id: str,
+    metadata: dict[str, Any],
+    *,
+    target_type: str = _AUDIT_TARGET,
 ) -> None:
     from pocketpaw_ee.cloud.audit import service as audit_service
 
@@ -1029,7 +1023,7 @@ async def _audit_event(
             target.workspace_id,
             user_id,
             action,
-            target_type=_AUDIT_TARGET,
+            target_type=target_type,
             target_id=target_id,
             metadata=metadata,
         )
@@ -2002,6 +1996,17 @@ async def delete_kv_key(
 
 
 # --------------------------------------------------------------------------- SQL console
+#
+# Reads need what reading rows needs; writes need ``sites.data_write`` (passed in by
+# the router), edit access, a ``confirm`` (``unbounded`` for an UPDATE / DELETE with no
+# WHERE), and take a restore point first. One run per user at a time
+# (``budget.claim_once``, 35 s TTL, 429 ``sites.data_sql_busy``); D1's own error is 422
+# ``sites.data_sql_error`` with ids stripped. Every run that reaches D1 records
+# ``site_data.sql`` (target ``<pocket>``, the SQL cut at 2 KB, changes, restore point,
+# database id). A write that landed uses target type ``site_data`` (its restore point
+# is one ``restore`` accepts, and it counts in ``changes_since``); reads and failed
+# runs use ``site_query``. ``get_schema`` is the read-only schema view: columns,
+# indexes (``PRAGMA index_list`` / ``index_info``), CREATE text.
 
 _SQL_TTL_S = 35  # a little over D1's 30 s statement timeout
 
@@ -2093,6 +2098,7 @@ async def run_sql(
         stmt,
         sql,
         restore_point,
+        changed=stmt.kind == "write",
         changes=changes,
         rows=len(rows),
         truncated=truncated,
@@ -2110,12 +2116,20 @@ async def run_sql(
     )
 
 
+# Console reads and failed statements change nothing, so they are recorded under their
+# own target type: a restore's ``changes_since`` (``site_data`` events) never counts
+# them, and their bookmark is never one ``restore`` accepts.
+_SQL_QUERY_TARGET = "site_query"
+
+
 async def _sql_audit(
     target: DataTarget,
     user_id: str,
     stmt: console.Statement,
     sql: str,
     restore_point: str | None,
+    *,
+    changed: bool = False,
     **extra: Any,
 ) -> None:
     await _audit_event(
@@ -2131,6 +2145,7 @@ async def _sql_audit(
             "database_id": target.d1_id,
             **extra,
         },
+        target_type=_AUDIT_TARGET if changed else _SQL_QUERY_TARGET,
     )
 
 

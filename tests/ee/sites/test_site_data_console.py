@@ -329,6 +329,15 @@ CASES = [
     ("SELECT 'never closed", ERROR),
     ("SELECT 1\x00; DROP TABLE notes", ERROR),
     ("SELECT 1 # 2", ERROR),
+    # comment and whitespace tricks
+    ("SELECT 1 /*/ DROP TABLE notes /*/", READ),
+    ("SELECT 1 -- \r DROP TABLE notes", READ),
+    ("SELECT 1 \u2028 ; DROP TABLE notes", MULTI),
+    ("SELECT 1 \\; DROP TABLE notes", MULTI),
+    ("SELECT * FROM (WITH t AS (SELECT 1) SELECT * FROM t) WHERE (CREATE TRIGGER x)", DDL),
+    ("WITH t AS (SELECT 1) SELECT * FROM t; CREATE TRIGGER x BEGIN SELECT 1; END", MULTI),
+    ("SeLeCt 1", READ),
+    ("INSERT INTO notes (body) VALUES ('x') RETURNING (SELECT 1 FROM notes)", WRITE),
 ]
 
 
@@ -394,6 +403,26 @@ async def _schema(cf: SqliteD1) -> d1.Schema:
             422,
         ),
         ("SELECT account FROM customers", "sites.data_sql_ambiguous", 422),
+        (
+            "INSERT INTO notes (body) VALUES ((SELECT password FROM account))",
+            "sites.data_read_only",
+            403,
+        ),
+        (
+            "INSERT INTO api_clients (id, label) SELECT id + 10, api_key FROM api_clients",
+            "sites.data_sql_masked_column",
+            422,
+        ),
+        (
+            "UPDATE api_clients SET label = 'x' RETURNING upper(api_key)",
+            "sites.data_sql_masked_column",
+            422,
+        ),
+        (
+            "DELETE FROM notes WHERE body IN (SELECT id FROM user_sessions)",
+            "sites.data_read_only",
+            403,
+        ),
     ],
 )
 async def test_plan_refusals(db, sql, code, status):
@@ -525,6 +554,15 @@ _LEAKS = [
     'SELECT "twoFactorSecret" AS s FROM "user"',
     "VALUES ((SELECT password FROM account LIMIT 1))",
     "SELECT (SELECT password FROM account WHERE id = 'a1') AS p",
+    "SELECT * FROM notes WHERE tag IN (SELECT token FROM session) OR 1",
+    "SELECT * FROM notes NATURAL JOIN account",
+    'SELECT * FROM notes LEFT OUTER JOIN "main"."account" ON 1',
+    'SELECT * FROM notes AS "x", account',
+    "SELECT * FROM notes, (account a)",
+    "SELECT * FROM json_each((SELECT json_group_array(password) FROM account))",
+    "SELECT * FROM (SELECT 1), account",
+    "EXPLAIN SELECT password FROM account",
+    "SELECT * FROM account ORDER BY 3",
 ]
 
 
@@ -678,11 +716,42 @@ async def test_every_run_is_audited(site_doc, db, audit):
     assert write["metadata"]["restore_point"] == res.restore_point
     assert write["metadata"]["database_id"] == _DB
     assert len(events[2]["metadata"]["sql"]) == 2_048
+    # Reads change nothing: they stay out of a restore's "changes since" count.
+    assert [e["target_type"] for e in events] == ["site_query", "site_data", "site_query"]
+    await _raises(
+        "sites.data_sql_error", 422, _run(db, "DELETE FROM notes WHERE nope = 1", confirm="write")
+    )
+    assert audit[-1]["target_type"] == "site_query"  # a failed write changed nothing
 
 
 @pytest.mark.asyncio
-async def test_a_console_restore_point_is_one_restore_accepts(site_doc, db, audit):
-    assert "site_data.sql" in data_service._RESTORE_POINT_ACTIONS
+async def test_console_reads_do_not_count_as_changes(site_doc, db, beanie_test_db):
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    since = datetime.now(UTC).replace(microsecond=0)
+    await _run(db, "SELECT 1")
+    await _run(db, "DELETE FROM notes WHERE tag = 'a'", confirm="write")
+    count = await audit_service.count_target_events(
+        "ws1", target_type="site_data", target_root="pk1", since=since, action_prefix="site_data."
+    )
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_console_restore_point_is_one_restore_accepts(site_doc, db, beanie_test_db):
+    """The audit event a console write records lets restore name its bookmark."""
+    res = await _run(db, "DELETE FROM notes", confirm="unbounded")
+    assert db.rows("SELECT count(*) AS n FROM notes") == [{"n": 0}]
+    with _pocket():
+        await data_service.restore(
+            workspace_id="ws1",
+            user_id="u-admin",
+            pocket_id="pk1",
+            restore_point=res.restore_point,
+            confirm_name="Shop",
+            _cloudflare=db,
+        )
+    assert db.rows("SELECT count(*) AS n FROM notes") == [{"n": 2}]
 
 
 @pytest.mark.asyncio
@@ -915,3 +984,24 @@ async def test_client_raw_endpoint_wire_shape():
     with pytest.raises(CloudError) as exc:
         await cf.query_d1_raw(database_id=_DB, sql="bad")
     assert exc.value.code == "sites.cloudflare_error" and "near bad" in exc.value.message
+
+
+def test_deep_nesting_classifies_in_linear_time():
+    import time
+
+    sql = "SELECT " + "abs(" * 3_000 + "1" + ")" * 3_000
+    started = time.monotonic()
+    assert console.classify(sql).kind == "read"
+    assert time.monotonic() - started < 2.0
+
+
+@pytest.mark.asyncio
+async def test_sqlite_folds_only_ascii_case(db):
+    """SQLite treats "\u00c4" and "\u00e4" as different names; so does the planner."""
+    db.execute('CREATE TABLE "\u00c4" (id INTEGER PRIMARY KEY, secret TEXT)')
+    db.execute('CREATE TABLE "\u00e4" (id INTEGER PRIMARY KEY, label TEXT)')
+    schema = await _schema(db)
+    p = console.plan(console.classify('SELECT secret AS s FROM "\u00c4"'), schema)
+    assert MASK in p.sql
+    p = console.plan(console.classify('SELECT label FROM "\u00e4"'), schema)
+    assert MASK not in p.sql

@@ -161,7 +161,15 @@ class Token:
     def name(self) -> str:
         """The identifier this token spells, lower case (words, quoted names, and
         strings, which SQLite accepts as a table name in FROM)."""
-        return (self.text if self.type == "word" else self.value).lower()
+        return fold(self.text if self.type == "word" else self.value)
+
+
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def fold(name: str) -> str:
+    """``name`` lower-cased the way SQLite compares names: ASCII letters only."""
+    return name.translate(_ASCII_LOWER)
 
 
 def _id_char(ch: str) -> bool:
@@ -467,16 +475,21 @@ def _track(toks: list[Token], verb: str, verb_index: int) -> tuple[list[Ref], se
         elif t.type == "comma" and in_from.get(depth):
             expect = "source"
         i += 1
-    # CTE definitions: ``name AS (`` or ``name (cols) AS (``.
+    # CTE definitions: ``name AS (`` or ``name (cols) AS (``. Matching parentheses are
+    # found once, so a deeply nested statement stays linear.
+    close: dict[int, int] = {}
+    stack: list[int] = []
+    for j, t in enumerate(toks):
+        if t.type == "lparen":
+            stack.append(j)
+        elif t.type == "rparen" and stack:
+            close[stack.pop()] = j
     for j, t in enumerate(toks):
         if not t.name_like:
             continue
         k = j + 1
-        if _at(toks, k) is not None and toks[k].type == "lparen":
-            try:
-                k = _skip_group(toks, k)
-            except ValidationError:
-                continue
+        if k in close:
+            k = close[k] + 1
         if _is(_at(toks, k), "AS"):
             nxt = _at(toks, k + 1)
             if _is(nxt, "MATERIALIZED") or _is(nxt, "NOT") or (nxt and nxt.type == "lparen"):
@@ -606,7 +619,7 @@ def _masked_source(table: d1.Table) -> str:
 
 def plan(stmt: Statement, schema: d1.Schema) -> Plan:
     """The SQL D1 runs for ``stmt`` against this database, or the refusal."""
-    by_name = {name.lower(): t for name, t in schema.tables.items()}
+    by_name = {fold(name): t for name, t in schema.tables.items()}
     toks = list(stmt.tokens)
     for ref in stmt.refs:
         if ref.name not in by_name and ref.name not in stmt.ctes:
@@ -646,14 +659,14 @@ def plan(stmt: Statement, schema: d1.Schema) -> Plan:
 
     mask: set[str] = set()
     for t in tables:
-        mask |= {c.lower() for c in t.masked}
+        mask |= {c.lower() for c in t.masked}  # wider than SQLite's folding: masks more
 
     if stmt.kind == "write":
         for ref in stmt.refs:
             if ref.role != "target" or ref.name not in by_name:
                 continue
             target = by_name[ref.name]
-            hidden = {c.lower() for c in target.masked}
+            hidden = {fold(c) for c in target.masked}
             if not hidden:
                 continue
             for j, t in enumerate(toks):
@@ -720,17 +733,14 @@ def plan(stmt: Statement, schema: d1.Schema) -> Plan:
 
 def labels(columns: list[str]) -> list[str]:
     """Result column names, a repeated one suffixed ``:1``, ``:2`` … as SQLite does."""
-    seen: dict[str, int] = {}
+    used: set[str] = set()
     out: list[str] = []
     for c in columns:
-        name = str(c)
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}:{seen[name]}"
-            while name in seen:
-                seen[name.rsplit(":", 1)[0]] += 1
-                name = f"{name.rsplit(':', 1)[0]}:{seen[name.rsplit(':', 1)[0]]}"
-        seen.setdefault(name, 0)
+        name, k = str(c), 0
+        while name in used:
+            k += 1
+            name = f"{c}:{k}"
+        used.add(name)
         out.append(name)
     return out
 
