@@ -676,12 +676,15 @@ def build_page_query(
     offset: int | None = 0,
     spec_fields: dict[str, str] | None = None,
     max_limit: int = LIMIT_MAX,
+    keyset: bool = False,
+    after_key: Any = None,
 ) -> PageQuery:
     """The rows-page SELECT and its capped COUNT for ``table`` (TDD §5.3). Raises a
     422 for a column not in the schema, a masked column, a bad operator or value,
     or out-of-range paging, before any SQL is built. ``max_limit`` is the server's
     own page size cap (the CSV export reads 500 at a time); callers never pass a
-    client's value there."""
+    client's value there. ``keyset`` (default order only, a table with a key) pages
+    by ``key < after_key`` (``>`` ascending) instead of OFFSET."""
     spec_fields = spec_fields or {}
     limit = LIMIT_DEFAULT if limit is None else limit
     offset = offset or 0
@@ -737,6 +740,12 @@ def build_page_query(
         else:
             where.append("0")  # nothing searchable: a search matches no row
 
+    if keyset and (sort or not table.key_sql):
+        raise _bad("bad_paging", "Key paging needs the table's key and its default order.")
+    if keyset and after_key is not None:
+        newest_first = (direction or "desc") == "desc"
+        where.append(f"{table.key_sql} {'<' if newest_first else '>'} ?")
+        params.append(after_key)
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     # Default order is newest first; an explicit sort defaults to ascending.
     descending = direction == "desc" or (direction is None and not sort)

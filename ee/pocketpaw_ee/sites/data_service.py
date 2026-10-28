@@ -20,7 +20,9 @@
 # import one ``site_data.import`` (counts and mapping, no values, target
 # ``<pocket>:<table>``); an audit failure never fails the write. A bulk delete and an
 # import take a Time Travel bookmark first and return it as ``restore_point``
-# (null when the database has none). Export reads 500 rows a call, credentials left out.
+# (null when the database has none). An import claims its upload (imports once) and
+# reports what landed if it stops; export pages by key, credentials left out. One
+# import or export runs per workspace at a time (429 ``sites.data_job_busy``).
 #
 # Restore (``restore_status`` / ``restore`` / ``restore_undo``) needs edit access
 # here and ``sites.data_restore`` in the router; a ``production`` D1, a moment inside
@@ -34,7 +36,8 @@
 #
 # Every Cloudflare call goes through ``site_data.budget`` (429 ``sites.data_busy``)
 # on the data-token client (``service._data_cf_client``); long imports and exports
-# wait out a spent budget a few times (``_patient``).
+# wait out their own workspace's spent minute a few times, never the global bucket
+# (``_patient``).
 from __future__ import annotations
 
 import asyncio
@@ -46,7 +49,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from pocketpaw_ee.cloud._core.errors import CloudError, Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    Forbidden,
+    NotFound,
+    RateLimited,
+    ValidationError,
+)
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.project_data import auth_table, masked_columns
 from pocketpaw_ee.sites.site_data import budget, csv_io, d1, writes
@@ -670,6 +679,7 @@ async def row_history(
 
 _BUSY_RETRIES = 3
 _BUSY_MAX_SLEEP_S = 30
+_JOB_TTL_S = 15 * 60  # a crashed job's slot frees itself
 
 
 async def _restore_point(w: _Writable) -> str | None:
@@ -692,7 +702,9 @@ async def _patient(call: Any) -> Any:
         try:
             return await call()
         except budget.DataBusy as exc:
-            if attempt == _BUSY_RETRIES:
+            # Only this workspace's own minute is worth waiting out; a spent global
+            # bucket is everyone's, so a long job gives way at once.
+            if attempt == _BUSY_RETRIES or exc.scope != "workspace":
                 raise
             wait = int((exc.details or {}).get("retry_after") or 1)
             await asyncio.sleep(min(max(wait, 1), _BUSY_MAX_SLEEP_S))
@@ -781,6 +793,79 @@ _BATCH_REFUSED = (
 )
 
 
+@dataclass
+class _Written:
+    inserted: int = 0
+    updated: int = 0
+    failed: dict[int, str] = field(default_factory=dict)
+    failed_count: int = 0
+    stopped: bool = False
+
+    def fail(self, rows: Any, message: str) -> None:
+        for row in rows:
+            self.failed.setdefault(row.number, message)
+            self.failed_count += 1
+
+
+async def _write_rows(w: _Writable, rows: list[csv_io.Row], mode: str) -> _Written:
+    """Write ``rows`` in D1 batches. A batch the database refuses fails its rows and
+    the rest go on; anything else (a spent budget, a dropped connection) stops the
+    import there and fails every row not yet sent."""
+    out = _Written()
+    key = csv_io.upsert_key(w.table) if mode == "upsert" else None
+    seen: set[Any] = set()
+    pending = csv_io.batches(csv_io.plan(w.table, rows, mode))
+    for index, batch in enumerate(pending):
+        statements = [st for chunk in batch for st in chunk.statements]
+        try:
+            results = await _patient(
+                lambda st=statements: w.cf.query_d1_batch(database_id=w.target.d1_id, statements=st)
+            )
+        except ValidationError as exc:
+            if exc.code != "sites.cloudflare_error":
+                raise
+            out.fail((r for chunk in batch for r in chunk.rows), _BATCH_REFUSED)
+            continue
+        except Exception as exc:  # noqa: BLE001 — report what landed rather than a 500
+            busy = isinstance(exc, budget.DataBusy)
+            if not busy:
+                logger.warning("site_data: import into %s stopped", w.table.name, exc_info=True)
+            message = (
+                "Not imported: the site's data is busy."
+                if busy
+                else "Not imported: the import stopped."
+            )
+            out.fail((r for rest in pending[index:] for chunk in rest for r in chunk.rows), message)
+            out.stopped = True
+            break
+        at = 0
+        for chunk in batch:
+            existing: set[Any] = set()
+            if len(chunk.statements) == 2:
+                existing = {r.get("__key") for r in results[at]}
+            at += len(chunk.statements)
+            for row in chunk.rows:
+                k = row.values.get(key) if key else None
+                if k is not None and (k in existing or k in seen):
+                    out.updated += 1
+                else:
+                    out.inserted += 1
+                if k is not None:
+                    seen.add(k)
+    return out
+
+
+async def _claim_job(workspace_id: str) -> str:
+    """The workspace's one import / export slot, or 429 ``sites.data_job_busy``."""
+    slot = f"site_data:job:{workspace_id or '-'}"
+    if not await budget.claim_once(slot, _JOB_TTL_S):
+        raise RateLimited(
+            "sites.data_job_busy",
+            "Another import or export is running for this workspace. Try again when it ends.",
+        )
+    return slot
+
+
 async def import_commit(
     *,
     workspace_id: str,
@@ -794,9 +879,10 @@ async def import_commit(
 ) -> ImportResult:
     """Write a previewed upload's rows under ``mapping``: ``insert`` adds them,
     ``upsert`` updates the rows whose key matches and adds the rest. Each D1 batch
-    (at most 50 statements) lands whole or not at all; a refused batch fails its rows
-    and the rest go on. A restore point is taken before the first write.
-    ``POST .../data/tables/{table}/import``."""
+    (at most 50 statements) lands whole or not at all. The upload is claimed first,
+    so it imports once; it is put back only when the commit is refused before any
+    write. A restore point is taken before the first write. One import or export
+    runs per workspace at a time. ``POST .../data/tables/{table}/import``."""
     w = await _importable(
         workspace_id=workspace_id,
         user_id=user_id,
@@ -804,65 +890,33 @@ async def import_commit(
         table=table,
         _cloudflare=_cloudflare,
     )
-    filename, text = await csv_io.load_upload(
-        upload_id,
-        workspace_id=w.target.workspace_id,
-        pocket_id=pocket_id,
-        user_id=user_id,
-        table=w.table.name,
-    )
-    parsed = csv_io.parse(text)
-    mapped = csv_io.check_mapping(w.table, w.kinds, parsed.header, mapping, mode)
-    formats = await _formats(w, list(mapped.values()))
-    rows, _errors, _bad = csv_io.check_rows(w.table, w.kinds, parsed, mapped, formats)
-    failed: dict[int, str] = {}
-    for e in _errors:
-        failed.setdefault(e.row, f"{e.column}: {e.error}" if e.column else e.error)
-    failed_count = _bad
-
-    restore_point = await _restore_point(w) if rows else None
-    key = csv_io.upsert_key(w.table) if mode == "upsert" else None
-    inserted = updated = 0
-    seen: set[Any] = set()
-    pending = csv_io.batches(csv_io.plan(w.table, rows, mode))
-    for index, batch in enumerate(pending):
-        statements = [st for chunk in batch for st in chunk.statements]
+    slot = await _claim_job(w.target.workspace_id)
+    try:
+        claimed = await csv_io.claim_upload(
+            upload_id,
+            workspace_id=w.target.workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+            table=w.table.name,
+        )
         try:
-            results = await _patient(
-                lambda st=statements: w.cf.query_d1_batch(database_id=w.target.d1_id, statements=st)
-            )
-        except budget.DataBusy:
-            for rest in pending[index:]:
-                for chunk in rest:
-                    for row in chunk.rows:
-                        failed.setdefault(row.number, "Not imported: the site's data is busy.")
-                        failed_count += 1
-            break
-        except ValidationError as exc:
-            if exc.code != "sites.cloudflare_error":
-                raise
-            for chunk in batch:
-                for row in chunk.rows:
-                    failed.setdefault(row.number, _BATCH_REFUSED)
-                    failed_count += 1
-            continue
-        at = 0
-        for chunk in batch:
-            existing: set[Any] = set()
-            if len(chunk.statements) == 2:
-                existing = {r.get("__key") for r in results[at]}
-            at += len(chunk.statements)
-            for row in chunk.rows:
-                k = row.values.get(key) if key else None
-                if k is not None and (k in existing or k in seen):
-                    updated += 1
-                else:
-                    inserted += 1
-                if k is not None:
-                    seen.add(k)
+            parsed = csv_io.parse(claimed.text)
+            mapped = csv_io.check_mapping(w.table, w.kinds, parsed.header, mapping, mode)
+            formats = await _formats(w, list(mapped.values()))
+            rows, errors, bad = csv_io.check_rows(w.table, w.kinds, parsed, mapped, formats)
+            restore_point = await _restore_point(w) if rows else None
+        except CloudError:
+            await csv_io.put_back(claimed)  # nothing was written: the owner can fix and retry
+            raise
+        written = await _write_rows(w, rows, mode)
+    finally:
+        await budget.release(slot)
 
+    failed = dict(written.failed)
+    for e in errors:
+        failed.setdefault(e.row, f"{e.column}: {e.error}" if e.column else e.error)
+    failed_count = bad + written.failed_count
     d1.forget_counts(w.target.d1_id)
-    await csv_io.drop_upload(upload_id)
     await _audit_event(
         w.target,
         user_id,
@@ -871,22 +925,24 @@ async def import_commit(
         {
             "table": w.table.name,
             "mode": mode,
-            "filename": filename,
+            "filename": claimed.filename,
             "mapping": mapped,
             "rows": len(parsed.rows),
-            "inserted": inserted,
-            "updated": updated,
+            "inserted": written.inserted,
+            "updated": written.updated,
             "failed": failed_count,
+            "stopped": written.stopped,
             "restore_point": restore_point,
         },
     )
     return ImportResult(
-        inserted=inserted,
-        updated=updated,
+        inserted=written.inserted,
+        updated=written.updated,
         failed=[ImportFailure(row=n, error=m) for n, m in sorted(failed.items())][
             : csv_io.MAX_ERRORS
         ],
         failed_count=failed_count,
+        stopped=written.stopped,
         restore_point=restore_point,
     )
 
@@ -925,7 +981,9 @@ async def export_csv(
     _cloudflare: Any | None = None,
 ) -> tuple[str, AsyncIterator[bytes]]:
     """``(filename, body)``: the rows under the search, filters and sort as CSV,
-    500 per D1 read, at most 100,000, credential columns left out. The first page is
+    500 per D1 read, credential columns left out: at most 100,000 rows paged by key
+    in the default order, 20,000 under an owner-chosen sort. Holds the workspace's
+    one import / export slot until the body is done. The first page is
     read before this returns, so a bad query or a busy budget is a clean error.
     ``GET .../data/tables/{table}/export.csv``."""
     filters = d1.parse_filters(f)
@@ -951,40 +1009,61 @@ async def export_csv(
 
     fields = _spec_fields(target.spec_object(table))
     columns = csv_io.export_columns(t)
+    # Page by key (WHERE key < last) when the owner kept the default order: every
+    # page costs the same. An owner-chosen sort pages by OFFSET, capped lower.
+    key_col = t.column(t.key) if t.key and t.key != "rowid" else None
+    keyset = (
+        not sort
+        and t.key_sql is not None
+        and (t.key == "rowid" or t.key == t.rowid_alias or bool(key_col and key_col.notnull))
+    )
+    cap = csv_io.EXPORT_MAX_ROWS if keyset else csv_io.EXPORT_MAX_SORTED_ROWS
+    page_size = csv_io.EXPORT_PAGE
 
-    def _query(offset: int) -> d1.PageQuery:
+    def _query(offset: int, after: Any) -> d1.PageQuery:
         return d1.build_page_query(
             t,
             q=q,
             sort=sort,
             direction=dir,
             filters=filters,
-            limit=csv_io.EXPORT_PAGE,
+            limit=page_size,
             offset=offset,
             spec_fields=fields,
-            max_limit=csv_io.EXPORT_PAGE,
+            max_limit=page_size,
+            keyset=keyset,
+            after_key=after,
         )
 
-    async def _page(offset: int) -> list[dict[str, Any]]:
-        query = _query(offset)
+    async def _page(offset: int, after: Any) -> list[dict[str, Any]]:
+        query = _query(offset, after)
         return await _patient(
             lambda: cf.query_d1(database_id=target.d1_id, sql=query.sql, params=query.params)
         )
 
-    first = await _page(0)
+    _query(0, None)  # a bad sort or filter is a 422 before the slot is taken
+    slot = await _claim_job(target.workspace_id)
+    try:
+        first = await _page(0, None)
+    except BaseException:
+        await budget.release(slot)
+        raise
 
     async def _body() -> AsyncIterator[bytes]:
-        yield csv_io.header_line(columns).encode("utf-8")
-        rows, offset, sent = first, 0, 0
-        while True:
-            chunk = rows[: csv_io.EXPORT_MAX_ROWS - sent]
-            if chunk:
-                yield csv_io.rows_text(chunk, columns).encode("utf-8")
-            sent += len(chunk)
-            if len(rows) < csv_io.EXPORT_PAGE or sent >= csv_io.EXPORT_MAX_ROWS:
-                return
-            offset += csv_io.EXPORT_PAGE
-            rows = await _page(offset)
+        try:
+            yield csv_io.header_line(columns).encode("utf-8")
+            rows, offset, sent = first, 0, 0
+            while True:
+                chunk = rows[: cap - sent]
+                if chunk:
+                    yield csv_io.rows_text(chunk, columns).encode("utf-8")
+                sent += len(chunk)
+                if len(rows) < page_size or sent >= cap:
+                    return
+                offset += page_size
+                rows = await _page(0 if keyset else offset, rows[-1].get("__key"))
+        finally:
+            await budget.release(slot)
 
     return filename, _body()
 

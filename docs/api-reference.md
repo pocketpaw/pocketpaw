@@ -4148,11 +4148,12 @@ row counts.
   (`null` when the table has no single primary key). `errors` (at most 100) and
   `error_count` (rows with any bad cell) are the cells that won't store under
   `mapping`; `row` is the row number a spreadsheet shows (the header is row 1). The
-  upload is kept 15 minutes, for this user, site and table only.
+  upload is kept 15 minutes, for this user, site and table only; a user has at most
+  3 waiting per workspace (`429` `sites.data_import_busy`).
 - `POST …/data/tables/{table}/import` (write)
   `{"upload_id": "Qm9…", "mapping": {"Name": "name", "EMAIL": "email"}, "mode": "insert"}` →
   `{"inserted": 1, "updated": 0, "failed": [{"row": 3, "error": "EMAIL: Required."}],
-  "failed_count": 1, "restore_point": "00000085-0000024c-…"}`. `mode` is `insert`
+  "failed_count": 1, "stopped": false, "restore_point": "00000085-0000024c-…"}`. `mode` is `insert`
   (default) or `upsert` (rows whose key matches are updated, the rest inserted). An
   empty cell is `NULL`, except in a `NOT NULL` column with a default, where the
   column is left out (the default on insert, unchanged on update). A row with any
@@ -4161,16 +4162,28 @@ row counts.
   each batch lands whole or not at all, and a batch the database refuses (a
   duplicate unique value, say) fails its rows while the rest go on. `restore_point`
   is the Time Travel bookmark taken before the first write (`null` when nothing was
-  written or the database has no Time Travel). The upload is used up. One audit
+  written or the database has no Time Travel). A cell exported with the formula
+  guard (`'+1 555 0100`) imports without its `'`. The commit claims the upload
+  atomically, so a double click imports once; a commit refused before any write
+  (a bad mapping, a busy budget) keeps the upload for a retry, and after any write
+  it is used up. If the import stops part way (the budget ran out, the connection
+  dropped) the response is still `200` with `stopped: true`, the rows not sent
+  listed in `failed` as "Not imported", and the restore point to go back to. One audit
   event `site_data.import` (target `<pocket_id>:<table>`; metadata `{table, mode,
   filename, mapping, rows, inserted, updated, failed, restore_point}`, no values).
 - `GET …/data/tables/{table}/export.csv?q=&sort=&dir=&f=` (read) → `text/csv` stream,
   `Content-Disposition: attachment; filename="<table>-<yyyy-mm-dd>.csv"`. Same
-  search, filters and sort as `/rows`; UTF-8 with a BOM, CRLF lines, at most 100,000
-  rows read 500 at a time. Credential columns are left out entirely. A text cell
+  search, filters and sort as `/rows`; UTF-8 with a BOM, CRLF lines, read 500 rows
+  at a time: by key (`WHERE key < last`) in the default order, at most 100,000 rows;
+  by `OFFSET` under an owner-chosen `sort`, at most 20,000. Credential columns are
+  left out entirely. A text cell
   starting with `=` `+` `-` `@`, tab or CR gets a leading `'` so a spreadsheet won't
   run it as a formula (numbers stored as numbers are written as they are). A bad
   query is a `422` before any byte is sent.
+
+One import or export runs per workspace at a time (`429` `sites.data_job_busy`). A
+long one waits out its own workspace's per-minute budget but gives way at once when
+the shared global budget is spent (`429` `sites.data_busy`).
 
 Import errors: `422` `sites.data_csv_empty` / `_unreadable` (not CSV, or a cell
 over 128 KB) / `_too_wide` / `_too_many_rows` / `_bad_header` (two columns with one

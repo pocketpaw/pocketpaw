@@ -21,15 +21,22 @@
 # upsert's update). Rows are grouped by which columns they carry, and each statement
 # holds ``floor(90 / columns)`` rows, so no statement binds more than 90 values.
 #
+# Uploads: kept 15 minutes (Redis through the dashboard's shared client, else this
+# process within a 50 MB budget) under an unguessable id and a key bound to the user,
+# workspace, site and table they were uploaded for; anyone else gets a 404. At most
+# 3 wait per user and workspace (429 ``sites.data_import_busy``). A commit CLAIMS its
+# upload atomically (``GETDEL`` / pop), so it imports once; ``put_back`` returns it
+# only when the commit was refused before any write.
+#
 # Invariants: identifiers reach SQL only from the introspected ``d1.Table``, quoted;
-# every value binds. An upload is kept 15 minutes (Redis through the dashboard's
-# shared client, else this process) under an unguessable id, and only the user,
-# workspace, site and table it was uploaded for can read it back; anyone else gets a
-# 404. Exported cells that start with ``= + - @`` tab or CR get a leading ``'`` so a
-# spreadsheet never runs them as formulas; numbers stored as numbers are left alone.
+# every value binds. Exported cells that start with ``= + - @`` tab or CR get a
+# leading ``'`` so a spreadsheet never runs them as formulas (numbers stored as
+# numbers are left alone), and an import strips that one ``'`` again, so an export
+# re-imports as it was.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -40,7 +47,12 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from pocketpaw_ee.cloud._core.errors import NotFound, PayloadTooLarge, ValidationError
+from pocketpaw_ee.cloud._core.errors import (
+    NotFound,
+    PayloadTooLarge,
+    RateLimited,
+    ValidationError,
+)
 from pocketpaw_ee.sites.project_data import quote_ident
 from pocketpaw_ee.sites.site_data import budget, d1, writes
 from pocketpaw_ee.sites.site_data.dto import ImportRowError, ImportTarget
@@ -54,10 +66,13 @@ MAX_HEADER_NAME = 200
 PREVIEW_ROWS = 20
 MAX_ERRORS = 100
 UPLOAD_TTL_S = 15 * 60
+MAX_LIVE_UPLOADS = 3  # per user and workspace
+LOCAL_MAX_BYTES = 50 * 1024 * 1024  # every upload this process holds, together
 PARAMS_PER_STATEMENT = 90
 STATEMENTS_PER_BATCH = 50
 EXPORT_PAGE = 500
-EXPORT_MAX_ROWS = 100_000
+EXPORT_MAX_ROWS = 100_000  # paged by key
+EXPORT_MAX_SORTED_ROWS = 20_000  # an owner-chosen sort pages by OFFSET, which costs more
 BOM = "﻿"
 
 _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
@@ -323,6 +338,8 @@ def check_rows(
                 else:
                     values[dest] = None
                 continue
+            if len(cell) > 1 and cell[0] == "'" and cell.startswith(_FORMULA_START, 1):
+                cell = cell[1:]  # our export's formula guard, undone
             fmt, sample = formats.get(dest, ("", None))
             try:
                 values[dest] = writes.coerce(kinds[dest], fmt, cell, sample=sample)
@@ -414,9 +431,8 @@ def batches(chunks: list[Chunk]) -> list[list[Chunk]]:
 
 # --------------------------------------------------------------------------- uploads
 
-# upload id -> (expires at, monotonic; the JSON record)
-_local_uploads: dict[str, tuple[float, str]] = {}
-_LOCAL_MAX = 64
+# Redis key -> (expires at, wall clock; owner; the JSON record)
+_local_uploads: dict[str, tuple[float, list[str], str]] = {}
 
 
 def reset_uploads() -> None:
@@ -427,69 +443,145 @@ def _owner(workspace_id: str, pocket_id: str, user_id: str, table: str) -> list[
     return [workspace_id, pocket_id, user_id, table]
 
 
+def _key(upload_id: str, owner: list[str]) -> str:
+    """The upload's key, bound to its owner: someone else's id resolves to nothing."""
+    tag = hashlib.sha256(json.dumps(owner).encode("utf-8")).hexdigest()[:24]
+    return f"{_UPLOAD_KEY}{tag}:{upload_id}"
+
+
+def _quota_key(owner: list[str]) -> str:
+    return f"site_data:csv_uploads:{owner[0]}:{owner[2]}"
+
+
+def _busy() -> RateLimited:
+    return RateLimited(
+        "sites.data_import_busy",
+        f"You have {MAX_LIVE_UPLOADS} imports waiting. Finish one, or wait a few minutes.",
+    )
+
+
+def _local_put(key: str, owner: list[str], record: str, expires_at: float) -> None:
+    now = time.time()
+    for k in [k for k, (exp, _o, _r) in _local_uploads.items() if exp <= now]:
+        _local_uploads.pop(k, None)
+    while _local_uploads and (
+        sum(len(r) for _e, _o, r in _local_uploads.values()) + len(record) > LOCAL_MAX_BYTES
+    ):
+        _local_uploads.pop(next(iter(_local_uploads)))  # the oldest goes first
+    _local_uploads[key] = (expires_at, owner, record)
+
+
+def _local_live(owner: list[str]) -> int:
+    now = time.time()
+    return sum(
+        1
+        for exp, o, _r in _local_uploads.values()
+        if exp > now and o[0] == owner[0] and o[2] == owner[2]
+    )
+
+
 async def save_upload(
     *, workspace_id: str, pocket_id: str, user_id: str, table: str, filename: str, text: str
 ) -> str:
-    """Keep an upload for 15 minutes; returns its id."""
+    """Keep an upload for 15 minutes; returns its id. 429 ``sites.data_import_busy``
+    when this user already has 3 waiting in the workspace."""
     upload_id = secrets.token_urlsafe(24)
+    owner = _owner(workspace_id, pocket_id, user_id, table)
+    expires_at = time.time() + UPLOAD_TTL_S
     record = json.dumps(
-        {
-            "owner": _owner(workspace_id, pocket_id, user_id, table),
-            "filename": filename,
-            "text": text,
-        }
+        {"owner": owner, "filename": filename, "text": text, "expires_at": expires_at},
+        ensure_ascii=False,
     )
+    key = _key(upload_id, owner)
     client = budget.redis_client()
     if client is not None:
+        quota = _quota_key(owner)
         try:
-            await client.set(_UPLOAD_KEY + upload_id, record, ex=UPLOAD_TTL_S)
-            return upload_id
+            await client.zremrangebyscore(quota, "-inf", time.time())
+            live = int(await client.zcard(quota) or 0)
         except Exception:  # noqa: BLE001 — fall back to this process
             logger.warning("site_data.csv: Redis unavailable, keeping the upload in process")
-    now = time.monotonic()
-    for k in [k for k, (exp, _) in _local_uploads.items() if exp <= now]:
-        _local_uploads.pop(k, None)
-    if len(_local_uploads) >= _LOCAL_MAX:
-        _local_uploads.pop(next(iter(_local_uploads)))
-    _local_uploads[upload_id] = (now + UPLOAD_TTL_S, record)
+        else:
+            if live >= MAX_LIVE_UPLOADS:
+                raise _busy()
+            try:
+                await client.set(key, record, ex=UPLOAD_TTL_S)
+                await client.zadd(quota, {upload_id: expires_at})
+                await client.expire(quota, UPLOAD_TTL_S)
+                return upload_id
+            except Exception:  # noqa: BLE001
+                logger.warning("site_data.csv: Redis unavailable, keeping the upload in process")
+    if _local_live(owner) >= MAX_LIVE_UPLOADS:
+        raise _busy()
+    _local_put(key, owner, record, expires_at)
     return upload_id
 
 
-async def load_upload(
+@dataclass(frozen=True)
+class Claimed:
+    upload_id: str
+    owner: list[str]
+    filename: str
+    text: str
+    record: str
+    expires_at: float
+
+
+async def claim_upload(
     upload_id: str, *, workspace_id: str, pocket_id: str, user_id: str, table: str
-) -> tuple[str, str]:
-    """``(filename, text)`` of an upload this caller made for this table, or NotFound
-    (expired, never made, or someone else's)."""
+) -> Claimed:
+    """Take an upload this caller made for this table, atomically (Redis ``GETDEL``,
+    else a pop): of two commits of one upload, only one gets it. NotFound when it
+    expired, was taken, or is someone else's."""
     if not isinstance(upload_id, str) or not _UPLOAD_ID.match(upload_id):
         raise NotFound("site_data_upload", "")
+    owner = _owner(workspace_id, pocket_id, user_id, table)
+    key = _key(upload_id, owner)
     record: str | None = None
     client = budget.redis_client()
     if client is not None:
         try:
-            raw = await client.get(_UPLOAD_KEY + upload_id)
-            record = raw.decode() if isinstance(raw, bytes) else raw
+            raw = await client.getdel(key)
+            record = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+            if record is not None:
+                await client.zrem(_quota_key(owner), upload_id)
         except Exception:  # noqa: BLE001
             logger.warning("site_data.csv: Redis unavailable reading an upload")
     if record is None:
-        hit = _local_uploads.get(upload_id)
-        if hit is not None and hit[0] > time.monotonic():
-            record = hit[1]
+        hit = _local_uploads.pop(key, None)
+        if hit is not None and hit[0] > time.time():
+            record = hit[2]
     if record is None:
         raise NotFound("site_data_upload", "")
     data = json.loads(record)
     if data.get("owner") != _owner(workspace_id, pocket_id, user_id, table):
         raise NotFound("site_data_upload", "")
-    return str(data.get("filename") or ""), str(data.get("text") or "")
+    return Claimed(
+        upload_id=upload_id,
+        owner=owner,
+        filename=str(data.get("filename") or ""),
+        text=str(data.get("text") or ""),
+        record=record,
+        expires_at=float(data.get("expires_at") or 0),
+    )
 
 
-async def drop_upload(upload_id: str) -> None:
-    _local_uploads.pop(upload_id, None)
+async def put_back(claimed: Claimed) -> None:
+    """Return a claimed upload for the rest of its 15 minutes (its commit was refused
+    before anything was written)."""
+    left = int(claimed.expires_at - time.time())
+    if left < 1:
+        return
+    key = _key(claimed.upload_id, claimed.owner)
     client = budget.redis_client()
     if client is not None:
         try:
-            await client.delete(_UPLOAD_KEY + upload_id)
-        except Exception:  # noqa: BLE001 — it expires on its own
-            logger.warning("site_data.csv: could not drop upload %s", upload_id[:8])
+            await client.set(key, claimed.record, ex=left)
+            await client.zadd(_quota_key(claimed.owner), {claimed.upload_id: claimed.expires_at})
+            return
+        except Exception:  # noqa: BLE001
+            logger.warning("site_data.csv: Redis unavailable, keeping the upload in process")
+    _local_put(key, claimed.owner, claimed.record, claimed.expires_at)
 
 
 # --------------------------------------------------------------------------- export

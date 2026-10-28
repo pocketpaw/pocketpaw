@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import pytest
 
@@ -374,38 +373,211 @@ async def test_an_upload_is_used_once(site_doc, db, audit):
     assert exc.value.status_code == 404
 
 
-class _FakeRedis:
-    """Strings with a TTL flag; ``eval`` fails so the budget uses its own buckets."""
+@pytest.fixture
+async def redis():
+    from fakeredis import FakeAsyncRedis
 
-    def __init__(self) -> None:
-        self.data: dict[str, Any] = {}
-        self.ttl: dict[str, int] = {}
+    client = FakeAsyncRedis()
+    budget.use_redis(client)
+    yield client
+    budget.use_redis(None)
+    await client.aclose()
 
-    async def set(self, key, value, ex=None):
-        self.data[key], self.ttl[key] = value, ex
 
-    async def get(self, key):
-        v = self.data.get(key)
-        return v.encode() if isinstance(v, str) else v
+@pytest.fixture(params=["local", "redis"])
+async def store(request):
+    """Run a test against the in-process upload store and against Redis."""
+    if request.param == "local":
+        yield None
+        return
+    from fakeredis import FakeAsyncRedis
 
-    async def delete(self, key):
-        self.data.pop(key, None)
+    client = FakeAsyncRedis()
+    budget.use_redis(client)
+    yield client
+    budget.use_redis(None)
+    await client.aclose()
 
-    async def eval(self, *a, **k):
-        raise ConnectionError("no scripts here")
+
+async def _upload_keys(redis) -> list[bytes]:
+    return [k async for k in redis.scan_iter("site_data:csv_upload:*")]
 
 
 @pytest.mark.asyncio
-async def test_uploads_live_in_redis_with_a_15_minute_ttl(site_doc, db, audit):
-    redis = _FakeRedis()
-    budget.use_redis(redis)
-    p = await _preview(db, "notes", "body\nx\n")
-    key = f"site_data:csv_upload:{p.upload_id}"
-    assert redis.ttl[key] == 900 and p.expires_in == 900
-    assert json.loads(redis.data[key])["owner"] == ["ws1", "pk1", "u-admin", "notes"]
+async def test_uploads_live_in_redis_with_a_15_minute_ttl(site_doc, db, audit, redis):
+    p = await _preview(db, "notes", "body\ncafé\n")
+    (key,) = await _upload_keys(redis)
+    assert 0 < await redis.ttl(key) <= 900 and p.expires_in == 900
+    raw = await redis.get(key)
+    assert "café".encode() in raw  # stored as UTF-8, not \\u escapes
+    assert json.loads(raw)["owner"] == ["ws1", "pk1", "u-admin", "notes"]
+    assert key != f"site_data:csv_upload:{p.upload_id}".encode()  # owner-bound key
     assert csv_io._local_uploads == {}
     res = await _commit(db, "notes", p.upload_id, p.mapping)
-    assert res.inserted == 1 and key not in redis.data
+    assert res.inserted == 1 and await _upload_keys(redis) == []
+
+
+@pytest.mark.asyncio
+async def test_parallel_commits_of_one_upload_import_once(site_doc, db, audit, store):
+    import asyncio
+
+    p = await _preview(db, "notes", "body\nonce\n")
+    results = await asyncio.gather(
+        _commit(db, "notes", p.upload_id, p.mapping),
+        _commit(db, "notes", p.upload_id, p.mapping),
+        return_exceptions=True,
+    )
+    ok = [r for r in results if not isinstance(r, Exception)]
+    gone = [r for r in results if isinstance(r, CloudError)]
+    # the job slot (429) or the upload claim (404) stops the second
+    assert len(ok) == 1 and len(gone) == 1 and gone[0].status_code in (404, 429)
+    assert db.rows("SELECT COUNT(*) AS n FROM notes WHERE body = 'once'") == [{"n": 1}]
+
+
+@pytest.mark.asyncio
+async def test_an_upload_is_claimed_by_exactly_one_caller(site_doc, db, audit, store):
+    import asyncio
+
+    p = await _preview(db, "notes", "body\nx\n")
+    who = {"workspace_id": "ws1", "pocket_id": "pk1", "user_id": "u-admin", "table": "notes"}
+    results = await asyncio.gather(
+        *(csv_io.claim_upload(p.upload_id, **who) for _ in range(5)), return_exceptions=True
+    )
+    assert sum(isinstance(r, csv_io.Claimed) for r in results) == 1
+    assert sum(isinstance(r, CloudError) and r.status_code == 404 for r in results) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_refused_mapping_keeps_the_upload(site_doc, db, audit, store):
+    p = await _preview(db, "customers", "name,email\nCy,cy@x.io\n")
+    await _raises(
+        "sites.data_import_bad_mapping",
+        422,
+        _commit(db, "customers", p.upload_id, {"name": None, "email": "email"}),
+    )
+    res = await _commit(db, "customers", p.upload_id, p.mapping)
+    assert res.inserted == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_a_write_reports_what_landed_and_drops_the_upload(
+    site_doc, audit, monkeypatch
+):
+    import sqlite3
+
+    monkeypatch.setattr(csv_io, "PARAMS_PER_STATEMENT", 1)  # one row per statement
+    monkeypatch.setattr(csv_io, "STATEMENTS_PER_BATCH", 2)  # two rows per batch
+    cf = SqliteD1("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);", database_id=_DB)
+    p = await _preview(cf, "t", "v\na\nb\nc\nd\ne\n")
+    original, seen = cf.query_d1_batch, {"n": 0}
+
+    async def _dies_on_the_second(**kw):
+        if any(st.startswith("INSERT") for st, _ in kw["statements"]):
+            seen["n"] += 1
+            if seen["n"] == 2:
+                raise sqlite3.InterfaceError("connection dropped")
+        return await original(**kw)
+
+    cf.query_d1_batch = _dies_on_the_second  # type: ignore[method-assign]
+    res = await _commit(cf, "t", p.upload_id, p.mapping)
+    assert res.inserted == 2 and res.stopped is True
+    assert res.failed_count == 3 and [f.row for f in res.failed] == [4, 5, 6]
+    assert all(f.error.startswith("Not imported") for f in res.failed)
+    assert cf.rows("SELECT v FROM t ORDER BY id") == [{"v": "a"}, {"v": "b"}]
+    with pytest.raises(CloudError) as exc:  # no retry that re-imports a and b
+        await _commit(cf, "t", p.upload_id, p.mapping)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_three_live_uploads_per_user(site_doc, db, audit, store):
+    previews = [await _preview(db, "notes", "body\nx\n") for _ in range(3)]
+    await _raises("sites.data_import_busy", 429, _preview(db, "notes", "body\nx\n"))
+    with _pocket():  # another user still has room
+        await data_service.import_preview(
+            **{**_kw(db, "notes", filename="x.csv", data=b"body\nx\n"), "user_id": "u-other"}
+        )
+    await _commit(db, "notes", previews[0].upload_id, previews[0].mapping)
+    await _preview(db, "notes", "body\nx\n")  # a used upload frees its slot
+
+
+@pytest.mark.asyncio
+async def test_local_uploads_keep_to_a_byte_budget(site_doc, db, audit, monkeypatch):
+    monkeypatch.setattr(csv_io, "LOCAL_MAX_BYTES", 2_000)
+    monkeypatch.setattr(csv_io, "MAX_LIVE_UPLOADS", 100)
+    first = await _preview(db, "notes", "body\n" + "a" * 900 + "\n")
+    await _preview(db, "notes", "body\n" + "b" * 900 + "\n")
+    await _preview(db, "notes", "body\n" + "c" * 900 + "\n")
+    assert sum(len(r) for _e, _o, r in csv_io._local_uploads.values()) <= 2_000
+    with pytest.raises(CloudError) as exc:  # the oldest was evicted
+        await _commit(db, "notes", first.upload_id, first.mapping)
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_exported_formula_guard_round_trips_on_import(site_doc, audit):
+    cf = SqliteD1(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, phone TEXT, note TEXT);", database_id=_DB
+    )
+    cf.execute("INSERT INTO t VALUES (?, ?, ?)", (1, "+1 555 0100", "'plain"))
+    _name, text = await _export(cf, "t")
+    assert "'+1 555 0100" in text
+    cf.execute("DELETE FROM t")
+    _p, res = await _import(cf, "t", text.lstrip("\ufeff").encode("utf-8"))
+    assert res.inserted == 1
+    assert cf.rows("SELECT phone, note FROM t") == [{"phone": "+1 555 0100", "note": "'plain"}]
+
+
+# --------------------------------------------------------------------------- jobs
+
+
+@pytest.mark.asyncio
+async def test_one_import_or_export_per_workspace_at_a_time(site_doc, db, audit):
+    p = await _preview(db, "notes", "body\nx\n")
+    assert await budget.claim_once("site_data:job:ws1", 60)  # a job is running
+    await _raises("sites.data_job_busy", 429, _commit(db, "notes", p.upload_id, p.mapping))
+    await _raises("sites.data_job_busy", 429, _export(db, "notes"))
+    await budget.release("site_data:job:ws1")
+    res = await _commit(db, "notes", p.upload_id, p.mapping)  # the upload survived the 429
+    assert res.inserted == 1
+    await _export(db, "notes")
+    await _export(db, "notes")  # each job gives the slot back when it ends
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_export_gives_the_job_slot_back(site_doc, db, audit):
+    with _pocket():
+        _name, body = await data_service.export_csv(**_kw(db, "notes"))
+        await body.__anext__()
+        await body.aclose()
+    await _export(db, "notes")
+
+
+@pytest.mark.asyncio
+async def test_long_jobs_wait_out_the_workspace_bucket_but_not_the_global_one(monkeypatch):
+    slept: list[float] = []
+
+    async def _sleep(s):
+        slept.append(s)
+
+    monkeypatch.setattr(data_service.asyncio, "sleep", _sleep)
+    calls = {"n": 0}
+
+    async def _busy_then_ok(scope):
+        async def _call():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise budget.DataBusy(7, scope)
+            return "done"
+
+        return _call
+
+    assert await data_service._patient(await _busy_then_ok("workspace")) == "done"
+    assert slept == [7]
+    calls["n"], slept[:] = 0, []
+    with pytest.raises(budget.DataBusy):
+        await data_service._patient(await _busy_then_ok("global"))
+    assert slept == [] and calls["n"] == 1
 
 
 # --------------------------------------------------------------------------- writes
@@ -529,13 +701,36 @@ async def test_export_honours_filter_search_and_sort(site_doc, db, audit):
 
 
 @pytest.mark.asyncio
-async def test_export_streams_every_page(site_doc, audit):
+async def test_export_streams_every_page_by_key(site_doc, audit):
     cf = SqliteD1("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);", database_id=_DB)
     cf.executemany("INSERT INTO t (v) VALUES (?)", [("x",)] * 1203)
     _name, text = await _export(cf, "t")
     assert len(text.splitlines()) == 1204
-    pages = [p for s, p in cf.sql if s.startswith('SELECT "id"')]
-    assert [p[-2:] for p in pages] == [[500, 0], [500, 500], [500, 1000]]
+    ids = [int(line.split(",")[0]) for line in text.splitlines()[1:]]
+    assert ids == list(range(1203, 0, -1))  # newest first, nothing twice or skipped
+    pages = [(s, p) for s, p in cf.sql if s.startswith('SELECT "id"')]
+    assert len(pages) == 3
+    assert all(p[-1] == 0 for _s, p in pages)  # no OFFSET walk
+    assert '"id" < ?' not in pages[0][0] and all('"id" < ?' in s for s, _ in pages[1:])
+    assert [p[-3] for _s, p in pages[1:]] == [704, 204]
+
+
+@pytest.mark.asyncio
+async def test_a_sorted_export_pages_by_offset_and_caps_lower(site_doc, audit, monkeypatch):
+    monkeypatch.setattr(csv_io, "EXPORT_MAX_SORTED_ROWS", 5)
+    monkeypatch.setattr(csv_io, "EXPORT_PAGE", 2)
+    cf = SqliteD1("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);", database_id=_DB)
+    cf.executemany("INSERT INTO t (v) VALUES (?)", [(f"v{i:02d}",) for i in range(10)])
+    _name, text = await _export(cf, "t", sort="v", dir="asc")
+    assert [line.split(",")[1] for line in text.splitlines()[1:]] == [
+        "v00",
+        "v01",
+        "v02",
+        "v03",
+        "v04",
+    ]
+    offsets = [p[-1] for s, p in cf.sql if s.startswith('SELECT "id"')]
+    assert offsets == [0, 2, 4]
 
 
 @pytest.mark.asyncio

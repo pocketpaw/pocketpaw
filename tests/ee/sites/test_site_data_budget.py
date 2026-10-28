@@ -135,3 +135,39 @@ async def test_budgeted_client_charges_one_token_per_call(small):
     with pytest.raises(budget.DataBusy):
         await wrapped.query_d1(database_id="d", sql="SELECT 1")
     assert cf.calls == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_redis", [False, True])
+async def test_a_refusal_names_the_bucket_that_was_full(small, use_redis):
+    """Long jobs wait out their own workspace's bucket but must fail fast on the
+    shared global one, so the refusal says which it was."""
+    redis = FakeAsyncRedis(decode_responses=True) if use_redis else None
+    if redis is not None:
+        budget.use_redis(redis)
+    for _ in range(3):
+        await budget.acquire("d1", "ws1")
+    with pytest.raises(budget.DataBusy) as exc:
+        await budget.acquire("d1", "ws1")
+    assert exc.value.scope == "workspace"
+    await budget.acquire("d1", "ws2")
+    await budget.acquire("d1", "ws2")
+    with pytest.raises(budget.DataBusy) as exc:
+        await budget.acquire("d1", "ws3")
+    assert exc.value.scope == "global"
+    if redis is not None:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_redis", [False, True])
+async def test_claim_once_is_exclusive_until_released(use_redis):
+    redis = FakeAsyncRedis(decode_responses=True) if use_redis else None
+    if redis is not None:
+        budget.use_redis(redis)
+    assert await budget.claim_once("k", 60) is True
+    assert await budget.claim_once("k", 60) is False
+    await budget.release("k")
+    assert await budget.claim_once("k", 60) is True
+    if redis is not None:
+        await redis.aclose()

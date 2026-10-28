@@ -90,15 +90,6 @@
     ]
   },
   {
-    "label": "an upload answers anyone who has its id",
-    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
-    "find": "    if data.get(\"owner\") != _owner(workspace_id, pocket_id, user_id, table):",
-    "replace": "    if False:",
-    "tests": [
-      "tests/ee/sites/test_site_data_import.py::test_someone_elses_upload_is_404"
-    ]
-  },
-  {
     "label": "export drops the formula guard",
     "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
     "find": "    return \"'\" + text if text.startswith(_FORMULA_START) else text",
@@ -206,6 +197,151 @@
     "replace": "        pass",
     "tests": [
       "tests/ee/sites/test_site_data_restore.py::test_confirm_name_mismatch_is_422_before_any_cloudflare_call"
+    ]
+  },
+  {
+    "label": "an upload answers anyone who has its id",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "    tag = hashlib.sha256(json.dumps(owner).encode(\"utf-8\")).hexdigest()[:24]\n    return f\"{_UPLOAD_KEY}{tag}:{upload_id}\"",
+    "replace": "    return f\"{_UPLOAD_KEY}{upload_id}\"",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_uploads_live_in_redis_with_a_15_minute_ttl"
+    ]
+  },
+  {
+    "label": "a Redis upload is read, not claimed",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "            raw = await client.getdel(key)",
+    "replace": "            raw = await client.get(key)",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_an_upload_is_claimed_by_exactly_one_caller"
+    ]
+  },
+  {
+    "label": "a local upload is read, not claimed",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "        hit = _local_uploads.pop(key, None)",
+    "replace": "        hit = _local_uploads.get(key, None)",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_an_upload_is_claimed_by_exactly_one_caller"
+    ]
+  },
+  {
+    "label": "a refused mapping loses the upload",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            await csv_io.put_back(claimed)  # nothing was written: the owner can fix and retry",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_refused_mapping_keeps_the_upload"
+    ]
+  },
+  {
+    "label": "a failure after a write is a 500 that hides what landed",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        except Exception as exc:  # noqa: BLE001 — report what landed rather than a 500",
+    "replace": "        except budget.DataBusy as exc:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_failure_after_a_write_reports_what_landed_and_drops_the_upload"
+    ]
+  },
+  {
+    "label": "no quota on live uploads in Redis",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "            if live >= MAX_LIVE_UPLOADS:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_three_live_uploads_per_user"
+    ]
+  },
+  {
+    "label": "no quota on live uploads in process",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "    if _local_live(owner) >= MAX_LIVE_UPLOADS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_three_live_uploads_per_user"
+    ]
+  },
+  {
+    "label": "local uploads have no byte budget",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "        sum(len(r) for _e, _o, r in _local_uploads.values()) + len(record) > LOCAL_MAX_BYTES",
+    "replace": "        False",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_local_uploads_keep_to_a_byte_budget"
+    ]
+  },
+  {
+    "label": "uploads are stored with ASCII escapes",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "        ensure_ascii=False,\n    )\n    key = _key(upload_id, owner)",
+    "replace": "        ensure_ascii=True,\n    )\n    key = _key(upload_id, owner)",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_uploads_live_in_redis_with_a_15_minute_ttl"
+    ]
+  },
+  {
+    "label": "import keeps the export's formula-guard quote",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "                cell = cell[1:]  # our export's formula guard, undone",
+    "replace": "                pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_exported_formula_guard_round_trips_on_import"
+    ]
+  },
+  {
+    "label": "imports and exports run in parallel per workspace",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not await budget.claim_once(slot, _JOB_TTL_S):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_one_import_or_export_per_workspace_at_a_time"
+    ]
+  },
+  {
+    "label": "an export never gives its job slot back",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        finally:\n            await budget.release(slot)\n\n    return filename, _body()",
+    "replace": "        finally:\n            pass\n\n    return filename, _body()",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_one_import_or_export_per_workspace_at_a_time",
+      "tests/ee/sites/test_site_data_import.py::test_an_abandoned_export_gives_the_job_slot_back"
+    ]
+  },
+  {
+    "label": "export walks OFFSET in the default order",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    keyset = (\n        not sort",
+    "replace": "    keyset = False and (\n        not sort",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_export_streams_every_page_by_key"
+    ]
+  },
+  {
+    "label": "a sorted export keeps the 100k cap",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    cap = csv_io.EXPORT_MAX_ROWS if keyset else csv_io.EXPORT_MAX_SORTED_ROWS",
+    "replace": "    cap = csv_io.EXPORT_MAX_ROWS",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_sorted_export_pages_by_offset_and_caps_lower"
+    ]
+  },
+  {
+    "label": "long jobs wait out the global bucket",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            if attempt == _BUSY_RETRIES or exc.scope != \"workspace\":",
+    "replace": "            if attempt == _BUSY_RETRIES:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_long_jobs_wait_out_the_workspace_bucket_but_not_the_global_one"
+    ]
+  },
+  {
+    "label": "every refusal claims to be the workspace bucket",
+    "file": "ee/pocketpaw_ee/sites/site_data/budget.py",
+    "find": "    if key.startswith(\"cf:data:ws:\"):",
+    "replace": "    if True:",
+    "tests": [
+      "tests/ee/sites/test_site_data_budget.py::test_a_refusal_names_the_bucket_that_was_full"
     ]
   }
 ]

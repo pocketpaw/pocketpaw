@@ -204,6 +204,9 @@ class ImportResult(BaseModel):
     updated: int
     failed: list[ImportFailure] = Field(default_factory=list)  # max 100
     failed_count: int = 0
+    # True when the import stopped part way (a spent budget, a dropped connection):
+    # the rows not sent are in ``failed`` as "Not imported", and the upload is gone.
+    stopped: bool = False
     restore_point: str | None = None  # the D1 bookmark from before the first write
 
 

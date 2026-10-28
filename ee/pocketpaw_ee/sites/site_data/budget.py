@@ -42,15 +42,16 @@ RESTORE_LIMIT: tuple[int, int] = (3, 600)
 
 KINDS = frozenset({"d1", "kv", "r2"})
 
-# KEYS: the bucket keys. ARGV: limit, window_ms per key, in KEYS order. Returns 0 when
-# granted (every key charged), else the milliseconds until the full bucket resets.
+# KEYS: the bucket keys. ARGV: limit, window_ms per key, in KEYS order. Returns {0, 0}
+# when granted (every key charged), else {milliseconds until the full bucket resets,
+# its 1-based position in KEYS}.
 _ACQUIRE_LUA = """
 for i = 1, #KEYS do
   local used = tonumber(redis.call('GET', KEYS[i]) or '0')
   if used >= tonumber(ARGV[2 * i - 1]) then
     local ttl = redis.call('PTTL', KEYS[i])
     if ttl < 1 then ttl = tonumber(ARGV[2 * i]) end
-    return ttl
+    return {ttl, i}
   end
 end
 for i = 1, #KEYS do
@@ -59,7 +60,7 @@ for i = 1, #KEYS do
     redis.call('PEXPIRE', KEYS[i], ARGV[2 * i])
   end
 end
-return 0
+return {0, 0}
 """
 
 _redis: Any | None = None
@@ -68,14 +69,17 @@ _local: dict[str, list[float]] = {}
 
 
 class DataBusy(RateLimited):
-    """The dashboard's Cloudflare budget is spent for now (429)."""
+    """The dashboard's Cloudflare budget is spent for now (429). ``scope`` names the
+    bucket that was full: ``workspace`` (this workspace's own minute), ``global`` or
+    ``r2`` (shared by everyone)."""
 
-    def __init__(self, retry_after: int) -> None:
+    def __init__(self, retry_after: int, scope: str = "workspace") -> None:
         super().__init__(
             "sites.data_busy",
             f"Your site's data is busy. Try again in {retry_after} s.",
         )
         self.details = {"retry_after": retry_after}
+        self.scope = scope
 
 
 def use_redis(client: Any | None) -> None:
@@ -115,8 +119,8 @@ def redis_client() -> Any | None:
         return None
 
 
-def _acquire_local(buckets: list[tuple[str, int, int]]) -> float:
-    """0 when granted, else seconds until the full bucket resets."""
+def _acquire_local(buckets: list[tuple[str, int, int]]) -> tuple[float, str]:
+    """``(0, "")`` when granted, else (seconds until the full bucket resets, its key)."""
     now = time.monotonic()
     for key, limit, window in buckets:
         slot = _local.get(key)
@@ -124,19 +128,28 @@ def _acquire_local(buckets: list[tuple[str, int, int]]) -> float:
             slot = None
             _local.pop(key, None)
         if slot is not None and slot[0] >= limit:
-            return max(slot[1] - now, 0.001)
+            return max(slot[1] - now, 0.001), key
     for key, _limit, window in buckets:
         slot = _local.setdefault(key, [0, now + window])
         slot[0] += 1
-    return 0.0
+    return 0.0, ""
 
 
-async def _acquire_redis(client: Any, buckets: list[tuple[str, int, int]]) -> float:
+async def _acquire_redis(client: Any, buckets: list[tuple[str, int, int]]) -> tuple[float, str]:
     args: list[Any] = []
     for _key, limit, window in buckets:
         args += [limit, window * 1000]
-    wait_ms = await client.eval(_ACQUIRE_LUA, len(buckets), *[b[0] for b in buckets], *args)
-    return int(wait_ms or 0) / 1000.0
+    out = await client.eval(_ACQUIRE_LUA, len(buckets), *[b[0] for b in buckets], *args)
+    wait_ms, index = (list(out) + [0, 0])[:2] if isinstance(out, list | tuple) else (out, 0)
+    index = int(index or 0)
+    key = buckets[index - 1][0] if 1 <= index <= len(buckets) else ""
+    return int(wait_ms or 0) / 1000.0, key
+
+
+def _scope(key: str) -> str:
+    if key.startswith("cf:data:ws:"):
+        return "workspace"
+    return "r2" if key == "cf:data:r2" else "global"
 
 
 class RestoreBusy(RateLimited):
@@ -150,10 +163,10 @@ class RestoreBusy(RateLimited):
         self.details = {"retry_after": retry_after}
 
 
-async def _wait(buckets: list[tuple[str, int, int]]) -> float:
-    """Charge every bucket and answer 0, or answer the seconds until the full one
-    resets (charging nothing)."""
-    wait = 0.0
+async def _wait(buckets: list[tuple[str, int, int]]) -> tuple[float, str]:
+    """Charge every bucket and answer ``(0, "")``, or answer the seconds until the
+    full one resets and its key (charging nothing)."""
+    wait: tuple[float, str] = (0.0, "")
     client = redis_client()
     if client is not None:
         try:
@@ -169,15 +182,15 @@ async def _wait(buckets: list[tuple[str, int, int]]) -> float:
 async def acquire(kind: str, workspace_id: str) -> None:
     """Spend one Cloudflare call of ``kind`` (``d1`` / ``kv`` / ``r2``) for
     ``workspace_id``, or raise ``DataBusy`` when any bucket it needs is spent."""
-    wait = await _wait(_buckets(kind, workspace_id))
+    wait, key = await _wait(_buckets(kind, workspace_id))
     if wait > 0:
-        raise DataBusy(max(1, math.ceil(wait)))
+        raise DataBusy(max(1, math.ceil(wait)), _scope(key))
 
 
 async def acquire_restore(database_id: str) -> None:
     """Spend one of the database's restores (3 per 10 minutes), or raise
     ``RestoreBusy``."""
-    wait = await _wait([(f"cf:data:restore:{database_id or '-'}", *RESTORE_LIMIT)])
+    wait, _key = await _wait([(f"cf:data:restore:{database_id or '-'}", *RESTORE_LIMIT)])
     if wait > 0:
         raise RestoreBusy(max(1, math.ceil(wait)))
 
