@@ -1,6 +1,6 @@
 # ee/pocketpaw_ee/sites/site_data/dto.py — wire shapes of the Sites Data dashboard
-# read routes (``sites.data_router``): the inventory, one table's schema, and a page
-# of rows.
+# (``sites.data_router``): the inventory, one table's schema, a page of rows, the row
+# write bodies and results, and a row's change history.
 #
 # Every response carries ``available`` / ``reason``: a site with no reachable
 # database (local mode, not published yet) answers ``available=false`` with
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 ColumnKind = Literal[
     "text", "longtext", "integer", "real", "boolean", "datetime", "date", "json", "blob"
@@ -43,6 +43,9 @@ class TableSchema(BaseModel):
     columns: list[ColumnInfo] = Field(default_factory=list)
     key: str | None = None  # single-column primary key, else "rowid", else None
     editable: bool = False
+    # Rows can be added / duplicated. False on read-only tables and on user tables,
+    # whose rows people create by signing up on the site.
+    insertable: bool = False
     read_only_reason: ReadOnlyReason = ""
     row_count: int | None = None  # None when over the count cap (or unavailable)
 
@@ -90,3 +93,59 @@ class RowPage(BaseModel):
     # True when the search had to skip some text columns to stay under D1's
     # 100-bound-parameter cap.
     search_truncated: bool = False
+
+
+# --------------------------------------------------------------------------- writes
+#
+# Bodies refuse unknown fields, so nothing beyond these can reach the write path.
+# Keys and values are JSON scalars; the server coerces them to each column's type.
+
+Scalar = str | int | float | bool | None
+
+
+class _Body(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+
+class InsertRowBody(_Body):
+    values: dict[str, Any] = Field(default_factory=dict)
+
+
+class UpdateRowBody(_Body):
+    # ``set``: the new values. ``expected``: what the owner saw for (at least) every
+    # column in ``set``; the update lands only if the row still holds those values.
+    set_: dict[str, Any] = Field(default_factory=dict, alias="set")
+    expected: dict[str, Any] = Field(default_factory=dict)
+
+
+class DeleteRowsBody(_Body):
+    keys: list[Scalar] = Field(default_factory=list)
+
+
+class DuplicateRowBody(_Body):
+    key: Scalar
+    # Values to put in the copy instead of the source's (a new text key, say).
+    values: dict[str, Any] = Field(default_factory=dict)
+
+
+class RowOut(BaseModel):
+    row: dict[str, Any]  # masked, carries "__key"
+
+
+class DeleteRowsOut(BaseModel):
+    deleted: int
+    keys: list[Any]  # the keys that were deleted
+    restore_point: str | None = None  # a D1 bookmark once restore points ship
+
+
+class HistoryEvent(BaseModel):
+    action: str  # site_data.row_insert | row_update | row_delete
+    actor_id: str
+    actor_name: str | None = None
+    at: str  # ISO 8601
+    before: dict[str, Any] | None = None  # credentials removed, values capped at 1 KB
+    after: dict[str, Any] | None = None
+
+
+class RowHistory(BaseModel):
+    events: list[HistoryEvent] = Field(default_factory=list)  # newest first, max 50

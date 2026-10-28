@@ -904,6 +904,7 @@ async def test_route_schema_shape(routed):
         "columns",
         "key",
         "editable",
+        "insertable",
         "read_only_reason",
         "row_count",
     }
