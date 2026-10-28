@@ -25,8 +25,9 @@ a run with ``force_pydantic_ai`` (the cloud's platform-funded free run), which
 swaps the backend without the tool lockdown. Per-run usage limits
 (``max_requests``, ``total_tokens_limit``) go only to a backend that declares
 them; a limited run on any other backend is refused, never run unlimited.
-``max_turns`` is the opposite knob, a surface RAISING the tool-turn cap for one
-run (a Sites app build): it goes only to a backend that declares it (a backend
+``max_turns`` is the opposite knob, a surface overriding the tool-turn cap for
+one run (a Sites app build: 0 = no cap, N = raise to N, None = no override). Any
+non-None value, 0 included, goes only to a backend that declares it (a backend
 that does not keeps its own cap), and on pydantic_ai ``max_requests`` still wins.
 
 BYOK: a turn given ``byok_api_key`` runs on a private backend built for that
@@ -640,7 +641,8 @@ class AgentPool:
             prewarm_kwargs["model_override"] = model_override
         if tools_enabled is False and _declares_param(backend_prewarm, "tools_enabled"):
             prewarm_kwargs["tools_enabled"] = False
-        # The turn's raised tool-turn cap is fixed at connect(), so it is in the key.
+        # The turn's tool-turn override (0 = no cap) is fixed at connect(), so it is
+        # in the key. ``is not None``: a 0 must ride.
         if max_turns is not None and _declares_param(backend_prewarm, "max_turns"):
             prewarm_kwargs["max_turns"] = max_turns
         await backend_prewarm(**prewarm_kwargs)
@@ -1049,10 +1051,10 @@ class AgentPool:
             # different object.
             if tools_enabled is False and _accepts_tools_enabled_kwarg(run_backend.run):
                 run_kwargs["tools_enabled"] = tools_enabled
-            # A surface's raised tool-turn cap (a Sites app build). Same two gates:
-            # only a value rides, and only to a backend that declares it; any other
-            # keeps its own cap. pydantic_ai applies ``max_requests`` after it, so the
-            # bounded free run is never raised.
+            # A surface's tool-turn override (a Sites app build; 0 = no cap). Same
+            # two gates: any non-None value rides, 0 included, and only to a backend
+            # that declares it; any other keeps its own cap. pydantic_ai applies
+            # ``max_requests`` after it, so the bounded free run is never lifted.
             if max_turns is not None and _declares_param(run_backend.run, "max_turns"):
                 run_kwargs["max_turns"] = max_turns
             # Deny-by-default surface (the public concierge). Same two gates:

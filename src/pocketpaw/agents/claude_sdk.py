@@ -15,7 +15,7 @@ native-resume launches none. ``prewarm`` therefore takes no history.
 
 Warm-client key (``_client_cache_key``): session key, cwd, model, allowed and denied
 tools, the prompt's ``stable_digest`` (else a hash of its behavioural prefix), the
-plugin/skills digest, the tenant scope, a raised ``max_turns`` and any
+plugin/skills digest, the tenant scope, a per-run ``max_turns`` override and any
 surface-scoped MCP servers the client carries. Any change forces a fresh
 subprocess; the same key gates reuse of a supervisor-leased client (WH-1).
 Per-run skill dirs are cached per digest and dropped on eviction or cleanup.
@@ -38,9 +38,11 @@ Lifecycle invariants:
   * API-error text and error results become one error event (a too-old CLI names
     ``POCKETPAW_CLAUDE_SDK_CLI_PATH``); a max-turns stop names the limit.
 
-Options: ``max_turns`` is ``claude_sdk_max_turns``, raised (never lowered) by a
-``max_turns`` the caller passes for one run (a Sites app build, via the surface
-profile); it is fixed at connect(), so a raise is part of the warm-client key.
+Options: ``max_turns`` is ``claude_sdk_max_turns`` unless the caller overrides it
+for one run (a Sites app build, via the surface profile): 0 lifts the cap (no
+``max_turns`` sent), N raises it (never lowers it), None leaves it. It is fixed at
+connect(), so an override is part of the warm-client key; an ordinary turn's key
+is unchanged.
 Permissions are always bypassed (headless), ``cli_path`` comes from
 ``claude_sdk_cli_path`` (else the bundled CLI), ``max_buffer_size`` is 32 MiB for
 image-returning tools. The subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS``
@@ -755,10 +757,12 @@ _CLI_TOO_OLD_RE = re.compile(
 
 
 def _effective_max_turns(configured: int, requested: int | None) -> int | None:
-    """The ``max_turns`` a run's options carry: ``claude_sdk_max_turns`` (0 means
-    unlimited, sent as None), raised to ``requested`` when a surface asks for more.
-    A request can only raise the cap, never lower it or limit an unlimited one."""
-    if not configured:
+    """The ``max_turns`` a run's options carry, None meaning unlimited.
+
+    ``configured`` is ``claude_sdk_max_turns`` (0 = unlimited). ``requested`` is the
+    run's override: None keeps ``configured``, 0 lifts the cap for this run, and
+    N > 0 raises it to N. A request never lowers the cap or limits an unlimited one."""
+    if not configured or requested == 0:
         return None
     if requested and requested > configured:
         return requested
@@ -2292,15 +2296,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
             f"{prompt_key}:"
             f"{plugin_digest}:"
             f"{tenant_scope}"
-            f"{f':turns={turn_cap}' if turn_cap else ''}"
+            f"{f':turns={turn_cap}' if turn_cap is not None else ''}"
         ) + cls._scoped_servers_key(options)
 
     def _raised_turn_cap(self, options: Any) -> int | None:
-        """The options' ``max_turns`` when a run RAISED it past ``claude_sdk_max_turns``
-        (``_effective_max_turns``), else None. Only a raise enters the warm-client key,
-        so an ordinary turn keys exactly as it did before the raise existed."""
+        """The options' ``max_turns`` when a run overrode ``claude_sdk_max_turns``
+        (``_effective_max_turns``): N for a raise, 0 for a lifted cap (options
+        ``max_turns`` None while the setting is a positive int). None otherwise, so
+        an ordinary turn, or an options object that does not echo the setting, keys
+        exactly as it did before overrides existed."""
         value = getattr(options, "max_turns", None)
-        configured = self.settings.claude_sdk_max_turns or None
+        configured = self.settings.claude_sdk_max_turns
+        if not isinstance(configured, int) or isinstance(configured, bool) or configured <= 0:
+            configured = None
+        if value is None:
+            return 0 if configured is not None else None
         if isinstance(value, int) and not isinstance(value, bool) and value != configured:
             return value
         return None
@@ -3694,7 +3704,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # Per-turn volatile context (KB hits, scope/participants, uploaded-file
         # text, soul recall). Sent in the query text, never the system prompt.
         turn_context: str = "",
-        # A surface's raised tool-turn cap for this run (``_effective_max_turns``).
+        # A surface's tool-turn override for this run (``_effective_max_turns``):
+        # None = keep the setting, 0 = no cap, N = raise to N.
         max_turns: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
