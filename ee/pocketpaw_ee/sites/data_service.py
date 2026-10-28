@@ -37,6 +37,17 @@
 # database's ``created_at`` or its history (Cloudflare 7400) is out of window. A
 # restore drops every cache of the database.
 #
+# SQL console (``run_sql``): ``site_data.console`` classifies the one statement and
+# builds what D1 runs (credentials masked at the source). Reads need what reading rows
+# needs; writes need ``sites.data_write`` (passed in by the router), edit access, a
+# ``confirm`` (``unbounded`` for an UPDATE / DELETE with no WHERE), and take a restore
+# point first. One run per user at a time (``budget.claim_once``, 35 s TTL, 429
+# ``sites.data_sql_busy``); D1's own error is 422 ``sites.data_sql_error`` with ids
+# stripped. Every run that reaches D1 records ``site_data.sql`` (target ``<pocket>``,
+# the SQL text cut at 2 KB, changes, restore point, database id), so a console
+# write's restore point is one ``restore`` accepts. ``get_schema`` is the read-only
+# schema view: columns, indexes (``PRAGMA index_list`` / ``index_info``), CREATE text.
+#
 # Files (R2) and key-values (KV): see the section header below. A store is named by a
 # binding the Site doc records (else 404), files are typed so they can't run as a page
 # (``site_data.files_kv``), credential-named KV keys read ``MASK``, and each write is
@@ -73,12 +84,13 @@ from pocketpaw_ee.cloud._core.errors import (
     ValidationError,
 )
 from pocketpaw_ee.sites import service as sites_service
-from pocketpaw_ee.sites.project_data import auth_table, masked_columns
-from pocketpaw_ee.sites.site_data import budget, csv_io, d1, files_kv, writes
+from pocketpaw_ee.sites.project_data import auth_table, masked_columns, quote_ident
+from pocketpaw_ee.sites.site_data import budget, console, csv_io, d1, files_kv, writes
 from pocketpaw_ee.sites.site_data.dto import (
     ColumnInfo,
     ConnectorRef,
     DataInventory,
+    DataSchema,
     DeleteRowsOut,
     FileList,
     FileObject,
@@ -96,6 +108,10 @@ from pocketpaw_ee.sites.site_data.dto import (
     RowHistory,
     RowOut,
     RowPage,
+    SchemaColumn,
+    SchemaIndex,
+    SchemaTable,
+    SqlResult,
     StoreRef,
     TableSchema,
     TableSummary,
@@ -734,15 +750,19 @@ _JOB_TTL_S = 15 * 60  # a crashed job's slot frees itself
 
 
 async def _restore_point(w: _Writable) -> str | None:
+    return await _bookmark_now(w.cf, w.target)
+
+
+async def _bookmark_now(cf: budget.Budgeted, target: DataTarget) -> str | None:
     """The database's current bookmark, taken before a bulk write, or None when it
     has no Time Travel (an alpha database) or Cloudflare can't answer. A spent
     budget still refuses the write: nothing has been written yet."""
     try:
-        return await w.cf.d1_bookmark(w.target.d1_id)
+        return await cf.d1_bookmark(target.d1_id)
     except budget.DataBusy:
         raise
     except CloudError:
-        logger.warning("site_data: no restore point for %s", w.target.pocket_id, exc_info=True)
+        logger.warning("site_data: no restore point for %s", target.pocket_id, exc_info=True)
         return None
 
 
@@ -1194,7 +1214,7 @@ async def _database_state(
     return reason, _created(info)
 
 
-_RESTORE_POINT_ACTIONS = ["site_data.import", "site_data.row_delete"]
+_RESTORE_POINT_ACTIONS = ["site_data.import", "site_data.row_delete", "site_data.sql"]
 
 
 def _bad_request() -> ValidationError:
@@ -1979,3 +1999,197 @@ async def delete_kv_key(
     await _store_audit(
         target, user_id, "site_data.kv_delete", binding, files_kv.audit_kv_name(key), {}
     )
+
+
+# --------------------------------------------------------------------------- SQL console
+
+_SQL_TTL_S = 35  # a little over D1's 30 s statement timeout
+
+
+async def run_sql(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    sql: str,
+    confirm: str | None = None,
+    can_write: bool = False,
+    _cloudflare: Any | None = None,
+) -> SqlResult:
+    """Run ONE console statement (``site_data.console`` decides read / write / refused).
+    A read needs what reading rows needs; a write needs ``can_write`` (the router's
+    ``sites.data_write``), edit access, ``confirm`` (``unbounded`` for an UPDATE /
+    DELETE with no WHERE), and gets a restore point first. One run per user at a
+    time (429 ``sites.data_sql_busy``). Every run that reaches D1 is audited as
+    ``site_data.sql``. ``POST .../data/sql``."""
+    stmt = console.classify(sql)
+    if stmt.kind == "write":
+        if not can_write:
+            raise Forbidden(
+                "sites.data_write_forbidden", "Changing rows needs the Data write permission."
+            )
+        target = await _editable_target(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            _cloudflare=_cloudflare,
+        )
+    else:
+        target = await resolve_target(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            _cloudflare=_cloudflare,
+        )
+    if target.reason:
+        raise writes.unavailable(target.reason)
+
+    slot = f"site_data:sql:{workspace_id or '-'}:{user_id}"
+    if not await budget.claim_once(slot, _SQL_TTL_S):
+        raise RateLimited(
+            "sites.data_sql_busy", "Your last statement is still running. Try again when it ends."
+        )
+    restore_point: str | None = None
+    try:
+        cf = _client(target, _cloudflare)
+        schema = await d1.introspect(cf, target.d1_id)
+        planned = console.plan(stmt, schema)
+        if stmt.kind == "write":
+            if not (confirm == "unbounded" or (confirm == "write" and not stmt.unbounded)):
+                raise ValidationError(
+                    "sites.data_sql_confirm_needed",
+                    "This changes every row of the table. Confirm before it runs."
+                    if stmt.unbounded
+                    else "Confirm this change before it runs.",
+                    {"kind": stmt.kind, "unbounded": stmt.unbounded},
+                )
+            restore_point = await _bookmark_now(cf, target)
+        started = time.monotonic()
+        try:
+            raw = await cf.query_d1_raw(
+                database_id=target.d1_id, sql=planned.sql, params=planned.params
+            )
+        except budget.DataBusy:
+            raise
+        except ValidationError as exc:
+            if exc.code != "sites.cloudflare_error":
+                raise
+            message = console.clean_error(exc.message)
+            await _sql_audit(target, user_id, stmt, sql, restore_point, error=message)
+            raise ValidationError("sites.data_sql_error", message) from exc
+        duration_ms = int((time.monotonic() - started) * 1000)
+    finally:
+        await budget.release(slot)
+
+    columns, rows, truncated = console.shape(
+        list(raw.get("columns") or []), list(raw.get("rows") or []), planned.mask
+    )
+    changes = int(raw.get("changes") or 0) if stmt.kind == "write" else None
+    if stmt.kind == "write":
+        d1.forget_counts(target.d1_id)
+    await _sql_audit(
+        target,
+        user_id,
+        stmt,
+        sql,
+        restore_point,
+        changes=changes,
+        rows=len(rows),
+        truncated=truncated,
+        duration_ms=duration_ms,
+    )
+    return SqlResult(
+        pocket_id=pocket_id,
+        kind=stmt.kind,
+        columns=columns,
+        rows=rows,
+        truncated=truncated,
+        changes=changes,
+        duration_ms=duration_ms,
+        restore_point=restore_point,
+    )
+
+
+async def _sql_audit(
+    target: DataTarget,
+    user_id: str,
+    stmt: console.Statement,
+    sql: str,
+    restore_point: str | None,
+    **extra: Any,
+) -> None:
+    await _audit_event(
+        target,
+        user_id,
+        "site_data.sql",
+        target.pocket_id,
+        {
+            "kind": stmt.kind,
+            "verb": stmt.verb,
+            "sql": sql[: console.AUDIT_SQL_MAX],
+            "restore_point": restore_point,
+            "database_id": target.d1_id,
+            **extra,
+        },
+    )
+
+
+async def get_schema(
+    *, workspace_id: str, user_id: str, pocket_id: str, _cloudflare: Any | None = None
+) -> DataSchema:
+    """Every user table's columns, indexes and CREATE text, read only (login tables
+    included: their CREATE text holds no values). ``GET .../data/schema``."""
+    target = await resolve_target(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    if target.reason:
+        return DataSchema(pocket_id=pocket_id, available=False, reason=target.reason)
+    cf = _client(target, _cloudflare)
+    schema = await d1.introspect(cf, target.d1_id)
+    names = list(schema.tables)
+    lists: list[list[dict[str, Any]]] = []
+    if names:
+        lists = await cf.query_d1_batch(
+            database_id=target.d1_id,
+            statements=[(f"PRAGMA index_list({quote_ident(n)})", []) for n in names],
+        )
+    found: list[tuple[str, str, bool]] = []  # (table, index, unique)
+    for name, rows in zip(names, lists, strict=False):
+        for r in sorted(rows, key=lambda r: int(r.get("seq") or 0)):
+            ix = r.get("name")
+            if isinstance(ix, str) and ix:
+                found.append((name, ix, bool(r.get("unique"))))
+    infos: list[list[dict[str, Any]]] = []
+    if found:
+        infos = await cf.query_d1_batch(
+            database_id=target.d1_id,
+            statements=[(f"PRAGMA index_info({quote_ident(ix)})", []) for _t, ix, _u in found],
+        )
+    indexes: dict[str, list[SchemaIndex]] = {n: [] for n in names}
+    for (table, ix, unique), rows in zip(found, infos, strict=False):
+        ordered = sorted(rows, key=lambda r: int(r.get("seqno") or 0))
+        cols = [str(r["name"]) if r.get("name") else "(expression)" for r in ordered]
+        indexes[table].append(SchemaIndex(name=ix, unique=unique, columns=cols))
+    tables: list[SchemaTable] = []
+    for name in names:
+        t = schema.tables[name]
+        fields = _spec_fields(target.spec_object(name))
+        columns = [
+            SchemaColumn(
+                name=c.name,
+                sql_type=c.sql_type,
+                kind=d1.infer_kind(  # type: ignore[arg-type]
+                    c.name, c.sql_type, c.default, [], spec_type=fields.get(c.name)
+                ),
+                nullable=not c.notnull,
+                primary_key=c.pk > 0,
+                default=c.default,
+                references=c.references,
+                masked=c.name in t.masked,
+            )
+            for c in t.columns
+        ]
+        tables.append(
+            SchemaTable(name=name, columns=columns, indexes=indexes[name], create_sql=t.create_sql)
+        )
+    return DataSchema(pocket_id=pocket_id, available=True, tables=tables)

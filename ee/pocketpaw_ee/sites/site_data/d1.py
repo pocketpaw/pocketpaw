@@ -137,6 +137,7 @@ class Table:
     masked: frozenset[str]
     read_only_reason: str  # "" when editable
     rowid_alias: str = ""  # the INTEGER PRIMARY KEY column, if any
+    create_sql: str = ""  # the CREATE text sqlite_master holds (schema view)
 
     @property
     def editable(self) -> bool:
@@ -281,6 +282,7 @@ def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict])
         masked=masked,
         read_only_reason=reason,
         rowid_alias=alias,
+        create_sql=create_sql or "",
     )
 
 

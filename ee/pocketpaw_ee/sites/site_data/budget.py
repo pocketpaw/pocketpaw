@@ -214,6 +214,10 @@ class Budgeted:
         await acquire("d1", self._workspace_id)
         return await self._cf.query_d1(database_id=database_id, sql=sql, params=params)
 
+    async def query_d1_raw(self, *, database_id: str, sql: str, params: list | None = None) -> Any:
+        await acquire("d1", self._workspace_id)
+        return await self._cf.query_d1_raw(database_id=database_id, sql=sql, params=params)
+
     async def query_d1_batch(self, *, database_id: str, statements: Any) -> Any:
         await acquire("d1", self._workspace_id)
         return await self._cf.query_d1_batch(database_id=database_id, statements=statements)

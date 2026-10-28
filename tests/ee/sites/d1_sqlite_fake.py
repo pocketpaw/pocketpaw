@@ -1,8 +1,9 @@
 # tests/ee/sites/d1_sqlite_fake.py — a D1 client double backed by a REAL in-memory
 # SQLite database, for the Sites Data dashboard tests.
 #
-# It implements the two CloudflareClient methods the data dashboard calls
-# (``query_d1`` and ``query_d1_batch``) by executing the SQL with ``sqlite3``, so
+# It implements the CloudflareClient D1 methods the data dashboard calls
+# (``query_d1``, ``query_d1_batch``, and the SQL console's ``query_d1_raw``) by
+# executing the SQL with ``sqlite3``, so
 # quoting, PRAGMA output, ``instr``, ``IS``, ``RETURNING``, the COUNT subquery and
 # column affinity are tested for real rather than as string matches. Every statement
 # is recorded in ``sql`` and every API call bumps ``calls``, so a test can assert
@@ -89,6 +90,32 @@ class SqliteD1:
             return self._run(sql, params)
         except sqlite3.Error as exc:
             raise ValidationError("sites.cloudflare_error", "D1 query statement failed") from exc
+
+    async def query_d1_raw(
+        self, *, database_id: str, sql: str, params: list | None = None
+    ) -> dict[str, Any]:
+        """D1's ``raw`` endpoint: columns in order, rows as lists (a blob as a list of
+        byte values, as D1's JSON carries it), ``changes``. A failure carries SQLite's
+        message the way D1 words it, with the database id in it, as live D1 does."""
+        self._check_db(database_id)
+        self.calls += 1
+        params = list(params or [])
+        self.sql.append((sql, params))
+        if self.fail_on and self.fail_on in sql:
+            raise ValidationError("sites.cloudflare_error", f"injected failure: {self.fail_on}")
+        before = self.conn.total_changes
+        try:
+            cur = self.conn.execute(sql, params)
+            rows = cur.fetchall()
+        except (sqlite3.Error, sqlite3.Warning) as exc:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                f"Cloudflare API 400: D1_ERROR: {exc}: SQLITE_ERROR on database "
+                f"{database_id or '00000000-0000-0000-0000-000000000000'} (code 7500)",
+            ) from exc
+        columns = [d[0] for d in cur.description or []]
+        out = [[list(v) if isinstance(v, bytes) else v for v in tuple(r)] for r in rows]
+        return {"columns": columns, "rows": out, "changes": self.conn.total_changes - before}
 
     async def query_d1_batch(self, *, database_id: str, statements) -> list[list[dict[str, Any]]]:
         self._check_db(database_id)

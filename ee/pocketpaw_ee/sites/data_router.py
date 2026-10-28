@@ -16,6 +16,8 @@
 #   GET   /restore             ?at=<iso> | ?restore_point=<bookmark> -> RestoreStatus
 #   POST  /restore             {at | restore_point, confirm_name} -> RestoreOut
 #   POST  /restore:undo               {previous_bookmark, confirm_name} -> RestoreOut
+#   POST  /sql                        {sql, confirm?: write|unbounded} -> SqlResult
+#   GET   /schema                                 DataSchema
 #   GET   /files/{binding}                        ?prefix=&cursor=  -> FileList
 #   GET   /files/{binding}/object?key=            the object, streamed as an attachment
 #   PUT   /files/{binding}/object?key=&overwrite= raw body (<= 50 MB) -> FileObjectOut
@@ -34,7 +36,9 @@
 # ``sites.data_write`` (ADMIN, overridable per member) and refuses a body over
 # 1 MB (413 ``sites.data_body_too_large``; a CSV upload is capped at 5 MB, 413
 # ``sites.data_csv_too_large``). The three restore routes require
-# ``sites.data_restore`` (ADMIN) instead. Three reads are guarded like writes
+# ``sites.data_restore`` (ADMIN) instead. ``/sql`` takes ``fabric.read`` and passes
+# ``sites.data_write`` in as a bool: the statement's kind decides which it needs.
+# Three reads are guarded like writes
 # (``sites.data_write`` plus edit access): the KV key list, one KV key, and a file
 # download, because KV names can be session tokens and uploads can be private; the
 # file LISTING stays on ``fabric.read``. ``can_write`` /
@@ -63,6 +67,7 @@ from pocketpaw_ee.sites import data_service
 from pocketpaw_ee.sites.site_data import csv_io
 from pocketpaw_ee.sites.site_data.dto import (
     DataInventory,
+    DataSchema,
     DeleteRowsBody,
     DeleteRowsOut,
     DuplicateRowBody,
@@ -84,6 +89,8 @@ from pocketpaw_ee.sites.site_data.dto import (
     RowHistory,
     RowOut,
     RowPage,
+    SqlBody,
+    SqlResult,
     TableSchema,
     UpdateRowBody,
 )
@@ -421,6 +428,42 @@ async def site_data_restore_undo(
         pocket_id=pocket_id,
         previous_bookmark=body.previous_bookmark,
         confirm_name=body.confirm_name,
+    )
+
+
+# --------------------------------------------------------------------------- SQL console
+
+
+@router.post(_BASE + "/sql", response_model=SqlResult)
+async def site_data_sql(
+    pocket_id: str,
+    body: SqlBody,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    can_write: bool = Depends(action_allowed_any_workspace("sites.data_write")),
+    ___: None = Depends(_write_body_limit),
+) -> SqlResult:
+    """Run one statement: a read for anyone who reads rows, a row change for
+    ``sites.data_write`` with ``confirm``; structure changes are refused."""
+    return await data_service.run_sql(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        sql=body.sql,
+        confirm=body.confirm,
+        can_write=can_write,
+    )
+
+
+@router.get(_BASE + "/schema", response_model=DataSchema)
+async def site_data_schema(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+) -> DataSchema:
+    """Every table's columns, indexes and CREATE text, read only."""
+    return await data_service.get_schema(
+        workspace_id=ctx.workspace_id or "", user_id=ctx.user_id, pocket_id=pocket_id
     )
 
 
