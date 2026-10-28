@@ -4201,7 +4201,8 @@ three routes require `sites.data_restore` (ADMIN, `403`
 
   `available` is false with `reason` `live_on_cloudflare_only`, `not_published` or
   `not_production` (an alpha D1 has no Time Travel). `window_days` comes from
-  `PAW_CF_D1_TT_DAYS` (default 30; 7 on a free account). Without `at`, `at`,
+  `PAW_CF_D1_TT_DAYS` (default 30; 7 on a free account); `earliest` is the later of
+  that window's start and the database's `created_at`. Without `at`, `at`,
   `bookmark` and `changes_since` are `null`. `changes_since` counts the dashboard's
   own `site_data.*` audit events for this site since `at`; visitors' writes are never
   counted. `site_name` is what `confirm_name` must match.
@@ -4211,13 +4212,17 @@ three routes require `sites.data_restore` (ADMIN, `403`
   `confirm_name` must equal the site's name (case and outer spaces ignored).
   Audited as `site_data.restore` (target `<pocket_id>`, metadata `{database_id, at,
   bookmark, previous_bookmark}`).
-- `POST …/data/restore:undo` `{"previous_bookmark": "00000091-…"}` →
-  `{"bookmark", "previous_bookmark"}`. Only a `previous_bookmark` this site's own
-  restore (or undo) recorded for its current database is accepted. Audited as
-  `site_data.restore_undo` (`undoes` is the bookmark restored to).
+- `POST …/data/restore:undo` `{"previous_bookmark": "00000091-…", "confirm_name": "Shop"}`
+  → `{"bookmark", "previous_bookmark"}`. Undoes only the NEWEST restore (or undo) of
+  this site's current database, within 24 hours of it, and only once:
+  `previous_bookmark` must be the one that event recorded, and `confirm_name` is
+  checked like a restore's. Audited as `site_data.restore_undo` (`undoes` is the
+  bookmark restored to); undoing that undo is the next newest event.
 
 Restore errors: `422` `sites.data_restore_bad_time` / `_out_of_window` (older than
-the window or in the future) / `_confirm_mismatch` / `_unknown_bookmark`; `409`
+the window or the database, in the future, or a moment Cloudflare has no history
+for: its code 7400) / `_confirm_mismatch` / `_unknown_bookmark` (not the newest
+restore, older than 24 hours, or already undone); `409`
 `sites.data_unavailable` with `error.details.reason`; `429`
 `sites.data_restore_busy` (`error.details.retry_after`) past 3 restores per database
 per 10 minutes, and `sites.data_busy` when the dashboard's Cloudflare budget is

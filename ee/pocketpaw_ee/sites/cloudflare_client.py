@@ -33,7 +33,9 @@
 #     ``delete_database``, ``query_d1`` and ``query_d1_batch`` (parameterized, never
 #     interpolated SQL), ``d1_info`` (``version``: Time Travel needs ``production``),
 #     ``d1_bookmark`` / ``d1_restore`` (Time Travel: the bookmark at or before a
-#     moment; an in-place restore that answers the ``previous_bookmark`` undoing it),
+#     moment; an in-place restore that answers the ``previous_bookmark`` undoing it;
+#     a moment before the database's history, code 7400, is a 422
+#     ``sites.data_restore_out_of_window``),
 #     ``export_d1_sql`` (the D1 export API: poll with the bookmark,
 #     then fetch the signed URL with a client that carries NO token, since the URL is
 #     another host). ``create_database`` adds the operator's
@@ -1142,6 +1144,23 @@ class CloudflareClient:
     def _d1_url(self, database_id: str) -> str:
         return f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}"
 
+    @staticmethod
+    def _time_travel_unwrap(resp: httpx.Response) -> Any:
+        """``_unwrap``, except that Cloudflare's code 7400 ("Provided timestamp is
+        too old": before the database existed, or past retention) is the caller's
+        choice of moment, so it is a 422 ``sites.data_restore_out_of_window``."""
+        if resp.status_code == 400:
+            try:
+                errors = (resp.json() or {}).get("errors") or []
+            except (json.JSONDecodeError, ValueError, AttributeError):
+                errors = []
+            if any(isinstance(e, dict) and e.get("code") == 7400 for e in errors):
+                raise ValidationError(
+                    "sites.data_restore_out_of_window",
+                    "That time is before this database's history begins.",
+                )
+        return CloudflareClient._unwrap(resp)
+
     async def d1_info(self, database_id: str) -> dict:
         """The database's details (``GET /d1/database/{id}``): ``version``
         (``production`` or ``alpha``; Time Travel needs ``production``),
@@ -1160,7 +1179,7 @@ class CloudflareClient:
             resp = await client.get(
                 f"{self._d1_url(database_id)}/time_travel/bookmark", params=params
             )
-        result = self._unwrap(resp)
+        result = self._time_travel_unwrap(resp)
         bookmark = result.get("bookmark") if isinstance(result, dict) else None
         if not isinstance(bookmark, str) or not bookmark:
             raise ValidationError("sites.cloudflare_error", "D1 returned no bookmark")
@@ -1182,7 +1201,7 @@ class CloudflareClient:
             resp = await client.post(
                 f"{self._d1_url(database_id)}/time_travel/restore", params=params
             )
-        result = self._unwrap(resp)
+        result = self._time_travel_unwrap(resp)
         result = result if isinstance(result, dict) else {}
         previous = result.get("previous_bookmark")
         if not isinstance(previous, str) or not previous:

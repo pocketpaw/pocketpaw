@@ -74,10 +74,10 @@ async def _restore(cf, at, name="Shop", pocket_id="pk1"):
         return await data_service.restore(**_kw(cf, at=at, confirm_name=name, pocket_id=pocket_id))
 
 
-async def _undo(cf, bookmark, pocket_id="pk1"):
+async def _undo(cf, bookmark, pocket_id="pk1", name="Shop"):
     with _pocket():
         return await data_service.restore_undo(
-            **_kw(cf, previous_bookmark=bookmark, pocket_id=pocket_id)
+            **_kw(cf, previous_bookmark=bookmark, pocket_id=pocket_id, confirm_name=name)
         )
 
 
@@ -317,7 +317,7 @@ def routed_tt(site_doc, monkeypatch, tt):
 _RESTORE_CALLS = [
     ("GET", "/restore", None),
     ("POST", "/restore", {"at": "2026-10-27T10:00:00Z", "confirm_name": "Shop"}),
-    ("POST", "/restore:undo", {"previous_bookmark": "00000001-ab"}),
+    ("POST", "/restore:undo", {"previous_bookmark": "00000001-ab", "confirm_name": "Shop"}),
 ]
 
 
@@ -352,7 +352,10 @@ async def test_route_shapes(routed_tt, beanie_test_db):
     assert done.status_code == 200, done.text
     assert set(done.json()) == {"bookmark", "previous_bookmark"}
     undo = await _call(
-        app, "POST", "/restore:undo", {"previous_bookmark": done.json()["previous_bookmark"]}
+        app,
+        "POST",
+        "/restore:undo",
+        {"previous_bookmark": done.json()["previous_bookmark"], "confirm_name": "Shop"},
     )
     assert undo.status_code == 200, undo.text
     bad = await _call(app, "POST", "/restore", {"at": at})
@@ -361,3 +364,109 @@ async def test_route_shapes(routed_tt, beanie_test_db):
         app, "POST", "/restore", {"at": at, "confirm_name": "Shop", "bookmark": "x"}
     )
     assert extra.status_code == 422
+
+
+# --------------------------------------------------------------------------- review fixes
+
+
+@pytest.mark.asyncio
+async def test_earliest_is_raised_to_the_databases_creation(site_doc, tt, beanie_test_db):
+    tt.mark(datetime.now(UTC) - timedelta(hours=5))  # a bookmark exists that far back
+    created = datetime.now(UTC) - timedelta(hours=3)
+    tt.created_at = created.isoformat()
+    s = await _status(tt)
+    assert abs(datetime.fromisoformat(s.earliest) - created) < timedelta(seconds=1)
+    await _raises("sites.data_restore_out_of_window", 422, _status(tt, at=_ago(hours=4)))
+    await _raises("sites.data_restore_out_of_window", 422, _restore(tt, _ago(hours=4)))
+    assert tt.restores == []
+
+
+@pytest.mark.asyncio
+async def test_a_time_before_the_databases_history_is_out_of_window(site_doc, tt, beanie_test_db):
+    """Live D1 answers code 7400 (the client raises out_of_window) for a moment with
+    no bookmark: before the database existed, or past retention."""
+    await _raises("sites.data_restore_out_of_window", 422, _status(tt, at=_ago(hours=5)))
+    await _raises("sites.data_restore_out_of_window", 422, _restore(tt, _ago(hours=5)))
+    assert tt.restores == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("at", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"])
+async def test_extreme_times_are_bad_time_not_a_crash(site_doc, tt, beanie_test_db, at):
+    await _raises("sites.data_restore_bad_time", 422, _status(tt, at=at))
+    await _raises("sites.data_restore_bad_time", 422, _restore(tt, at))
+
+
+@pytest.mark.asyncio
+async def test_undo_needs_the_confirm_name(site_doc, tt, beanie_test_db):
+    out = await _restore(tt, _ago(hours=1))
+    await _raises(
+        "sites.data_restore_confirm_mismatch", 422, _undo(tt, out.previous_bookmark, name="nope")
+    )
+    assert len(tt.restores) == 1
+
+
+@pytest.mark.asyncio
+async def test_undo_accepts_only_the_newest_restore(site_doc, tt, beanie_test_db):
+    first = await _restore(tt, _ago(hours=1))
+    second = await _restore(tt, _ago(minutes=90))
+    await _raises("sites.data_restore_unknown_bookmark", 422, _undo(tt, first.previous_bookmark))
+    await _undo(tt, second.previous_bookmark)
+    assert tt.restores[-1]["bookmark"] == second.previous_bookmark
+
+
+@pytest.mark.asyncio
+async def test_an_undo_is_consumed(site_doc, tt, beanie_test_db):
+    out = await _restore(tt, _ago(hours=1))
+    await _undo(tt, out.previous_bookmark)
+    await _raises("sites.data_restore_unknown_bookmark", 422, _undo(tt, out.previous_bookmark))
+    assert len(tt.restores) == 2
+
+
+@pytest.mark.asyncio
+async def test_parallel_undos_run_once(site_doc, tt, beanie_test_db, monkeypatch):
+    import asyncio
+
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    out = await _restore(tt, _ago(hours=1))
+    # Both requests read the audit log before either restores: a real race.
+    real = audit_service.find_target_event
+    arrived: list[int] = []
+    both = asyncio.Event()
+
+    async def _racing(*a, **kw):
+        found = await real(*a, **kw)
+        arrived.append(1)
+        if len(arrived) >= 2:
+            both.set()
+        await asyncio.wait_for(both.wait(), 5)
+        return found
+
+    monkeypatch.setattr(audit_service, "find_target_event", _racing)
+    results = await asyncio.gather(
+        _undo(tt, out.previous_bookmark), _undo(tt, out.previous_bookmark), return_exceptions=True
+    )
+    ok = [r for r in results if not isinstance(r, Exception)]
+    refused = [r for r in results if isinstance(r, CloudError)]
+    assert len(ok) == 1 and len(refused) == 1
+    assert refused[0].code == "sites.data_restore_unknown_bookmark"
+    assert len(tt.restores) == 2
+
+
+@pytest.mark.asyncio
+async def test_undo_expires_after_24_hours(site_doc, tt, beanie_test_db):
+    from pocketpaw_ee.cloud.models.audit_event import AuditEvent
+
+    stale = tt.mark()
+    await AuditEvent(
+        workspace="ws1",
+        actor_id="u",
+        action="site_data.restore",
+        target_type="site_data",
+        target_id="pk1",
+        metadata={"previous_bookmark": stale, "database_id": _DB},
+        at=datetime.now(UTC) - timedelta(hours=25),
+    ).insert()
+    await _raises("sites.data_restore_unknown_bookmark", 422, _undo(tt, stale))
+    assert tt.restores == []

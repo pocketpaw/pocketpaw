@@ -27,8 +27,10 @@
 # ``PAW_CF_D1_TT_DAYS`` (default 30), ``confirm_name`` equal to the site's name (case
 # and spaces ignored), and at most 3 restores per database per 10 minutes. Each
 # restore is audited (target ``<pocket>``) with its ``previous_bookmark`` and database
-# id; undo only accepts a bookmark this site's own restore events recorded for this
-# database. A restore drops every cache of the database.
+# id; undo takes the confirm name too and only the newest such event's bookmark,
+# within 24 h and once (a ``budget.claim_once`` marker). A moment before the
+# database's ``created_at`` or its history (Cloudflare 7400) is out of window. A
+# restore drops every cache of the database.
 #
 # Every Cloudflare call goes through ``site_data.budget`` (429 ``sites.data_busy``)
 # on the data-token client (``service._data_cf_client``); long imports and exports
@@ -995,6 +997,7 @@ _CLOCK_SKEW = timedelta(minutes=1)
 _BOOKMARK = re.compile(r"^[A-Za-z0-9-]{1,200}$")
 _RESTORE_ACTIONS = ["site_data.restore", "site_data.restore_undo"]
 _REASON_NOT_PRODUCTION = "not_production"
+_UNDO_WINDOW = timedelta(hours=24)
 
 
 def window_days() -> int:
@@ -1018,9 +1021,10 @@ def _moment(at: str, now: datetime, days: int) -> datetime:
     try:
         text = at.strip()
         moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
-    except (AttributeError, ValueError):
+        moment = moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+    except (AttributeError, ValueError, OverflowError):
+        # OverflowError: year 1 or 9999 with an offset falls off datetime's range.
         raise _restore_error("bad_time", "Pick a time like 2026-10-27T15:30:00Z.") from None
-    moment = moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
     if moment < now - timedelta(days=days) or moment > now + _CLOCK_SKEW:
         raise _restore_error("out_of_window", f"Pick a time within the last {days} days.")
     return moment
@@ -1030,11 +1034,33 @@ def _iso(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-async def _unavailable_reason(target: DataTarget, cf: budget.Budgeted | None) -> str:
-    if target.reason:
-        return target.reason
-    info = await cf.d1_info(target.d1_id) if cf is not None else {}
-    return "" if (info or {}).get("version") == "production" else _REASON_NOT_PRODUCTION
+def _created(info: dict[str, Any]) -> datetime | None:
+    """When the database was created (``d1_info``'s ``created_at``), if it says."""
+    raw = info.get("created_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    try:
+        moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
+        return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _not_before_creation(moment: datetime, created: datetime | None) -> None:
+    if created is not None and moment < created:
+        raise _restore_error("out_of_window", "That time is before this database was created.")
+
+
+async def _database_state(
+    target: DataTarget, cf: budget.Budgeted | None
+) -> tuple[str, datetime | None]:
+    """``(why it can't be restored, or ""; when it was created)``."""
+    if target.reason or cf is None:
+        return target.reason or _REASON_NOT_PUBLISHED, None
+    info = (await cf.d1_info(target.d1_id)) or {}
+    reason = "" if info.get("version") == "production" else _REASON_NOT_PRODUCTION
+    return reason, _created(info)
 
 
 def _same_name(given: str, expected: str) -> bool:
@@ -1061,14 +1087,19 @@ async def restore_status(
     now = datetime.now(UTC)
     moment = _moment(at, now, days) if at else None
     cf = None if target.reason else _client(target, _cloudflare)
-    reason = await _unavailable_reason(target, cf)
+    reason, created = await _database_state(target, cf)
+    earliest = now - timedelta(days=days)
+    if created is not None and created > earliest:
+        earliest = created
+    if moment is not None and not reason:
+        _not_before_creation(moment, created)
     status = RestoreStatus(
         pocket_id=pocket_id,
         available=not reason,
         reason=reason,
         site_name=target.site_name,
         window_days=days,
-        earliest=(now - timedelta(days=days)).isoformat(),
+        earliest=earliest.isoformat(),
         at=moment.isoformat() if moment else None,
     )
     if reason or cf is None or moment is None:
@@ -1132,9 +1163,10 @@ async def restore(
         raise _restore_error("confirm_mismatch", "Type the site's name to confirm the restore.")
     moment = _moment(at, datetime.now(UTC), window_days())
     cf = None if target.reason else _client(target, _cloudflare)
-    reason = await _unavailable_reason(target, cf)
+    reason, created = await _database_state(target, cf)
     if reason or cf is None:
         raise writes.unavailable(reason or _REASON_NOT_PUBLISHED)
+    _not_before_creation(moment, created)
     return await _do_restore(target, cf, user_id, "site_data.restore", timestamp=_iso(moment))
 
 
@@ -1144,30 +1176,44 @@ async def restore_undo(
     user_id: str,
     pocket_id: str,
     previous_bookmark: str,
+    confirm_name: str,
     _cloudflare: Any | None = None,
 ) -> RestoreOut:
-    """Go back to the bookmark a restore of THIS site recorded as its
-    ``previous_bookmark``; any other bookmark is refused. ``POST .../data/restore:undo``."""
+    """Undo the NEWEST restore (or undo) of this site's database, within 24 hours of
+    it and only once: ``previous_bookmark`` must be the one that event recorded, and
+    ``confirm_name`` the site's name. ``POST .../data/restore:undo``."""
     from pocketpaw_ee.cloud.audit import service as audit_service
 
     target = await _editable_target(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
     )
+    if not _same_name(confirm_name, target.site_name):
+        raise _restore_error("confirm_mismatch", "Type the site's name to confirm the undo.")
     unknown = _restore_error("unknown_bookmark", "That isn't a restore of this site to undo.")
     if not isinstance(previous_bookmark, str) or not _BOOKMARK.match(previous_bookmark):
         raise unknown
     if target.reason:
         raise writes.unavailable(target.reason)
-    recorded = await audit_service.find_target_event(
+    newest = await audit_service.find_target_event(
         target.workspace_id,
         target_type=_AUDIT_TARGET,
         target_id=pocket_id,
         actions=_RESTORE_ACTIONS,
-        metadata={"previous_bookmark": previous_bookmark, "database_id": target.d1_id},
+        metadata={"database_id": target.d1_id},
     )
-    if recorded is None:
+    if newest is None or (newest.metadata or {}).get("previous_bookmark") != previous_bookmark:
         raise unknown
+    at = newest.at if newest.at.tzinfo is not None else newest.at.replace(tzinfo=UTC)
+    if datetime.now(UTC) - at > _UNDO_WINDOW:
+        raise unknown
+    claim = f"site_data:undo:{newest.id}"
+    if not await budget.claim_once(claim, int(_UNDO_WINDOW.total_seconds())):
+        raise unknown  # another request is undoing it, or already has
     cf = _client(target, _cloudflare)
-    return await _do_restore(
-        target, cf, user_id, "site_data.restore_undo", bookmark=previous_bookmark
-    )
+    try:
+        return await _do_restore(
+            target, cf, user_id, "site_data.restore_undo", bookmark=previous_bookmark
+        )
+    except BaseException:
+        await budget.release(claim)
+        raise

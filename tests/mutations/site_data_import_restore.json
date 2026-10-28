@@ -1,39 +1,11 @@
 [
   {
-    "label": "restore ignores the confirm name",
-    "file": "ee/pocketpaw_ee/sites/data_service.py",
-    "find": "    if not _same_name(confirm_name, target.site_name):",
-    "replace": "    if False:",
-    "tests": [
-      "tests/ee/sites/test_site_data_restore.py::test_confirm_name_mismatch_is_422_before_any_cloudflare_call"
-    ]
-  },
-  {
     "label": "any confirm name matches",
     "file": "ee/pocketpaw_ee/sites/data_service.py",
     "find": "    return bool(expected) and given.strip().casefold() == expected.strip().casefold()",
     "replace": "    return True",
     "tests": [
       "tests/ee/sites/test_site_data_restore.py::test_confirm_name_mismatch_is_422_before_any_cloudflare_call"
-    ]
-  },
-  {
-    "label": "undo accepts a bookmark no restore of this site recorded",
-    "file": "ee/pocketpaw_ee/sites/data_service.py",
-    "find": "    if recorded is None:\n        raise unknown",
-    "replace": "    if False:\n        raise unknown",
-    "tests": [
-      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_a_bookmark_this_site_never_recorded",
-      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_another_sites_or_workspaces_bookmark"
-    ]
-  },
-  {
-    "label": "undo provenance ignores which database recorded the bookmark",
-    "file": "ee/pocketpaw_ee/sites/data_service.py",
-    "find": "metadata={\"previous_bookmark\": previous_bookmark, \"database_id\": target.d1_id},",
-    "replace": "metadata={\"previous_bookmark\": previous_bookmark},",
-    "tests": [
-      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_another_sites_or_workspaces_bookmark"
     ]
   },
   {
@@ -161,6 +133,79 @@
     "replace": "    restore_point = None",
     "tests": [
       "tests/ee/sites/test_site_data_import.py::test_restore_point_is_taken_before_the_first_write"
+    ]
+  },
+  {
+    "label": "undo accepts a bookmark other than the newest restore's",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if newest is None or (newest.metadata or {}).get(\"previous_bookmark\") != previous_bookmark:\n        raise unknown",
+    "replace": "    if newest is None:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_a_bookmark_this_site_never_recorded",
+      "tests/ee/sites/test_site_data_restore.py::test_undo_accepts_only_the_newest_restore"
+    ]
+  },
+  {
+    "label": "undo looks at restores of any database",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        metadata={\"database_id\": target.d1_id},",
+    "replace": "        metadata={},",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_another_sites_or_workspaces_bookmark"
+    ]
+  },
+  {
+    "label": "undo never expires",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if datetime.now(UTC) - at > _UNDO_WINDOW:\n        raise unknown",
+    "replace": "    if False:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_undo_expires_after_24_hours"
+    ]
+  },
+  {
+    "label": "parallel undos both run",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not await budget.claim_once(claim, int(_UNDO_WINDOW.total_seconds())):\n        raise unknown",
+    "replace": "    if False:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_parallel_undos_run_once"
+    ]
+  },
+  {
+    "label": "undo skips the confirm name",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        raise _restore_error(\"confirm_mismatch\", \"Type the site's name to confirm the undo.\")",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_undo_needs_the_confirm_name"
+    ]
+  },
+  {
+    "label": "restore reaches before the database was created",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if created is not None and moment < created:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_earliest_is_raised_to_the_databases_creation"
+    ]
+  },
+  {
+    "label": "Cloudflare's timestamp-too-old is a generic Cloudflare error",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "            if any(isinstance(e, dict) and e.get(\"code\") == 7400 for e in errors):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py::test_a_timestamp_before_the_database_is_out_of_window"
+    ]
+  },
+  {
+    "label": "restore ignores the confirm name",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        raise _restore_error(\"confirm_mismatch\", \"Type the site's name to confirm the restore.\")",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_confirm_name_mismatch_is_422_before_any_cloudflare_call"
     ]
   }
 ]

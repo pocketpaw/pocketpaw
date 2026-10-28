@@ -231,6 +231,7 @@ class RestoreBody(_Body):
 
 class RestoreUndoBody(_Body):
     previous_bookmark: str = Field(max_length=200)
+    confirm_name: str = Field(max_length=500)
 
 
 class RestoreOut(BaseModel):

@@ -15,7 +15,7 @@
 #   GET   /tables/{table}/export.csv              ?q=&sort=&dir=&f=  -> text/csv stream
 #   GET   /restore                                ?at=<iso>  -> RestoreStatus
 #   POST  /restore                                {at, confirm_name} -> RestoreOut
-#   POST  /restore:undo                           {previous_bookmark} -> RestoreOut
+#   POST  /restore:undo               {previous_bookmark, confirm_name} -> RestoreOut
 #
 # Thin handlers over ``sites.data_service``; errors are CloudErrors mapped by
 # ``_core.http`` (422 for a bad query or value, 404 for an unknown table, row or
@@ -392,4 +392,5 @@ async def site_data_restore_undo(
         user_id=ctx.user_id,
         pocket_id=pocket_id,
         previous_bookmark=body.previous_bookmark,
+        confirm_name=body.confirm_name,
     )

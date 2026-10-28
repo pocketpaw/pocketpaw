@@ -51,6 +51,7 @@ class SqliteD1:
         self.calls = 0
         self.fail_on: str | None = None  # a statement containing this text fails
         self.version = "production"
+        self.created_at: str | None = None  # what d1_info reports, when set
         self.restores: list[dict[str, Any]] = []
         self._snapshots: list[tuple[datetime, str, bytes]] = []
 
@@ -128,14 +129,17 @@ class SqliteD1:
     def _at_or_before(self, timestamp: str) -> tuple[datetime, str, bytes]:
         moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
         found = [s for s in self._snapshots if s[0] <= moment]
-        if not found:
-            raise ValidationError("sites.cloudflare_error", "No bookmark that far back")
+        if not found:  # live D1: 400 code 7400, which the client raises as this
+            raise ValidationError("sites.data_restore_out_of_window", "Timestamp is too old")
         return max(found, key=lambda s: s[0])
 
     async def d1_info(self, database_id: str) -> dict[str, Any]:
         self._check_db(database_id)
         self.calls += 1
-        return {"uuid": database_id, "version": self.version, "file_size": 4096}
+        info: dict[str, Any] = {"uuid": database_id, "version": self.version, "file_size": 4096}
+        if self.created_at:
+            info["created_at"] = self.created_at
+        return info
 
     async def d1_bookmark(self, database_id: str, timestamp: str | None = None) -> str:
         self._check_db(database_id)

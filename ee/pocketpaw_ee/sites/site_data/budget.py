@@ -21,6 +21,8 @@
 # ``acquire_restore`` is a separate, stricter cap on the same machinery: at most 3
 # Time Travel restores per database per 10 minutes (Cloudflare allows 10), bucket
 # ``cf:data:restore:<database id>``; refusal is 429 ``sites.data_restore_busy``.
+# ``claim_once`` / ``release`` are one-shot claims on the same client (Redis
+# ``SET NX`` with a TTL, else this process): undoing a restore, running a job.
 from __future__ import annotations
 
 import logging
@@ -83,10 +85,11 @@ def use_redis(client: Any | None) -> None:
 
 
 def reset() -> None:
-    """Forget every in-process bucket and any injected Redis (tests)."""
+    """Forget every in-process bucket and claim and any injected Redis (tests)."""
     global _redis
     _redis = None
     _local.clear()
+    _claims.clear()
 
 
 def _buckets(kind: str, workspace_id: str) -> list[tuple[str, int, int]]:
@@ -207,3 +210,38 @@ class Budgeted:
     ) -> Any:
         await acquire("d1", self._workspace_id)
         return await self._cf.d1_restore(database_id, bookmark=bookmark, timestamp=timestamp)
+
+
+# --------------------------------------------------------------------------- one-shot claims
+
+# key -> expires at (monotonic seconds)
+_claims: dict[str, float] = {}
+
+
+async def claim_once(key: str, ttl_s: int) -> bool:
+    """Atomically claim ``key`` for ``ttl_s`` seconds: True for the one caller that
+    got it, False while anyone else holds it."""
+    client = redis_client()
+    if client is not None:
+        try:
+            return bool(await client.set(key, "1", nx=True, ex=max(1, ttl_s)))
+        except Exception:  # noqa: BLE001 — fall back to this process
+            logger.warning("site_data.budget: Redis unavailable, claiming in process")
+    now = time.monotonic()
+    held = _claims.get(key)
+    if held is not None and held > now:
+        return False
+    _claims[key] = now + ttl_s
+    return True
+
+
+async def release(key: str) -> None:
+    """Give a claim back (the work it guarded is over, or failed before it changed
+    anything)."""
+    _claims.pop(key, None)
+    client = redis_client()
+    if client is not None:
+        try:
+            await client.delete(key)
+        except Exception:  # noqa: BLE001 — it expires on its own
+            logger.warning("site_data.budget: could not release %s", key)

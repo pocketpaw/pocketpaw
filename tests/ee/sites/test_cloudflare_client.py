@@ -925,3 +925,30 @@ async def test_d1_restore_refusal_fails_closed():
     with pytest.raises(Exception) as exc:
         await _client(handler).d1_restore("db-1", timestamp="2026-10-27T10:00:00Z")
     assert "too many" in str(getattr(exc.value, "message", exc.value))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.d1_bookmark("db-1", "2020-01-01T00:00:00Z"),
+        lambda c: c.d1_restore("db-1", timestamp="2020-01-01T00:00:00Z"),
+    ],
+)
+async def test_a_timestamp_before_the_database_is_out_of_window(call):
+    """Live D1 answers 400 code 7400 for a moment before the database existed or
+    past retention; that is the owner's choice of time, not a Cloudflare fault."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "success": False,
+                "errors": [{"code": 7400, "message": "Provided timestamp is too old"}],
+            },
+        )
+
+    with pytest.raises(Exception) as exc:
+        await call(_client(handler))
+    assert getattr(exc.value, "code", "") == "sites.data_restore_out_of_window"
+    assert getattr(exc.value, "status_code", 0) == 422
