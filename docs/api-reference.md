@@ -4105,7 +4105,11 @@ refuse unknown fields. Every returned row is masked like a read and carries `__k
   without Time Travel.
   This also covers `twoFactor`, `passkey` and `apikey` rows: the matching login
   tables with a `userId` / `user_id` column (through its foreign key when it has
-  one).
+  one). Any other delete whose foreign-key `ON DELETE` action or `DELETE` trigger
+  would reach a login table or a masked column is `403` `sites.data_read_only` with
+  `details.reason` `cascades_to_login_table` / `trigger_on_table`; inserts, updates,
+  duplicates and imports are checked the same way for their own events (see the SQL
+  console's cascades and triggers rule).
 - `POST …/data/tables/{table}/rows:duplicate` `{"key": 3, "values": {}}` → `{"row"}`:
   a copy without generated columns and the key; `values` overrides copied fields
   and must carry a new key for a table whose key the database doesn't fill.
@@ -4251,7 +4255,8 @@ three routes require `sites.data_restore` (ADMIN, `403`
   `confirm_name` must equal the site's name (case and outer spaces ignored).
   A `restore_point` restores to exactly the bookmark an import or bulk delete took
   before its first write, so a client clock running ahead can't miss it. It must be
-  one this site's own `site_data.import` / `site_data.row_delete` event recorded
+  one this site's own `site_data.import` / `site_data.row_delete` / console write
+  (`site_data.sql`) event recorded
   (`metadata.restore_point`) for the current database inside the Time Travel
   window; anything else, a restore's or an undo's bookmark included, is `422`
   `sites.data_restore_unknown_bookmark`. Audited as `site_data.restore` (target
@@ -4272,6 +4277,123 @@ restore, older than 24 hours, or already undone); `409`
 `sites.data_restore_busy` (`error.details.retry_after`) past 3 restores per database
 per 10 minutes, and `sites.data_busy` when the dashboard's Cloudflare budget is
 spent. A restore drops every cached schema and row count of the database.
+
+#### SQL console
+
+`POST …/data/sql` `{"sql": "SELECT name, email FROM customers", "confirm": null}` runs
+ONE statement against the site's D1 and answers:
+
+```json
+{
+  "pocket_id": "pk1", "kind": "read", "columns": ["name", "email"],
+  "rows": [{"name": "Ada", "email": "ada@x.io"}], "truncated": false,
+  "changes": null, "duration_ms": 12, "restore_point": null
+}
+```
+
+What may run (refusals are checked before any Cloudflare call):
+
+| Statement | Kind | Needs |
+|---|---|---|
+| `SELECT`, `VALUES`, `WITH … SELECT`, `EXPLAIN [QUERY PLAN] SELECT …` | read | `fabric.read` |
+| `PRAGMA table_info` / `table_xinfo` / `index_list` / `index_info` / `foreign_key_list`, bare or with one argument | read | `fabric.read` |
+| `INSERT`, `REPLACE`, `UPDATE`, `DELETE` (also after `WITH …`) | write | `sites.data_write` + edit access + `confirm` |
+| anything else: `CREATE`, `ALTER`, `DROP`, `ATTACH`, `DETACH`, `VACUUM`, `REINDEX`, `ANALYZE`, transactions and savepoints, any other or assigning `PRAGMA` | refused | `422` `sites.data_ddl_refused` (use Change structure) |
+
+- A DDL or transaction keyword anywhere in the statement (a `CREATE` inside a
+  subquery, a `DELETE` inside a read) is refused the same way. Comments are stripped
+  before classifying and never reach D1.
+- One statement only: a second one, even after a comment, is `422`
+  `sites.data_sql_multiple` (so is a quoted name holding `;`). Empty is
+  `sites.data_sql_empty`, over 20 KB `sites.data_sql_too_long`. Bound parameters
+  (`?`, `:name`), control characters, unbalanced parentheses and an unclosed quote
+  are `sites.data_sql_error`. A string literal holding `;` is sent as a bound
+  parameter, so the SQL text D1 receives never contains a semicolon.
+- Internal tables (`sqlite_*`, `_cf_*`, `__drizzle*`, `_paw_*`, `d1_migrations`) and
+  `pragma_*` functions outside the allowlist are `422`
+  `sites.data_sql_internal_table`, wherever they appear. A table the database
+  doesn't have (a view included) is `422` `sites.data_sql_unknown_table`.
+- **Credentials.** Every table that has masked columns (the grid's rules: credential
+  names on any table, login tables, session-like tables) is read through a subquery
+  whose masked columns hold `"•••"` (null stays null). Expressions, filters, sorts,
+  unions and CTE renames over them only ever see the mask, so `SELECT password AS p`,
+  `hex(password)` or `WHERE password LIKE 's%'` reveal nothing. On top of that, any
+  result column named like a credential, or named like a masked column of a table the
+  statement reads, reads `"•••"`. A bare mention of such a table the console can't
+  place as a table or a qualified column is `422` `sites.data_sql_ambiguous` (write
+  `orders.account`); so is a CTE named like one.
+- **Writes** must send `confirm: "write"`, or `confirm: "unbounded"` for an `UPDATE`
+  / `DELETE` with no top-level `WHERE` (a `WHERE` inside a subquery doesn't count);
+  otherwise `422` `sites.data_sql_confirm_needed` with
+  `error.details = {"kind": "write", "unbounded": true|false}`. A write that touches a
+  login table at all (target or source) is `403` `sites.data_read_only`
+  (`details.reason: "login_table"`); naming a masked column of the target, or an
+  `INSERT` into a table with masked columns without a column list, is `422`
+  `sites.data_sql_masked_column`. A member gets `403` `sites.data_write_forbidden`,
+  a caller without edit access `403` `pocket.access_denied`. A restore point is taken
+  first and returned as `restore_point` (null when the database has none); `changes`
+  is D1's `meta.changes` (the statement's own rows, not a trigger's). `RETURNING`
+  rows are masked and capped like a read's.
+- **What counts as unbounded.** Only a missing top-level `WHERE` makes an `UPDATE` /
+  `DELETE` unbounded. An always-true `WHERE` (`WHERE 1`, `WHERE id = id`) is accepted
+  as a bounded write on purpose: someone typed it, so it is explicit, it still needs
+  `confirm: "write"`, and a restore point is taken before it runs. The console does
+  not try to prove a condition true or false.
+- **Cascades and triggers.** A write is also `403` `sites.data_read_only` when it
+  would change sign-in data indirectly: `details.reason: "cascades_to_login_table"`
+  when a foreign key with `ON DELETE` (for `DELETE`, `REPLACE`, `INSERT OR REPLACE`)
+  or `ON UPDATE` (for `UPDATE`, an upsert's `DO UPDATE`) `CASCADE` / `SET NULL` /
+  `SET DEFAULT` reaches a login table or a masked column, following chains through
+  ordinary tables; `"trigger_on_table"` when a trigger for the write's event
+  (`INSERT` for an insert, `REPLACE` or upsert; `UPDATE` for an update or `DO UPDATE`;
+  `DELETE` for a delete or `REPLACE`) on a table the write reaches mentions a login
+  table or a masked column. Tables reached further along count with every event. The
+  Rows tab applies the same check to every write: an insert or duplicate (`INSERT`
+  triggers), an update (`UPDATE` triggers and `ON UPDATE` actions), a delete, and a
+  CSV import (`INSERT` triggers, plus `UPDATE` for `upsert`), except that a user's own
+  login rows still go with the user. An import is refused before its upload is
+  claimed, so the same `upload_id` can be committed once the trigger is gone.
+- Reads of `SELECT` / `VALUES` run as `SELECT * FROM (…) LIMIT 501`; at most 500 rows
+  come back and `truncated` says there were more. A repeated column name comes back
+  as `id`, `id:1`, …. Integers beyond 2^53 come back as digit strings.
+- Only the statement's own failure in D1 (an HTTP 400 carrying a D1 / `SQLITE_*`
+  error: syntax, missing column, constraint) is `422` `sites.data_sql_error`, with
+  D1's message up to its `SQLITE_*` code, account and database ids removed.
+  Cloudflare's own `429` is `429` `sites.data_busy`; any other failure (`401`, `403`,
+  `5xx`, a timeout) is `502` `sites.cloudflare_error` "Couldn't reach the site's
+  database." (Cloudflare's text is logged server-side only). One run per user at a
+  time (`429` `sites.data_sql_busy`, freed after 35 s if a run dies); `429`
+  `sites.data_busy` when the dashboard's Cloudflare budget is spent; `409`
+  `sites.data_unavailable` in local mode or before publish.
+- Every run that reaches D1 is audited as `site_data.sql` (target `<pocket_id>`,
+  metadata `{kind, verb, sql (first 2 KB), restore_point, database_id, changes,
+  rows, truncated, duration_ms}`, or `error`). A write that landed uses target type
+  `site_data`, so it counts in a restore's `changes_since` and its restore point is
+  one `POST …/data/restore` accepts; reads and failed runs use target type
+  `site_query`.
+
+#### Schema
+
+`GET …/data/schema` (`fabric.read`) → every user table's structure, read only:
+
+```json
+{
+  "pocket_id": "pk1", "available": true, "reason": "",
+  "tables": [{
+    "name": "customers",
+    "columns": [{"name": "id", "sql_type": "integer", "kind": "integer",
+                 "nullable": true, "primary_key": true, "default": null,
+                 "references": null, "masked": false}],
+    "indexes": [{"name": "customers_email", "unique": false, "columns": ["email"]}],
+    "create_sql": "CREATE TABLE customers (id INTEGER PRIMARY KEY, email TEXT)"
+  }]
+}
+```
+
+Internal tables are left out; login tables are included (`create_sql` holds no
+values) with their credential columns `masked: true`. `default` is the declared
+default as SQL text; an expression index column reads `"(expression)"`. In local
+mode or before publish, `available` is false with `reason` and no tables.
 
 #### Files (R2) and key-values (KV)
 

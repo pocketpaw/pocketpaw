@@ -146,8 +146,8 @@
   {
     "label": "users can be inserted",
     "file": "ee/pocketpaw_ee/sites/data_service.py",
-    "find": "    if not d1.insertable(w.table):\n        raise writes.read_only(\"login_table\")\n    row = await writes.insert(",
-    "replace": "    row = await writes.insert(",
+    "find": "    if not d1.insertable(w.table):\n        raise writes.read_only(\"login_table\")\n    _refuse_exposure(w, inserts=True)\n    row = await writes.insert(",
+    "replace": "    _refuse_exposure(w, inserts=True)\n    row = await writes.insert(",
     "tests": [
       "tests/ee/sites/test_site_data_write.py"
     ]

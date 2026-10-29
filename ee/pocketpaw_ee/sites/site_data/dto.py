@@ -1,8 +1,9 @@
 # ee/pocketpaw_ee/sites/site_data/dto.py — wire shapes of the Sites Data dashboard
 # (``sites.data_router``): the inventory, one table's schema, a page of rows, the row
 # write bodies and results, a row's change history, the CSV import preview and
-# commit, point-in-time restore (status, restore, undo), and the site's R2 files and
-# KV keys (lists, one object, one key, their write bodies).
+# commit, point-in-time restore (status, restore, undo), the site's R2 files and KV
+# keys (lists, one object, one key, their write bodies), the SQL console's run body and
+# result, and the read-only schema view.
 #
 # Every read response carries ``available`` / ``reason``: a site with no reachable
 # database (local mode, not published yet) answers ``available=false`` with
@@ -332,3 +333,52 @@ class KvPutOut(BaseModel):
     size: int
     # The dashboard shows "Changes can take up to a minute to reach your live site."
     propagation_note: bool = True
+
+
+class SqlBody(_Body):
+    sql: str = Field(max_length=100_000)  # the console's own 20 KB cap answers first
+    # A write runs only with ``write``; an UPDATE / DELETE with no WHERE needs
+    # ``unbounded``.
+    confirm: Literal["write", "unbounded"] | None = None
+
+
+class SqlResult(BaseModel):
+    pocket_id: str
+    kind: Literal["read", "write"]
+    columns: list[str] = Field(default_factory=list)  # a repeated name reads "id:1"
+    rows: list[dict[str, Any]] = Field(default_factory=list)  # at most 500
+    truncated: bool = False  # the statement returned more than 500 rows
+    changes: int | None = None  # rows a write changed; None for a read
+    duration_ms: int = 0
+    restore_point: str | None = None  # the bookmark taken before a write
+
+
+class SchemaColumn(BaseModel):
+    name: str
+    sql_type: str
+    kind: ColumnKind
+    nullable: bool
+    primary_key: bool
+    default: str | None = None
+    references: str | None = None
+    masked: bool = False
+
+
+class SchemaIndex(BaseModel):
+    name: str
+    unique: bool
+    columns: list[str] = Field(default_factory=list)
+
+
+class SchemaTable(BaseModel):
+    name: str
+    columns: list[SchemaColumn] = Field(default_factory=list)
+    indexes: list[SchemaIndex] = Field(default_factory=list)
+    create_sql: str = ""
+
+
+class DataSchema(BaseModel):
+    pocket_id: str
+    available: bool
+    reason: str = ""
+    tables: list[SchemaTable] = Field(default_factory=list)

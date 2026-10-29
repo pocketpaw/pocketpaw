@@ -1450,6 +1450,36 @@ class CloudflareClient:
             rows.append([r for r in found if isinstance(r, dict)])
         return rows
 
+    async def query_d1_raw(self, *, database_id: str, sql: str, params: list | None = None) -> dict:
+        """Run ONE statement through D1's ``raw`` endpoint and return ``{columns, rows,
+        changes}``: the column names in order (repeats kept), each row as a list, and
+        ``meta.changes``. The Data dashboard's SQL console reads this way so a result
+        with no rows still names its columns and two columns of one name both survive.
+
+        Same rules as ``query_d1``: the caller passes one fully-formed statement and
+        every value rides ``params``. A failed statement raises ValidationError
+        ``sites.cloudflare_error`` carrying D1's own message."""
+        url = f"{self._d1_url(database_id)}/raw"
+        async with self._client() as client:
+            resp = await client.post(url, json={"sql": sql, "params": params or []})
+        result = self._unwrap(resp)
+        statements = result if isinstance(result, list) else []
+        first = statements[0] if statements and isinstance(statements[0], dict) else {}
+        if first.get("success") is False:
+            raise ValidationError(
+                "sites.cloudflare_error", str(first.get("error") or "D1 query statement failed")
+            )
+        results = first.get("results") if isinstance(first.get("results"), dict) else {}
+        columns = results.get("columns") if isinstance(results.get("columns"), list) else []
+        rows = results.get("rows") if isinstance(results.get("rows"), list) else []
+        meta = first.get("meta") if isinstance(first.get("meta"), dict) else {}
+        changes = meta.get("changes")
+        return {
+            "columns": [str(c) for c in columns],
+            "rows": [r for r in rows if isinstance(r, list)],
+            "changes": changes if isinstance(changes, int) and not isinstance(changes, bool) else 0,
+        }
+
     def _d1_url(self, database_id: str) -> str:
         return f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}"
 

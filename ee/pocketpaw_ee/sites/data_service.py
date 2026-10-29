@@ -16,7 +16,9 @@
 # Writes (rows and imports) go through ``_writable_table``: EDIT access to the pocket
 # (403 ``pocket.access_denied``), a known table (404 before any row SQL), a reachable
 # database (409 ``sites.data_unavailable``), an editable table (``sites.data_read_only``).
-# Imports also refuse every login table. Each written row records one audit event
+# Imports also refuse every login table. Every write (row insert / update / duplicate /
+# delete, import) is refused when a trigger for its event or a foreign-key action
+# would reach sign-in data (``d1.write_exposure``). Each written row records one audit event
 # (``site_data.row_*``, target ``<pocket>:<table>:<key>``, credentials removed), an
 # import one ``site_data.import`` (counts and mapping, no values, target
 # ``<pocket>:<table>``); an audit failure never fails the write. A bulk delete and an
@@ -27,15 +29,14 @@
 #
 # Restore (``restore_status`` / ``restore`` / ``restore_undo``) needs edit access
 # here and ``sites.data_restore`` in the router; a ``production`` D1, a moment inside
-# ``PAW_CF_D1_TT_DAYS`` (default 30), ``confirm_name`` equal to the site's name (case
-# and spaces ignored), and at most 3 restores per database per 10 minutes. Each
-# restore is audited (target ``<pocket>``) with its ``previous_bookmark`` and database
-# id. Instead of ``at`` a restore can name a ``restore_point``: only one this
-# site's own import / bulk delete event recorded for this database inside the
-# window. Undo takes the confirm name too and only the newest restore event's bookmark,
-# within 24 h and once (a ``budget.claim_once`` marker). A moment before the
-# database's ``created_at`` or its history (Cloudflare 7400) is out of window. A
-# restore drops every cache of the database.
+# ``PAW_CF_D1_TT_DAYS`` (default 30) and after the database's history begins,
+# ``confirm_name`` equal to the site's name, at most 3 restores per database per 10
+# minutes. Instead of ``at`` it can name a ``restore_point`` one of this site's own
+# import / bulk delete / console write events recorded. Undo takes only the newest
+# restore's bookmark, within 24 h and once. A restore drops every cache of the database.
+#
+# SQL console (``run_sql``, ``get_schema``): ``site_data.console`` decides what one
+# statement may do and builds what D1 runs; the section header below has the rules.
 #
 # Files (R2) and key-values (KV): see the section header below. A store is named by a
 # binding the Site doc records (else 404), files are typed so they can't run as a page
@@ -63,6 +64,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 import anyio.to_thread
+import httpx
 
 from pocketpaw_ee.cloud._core.errors import (
     CloudError,
@@ -73,12 +75,13 @@ from pocketpaw_ee.cloud._core.errors import (
     ValidationError,
 )
 from pocketpaw_ee.sites import service as sites_service
-from pocketpaw_ee.sites.project_data import auth_table, masked_columns
-from pocketpaw_ee.sites.site_data import budget, csv_io, d1, files_kv, writes
+from pocketpaw_ee.sites.project_data import auth_table, masked_columns, quote_ident
+from pocketpaw_ee.sites.site_data import budget, console, csv_io, d1, files_kv, writes
 from pocketpaw_ee.sites.site_data.dto import (
     ColumnInfo,
     ConnectorRef,
     DataInventory,
+    DataSchema,
     DeleteRowsOut,
     FileList,
     FileObject,
@@ -96,6 +99,10 @@ from pocketpaw_ee.sites.site_data.dto import (
     RowHistory,
     RowOut,
     RowPage,
+    SchemaColumn,
+    SchemaIndex,
+    SchemaTable,
+    SqlResult,
     StoreRef,
     TableSchema,
     TableSummary,
@@ -494,6 +501,22 @@ async def _writable_table(
     return _Writable(target=target, cf=cf, schema=schema, table=t, kinds=kinds)
 
 
+def _refuse_exposure(w: _Writable, *, inserts: bool = False, updates: bool = False) -> None:
+    """403 when the write would reach sign-in data through a trigger for its event or
+    a foreign-key action (``d1.write_exposure``); a user's own login rows are kept, as
+    the delete keeps them. Runs before any row SQL (and before an upload is claimed)."""
+    reason = d1.write_exposure(
+        w.schema,
+        [w.table.name],
+        deletes=False,
+        updates=updates,
+        inserts=inserts,
+        keep_user_cascade=True,
+    )
+    if reason:
+        raise writes.read_only(reason)
+
+
 def _masked(table: d1.Table, row: dict[str, Any]) -> dict[str, Any]:
     return d1.mask_page(table, [row])[0]
 
@@ -548,6 +571,7 @@ async def insert_row(
     )
     if not d1.insertable(w.table):
         raise writes.read_only("login_table")
+    _refuse_exposure(w, inserts=True)
     row = await writes.insert(w.cf, w.target.d1_id, w.table, w.kinds, values)
     d1.forget_counts(w.target.d1_id)
     await _audit(w, user_id, "site_data.row_insert", row.get("__key"), before=None, after=row)
@@ -574,6 +598,7 @@ async def update_row(
         table=table,
         _cloudflare=_cloudflare,
     )
+    _refuse_exposure(w, updates=True)
     row_key = writes.key_value(w.table, w.kinds, key)
     before, after = await writes.update(
         w.cf,
@@ -654,6 +679,7 @@ async def duplicate_row(
     )
     if not d1.insertable(w.table):
         raise writes.read_only("login_table")
+    _refuse_exposure(w, inserts=True)
     source = writes.key_value(w.table, w.kinds, key)
     row = await writes.duplicate(w.cf, w.target.d1_id, w.table, w.kinds, source, values or {})
     d1.forget_counts(w.target.d1_id)
@@ -734,15 +760,19 @@ _JOB_TTL_S = 15 * 60  # a crashed job's slot frees itself
 
 
 async def _restore_point(w: _Writable) -> str | None:
+    return await _bookmark_now(w.cf, w.target)
+
+
+async def _bookmark_now(cf: budget.Budgeted, target: DataTarget) -> str | None:
     """The database's current bookmark, taken before a bulk write, or None when it
     has no Time Travel (an alpha database) or Cloudflare can't answer. A spent
     budget still refuses the write: nothing has been written yet."""
     try:
-        return await w.cf.d1_bookmark(w.target.d1_id)
+        return await cf.d1_bookmark(target.d1_id)
     except budget.DataBusy:
         raise
     except CloudError:
-        logger.warning("site_data: no restore point for %s", w.target.pocket_id, exc_info=True)
+        logger.warning("site_data: no restore point for %s", target.pocket_id, exc_info=True)
         return None
 
 
@@ -941,6 +971,8 @@ async def import_commit(
         table=table,
         _cloudflare=_cloudflare,
     )
+    # Before the job slot and the upload are claimed, so a refused upload survives.
+    _refuse_exposure(w, inserts=True, updates=mode == "upsert")
     slot = await _claim_job(w.target.workspace_id)
     try:
         claimed = await csv_io.claim_upload(
@@ -1000,7 +1032,13 @@ async def import_commit(
 
 
 async def _audit_event(
-    target: DataTarget, user_id: str, action: str, target_id: str, metadata: dict[str, Any]
+    target: DataTarget,
+    user_id: str,
+    action: str,
+    target_id: str,
+    metadata: dict[str, Any],
+    *,
+    target_type: str = _AUDIT_TARGET,
 ) -> None:
     from pocketpaw_ee.cloud.audit import service as audit_service
 
@@ -1009,7 +1047,7 @@ async def _audit_event(
             target.workspace_id,
             user_id,
             action,
-            target_type=_AUDIT_TARGET,
+            target_type=target_type,
             target_id=target_id,
             metadata=metadata,
         )
@@ -1194,7 +1232,7 @@ async def _database_state(
     return reason, _created(info)
 
 
-_RESTORE_POINT_ACTIONS = ["site_data.import", "site_data.row_delete"]
+_RESTORE_POINT_ACTIONS = ["site_data.import", "site_data.row_delete", "site_data.sql"]
 
 
 def _bad_request() -> ValidationError:
@@ -1979,3 +2017,240 @@ async def delete_kv_key(
     await _store_audit(
         target, user_id, "site_data.kv_delete", binding, files_kv.audit_kv_name(key), {}
     )
+
+
+# --------------------------------------------------------------------------- SQL console
+#
+# Reads need what reading rows needs; writes need ``sites.data_write`` (passed in by
+# the router), edit access, a ``confirm`` (``unbounded`` for an UPDATE / DELETE with no
+# WHERE), and take a restore point first. One run per user at a time
+# (``budget.claim_once``, 35 s TTL, 429 ``sites.data_sql_busy``). Only the statement's
+# own failure in D1 (a 400 carrying a D1 / SQLite error) is 422 ``sites.data_sql_error``
+# (ids and anything after the SQLite code stripped); Cloudflare's 429 is
+# ``sites.data_busy``; any other failure (401 / 403 / 5xx / timeout) is 502
+# ``sites.cloudflare_error`` with a generic message, logged. Writes are refused when a
+# foreign-key action or a trigger would reach sign-in data (``d1.write_exposure``).
+# Every run that reaches D1 records
+# ``site_data.sql`` (target ``<pocket>``, the SQL cut at 2 KB, changes, restore point,
+# database id). A write that landed uses target type ``site_data`` (its restore point
+# is one ``restore`` accepts, and it counts in ``changes_since``); reads and failed
+# runs use ``site_query``. ``get_schema`` is the read-only schema view: columns,
+# indexes (``PRAGMA index_list`` / ``index_info``), CREATE text.
+
+_SQL_TTL_S = 35  # a little over D1's 30 s statement timeout
+_CF_BUSY_RETRY_S = 60  # Cloudflare's own 429: its window is minutes, not seconds
+
+
+def _unreachable() -> CloudError:
+    return CloudError(502, "sites.cloudflare_error", "Couldn't reach the site's database.")
+
+
+async def run_sql(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    sql: str,
+    confirm: str | None = None,
+    can_write: bool = False,
+    _cloudflare: Any | None = None,
+) -> SqlResult:
+    """Run ONE console statement (``site_data.console`` decides read / write / refused).
+    A read needs what reading rows needs; a write needs ``can_write`` (the router's
+    ``sites.data_write``), edit access, ``confirm`` (``unbounded`` for an UPDATE /
+    DELETE with no WHERE), and gets a restore point first. One run per user at a
+    time (429 ``sites.data_sql_busy``). Every run that reaches D1 is audited as
+    ``site_data.sql``. ``POST .../data/sql``."""
+    stmt = console.classify(sql)
+    if stmt.kind == "write":
+        if not can_write:
+            raise Forbidden(
+                "sites.data_write_forbidden", "Changing rows needs the Data write permission."
+            )
+        target = await _editable_target(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            _cloudflare=_cloudflare,
+        )
+    else:
+        target = await resolve_target(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            _cloudflare=_cloudflare,
+        )
+    if target.reason:
+        raise writes.unavailable(target.reason)
+
+    slot = f"site_data:sql:{workspace_id or '-'}:{user_id}"
+    if not await budget.claim_once(slot, _SQL_TTL_S):
+        raise RateLimited(
+            "sites.data_sql_busy", "Your last statement is still running. Try again when it ends."
+        )
+    restore_point: str | None = None
+    try:
+        cf = _client(target, _cloudflare)
+        schema = await d1.introspect(cf, target.d1_id)
+        planned = console.plan(stmt, schema)
+        if stmt.kind == "write":
+            if not (confirm == "unbounded" or (confirm == "write" and not stmt.unbounded)):
+                raise ValidationError(
+                    "sites.data_sql_confirm_needed",
+                    "This changes every row of the table. Confirm before it runs."
+                    if stmt.unbounded
+                    else "Confirm this change before it runs.",
+                    {"kind": stmt.kind, "unbounded": stmt.unbounded},
+                )
+            restore_point = await _bookmark_now(cf, target)
+        started = time.monotonic()
+        try:
+            raw = await cf.query_d1_raw(
+                database_id=target.d1_id, sql=planned.sql, params=planned.params
+            )
+        except budget.DataBusy:
+            raise
+        except httpx.HTTPError as exc:  # a timeout or a dropped connection
+            logger.warning("site_data: console call failed for %s: %r", pocket_id, exc)
+            await _sql_audit(target, user_id, stmt, sql, restore_point, error="unreachable")
+            raise _unreachable() from exc
+        except ValidationError as exc:
+            if exc.code != "sites.cloudflare_error":
+                raise
+            kind = console.failure_kind(exc.message)
+            if kind == "busy":
+                raise budget.DataBusy(_CF_BUSY_RETRY_S, scope="global") from exc
+            if kind == "unreachable":
+                # Cloudflare's text (auth, outage) is for the operator, not the page.
+                logger.warning("site_data: console call failed for %s: %s", pocket_id, exc.message)
+                await _sql_audit(target, user_id, stmt, sql, restore_point, error="unreachable")
+                raise _unreachable() from exc
+            message = console.clean_error(exc.message)
+            await _sql_audit(target, user_id, stmt, sql, restore_point, error=message)
+            raise ValidationError("sites.data_sql_error", message) from exc
+        duration_ms = int((time.monotonic() - started) * 1000)
+    finally:
+        await budget.release(slot)
+
+    columns, rows, truncated = console.shape(
+        list(raw.get("columns") or []), list(raw.get("rows") or []), planned.mask
+    )
+    changes = int(raw.get("changes") or 0) if stmt.kind == "write" else None
+    if stmt.kind == "write":
+        d1.forget_counts(target.d1_id)
+    await _sql_audit(
+        target,
+        user_id,
+        stmt,
+        sql,
+        restore_point,
+        changed=stmt.kind == "write",
+        changes=changes,
+        rows=len(rows),
+        truncated=truncated,
+        duration_ms=duration_ms,
+    )
+    return SqlResult(
+        pocket_id=pocket_id,
+        kind=stmt.kind,
+        columns=columns,
+        rows=rows,
+        truncated=truncated,
+        changes=changes,
+        duration_ms=duration_ms,
+        restore_point=restore_point,
+    )
+
+
+# Console reads and failed statements change nothing, so they are recorded under their
+# own target type: a restore's ``changes_since`` (``site_data`` events) never counts
+# them, and their bookmark is never one ``restore`` accepts.
+_SQL_QUERY_TARGET = "site_query"
+
+
+async def _sql_audit(
+    target: DataTarget,
+    user_id: str,
+    stmt: console.Statement,
+    sql: str,
+    restore_point: str | None,
+    *,
+    changed: bool = False,
+    **extra: Any,
+) -> None:
+    await _audit_event(
+        target,
+        user_id,
+        "site_data.sql",
+        target.pocket_id,
+        {
+            "kind": stmt.kind,
+            "verb": stmt.verb,
+            "sql": sql[: console.AUDIT_SQL_MAX],
+            "restore_point": restore_point,
+            "database_id": target.d1_id,
+            **extra,
+        },
+        target_type=_AUDIT_TARGET if changed else _SQL_QUERY_TARGET,
+    )
+
+
+async def get_schema(
+    *, workspace_id: str, user_id: str, pocket_id: str, _cloudflare: Any | None = None
+) -> DataSchema:
+    """Every user table's columns, indexes and CREATE text, read only (login tables
+    included: their CREATE text holds no values). ``GET .../data/schema``."""
+    target = await resolve_target(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    if target.reason:
+        return DataSchema(pocket_id=pocket_id, available=False, reason=target.reason)
+    cf = _client(target, _cloudflare)
+    schema = await d1.introspect(cf, target.d1_id)
+    names = list(schema.tables)
+    lists: list[list[dict[str, Any]]] = []
+    if names:
+        lists = await cf.query_d1_batch(
+            database_id=target.d1_id,
+            statements=[(f"PRAGMA index_list({quote_ident(n)})", []) for n in names],
+        )
+    found: list[tuple[str, str, bool]] = []  # (table, index, unique)
+    for name, rows in zip(names, lists, strict=False):
+        for r in sorted(rows, key=lambda r: int(r.get("seq") or 0)):
+            ix = r.get("name")
+            if isinstance(ix, str) and ix:
+                found.append((name, ix, bool(r.get("unique"))))
+    infos: list[list[dict[str, Any]]] = []
+    if found:
+        infos = await cf.query_d1_batch(
+            database_id=target.d1_id,
+            statements=[(f"PRAGMA index_info({quote_ident(ix)})", []) for _t, ix, _u in found],
+        )
+    indexes: dict[str, list[SchemaIndex]] = {n: [] for n in names}
+    for (table, ix, unique), rows in zip(found, infos, strict=False):
+        ordered = sorted(rows, key=lambda r: int(r.get("seqno") or 0))
+        cols = [str(r["name"]) if r.get("name") else "(expression)" for r in ordered]
+        indexes[table].append(SchemaIndex(name=ix, unique=unique, columns=cols))
+    tables: list[SchemaTable] = []
+    for name in names:
+        t = schema.tables[name]
+        fields = _spec_fields(target.spec_object(name))
+        columns = [
+            SchemaColumn(
+                name=c.name,
+                sql_type=c.sql_type,
+                kind=d1.infer_kind(  # type: ignore[arg-type]
+                    c.name, c.sql_type, c.default, [], spec_type=fields.get(c.name)
+                ),
+                nullable=not c.notnull,
+                primary_key=c.pk > 0,
+                default=c.default,
+                references=c.references,
+                masked=c.name in t.masked,
+            )
+            for c in t.columns
+        ]
+        tables.append(
+            SchemaTable(name=name, columns=columns, indexes=indexes[name], create_sql=t.create_sql)
+        )
+    return DataSchema(pocket_id=pocket_id, available=True, tables=tables)

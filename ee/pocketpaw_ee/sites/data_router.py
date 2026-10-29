@@ -16,6 +16,8 @@
 #   GET   /restore             ?at=<iso> | ?restore_point=<bookmark> -> RestoreStatus
 #   POST  /restore             {at | restore_point, confirm_name} -> RestoreOut
 #   POST  /restore:undo               {previous_bookmark, confirm_name} -> RestoreOut
+#   POST  /sql                        {sql, confirm?: write|unbounded} -> SqlResult
+#   GET   /schema                                 DataSchema
 #   GET   /files/{binding}                        ?prefix=&cursor=  -> FileList
 #   GET   /files/{binding}/object?key=            the object, streamed as an attachment
 #   PUT   /files/{binding}/object?key=&overwrite= raw body (<= 50 MB) -> FileObjectOut
@@ -27,28 +29,20 @@
 #   DELETE /kv/{binding}/keys/{key}               204
 #
 # Thin handlers over ``sites.data_service``; errors are CloudErrors mapped by
-# ``_core.http`` (422 for a bad query or value, 404 for an unknown table, row or
-# pocket, 409 ``sites.data_conflict`` / ``sites.data_unavailable``, 429
-# ``sites.data_busy`` when the Cloudflare budget is spent). Every route takes
-# ``request_context`` + ``fabric.read``; every write route also requires
-# ``sites.data_write`` (ADMIN, overridable per member) and refuses a body over
-# 1 MB (413 ``sites.data_body_too_large``; a CSV upload is capped at 5 MB, 413
-# ``sites.data_csv_too_large``). The three restore routes require
-# ``sites.data_restore`` (ADMIN) instead. Three reads are guarded like writes
-# (``sites.data_write`` plus edit access): the KV key list, one KV key, and a file
-# download, because KV names can be session tokens and uploads can be private; the
-# file LISTING stays on ``fabric.read``. ``can_write`` /
-# ``can_restore`` on the inventory come from the non-raising checks. ``{key}`` is
-# the row's ``__key`` (or the KV key), URL-encoded; it may contain ``/``. A file
-# upload streams its raw body (413 ``sites.data_file_too_large`` past 50 MB; the body
-# ceiling middleware stops a bigger one first), a KV write is capped at 3 MB of JSON,
-# and a download always answers ``attachment``, ``nosniff`` and a sandboxing CSP.
+# ``_core.http``. Every route takes ``request_context`` + ``fabric.read``; every write
+# route also requires ``sites.data_write`` (ADMIN, overridable per member) and refuses
+# a body over 1 MB (413 ``sites.data_body_too_large``; a CSV upload 5 MB). Restore
+# routes require ``sites.data_restore`` (ADMIN) instead. ``/sql`` passes
+# ``sites.data_write`` in as a bool: the statement's kind decides what it needs. The KV
+# key list, one KV key and a file download are guarded like writes (KV names can be
+# session tokens, uploads can be private); the file listing stays on ``fabric.read``.
+# ``{key}`` is the row's ``__key`` (or the KV key), URL-encoded, ``/`` allowed. A file
+# upload streams (413 past 50 MB), a KV write is capped at 3 MB, and a download always
+# answers ``attachment``, ``nosniff`` and a sandboxing CSP.
 #
-# Mounting: ``sites.router`` includes this router BEFORE its own routes, so it is
-# mounted (and plan-gated) wherever the sites router is. That order matters:
-# ``.../data/inventory`` would otherwise be swallowed by the legacy
-# ``.../data/{table}``. A table literally named ``inventory`` is still reachable
-# through ``.../data/tables/inventory``.
+# Mounting: ``sites.router`` includes this router BEFORE its own routes, so
+# ``.../data/inventory`` / ``schema`` / ``sql`` aren't swallowed by the legacy
+# ``.../data/{table}`` (a table named so is still at ``.../data/tables/<name>``).
 """Sites Data dashboard routes."""
 
 from __future__ import annotations
@@ -63,6 +57,7 @@ from pocketpaw_ee.sites import data_service
 from pocketpaw_ee.sites.site_data import csv_io
 from pocketpaw_ee.sites.site_data.dto import (
     DataInventory,
+    DataSchema,
     DeleteRowsBody,
     DeleteRowsOut,
     DuplicateRowBody,
@@ -84,6 +79,8 @@ from pocketpaw_ee.sites.site_data.dto import (
     RowHistory,
     RowOut,
     RowPage,
+    SqlBody,
+    SqlResult,
     TableSchema,
     UpdateRowBody,
 )
@@ -421,6 +418,42 @@ async def site_data_restore_undo(
         pocket_id=pocket_id,
         previous_bookmark=body.previous_bookmark,
         confirm_name=body.confirm_name,
+    )
+
+
+# --------------------------------------------------------------------------- SQL console
+
+
+@router.post(_BASE + "/sql", response_model=SqlResult)
+async def site_data_sql(
+    pocket_id: str,
+    body: SqlBody,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    can_write: bool = Depends(action_allowed_any_workspace("sites.data_write")),
+    ___: None = Depends(_write_body_limit),
+) -> SqlResult:
+    """Run one statement: a read for anyone who reads rows, a row change for
+    ``sites.data_write`` with ``confirm``; structure changes are refused."""
+    return await data_service.run_sql(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        sql=body.sql,
+        confirm=body.confirm,
+        can_write=can_write,
+    )
+
+
+@router.get(_BASE + "/schema", response_model=DataSchema)
+async def site_data_schema(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+) -> DataSchema:
+    """Every table's columns, indexes and CREATE text, read only."""
+    return await data_service.get_schema(
+        workspace_id=ctx.workspace_id or "", user_id=ctx.user_id, pocket_id=pocket_id
     )
 
 

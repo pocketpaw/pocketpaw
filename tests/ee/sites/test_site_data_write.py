@@ -1167,6 +1167,12 @@ def test_every_write_route_requires_sites_data_write():
         # Reading KV or downloading a file is guarded like a write (tokens and private
         # uploads); test_site_data_files_kv pins exactly which reads those are.
         admin_read = route.path.endswith(("/kv/{binding}/keys", "/keys/{key:path}", "/object"))
+        # The SQL console runs reads too: the statement's kind decides, so the route
+        # passes the non-raising check in and run_sql refuses a write without it.
+        if route.path.endswith("/data/sql"):
+            assert "action_allowed_sites_data_write" in guards
+            assert "require_action_fabric_read" in guards
+            continue
         is_write = (
             bool(methods & {"POST", "PATCH", "PUT", "DELETE"}) or admin_read
         ) and not is_restore

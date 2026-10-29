@@ -18,7 +18,9 @@
 #
 # ``column_writable`` / ``insertable`` are the one statement of which columns and
 # tables the dashboard may write; ``site_data.writes`` enforces them and
-# ``ColumnInfo.writable`` reports them.
+# ``ColumnInfo.writable`` reports them. ``write_exposure`` says whether a write would
+# reach sign-in data through FK actions (``Column.on_delete`` / ``on_update``) or the
+# triggers introspection also reads (``Schema.triggers``).
 #
 # Invariants:
 #   * Read only. Every value binds through ``params``; no statement here writes.
@@ -50,7 +52,10 @@ from pocketpaw_ee.sites.project_data import (
 )
 from pocketpaw_ee.sites.site_data.dto import ColumnInfo
 
-LIST_SQL = "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name"
+LIST_SQL = (
+    "SELECT type, name, tbl_name, sql FROM sqlite_master "
+    "WHERE type IN ('table', 'trigger') ORDER BY name"
+)
 
 COUNT_CAP = 10_000
 LIMIT_DEFAULT = 50
@@ -124,6 +129,8 @@ class Column:
     pk: int  # position in the primary key, 0 when not part of it
     hidden: int  # PRAGMA table_xinfo: 2 / 3 = generated
     references: str | None
+    on_delete: str = ""  # the FK's ON DELETE action, upper case ("CASCADE", "SET NULL" …)
+    on_update: str = ""
 
 
 @dataclass(frozen=True)
@@ -137,6 +144,7 @@ class Table:
     masked: frozenset[str]
     read_only_reason: str  # "" when editable
     rowid_alias: str = ""  # the INTEGER PRIMARY KEY column, if any
+    create_sql: str = ""  # the CREATE text sqlite_master holds (schema view)
 
     @property
     def editable(self) -> bool:
@@ -150,6 +158,8 @@ class Table:
 class Schema:
     fingerprint: str
     tables: dict[str, Table] = field(default_factory=dict)
+    # Trigger CREATE texts by the (folded) name of the table they fire on.
+    triggers: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 _schema_cache: dict[tuple[str, ...], tuple[float, Schema]] = {}
@@ -202,6 +212,113 @@ def column_writable(table: Table, column: Column, kind: str) -> bool:
     return True
 
 
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def fold(name: str) -> str:
+    """``name`` lower-cased the way SQLite compares names: ASCII letters only."""
+    return name.translate(_ASCII_LOWER)
+
+
+def is_login(table: Table) -> bool:
+    """A sign-in table: a better-auth name (users included) or a session-like one."""
+    return bool(auth_table(table.name)) or table.read_only_reason == "login_table"
+
+
+# FK actions that change a child row when its parent row changes.
+_FK_ACTS = frozenset({"CASCADE", "SET NULL", "SET DEFAULT"})
+# Every name a trigger body mentions: quoted, bracketed, backticked or bare.
+_TRIGGER_NAME = re.compile(
+    r'"((?:[^"]|"")*)"|`((?:[^`]|``)*)`|\[([^\]]*)\]|'
+    r"'((?:[^']|'')*)'|([A-Za-z_\x80-\U0010ffff][\w$\x80-\U0010ffff]*)"
+)
+
+
+def _mentions(sql: str) -> set[str]:
+    out: set[str] = set()
+    for m in _TRIGGER_NAME.finditer(sql or ""):
+        raw = next(g for g in m.groups() if g is not None)
+        out.add(fold(raw.replace('""', '"').replace("``", "`").replace("''", "'")))
+    return out
+
+
+_EVENTS = frozenset({"INSERT", "UPDATE", "DELETE"})
+# Quoted / bracketed names, blanked before the event is read (a trigger may be named
+# "on insert").
+_QUOTED = re.compile(r'"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]')
+_TRIGGER_HEAD = re.compile(
+    r"^\s*CREATE\s+(?:TEMP(?:ORARY)?\s+)?TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"\S+\s+(?:(?:BEFORE|AFTER|INSTEAD\s+OF)\s+)?(INSERT|UPDATE|DELETE)\b",
+    re.I,
+)
+
+
+def trigger_events(sql: str) -> frozenset[str]:
+    """The event a trigger fires on (``INSERT`` / ``UPDATE`` / ``DELETE``), read from
+    its CREATE text; every event when the text can't be read."""
+    m = _TRIGGER_HEAD.match(_QUOTED.sub("x", sql or ""))
+    return frozenset({m.group(1).upper()}) if m else _EVENTS
+
+
+def write_exposure(
+    schema: Schema,
+    targets: list[str] | set[str] | frozenset[str],
+    *,
+    deletes: bool,
+    updates: bool,
+    inserts: bool = False,
+    keep_user_cascade: bool = False,
+) -> str:
+    """Why writing ``targets`` would change sign-in data or credentials behind the
+    dashboard's back, or "" when it can't: ``cascades_to_login_table`` when a foreign
+    key with ON DELETE (``deletes``) / ON UPDATE (``updates``) CASCADE / SET NULL / SET
+    DEFAULT reaches a login table or a masked column, ``trigger_on_table`` when a
+    trigger for one of the write's events (``inserts`` / ``updates`` / ``deletes``) on
+    a reached table mentions a login table or a masked column. The walk follows every
+    reached table on with every event (its rows change in ways it can't tell).
+    ``keep_user_cascade`` lets a user table's own login rows go with it (the Rows
+    tab's deliberate user delete, and its profile edits)."""
+    by_name = {fold(n): t for n, t in schema.tables.items()}
+    queue = [(fold(t), deletes, updates, inserts) for t in targets]
+    seen: set[tuple[str, bool, bool, bool]] = set()
+    while queue:
+        name, dels, ups, ins = item = queue.pop()
+        if item in seen:
+            continue
+        seen.add(item)
+        events = {e for e, on in (("DELETE", dels), ("UPDATE", ups), ("INSERT", ins)) if on}
+        parent = by_name.get(name)
+        for child in schema.tables.values():
+            for c in child.columns:
+                if not c.references or fold(c.references.partition(".")[0]) != name:
+                    continue
+                acts = (dels and c.on_delete in _FK_ACTS) or (ups and c.on_update in _FK_ACTS)
+                if not acts:
+                    continue
+                if keep_user_cascade and parent is not None and is_users(parent.name):
+                    if is_login(child):
+                        continue
+                if is_login(child) or c.name in child.masked:
+                    return "cascades_to_login_table"
+                queue.append((fold(child.name), True, True, True))
+        for sql in schema.triggers.get(name, ()):
+            if not trigger_events(sql) & events:
+                continue
+            mentioned = _mentions(sql)
+            for other in mentioned:
+                t = by_name.get(other)
+                if t is None:
+                    continue
+                if {fold(c) for c in t.masked} & mentioned:
+                    return "trigger_on_table"
+                if other == name:
+                    continue  # the trigger's own table (``ON name``) is the target
+                if is_login(t):
+                    return "trigger_on_table"
+                queue.append((other, True, True, True))
+    return ""
+
+
 def insertable(table: Table) -> bool:
     """Whether rows can be added (and duplicated): editable, and not a user table."""
     return table.editable and not is_users(table.name)
@@ -212,11 +329,16 @@ def insertable(table: Table) -> bool:
 
 def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict]) -> Table:
     refs: dict[str, str] = {}
+    actions: dict[str, tuple[str, str]] = {}
     for fk in fks:
         src, parent = fk.get("from"), fk.get("table")
         if isinstance(src, str) and isinstance(parent, str):
             to = fk.get("to")
             refs[src] = f"{parent}.{to}" if isinstance(to, str) and to else parent
+            actions[src] = (
+                str(fk.get("on_delete") or "").upper(),
+                str(fk.get("on_update") or "").upper(),
+            )
     cols: list[Column] = []
     for row in xinfo:
         cname = row.get("name")
@@ -233,6 +355,8 @@ def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict])
                 pk=int(row.get("pk") or 0),
                 hidden=hidden,
                 references=refs.get(cname),
+                on_delete=actions.get(cname, ("", ""))[0],
+                on_update=actions.get(cname, ("", ""))[1],
             )
         )
     without_rowid = bool(_WITHOUT_ROWID.search(create_sql or ""))
@@ -281,28 +405,46 @@ def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict])
         masked=masked,
         read_only_reason=reason,
         rowid_alias=alias,
+        create_sql=create_sql or "",
     )
 
 
 async def read_master(cf: Any, database_id: str) -> dict[str, str]:
     """``{table name: CREATE text}`` for every user table, by name."""
+    return (await _read_master(cf, database_id))[0]
+
+
+async def _read_master(
+    cf: Any, database_id: str
+) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+    """User tables' CREATE texts, and every trigger's CREATE text by the folded name of
+    the table it fires on (a row without ``type`` reads as a table)."""
     rows = await cf.query_d1(database_id=database_id, sql=LIST_SQL, params=[])
-    out: dict[str, str] = {}
+    tables: dict[str, str] = {}
+    triggers: dict[str, list[str]] = {}
     for r in rows:
         name = r.get("name")
-        if isinstance(name, str) and name and is_user_table(name):
-            out[name] = str(r.get("sql") or "")
-    return out
+        if not isinstance(name, str) or not name:
+            continue
+        if r.get("type") == "trigger":
+            on = r.get("tbl_name")
+            if isinstance(on, str) and on:
+                triggers.setdefault(fold(on), []).append(str(r.get("sql") or ""))
+        elif is_user_table(name):
+            tables[name] = str(r.get("sql") or "")
+    return tables, {k: tuple(v) for k, v in triggers.items()}
 
 
-def _fingerprint(master: dict[str, str]) -> str:
-    return hashlib.sha256(json.dumps(sorted(master.items())).encode()).hexdigest()
+def _fingerprint(master: dict[str, str], triggers: dict[str, tuple[str, ...]]) -> str:
+    body = [sorted(master.items()), sorted(triggers.items())]
+    return hashlib.sha256(json.dumps(body).encode()).hexdigest()
 
 
 async def introspect(cf: Any, database_id: str) -> Schema:
-    """Every user table of the database, cached 60 s per schema fingerprint."""
-    master = await read_master(cf, database_id)
-    fp = _fingerprint(master)
+    """Every user table of the database (and the triggers on them), cached 60 s per
+    schema fingerprint."""
+    master, triggers = await _read_master(cf, database_id)
+    fp = _fingerprint(master, triggers)
     cached = _recall(_schema_cache, (database_id, fp))
     if cached is not None:
         return cached
@@ -318,7 +460,7 @@ async def introspect(cf: Any, database_id: str) -> Schema:
             xinfo = results[2 * i] if 2 * i < len(results) else []
             fks = results[2 * i + 1] if 2 * i + 1 < len(results) else []
             tables[name] = _build_table(name, master[name], xinfo, fks)
-    schema = Schema(fingerprint=fp, tables=tables)
+    schema = Schema(fingerprint=fp, tables=tables, triggers=triggers)
     _remember(_schema_cache, (database_id, fp), SCHEMA_TTL_S, schema)
     return schema
 

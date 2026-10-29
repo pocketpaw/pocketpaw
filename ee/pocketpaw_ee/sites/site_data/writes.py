@@ -28,7 +28,9 @@
 #   * Bad input is a 422, never a 500: numeric strings are capped at 40 characters,
 #     values (set and expected) at 1 MB, text keys at 512 characters, and JSON
 #     nesting, huge dates and out-of-range numbers are refused before binding.
-#   * A delete takes at most 500 keys, 90 per statement.
+#   * A delete takes at most 500 keys, 90 per statement, and is refused (403) when a
+#     foreign-key action or a trigger would reach sign-in data
+#     (``d1.write_exposure``); a user's own login rows still go with it.
 from __future__ import annotations
 
 import json
@@ -101,12 +103,18 @@ _READ_ONLY_MESSAGES = {
     "login_table": "Sign-in data can't be edited here.",
     "no_key": "This table has no ID column, so rows can't be edited here.",
     "not_created": "This table doesn't exist in the database yet. Publish the site first.",
+    "cascades_to_login_table": "This change would also change sign-in data, through a "
+    "linked table.",
+    "trigger_on_table": "A trigger on this table touches sign-in data or credentials, "
+    "so it can't be changed here.",
 }
+# Rules rather than states: a 403, like the login tables themselves.
+_RULE_REASONS = frozenset({"login_table", "cascades_to_login_table", "trigger_on_table"})
 
 
 def read_only(reason: str) -> CloudError:
     """403 for login tables (a rule, not a state), 422 for any other read-only table."""
-    status = 403 if reason == "login_table" else 422
+    status = 403 if reason in _RULE_REASONS else 422
     message = _READ_ONLY_MESSAGES.get(reason, "This table can't be edited here.")
     return CloudError(status, "sites.data_read_only", message, {"reason": reason})
 
@@ -664,6 +672,11 @@ async def delete(
     90, in one atomic batch; a user's login rows go first in the same batch. Returns
     the deleted rows (raw, with ``__key``) and, for a user table, how many rows of
     each login table went with each deleted row (by ``__key``)."""
+    reason = d1.write_exposure(
+        schema, [table.name], deletes=True, updates=False, keep_user_cascade=True
+    )
+    if reason:
+        raise read_only(reason)
     ident = quote_ident(table.name)
     cascades = _cascades(schema, table)
     statements: list[tuple[str, list[Any]]] = []

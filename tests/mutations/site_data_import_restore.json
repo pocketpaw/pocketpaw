@@ -430,8 +430,8 @@
   {
     "label": "a restore or undo event's bookmark counts as a restore point",
     "file": "ee/pocketpaw_ee/sites/data_service.py",
-    "find": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\"]",
-    "replace": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\", \"site_data.restore\", \"site_data.restore_undo\"]",
+    "find": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\", \"site_data.sql\"]",
+    "replace": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\", \"site_data.sql\", \"site_data.restore\", \"site_data.restore_undo\"]",
     "tests": [
       "tests/ee/sites/test_site_data_restore.py::test_a_restore_or_undo_bookmark_is_not_a_restore_point"
     ]
