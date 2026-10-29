@@ -39,6 +39,7 @@ from __future__ import annotations
 import base64
 import re
 import time
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -349,6 +350,11 @@ class AirtableProvider(BaseProvider):
             write=True,
         ),
     }
+
+    def dashboard_url(self, settings: Mapping[str, Any]) -> str | None:
+        """The base in Airtable, from the stored ``base_id``."""
+        base_id = str(settings.get("base_id") or "")
+        return f"https://airtable.com/{base_id}" if _BASE_ID.fullmatch(base_id) else None
 
     def availability(self) -> Availability:
         client_id, secret = oauth_http.client_credentials(ENV_PREFIX)

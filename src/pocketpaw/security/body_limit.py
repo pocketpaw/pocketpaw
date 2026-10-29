@@ -29,10 +29,10 @@
 # the container's disk before any of those checks execute. The limit was never
 # wrong; it was just downstream of the damage.
 #
-# The Sites Data CSV preview (``POST …/data/tables/{table}/import:preview``) is
-# the second shape-matched route, for the same reason: it takes one CSV of at
-# most 5 MB, so it gets 6 MiB instead of the global ~1.27 GB, and a miss falls back
-# to the global ceiling.
+# Four Sites Data routes are shape-matched for the same reason (a miss falls back to
+# the global ~1.27 GB): the CSV preview (``POST …/import:preview``) 6 MiB, the file
+# upload (``PUT …/data/files/{binding}/object``) 51 MiB, a KV write (``PUT
+# …/data/kv/{binding}/keys/{key}``) 3 MiB and a file move (``POST …/object:move``) 64 KiB.
 #
 # Two things this deliberately does NOT do, so nobody mistakes it for a
 # complete fix:
@@ -79,6 +79,24 @@ _SITE_DATA_CSV_PATH_RE = re.compile(
     r"^/api/v1/sites/by-pocket/[^/]+/data/tables/[^/]+/import:preview$"
 )
 _SITE_DATA_CSV_BYTES = 6 * 1024 * 1024
+
+#: ``PUT /api/v1/sites/by-pocket/{pocket_id}/data/files/{binding}/object``, the Sites
+#: Data file upload: one raw body of at most 50 MiB
+#: (``pocketpaw_ee.sites.site_data.files_kv.MAX_FILE_BYTES``, pinned by an EE test),
+#: plus 1 MiB of slack. The object key rides in the query string, not the path.
+_SITE_DATA_FILE_PATH_RE = re.compile(r"^/api/v1/sites/by-pocket/[^/]+/data/files/[^/]+/object$")
+_SITE_DATA_FILE_BYTES = 51 * 1024 * 1024
+
+#: ``PUT …/data/kv/{binding}/keys/{key}``: a 1 MB value as JSON plus metadata
+#: (``pocketpaw_ee.sites.data_router.MAX_KV_BODY``, pinned by an EE test).
+_SITE_DATA_KV_PATH_RE = re.compile(r"^/api/v1/sites/by-pocket/[^/]+/data/kv/[^/]+/keys/.+$")
+_SITE_DATA_KV_BYTES = 3 * 1024 * 1024
+
+#: ``POST …/data/files/{binding}/object:move``: two keys and a flag.
+_SITE_DATA_MOVE_PATH_RE = re.compile(
+    r"^/api/v1/sites/by-pocket/[^/]+/data/files/[^/]+/object:move$"
+)
+_SITE_DATA_MOVE_BYTES = 64 * 1024
 
 #: Framing slack on a relay part. The body is raw bytes with no envelope, so
 #: unlike ``_MULTIPART_OVERHEAD_BYTES`` there is nothing real to cover — 1 MiB
@@ -163,6 +181,23 @@ def _is_site_data_csv(scope: Scope) -> bool:
     return bool(_SITE_DATA_CSV_PATH_RE.match(scope.get("path", "") or ""))
 
 
+def _is_site_data_file(scope: Scope) -> bool:
+    """True for the Sites Data file upload."""
+    path = scope.get("path", "") or ""
+    return scope.get("method") == "PUT" and bool(_SITE_DATA_FILE_PATH_RE.match(path))
+
+
+def _site_data_ceiling(scope: Scope) -> int | None:
+    """The KV write's or file move's own ceiling, else None."""
+    path = scope.get("path", "") or ""
+    method = scope.get("method")
+    if method == "PUT" and _SITE_DATA_KV_PATH_RE.match(path):
+        return _SITE_DATA_KV_BYTES
+    if method == "POST" and _SITE_DATA_MOVE_PATH_RE.match(path):
+        return _SITE_DATA_MOVE_BYTES
+    return None
+
+
 def _is_relay_part(scope: Scope) -> bool:
     """True for the one route whose body is a bare multipart part."""
     if scope.get("method") != "PUT":
@@ -215,6 +250,10 @@ class BodySizeLimitMiddleware:
             return self.relay_part_bytes
         if _is_site_data_csv(scope):
             return _SITE_DATA_CSV_BYTES
+        if _is_site_data_file(scope):
+            return _SITE_DATA_FILE_BYTES
+        if (small := _site_data_ceiling(scope)) is not None:
+            return small
         return self.max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

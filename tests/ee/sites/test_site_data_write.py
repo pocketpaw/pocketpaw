@@ -1164,7 +1164,12 @@ def test_every_write_route_requires_sites_data_write():
         methods = getattr(route, "methods", set())
         guards = {getattr(d.call, "__name__", "") for d in route.dependant.dependencies}
         is_restore = "/restore" in route.path
-        is_write = bool(methods & {"POST", "PATCH", "PUT", "DELETE"}) and not is_restore
+        # Reading KV or downloading a file is guarded like a write (tokens and private
+        # uploads); test_site_data_files_kv pins exactly which reads those are.
+        admin_read = route.path.endswith(("/kv/{binding}/keys", "/keys/{key:path}", "/object"))
+        is_write = (
+            bool(methods & {"POST", "PATCH", "PUT", "DELETE"}) or admin_read
+        ) and not is_restore
         assert ("require_action_sites_data_write" in guards) == is_write, route.path
         assert ("require_action_sites_data_restore" in guards) == is_restore, route.path
 

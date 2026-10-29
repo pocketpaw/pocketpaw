@@ -611,6 +611,13 @@ class NotionProvider(BaseProvider):
         ),
     }
 
+    def dashboard_url(self, settings: Mapping[str, Any]) -> str | None:
+        """The database in Notion, from the stored ``database_id`` (dashes removed)."""
+        source = str(settings.get("database_id") or "").strip()
+        if not _ID_RE.match(source):
+            return None
+        return "https://www.notion.so/" + source.replace("-", "").lower()
+
     def availability(self) -> Availability:
         client_id, secret = oauth_http.client_credentials(ENV_PREFIX)
         return "available" if client_id and secret else "unconfigured"

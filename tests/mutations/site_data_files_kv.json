@@ -1,0 +1,440 @@
+[
+  {
+    "label": "file keys may have . / .. segments",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "        if segment in (\"\", \".\", \"..\"):",
+    "replace": "        if segment in (\"\",):",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_bad_file_keys_are_422_before_any_call"
+    ]
+  },
+  {
+    "label": "file keys may hold backslashes or control characters",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if \"\\\\\" in key or _CONTROL.search(key):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_bad_file_keys_are_422_before_any_call"
+    ]
+  },
+  {
+    "label": "file keys may exceed 1,024 bytes",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if len(key.encode(\"utf-8\")) > MAX_FILE_KEY_BYTES:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_bad_file_keys_are_422_before_any_call"
+    ]
+  },
+  {
+    "label": "the client sends R2 keys with dot segments (httpx resolves them to another URL)",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "    if not key or _dot_segment(key):",
+    "replace": "    if not key:",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client_r2_kv.py::test_r2_keys_with_dot_segments_never_reach_the_wire"
+    ]
+  },
+  {
+    "label": "the client percent-encodes slashes in R2 keys",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "    return quote(key, safe=\"/\")",
+    "replace": "    return quote(key, safe=\"\")",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client_r2_kv.py::test_r2_object_keys_keep_slashes_literal_and_encode_the_rest"
+    ]
+  },
+  {
+    "label": "downloads drop nosniff",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "    \"X-Content-Type-Options\": \"nosniff\",\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_download_headers_never_render"
+    ]
+  },
+  {
+    "label": "downloads render inline",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    return f\"attachment; filename=",
+    "replace": "    return f\"inline; filename=",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_download_headers_never_render"
+    ]
+  },
+  {
+    "label": "a file binding not on the Site is used as a bucket name",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    bucket = target.r2.get(binding) if isinstance(binding, str) else None",
+    "replace": "    bucket = target.r2.get(binding) or binding",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_a_binding_not_on_the_site_is_404_before_any_call"
+    ]
+  },
+  {
+    "label": "a KV binding not on the Site is used as a namespace id",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    namespace = target.kv.get(binding) if isinstance(binding, str) else None",
+    "replace": "    namespace = target.kv.get(binding) or binding",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_a_binding_not_on_the_site_is_404_before_any_call"
+    ]
+  },
+  {
+    "label": "uploads skip sites.data_write",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "    overwrite: bool = Query(False),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n    __: object = Depends(_WRITE),\n) -> FileObjectOut:",
+    "replace": "    overwrite: bool = Query(False),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n) -> FileObjectOut:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_member_cannot_write",
+      "tests/ee/sites/test_site_data_files_kv.py::test_every_files_kv_route_is_guarded"
+    ]
+  },
+  {
+    "label": "file and KV writes skip the pocket edit check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if edit:\n        return await _editable_target(",
+    "replace": "    if False:\n        return await _editable_target(",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_read_only_pocket_cannot_write"
+    ]
+  },
+  {
+    "label": "a credential-named KV value is returned",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if masked:\n        return out.model_copy(update={\"value\": files_kv.MASK})\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_list_and_masking"
+    ]
+  },
+  {
+    "label": "a credential-named KV key's metadata is listed",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        metadata=None if masked else row.get(\"metadata\"),",
+    "replace": "        metadata=row.get(\"metadata\"),",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_list_and_masking"
+    ]
+  },
+  {
+    "label": "a credential-named KV key can be overwritten",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if files_kv.masked_kv_key(key):\n        raise Forbidden(",
+    "replace": "    if False:\n        raise Forbidden(",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_list_and_masking"
+    ]
+  },
+  {
+    "label": "the file upload body ceiling is dropped",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "        if _is_site_data_file(scope):\n            return _SITE_DATA_FILE_BYTES",
+    "replace": "        if False:\n            return _SITE_DATA_FILE_BYTES",
+    "tests": [
+      "tests/test_body_size_limit.py::TestSiteDataFileUploadCeiling::test_an_oversized_upload_is_refused_before_the_app"
+    ]
+  },
+  {
+    "label": "a streamed upload past 50 MB is spooled anyway",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            if size > limit:\n                raise _too_large()",
+    "replace": "            if False:\n                raise _too_large()",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_streamed_past_the_cap_is_413",
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_over_the_cap_is_413"
+    ]
+  },
+  {
+    "label": "move overwrites an existing file",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not overwrite and await _file_exists(cf, bucket, to_key):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_move_refuses_to_overwrite"
+    ]
+  },
+  {
+    "label": "a KV TTL under 60 s is sent",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if expiration_ttl is not None and expiration_ttl < files_kv.MIN_TTL:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_put_limits"
+    ]
+  },
+  {
+    "label": "file and KV changes are audited as database changes (restore would count them)",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "_STORE_AUDIT_TARGET = \"site_store\"",
+    "replace": "_STORE_AUDIT_TARGET = \"site_data\"",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_stores_risky_files_as_octet_stream"
+    ]
+  },
+  {
+    "label": "a dashboard link is built from an unchecked Airtable id",
+    "file": "ee/pocketpaw_ee/integrations/providers/airtable.py",
+    "find": "        return f\"https://airtable.com/{base_id}\" if _BASE_ID.fullmatch(base_id) else None",
+    "replace": "        return f\"https://airtable.com/{base_id}\" if base_id else None",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_dashboard_url_refuses_bad_ids"
+    ]
+  },
+  {
+    "label": "a dashboard link is built from any Sheets URL",
+    "file": "ee/pocketpaw_ee/integrations/providers/google_sheets.py",
+    "find": "            found = _DASH_SHEET_URL.fullmatch(",
+    "replace": "            found = _DASH_SHEET_URL.search(",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_dashboard_url_refuses_bad_ids"
+    ]
+  },
+  {
+    "label": "the client sends KV keys with dot segments",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "    if key == \"\" or _dot_segment(key):",
+    "replace": "    if key == \"\":",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client_r2_kv.py::test_kv_dot_keys_never_reach_the_wire"
+    ]
+  },
+  {
+    "label": "downloads let R2 pick a content encoding",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "request = client.build_request(\"GET\", url, headers={\"Accept-Encoding\": \"identity\"})",
+    "replace": "request = client.build_request(\"GET\", url)",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client_r2_kv.py::test_r2_get_asks_for_identity_and_streams_raw_bytes"
+    ]
+  },
+  {
+    "label": "downloads stream decoded bytes (Content-Length no longer true)",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "            async for chunk in self._resp.aiter_raw():",
+    "replace": "            async for chunk in self._resp.aiter_bytes():",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client_r2_kv.py::test_r2_get_asks_for_identity_and_streams_raw_bytes"
+    ]
+  },
+  {
+    "label": "any well-formed audio/video subtype passes, xml included",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    return main in (\"audio\", \"video\") and \"xml\" not in sub and \"script\" not in sub",
+    "replace": "    return main in (\"audio\", \"video\")",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_every_other_type_is_octet_stream"
+    ]
+  },
+  {
+    "label": "the allowlist accepts any well-formed type",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    return main in (\"audio\", \"video\") and \"xml\" not in sub and \"script\" not in sub",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_every_other_type_is_octet_stream"
+    ]
+  },
+  {
+    "label": "a page/script extension keeps a safe declared type",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if _extension(key) in RISKY_EXTENSIONS:\n        return False",
+    "replace": "    if False:\n        return False",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_a_harmful_extension_forces_octet_stream"
+    ]
+  },
+  {
+    "label": "an extension implying an unsafe type is harmless",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    return not guess or guess == OCTET or safe_type(guess)",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_a_harmful_extension_forces_octet_stream"
+    ]
+  },
+  {
+    "label": "a declared type is stored without the allowlist",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    return mime if safe_type(mime) else OCTET",
+    "replace": "    return mime",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_every_other_type_is_octet_stream",
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_stores_risky_files_as_octet_stream"
+    ]
+  },
+  {
+    "label": "downloads serve the stored type without the allowlist",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if safe_type(mime) and harmless_extension(key):",
+    "replace": "    if mime:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_every_other_type_is_octet_stream",
+      "tests/ee/sites/test_site_data_files_kv.py::test_download_headers_never_render"
+    ]
+  },
+  {
+    "label": "KV masking only knows the shared credential words (sessions leak)",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    CREDENTIAL.pattern + r\"|credentials?|access_?key|session|jwt|cookie|passphrase|auth\"",
+    "replace": "    CREDENTIAL.pattern + r\"|credentials?\"",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_names_that_look_like_credentials_are_masked",
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_list_and_masking"
+    ]
+  },
+  {
+    "label": "audit rows keep token-like KV names",
+    "file": "ee/pocketpaw_ee/sites/site_data/files_kv.py",
+    "find": "    if masked_kv_key(name) or len(name) > MAX_AUDIT_NAME:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_audit_hashes_token_like_or_long_names"
+    ]
+  },
+  {
+    "label": "a masked KV key reports its size",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        return out.model_copy(update={\"value\": files_kv.MASK})",
+    "replace": "        return out.model_copy(update={\"value\": files_kv.MASK, \"size\": got.size})",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_kv_list_and_masking"
+    ]
+  },
+  {
+    "label": "the KV key list is open to readers",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "    cursor: str | None = Query(None, max_length=2048),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n    __: object = Depends(_WRITE),\n) -> KvKeyList:",
+    "replace": "    cursor: str | None = Query(None, max_length=2048),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n) -> KvKeyList:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_member_cannot_read_kv_or_download"
+    ]
+  },
+  {
+    "label": "one KV key is open to readers",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "    _: object = Depends(_READ),\n    __: object = Depends(_WRITE),\n) -> KvKeyValue:",
+    "replace": "    _: object = Depends(_READ),\n) -> KvKeyValue:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_member_cannot_read_kv_or_download"
+    ]
+  },
+  {
+    "label": "file downloads are open to readers",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "    _: object = Depends(_READ),\n    __: object = Depends(_WRITE),\n) -> StreamingResponse:\n    \"\"\"The object as a download",
+    "replace": "    _: object = Depends(_READ),\n) -> StreamingResponse:\n    \"\"\"The object as a download",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_member_cannot_read_kv_or_download"
+    ]
+  },
+  {
+    "label": "an inventory reader may open KV",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            StoreRef(binding=b, label=_label(b), writable=store_writable, readable=can_write)",
+    "replace": "            StoreRef(binding=b, label=_label(b), writable=store_writable)",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_inventory_store_hints_and_dashboard_urls"
+    ]
+  },
+  {
+    "label": "an upload reads its body before spending the R2 budget",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        await cf.charge(\"r2\")\n        spool, size = await _spool(",
+    "replace": "        spool, size = await _spool(",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_charges_the_r2_budget_before_reading_the_body",
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_spends_one_r2_call"
+    ]
+  },
+  {
+    "label": "a workspace may run any number of uploads (this process)",
+    "file": "ee/pocketpaw_ee/sites/site_data/budget.py",
+    "find": "    if _slots.get(key, 0) >= UPLOAD_SLOTS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_at_most_two_uploads_per_workspace"
+    ]
+  },
+  {
+    "label": "a workspace may run any number of uploads (Redis)",
+    "file": "ee/pocketpaw_ee/sites/site_data/budget.py",
+    "find": "            if held > UPLOAD_SLOTS:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_slots_are_shared_through_redis"
+    ]
+  },
+  {
+    "label": "a finished upload keeps its slot",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    finally:\n        await budget.release_upload_slot(slot)\n    await _store_audit(",
+    "replace": "    finally:\n        pass\n    await _store_audit(",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_a_failed_upload_gives_its_slot_back"
+    ]
+  },
+  {
+    "label": "spool writes block the event loop",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            await anyio.to_thread.run_sync(spool.write, chunk)  # may hit the disk",
+    "replace": "            spool.write(chunk)",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_spool_io_runs_off_the_event_loop"
+    ]
+  },
+  {
+    "label": "the KV write body ceiling is dropped",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "    if method == \"PUT\" and _SITE_DATA_KV_PATH_RE.match(path):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/test_body_size_limit.py::TestSiteDataKvAndMoveCeilings::test_an_oversized_kv_write_is_refused"
+    ]
+  },
+  {
+    "label": "the file move body ceiling is dropped",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "    if method == \"POST\" and _SITE_DATA_MOVE_PATH_RE.match(path):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/test_body_size_limit.py::TestSiteDataKvAndMoveCeilings::test_an_oversized_move_is_refused"
+    ]
+  },
+  {
+    "label": "an upload silently replaces an existing file",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not overwrite and await _file_exists(cf, bucket, key):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_refuses_an_existing_key_before_reading_the_body"
+    ]
+  },
+  {
+    "label": "the existence check matches any key under the prefix",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    return any(o[\"key\"] == key for o in found[\"objects\"])",
+    "replace": "    return bool(found[\"objects\"])",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_checks_existence_by_exact_key"
+    ]
+  },
+  {
+    "label": "the existence check runs after the body is read",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not overwrite and await _file_exists(cf, bucket, key):\n        raise _file_exists_error()\n    slot = await budget.claim_upload_slot(target.workspace_id)\n    try:\n        await cf.charge(\"r2\")\n        spool, size = await _spool(body, files_kv.MAX_FILE_BYTES)\n",
+    "replace": "    slot = await budget.claim_upload_slot(target.workspace_id)\n    try:\n        await cf.charge(\"r2\")\n        spool, size = await _spool(body, files_kv.MAX_FILE_BYTES)\n        if not overwrite and await _file_exists(cf, bucket, key):\n            raise _file_exists_error()\n",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_refuses_an_existing_key_before_reading_the_body"
+    ]
+  },
+  {
+    "label": "the overwrite query is ignored",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "        overwrite=overwrite,\n    )",
+    "replace": "    )",
+    "tests": [
+      "tests/ee/sites/test_site_data_files_kv.py::test_upload_with_overwrite_replaces"
+    ]
+  }
+]

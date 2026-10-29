@@ -14,15 +14,19 @@
 # The buckets live in Redis (the shared ``get_redis()`` client, one Lua script so
 # check-and-charge is atomic across processes) when ``POCKETPAW_REDIS_URL`` is set,
 # and in this process otherwise. A Redis error falls back to the in-process buckets
-# rather than failing the read. ``Budgeted`` wraps a D1 client so each API call (a
-# whole batch counts once, and so does each Time Travel call) is charged before it
-# is made.
+# rather than failing the read. ``Budgeted`` wraps the Cloudflare client so each D1,
+# KV and R2 API call (a whole batch counts once, and so does each Time Travel call
+# and each R2 download however long it streams) is charged before it is made.
 #
 # ``acquire_restore`` is a separate, stricter cap on the same machinery: at most 3
 # Time Travel restores per database per 10 minutes (Cloudflare allows 10), bucket
 # ``cf:data:restore:<database id>``; refusal is 429 ``sites.data_restore_busy``.
 # ``claim_once`` / ``release`` are one-shot claims on the same client (Redis
 # ``SET NX`` with a TTL, else this process): undoing a restore, running a job.
+# ``claim_upload_slot`` / ``release_upload_slot`` count a workspace's file uploads and
+# moves in flight (at most ``UPLOAD_SLOTS``, Redis ``INCR`` with a TTL so a crashed
+# holder's slot frees itself, else this process); a full workspace is 429
+# ``sites.data_upload_busy``.
 from __future__ import annotations
 
 import logging
@@ -39,6 +43,8 @@ GLOBAL_LIMIT: tuple[int, int] = (900, 300)
 R2_LIMIT: tuple[int, int] = (900, 300)
 WORKSPACE_LIMIT: tuple[int, int] = (120, 60)
 RESTORE_LIMIT: tuple[int, int] = (3, 600)
+UPLOAD_SLOTS = 2
+UPLOAD_SLOT_TTL = 900  # seconds
 
 KINDS = frozenset({"d1", "kv", "r2"})
 
@@ -94,6 +100,7 @@ def reset() -> None:
     _redis = None
     _local.clear()
     _claims.clear()
+    _slots.clear()
 
 
 def _buckets(kind: str, workspace_id: str) -> list[tuple[str, int, int]]:
@@ -196,7 +203,8 @@ async def acquire_restore(database_id: str) -> None:
 
 
 class Budgeted:
-    """A D1 client whose every API call spends one token for ``workspace_id`` first."""
+    """A Cloudflare client whose every D1 / KV / R2 call spends one token for
+    ``workspace_id`` first."""
 
     def __init__(self, cf: Any, workspace_id: str) -> None:
         self._cf = cf
@@ -223,6 +231,49 @@ class Budgeted:
     ) -> Any:
         await acquire("d1", self._workspace_id)
         return await self._cf.d1_restore(database_id, bookmark=bookmark, timestamp=timestamp)
+
+    async def r2_list(self, bucket: str, **kw: Any) -> Any:
+        await acquire("r2", self._workspace_id)
+        return await self._cf.r2_list(bucket, **kw)
+
+    async def r2_get(self, bucket: str, key: str) -> Any:
+        await acquire("r2", self._workspace_id)
+        return await self._cf.r2_get(bucket, key)
+
+    async def charge(self, kind: str) -> None:
+        """Spend one call of ``kind`` now, for a call made later with ``prepaid``."""
+        await acquire(kind, self._workspace_id)
+
+    async def r2_put(
+        self, bucket: str, key: str, body: Any, *, prepaid: bool = False, **kw: Any
+    ) -> Any:
+        if not prepaid:
+            await acquire("r2", self._workspace_id)
+        return await self._cf.r2_put(bucket, key, body, **kw)
+
+    async def r2_delete(self, bucket: str, key: str) -> None:
+        await acquire("r2", self._workspace_id)
+        await self._cf.r2_delete(bucket, key)
+
+    async def kv_list_keys(self, namespace_id: str, **kw: Any) -> Any:
+        await acquire("kv", self._workspace_id)
+        return await self._cf.kv_list_keys(namespace_id, **kw)
+
+    async def kv_get(self, namespace_id: str, key: str, **kw: Any) -> Any:
+        await acquire("kv", self._workspace_id)
+        return await self._cf.kv_get(namespace_id, key, **kw)
+
+    async def kv_metadata(self, namespace_id: str, key: str) -> Any:
+        await acquire("kv", self._workspace_id)
+        return await self._cf.kv_metadata(namespace_id, key)
+
+    async def kv_put(self, namespace_id: str, key: str, value: bytes, **kw: Any) -> None:
+        await acquire("kv", self._workspace_id)
+        await self._cf.kv_put(namespace_id, key, value, **kw)
+
+    async def kv_delete(self, namespace_id: str, key: str) -> None:
+        await acquire("kv", self._workspace_id)
+        await self._cf.kv_delete(namespace_id, key)
 
 
 # --------------------------------------------------------------------------- one-shot claims
@@ -258,3 +309,60 @@ async def release(key: str) -> None:
             await client.delete(key)
         except Exception:  # noqa: BLE001 — it expires on its own
             logger.warning("site_data.budget: could not release %s", key)
+
+
+# --------------------------------------------------------------------------- upload slots
+
+# key -> uploads in flight in this process
+_slots: dict[str, int] = {}
+
+
+class UploadBusy(RateLimited):
+    """The workspace already has ``UPLOAD_SLOTS`` uploads or moves in flight (429)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "sites.data_upload_busy",
+            "Two uploads are already running for this workspace. Try again when one finishes.",
+        )
+        self.details = {"retry_after": 5}
+
+
+async def claim_upload_slot(workspace_id: str) -> tuple[str, bool]:
+    """Take one of the workspace's upload slots, or raise ``UploadBusy``. The token
+    goes back to ``release_upload_slot``."""
+    key = f"cf:data:upload:{workspace_id or '-'}"
+    client = redis_client()
+    if client is not None:
+        try:
+            held = int(await client.incr(key))
+            await client.expire(key, UPLOAD_SLOT_TTL)
+        except Exception:  # noqa: BLE001 — fall back to this process
+            logger.warning("site_data.budget: Redis unavailable, counting uploads in process")
+        else:
+            if held > UPLOAD_SLOTS:
+                await client.decr(key)
+                raise UploadBusy()
+            return key, True
+    if _slots.get(key, 0) >= UPLOAD_SLOTS:
+        raise UploadBusy()
+    _slots[key] = _slots.get(key, 0) + 1
+    return key, False
+
+
+async def release_upload_slot(token: tuple[str, bool]) -> None:
+    """Give back a slot ``claim_upload_slot`` handed out."""
+    key, shared = token
+    if shared:
+        client = redis_client()
+        try:
+            if client is not None:
+                await client.decr(key)
+        except Exception:  # noqa: BLE001 — the TTL frees it
+            logger.warning("site_data.budget: could not release upload slot %s", key)
+        return
+    left = _slots.get(key, 0) - 1
+    if left > 0:
+        _slots[key] = left
+    else:
+        _slots.pop(key, None)
