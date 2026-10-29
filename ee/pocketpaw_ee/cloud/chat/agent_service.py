@@ -29,6 +29,7 @@ The router does HTTP + SSE; this module decides *what the agent sees*:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import weakref
 from collections.abc import Awaitable, Callable, Iterator
@@ -51,7 +52,6 @@ if TYPE_CHECKING:
 from pocketpaw.agents.backend import ImageAttachment
 from pocketpaw.ripple import (
     HOME_POCKET_PROMPT,
-    INLINE_RIPPLE_SYSTEM_PROMPT,
     POCKET_DELEGATION_RULE,
     fill_current_pocket,
     get_pocket_prompts,
@@ -1972,13 +1972,13 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
         # "delegate, don't call add_widget" framing. Just the base ripple
         # conventions, then HOME_POCKET_PROMPT. (No /sites home pocket exists,
         # so the surface gate doesn't apply here.)
-        parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+        parts.append(chat_ripple_prompt())
     elif backend_name in _MCP_POCKET_BACKENDS:
         # Surface gate: omit the ripple LAW + delegation rule on a
         # ripple-off surface (/sites). The agent there hand-authors Svelte —
         # the "default to ui-spec" LAW would bias it away from that.
         if not ripple_off:
-            parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+            parts.append(chat_ripple_prompt())
             parts.append(POCKET_DELEGATION_RULE)
     else:
         creation_prompt, interaction_prompt = get_pocket_prompts(backend_name=backend_name)
@@ -1995,7 +1995,7 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
             # and get_pocket now carries the real backend summary.
             parts.append(fill_current_pocket(interaction_prompt, ctx.pocket_id, None))
         elif not ripple_off:
-            parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+            parts.append(chat_ripple_prompt())
     # Home surface: append the home-surface prompt so the agent calls
     # add_widget for an explicit widget request and answers directly
     # otherwise. Backend-agnostic — the discriminator is the pocket type.
@@ -2197,6 +2197,33 @@ def build_dynamic_context(ctx: ScopeContext) -> str:
     if ctx.pocket_id and ctx.intent != "pocket_create":
         parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
     return "\n".join(parts)
+
+
+
+@functools.cache
+def chat_ripple_prompt() -> str:
+    """The chat-inline Ripple prompt: core's chat-only head and tail around the
+    widget block the Paw Bar concierge uses, generated from the vendored manifest
+    (always-on widgets with props, every widget by category) and the authoring
+    rules for the chat card profile. Static per process, so it stays cacheable."""
+    from pocketpaw.ripple._inline import INLINE_RIPPLE_PROMPT_HEAD, INLINE_RIPPLE_PROMPT_TAIL
+    from pocketpaw_ee.paw_bar import widget_relevance
+    from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
+    from pocketpaw_ee.paw_bar.concierge_runtime import ripple_rules
+
+    cards = "\n".join(
+        [
+            "# WIDGETS (from the Ripple manifest)",
+            "",
+            "These widgets are listed with their props; copy the prop names exactly:",
+            *widget_relevance.core_lines(),
+            "Every widget by category (call `get_widget_spec` for the props of one "
+            "not listed above):",
+            *widget_relevance.index_lines(),
+            *ripple_rules(CHAT_PROFILE),
+        ]
+    )
+    return INLINE_RIPPLE_PROMPT_HEAD + "\n" + cards + "\n\n" + INLINE_RIPPLE_PROMPT_TAIL
 
 
 def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -> str:
