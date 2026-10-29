@@ -267,7 +267,9 @@ def test_every_craft_rule_the_prompt_cites_is_in_the_manifest():
     source = (here / "concierge_runtime.py").read_text()
     cited = set(re.findall(r'_craft\(\s*"([\w-]+)"', source))
     cited |= set(re.findall(r"CRAFT_RULES\[[\"']([\w-]+)[\"']\]", source))
-    manifest = json.loads((here / "ripple-manifest.json").read_text())
+    from pocketpaw.ripple.manifest import load_bundled_manifest
+
+    manifest = load_bundled_manifest()
     known = {r["id"] for r in manifest["craft"]["rules"]}
     assert {"reads-at-phone", "tile-rows-wrap", "inputs-full-row"} <= cited
     assert cited <= known, sorted(cited - known)

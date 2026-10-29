@@ -1,4 +1,4 @@
-ripple-manifest.json: the @ripple-ui/svelte 0.8.2 release manifest, the one the npm
+manifest.json: the @ripple-ui/svelte 0.8.2 release manifest, the one the npm
 package Paw OS and the Ripple site render ships with. It is the release asset
 (gh release download v0.8.2 -R qbtrix/ripple-iui --pattern manifest.json; asset sha256
 bcca322d6ac8fa5732669642f1adb6405372054ca5c5d0304ed74c667b58b8ba, generatedAt
@@ -12,12 +12,16 @@ widget_relevance reads "intents" and concierge_runtime renders rule text from "c
 
 Refresh from a release:
   gh release download <tag> -R qbtrix/ripple-iui --pattern manifest.json -D <dir>
-  python -I - <dir>/manifest.json ee/pocketpaw_ee/paw_bar/ripple-manifest.json <<'PY'
+  python -I - <dir>/manifest.json src/pocketpaw/ripple/manifest.json <<'PY'
   import json, sys
   m = json.load(open(sys.argv[1], encoding="utf-8"))
   for w in m["widgets"]:
       w.pop("example", None)
   open(sys.argv[2], "w", encoding="utf-8").write(json.dumps(m, indent=2, ensure_ascii=False) + "\n")
   PY
-then update this file and the pins in test_the_vendored_ripple_manifest_has_not_drifted
+then bump RIPPLE_UI_SVELTE_VERSION in src/pocketpaw/ripple/manifest.py to the
+@ripple-ui/svelte version paw-enterprise's package.json renders, update this file,
+and update the pins in test_the_vendored_ripple_manifest_has_not_drifted
 (tests/cloud/test_paw_bar_ripple_profile.py: _RIPPLE_MANIFEST_SHA256, version, count).
+Every reader (chat get_widget_spec, pocket tools, catalog gates, Paw Bar) loads
+this one file through pocketpaw.ripple.manifest; nothing fetches it at runtime.

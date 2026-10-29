@@ -108,6 +108,8 @@ jobs:
               bad.append(f"core wheel {core} contains pocketpaw_ee/")
           if any(n.startswith("pocketpaw/") for n in ee_names):
               bad.append(f"ee wheel {ee} contains pocketpaw/")
+          if "pocketpaw/ripple/manifest.json" not in core_names:
+              bad.append(f"core wheel {core} is missing the bundled Ripple manifest")
           if bad:
               print("\n".join(bad)); sys.exit(1)
           print(f"OK: {core} and {ee} are cleanly separated")

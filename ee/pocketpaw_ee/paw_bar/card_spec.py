@@ -5,7 +5,7 @@
 # ``CardProfile``. ``PAWBAR_PROFILE`` (the default) mirrors paw-bar's lib/spec-card.ts:
 # small bounds, the vendored pawbar-manifest.json widgets, the manifest's actions, host
 # events limited to add_to_cart / checkout, and the ``send_to_team`` lead form only
-# with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes ripple-manifest.json
+# with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes the bundled Ripple manifest
 # minus deferred widgets and page chrome (its ``illustration`` SVG is held to
 # illustration_svg's policy and its annotations to ids the widget keeps, ``bill-split``
 # to plain numbers, the games, habit-tracker and focus-timer to literal data (``_PLAY_CHECKS``),
@@ -39,7 +39,8 @@
 # and ``has_lead_form`` read a body for the runner; ``PartialScan`` judges a body
 # still streaming, flagging only what the finished card is sure to fail.
 #
-# Both manifests are vendored (``.source`` beside ripple-manifest.json says how);
+# pawbar-manifest.json is vendored here; the full Ripple catalog is core's bundled
+# pocketpaw/ripple/manifest.json (``.source`` beside each says how to refresh);
 # the drift tests in tests/cloud/test_paw_bar_concierge_v2_output.py and
 # tests/cloud/test_paw_bar_ripple_profile.py pin their hashes, and the shared
 # parity fixtures live in tests/fixtures/card_parity/.
@@ -58,6 +59,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
+from pocketpaw.ripple.manifest import BUNDLED_MANIFEST_PATH, load_bundled_manifest
 from pocketpaw_ee.paw_bar.illustration_svg import svg_ids, svg_violation
 
 logger = logging.getLogger(__name__)
@@ -125,8 +127,8 @@ PAWBAR_PROFILE = CardProfile(
     manifest=MANIFEST,
 )
 
-RIPPLE_MANIFEST_PATH = Path(__file__).with_name("ripple-manifest.json")
-RIPPLE_MANIFEST: dict[str, Any] = json.loads(RIPPLE_MANIFEST_PATH.read_text(encoding="utf-8"))
+RIPPLE_MANIFEST_PATH = BUNDLED_MANIFEST_PATH
+RIPPLE_MANIFEST: dict[str, Any] = load_bundled_manifest()
 # Craft rule id to its one-sentence text, from the manifest's ``craft`` (ripple's
 # craft.ts); the concierge's authoring rules that repeat a craft rule lead with it.
 CRAFT_RULES: dict[str, str] = {r["id"]: r["text"] for r in RIPPLE_MANIFEST["craft"]["rules"]}
