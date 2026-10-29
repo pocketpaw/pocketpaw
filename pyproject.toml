@@ -1,8 +1,8 @@
-# Updated: 2026-06-10 — Add langchain-ollama to the deep-agents dependency block (and its
-# mirrored bundle/dev copies) so the local / bring-your-own-model (Ollama) lane works:
-# DeepAgentsBackend/LangchainReactBackend build a ChatOllama via init_chat_model("ollama:..."),
-# which needs this binding. Fixes the self-hosted local-only path for the compliance ICP.
-# Prior: 2026-04-29 — Release 0.4.18: dev → main sync (PR #1015) — file jail OCR/STT, scope enforcement + fail-closed require_scope, SSRF guard scaffolding, PII tightening, rate-limiter race fix + ReDoS bounds, audit-log scrubbing, dynamic cookie Secure flag, nonce-based CSP, plus bus mutation leakage and token-usage propagation fixes.
+# pyproject.toml: the pocketpaw package, its optional extras (backends, channels,
+# knowledge extraction, the `all` / `all-backends` bundles the production image
+# installs) and the tool config (pytest, ruff, import-linter guards, uv's
+# release-age floor). Several pins carry their reason inline and are guarded by
+# tests and mutation plans; read the comment before moving any bound.
 [project]
 name = "pocketpaw"
 version = "0.4.18"
@@ -49,12 +49,35 @@ dependencies = [
     # LLM Clients
     "openai>=1.60.0",
     "anthropic>=0.45.0",
+    # LLM pricing — effective-dated rates compiled into the package as Python
+    # source, so a lookup touches no network. It is already an unconditional
+    # requirement of pydantic-ai-slim, which ee depends on hard, so it is present
+    # everywhere metering runs; declared explicitly so a change in pydantic-ai's
+    # own dependency list cannot silently unprice our billing.
+    "genai-prices>=0.0.73",
     # Agent Backend (recommended default)
-    "claude-agent-sdk>=0.1.72",
+    # !=0.2.157: that release shipped no win_amd64 wheel, so Windows would build
+    # the sdist. 0.2.156 is the newest release with every platform wheel.
+    "claude-agent-sdk>=0.2.156,!=0.2.157",
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
     "uvicorn[standard]>=0.31.1",
     "jinja2>=3.1.0",
-    "fastapi>=0.134.0",   # fastapi 0.134.0 first allowed starlette 1.0.0 (dropped upper bound)
+    # Lower bound: 0.134.0 first allowed starlette 1.0.0 (dropped its upper bound).
+    # Upper bound: 0.137 stopped flattening include_router()'s routes into
+    # app.routes and appends an _IncludedRouter with no `.path` instead.
+    # opentelemetry-instrumentation-fastapi's _get_route_details reads `.path`
+    # unconditionally on a partial match (path matches, method does not), which
+    # is every CORS preflight. The OTel ASGI middleware runs on every request,
+    # so under fastapi>=0.137 each OPTIONS returns 500 and the browser reports
+    # it as a CORS failure. Seen in production 2026-09-06: 163 preflight 500s
+    # on /chat/groups, /auth/ws/ticket, /agents and /auth/me.
+    #
+    # The real fix is opentelemetry-instrumentation-fastapi>=0.64b0, which
+    # handles both match shapes. We cannot take it: logfire pins
+    # opentelemetry-sdk<1.43.0 and 0.64b0 needs >=1.43 (pydantic/logfire#2041).
+    # LIFT THIS BOUND when that ceiling moves, not before. Gated by
+    # tests/test_fastapi_version_cap.py.
+    "fastapi>=0.134.0,<0.137",
     "qrcode[pil]>=7.4",
     "python-multipart>=0.0.22",
     # Logging & CLI
@@ -71,8 +94,7 @@ dependencies = [
     # soul_protocol.engine.journal for fleet installer event emission (#947).
     # Promoted from optional extra to base dep in v0.3.1 integration work;
     # the runtime now takes a hard dependency on the journal primitives.
-    # Updated to v0.5.0: game profiles, dedup-aware writes, health audit, eternal storage fixes.
-    "soul-protocol[engine]>=0.5.0",
+    "soul-protocol[engine]>=0.3.1",
     # NOTE: livekit-agents / livekit-plugins-deepgram moved to ee/pyproject.toml
     # in the OSS-EE split (Phase 4) — only ee/pocketpaw_ee/cloud/livekit imports them.
     "cel-python>=0.5.0",
@@ -81,7 +103,23 @@ dependencies = [
 [project.optional-dependencies]
 # --- Feature extras ---
 vector = ["chromadb", "bm25s"]
-knowledge = ["trafilatura", "bm25s", "pypdf"]
+# The Dockerfile installs `.[knowledge]` explicitly (`.[all]` is a
+# hand-maintained list that omits it), so this extra is the reliable route into
+# the production image for anything the extraction adapters lazy-import.
+# python-pptx / openpyxl / pillow-heif are duplicated in ee's `extraction`
+# extra — same as trafilatura and pypdf — because `uv sync --all-extras`
+# resolves only the ROOT project's extras and never ee's.
+knowledge = [
+    "trafilatura",
+    # HTML pages (site crawl, concierge links, URL ingest) reach the KB as
+    # Markdown, so tables and headings survive. Rust core, MIT, Linux wheels.
+    "html-to-markdown>=3.10",
+    "bm25s",
+    "pypdf",
+    "python-pptx>=1.0.0",
+    "openpyxl>=3.1.0",
+    "pillow-heif>=0.18.0",
+]
 databases = [
     "sqlalchemy[asyncio]>=2.0.0",
     "asyncpg>=0.29.0",       # PostgreSQL
@@ -148,6 +186,80 @@ deep-agents = [
     # LangChain needs this adapter package. 1.x line matches langchain-core 1.x.
     "langchain-ollama>=1.0,<2.0",
 ]
+pydantic-ai = [
+    # In-process agent backend (agents/pydantic_ai.py). ``-slim`` + the
+    # ``openai`` extra deliberately: the model client is an OpenAI-compatible
+    # one pointed at OUR LiteLLM proxy, so pulling the full ``pydantic-ai``
+    # meta-package (every vendor SDK) would add weight we never call.
+    #
+    # PINNED EXACTLY, and to a version that is NOT the newest. Two reasons:
+    # (1) pre-1.0-shaped release cadence — 16 releases in 3.5 months — so a
+    # floating range puts breaking changes on the request path; (2) the
+    # workspace's 7-day minimum-release-age supply-chain policy. 2.18.0 is the
+    # newest release clearing that window as of 2026-08-01 (2.19.0 landed
+    # 2026-07-28 and every version above it is newer still).
+    #
+    # 2.14.1 -> 2.18.0 reviewed for breaking changes across the four releases:
+    # none touch our surface. 2.17.0 caches per-message OpenTelemetry
+    # serialization to avoid an O(n^2) instrumentation cost, which is the
+    # release that makes the Instrumentation capability affordable on a long
+    # tool loop.
+    #
+    # The ``mcp`` extra pulls fastmcp, which moves ``starlette`` to the 1.x
+    # line. That is INSIDE this project's declared range, not a violation of it:
+    # the core ``fastapi>=0.134.0,<0.137`` pin has 0.134.0 as its floor precisely
+    # because 0.134.0 dropped starlette's upper bound, and fastapi 0.135.x
+    # requires only ``starlette>=0.46.0``. The ceiling is unrelated to starlette
+    # — see the fastapi entry above.
+    "pydantic-ai-slim[openai,mcp]==2.18.0",
+    # Harness capabilities (compaction, subagents, skills, planning, tool
+    # output limits, step persistence). 0.11.0 is likewise the newest release
+    # clearing the 7-day window as of 2026-08-01 (0.12.0 shipped 2026-07-28).
+    "pydantic-ai-harness==0.11.0",
+    # Agent Skills with progressive disclosure — the model sees names and
+    # descriptions and pulls a skill's body only when it uses one, rather than
+    # every skill riding in the system prompt each turn. The harness has no
+    # skills capability of its own. Third-party (MIT); 1.2.0 is the newest
+    # release clearing the 7-day minimum-release-age window (1.4.0 landed
+    # 2026-07-28). Used programmatically only — see _build_skills_capability.
+    "pydantic-ai-skills==1.3.0",
+    # Observability. Pydantic's own OpenTelemetry platform, and the thing that
+    # turns "the model feels slow" into a span with a number on it. Optional at
+    # runtime: nothing is configured unless POCKETPAW_LOGFIRE_ENABLED is set, so
+    # an install that never sets it pays nothing. Ranged rather than pinned
+    # because it is a 4.x line on a normal cadence, unlike the pre-1.0-shaped
+    # packages above.
+    #
+    # THE EXTRAS ARE THE INSTRUMENTORS. Each one is a thin
+    # `opentelemetry-instrumentation-*` package that logfire dispatches to;
+    # without it `logfire.instrument_fastapi()` raises at runtime telling you to
+    # install exactly this. They are declared HERE rather than in an extra of
+    # their own so there is one logfire version spec in this file: `[all]`
+    # already self-references `pocketpaw[pydantic-ai]` for the same reason, and
+    # the deployed image builds from `[all]`.
+    #
+    # Which ones and why: fastapi is a span per request with its route and
+    # status; httpx is the whole outbound surface, so a slow model call and a
+    # slow sandbox stop reading identically; redis is the arq queues and the run
+    # stream; pymongo covers Mongo under motor and beanie; system-metrics is the
+    # container's own CPU, memory and disk, which is what answers "was it the
+    # code or the box". Every instrumentor is inert until something calls it, so
+    # an install that never enables Logfire carries a few hundred KB of unused
+    # pure Python and nothing else.
+    #
+    # NOT included: sqlite3 and sqlalchemy. Fabric, Instinct, the audit log and
+    # the ledger all run on SQLite, and a span per statement would dominate the
+    # bill for little over the operation span already wrapping them.
+    "logfire[fastapi,httpx,redis,pymongo,system-metrics]>=4.39.0,<5",
+]
+pydantic-ai-evals = [
+    # Evaluation harness, kept OUT of the runtime extra on purpose: it is a
+    # development and CI dependency, and nothing in the request path imports it.
+    # Version-locked to pydantic-ai-slim above — they ship from one workspace on
+    # one version line, so a mismatch is a real risk rather than a theoretical
+    # one.
+    "pydantic-evals==2.18.0",
+]
 litellm = [
     "litellm>=1.40.0",
 ]
@@ -156,7 +268,7 @@ memory = [
     "ollama>=0.6.1",
 ]
 soul = [
-    "soul-protocol[engine]>=0.5.0",
+    "soul-protocol[engine]>=0.3.0",
 ]
 
 # --- Channel extras ---
@@ -271,10 +383,10 @@ all-tools = [
     # graph
     "networkx>=3.0",
     # soul
-    "soul-protocol[engine]>=0.5.0",
+    "soul-protocol[engine]>=0.3.0",
 ]
 all-backends = [
-    "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
+    "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm,pydantic-ai]",
 ]
 # NOTE: the `enterprise` extra was removed in the OSS-EE split (Phase 4).
 # Enterprise features now ship as the separate `pocketpaw-ee` package
@@ -307,7 +419,7 @@ all = [
     "sarvamai>=0.1.25",
     "mcp>=1.0.0",
     # soul
-    "soul-protocol[engine]>=0.5.0",
+    "soul-protocol[engine]>=0.3.0",
     # backends
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
@@ -321,6 +433,14 @@ all = [
     "langchain-litellm>=0.6.4,<0.6.5",
     # Local / bring-your-own-model (Ollama) provider path — see deep-agents extra.
     "langchain-ollama>=1.0,<2.0",
+    # A SELF-REFERENCE rather than the four inlined specs the rest of this list
+    # uses, and deliberately: the `pydantic-ai` extra above pins three packages
+    # EXACTLY, with a written justification per pin, so a copy here would be a
+    # second place to bump and the first one to go stale. This entry was missing
+    # entirely until 2026-08-11 — `Dockerfile.enterprise` builds the production
+    # image with `pip install '.[all]'`, so "all" omitting the CLOUD DEFAULT
+    # agent backend is how the enterprise image shipped without it.
+    "pocketpaw[pydantic-ai]",
 ]
 dev = [
     # all deps (flattened from [all])
@@ -359,6 +479,8 @@ dev = [
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
+    # parallel runs; scripts/flake_census.sh adds pytest-randomly per run with `uv run --with`
+    "pytest-xdist>=3.5,<4",
     "pytest-playwright>=0.4.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
@@ -367,6 +489,7 @@ dev = [
 
 [project.scripts]
 pocketpaw = "pocketpaw.__main__:main"
+paw = "pocketpaw.paw.cli:main"
 
 # --- Extension-point providers (OSS-EE split) ---
 # Core (`pocketpaw`) discovers optional providers via importlib entry-points
@@ -432,6 +555,18 @@ select = ["E", "F", "I", "UP"]
 "src/pocketpaw/ripple/_design.py" = ["E501"]
 "ee/pocketpaw_ee/cloud/decisions/explain/extractor.py" = ["E501"]
 "ee/pocketpaw_ee/cloud/decisions/explain/narrator.py" = ["E501"]
+# Studio style registry + softening prompts: each style carries rich
+# promptSuffix/config strings appended to the model prompt verbatim, so their
+# long single-line strings can't be wrapped without changing the rendered prompt.
+"ee/pocketpaw_ee/cloud/studio/style_catalog.py" = ["E501"]
+"ee/pocketpaw_ee/cloud/studio/prompt_soften.py" = ["E501"]
+# Sites Enhance-button system prompt: same reason, one rule per line.
+"ee/pocketpaw_ee/sites/prompt_enhance.py" = ["E501"]
+"ee/pocketpaw_ee/sites/motion_video.py" = ["E501"]
+# Embedded fake-herdr shim: canned JSON envelopes are single-line by
+# nature (an id + result + record) and can't be wrapped without breaking
+# the bash `echo` that emits them.
+"tests/test_herdr_runtime.py" = ["E501"]
 
 [dependency-groups]
 dev = [
@@ -471,6 +606,8 @@ dev = [
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
+    # parallel runs; scripts/flake_census.sh adds pytest-randomly per run with `uv run --with`
+    "pytest-xdist>=3.5,<4",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
     "pytest-playwright>=0.7.2",
@@ -478,7 +615,7 @@ dev = [
     "moto[s3]>=5.0.0",
     "types-aiofiles>=25.1.0.20260409",
     "import-linter>=2.11",
-    "fakeredis>=2.21.0",
+    "fakeredis[lua]>=2.21.0",
 ]
 
 # Enterprise layer — opt-in. `uv sync --dev --group ee` installs the
@@ -486,6 +623,53 @@ dev = [
 # development environment. Plain `uv sync --dev` stays OSS-only (that is what
 # the Test (OSS-only) CI job relies on).
 ee = ["pocketpaw-ee"]
+
+[tool.uv]
+# Install-time supply-chain floor for this repo's own Python resolution.
+#
+# WHY THIS IS HERE. The workspace policy is a 7-day minimum release age: a
+# version has to sit on the index for a week before we will resolve it, which
+# is the one control that catches a compromised fresh publish of a package we
+# already vetted (an allowlist pins WHICH package, and a ranged pin still
+# floats the VERSION). That policy was documented as living in the developer's
+# home directory — and those files do not exist on any machine we checked.
+# `npm config get min-release-age` returns null; there is no ~/.config/uv/
+# uv.toml and no UV_EXCLUDE_NEWER in the environment. So every `uv lock` /
+# `uv sync` in this repo, including the CI jobs, resolved straight off PyPI
+# with no age gate at all. Enforcement now lives per-repo instead: the Daytona
+# build sandbox got its bun floor (#1897), paw-enterprise got its npm floor
+# (#768), and this is pocketpaw's.
+#
+# THE UNIT IS A DATE, NOT A DURATION — this is the trade-off, and it is the
+# whole reason this block needs a comment. bun's `minimumReleaseAge` is
+# seconds and npm's `min-release-age` is days, so both roll forward on their
+# own. uv's `exclude-newer` is an absolute timestamp: it does not move, so it
+# needs a human to bump it. Keep it roughly ONE DAY behind today when you do.
+# Set it too recent and there is no floor left; set it too far back and it
+# starts refusing releases that have legitimately aged past the window, which
+# also breaks first-party packages on a fast cadence (soul-protocol has hit
+# exactly this). Bumping it is a deliberate act, not a chore to automate away.
+#
+# WHAT IT DOES AND DOES NOT GATE. It applies at RESOLUTION time. `uv sync`
+# against the committed uv.lock still installs what the lock pins — the lock
+# is the record of what was already vetted, and this stops a NEW resolve from
+# reaching for something the index published yesterday. If a bump makes a
+# needed dependency unresolvable, pin the previous satisfying version or raise
+# it with the captain. Do not lower this date to make a resolve pass, and
+# never work around it with a bypass flag.
+#
+# It lives in `[tool.uv]` rather than a `uv.toml` on purpose. This repo
+# already keeps its uv config in pyproject.toml (`[tool.uv.sources]` below,
+# and the same in ee/pyproject.toml), and adding an adjacent uv.toml makes uv
+# ignore the settings fields in `[tool.uv]` entirely — verified on uv 0.10.4,
+# which warns and then drops them. One config home, no split brain.
+exclude-newer = "2026-08-10T00:00:00Z"
+# Per-package floor for claude-agent-sdk (2026-09-27, chore/bump-claude-agent-sdk).
+# The SDK ships near-daily and bundles the Claude Code CLI, so the global date
+# above left us ~65 releases behind. This still enforces the 7-day minimum
+# release age for the SDK alone; bump it with the SDK, keep it 7+ days back.
+# Both pyproject files carry the same value so the two locks agree.
+exclude-newer-package = { claude-agent-sdk = "2026-09-20T00:00:00Z" }
 
 [tool.uv.sources]
 pocketpaw-ee = { path = "ee", editable = true }
@@ -507,8 +691,10 @@ camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--ignore=tests/cloud --ignore=tests/e2e"
+# --dist loadgroup keeps xdist_group-marked tests on one worker under -n; inert without -n.
+addopts = "--ignore=tests/cloud --ignore=tests/e2e --dist loadgroup"
 markers = [
+    "serial: test must run alone, outside the parallel phase; give the reason in a comment",
     "enforce_scope: opt a test out of the global _TESTING_FULL_ACCESS bypass so require_scope fails closed as in production",
 ]
 
@@ -545,4 +731,102 @@ ignore_imports = [
     # dashboard_lifecycle drains the EE InProcessExecutor on shutdown via a
     # try/except runtime import; the OSS core never imports EE statically.
     "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
+    # Same seam, same reason: request-log telemetry is batched behind a queue
+    # in EE, and this is the only shutdown hook that fires under
+    # FastAPI(lifespan=...), so the queued tail is flushed from here or not at
+    # all. Guarded by try/except; an OSS-only install has nothing to flush.
+    "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud._core.request_log",
+    "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.client",
+    "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona.store",
+    # atlas resolves optional EE introspection (Fabric schema) and the
+    # role-aware entitlement provider via try/except ImportError seams — an
+    # OSS-only install degrades to "no introspection"/default overlay and
+    # never imports EE statically.
+    "pocketpaw.atlas.fabric -> pocketpaw_ee.fabric",
+    "pocketpaw.atlas.overlay -> pocketpaw_ee.agent.atlas_provider",
+    # FL-3 agent Library verbs: the tag/move/annotate/search tools live in the
+    # OSS builtin tools package (registered via _EE_TOOLS, guarded by ee/
+    # availability) but act on the cloud Library. Every EE reach is a lazy
+    # try/except runtime import inside a method — the module top-level imports
+    # only OSS (pocketpaw.tools.protocol), and on a community install the tools
+    # degrade to an "enterprise feature" message. Same pattern the tools.cli
+    # dispatcher already uses for cloud pocket writes.
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.uploads.mongo_store",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.uploads.paths",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.uploads.folder_store",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.context",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.errors",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.realtime.emit",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud._core.realtime.events",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.file_versions.service",
+    "pocketpaw.tools.builtin.library_verbs -> pocketpaw_ee.cloud.agents.knowledge",
+    # FL-5 structural edit tools (port of dewani12's #1193): the edit_document /
+    # edit_slides / edit_spreadsheet tools live in the OSS builtin tools package
+    # (registered via _EE_TOOLS, guarded by ee/ availability) but edit a cloud
+    # Library file through the FL-2 file_versions service. Same lazy try/except
+    # runtime-import pattern as the FL-3 verbs above: the module top-level imports
+    # only OSS (pocketpaw.tools.protocol); a community install degrades to an
+    # "enterprise feature" message.
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud._core.context",
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud._core.errors",
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud.file_versions.service",
+    "pocketpaw.tools.builtin.edit_document -> pocketpaw_ee.cloud.file_versions.dto",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud._core.context",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud._core.errors",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud.file_versions.service",
+    "pocketpaw.tools.builtin.edit_slides -> pocketpaw_ee.cloud.file_versions.dto",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud._core.context",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud._core.errors",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.file_versions.service",
+    "pocketpaw.tools.builtin.edit_spreadsheet -> pocketpaw_ee.cloud.file_versions.dto",
+    # Studio — /studio Flow canvas: build_studio_flow persists the agent-drawn
+    # flow project server-side through the EE cloud store when the workspace
+    # has EE (cloud.studio.fal_edit pattern). Every EE reach is a lazy
+    # try/except runtime import inside the method — the module top-level
+    # imports only OSS (pocketpaw.tools.protocol); a community install
+    # degrades to "nothing to save" and never imports EE statically.
+    "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.chat.agent_service",
+    "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.studio.schemas",
+    "pocketpaw.tools.builtin.studio_flow_tool -> pocketpaw_ee.cloud.studio.service",
+    # Proxy spend attribution: both agent backends stamp the paying workspace on
+    # a LiteLLM proxy request, and the workspace comes from the same run-identity
+    # ContextVar the Library verbs above read. One lazy try/except runtime import
+    # inside a function, caught broadly on purpose — the module top-level imports
+    # only stdlib, and a community install has no workspaces to bill, so it
+    # returns None and the request goes out untagged exactly as before.
+    "pocketpaw.agents.spend_attribution -> pocketpaw_ee.cloud.chat.agent_service",
+]
+
+# Canonicalization Wave 0 guards (CN-1, 2026-10-01). Each lands green with
+# today's violators in ignore_imports; that list is the ratchet and only shrinks.
+# unmatched alerting is off so PRs that remove a violator merge in any order.
+# These forbid `pocketpaw.*` submodules, so they live here (both root packages)
+# rather than in ee/pyproject.toml, where `pocketpaw` is external.
+# Why: copies of a primitive drift apart, so new code reuses the canonical one.
+[[tool.importlinter.contracts]]
+name = "Fabric — object writes through one store"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["pocketpaw.fabric.journal_store"]
+ignore_imports = [
+    "pocketpaw_ee.cloud.people.service -> pocketpaw.fabric.journal_store",
+    "pocketpaw_ee.cloud.partners.service -> pocketpaw.fabric.journal_store",
+]
+
+[[tool.importlinter.contracts]]
+name = "Audit — cloud never writes SQLite AuditStore"
+type = "forbidden"
+allow_indirect_imports = "true"
+unmatched_ignore_imports_alerting = "none"
+source_modules = ["pocketpaw_ee"]
+forbidden_modules = ["pocketpaw.audit.store"]
+ignore_imports = [
+    "pocketpaw_ee.cloud.audit.listeners -> pocketpaw.audit.store",
+    "pocketpaw_ee.cloud.audit.service -> pocketpaw.audit.store",
 ]
