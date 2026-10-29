@@ -2,11 +2,13 @@
 
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace,
 built from its Agent document (``_build``: the per-agent ``config.model`` is
-routed onto the field the backend reads via ``route_model``, legacy backend
+routed onto the field the backend reads via ``route_model`` and, when set, turns
+smart routing off for that agent so its pick is the model that runs; legacy backend
 names go through ``_LEGACY_BACKENDS`` first, opt-in MCP servers in
 ``config.tools`` become the agent's ``ToolPolicy``). Instances are cached per
 process (``max_instances`` from settings), evicted when idle, rebuilt when the
-document changes, and refused with ``AgentDisabled`` once the agent is disabled.
+document changes (once, under the build lock, however many runs arrive
+together), and refused with ``AgentDisabled`` once the agent is disabled.
 Every backend the pool drops is torn down; ``invalidate`` defers that for a busy
 instance until its last run ends.
 
@@ -364,10 +366,22 @@ class AgentPool:
                             inst.active_runs,
                         )
                         return inst
-                    logger.info("Agent %s config changed, rebuilding", agent_id)
-                    await self._teardown(inst)
-                    del self._instances[agent_id]
-                    return await self._build(agent_doc)
+                    # Under the build lock, and only if ``inst`` is still the
+                    # cached one: concurrent runs for this agent all saw it
+                    # stale, and without this each tore it down and rebuilt,
+                    # dropping a sibling's fresh instance or handing back the
+                    # torn-down one.
+                    async with self._build_lock:
+                        current = self._instances.get(agent_id)
+                        if current is not None and current is not inst:
+                            return current
+                        # A run may have started on it while we waited.
+                        if inst.active_runs > 0:
+                            return inst
+                        logger.info("Agent %s config changed, rebuilding", agent_id)
+                        self._instances.pop(agent_id, None)
+                        await self._teardown(inst)
+                        return await self._build(agent_doc)
             except AgentDisabled:
                 # Must NOT be swallowed by the broad DB-error guard below — a
                 # disabled agent has to fail closed, not fall back to the
@@ -1137,7 +1151,12 @@ class AgentPool:
         # agent doc (e.g. ``claude_code``) still routes to the right field.
         model = config.get("model", "")
         canonical_backend = _LEGACY_BACKENDS.get(settings.agent_backend, settings.agent_backend)
-        route_model(settings, canonical_backend, model)
+        if route_model(settings, canonical_backend, model):
+            # The agent pinned a model, so it beats smart routing (which on the
+            # Claude SDK backend otherwise outranks ``claude_sdk_model`` and
+            # picked the haiku tier for a short message). Agents with no model
+            # keep the process-wide routing. This is a per-agent clone.
+            settings.smart_routing_enabled = False
 
         # Instantiate backend
         backend_cls = get_backend_class(settings.agent_backend)

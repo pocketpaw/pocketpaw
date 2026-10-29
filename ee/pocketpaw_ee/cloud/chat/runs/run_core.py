@@ -40,6 +40,9 @@ a non-terminal ``retrying`` frame, no partial Message. arq re-runs the job on th
 next worker and ``execute_run(retry=True)`` skips the gates that spend (guest
 turn, daily turns, early-access reservation), which attempt 1 already paid.
 
+A run that ends with nothing to show (blank text and only stream_start,
+thinking, token_usage or chunk frames, no artifact, no question) is failed with
+``run.empty_reply``, so an accepted run always ends in a reply or a visible error.
 Every other terminal path persists the streamed text as an assistant ``Message`` with
 its steps, records token usage (latest-wins), and sets the stream TTL. A
 completed run that asked an ``ask_user`` question (either backend spelling,
@@ -285,6 +288,14 @@ MALFORMED_OUTPUT_MESSAGE = (
     "Try again, and switch model if it keeps happening."
 )
 INTERNAL_ERROR_MESSAGE = "Something went wrong on our side, so the reply stopped. Try again."
+# A run that ended with nothing to show: no text, no tool work, no artifact, no
+# question. It used to complete silently with no Message, which left the user's
+# message unanswered in history with no error anywhere.
+EMPTY_REPLY_CODE = "run.empty_reply"
+EMPTY_REPLY_MESSAGE = "The agent stopped without replying. Send your message again."
+# Frames that show nothing on their own. A run whose frames were all of these
+# (and whose text is blank) ended without a reply.
+_PASSIVE_EVENTS = frozenset({"stream_start", "thinking", "token_usage", "chunk"})
 PROVIDER_SETUP_CODE = "agent.provider_unreachable"
 PROVIDER_SETUP_MESSAGE = (
     "The AI provider isn't reachable or isn't set up right. An admin needs to check "
@@ -2494,8 +2505,16 @@ async def _drive_agent_loop(
         # ``ctx.credential_source`` (set by ``execute_run``) wins when present:
         # a stored key on a backend that ignores it runs on our gateway, so the
         # catalog applies to it.
+        #
+        # A Claude id on the Claude SDK backend is not judged by the catalog
+        # either: that backend reaches Claude by its own route, and the catalog
+        # lists no Anthropic model at all, so every Claude pick there was refused
+        # (2026-10-29). Any other id on that backend is still checked.
         if (
             ctx.model_override
+            and not (
+                backend_name == "claude_agent_sdk" and ctx.model_override.startswith("claude-")
+            )
             and (getattr(ctx, "credential_source", None) or byok_creds.source) != "byok"
             and await _model_is_unknown_to_gateway(ctx.model_override)
         ):
@@ -3704,6 +3723,8 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
         # The latest ``ask_user_question`` frame, stored on the Message so the
         # option chips survive a reload.
         ask_frame: dict[str, Any] | None = None
+        # Whether any frame other than ``_PASSIVE_EVENTS`` reached the client.
+        acted = False
         agent_events = _iter_agent_events(spec, ctx)
         try:
             async for event_name, event_data in agent_events:
@@ -3783,6 +3804,8 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
                         # plain latest-wins rather than pinning the first.
                         if _usage_total(event_data) >= _usage_total(usage):
                             usage = event_data
+                if event_name not in _PASSIVE_EVENTS:
+                    acted = True
                 recorder.observe(event_name, event_data)
                 await transport.append_event(spec.run_id, event_name, event_data)
                 if event_name == "error":
@@ -3848,6 +3871,28 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
     if await transport.is_cancelled(spec.run_id):
         cancelled = True
 
+    ask_record = _ask_user_record(spec.run_id, ask_frame)
+    # An accepted run must end with a reply or a visible error. One with nothing
+    # to show (a backend torn down under it, a stream that closed early) takes
+    # the failed path with a frame the client renders. A turn that sent any
+    # other frame (a tool call, a surface, a studio flow), delivered an artifact
+    # or asked a question did something, so it still completes below.
+    if (
+        not cancelled
+        and error is None
+        and backend_error_message is None
+        and not full_text.strip()
+        and not delivered_artifacts
+        and ask_record is None
+        and not acted
+    ):
+        logger.warning("execute_run %s: ended without a reply; failing it", spec.run_id)
+        backend_error_message = EMPTY_REPLY_MESSAGE
+        error_code = EMPTY_REPLY_CODE
+        await transport.append_event(
+            spec.run_id, "error", {"code": EMPTY_REPLY_CODE, "message": EMPTY_REPLY_MESSAGE}
+        )
+
     # Drop the typing indicator before persist so a slow Mongo write
     # doesn't leave it stuck on. Only reached on non-cancelled paths;
     # the cancelled path handles typing-off inside the cleanup helper.
@@ -3889,11 +3934,10 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
 
-    ask_record = _ask_user_record(spec.run_id, ask_frame)
     if cancelled or (not full_text.strip() and not delivered_artifacts and ask_record is None):
-        # Empty-text non-cancelled runs still complete cleanly — without this,
-        # the doc would sit in ``running`` until the 10-minute sweeper marked
-        # it ``interrupted``, surfacing a phantom active_run to the frontend.
+        # A cancelled run, or a tool-only run with no closing text (an empty run
+        # that did nothing already failed above), ends here; the doc must still
+        # leave ``running`` or the sweeper reports a phantom active_run.
         # ART-1 exception: a non-cancelled run that DELIVERED artifacts but
         # produced no closing text must NOT early-return — the files landed in
         # blob storage, so it falls through to the persist path below to record
