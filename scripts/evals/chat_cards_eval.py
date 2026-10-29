@@ -7,10 +7,11 @@ the knowledge-base header, the way ``run_core`` passes it), on the local Claude
 Code CLI headless (empty temp cwd, like ripple's ``record-scenario.ts``), with
 no built-in tools and one stdio MCP server, ``pocketpaw_widgets``, serving the
 real ``get_widget_spec`` / ``get_inline_widget_help`` tools (this script with
-``--mcp-serve``), as the claude_agent_sdk backend does in-process. The reply goes through ``run_core``'s own fence
-extraction (normalizer + card gate) and the table shows, per prompt, the card's
-main widget, node count, gate verdict and PASS when the main widget is the
-gallery's purpose-built one and the gate passes.
+``--mcp-serve``), as the claude_agent_sdk backend does in-process. The reply
+goes through ``run_core``'s own fence extraction (normalizer + card gate) and
+the table shows, per prompt, the card's
+main widget, node count, gate verdict and PASS when the gallery's purpose-built
+widget is the root or within two levels of it and the gate passes.
 
 Spends Claude Code usage, so nothing runs it implicitly and no test imports it.
 Results go to ``--out`` (default: a temp dir), never into git.
@@ -47,6 +48,13 @@ EXPECTED: dict[str, set[str]] = {
     "book-appointment": {"ask-user-questions", "form", "form-layout", "booking", "wizard-layout"},
 }
 FIXTURES = "packages/svelte/src/routes/live/fixtures"
+# get_widget_spec reads ``ripple_manifest_url``, not the vendored manifest the
+# prompt and the card gate use. Pointed at an older release it answers "No such
+# widget" for every purpose-built widget and the model composes instead, so the
+# eval serves the release matching the vendored manifest unless told otherwise.
+VENDORED_MANIFEST_URL = (
+    "https://cdn.jsdelivr.net/gh/qbtrix/ripple-iui@v{v}/packages/svelte/static/manifest.json"
+)
 
 
 def _ripple_repo(arg: str | None) -> Path:
@@ -80,6 +88,16 @@ def _nodes(node: Any) -> list[dict[str, Any]]:
             tpl = n.get("template")
             if isinstance(tpl, dict):
                 queue.append(tpl)
+    return out
+
+
+def _top(ui: Any) -> set[str]:
+    """Types of the root and its children and grandchildren."""
+    out: set[str] = set()
+    level = [ui]
+    for _ in range(3):
+        out |= {n["type"] for n in level if isinstance(n, dict) and "type" in n}
+        level = [c for n in level if isinstance(n, dict) for c in n.get("children") or []]
     return out
 
 
@@ -134,7 +152,9 @@ def mcp_serve() -> None:
     server.run()
 
 
-def run_one(fid: str, prompt: str, model: str, out: Path, run: int) -> dict[str, Any]:
+def run_one(
+    fid: str, prompt: str, model: str, out: Path, run: int, manifest_url: str
+) -> dict[str, Any]:
     from pocketpaw_ee.cloud.chat.runs.run_core import _extract_ripple_attachment
     from pocketpaw_ee.paw_bar.card_spec import rejection_reason, render_card
     from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
@@ -148,6 +168,7 @@ def run_one(fid: str, prompt: str, model: str, out: Path, run: int) -> dict[str,
                 "pocketpaw_widgets": {
                     "command": sys.executable,
                     "args": [str(Path(__file__).resolve()), "--mcp-serve"],
+                    "env": {"POCKETPAW_RIPPLE_MANIFEST_URL": manifest_url} if manifest_url else {},
                 }
             }
         }
@@ -216,7 +237,8 @@ def run_one(fid: str, prompt: str, model: str, out: Path, run: int) -> dict[str,
             if ok
             else f"refused: {rejection_reason(body, verbs=verbs, profile=CHAT_PROFILE)}",
         )
-        row["pass"] = ok and main in EXPECTED[fid]
+        # A heading or callout may sit beside the main widget.
+        row["pass"] = ok and bool(_top(spec["ui"]) & EXPECTED[fid])
     return row
 
 
@@ -229,12 +251,21 @@ def main() -> None:
     ap.add_argument("--only", help="comma-separated fixture ids")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--out", help="where replies and results.json go (default: temp dir)")
+    ap.add_argument(
+        "--manifest-url",
+        help="manifest get_widget_spec reads (default: the vendored manifest's release; "
+        "'' for this machine's ripple_manifest_url setting)",
+    )
     ap.add_argument("--mcp-serve", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
     if args.mcp_serve:
         return mcp_serve()
     logging.disable(logging.WARNING)
 
+    if args.manifest_url is None:
+        from pocketpaw_ee.paw_bar.card_spec import RIPPLE_PROFILE
+
+        args.manifest_url = VENDORED_MANIFEST_URL.format(v=RIPPLE_PROFILE.manifest["version"])
     repo = _ripple_repo(args.ripple)
     ids = args.only.split(",") if args.only else list(EXPECTED)
     out = Path(args.out or tempfile.mkdtemp(prefix="chat-cards-eval-out-"))
@@ -242,7 +273,12 @@ def main() -> None:
     prompts = {fid: _fixture(repo, args.ref, fid)["prompt"] for fid in ids}
     jobs = [(fid, run) for fid in ids for run in range(1, args.runs + 1)]
     with ThreadPoolExecutor(args.jobs) as pool:
-        rows = list(pool.map(lambda j: run_one(j[0], prompts[j[0]], args.model, out, j[1]), jobs))
+        rows = list(
+            pool.map(
+                lambda j: run_one(j[0], prompts[j[0]], args.model, out, j[1], args.manifest_url),
+                jobs,
+            )
+        )
 
     (out / "results.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
     print("| prompt | run | expected | main widget | nodes | turns | gate | result |")
@@ -250,14 +286,16 @@ def main() -> None:
     for r in rows:
         print(
             f"| {r['id']} | {r['run']} | {'/'.join(sorted(EXPECTED[r['id']]))[:30]} | "
-            f"{r['main']} | {r['nodes']} | {r['turns']} | {r['gate'][:60]} | {'PASS' if r['pass'] else 'FAIL'} |"
+            f"{r['main']} | {r['nodes']} | {r['turns']} | {r['gate'][:60]} | "
+            f"{'PASS' if r['pass'] else 'FAIL'} |"
         )
     passed = sum(r["pass"] for r in rows)
     cost = sum(r["cost"] or 0 for r in rows)
     print(
         f"\n{passed}/{len(rows)} pass; system prompt {rows[0]['chars']:,} chars (first row); "
         f"${cost:.2f} reported cost; median {sorted(r['secs'] for r in rows)[len(rows) // 2]}s "
-        f"per reply; replies in {out}"
+        f"per reply; get_widget_spec manifest {args.manifest_url or 'from settings'}; "
+        f"replies in {out}"
     )
 
 

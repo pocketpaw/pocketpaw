@@ -1702,7 +1702,17 @@ def _chat_rules(host_events: Sequence[str]) -> tuple[str, ...]:
         ),
         _rule("   - Flow cards:"): "",
     }
-    return tuple(swaps.get(r, r) for r in _RIPPLE_RULES if swaps.get(r, r))
+    rules = (swaps.get(r, r) for r in _RIPPLE_RULES if swaps.get(r, r))
+    return tuple(r.replace(_PRIMITIVES_SIZE, _CHAT_PRIMITIVES_SIZE) for r in rules)
+
+
+# Chat checks for a purpose-built widget before it composes, so its node budget
+# applies only to a card built from primitives.
+_PRIMITIVES_SIZE = "Aim for about 25 to 90 nodes when building from primitives"
+_CHAT_PRIMITIVES_SIZE = (
+    "Only when no purpose-built widget fits and you build from primitives, aim for "
+    "about 25 to 90 nodes"
+)
 
 
 def ripple_rules(profile: Any = None) -> tuple[str, ...]:

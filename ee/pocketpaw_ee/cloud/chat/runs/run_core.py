@@ -115,6 +115,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     bind_turn,
     build_behavior_instructions,
     build_knowledge_context,
+    chat_turn_widgets,
     collect_delivered_artifacts,
     current_delivered_artifacts,
     detach_agent_identity,
@@ -2157,6 +2158,13 @@ async def _drive_agent_loop(
     # so its prompt must not name tools only the agent's own backend has.
     prompt_backend = "pydantic_ai" if getattr(ctx, "free_run_bounds", None) else backend_name
     behavior_instructions = build_behavior_instructions(ctx, backend_name=prompt_backend)
+    # The chat card prompt's per-turn widget picks ride knowledge_context, below
+    # the cache cut, so the keyed instructions layer stays the same every turn.
+    turn_widgets = chat_turn_widgets(behavior_instructions, user_content, history or ())
+    if turn_widgets:
+        knowledge_context = (
+            f"{knowledge_context}\n\n{turn_widgets}" if knowledge_context else turn_widgets
+        )
 
     # Uploaded files are INLINED, and the backend with file tools has to be
     # told so as a RULE. ``_build_attachments_block`` already says it inside
