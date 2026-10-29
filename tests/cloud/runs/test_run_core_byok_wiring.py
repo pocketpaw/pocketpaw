@@ -391,13 +391,14 @@ async def test_a_key_billed_as_platform_still_faces_the_model_catalog(monkeypatc
     """A stored key on a backend that ignores it is billed as platform
     (``ctx.credential_source``), so the turn runs on our gateway and a model id
     the gateway does not list is refused, as for any platform turn. Mutation:
-    key the catalog check on ``turn_credentials.source`` alone."""
+    key the catalog check on ``turn_credentials.source`` alone. The id is not a
+    ``claude-*`` one: on this Claude SDK agent a Claude id skips the catalog."""
 
     async def _unknown(_model):
         return True
 
     monkeypatch.setattr(run_core, "_model_is_unknown_to_gateway", _unknown)
-    ctx = _ctx(model_override="claude-made-up-9")
+    ctx = _ctx(model_override="made-up-model-9")
     ctx.turn_credentials = TurnCredentials(source="byok", api_key=_PLAINTEXT, provider="anthropic")
     ctx.credential_source = "platform"
     pool, out = await _drive(monkeypatch, ctx, creds=RuntimeError("must not resolve twice"))
