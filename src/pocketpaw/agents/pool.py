@@ -374,6 +374,9 @@ class AgentPool:
                         current = self._instances.get(agent_id)
                         if current is not None and current is not inst:
                             return current
+                        # A run may have started on it while we waited.
+                        if inst.active_runs > 0:
+                            return inst
                         logger.info("Agent %s config changed, rebuilding", agent_id)
                         self._instances.pop(agent_id, None)
                         await self._teardown(inst)

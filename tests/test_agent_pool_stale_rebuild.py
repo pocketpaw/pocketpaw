@@ -70,3 +70,37 @@ async def test_concurrent_gets_on_a_stale_agent_rebuild_once(monkeypatch):
     assert torn == [stale]
     assert all(g is built[0] for g in got)
     assert pool._instances[AID] is built[0]
+
+
+async def test_a_run_that_starts_while_get_waits_for_the_lock_is_not_torn_down(monkeypatch):
+    t0 = datetime.now(UTC) - timedelta(minutes=5)
+    doc = SimpleNamespace(disabled=False, updatedAt=t0 + timedelta(minutes=1))
+
+    class _Model:
+        async def get(self, oid):  # noqa: ARG002
+            return doc
+
+    monkeypatch.setattr("pocketpaw.agents.pool._resolve_agent_model", lambda: _Model())
+
+    pool = AgentPool()
+    stale = _instance(t0)
+    pool._instances[AID] = stale
+    torn: list[AgentInstance] = []
+
+    async def _teardown(inst):
+        torn.append(inst)
+
+    async def _build(agent_doc):  # pragma: no cover - must not be reached
+        raise AssertionError("rebuilt an instance with a run in flight")
+
+    monkeypatch.setattr(pool, "_teardown", _teardown)
+    monkeypatch.setattr(pool, "_build", _build)
+
+    await pool._build_lock.acquire()
+    pending = asyncio.create_task(pool.get(AID))
+    await asyncio.sleep(0.01)  # get saw the stale config and waits on the lock
+    stale.active_runs = 1  # a run started on the cached instance meanwhile
+    pool._build_lock.release()
+
+    assert await pending is stale
+    assert torn == []
