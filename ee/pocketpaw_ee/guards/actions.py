@@ -250,6 +250,11 @@ ACTIONS: dict[str, ActionRule] = {
     # (``confirm_do_data_loss``). Publishing is MEMBER; destroying stored data is the
     # irreversible half, so it needs the same tier as buying a plan.
     "sites.confirm_data_loss": ActionRule(WorkspaceRole.ADMIN, "sites.data_loss_confirm_forbidden"),
+    # The Sites Data dashboard: editing a site's live data (rows, files, KV keys) and
+    # restoring its database to an earlier point. Reading is ``fabric.read`` (MEMBER);
+    # changing what a live site's visitors see is ADMIN, like confirming data loss.
+    "sites.data_write": ActionRule(WorkspaceRole.ADMIN, "sites.data_write_forbidden"),
+    "sites.data_restore": ActionRule(WorkspaceRole.ADMIN, "sites.data_restore_forbidden"),
     # /ship — managed deploys onto real infrastructure.
     # Reading boxes / apps / logs is MEMBER. ``ship.manage`` (ADMIN) gates the
     # DESTRUCTIVE verbs — destroy, rollback, prod deploy — which never execute

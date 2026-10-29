@@ -289,7 +289,7 @@ async def test_dynamic_lane_masks_an_auth_table(monkeypatch):
             workspace_id="ws1", user_id="u1", pocket_id="pk1", table="users", _cloudflare=_CF()
         )
     assert res.rows == [{"id": "u1", "password_hash": project_data.MASK}]
-    assert calls == [("SELECT * FROM users LIMIT ?", [200])]
+    assert calls == [('SELECT * FROM "users" LIMIT ?', [200])]
 
 
 @pytest.mark.asyncio
@@ -318,7 +318,7 @@ async def test_dynamic_lane_offset(monkeypatch):
             offset=20,
             _cloudflare=_CF(),
         )
-    assert calls == [("SELECT * FROM entry LIMIT ? OFFSET ?", [10, 20])]
+    assert calls == [('SELECT * FROM "entry" LIMIT ? OFFSET ?', [10, 20])]
 
 
 # --------------------------------------------------------------------------- routing
