@@ -69,7 +69,7 @@ _FIXTURE = Path(__file__).parents[1] / "fixtures" / "ripple_explainer_card.json"
 # Refreshing ripple-manifest.json: see ee/pocketpaw_ee/paw_bar/ripple-manifest.json.source
 # (vendored from ripple branch feat/play-wave pending a release; drop the widget examples,
 # update the pins below).
-_RIPPLE_MANIFEST_SHA256 = "8c74da0464df611f86087d969e2eaeb169af018daac486118803d5b272f7cc73"
+_RIPPLE_MANIFEST_SHA256 = "76ad91447bc44d0fe4ce7fb6c3abbd7c9df4d7a2fac410c8d08d7b9791276cf3"
 
 
 def _pin_ops(monkeypatch, *site_ids: str, cap: float | None = None) -> None:
@@ -108,7 +108,7 @@ def test_the_vendored_ripple_manifest_has_not_drifted():
 
     raw = card_spec.RIPPLE_MANIFEST_PATH.read_bytes().replace(b"\r\n", b"\n")
     assert hashlib.sha256(raw).hexdigest() == _RIPPLE_MANIFEST_SHA256
-    assert card_spec.RIPPLE_MANIFEST["version"] == "0.8.0"
+    assert card_spec.RIPPLE_MANIFEST["version"] == "0.8.2"
     assert len(card_spec.RIPPLE_MANIFEST["widgets"]) == 216
     # Every trimmed or typed name is a real widget (a typo would trim nothing).
     every = {w["type"] for w in card_spec.RIPPLE_MANIFEST["widgets"]}
