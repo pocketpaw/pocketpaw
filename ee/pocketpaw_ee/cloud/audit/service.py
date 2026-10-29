@@ -5,6 +5,9 @@
 # * The Mongo ``AuditEvent`` collection, of which this module is the sole writer:
 #   ``record`` (fire-and-forget, never raises), ``list_events`` (cursor-paginated),
 #   ``list_target_events`` (one target's history, e.g. a Sites Data row),
+#   ``count_target_events`` (events on one target and those under it since a moment, e.g.
+#   a site's data changes since a restore point), ``find_target_event`` (the event
+#   on one target whose metadata matches, e.g. the restore that minted a bookmark),
 #   ``stream_export_csv``, ``actor_names``.
 # * ``purge_workspace_audit``: the retention seam, age- and tenant-scoped, called by
 #   ``workspace.service``; it purges both sinks (interim, until there is one sink).
@@ -12,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -322,6 +326,57 @@ async def list_target_events(
         .to_list()
     )
     return [_doc_to_domain(d) for d in docs]
+
+
+async def count_target_events(
+    workspace_id: str,
+    *,
+    target_type: str,
+    target_root: str,
+    since: datetime,
+    action_prefix: str = "",
+) -> int:
+    """How many of the workspace's events on ``target_type`` targets that are
+    ``target_root`` or under it (``<root>:…``), with an action starting with
+    ``action_prefix``, happened at or after ``since``. Both match literally."""
+    query: dict[str, Any] = {
+        "workspace": workspace_id,
+        "target_type": target_type,
+        "target_id": {"$regex": "^" + re.escape(target_root) + "(:|$)"},
+        "at": {"$gte": since},
+    }
+    if action_prefix:
+        query["action"] = {"$regex": "^" + re.escape(action_prefix)}
+    return await _AuditEventDoc.find(query).count()
+
+
+async def find_target_event(
+    workspace_id: str,
+    *,
+    target_type: str,
+    actions: list[str],
+    metadata: dict[str, Any],
+    target_id: str | None = None,
+    target_root: str | None = None,
+) -> AuditEventDomain | None:
+    """The newest of the workspace's events on exactly ``target_id`` (or on
+    ``target_root`` and the targets under it, ``<root>:…``), with one of
+    ``actions``, whose metadata holds every ``metadata`` key with that exact value."""
+    if (target_id is None) == (target_root is None):
+        raise ValueError("find_target_event takes exactly one of target_id / target_root")
+    target: Any = target_id
+    if target_root is not None:
+        target = {"$regex": "^" + re.escape(target_root) + "(:|$)"}
+    query: dict[str, Any] = {
+        "workspace": workspace_id,
+        "target_type": target_type,
+        "target_id": target,
+        "action": {"$in": list(actions)},
+    }
+    for key, value in metadata.items():
+        query[f"metadata.{key}"] = value
+    docs = await _AuditEventDoc.find(query).sort([("at", -1), ("_id", -1)]).limit(1).to_list()
+    return _doc_to_domain(docs[0]) if docs else None
 
 
 async def stream_export_csv(

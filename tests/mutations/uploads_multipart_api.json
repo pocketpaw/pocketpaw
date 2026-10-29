@@ -210,8 +210,8 @@
   {
     "label": "body ceiling: give the relay route the global ceiling, so a 5 GB part reaches the handler",
     "file": "src/pocketpaw/security/body_limit.py",
-    "find": "        return self.relay_part_bytes if _is_relay_part(scope) else self.max_bytes",
-    "replace": "        return self.max_bytes",
+    "find": "        if _is_relay_part(scope):\n            return self.relay_part_bytes",
+    "replace": "        if False:\n            return self.relay_part_bytes",
     "tests": [
       "tests/test_body_size_limit.py"
     ]

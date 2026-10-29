@@ -18,9 +18,18 @@
 #     what ``CloudflareClient`` raises for a ``success: false`` result;
 #   * foreign keys are enforced, as D1 enforces them (``foreign_keys=False`` to
 #     seed a database that breaks them).
+#
+# Time Travel (``d1_info`` / ``d1_bookmark`` / ``d1_restore``) is a minimal stub with
+# real semantics: every bookmark is a full ``serialize()`` copy of the database at
+# that moment, so a restore really puts the old rows back and its
+# ``previous_bookmark`` really undoes it. ``version`` (default ``production``) is what
+# ``d1_info`` reports; anything else refuses bookmarks like an alpha database.
+# ``mark(at)`` takes a bookmark stamped ``at`` for a test to restore to by time;
+# ``restores`` records every restore call.
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
@@ -41,6 +50,10 @@ class SqliteD1:
         self.sql: list[tuple[str, list[Any]]] = []
         self.calls = 0
         self.fail_on: str | None = None  # a statement containing this text fails
+        self.version = "production"
+        self.created_at: str | None = None  # what d1_info reports, when set
+        self.restores: list[dict[str, Any]] = []
+        self._snapshots: list[tuple[datetime, str, bytes]] = []
 
     def execute(self, sql: str, params: list[Any] | tuple = ()) -> None:
         """Seed helper: run a statement directly, unrecorded."""
@@ -100,3 +113,54 @@ class SqliteD1:
 
     def statements(self, needle: str) -> list[str]:
         return [s for s, _ in self.sql if needle in s]
+
+    # ----------------------------------------------------------------- Time Travel
+
+    def mark(self, at: datetime | None = None) -> str:
+        """A bookmark of the database as it is now, stamped ``at`` (default now)."""
+        bookmark = f"{len(self._snapshots) + 1:08x}-0000001a-00004c6d-{id(self) % 10**12:012x}"
+        self._snapshots.append((at or datetime.now(UTC), bookmark, self.conn.serialize()))
+        return bookmark
+
+    def _production(self) -> None:
+        if self.version != "production":
+            raise ValidationError("sites.cloudflare_error", "Time Travel needs a production D1")
+
+    def _at_or_before(self, timestamp: str) -> tuple[datetime, str, bytes]:
+        moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        found = [s for s in self._snapshots if s[0] <= moment]
+        if not found:  # live D1: 400 code 7400, which the client raises as this
+            raise ValidationError("sites.data_restore_out_of_window", "Timestamp is too old")
+        return max(found, key=lambda s: s[0])
+
+    async def d1_info(self, database_id: str) -> dict[str, Any]:
+        self._check_db(database_id)
+        self.calls += 1
+        info: dict[str, Any] = {"uuid": database_id, "version": self.version, "file_size": 4096}
+        if self.created_at:
+            info["created_at"] = self.created_at
+        return info
+
+    async def d1_bookmark(self, database_id: str, timestamp: str | None = None) -> str:
+        self._check_db(database_id)
+        self.calls += 1
+        self._production()
+        return self._at_or_before(timestamp)[1] if timestamp else self.mark()
+
+    async def d1_restore(
+        self, database_id: str, *, bookmark: str | None = None, timestamp: str | None = None
+    ) -> dict[str, Any]:
+        self._check_db(database_id)
+        self.calls += 1
+        self._production()
+        assert bool(bookmark) != bool(timestamp)
+        if timestamp:
+            target = self._at_or_before(timestamp)
+        else:
+            target = next((s for s in self._snapshots if s[1] == bookmark), None)
+            if target is None:
+                raise ValidationError("sites.cloudflare_error", "Unknown bookmark")
+        previous = self.mark()
+        self.conn.deserialize(target[2])
+        self.restores.append({"bookmark": bookmark, "timestamp": timestamp, "to": target[1]})
+        return {"bookmark": target[1], "previous_bookmark": previous, "message": "Restored"}

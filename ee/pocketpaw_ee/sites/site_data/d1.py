@@ -11,6 +11,11 @@
 # rowid table → ``rowid``; anything else (composite key, WITHOUT ROWID without a
 # single key, a key column that holds a credential) → no key, read only.
 #
+# Login tables are read only: the better-auth names (``LOGIN_READ_ONLY``) and any
+# ``session_like`` table (a foreign key to a user table plus an ``expires…``
+# column, as Lucia's ``user_sessions``), whose key and credential columns are
+# masked too. Reads, writes, import and export all take this from ``Table``.
+#
 # ``column_writable`` / ``insertable`` are the one statement of which columns and
 # tables the dashboard may write; ``site_data.writes`` enforces them and
 # ``ColumnInfo.writable`` reports them.
@@ -36,6 +41,7 @@ from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.project_data import (
+    MASK,
     auth_table,
     is_user_table,
     mask_rows,
@@ -88,6 +94,16 @@ USER_WRITABLE = frozenset({"name", "email", "image"})
 def is_users(name: str) -> bool:
     """Whether ``name`` is a user table (``user``, ``Users``, ``auth_user`` …)."""
     return auth_table(name) in USER_TABLES
+
+
+def session_like(columns: tuple[Column, ...] | list[Column]) -> bool:
+    """A session table under any name (Lucia's ``user_sessions``, say): a foreign
+    key to a user table AND an ``expires…`` column. Its rows are sign-ins, and its
+    key is often the session secret itself."""
+    refs_user = any(
+        c.references and auth_table(c.references.partition(".")[0]) in USER_TABLES for c in columns
+    )
+    return refs_user and any(norm(c.name).startswith("expires") for c in columns)
 
 
 def norm(column: str) -> str:
@@ -149,6 +165,13 @@ def forget_counts(database_id: str) -> None:
     """Drop the cached row counts of ``database_id`` (after a write)."""
     for key in [k for k in _counts_cache if k[0] == database_id]:
         _counts_cache.pop(key, None)
+
+
+def forget_database(database_id: str) -> None:
+    """Drop everything cached about ``database_id`` (after a restore rewrote it)."""
+    forget_counts(database_id)
+    for key in [k for k in _schema_cache if k[0] == database_id]:
+        _schema_cache.pop(key, None)
 
 
 def _remember(cache: dict, key: tuple[str, ...], ttl: float, value: Any) -> None:
@@ -213,7 +236,11 @@ def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict])
             )
         )
     without_rowid = bool(_WITHOUT_ROWID.search(create_sql or ""))
+    session = session_like(cols)
     masked = frozenset(masked_columns(name, [c.name for c in cols]))
+    if session:  # like a named session table: credentials and the key are secret
+        masked |= frozenset(masked_columns("session", [c.name for c in cols]))
+        masked |= frozenset(c.name for c in cols if c.pk)
     pks = sorted((c for c in cols if c.pk), key=lambda c: c.pk)
     lowered = {c.name.lower() for c in cols}
     rowid = None
@@ -233,7 +260,9 @@ def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict])
         first = next((quote_ident(c.name) for c in cols if c.name not in masked), None)
         order = tuple(unmasked_pks) or ((first,) if first else ())
 
-    if key is None:
+    if session:
+        reason = "login_table"
+    elif key is None:
         reason = "no_key"
     elif auth_table(name) in LOGIN_READ_ONLY:
         reason = "login_table"
@@ -668,15 +697,21 @@ def build_page_query(
     limit: int | None = None,
     offset: int | None = 0,
     spec_fields: dict[str, str] | None = None,
+    max_limit: int = LIMIT_MAX,
+    keyset: bool = False,
+    after_key: Any = None,
 ) -> PageQuery:
     """The rows-page SELECT and its capped COUNT for ``table`` (TDD §5.3). Raises a
     422 for a column not in the schema, a masked column, a bad operator or value,
-    or out-of-range paging, before any SQL is built."""
+    or out-of-range paging, before any SQL is built. ``max_limit`` is the server's
+    own page size cap (the CSV export reads 500 at a time); callers never pass a
+    client's value there. ``keyset`` (default order only, a table with a key) pages
+    by ``key < after_key`` (``>`` ascending) instead of OFFSET."""
     spec_fields = spec_fields or {}
     limit = LIMIT_DEFAULT if limit is None else limit
     offset = offset or 0
-    if not 1 <= limit <= LIMIT_MAX:
-        raise _bad("bad_paging", f"limit must be between 1 and {LIMIT_MAX}.")
+    if not 1 <= limit <= max_limit:
+        raise _bad("bad_paging", f"limit must be between 1 and {max_limit}.")
     if not 0 <= offset <= OFFSET_MAX:
         raise _bad("bad_paging", "That page is too far in. Add a filter to narrow the rows.")
     direction = (direction or "").lower() or None
@@ -727,6 +762,12 @@ def build_page_query(
         else:
             where.append("0")  # nothing searchable: a search matches no row
 
+    if keyset and (sort or not table.key_sql):
+        raise _bad("bad_paging", "Key paging needs the table's key and its default order.")
+    if keyset and after_key is not None:
+        newest_first = (direction or "desc") == "desc"
+        where.append(f"{table.key_sql} {'<' if newest_first else '>'} ?")
+        params.append(after_key)
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
     # Default order is newest first; an explicit sort defaults to ascending.
     descending = direction == "desc" or (direction is None and not sort)
@@ -768,9 +809,36 @@ async def read_page(
     return rows, mask_page(table, rows), _total(count)
 
 
+#: The largest integer a JavaScript number holds exactly (2**53 - 1).
+JS_SAFE_INT = 9_007_199_254_740_991
+
+
+def json_safe(value: Any) -> Any:
+    """``value`` as the browser can hold it: an integer beyond ``JS_SAFE_INT`` goes
+    out as its digit string, since ``JSON.parse`` would round it to another number.
+    The write paths coerce digit strings back to integers."""
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) > JS_SAFE_INT:
+        return str(value)
+    return value
+
+
+def json_safe_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: json_safe(v) for k, v in row.items()}
+
+
 def mask_page(table: Table, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``rows`` masked like the legacy viewer, keeping ``__key`` (which the
-    credential pattern would otherwise catch) as the row id it is."""
+    """``rows`` masked like the legacy viewer and made JSON-safe for the browser.
+    ``__key`` (which the credential pattern would otherwise catch) stays the row id
+    it is, always as a string so a large rowid or snowflake id survives the trip;
+    every write route accepts it back in that form."""
     keys = [r.get("__key") for r in rows]
     bare = [{k: v for k, v in r.items() if k != "__key"} for r in rows]
-    return [{**r, "__key": k} for r, k in zip(mask_rows(table.name, bare), keys, strict=True)]
+    out = [
+        {**json_safe_row(r), "__key": None if k is None else str(k)}
+        for r, k in zip(mask_rows(table.name, bare), keys, strict=True)
+    ]
+    for r in out:  # columns the schema masks beyond the name rule (session-like tables)
+        for c in table.masked:
+            if r.get(c) is not None:
+                r[c] = MASK
+    return out

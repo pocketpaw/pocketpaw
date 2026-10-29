@@ -4027,7 +4027,11 @@ answers `available: false` with `reason` `live_on_cloudflare_only` (local mode) 
   one, or `null` (read only, `read_only_reason: "no_key"`). Login tables
   (`session`, `account`, `verification` and plurals) read `login_table`; a declared
   table of a dynamic site that the database doesn't have yet reads `not_created`.
-  So do better-auth's plugin tables (`twoFactor`, `passkey`, `apikey`, `jwks`).
+  So do better-auth's plugin tables (`twoFactor`, `passkey`, `apikey`, `jwks`), and
+  any table that looks like a session store under another name: a foreign key to a
+  user table plus an `expires…` column (Lucia's `user_sessions`). On those the key
+  (often the session secret itself) and credential-like columns are masked too, and
+  reads, writes, import and export all treat them as login tables.
   Table names match in any casing, with `_` ignored and an `auth` prefix allowed
   (`auth_user` is a user table). `masked` columns read `"•••"` and can't be searched,
   filtered, sorted, written or audited. On every table that is a column named like a
@@ -4040,7 +4044,9 @@ answers `available: false` with `reason` `live_on_cloudflare_only` (local mode) 
 - `GET /sites/by-pocket/{pocket_id}/data/tables/{table}/rows?q=&sort=&dir=&f=&limit=&offset=` →
   `{pocket_id, table, available, reason, columns, rows, total, limit, offset,
   search_truncated}`. Each row carries `__key` (the value later write routes address
-  it by). Default order is newest first by key; `sort` must be a column, `dir` is
+  it by), always as a string. Any integer value past 2^53 - 1 is also sent as its
+  digit string, because `JSON.parse` would round it; write routes accept it back
+  in that form. Default order is newest first by key; `sort` must be a column, `dir` is
   `asc` or `desc`. `q` (≤ 100 characters) matches any text column, case-insensitive.
   `f` is a JSON list of up to 10 `{col, op, value}`: text columns take `eq`, `ne`,
   `contains`, `starts`; number and boolean columns `eq`, `ne`, `lt`, `gt`, `lte`,
@@ -4069,7 +4075,7 @@ existing values' style), JSON validated and re-serialised, `null` as `NULL`. Bod
 refuse unknown fields. Every returned row is masked like a read and carries `__key`.
 
 - `POST …/data/tables/{table}/rows` `{"values": {"name": "Cy", "vip": true}}` →
-  `{"row": {"id": 3, "name": "Cy", "vip": 1, "__key": 3}}`. Generated columns, the
+  `{"row": {"id": 3, "name": "Cy", "vip": 1, "__key": "3"}}`. Generated columns, the
   rowid alias and credentials are refused; a `NOT NULL` column without a default and
   a key the database doesn't fill are required.
 - `PATCH …/data/tables/{table}/rows/{key}`
@@ -4080,10 +4086,14 @@ refuse unknown fields. Every returned row is masked like a read and carries `__k
   gone, `404`. The key column can't be changed. On a user table, changing `email`
   also clears its `emailVerified` / `email_verified` flag in the same statement.
 - `POST …/data/tables/{table}/rows:delete` `{"keys": [3, 4]}` →
-  `{"deleted": 2, "keys": [3, 4], "restore_point": null}`. 1 to 500 keys (more is
-  `422` `sites.data_too_many_keys`), all deleted or none. Deleting from `user` /
-  `users` also deletes that user's `session(s)` and `account(s)` rows in the same
-  batch (signing them out). `restore_point` stays `null` until restore points ship.
+  `{"deleted": 2, "keys": [3, 4], "restore_point": "00000085-0000024c-…"}`. 1 to
+  500 keys (more is `422` `sites.data_too_many_keys`), all deleted or none. Deleting
+  from `user` / `users` also deletes that user's `session(s)` and `account(s)` rows
+  in the same batch (signing them out). A delete of 2+ rows takes a Time Travel
+  bookmark first and returns it as `restore_point` (also in each row's audit event,
+  with `database_id`; `POST …/data/restore` accepts it);
+  one row is undone by re-inserting it, so it stays `null`, as it does on a database
+  without Time Travel.
   This also covers `twoFactor`, `passkey` and `apikey` rows: the matching login
   tables with a `userId` / `user_id` column (through its foreign key when it has
   one).
@@ -4112,6 +4122,147 @@ value, rows that still reference this one); `sites.data_read_only` with
 with credential columns removed and values capped at 1 KB; a user delete also
 carries `cascade: {table: rows deleted}`). A write drops the inventory's cached
 row counts.
+
+#### CSV import and export
+
+- `POST …/data/tables/{table}/import:preview` (write), multipart field `file`, at
+  most 5 MB (`413` `sites.data_csv_too_large`; a request body over 6 MiB is refused
+  before it is read, `413` `request.body_too_large`) →
+
+  ```json
+  {
+    "pocket_id": "pk1", "table": "customers",
+    "upload_id": "Qm9…", "expires_in": 900, "filename": "people.csv",
+    "header": ["Name", "EMAIL"],
+    "rows": [["Cy", "cy@x.io"]],
+    "total_rows": 1,
+    "mapping": {"Name": "name", "EMAIL": "email"},
+    "targets": [{"name": "id", "kind": "integer", "required": false, "key": true},
+                {"name": "name", "kind": "text", "required": true, "key": false}],
+    "key": "id",
+    "errors": [{"row": 3, "column": "EMAIL", "error": "Required."}],
+    "error_count": 1
+  }
+  ```
+
+  Writes nothing. The file is UTF-8 (a BOM is fine; cp1252 is the fallback),
+  delimited by `,` `;` tab or `|` (sniffed), quoted newlines allowed, with a header
+  row; at most 20,000 rows and 500 columns. `rows` is the first 20 data rows.
+  `mapping` auto-matches each CSV column to a table column by exact name, then
+  case-insensitive, then normalised (`Order Total` = `orderTotal` = `order_total`);
+  unmatched columns are `null`. `targets` lists every column a CSV column may map
+  to: writable columns plus the table's key (also when it is the rowid alias), never
+  credentials, generated columns or blobs. `key` is the column an upsert matches on
+  (`null` when the table has no single primary key). `errors` (at most 100) and
+  `error_count` (rows with any bad cell) are the cells that won't store under
+  `mapping`; `row` is the row number a spreadsheet shows (the header is row 1). The
+  upload is kept 15 minutes, for this user, site and table only; a user has at most
+  3 waiting per workspace (`429` `sites.data_import_busy`).
+- `POST …/data/tables/{table}/import` (write)
+  `{"upload_id": "Qm9…", "mapping": {"Name": "name", "EMAIL": "email"}, "mode": "insert"}` →
+  `{"inserted": 1, "updated": 0, "failed": [{"row": 3, "error": "EMAIL: Required."}],
+  "failed_count": 1, "stopped": false, "restore_point": "00000085-0000024c-…"}`. `mode` is `insert`
+  (default) or `upsert` (rows whose key matches are updated, the rest inserted). An
+  empty cell is `NULL`, except in a `NOT NULL` column with a default, where the
+  column is left out (the default on insert, unchanged on update). A row with any
+  bad cell is skipped and listed in `failed` (at most 100; `failed_count` is the
+  total). Rows go in D1 batches of at most 50 statements of at most 90 values each;
+  each batch lands whole or not at all, and a batch the database refuses (a
+  duplicate unique value, say) fails its rows while the rest go on. `restore_point`
+  is the Time Travel bookmark taken before the first write (`null` when nothing was
+  written or the database has no Time Travel). A cell exported with the formula
+  guard (`'+1 555 0100`) imports without its `'`. The commit claims the upload
+  atomically, so a double click imports once; a commit refused before any write
+  (a bad mapping, a busy budget) keeps the upload for a retry, and after any write
+  it is used up. If the import stops part way (the budget ran out, the connection
+  dropped) the response is still `200` with `stopped: true`, the rows not sent
+  listed in `failed` as "Not imported", and the restore point to go back to. One audit
+  event `site_data.import` (target `<pocket_id>:<table>`; metadata `{table, mode,
+  filename, mapping, rows, inserted, updated, failed, stopped, restore_point,
+  database_id}`, no values).
+- `GET …/data/tables/{table}/export.csv?q=&sort=&dir=&f=` (read) → `text/csv` stream,
+  `Content-Disposition: attachment; filename="<table>-<yyyy-mm-dd>.csv"` (exposed to
+  cross-origin callers through `Access-Control-Expose-Headers`). Same
+  search, filters and sort as `/rows`; UTF-8 with a BOM, CRLF lines, read 500 rows
+  at a time: by key (`WHERE key < last`) in the default order, at most 100,000 rows;
+  by `OFFSET` under an owner-chosen `sort`, at most 20,000. Credential columns are
+  left out entirely. A text cell
+  starting with `=` `+` `-` `@`, tab or CR gets a leading `'` so a spreadsheet won't
+  run it as a formula (numbers stored as numbers are written as they are). A bad
+  query is a `422` before any byte is sent.
+
+One import or export runs per workspace at a time (`429` `sites.data_job_busy`). A
+long one waits out its own workspace's per-minute budget but gives way at once when
+the shared global budget is spent (`429` `sites.data_busy`).
+
+Import errors: `422` `sites.data_csv_empty` / `_unreadable` (not CSV, or a cell
+over 128 KB) / `_too_wide` / `_too_many_rows` / `_bad_header` (two columns with one
+name); `422` `sites.data_import_bad_mapping` with `error.details.fields` (`{csv
+column: message}` for an unknown column, a column mapped twice, a credential,
+generated, blob or other non-writable column; `{table column: "Required: …"}` for a
+required column left unmapped); `422` `sites.data_import_needs_key` for an upsert on
+a table without a key or without its key mapped; `403` `sites.data_read_only`
+(`reason: login_table`) for every login table, user tables included; `404` for an
+upload that expired, was used, or belongs to another user, site or table.
+
+#### Restore
+
+Point-in-time restore of the site's whole D1 database (Cloudflare Time Travel). All
+three routes require `sites.data_restore` (ADMIN, `403`
+`sites.data_restore_forbidden`) and edit access to the pocket.
+
+- `GET …/data/restore?at=<iso>` or `?restore_point=<bookmark>` →
+
+  ```json
+  {
+    "pocket_id": "pk1", "available": true, "reason": "", "site_name": "Shop",
+    "window_days": 30, "earliest": "2026-09-28T10:00:00+00:00",
+    "at": "2026-10-27T10:00:00+00:00", "bookmark": "00000085-0000024c-…",
+    "changes_since": 4, "visitor_writes_counted": false
+  }
+  ```
+
+  `available` is false with `reason` `live_on_cloudflare_only`, `not_published` or
+  `not_production` (an alpha D1 has no Time Travel). `window_days` comes from
+  `PAW_CF_D1_TT_DAYS` (default 30; 7 on a free account); `earliest` is the later of
+  that window's start and the database's `created_at`. Without `at`, `at`,
+  `bookmark` and `changes_since` are `null`. `changes_since` counts the dashboard's
+  own `site_data.*` audit events for this site since `at`; visitors' writes are never
+  counted. `site_name` is what `confirm_name` must match. With `restore_point` (a
+  `restore_point` an import or bulk delete of this site returned) instead of `at`,
+  `bookmark` is that restore point, `at` the server time of the event that recorded
+  it, and `changes_since` counts from then; an unknown one is `422`
+  `sites.data_restore_unknown_bookmark`, and sending both is `422`
+  `sites.data_restore_bad_request`.
+- `POST …/data/restore` `{"at": "2026-10-27T10:00:00Z", "confirm_name": "Shop"}` or
+  `{"restore_point": "00000085-…", "confirm_name": "Shop"}` (exactly one of `at` and
+  `restore_point`, else `422` `sites.data_restore_bad_request`) →
+  `{"bookmark": "00000085-…", "previous_bookmark": "00000091-…"}`. Restores the
+  database in place (in-flight queries on the live site are cancelled).
+  `confirm_name` must equal the site's name (case and outer spaces ignored).
+  A `restore_point` restores to exactly the bookmark an import or bulk delete took
+  before its first write, so a client clock running ahead can't miss it. It must be
+  one this site's own `site_data.import` / `site_data.row_delete` event recorded
+  (`metadata.restore_point`) for the current database inside the Time Travel
+  window; anything else, a restore's or an undo's bookmark included, is `422`
+  `sites.data_restore_unknown_bookmark`. Audited as `site_data.restore` (target
+  `<pocket_id>`, metadata `{database_id, at, bookmark, previous_bookmark}`, plus
+  `restore_point` when one was named); undo works the same either way.
+- `POST …/data/restore:undo` `{"previous_bookmark": "00000091-…", "confirm_name": "Shop"}`
+  → `{"bookmark", "previous_bookmark"}`. Undoes only the NEWEST restore (or undo) of
+  this site's current database, within 24 hours of it, and only once:
+  `previous_bookmark` must be the one that event recorded, and `confirm_name` is
+  checked like a restore's. Audited as `site_data.restore_undo` (`undoes` is the
+  bookmark restored to); undoing that undo is the next newest event.
+
+Restore errors: `422` `sites.data_restore_bad_time` / `_out_of_window` (older than
+the window or the database, in the future, or a moment Cloudflare has no history
+for: its code 7400) / `_confirm_mismatch` / `_unknown_bookmark` (not the newest
+restore, older than 24 hours, or already undone); `409`
+`sites.data_unavailable` with `error.details.reason`; `429`
+`sites.data_restore_busy` (`error.details.retry_after`) past 3 restores per database
+per 10 minutes, and `sites.data_busy` when the dashboard's Cloudflare budget is
+spent. A restore drops every cached schema and row count of the database.
 
 ### Project builds — `/sites/by-pocket/{pocket_id}/builds`
 

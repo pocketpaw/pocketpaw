@@ -1,6 +1,7 @@
 # ee/pocketpaw_ee/sites/site_data/dto.py — wire shapes of the Sites Data dashboard
 # (``sites.data_router``): the inventory, one table's schema, a page of rows, the row
-# write bodies and results, and a row's change history.
+# write bodies and results, a row's change history, the CSV import preview and
+# commit, and point-in-time restore (status, restore, undo).
 #
 # Every response carries ``available`` / ``reason``: a site with no reachable
 # database (local mode, not published yet) answers ``available=false`` with
@@ -135,7 +136,9 @@ class RowOut(BaseModel):
 class DeleteRowsOut(BaseModel):
     deleted: int
     keys: list[Any]  # the keys that were deleted
-    restore_point: str | None = None  # a D1 bookmark once restore points ship
+    # The D1 bookmark from just before a bulk (2+ key) delete; null for one row
+    # (undone by re-inserting it) or when the database has no Time Travel.
+    restore_point: str | None = None
 
 
 class HistoryEvent(BaseModel):
@@ -149,3 +152,94 @@ class HistoryEvent(BaseModel):
 
 class RowHistory(BaseModel):
     events: list[HistoryEvent] = Field(default_factory=list)  # newest first, max 50
+
+
+# --------------------------------------------------------------------------- CSV import
+
+
+class ImportTarget(BaseModel):
+    """A column a CSV column can be mapped to."""
+
+    name: str
+    kind: ColumnKind | Literal["any"]
+    required: bool  # NOT NULL without a default (or a key the database doesn't fill)
+    key: bool  # the table's key: the column an upsert matches rows on
+
+
+class ImportRowError(BaseModel):
+    row: int  # the row number a spreadsheet shows: the header is row 1
+    column: str | None = None  # the CSV column, when one cell is at fault
+    error: str
+
+
+class ImportPreview(BaseModel):
+    pocket_id: str
+    table: str
+    upload_id: str  # good for 15 minutes, for this user, site and table only
+    expires_in: int  # seconds
+    filename: str
+    header: list[str]
+    rows: list[list[str]]  # the first 20 data rows, as read
+    total_rows: int
+    mapping: dict[str, str | None]  # CSV column -> table column (auto-matched) or null
+    targets: list[ImportTarget]  # every column a CSV column may map to
+    key: str | None  # the column ``upsert`` matches on; null when upsert is impossible
+    errors: list[ImportRowError] = Field(default_factory=list)  # under ``mapping``, max 100
+    error_count: int = 0
+
+
+class ImportBody(_Body):
+    upload_id: str = Field(max_length=128)
+    mapping: dict[str, str | None]
+    mode: Literal["insert", "upsert"] = "insert"
+
+
+class ImportFailure(BaseModel):
+    row: int
+    error: str
+
+
+class ImportResult(BaseModel):
+    inserted: int
+    updated: int
+    failed: list[ImportFailure] = Field(default_factory=list)  # max 100
+    failed_count: int = 0
+    # True when the import stopped part way (a spent budget, a dropped connection):
+    # the rows not sent are in ``failed`` as "Not imported", and the upload is gone.
+    stopped: bool = False
+    restore_point: str | None = None  # the D1 bookmark from before the first write
+
+
+# --------------------------------------------------------------------------- restore
+
+
+class RestoreStatus(BaseModel):
+    pocket_id: str
+    available: bool
+    # "" | live_on_cloudflare_only | not_published | not_production
+    reason: str = ""
+    site_name: str = ""  # what ``confirm_name`` must match
+    window_days: int
+    earliest: str | None = None  # ISO 8601: the oldest moment a restore can reach
+    at: str | None = None  # the moment asked about, normalised to UTC
+    bookmark: str | None = None  # the bookmark nearest at or before ``at``
+    changes_since: int | None = None  # dashboard changes to this site's data since ``at``
+    visitor_writes_counted: bool = False  # visitors' own writes are never in that count
+
+
+class RestoreBody(_Body):
+    # Exactly one of ``at`` (a moment) and ``restore_point`` (a bookmark this site's
+    # import / bulk delete returned): 422 ``sites.data_restore_bad_request`` otherwise.
+    at: str | None = Field(default=None, max_length=64)
+    restore_point: str | None = Field(default=None, max_length=200)
+    confirm_name: str = Field(max_length=500)
+
+
+class RestoreUndoBody(_Body):
+    previous_bookmark: str = Field(max_length=200)
+    confirm_name: str = Field(max_length=500)
+
+
+class RestoreOut(BaseModel):
+    bookmark: str  # where the database is now
+    previous_bookmark: str  # where it was; ``restore:undo`` with this goes back

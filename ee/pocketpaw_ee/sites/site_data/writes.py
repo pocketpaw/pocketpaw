@@ -393,7 +393,7 @@ def expected_value(kind: str, value: Any) -> Any:
     raise ValueError("That value can't be compared.")
 
 
-def _why(table: d1.Table, column: d1.Column, kind: str) -> str:
+def not_writable_reason(table: d1.Table, column: d1.Column, kind: str) -> str:
     if column.hidden in (2, 3) or column.name == table.rowid_alias:
         return "Filled in by the database."
     if column.name in table.masked:
@@ -413,12 +413,12 @@ def _writable_values(
         if col is None:
             errors[name] = "Unknown column."
         elif not d1.column_writable(table, col, kinds[name]):
-            errors[name] = _why(table, col, kinds[name])
+            errors[name] = not_writable_reason(table, col, kinds[name])
         if len(errors) > MAX_FIELD_ERRORS:
             raise invalid(errors)
 
 
-async def _time_formats(
+async def time_formats(
     cf: Any, database_id: str, table: d1.Table, kinds: dict[str, str], names: list[str]
 ) -> dict[str, tuple[str, str | None]]:
     """``{column: (time_format, a stored string)}`` for the date columns in ``names``,
@@ -454,7 +454,7 @@ async def _coerced(
     errors: dict[str, str],
 ) -> dict[str, Any]:
     live = [n for n, v in values.items() if v is not None and n not in errors]
-    formats = await _time_formats(cf, database_id, table, kinds, live)
+    formats = await time_formats(cf, database_id, table, kinds, live)
     out: dict[str, Any] = {}
     for name, value in values.items():
         if name in errors:
@@ -479,7 +479,7 @@ def _check_params(params: list[Any]) -> None:
         )
 
 
-def _required(table: d1.Table, column: d1.Column) -> bool:
+def is_required(table: d1.Table, column: d1.Column) -> bool:
     if column.hidden in (2, 3) or column.name == table.rowid_alias:
         return False
     if column.name == table.key:  # a key the database doesn't fill
@@ -498,7 +498,7 @@ async def insert(
     errors: dict[str, str] = {}
     _writable_values(table, kinds, values, errors)
     for col in table.columns:
-        if _required(table, col) and values.get(col.name) is None and col.name not in errors:
+        if is_required(table, col) and values.get(col.name) is None and col.name not in errors:
             errors[col.name] = "Required."
     coerced = await _coerced(cf, database_id, table, kinds, values, errors)
     if errors:

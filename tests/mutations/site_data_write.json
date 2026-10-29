@@ -327,8 +327,8 @@
   {
     "label": "delete audit drops the cascade counts",
     "file": "ee/pocketpaw_ee/sites/data_service.py",
-    "find": "            extra = {\"cascade\": cascade[key]} if key in cascade else None",
-    "replace": "            extra = None",
+    "find": "            extra: dict[str, Any] = {\"cascade\": cascade[key]} if key in cascade else {}",
+    "replace": "            extra: dict[str, Any] = {}",
     "tests": [
       "tests/ee/sites/test_site_data_write.py"
     ]

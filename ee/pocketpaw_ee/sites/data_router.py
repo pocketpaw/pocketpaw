@@ -10,6 +10,12 @@
 #   POST  /tables/{table}/rows:delete             {keys}  -> {deleted, keys, restore_point}
 #   POST  /tables/{table}/rows:duplicate          {key, values?}    -> {row}
 #   GET   /tables/{table}/rows/{key}/history      -> {events}
+#   POST  /tables/{table}/import:preview          multipart ``file`` -> ImportPreview
+#   POST  /tables/{table}/import                  {upload_id, mapping, mode} -> ImportResult
+#   GET   /tables/{table}/export.csv              ?q=&sort=&dir=&f=  -> text/csv stream
+#   GET   /restore             ?at=<iso> | ?restore_point=<bookmark> -> RestoreStatus
+#   POST  /restore             {at | restore_point, confirm_name} -> RestoreOut
+#   POST  /restore:undo               {previous_bookmark, confirm_name} -> RestoreOut
 #
 # Thin handlers over ``sites.data_service``; errors are CloudErrors mapped by
 # ``_core.http`` (422 for a bad query or value, 404 for an unknown table, row or
@@ -17,7 +23,9 @@
 # ``sites.data_busy`` when the Cloudflare budget is spent). Every route takes
 # ``request_context`` + ``fabric.read``; every write route also requires
 # ``sites.data_write`` (ADMIN, overridable per member) and refuses a body over
-# 1 MB (413 ``sites.data_body_too_large``). ``can_write`` /
+# 1 MB (413 ``sites.data_body_too_large``; a CSV upload is capped at 5 MB, 413
+# ``sites.data_csv_too_large``). The three restore routes require
+# ``sites.data_restore`` (ADMIN) instead. ``can_write`` /
 # ``can_restore`` on the inventory come from the non-raising checks. ``{key}`` is
 # the row's ``__key``, URL-encoded; it may contain ``/``.
 #
@@ -30,18 +38,27 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi.responses import StreamingResponse
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import action_allowed_any_workspace, require_action_any_workspace
 from pocketpaw_ee.cloud._core.errors import PayloadTooLarge
 from pocketpaw_ee.sites import data_service
+from pocketpaw_ee.sites.site_data import csv_io
 from pocketpaw_ee.sites.site_data.dto import (
     DataInventory,
     DeleteRowsBody,
     DeleteRowsOut,
     DuplicateRowBody,
+    ImportBody,
+    ImportPreview,
+    ImportResult,
     InsertRowBody,
+    RestoreBody,
+    RestoreOut,
+    RestoreStatus,
+    RestoreUndoBody,
     RowHistory,
     RowOut,
     RowPage,
@@ -230,4 +247,156 @@ async def site_data_update_row(
         key=key,
         set=body.set_,
         expected=body.expected,
+    )
+
+
+# --------------------------------------------------------------------------- CSV
+
+
+async def _read_csv(file: UploadFile) -> bytes:
+    """The upload's bytes, refusing past 5 MB without reading further."""
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(64 * 1024):
+        total += len(chunk)
+        if total > csv_io.MAX_BYTES:
+            raise PayloadTooLarge("sites.data_csv_too_large", "A CSV file can be at most 5 MB.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@router.post(_BASE + "/tables/{table}/import:preview", response_model=ImportPreview)
+async def site_data_import_preview(
+    pocket_id: str,
+    table: str,
+    file: UploadFile = File(...),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
+) -> ImportPreview:
+    """Read a CSV (multipart ``file``) and say how it would import. Writes nothing."""
+    data = await _read_csv(file)
+    return await data_service.import_preview(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        table=table,
+        filename=file.filename or "",
+        data=data,
+    )
+
+
+@router.post(_BASE + "/tables/{table}/import", response_model=ImportResult)
+async def site_data_import(
+    pocket_id: str,
+    table: str,
+    body: ImportBody,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_WRITE),
+    ___: None = Depends(_write_body_limit),
+) -> ImportResult:
+    """Write a previewed upload's rows under ``mapping`` (``insert`` or ``upsert``)."""
+    return await data_service.import_commit(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        table=table,
+        upload_id=body.upload_id,
+        mapping=body.mapping,
+        mode=body.mode,
+    )
+
+
+@router.get(_BASE + "/tables/{table}/export.csv")
+async def site_data_export(
+    pocket_id: str,
+    table: str,
+    q: str | None = Query(None),
+    sort: str | None = Query(None),
+    dir: str | None = Query(None),  # noqa: A002 — the wire name
+    f: str | None = Query(None),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+) -> StreamingResponse:
+    """The rows under the search, filters and sort as a CSV download (no credentials,
+    at most 100,000 rows)."""
+    filename, body = await data_service.export_csv(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        table=table,
+        q=q,
+        sort=sort,
+        dir=dir,
+        f=f,
+    )
+    return StreamingResponse(
+        body,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+# --------------------------------------------------------------------------- restore
+
+_RESTORE = require_action_any_workspace("sites.data_restore")
+
+
+@router.get(_BASE + "/restore", response_model=RestoreStatus)
+async def site_data_restore_status(
+    pocket_id: str,
+    at: str | None = Query(None, max_length=64),
+    restore_point: str | None = Query(None, max_length=200),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_RESTORE),
+) -> RestoreStatus:
+    """Whether the database can be restored, how far back, and what ``at`` would do."""
+    return await data_service.restore_status(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        at=at,
+        restore_point=restore_point,
+    )
+
+
+@router.post(_BASE + "/restore", response_model=RestoreOut)
+async def site_data_restore(
+    pocket_id: str,
+    body: RestoreBody,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_RESTORE),
+) -> RestoreOut:
+    """Restore the whole database to ``at``; ``confirm_name`` must be the site's name."""
+    return await data_service.restore(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        at=body.at,
+        restore_point=body.restore_point,
+        confirm_name=body.confirm_name,
+    )
+
+
+@router.post(_BASE + "/restore:undo", response_model=RestoreOut)
+async def site_data_restore_undo(
+    pocket_id: str,
+    body: RestoreUndoBody,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_RESTORE),
+) -> RestoreOut:
+    """Undo a restore of this site with the ``previous_bookmark`` it returned."""
+    return await data_service.restore_undo(
+        workspace_id=ctx.workspace_id or "",
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        previous_bookmark=body.previous_bookmark,
+        confirm_name=body.confirm_name,
     )

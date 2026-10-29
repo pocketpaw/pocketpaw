@@ -1,0 +1,484 @@
+[
+  {
+    "label": "any confirm name matches",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    return bool(expected) and given.strip().casefold() == expected.strip().casefold()",
+    "replace": "    return True",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_confirm_name_mismatch_is_422_before_any_cloudflare_call"
+    ]
+  },
+  {
+    "label": "undo provenance reads other workspaces' audit events",
+    "file": "ee/pocketpaw_ee/cloud/audit/service.py",
+    "find": "    query: dict[str, Any] = {\n        \"workspace\": workspace_id,\n        \"target_type\": target_type,\n        \"target_id\": target,\n",
+    "replace": "    query: dict[str, Any] = {\n        \"target_type\": target_type,\n        \"target_id\": target,\n",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_another_sites_or_workspaces_bookmark",
+      "tests/ee/sites/test_site_data_restore.py::test_a_foreign_pockets_restore_point_is_refused"
+    ]
+  },
+  {
+    "label": "restore skips the per-database cap",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    await budget.acquire_restore(target.d1_id)",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_three_restores_per_ten_minutes"
+    ]
+  },
+  {
+    "label": "restore reaches outside the Time Travel window",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if moment < now - timedelta(days=days) or moment > now + _CLOCK_SKEW:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_outside_the_window_is_422"
+    ]
+  },
+  {
+    "label": "restore routes no longer need sites.data_restore",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "_RESTORE = require_action_any_workspace(\"sites.data_restore\")",
+    "replace": "_RESTORE = require_action_any_workspace(\"fabric.read\")",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_member_cannot_restore"
+    ]
+  },
+  {
+    "label": "import preview no longer needs sites.data_write",
+    "file": "ee/pocketpaw_ee/sites/data_router.py",
+    "find": "    file: UploadFile = File(...),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n    __: object = Depends(_WRITE),\n",
+    "replace": "    file: UploadFile = File(...),\n    ctx: RequestContext = Depends(request_context),\n    _: object = Depends(_READ),\n",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_member_cannot_import_but_can_export"
+    ]
+  },
+  {
+    "label": "a credential column can be mapped",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "        elif dest in table.masked:\n            errors[src] = \"Credentials can't be imported.\"",
+    "replace": "        elif False:\n            errors[src] = \"Credentials can't be imported.\"",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_bad_mappings_are_422"
+    ]
+  },
+  {
+    "label": "generated and blob columns become mappable",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "        elif dest not in allowed:",
+    "replace": "        elif False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_bad_mappings_are_422"
+    ]
+  },
+  {
+    "label": "upsert runs without its key mapped",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "        if key not in used:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_upsert_without_the_key_mapped_is_422"
+    ]
+  },
+  {
+    "label": "login tables accept imports",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if auth_table(w.table.name) or not d1.insertable(w.table):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_login_tables_refuse_import"
+    ]
+  },
+  {
+    "label": "export drops the formula guard",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "    return \"'\" + text if text.startswith(_FORMULA_START) else text",
+    "replace": "    return text",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_export_formula_guard"
+    ]
+  },
+  {
+    "label": "export includes credential columns",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "    return [n for n in names if n not in hidden]",
+    "replace": "    return names",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_export_leaves_credentials_out_entirely",
+      "tests/ee/sites/test_site_data_import.py::test_export_of_a_login_table_masks_its_secrets"
+    ]
+  },
+  {
+    "label": "bulk delete takes no restore point",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    restore_point = await _restore_point(w) if len(row_keys) > 1 else None",
+    "replace": "    restore_point = None",
+    "tests": [
+      "tests/ee/sites/test_site_data_write.py::test_delete_returns_count_and_keys"
+    ]
+  },
+  {
+    "label": "an import writes before its restore point",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    restore_point = await _restore_point(w) if rows else None",
+    "replace": "    restore_point = None",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_restore_point_is_taken_before_the_first_write"
+    ]
+  },
+  {
+    "label": "undo accepts a bookmark other than the newest restore's",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if newest is None or (newest.metadata or {}).get(\"previous_bookmark\") != previous_bookmark:\n        raise unknown",
+    "replace": "    if newest is None:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_a_bookmark_this_site_never_recorded",
+      "tests/ee/sites/test_site_data_restore.py::test_undo_accepts_only_the_newest_restore"
+    ]
+  },
+  {
+    "label": "undo looks at restores of any database",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        metadata={\"database_id\": target.d1_id},",
+    "replace": "        metadata={},",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_undo_refuses_another_sites_or_workspaces_bookmark"
+    ]
+  },
+  {
+    "label": "undo never expires",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if datetime.now(UTC) - at > _UNDO_WINDOW:\n        raise unknown",
+    "replace": "    if False:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_undo_expires_after_24_hours"
+    ]
+  },
+  {
+    "label": "parallel undos both run",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not await budget.claim_once(claim, int(_UNDO_WINDOW.total_seconds())):\n        raise unknown",
+    "replace": "    if False:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_parallel_undos_run_once"
+    ]
+  },
+  {
+    "label": "undo skips the confirm name",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        raise _restore_error(\"confirm_mismatch\", \"Type the site's name to confirm the undo.\")",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_undo_needs_the_confirm_name"
+    ]
+  },
+  {
+    "label": "restore reaches before the database was created",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if created is not None and moment < created:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_earliest_is_raised_to_the_databases_creation"
+    ]
+  },
+  {
+    "label": "Cloudflare's timestamp-too-old is a generic Cloudflare error",
+    "file": "ee/pocketpaw_ee/sites/cloudflare_client.py",
+    "find": "            if any(isinstance(e, dict) and e.get(\"code\") == 7400 for e in errors):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_cloudflare_client.py::test_a_timestamp_before_the_database_is_out_of_window"
+    ]
+  },
+  {
+    "label": "restore ignores the confirm name",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        raise _restore_error(\"confirm_mismatch\", \"Type the site's name to confirm the restore.\")",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_confirm_name_mismatch_is_422_before_any_cloudflare_call"
+    ]
+  },
+  {
+    "label": "an upload answers anyone who has its id",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "    tag = hashlib.sha256(json.dumps(owner).encode(\"utf-8\")).hexdigest()[:24]\n    return f\"{_UPLOAD_KEY}{tag}:{upload_id}\"",
+    "replace": "    return f\"{_UPLOAD_KEY}{upload_id}\"",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_uploads_live_in_redis_with_a_15_minute_ttl"
+    ]
+  },
+  {
+    "label": "a Redis upload is read, not claimed",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "            raw = await client.getdel(key)",
+    "replace": "            raw = await client.get(key)",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_an_upload_is_claimed_by_exactly_one_caller"
+    ]
+  },
+  {
+    "label": "a local upload is read, not claimed",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "        hit = _local_uploads.pop(key, None)",
+    "replace": "        hit = _local_uploads.get(key, None)",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_an_upload_is_claimed_by_exactly_one_caller"
+    ]
+  },
+  {
+    "label": "a refused mapping loses the upload",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            await csv_io.put_back(claimed)  # nothing was written: the owner can fix and retry",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_refused_mapping_keeps_the_upload"
+    ]
+  },
+  {
+    "label": "a failure after a write is a 500 that hides what landed",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        except Exception as exc:  # noqa: BLE001 — report what landed rather than a 500",
+    "replace": "        except budget.DataBusy as exc:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_failure_after_a_write_reports_what_landed_and_drops_the_upload"
+    ]
+  },
+  {
+    "label": "no quota on live uploads in Redis",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "            if live >= MAX_LIVE_UPLOADS:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_three_live_uploads_per_user"
+    ]
+  },
+  {
+    "label": "no quota on live uploads in process",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "    if _local_live(owner) >= MAX_LIVE_UPLOADS:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_three_live_uploads_per_user"
+    ]
+  },
+  {
+    "label": "local uploads have no byte budget",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "        sum(len(r) for _e, _o, r in _local_uploads.values()) + len(record) > LOCAL_MAX_BYTES",
+    "replace": "        False",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_local_uploads_keep_to_a_byte_budget"
+    ]
+  },
+  {
+    "label": "uploads are stored with ASCII escapes",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "        ensure_ascii=False,\n    )\n    key = _key(upload_id, owner)",
+    "replace": "        ensure_ascii=True,\n    )\n    key = _key(upload_id, owner)",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_uploads_live_in_redis_with_a_15_minute_ttl"
+    ]
+  },
+  {
+    "label": "import keeps the export's formula-guard quote",
+    "file": "ee/pocketpaw_ee/sites/site_data/csv_io.py",
+    "find": "                cell = cell[1:]  # our export's formula guard, undone",
+    "replace": "                pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_exported_formula_guard_round_trips_on_import"
+    ]
+  },
+  {
+    "label": "imports and exports run in parallel per workspace",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not await budget.claim_once(slot, _JOB_TTL_S):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_one_import_or_export_per_workspace_at_a_time"
+    ]
+  },
+  {
+    "label": "an export never gives its job slot back",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        finally:\n            await budget.release(slot)\n\n    return filename, _body()",
+    "replace": "        finally:\n            pass\n\n    return filename, _body()",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_one_import_or_export_per_workspace_at_a_time",
+      "tests/ee/sites/test_site_data_import.py::test_an_abandoned_export_gives_the_job_slot_back"
+    ]
+  },
+  {
+    "label": "export walks OFFSET in the default order",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    keyset = (\n        not sort",
+    "replace": "    keyset = False and (\n        not sort",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_export_streams_every_page_by_key"
+    ]
+  },
+  {
+    "label": "a sorted export keeps the 100k cap",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    cap = csv_io.EXPORT_MAX_ROWS if keyset else csv_io.EXPORT_MAX_SORTED_ROWS",
+    "replace": "    cap = csv_io.EXPORT_MAX_ROWS",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_sorted_export_pages_by_offset_and_caps_lower"
+    ]
+  },
+  {
+    "label": "long jobs wait out the global bucket",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            if attempt == _BUSY_RETRIES or exc.scope != \"workspace\":",
+    "replace": "            if attempt == _BUSY_RETRIES:",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_long_jobs_wait_out_the_workspace_bucket_but_not_the_global_one"
+    ]
+  },
+  {
+    "label": "every refusal claims to be the workspace bucket",
+    "file": "ee/pocketpaw_ee/sites/site_data/budget.py",
+    "find": "    if key.startswith(\"cf:data:ws:\"):",
+    "replace": "    if True:",
+    "tests": [
+      "tests/ee/sites/test_site_data_budget.py::test_a_refusal_names_the_bucket_that_was_full"
+    ]
+  },
+  {
+    "label": "the CSV preview gets the global body ceiling",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "        if _is_site_data_csv(scope):\n            return _SITE_DATA_CSV_BYTES",
+    "replace": "        if False:\n            return _SITE_DATA_CSV_BYTES",
+    "tests": [
+      "tests/test_body_size_limit.py::TestSiteDataCsvPreviewCeiling"
+    ]
+  },
+  {
+    "label": "the CSV preview ceiling applies to every method",
+    "file": "src/pocketpaw/security/body_limit.py",
+    "find": "    if scope.get(\"method\") != \"POST\":\n        return False\n    return bool(_SITE_DATA_CSV_PATH_RE",
+    "replace": "    if False:\n        return False\n    return bool(_SITE_DATA_CSV_PATH_RE",
+    "tests": [
+      "tests/test_body_size_limit.py::TestSiteDataCsvPreviewCeiling"
+    ]
+  },
+  {
+    "label": "a Lucia-style session table is an ordinary editable table",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "    return refs_user and any(norm(c.name).startswith(\"expires\") for c in columns)",
+    "replace": "    return False",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_lucia_style_session_table_is_a_login_table"
+    ]
+  },
+  {
+    "label": "any table referencing users counts as a session table",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "    return refs_user and any(norm(c.name).startswith(\"expires\") for c in columns)",
+    "replace": "    return refs_user",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_user_reference_or_an_expiry_alone_is_not_a_session"
+    ]
+  },
+  {
+    "label": "a session table's key (the session secret) is shown",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "        masked |= frozenset(c.name for c in cols if c.pk)",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_lucia_style_session_table_is_a_login_table"
+    ]
+  },
+  {
+    "label": "rows show columns only the schema masks",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "            if r.get(c) is not None:\n                r[c] = MASK",
+    "replace": "            if False:\n                r[c] = MASK",
+    "tests": [
+      "tests/ee/sites/test_site_data_import.py::test_a_lucia_style_session_table_is_a_login_table"
+    ]
+  },
+  {
+    "label": "any recorded restore point is accepted, whoever's it is",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if event is None:\n        raise unknown\n    at = event.at",
+    "replace": "    if False:\n        raise unknown\n    at = event.at",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_foreign_pockets_restore_point_is_refused",
+      "tests/ee/sites/test_site_data_restore.py::test_a_made_up_restore_point_is_refused"
+    ]
+  },
+  {
+    "label": "restore points of another database are accepted",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        metadata={\"restore_point\": restore_point, \"database_id\": target.d1_id},",
+    "replace": "        metadata={\"restore_point\": restore_point},",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_foreign_pockets_restore_point_is_refused"
+    ]
+  },
+  {
+    "label": "restore points are looked up across every pocket",
+    "file": "ee/pocketpaw_ee/cloud/audit/service.py",
+    "find": "        target = {\"$regex\": \"^\" + re.escape(target_root) + \"(:|$)\"}\n    query",
+    "replace": "        target = {\"$exists\": True}\n    query",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_foreign_pockets_restore_point_is_refused"
+    ]
+  },
+  {
+    "label": "a restore or undo event's bookmark counts as a restore point",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\"]",
+    "replace": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\", \"site_data.restore\", \"site_data.restore_undo\"]",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_restore_or_undo_bookmark_is_not_a_restore_point"
+    ]
+  },
+  {
+    "label": "a restore point outside the Time Travel window is accepted",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if at < now - timedelta(days=days):\n        raise unknown",
+    "replace": "    if False:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_restore_point_outside_the_window_is_refused"
+    ]
+  },
+  {
+    "label": "a restore point skips the bookmark shape check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not isinstance(restore_point, str) or not _BOOKMARK.match(restore_point):\n        raise unknown",
+    "replace": "    if False:\n        raise unknown",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_a_made_up_restore_point_is_refused"
+    ]
+  },
+  {
+    "label": "restore takes both at and restore_point",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if (at is None) == (restore_point is None):\n        raise _bad_request()",
+    "replace": "    if False:\n        raise _bad_request()",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_both_or_neither_of_at_and_restore_point_is_a_bad_request"
+    ]
+  },
+  {
+    "label": "a bulk delete's restore point is not tied to its database",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "                extra[\"database_id\"] = w.target.d1_id",
+    "replace": "                pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_restore.py::test_restore_to_a_bulk_deletes_restore_point"
+    ]
+  },
+  {
+    "label": "Content-Disposition is hidden from cross-origin callers",
+    "file": "src/pocketpaw/api/cors.py",
+    "find": "        expose_headers=list(EXPOSE_HEADERS),",
+    "replace": "",
+    "tests": [
+      "tests/test_api_cors.py::TestExposedHeaders"
+    ]
+  }
+]
