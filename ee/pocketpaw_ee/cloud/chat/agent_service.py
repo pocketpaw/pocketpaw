@@ -32,7 +32,7 @@ import asyncio
 import functools
 import logging
 import weakref
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -2199,12 +2199,29 @@ def build_dynamic_context(ctx: ScopeContext) -> str:
     return "\n".join(parts)
 
 
+# Chat-only: the order a card's main widget is chosen in. The "Match the card to
+# the answer" rule already maps intents to widgets; this makes checking it come
+# before composing, which the model skipped without it.
+PURPOSE_BUILT_FIRST_RULE = (
+    "   - Purpose-built first. Before you compose anything, check the Match the card "
+    "rule and the widgets listed for this message (under Widgets for this message in "
+    "your context). When one fits the request, it is the card's main widget, filled "
+    "with the user's own numbers and items, alone or under one heading; call "
+    "get_widget_spec for its props when they are not listed. How a thing in the figure "
+    "list works is a figure with its params and labels; a thing to spin, explore or "
+    "label in 3D is a model-viewer. Compose from flex, grid, slider, each and inputs "
+    "only when no purpose-built widget fits."
+)
+
+
 @functools.cache
 def chat_ripple_prompt() -> str:
     """The chat-inline Ripple prompt: core's chat-only head and tail around the
     widget block the Paw Bar concierge uses, generated from the vendored manifest
-    (always-on widgets with props, every widget by category) and the authoring
-    rules for the chat card profile. Static per process, so it stays cacheable."""
+    (always-on widgets with props, the figure and 3D model ids, every widget by
+    category), the authoring rules for the chat card profile and
+    ``PURPOSE_BUILT_FIRST_RULE``. Static per process, so it stays cacheable; the
+    per-turn part is ``chat_turn_widgets``."""
     from pocketpaw.ripple._inline import INLINE_RIPPLE_PROMPT_HEAD, INLINE_RIPPLE_PROMPT_TAIL
     from pocketpaw_ee.paw_bar import widget_relevance
     from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
@@ -2216,13 +2233,40 @@ def chat_ripple_prompt() -> str:
             "",
             "These widgets are listed with their props; copy the prop names exactly:",
             *widget_relevance.core_lines(),
+            widget_relevance.full_line("figure"),
+            widget_relevance.full_line("model-viewer"),
             "Every widget by category (call `get_widget_spec` for the props of one "
             "not listed above):",
             *widget_relevance.index_lines(),
             *ripple_rules(CHAT_PROFILE),
+            PURPOSE_BUILT_FIRST_RULE,
         ]
     )
     return INLINE_RIPPLE_PROMPT_HEAD + "\n" + cards + "\n\n" + INLINE_RIPPLE_PROMPT_TAIL
+
+
+def chat_turn_widgets(behavior: str, message: str, history: Sequence[dict[str, Any]] = ()) -> str:
+    """The chat card prompt's per-turn part: the full prop lines of the widgets
+    ``message`` (and the last turns of ``history``) likely need, from Paw Bar's
+    ``pick_widgets`` and ``full_line``, so a named figure carries its sliders and
+    anchors. Empty unless ``behavior`` carries ``chat_ripple_prompt()``. run_core
+    adds it to knowledge_context, below the cache cut, so the instructions layer
+    stays byte-stable across turns."""
+    from pocketpaw_ee.paw_bar import widget_relevance
+
+    if not message or chat_ripple_prompt() not in behavior:
+        return ""
+    picked = widget_relevance.pick_widgets(message, history)
+    if not picked:
+        return ""
+    return "\n".join(
+        [
+            "## Widgets for this message",
+            "These purpose-built widgets fit this message, best first, with their props. "
+            "When one fits, it is the card's main widget (Purpose-built first):",
+            *(widget_relevance.full_line(name, message, history) for name in picked),
+        ]
+    )
 
 
 def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -> str:

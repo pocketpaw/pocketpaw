@@ -523,8 +523,9 @@ Final self-check before sending:
 ✔ ui-spec used when response has structure
 ✔ Interactive elements bind to state or have on_click / on_change
 ✔ Buttons change card state or emit chat.send; no other emit target, no pin
-✔ Card size fits the answer: one data widget for a data view, or a
-  primitives tool (about 25 to 90 nodes) with state, bind, derived values, each
+✔ The card's main widget is a purpose-built one when one fits the request; only
+  when none fits, a primitives tool (about 25 to 90 nodes) with state, bind,
+  derived values, each
 ✔ flex/grid `gap` is tight for inline — numeric 2 or 4, not 10/12+
 ✔ Matched the reply SHAPE to its typed widget (comparison-table / data-grid /
   timeline / kv-table / status-dot / pricing-table) — did NOT rebuild it from a
