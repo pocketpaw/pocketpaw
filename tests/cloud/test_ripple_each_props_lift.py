@@ -128,7 +128,7 @@ async def test_chat_quality_line_flags_props_items_on_each(caplog):
     from pocketpaw_ee.cloud import ripple_validator
 
     manifest_path = (
-        Path(__file__).resolve().parents[2] / "ee/pocketpaw_ee/paw_bar/ripple-manifest.json"
+        Path(__file__).resolve().parents[2] / "src/pocketpaw/ripple/manifest.json"
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw = _packing_spec(

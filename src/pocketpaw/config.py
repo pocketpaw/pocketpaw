@@ -2296,13 +2296,15 @@ class Settings(BaseSettings):
         ),
     )
     ripple_manifest_url: str = Field(
-        default="http://localhost:5174/manifest.json",
+        default="",
         description=(
-            "URL to the Ripple UI manifest (widget specs). Defaults to the "
-            "local ripple dev server while @ripple-ui/svelte is unreleased; "
-            "swap to "
-            "https://cdn.jsdelivr.net/npm/@ripple-ui/svelte@latest/dist/manifest.json "
-            "(or any pinned version) once published."
+            "Optional override URL for the Ripple widget manifest. Empty (the "
+            "default) uses the catalog bundled in the package "
+            "(pocketpaw/ripple/manifest.json, pinned to the @ripple-ui/svelte "
+            "version Paw OS renders), with no network call. When set, the URL is "
+            "fetched and cached for ripple_manifest_ttl_seconds; if the fetch "
+            "fails or it serves a version older than the bundled one, a warning "
+            "is logged and the bundled catalog is used."
         ),
     )
     ripple_manifest_ttl_seconds: int = Field(
@@ -2315,10 +2317,8 @@ class Settings(BaseSettings):
             "When True, the strict (agent-generation) catalog gate FAILS CLOSED "
             "if the Ripple widget manifest can't be fetched — an unverifiable "
             "spec is rejected instead of persisted. Defaults False (best-effort "
-            "skip, preserving current behavior) because ripple_manifest_url "
-            "defaults to the local ripple dev server, which is often down in "
-            "dev; enable it on cloud/prod where the manifest URL points at a "
-            "reliable CDN. Set via "
+            "skip). The manifest is bundled now, so it is always available "
+            "and this flag rarely matters. Set via "
             "POCKETPAW_RIPPLE_CATALOG_GATE_REQUIRE_MANIFEST."
         ),
     )
