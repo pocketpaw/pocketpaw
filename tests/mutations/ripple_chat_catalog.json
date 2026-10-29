@@ -1,0 +1,51 @@
+[
+  {
+    "label": "the chat catalog names a widget the manifest does not ship",
+    "file": "src/pocketpaw/ripple/_inline.py",
+    "find": "media       audio, video\n",
+    "replace": "media       audio, video, hologram\n",
+    "tests": ["tests/ee/test_ripple_prompt_catalog_in_manifest.py"]
+  },
+  {
+    "label": "a manifest widget drops out of the chat catalog",
+    "file": "src/pocketpaw/ripple/_inline.py",
+    "find": "media       audio, video\n",
+    "replace": "media       audio\n",
+    "tests": ["tests/ee/test_ripple_prompt_catalog_in_manifest.py"]
+  },
+  {
+    "label": "the intent map points at a widget the manifest does not ship",
+    "file": "src/pocketpaw/ripple/_inline.py",
+    "find": "→ bill-split\n",
+    "replace": "→ bill-splitter\n",
+    "tests": ["tests/ee/test_ripple_prompt_catalog_in_manifest.py"]
+  },
+  {
+    "label": "get_widget_spec output loses the action grammar and motion",
+    "file": "src/pocketpaw/ripple/manifest.py",
+    "find": "    lines.extend(_format_actions_and_motion(manifest))\n",
+    "replace": "\n",
+    "tests": ["tests/ee/test_ripple_manifest.py"]
+  },
+  {
+    "label": "the SDK get_widget_spec handler stops passing actions through",
+    "file": "src/pocketpaw/agents/sdk_mcp_widgets.py",
+    "find": "\"actions\": manifest.get(\"actions\")",
+    "replace": "\"actions\": None",
+    "tests": ["tests/ee/test_ripple_manifest.py"]
+  },
+  {
+    "label": "the builtin widget_spec tool stops passing actions through",
+    "file": "src/pocketpaw/tools/builtin/widget_spec.py",
+    "find": "\"actions\": manifest.get(\"actions\")",
+    "replace": "\"actions\": None",
+    "tests": ["tests/ee/test_ripple_manifest.py"]
+  },
+  {
+    "label": "the chat quality line rewrites known item aliases in the card",
+    "file": "ee/pocketpaw_ee/cloud/ripple_validator.py",
+    "find": "validate_against_manifest(flat, manifest, apply_aliases=False)",
+    "replace": "validate_against_manifest(flat, manifest, apply_aliases=True)",
+    "tests": ["tests/ee/test_ripple_prompt_catalog_in_manifest.py"]
+  }
+]

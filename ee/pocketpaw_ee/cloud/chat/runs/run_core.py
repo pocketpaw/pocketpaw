@@ -3987,6 +3987,10 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
         attachments.append({"type": "ripple", "meta": ripple_spec})
         full_text = remaining_text
         await transport.append_event(spec.run_id, "ripple", {"spec": ripple_spec})
+        # Log-only card quality line, off the reply path; never changes the card.
+        from pocketpaw_ee.cloud.ripple_validator import log_chat_spec_quality
+
+        asyncio.create_task(log_chat_spec_quality(ripple_spec, run_id=spec.run_id))
 
     # ART-1: drain the per-run delivered-artifact collector. Each successful
     # ``deliver_artifact`` call appended one ``{file_id, name, mime, size}`` meta;
