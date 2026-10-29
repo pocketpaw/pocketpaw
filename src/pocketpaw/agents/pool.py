@@ -6,7 +6,8 @@ routed onto the field the backend reads via ``route_model``, legacy backend
 names go through ``_LEGACY_BACKENDS`` first, opt-in MCP servers in
 ``config.tools`` become the agent's ``ToolPolicy``). Instances are cached per
 process (``max_instances`` from settings), evicted when idle, rebuilt when the
-document changes, and refused with ``AgentDisabled`` once the agent is disabled.
+document changes (once, under the build lock, however many runs arrive
+together), and refused with ``AgentDisabled`` once the agent is disabled.
 Every backend the pool drops is torn down; ``invalidate`` defers that for a busy
 instance until its last run ends.
 
@@ -364,10 +365,19 @@ class AgentPool:
                             inst.active_runs,
                         )
                         return inst
-                    logger.info("Agent %s config changed, rebuilding", agent_id)
-                    await self._teardown(inst)
-                    del self._instances[agent_id]
-                    return await self._build(agent_doc)
+                    # Under the build lock, and only if ``inst`` is still the
+                    # cached one: concurrent runs for this agent all saw it
+                    # stale, and without this each tore it down and rebuilt,
+                    # dropping a sibling's fresh instance or handing back the
+                    # torn-down one.
+                    async with self._build_lock:
+                        current = self._instances.get(agent_id)
+                        if current is not None and current is not inst:
+                            return current
+                        logger.info("Agent %s config changed, rebuilding", agent_id)
+                        self._instances.pop(agent_id, None)
+                        await self._teardown(inst)
+                        return await self._build(agent_doc)
             except AgentDisabled:
                 # Must NOT be swallowed by the broad DB-error guard below — a
                 # disabled agent has to fail closed, not fall back to the
