@@ -13,24 +13,40 @@
 # Local mode answers ``available=false`` / ``live_on_cloudflare_only`` and a site with
 # no database yet ``not_published`` on every read, with no Cloudflare call.
 #
+# Writes (insert, update with the conflict check, delete, duplicate) go through
+# ``site_data.writes`` after ``_writable_table``: the caller needs EDIT access to the
+# pocket (``pockets.service.has_edit_access``; reading it is not enough, 403
+# ``pocket.access_denied``), an unknown table is NotFound before any row SQL, a
+# site whose database can't be reached is 409 ``sites.data_unavailable``
+# (``details.reason``), and a read-only table is ``sites.data_read_only`` (403 for
+# login tables, 422 otherwise). The ``sites.data_write`` permission is the router's
+# job. Each written row records one audit event (``site_data.row_insert`` /
+# ``row_update`` / ``row_delete``, target ``<pocket>:<table>:<key>``, credentials
+# removed); an audit failure never fails the write. ``row_history`` reads those
+# events back for one row. A write drops the inventory's cached row counts.
+#
 # Every Cloudflare call goes through ``site_data.budget`` (429 ``sites.data_busy``)
-# on the data-token client (``service._data_cf_client``). Reads only; the write
-# actions (``sites.data_write`` / ``sites.data_restore``) only feed the
-# ``can_write`` / ``can_restore`` flags here.
+# on the data-token client (``service._data_cf_client``).
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any, Literal
 
-from pocketpaw_ee.cloud._core.errors import CloudError, NotFound
+from pocketpaw_ee.cloud._core.errors import CloudError, Forbidden, NotFound
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.project_data import masked_columns
-from pocketpaw_ee.sites.site_data import budget, d1
+from pocketpaw_ee.sites.site_data import budget, d1, writes
 from pocketpaw_ee.sites.site_data.dto import (
     ColumnInfo,
     ConnectorRef,
     DataInventory,
+    DeleteRowsOut,
+    HistoryEvent,
+    RowHistory,
+    RowOut,
     RowPage,
     StoreRef,
     TableSchema,
@@ -270,6 +286,7 @@ async def get_table_schema(
         columns=d1.column_infos(t, raw, fields),
         key=t.key,
         editable=t.editable,
+        insertable=d1.insertable(t),
         read_only_reason=t.read_only_reason,  # type: ignore[arg-type]
         row_count=total,
     )
@@ -342,3 +359,271 @@ async def get_rows(
         offset=query.offset,
         search_truncated=query.search_truncated,
     )
+
+
+# --------------------------------------------------------------------------- writes
+
+_AUDIT_TARGET = "site_data"
+_AUDIT_CONCURRENCY = 25
+
+
+@dataclass(frozen=True)
+class _Writable:
+    target: DataTarget
+    cf: budget.Budgeted
+    schema: d1.Schema
+    table: d1.Table
+    kinds: dict[str, str]
+
+
+async def _writable_table(
+    *, workspace_id: str, user_id: str, pocket_id: str, table: str, _cloudflare: Any | None
+) -> _Writable:
+    """The site and the editable live table a write addresses, or the refusal: no
+    edit access to the pocket 403, an unknown table 404, an unreachable database
+    409, a read-only table."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    target = await resolve_target(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    if not await pockets_service.has_edit_access(pocket_id, user_id):
+        raise Forbidden("pocket.access_denied", "You don't have edit access to this site.")
+    if target.lane == "dynamic" and target.spec_object(table) is None:
+        raise NotFound("site_table", table)
+    if target.reason:
+        raise writes.unavailable(target.reason)
+    cf = _client(target, _cloudflare)
+    schema = await d1.introspect(cf, target.d1_id)
+    t = schema.tables.get(table)
+    if t is None:
+        if target.lane == "project":
+            raise NotFound("site_table", table)
+        raise writes.read_only("not_created")
+    if not t.editable:
+        raise writes.read_only(t.read_only_reason)
+    kinds = writes.kinds_of(t, _spec_fields(target.spec_object(table)))
+    return _Writable(target=target, cf=cf, schema=schema, table=t, kinds=kinds)
+
+
+def _masked(table: d1.Table, row: dict[str, Any]) -> dict[str, Any]:
+    return d1.mask_page(table, [row])[0]
+
+
+async def _audit(
+    w: _Writable,
+    user_id: str,
+    action: str,
+    key: Any,
+    *,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    try:
+        await audit_service.record(
+            w.target.workspace_id,
+            user_id,
+            action,
+            target_type=_AUDIT_TARGET,
+            target_id=f"{w.target.pocket_id}:{w.table.name}:{writes.target_key(key)}",
+            metadata={
+                "table": w.table.name,
+                "keys": [key],
+                "before": writes.audit_row(w.table, before),
+                "after": writes.audit_row(w.table, after),
+                **(extra or {}),
+            },
+        )
+    except Exception:  # noqa: BLE001 — the write landed; a lost audit row must not undo it
+        logger.warning("site_data: audit failed for %s on %s", action, w.table.name, exc_info=True)
+
+
+async def insert_row(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    table: str,
+    values: dict[str, Any],
+    _cloudflare: Any | None = None,
+) -> RowOut:
+    """Add one row. ``POST .../data/tables/{table}/rows``."""
+    w = await _writable_table(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        table=table,
+        _cloudflare=_cloudflare,
+    )
+    if not d1.insertable(w.table):
+        raise writes.read_only("login_table")
+    row = await writes.insert(w.cf, w.target.d1_id, w.table, w.kinds, values)
+    d1.forget_counts(w.target.d1_id)
+    await _audit(w, user_id, "site_data.row_insert", row.get("__key"), before=None, after=row)
+    return RowOut(row=_masked(w.table, row))
+
+
+async def update_row(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    table: str,
+    key: Any,
+    set: dict[str, Any],  # noqa: A002 — the wire name
+    expected: dict[str, Any],
+    _cloudflare: Any | None = None,
+) -> RowOut:
+    """Change one row if it still holds ``expected``.
+    ``PATCH .../data/tables/{table}/rows/{key}``."""
+    w = await _writable_table(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        table=table,
+        _cloudflare=_cloudflare,
+    )
+    row_key = writes.key_value(w.table, w.kinds, key)
+    before, after = await writes.update(
+        w.cf,
+        w.target.d1_id,
+        w.table,
+        w.kinds,
+        row_key,
+        set,
+        expected,
+        mask=lambda r: _masked(w.table, r),
+    )
+    await _audit(w, user_id, "site_data.row_update", row_key, before=before, after=after)
+    return RowOut(row=_masked(w.table, after))
+
+
+async def delete_rows(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    table: str,
+    keys: list[Any],
+    _cloudflare: Any | None = None,
+) -> DeleteRowsOut:
+    """Delete up to 500 rows by key, atomically (a user's sessions and accounts
+    with them). ``POST .../data/tables/{table}/rows:delete``."""
+    w = await _writable_table(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        table=table,
+        _cloudflare=_cloudflare,
+    )
+    row_keys = writes.delete_keys(w.table, w.kinds, keys)
+    deleted, cascade = await writes.delete(w.cf, w.target.d1_id, w.schema, w.table, row_keys)
+    d1.forget_counts(w.target.d1_id)
+    gone = {r.get("__key") for r in deleted}
+    slots = asyncio.Semaphore(_AUDIT_CONCURRENCY)
+
+    async def _one(row: dict[str, Any]) -> None:
+        async with slots:
+            key = row.get("__key")
+            extra = {"cascade": cascade[key]} if key in cascade else None
+            await _audit(
+                w, user_id, "site_data.row_delete", key, before=row, after=None, extra=extra
+            )
+
+    await asyncio.gather(*(_one(r) for r in deleted))
+    return DeleteRowsOut(deleted=len(deleted), keys=[k for k in row_keys if k in gone])
+
+
+async def duplicate_row(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    table: str,
+    key: Any,
+    values: dict[str, Any] | None = None,
+    _cloudflare: Any | None = None,
+) -> RowOut:
+    """Copy one row into a new one. ``POST .../data/tables/{table}/rows:duplicate``."""
+    w = await _writable_table(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        table=table,
+        _cloudflare=_cloudflare,
+    )
+    if not d1.insertable(w.table):
+        raise writes.read_only("login_table")
+    source = writes.key_value(w.table, w.kinds, key)
+    row = await writes.duplicate(w.cf, w.target.d1_id, w.table, w.kinds, source, values or {})
+    d1.forget_counts(w.target.d1_id)
+    await _audit(
+        w,
+        user_id,
+        "site_data.row_insert",
+        row.get("__key"),
+        before=None,
+        after=row,
+        extra={"duplicate_of": source},
+    )
+    return RowOut(row=_masked(w.table, row))
+
+
+async def row_history(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    table: str,
+    key: str,
+    _cloudflare: Any | None = None,
+) -> RowHistory:
+    """The dashboard's changes to one row, newest first, at most 50 (visitors'
+    writes are not audited). ``GET .../data/tables/{table}/rows/{key}/history``."""
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    target = await resolve_target(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    if target.lane == "dynamic" and target.spec_object(table) is None:
+        raise NotFound("site_table", table)
+    key_text = key
+    if not target.reason:
+        cf = _client(target, _cloudflare)
+        t = await _live_table(target, table, cf)
+        if t is not None and t.key:
+            kinds = writes.kinds_of(t, _spec_fields(target.spec_object(table)))
+            key_text = writes.target_key(writes.key_value(t, kinds, key))
+    events = await audit_service.list_target_events(
+        target.workspace_id,
+        target_type=_AUDIT_TARGET,
+        target_id=f"{pocket_id}:{table}:{key_text}",
+        limit=50,
+    )
+    events = [e for e in events if (e.metadata or {}).get("table") == table]
+    try:
+        names = await audit_service.actor_names(
+            target.workspace_id, sorted({e.actor_id for e in events})
+        )
+    except Exception:  # noqa: BLE001 — names are a nicety; the history still reads
+        logger.warning("site_data: could not resolve history actor names", exc_info=True)
+        names = {}
+    out: list[HistoryEvent] = []
+    for e in events:
+        meta = e.metadata or {}
+        at = e.at if e.at.tzinfo is not None else e.at.replace(tzinfo=UTC)
+        before, after = meta.get("before"), meta.get("after")
+        out.append(
+            HistoryEvent(
+                action=e.action,
+                actor_id=e.actor_id,
+                actor_name=names.get(e.actor_id),
+                at=at.isoformat(),
+                before=before if isinstance(before, dict) else None,
+                after=after if isinstance(after, dict) else None,
+            )
+        )
+    return RowHistory(events=out)

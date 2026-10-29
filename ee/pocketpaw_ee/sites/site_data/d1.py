@@ -11,6 +11,10 @@
 # rowid table → ``rowid``; anything else (composite key, WITHOUT ROWID without a
 # single key, a key column that holds a credential) → no key, read only.
 #
+# ``column_writable`` / ``insertable`` are the one statement of which columns and
+# tables the dashboard may write; ``site_data.writes`` enforces them and
+# ``ColumnInfo.writable`` reports them.
+#
 # Invariants:
 #   * Read only. Every value binds through ``params``; no statement here writes.
 #   * Every identifier reaching SQL came from ``sqlite_master`` / PRAGMA and is
@@ -32,6 +36,7 @@ from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.project_data import (
+    auth_table,
     is_user_table,
     mask_rows,
     masked_columns,
@@ -53,10 +58,42 @@ SCHEMA_TTL_S = 60.0
 COUNTS_TTL_S = 30.0
 _CACHE_MAX = 256
 
-# Login tables the dashboard never edits (better-auth's and the dynamic lane's).
+# Login tables the dashboard never edits (better-auth's, its plugins' and the
+# dynamic lane's), as ``project_data.auth_table`` names them.
 LOGIN_READ_ONLY = frozenset(
-    {"session", "sessions", "account", "accounts", "verification", "verifications"}
+    {
+        "session",
+        "sessions",
+        "account",
+        "accounts",
+        "verification",
+        "verifications",
+        "twofactor",
+        "twofactors",
+        "passkey",
+        "passkeys",
+        "apikey",
+        "apikeys",
+        "jwks",
+    }
 )
+# User tables: editable, but only their profile columns, and rows can't be added
+# (people sign up on the site). Column names compare lowercased with "_" removed.
+# ``emailVerified`` is deliberately NOT writable: setting a new email AND marking it
+# verified would take the account over; changing the email clears it instead.
+USER_TABLES = frozenset({"user", "users"})
+USER_WRITABLE = frozenset({"name", "email", "image"})
+
+
+def is_users(name: str) -> bool:
+    """Whether ``name`` is a user table (``user``, ``Users``, ``auth_user`` …)."""
+    return auth_table(name) in USER_TABLES
+
+
+def norm(column: str) -> str:
+    """A column name compared loosely: lowercased, ``_`` removed."""
+    return column.replace("_", "").lower()
+
 
 _WITHOUT_ROWID = re.compile(r"\bWITHOUT\s+ROWID\b", re.I)
 _ROWID_ALIASES = ("rowid", "_rowid_", "oid")
@@ -108,6 +145,12 @@ def clear_caches() -> None:
     _counts_cache.clear()
 
 
+def forget_counts(database_id: str) -> None:
+    """Drop the cached row counts of ``database_id`` (after a write)."""
+    for key in [k for k in _counts_cache if k[0] == database_id]:
+        _counts_cache.pop(key, None)
+
+
 def _remember(cache: dict, key: tuple[str, ...], ttl: float, value: Any) -> None:
     if len(cache) >= _CACHE_MAX:
         cache.pop(next(iter(cache)))
@@ -120,6 +163,25 @@ def _recall(cache: dict, key: tuple[str, ...]) -> Any | None:
         cache.pop(key, None)
         return None
     return hit[1]
+
+
+def column_writable(table: Table, column: Column, kind: str) -> bool:
+    """Whether the dashboard may write ``column``: the table is editable, and the
+    column isn't generated, the rowid alias, a credential, a blob, or (on a user
+    table) anything but a profile column. The write paths and ``ColumnInfo.writable``
+    both read this, so the flags the UI gets are the rules the server enforces."""
+    if not table.editable or column.hidden in (2, 3) or column.name == table.rowid_alias:
+        return False
+    if column.name in table.masked or kind == "blob":
+        return False
+    if is_users(table.name):
+        return norm(column.name) in USER_WRITABLE
+    return True
+
+
+def insertable(table: Table) -> bool:
+    """Whether rows can be added (and duplicated): editable, and not a user table."""
+    return table.editable and not is_users(table.name)
 
 
 # --------------------------------------------------------------------------- introspection
@@ -173,7 +235,7 @@ def _build_table(name: str, create_sql: str, xinfo: list[dict], fks: list[dict])
 
     if key is None:
         reason = "no_key"
-    elif name.lower() in LOGIN_READ_ONLY:
+    elif auth_table(name) in LOGIN_READ_ONLY:
         reason = "login_table"
     else:
         reason = ""
@@ -424,7 +486,7 @@ def column_infos(
                 auto=auto,
                 primary_key=c.pk > 0,
                 masked=masked,
-                writable=table.editable and not auto and not masked and kind != "blob",
+                writable=column_writable(table, c, kind),
                 references=c.references,
             )
         )

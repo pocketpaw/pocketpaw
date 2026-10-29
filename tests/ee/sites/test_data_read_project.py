@@ -254,7 +254,8 @@ async def test_ordinary_tables_are_not_masked(site_doc):
         ("users", ["id", "email", "password_hash"], {"password_hash"}),
         ("user", ["id", "email", "name"], set()),
         ("Accounts", ["api_key", "client_secret"], {"api_key", "client_secret"}),
-        ("orders", ["password", "token"], set()),
+        # Credential names are masked on every table; "key" / "note" are not.
+        ("orders", ["password", "token", "key", "note"], {"password", "token"}),
     ],
 )
 def test_masked_columns(table, columns, expected):
