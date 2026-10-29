@@ -588,9 +588,14 @@ def _catalog_index(catalog: Iterable[Any] | None) -> dict[str, Any]:
     return index
 
 
-def _card_verbs(verbs: Iterable[str] | None) -> list[str]:
+def _card_verbs(verbs: Iterable[str] | None, profile: CardProfile | None = None) -> list[str]:
+    """The declared ``verbs`` a card may emit: ``HOST_EVENTS``, plus a profile's own
+    host events (chat's ``chat.send``) other than the ``SERVER_WIRED`` ones."""
+    # Chat profile: chat.send comes from CHAT_PROFILE.host_events, not HOST_EVENTS.
     declared = set(verbs or ())
-    return [v for v in HOST_EVENTS if v in declared]
+    wired = {event for _, event in SERVER_WIRED.values()}
+    extra = tuple(e for e in (profile.host_events if profile else ()) if e not in wired)
+    return [v for v in dict.fromkeys((*HOST_EVENTS, *extra)) if v in declared]
 
 
 def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, Any]]:
@@ -2374,7 +2379,7 @@ def validate_and_hydrate(
             raise _Reject("state is not an object")
         if len(_serialize(spec)) > profile.max_chars:
             raise _Reject(f"longer than {profile.max_chars} characters")
-        events = _card_verbs(verbs)
+        events = _card_verbs(verbs, profile)
         if profile.strict:
             _check_strict(spec, events, lead_capture, profile)
         else:
@@ -2748,7 +2753,10 @@ def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
     renamed first; on pawbar only children, as ``_check_tree`` walks (a form field is
     not a node). A node's own ``props`` object is never read as a node. The caller
     checks the result in full. Returns it and how many keys moved."""
-    table = _LIFTABLE_BY_PROFILE.get(profile.name, {})
+    # Chat profile: a profile on the ripple manifest under another name lifts the same.
+    table = _LIFTABLE_BY_PROFILE.get(profile.name) or (
+        _LIFTABLE if profile.manifest is RIPPLE_MANIFEST else {}
+    )
     moved = 0
     stack = [ui]
     while stack:
@@ -2888,7 +2896,7 @@ def rejection_reason(
         spec["ui"], _ = _lift_flat_props(spec["ui"], profile)
         if len(_serialize(spec)) > profile.max_chars:
             return f"it is longer than {profile.max_chars} characters"
-        _check_strict(spec, _card_verbs(verbs), lead_capture, profile)
+        _check_strict(spec, _card_verbs(verbs, profile), lead_capture, profile)
     except _Reject as exc:
         return f"{exc} (at {exc.path})" if exc.path else str(exc)
     except Exception:  # noqa: BLE001 — same as render_card: never raises
