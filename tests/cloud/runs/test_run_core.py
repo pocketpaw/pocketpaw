@@ -942,7 +942,11 @@ async def test_execute_run_artifact_rides_alongside_ripple(monkeypatch):
 
 
 async def test_execute_run_no_delivery_emits_no_artifact_event(monkeypatch):
-    events, attachments = await _run_and_capture(monkeypatch, _delivering_events([]))
+    # A plain text reply with no delivery. (A run with no text at all is not a
+    # reply; it fails as run.empty_reply, see test_run_silent_end.py.)
+    events, attachments = await _run_and_capture(
+        monkeypatch, _delivering_events([], block="Here is the summary.")
+    )
 
     assert not any(e.event == "artifact" for e in events)
     assert all(a["type"] != "artifact" for a in attachments)
