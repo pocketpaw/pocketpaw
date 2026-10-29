@@ -1,10 +1,8 @@
-# Updated: 2026-10-01 — Add Wave 0 import-linter guards (Fabric journal store, SQLite AuditStore)
-# that stop new duplicate primitives; today's importers are ignored and the list only shrinks.
-# Prior: 2026-06-10 — Add langchain-ollama to the deep-agents dependency block (and its
-# mirrored bundle/dev copies) so the local / bring-your-own-model (Ollama) lane works:
-# DeepAgentsBackend/LangchainReactBackend build a ChatOllama via init_chat_model("ollama:..."),
-# which needs this binding. Fixes the self-hosted local-only path for the compliance ICP.
-# Prior: 2026-04-29 — Release 0.4.18: dev → main sync (PR #1015) — file jail OCR/STT, scope enforcement + fail-closed require_scope, SSRF guard scaffolding, PII tightening, rate-limiter race fix + ReDoS bounds, audit-log scrubbing, dynamic cookie Secure flag, nonce-based CSP, plus bus mutation leakage and token-usage propagation fixes.
+# pyproject.toml: the pocketpaw package, its optional extras (backends, channels,
+# knowledge extraction, the `all` / `all-backends` bundles the production image
+# installs) and the tool config (pytest, ruff, import-linter guards, uv's
+# release-age floor). Several pins carry their reason inline and are guarded by
+# tests and mutation plans; read the comment before moving any bound.
 [project]
 name = "pocketpaw"
 version = "0.4.18"
