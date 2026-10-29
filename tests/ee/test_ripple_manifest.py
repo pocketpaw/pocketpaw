@@ -25,6 +25,19 @@ VALID_MANIFEST = {
             "ui": {"type": "flex", "props": {}, "children": []},
         },
     },
+    "actions": {
+        "set": {
+            "description": "Assign `value` to the state path `target`. The most common action.",
+            "shape": {"action": '"set"', "target": "string", "value?": "any"},
+        }
+    },
+    "motion": {
+        "field": "motion",
+        "description": "Add a `motion` field to ANY node to animate it.",
+        "budgetRule": "MOTION BUDGET: animate entrances and the PRIMARY call-to-action only.",
+        "presets": {"snappy": "spring, the default."},
+        "examples": [{"name": "hero-entrance-example-not-rendered"}],
+    },
     "widgets": [
         {
             "type": "metric",
@@ -187,6 +200,27 @@ async def test_get_widget_spec_handler_returns_matched_entries(monkeypatch):
     assert "metric" in text
     assert "KPI tile." in text
     assert "**Props:**" in text
+    # The action grammar and the motion field ride along with every lookup.
+    assert "- `set` {target, value?} — Assign `value` to the state path `target`" in text
+    assert "MOTION BUDGET" in text
+    assert "`snappy` spring, the default" in text
+    assert "hero-entrance-example-not-rendered" not in text
+
+
+async def test_widget_spec_builtin_tool_includes_actions_and_motion(monkeypatch):
+    """The runtime builtin (every backend) carries the same action grammar."""
+    from pocketpaw.ripple import manifest as m
+    from pocketpaw.tools.builtin.widget_spec import WidgetSpecTool
+
+    async def fake_get(self, url, timeout):
+        return httpx.Response(200, json=VALID_MANIFEST, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    m._cache.clear()
+
+    text = await WidgetSpecTool().execute(types=["metric"])
+    assert "## Actions" in text
+    assert "MOTION BUDGET" in text
 
 
 async def test_get_widget_spec_handler_errors_on_empty_types():

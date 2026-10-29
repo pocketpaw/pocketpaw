@@ -1,98 +1,33 @@
 # pocketpaw/ripple/_inline.py — Canonical system prompt for chat-inline Ripple.
 #
-# This is the SOURCE OF TRUTH for the chat-inline Ripple system prompt.
-# Imported by pocketpaw_ee/cloud/chat/agent_service.py::build_context_block.
-# Edits land here; the agent service does not duplicate any of this content.
+# SOURCE OF TRUTH for the chat-inline Ripple system prompt, imported by
+# pocketpaw_ee/cloud/chat/agent_service.py::build_context_block. The agent
+# service does not duplicate any of this content.
 #
 # Surface contract: cloud chat (DM / group / pocket-chat scopes). The host
-# (paw-enterprise's MarkdownRenderer) intercepts `emit chat.send` events and
-# posts the value as the user's next message — buttons in chat-inline specs
-# ARE supported and drive the conversation loop.
+# (paw-enterprise's chat ripple adapter) handles `emit chat.send` (posts the
+# value as the user's next message), the flow.* emits, navigate, toast and api.
+# Any other emit name, and pin / unpin, does nothing in chat, so the prompt
+# never advertises them.
 #
-# Composition: surface-specific framing here (intro, chat.send loop, fence
-# rules) + the shared design language from pocketpaw.ripple._design (widget
-# catalog, canonical shapes, full-pane rule, theme, design-quality bar).
+# Composition, in order: ground-truth rule, preamble (UI-first rule, spec
+# shape, chat.send loop), the shared widget catalog + use-the-widget rule from
+# pocketpaw.ripple._design, the chat-only _INLINE_MORE_WIDGETS block (every
+# manifest widget the shared catalog lacks, plus the data-widget intent map
+# from the manifest's `intents`; it stays out of _design.py because atlas
+# compiles that catalog and these names collide with OS entries such as soul
+# and studio in atlas search), the core catalog (props for six widgets, every
+# other type goes through `get_widget_spec`), the typed-widget rule (inlined
+# props for the common shaped answers) with the card-size rule and the
+# engine-verified EXPRESSIONS block for primitives tools, the multi-step flow
+# rule (`start_flow`), the Instinct tray rule, and the final self-check.
 #
-# Modified: 2026-05-21 — prepended a ground-truth / do-not-mock rule to
-# the inline system prompt. Reworked from PR #1106.
-# Modified: 2026-05-31 (fix/bridge-start-flow-to-chat, RFC 13) — added
-#   `_MULTI_STEP_FLOW_RULE`: for any multi-step / wizard / step-by-step /
-#   collect-then-act flow, call the `start_flow` tool (descriptor only) and
-#   emit its returned doc verbatim. Do NOT hand-author nested chain /
-#   chain_map trees and do NOT fake a flow with a single `set`-stepped spec
-#   — that anti-pattern renders step 1 and never advances. Wired into the
-#   assembled prompt + the final self-check.
-# Modified: 2026-06-15 (feat/chain-flow-v2) — rewrote `_MULTI_STEP_FLOW_RULE`
-#   for CHAIN FLOW v2. The rule now teaches STATE-TRANSITION authoring ("think
-#   in states, not screens"): the agent describes a FLAT step-graph to
-#   `start_flow` (a `flow` id, an `entry`, and a `steps` list where each step
-#   points at the next by id via `next` / `branch`), and the builder owns the
-#   nesting + deep-validation. Dropped the 2-template ceiling and the
-#   "no-template-fit → ask-user-questions" fallback (there is no fixed template
-#   list anymore — describe the graph the request needs). Appended a
-#   state-grammar primitives block and two copy-paste flat-descriptor skeletons
-#   (a branching intake and an action-rich mini-app). `invoke_tool` is marked as
-#   possibly-unavailable until the tool registry ships; call_binding /
-#   create_pocket / api / emit / navigate are the actions that work now.
-# Modified: 2026-06-15 (feat/chain-flow-v2 — REAL-SCENARIO SKELETONS) — the
-#   genesis "biggest lever": added an ACTION GRAMMAR callout block (a terminal
-#   `complete` uses `action:` not `type:`/`kind:`; approve/reject/fulfill/take-
-#   action means a `call_binding` ACTION BUTTON, never a yes/no select; use
-#   `call_binding` for backend/connector data, not the possibly-unavailable
-#   `invoke_tool`) and three copy-paste skeletons for the captain's real
-#   internal-team scenarios, each ending in a REAL action (not Q&A): APPROVE /
-#   REJECT (call_binding buttons), FULFILL ORDER (collect → confirm with a
-#   call_binding action), and ACT ON CONNECTOR/BACKEND DATA (call_binding
-#   against the pocket's backend, explicitly NOT invoke_tool). Kept the two
-#   existing skeletons (A branching intake, B action-rich mini-app).
-# Modified: 2026-06-15 (feat/invoke-tool-v1, v2) — refreshed the two
-#   `invoke_tool` notes now that the verb is live. It is no longer
-#   "possibly-unavailable until the tool registry ships": a connector READ
-#   grant fires immediately; a connector WRITE grant is PROPOSED for the user's
-#   approval (it lands in their Instinct Tray and fires on approve) rather than
-#   running inline. `call_binding` remains the first reach for backend/connector
-#   data; `invoke_tool` is for a named tool/connector grant the owner allow-listed.
-# Modified: 2026-06-15 - widget-richness fix: added _INLINE_TYPED_WIDGET_RULE
-#   (shape->typed-widget map + inlined schemas/examples for comparison-table,
-#   data-grid, timeline, kv-table, status-dot, pricing-table) so chat reaches
-#   for the typed widget instead of rebuilding shapes from table/text/flex;
-#   reframed the core-catalog opening and added a self-check line.
-# Modified: 2026-06-15 - inlined funnel + gauge into _INLINE_TYPED_WIDGET_RULE
-#   (two shape->widget map rows, prop shapes, and worked examples) so
-#   conversion/drop-off funnels and metric-vs-target dials reach for the
-#   typed widget with no tool-call friction. Props sourced from the ripple
-#   manifest (funnel: data[{label,value}]/title/sort/colors/height;
-#   gauge: value/max/label/title/color/height).
-# Modified: 2026-06-16 (feat/invoke-tool-v1 — close the in-chat approval loop)
-#   — added `_INSTINCT_TRAY_RULE`: when the agent renders the pending-Instinct-
-#   approvals view (the items `instinct_pending` returns), the Approve / Reject
-#   buttons MUST be bound to the backend Instinct decision routes as `api`
-#   actions — POST /api/v1/instinct/actions/{id}/approve and .../reject — so the
-#   HUMAN's click finalizes the decision directly (the backend re-validates
-#   workspace + params_hash + idempotency and fires the connector write via
-#   execute_approved_external_action). Explicitly NOT an `emit`/`chat.send`
-#   round-trip and NOT an autonomous agent verb — the user's click IS the
-#   approval, which is the whole point of the gate. Also teaches the Tray route:
-#   the pending-approvals list is at /deep-work, surfaced via a `navigate`
-#   button + referenced in the text guidance. Spliced into the assembled prompt
-#   after `_MULTI_STEP_FLOW_RULE` and added to the final self-check.
-
-# Modified: 2026-08-04 (fix/prompt-tells-the-truth) — two changes, both about
-#   the prompt saying only what is true and saying it once.
-#   1. `# MUST CALL BEFORE EMIT` mandated `get_inline_widget_help`, which reads
-#      a 16-widget design catalog. Prop schemas come from the manifest, which
-#      `get_widget_spec` reads — 759 chars of answer for `definition-list`
-#      against 18,623 chars that never named the field. The block cited that
-#      exact widget as a known failure while pointing at the tool that caused
-#      it. Now mandates `get_widget_spec`, and says what the other tool is for.
-#   2. `_MULTI_STEP_FLOW_RULE`'s HOW TO AUTHOR block restated the step shape
-#      (steps / kinds / next / branch / terminal complete / actions /
-#      {stepId.field}) that `start_flow`'s own schema specifies and the builder
-#      enforces — a THIRD copy of a contract that already existed twice. The
-#      prompt now routes to the schema and keeps only what a schema cannot say:
-#      when to reach for a flow, the two anti-patterns, and the skeletons.
-#      Section 8,733 -> 7,308 chars; nothing unique to the prompt was dropped
-#      (guarded by tests/test_start_flow_contract_is_shared.py).
+# The card-size rule: a data widget card is 1-5 nodes; when no data widget
+# fits, the card is a small interactive tool built from primitives (state,
+# bind, derived values, each), roughly 15-35 nodes. The EXPRESSIONS block is
+# copied from ripple's packages/svelte/scripts/record-scenario.ts; keep its
+# semantics exact. Mutation anchors in tests/mutations/prompt_truth.json pin
+# some sentences here.
 
 from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
@@ -191,7 +126,7 @@ Only skip the ui-spec when:
 ## UI design principles
 
 1. Actionable — every component must lead somewhere (emit, navigate, etc.)
-2. Minimal — no clutter; one clear purpose per spec
+2. Focused — no clutter; one clear purpose per spec
 3. Structured — use proper layout widgets, not text rows
 4. Progressive — break complex flows into steps; one spec per turn
 5. Loop-driven — every action feeds back into the next turn via chat.send
@@ -251,22 +186,82 @@ Use `{event}` to forward the chosen value from a select / multi-select
     "on_change": { "action": "emit", "target": "chat.send",
                    "value": "I'd like a {event}" } }
 
-Standard channels (host-recognized targets on `emit`):
-- `chat.send`    — post the value as the user's next message in this thread.
-- `chat.suggest` — surface as a tappable quick-reply chip (host's call).
-- `tool.invoke`  — call a registered tool by name; payload is `{name, args}`.
-- `nav.open`     — navigate; or use the dedicated `navigate` action.
+The only `emit` target the chat host handles is `chat.send` (plus the
+flow.* verbs `start_flow` writes for you). Any other emit name, and the
+`pin` / `unpin` actions, do nothing in chat: never use them.
 
-Field name per action: `navigate` uses `url`; `emit`/`pin`/`unpin` use `target`.
+Field name per action: `navigate` uses `url`; `emit` uses `target`.
 They are NOT interchangeable.
 
 Interaction rules:
-- EVERY interactive element MUST include on_click / on_change.
-- EVERY action MUST emit chat.send unless explicitly not needed.
+- EVERY interactive element MUST bind to state or carry on_click / on_change.
+- Actions that change the card itself use set / toggle / push / remove;
+  actions that advance the conversation emit chat.send.
 - NEVER create dead UI — every component must lead somewhere.
 - ALWAYS guide the user to the next step.
 
 ---
+"""
+
+
+_INLINE_MORE_WIDGETS = """\
+# MORE WIDGETS — chat (the rest of the manifest)
+
+layout      bento-grid, spotlight, reveal, parallax, aurora
+display     illustration, richtext, led-clock, glyph-grid, fill-grid,
+            streak-bars, text-effect, marquee, shimmer, border-beam,
+            animated-beam
+input       checkbox-group
+data        seismograph
+composite   itinerary, growth-projection, bill-split, meal-plan, recipe,
+            booking, menu-order, interval-workout, habit-tracker,
+            focus-timer, notes, standup-board, agenda, week-schedule,
+            weather-forecast, place-results, product-grid, media-grid,
+            music-player, flashcard-deck, quiz, word-guess, memory-match,
+            board-game, figure, iso-scene
+interactive  todo-list, timer, flashcard, drawing-canvas
+media       audio, video
+ai          stream-text, tool-call, reasoning-trace, approval-gate
+marketing   marketing-hero, feature-grid, testimonial, logo-cloud, faq,
+            cta, newsletter, navbar, footer
+
+## Data widgets — the card IS the widget (from the manifest's intents)
+
+A data widget carries its own controls, totals, charts and progress: put
+the user's numbers and items in its props, the one-line takeaway in its
+"verdict" when it has one, and never repeat its inputs or outputs with
+sliders, stats or charts beside it. Call `get_widget_spec` for its props.
+
+  savings / invest / compound / retirement → growth-projection (has its own
+                                        deposit, rate, years controls)
+  split / bill / tip / owe            → bill-split
+  trip / travel / itinerary / vacation → itinerary
+  meal plan / meals / diet / nutrition → meal-plan
+  recipe / cook / ingredients / dish  → recipe
+  workout / hiit / yoga / exercise    → interval-workout
+  habit / habits / streak / daily     → habit-tracker
+  focus / pomodoro / deep work        → focus-timer
+  notes / jot / ideas / memo          → notes (seed a couple; never a form)
+  todo / to-do / todo list            → todo-list
+  standup / blockers / team status    → standup-board (never a kanban)
+  agenda / meeting / run of show      → agenda
+  weekly schedule / timetable / classes → week-schedule
+  weather / forecast / temperature    → weather-forecast
+  order / food / menu / takeaway      → menu-order (never a form)
+  book / appointment / reservation    → booking
+  restaurant / cafe / places near me  → place-results
+  products / shopping / deals         → product-grid
+  films / books to read / podcasts    → media-grid
+  music / playlist / lofi             → music-player
+  flashcards / study cards / vocabulary → flashcard-deck
+  quiz / trivia / test me             → quiz
+  word game / guess the word          → word-guess
+  memory game / matching pairs        → memory-match
+  tic-tac-toe / connect four          → board-game (set "game")
+  drawing pad / sketch / doodle       → drawing-canvas
+  draw / picture / diagram            → illustration
+  how it works / mechanism / gears    → iso-scene (a figure first when one
+                                        exists for the subject)
 """
 
 
@@ -283,8 +278,9 @@ rebuilding the shape out of `table` / `text` / `flex`. The six base widgets:
   text       — plain or rich text. Props: text, variant ('h1'..'h4',
                'body','muted','small'), align.
   heading    — same as text.h1..h4 with stronger visual default.
-  stat       — single big number. Props: label, value, delta, trend
-               ('up'|'down'|'flat'), sublabel.
+  stat       — single big number. Props: label, value, format
+               ('number'|'currency'|'percent'|'compact'), currency,
+               delta, direction ('up'|'down'|'neutral'|'auto').
   button     — Props: label, icon, variant ('primary'|'secondary'|
                'outline'|'ghost'|'link'|'destructive'). Always carries
                on_click.
@@ -628,15 +624,17 @@ _INLINE_RULES = """\
 - Pocket canvases are a SEPARATE surface — do not call
   `cloud_update_pocket` from a chat reply. chat.send loops drive the
   conversation; they do NOT mutate pocket state.
-- Interactive elements MUST have on_click / on_change. A button with
-  a label and no handler is dead UI — render only buttons that lead
-  somewhere via chat.send (or omit them entirely).
+- Interactive elements MUST bind to state or have on_click / on_change.
+  A button with a label and no handler is dead UI — render only buttons
+  that change the card's state or lead somewhere via chat.send (or omit
+  them entirely).
 
 Final self-check before sending:
 ✔ ui-spec used when response has structure
-✔ Interactive elements have on_click / on_change
-✔ Actions emit chat.send to close the loop
-✔ One focal widget — clean, minimal layout, no clutter
+✔ Interactive elements bind to state or have on_click / on_change
+✔ Buttons change card state or emit chat.send; no other emit target, no pin
+✔ Card size fits the answer: one data widget (1-5 nodes) for a data view,
+  or a primitives tool (~15-35 nodes) with state, bind, derived values, each
 ✔ flex/grid `gap` is tight for inline — numeric 2 or 4, not 10/12+
 ✔ Matched the reply SHAPE to its typed widget (comparison-table / data-grid /
   timeline / kv-table / status-dot / pricing-table) — did NOT rebuild it from a
@@ -724,9 +722,67 @@ Worked examples — the typed-widget choice in action (data already in hand):
   "sales funnel leads to closed"   -> ONE funnel  (data:[{label,value}] per stage, NOT a table)
   "capacity at 75 of 100"          -> ONE gauge  (value + max, NOT a bare stat tile)
 
-Keep it tight: ONE typed widget is the answer most of the time. Wrap it in
-at most a heading + a chat.send follow-up — never surround it with
-redundant stat tiles or a second table.
+# CARD SIZE — a data view, or a small tool
+
+- When the answer is a data view, the card is ONE data widget (1 to 5
+  nodes): a typed widget above or a data widget from the use-the-widget
+  map, at most with a heading and a chat.send follow-up. A data widget
+  carries its own controls and totals; never surround it with redundant
+  stat tiles, sliders, charts or a second table.
+- When no data widget fits (a calculator, a planner, a checklist, an
+  explainer), build a genuinely interactive tool from primitives, roughly
+  15 to 35 nodes, not a static mockup: seed state with the user's numbers,
+  bind inputs (number-input, slider, segmented, switch, checkbox) to state,
+  derive every output from state with expressions so it updates live, and
+  wire buttons with actions (set, toggle, push, remove, toast).
+- In a primitives tool, every quantity the user mentions (amounts, counts,
+  percentages) must be adjustable in the UI, and every derived number must
+  follow from state. Never hardcode a copy of a state value in an
+  expression: write state.people.length, not 4.
+- Lists the user can grow or shrink live in state as arrays, render with
+  "each", and change with push / remove actions. Inside "each", bind a row
+  field with a templated path ("bind": "people.{index}.drinks") and remove
+  the row with {"action":"remove","target":"people","value":"{item}"}
+  (remove's "index" only accepts a literal number, so never
+  "index": "{index}").
+
+# EXPRESSIONS (verified against the engine; follow exactly)
+
+- A prop that is exactly "{expr}" keeps the value's type. "Text {expr} more"
+  builds a string.
+- Supported: state paths (state.a.b, state.list[0].x), arithmetic + - * / %
+  with parentheses, comparisons, ternary a ? b : c, || and ??. Inside
+  "each", the loop item is {item.field} and the index is {index} (or the
+  names given by item_as / index_as).
+- When a calculation needs the count or sum of a list, keep that number in
+  state and refresh it with a set action whose value is the method
+  expression: chain it after the push / remove that changes the list, and
+  put it in the on_change of any input that edits a list item, e.g.
+  "on_change": {"action":"set","target":"drinkers",
+                "value":"{state.people.where('drinks', true).count()}"}.
+  When an edit feeds several kept numbers (a count AND a total), its
+  on_change is a list that refreshes every one of them. Seed every kept
+  number with exactly what its refresh expression would give for the
+  seeded list: add the list up item by item before writing it.
+- For an amount that applies only when a flag is true, multiply by the flag
+  (true counts as 1): item.drinks * state.drinksTotal / state.drinkers.
+- Use a ternary only as the whole expression (to pick a label or value),
+  never inside arithmetic.
+- For money, compute the raw number and show it with the "stat" widget
+  using "format": "currency" (it formats to 2 decimals), e.g.
+  {"type":"stat","props":{"label":"Each pays",
+   "value":"{state.total * (1 + state.tipPercent / 100) / state.people.length}",
+   "format":"currency"}}.
+- A computed number that can have decimals (any division or rate) is shown
+  with a "stat" (format "number", "currency" or "percent"), never inside a
+  text template, which prints every digit.
+- Division by zero yields 0. Keep numeric state as numbers, not strings.
+- There is no exponent operator (no ** or ^) and no Math functions. Write
+  compound growth as repeated multiplication starting from a state path,
+  e.g. three years at a yearly rate:
+  state.start * (1 + state.rate / 100) * (1 + state.rate / 100) * (1 + state.rate / 100).
+- Chart "data" items resolve expressions, and the chart redraws when they
+  change, so a chart can follow state: {"label":"Jul","value":"{state.jul}"}.
 """
 
 
@@ -736,6 +792,8 @@ INLINE_RIPPLE_SYSTEM_PROMPT = (
     + WIDGET_CATALOG
     + "\n"
     + USE_THE_WIDGET_RULE
+    + "\n"
+    + _INLINE_MORE_WIDGETS
     + "\n"
     + _INLINE_CORE_CATALOG
     + "\n"
