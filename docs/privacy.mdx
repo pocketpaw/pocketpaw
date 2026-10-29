@@ -1,0 +1,143 @@
+---
+title: Paw OS Privacy Policy
+description: "How Paw OS, made by Qbtrix Innovations, collects, uses, shares and protects your personal data, including data received from Google Sign-In."
+ogType: article
+---
+
+{/* Mirrors paw-enterprise src/lib/core/legal/privacy.md. Both copies must change together. */}
+
+# Paw OS Privacy Policy
+
+_Last updated: 29 October 2026_
+
+This policy explains what personal data Paw OS collects, why, who processes it for us, how long we keep it, and the choices you have. Paw OS is made by PocketPaw and run by Qbtrix Innovations ("we", "us"), which is the controller of your personal data. Paw OS is in early access, so this policy will change as the product does. We will tell you about significant changes.
+
+## 1. Who we are
+
+Qbtrix Innovations, 410, Saheed Nagar, Bhubaneswar 751007, Odisha, India. Contact us about privacy at team@qbtrix.com.
+
+## 2. What we collect
+
+**Account details from Google.** You sign in with Google. Google shares your name, email address, profile picture and a Google account ID with us. We only accept a verified email address. We never see your Google password.
+
+**How we use Google user data.** When you sign in with Google, Paw OS asks only for the openid, email and profile scopes. It receives only your name, email address and profile picture, plus the account ID Google uses to identify your sign-in. We use this information only to create your account and sign you in. We do not sell it, and we do not use it for advertising or to train AI models. Paw OS's use of information received from Google APIs adheres to the [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy), including the Limited Use requirements.
+
+**What you create in Paw OS.** Your chats and prompts, the AI responses you get back, files you upload, pockets, notes, sites, agents and their instructions, memory your agents keep, comments, and the settings of your workspaces. If you invite people to a workspace, we store their email address and the invitation.
+
+**Data from services you connect.** When you connect a third-party service (for example email, calendar, storage or code hosting), we access the data that service exposes within the permissions you grant, and store the access tokens needed to keep the connection working. Tokens and keys are encrypted at rest.
+
+**Your own AI provider key, if you add one.** If you bring your own API key for a model provider, we store it encrypted and use it only to send your requests to that provider.
+
+**Credits and usage.** Your credit balance, the credits each action used, which models and features you used, and how much (for example token counts). We use this to run the free allowance and to stop abuse.
+
+**Device and log data.** IP address, browser and device type (from your user agent), sign-in sessions, timestamps, and server logs of requests and errors. Session records let you see and sign out of your active sessions.
+
+**Messages with us.** If you email us, we keep the conversation.
+
+**What we don't collect.** We don't buy data about you, we don't run advertising, and Paw OS doesn't load third-party analytics or advertising trackers.
+
+## 3. Why we use it, and our legal basis
+
+| Purpose | Data | Legal basis (UK/EU GDPR) |
+|---|---|---|
+| Create your account and sign you in | Account details, sessions | Performing our contract with you |
+| Run the service: store your work, run AI features, agents and connectors you ask for, publish what you choose to publish | Your content, connected data, your API key | Performing our contract with you |
+| Give and meter the early-access credits, prevent multiple-account abuse | Credits and usage, account details, IP address | Contract; legitimate interest in keeping the free allowance fair |
+| Keep the service secure, debug problems, prevent fraud and abuse | Device and log data, usage | Legitimate interest in a secure, working service |
+| Send service emails (sign-in, security, notifications you turn on, changes to these policies) | Email address | Contract; legitimate interest |
+| Improve Paw OS | Aggregated usage, feedback you send | Legitimate interest. We do not use your content to train AI models. |
+| Meet legal obligations and respond to lawful requests | As needed | Legal obligation |
+
+Where we rely on legitimate interest, you can object (see section 8).
+
+## 4. How AI processing works
+
+When you chat, run an agent or use an AI feature, the relevant content (your prompt, the conversation so far, and any files, memory or connected data the task needs) is sent through our AI gateway to the model provider that serves the model in use. By default that is Anthropic (Claude models). Providers process this data to return a response, under the terms that govern our use of their API, which do not allow them to train their models on it.
+
+Our gateway keeps a usage log of each request, including the prompt, for 30 days so we can meter credits, investigate failures and stop abuse. It also caches identical requests for up to 10 minutes to save cost.
+
+AI output can be wrong. Don't put information into Paw OS that you are not allowed to share with the services listed below.
+
+## 5. Who processes your data
+
+We don't sell your personal data or share it for advertising. We share it only with service providers that process it for us, under contracts that limit what they can do with it:
+
+| Provider | What they do | Where |
+|---|---|---|
+| Hetzner Online | Hosts our servers, database and file storage | Germany |
+| Cloudflare | DNS, network security and delivery, sending our emails, hosting sites you publish | Global network |
+| Google | Sign-in with Google. Some fonts and animated emoji load from Google Fonts, which sees your IP address | United States and global |
+| Anthropic | AI models (Claude) that process prompts and content | United States |
+
+These providers are used only when you use the related feature:
+
+| Provider | Feature | Where |
+|---|---|---|
+| Other AI model providers (such as OpenAI, Google Gemini, DeepSeek, or routing through OpenRouter) | When you pick one of their models | Varies by provider |
+| fal.ai | Image, video and motion generation in Studio | United States |
+| ElevenLabs, Deepgram | Voice features (text to speech, speech to text) | United States |
+| LiveKit | Voice and video calls | Varies by region |
+| Brave Search, Tavily, Perplexity | Web search done by agents | United States |
+| Composio | Running some third-party connectors | United States |
+| The services you connect | Whatever you ask your agents to do there | Their own locations |
+
+We may also disclose data if the law requires it, to protect people's safety or our rights, or to a buyer if we sell or merge the business (we will tell you first).
+
+## 6. International transfers
+
+Our servers are in the European Union (Germany). Some providers above process data in other countries, including the United States. Where the law requires it, we rely on safeguards such as the EU Standard Contractual Clauses, the UK addendum, or the provider's certification under the EU-US Data Privacy Framework.
+
+## 7. How long we keep data
+
+- **Your account and content:** while your account is active. When you ask us to delete your account, we delete your account and the workspaces you own within 30 days. Copies in backups are overwritten on our normal backup cycle.
+- **Content in shared workspaces:** content you added to a workspace someone else owns belongs to that workspace and stays under its owner's control.
+- **Sign-in sessions:** a sign-in lasts up to 7 days. Session records are kept so you can review and revoke them.
+- **Notifications:** deleted automatically after 90 days. Delivered email records after 30 days. Expired invitations 14 days after they expire.
+- **AI gateway usage logs:** 30 days (see section 4).
+- **Security and audit records:** kept as long as needed to protect the service and meet legal obligations. Workspace owners can set a shorter retention period for their workspace's audit log.
+- **Credit and usage records:** while your account is active, and longer where tax or accounting law requires it once paid plans exist.
+
+## 8. Your rights
+
+Depending on where you live, you can ask us to:
+
+- **access** the personal data we hold about you and get a copy;
+- **export** your content in a portable format;
+- **correct** data that is wrong;
+- **delete** your account and data;
+- **restrict** or **object to** some processing, including processing based on legitimate interest;
+- **withdraw consent** where we rely on it.
+
+In early access, the quickest way is to email team@qbtrix.com from the address you sign in with. We will answer within 30 days. You can disconnect connectors, revoke sessions and delete individual items in the app at any time.
+
+If you are unhappy with how we handle your data, please contact us first. You also have the right to complain to your local data protection authority.
+
+If you live in California or another US state with a privacy law, you have similar rights to know, delete and correct your data. We don't sell or share personal information for cross-context behavioural advertising.
+
+## 9. Cookies and local storage
+
+We use only what the service needs to work:
+
+| Name | Type | Why | How long |
+|---|---|---|---|
+| paw_auth | Cookie | Keeps you signed in (HttpOnly, Secure) | Up to 7 days |
+| paw_csrf | Cookie | Protects your account against cross-site request forgery | Your sign-in session |
+| App preferences | Browser local storage | Remembers your theme, wallpaper, layout and last workspace | Until you clear it |
+
+We don't use advertising or analytics cookies, so there is no cookie banner. Sites you publish with Paw OS may set their own cookies; their owners are responsible for them.
+
+## 10. Security
+
+We encrypt data in transit with TLS, encrypt stored access tokens and API keys, keep the session cookie out of reach of page scripts, and limit who on our team can access production systems. No system is perfectly secure. If a breach affects your personal data, we will tell you and the authorities as the law requires.
+
+## 11. Children
+
+Paw OS is not for children. You must be at least 16, or older where local law requires. We don't knowingly collect data from children under 16. If you believe a child has given us personal data, contact us and we will delete it.
+
+## 12. Changes to this policy
+
+We will update this policy as Paw OS changes, for example when paid plans and a payment provider arrive. We will change the "Last updated" date and, for significant changes, tell you in the app or by email before they take effect.
+
+## 13. Contact
+
+Qbtrix Innovations, 410, Saheed Nagar, Bhubaneswar 751007, Odisha, India, team@qbtrix.com.
