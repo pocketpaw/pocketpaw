@@ -47,5 +47,26 @@
     "find": "validate_against_manifest(flat, manifest, apply_aliases=False)",
     "replace": "validate_against_manifest(flat, manifest, apply_aliases=True)",
     "tests": ["tests/ee/test_ripple_prompt_catalog_in_manifest.py"]
+  },
+  {
+    "label": "the normalizer stops lifting each loop fields out of props",
+    "file": "ee/pocketpaw_ee/cloud/ripple_normalizer.py",
+    "find": "misplaced = [k for k in _EACH_NODE_FIELDS if k in props]",
+    "replace": "misplaced = []",
+    "tests": ["tests/cloud/test_ripple_each_props_lift.py"]
+  },
+  {
+    "label": "a props copy of items overrides the node-level items on each",
+    "file": "ee/pocketpaw_ee/cloud/ripple_normalizer.py",
+    "find": "node.setdefault(key, props[key])",
+    "replace": "node[key] = props[key]",
+    "tests": ["tests/cloud/test_ripple_each_props_lift.py"]
+  },
+  {
+    "label": "the chat prompt drops the each-items-at-node-level line",
+    "file": "src/pocketpaw/ripple/_inline.py",
+    "find": "- \"each\" takes items at node level, never inside props:\n",
+    "replace": "- \"each\" takes items wherever:\n",
+    "tests": ["tests/ee/test_ripple_prompt_catalog_in_manifest.py"]
   }
 ]

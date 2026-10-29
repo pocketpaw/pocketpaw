@@ -745,6 +745,8 @@ Worked examples — the typed-widget choice in action (data already in hand):
   the row with {"action":"remove","target":"people","value":"{item}"}
   (remove's "index" only accepts a literal number, so never
   "index": "{index}").
+- "each" takes items at node level, never inside props:
+  {"type":"each","items":"{state.people}","children":[...]}.
 
 # EXPRESSIONS (verified against the engine; follow exactly)
 

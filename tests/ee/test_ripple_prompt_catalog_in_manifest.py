@@ -115,6 +115,7 @@ def test_inline_prompt_names_only_handled_emit_channels():
     assert "ONE typed widget is the answer most of the time" not in p
     assert "# EXPRESSIONS (verified against the engine; follow exactly)" in p
     assert "15 to 35 nodes" in p
+    assert '"each" takes items at node level, never inside props' in p
 
 
 # ---------------------------------------------------------------------------
