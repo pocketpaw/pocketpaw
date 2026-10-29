@@ -1657,7 +1657,6 @@ _RIPPLE_RULES = (
 )
 
 
-
 # The chat variant swaps the Paw Bar-only parts of _RIPPLE_RULES, found by their
 # opening words: the real-actions rule names the profile's host events, the ask
 # example emits chat.send, match-the-card loses the store-backed menu and booking
@@ -1683,8 +1682,8 @@ def _chat_rules(host_events: Sequence[str]) -> tuple[str, ...]:
     match = _rule("   - Match the card to the answer.")
     for part in _CHAT_STORE_TEXT:
         assert part in match, part
-    chat_match = match.replace(_CHAT_STORE_TEXT[0], "A booking is a booking with its "
-                               "services and a few days of slots. ").replace(_CHAT_STORE_TEXT[1], "")
+    booking = "A booking is a booking with its services and a few days of slots. "
+    chat_match = match.replace(_CHAT_STORE_TEXT[0], booking).replace(_CHAT_STORE_TEXT[1], "")
     ask = _rule("   - A click can send a follow-up as the visitor:")
     ask_json = json.dumps(_RIPPLE_ASK, separators=(",", ":"))
     assert ask_json in ask

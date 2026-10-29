@@ -2199,7 +2199,6 @@ def build_dynamic_context(ctx: ScopeContext) -> str:
     return "\n".join(parts)
 
 
-
 @functools.cache
 def chat_ripple_prompt() -> str:
     """The chat-inline Ripple prompt: core's chat-only head and tail around the
