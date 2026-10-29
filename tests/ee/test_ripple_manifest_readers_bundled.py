@@ -27,12 +27,13 @@ def _offline_default(monkeypatch):
 
 
 async def test_all_readers_resolve_to_the_bundled_catalog(monkeypatch):
-    from pocketpaw.config import get_settings
     from pocketpaw_ee.agent.mcp_servers import pockets
     from pocketpaw_ee.agent.pocket_specialist import tools as specialist_tools
     from pocketpaw_ee.cloud import ripple_validator
     from pocketpaw_ee.cloud.pockets import agent_context, service
     from pocketpaw_ee.paw_bar import card_spec
+
+    from pocketpaw.config import get_settings
 
     bundled = m.load_bundled_manifest()
     assert bundled["version"] == m.RIPPLE_UI_SVELTE_VERSION

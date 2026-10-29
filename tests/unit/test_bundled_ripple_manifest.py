@@ -73,7 +73,9 @@ async def test_empty_url_serves_bundled_without_network(no_network):
     assert got is m.load_bundled_manifest()
 
 
-async def test_chat_get_widget_spec_finds_purpose_built_widgets_offline(no_network, default_settings):
+async def test_chat_get_widget_spec_finds_purpose_built_widgets_offline(
+    no_network, default_settings
+):
     from pocketpaw.agents import sdk_mcp_widgets
 
     result = await sdk_mcp_widgets._get_widget_spec_handler({"types": PURPOSE_BUILT})

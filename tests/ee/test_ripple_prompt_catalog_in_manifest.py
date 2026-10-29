@@ -22,9 +22,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-_MANIFEST = (
-    Path(__file__).resolve().parents[2] / "src" / "pocketpaw" / "ripple" / "manifest.json"
-)
+_MANIFEST = Path(__file__).resolve().parents[2] / "src" / "pocketpaw" / "ripple" / "manifest.json"
 
 
 def _manifest() -> dict:
