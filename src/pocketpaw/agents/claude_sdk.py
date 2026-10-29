@@ -2721,7 +2721,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
         from pocketpaw.llm.client import resolve_llm_client
 
         provider = self.settings.claude_sdk_provider or "anthropic"
-        llm = resolve_llm_client(self.settings, force_provider=provider)
+        # ``backend=`` makes a non-Anthropic route (litellm, openrouter, ollama)
+        # launch ``claude_sdk_model`` before the provider's own default. That is
+        # the field ``AgentPool._build`` routes an agent's ``config.model`` onto;
+        # without it the gateway default ran and the agent's pick was ignored.
+        llm = resolve_llm_client(self.settings, force_provider=provider, backend="claude_agent_sdk")
 
         # ── API key check for Anthropic provider ──────────────
         # Skip if using a non-Anthropic provider, or if the active
@@ -3307,6 +3311,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # 1. Smart routing (opt-in) — overrides with complexity-based model
         # 2. Explicit claude_sdk_model — user-chosen fixed model
         # 3. Neither set — let Claude Code CLI auto-select (recommended)
+        # An agent that pins a model never reaches 1: ``AgentPool._build`` turns
+        # smart routing off on that agent's settings clone.
         if not is_non_anthropic:
             if self.settings.smart_routing_enabled:
                 from pocketpaw.agents.model_router import ModelRouter

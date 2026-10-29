@@ -2494,9 +2494,17 @@ async def _drive_agent_loop(
         # ``ctx.credential_source`` (set by ``execute_run``) wins when present:
         # a stored key on a backend that ignores it runs on our gateway, so the
         # catalog applies to it.
+        #
+        # A Claude id on the Claude SDK backend is not judged by the catalog
+        # either: that backend reaches Claude by its own route, and the catalog
+        # lists no Anthropic model at all, so every Claude pick there was refused
+        # (2026-10-29). Any other id on that backend is still checked.
         if (
             ctx.model_override
             and (getattr(ctx, "credential_source", None) or byok_creds.source) != "byok"
+            and not (
+                backend_name == "claude_agent_sdk" and ctx.model_override.startswith("claude-")
+            )
             and await _model_is_unknown_to_gateway(ctx.model_override)
         ):
             yield (

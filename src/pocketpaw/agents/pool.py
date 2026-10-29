@@ -2,7 +2,8 @@
 
 Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace,
 built from its Agent document (``_build``: the per-agent ``config.model`` is
-routed onto the field the backend reads via ``route_model``, legacy backend
+routed onto the field the backend reads via ``route_model`` and, when set, turns
+smart routing off for that agent so its pick is the model that runs; legacy backend
 names go through ``_LEGACY_BACKENDS`` first, opt-in MCP servers in
 ``config.tools`` become the agent's ``ToolPolicy``). Instances are cached per
 process (``max_instances`` from settings), evicted when idle, rebuilt when the
@@ -1137,7 +1138,12 @@ class AgentPool:
         # agent doc (e.g. ``claude_code``) still routes to the right field.
         model = config.get("model", "")
         canonical_backend = _LEGACY_BACKENDS.get(settings.agent_backend, settings.agent_backend)
-        route_model(settings, canonical_backend, model)
+        if route_model(settings, canonical_backend, model):
+            # The agent pinned a model, so it beats smart routing (which on the
+            # Claude SDK backend otherwise outranks ``claude_sdk_model`` and
+            # picked the haiku tier for a short message). Agents with no model
+            # keep the process-wide routing. This is a per-agent clone.
+            settings.smart_routing_enabled = False
 
         # Instantiate backend
         backend_cls = get_backend_class(settings.agent_backend)

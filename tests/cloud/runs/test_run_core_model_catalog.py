@@ -13,6 +13,10 @@
 # catalog does not hold is one the gateway would refuse anyway; rejecting it here
 # turns an opaque upstream 400 into a typed error the composer can show.
 #
+# Two kinds of turn skip the catalog: a BYOK turn (the tenant's gateway, not
+# ours) and a Claude id on the Claude SDK backend, which reaches Claude by its
+# own route while the catalog lists no Anthropic model.
+#
 # The two tests that earn their space are the fail-open ones. A catalog outage
 # and an empty catalog must NOT reject the turn: either would make every
 # override fail on a deployment whose /model/info is admin-gated or misread,
@@ -44,12 +48,13 @@ class _Ev:
 
 
 class _CapturePool:
-    def __init__(self) -> None:
+    def __init__(self, backend: str = "pydantic_ai") -> None:
         self.run_kwargs: dict[str, Any] | None = None
         self.run_called = False
+        self.backend = backend
 
     async def get(self, _agent_id):
-        return SimpleNamespace(config={"backend": "pydantic_ai", "model": ""}, agent_name="A")
+        return SimpleNamespace(config={"backend": self.backend, "model": ""}, agent_name="A")
 
     def run(self, agent_id, content, session_key, **kwargs):
         self.run_called = True
@@ -90,6 +95,7 @@ async def _drive(
     *,
     catalog,
     creds: TurnCredentials | None = None,
+    backend: str = "pydantic_ai",
 ) -> tuple[_CapturePool, list[tuple[str, dict]]]:
     """Run the loop with *catalog* standing in for ``catalog_service.list_models``.
 
@@ -97,7 +103,7 @@ async def _drive(
     """
     monkeypatch.delenv("POCKETPAW_SESSION_SUPERVISOR", raising=False)
 
-    pool = _CapturePool()
+    pool = _CapturePool(backend)
     monkeypatch.setattr(run_core, "get_agent_pool", lambda: pool)
 
     async def _fake_knowledge(*a, **k):
@@ -217,6 +223,49 @@ async def test_an_empty_catalog_refuses_nothing(monkeypatch):
     )
     assert pool.run_called is True
     assert not [d for name, d in out if name == "error"]
+
+
+async def test_a_claude_model_on_the_claude_sdk_backend_skips_the_catalog(monkeypatch):
+    """The live regression, 2026-10-29: the gateway catalog lists no Anthropic
+    model at all, yet the Claude SDK backend reaches Claude by its own route. So
+    every Claude pick on that backend ("claude-sonnet-5-5") was refused with
+    model.not_available. A Claude id on the Claude SDK backend is not free text
+    billed through the gateway's catalog; it skips the check.
+
+    Mutation that must break this: drop the claude_agent_sdk term from the guard.
+    """
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(model_override="claude-sonnet-5-5"),
+        catalog=[_entry("deepseek/deepseek-chat")],
+        backend="claude_agent_sdk",
+    )
+    assert [d for name, d in out if name == "error"] == []
+    assert pool.run_called is True
+    assert pool.run_kwargs.get("model_override") == "claude-sonnet-5-5"
+
+
+async def test_a_non_claude_model_on_the_claude_sdk_backend_is_still_checked(monkeypatch):
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(model_override="gpt-9-ultra-expensive"),
+        catalog=[_entry("deepseek/deepseek-chat")],
+        backend="claude_agent_sdk",
+    )
+    assert pool.run_called is False
+    errors = [d for name, d in out if name == "error"]
+    assert errors and errors[0]["code"] == "model.not_available"
+
+
+async def test_a_claude_model_on_another_backend_is_still_checked(monkeypatch):
+    pool, out = await _drive(
+        monkeypatch,
+        _ctx(model_override="claude-sonnet-5-5"),
+        catalog=[_entry("deepseek/deepseek-chat")],
+    )
+    assert pool.run_called is False
+    errors = [d for name, d in out if name == "error"]
+    assert errors and errors[0]["code"] == "model.not_available"
 
 
 # ---------------------------------------------------------------------------
