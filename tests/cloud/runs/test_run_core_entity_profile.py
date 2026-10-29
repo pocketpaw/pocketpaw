@@ -21,6 +21,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
     build_behavior_instructions,
+    chat_ripple_prompt,
 )
 from pocketpaw_ee.cloud.chat.runs import run_core
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
@@ -30,8 +31,6 @@ from pocketpaw_ee.cloud.surface import (
     SurfaceKind,
     SurfaceMeta,
 )
-
-from pocketpaw.ripple import INLINE_RIPPLE_SYSTEM_PROMPT
 
 pytestmark = pytest.mark.asyncio
 
@@ -207,7 +206,7 @@ async def test_build_behavior_instructions_reads_resolved_profile():
     ctx = _entity_surface_ctx(SurfaceMeta(pocket_id="pkt_1"))
     ctx.resolved_profile = entity
     block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
-    assert INLINE_RIPPLE_SYSTEM_PROMPT not in block, (
+    assert chat_ripple_prompt() not in block, (
         "an entity room with ripple_mode='off' must omit the ripple LAW"
     )
 

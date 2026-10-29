@@ -1,7 +1,7 @@
 {
   "schema": "ripple.manifest/v1",
-  "version": "0.8.0",
-  "generatedAt": "2026-10-09T21:00:37.569Z",
+  "version": "0.8.2",
+  "generatedAt": "2026-10-28T15:31:10.672Z",
   "spec": {
     "uiField": "ui",
     "stateField": "state",
@@ -13,13 +13,9 @@
       "body",
       "content"
     ],
-    "description": "A Ripple spec is a JSON object with two top-level fields that matter for rendering: `ui` (the node tree the renderer mounts — REQUIRED) and `state` (the StateManager seed — required when any node uses `bind` or reads `{state.*}`). The renderable tree field is named `ui` exactly — never `root`, `tree`, `view`, `body`, or `content`. Specs that use those aliases will not render.",
+    "description": "A Ripple spec is a JSON object with two top-level fields that matter for rendering: `ui` (the node tree the renderer mounts — REQUIRED) and `state` (the StateManager seed — required when any node uses `bind` or reads `{state.*}`). The renderable tree field is named `ui` exactly — never `root`, `tree`, `view`, `body`, or `content`. Specs that use those aliases will not render. Write `ui` before `state` so the interface can draw while the rest of the spec streams in, and keep the seed `state` small. Leave out any prop whose value equals the default its widget documents. For repeated rows or cards, keep the records as an array in `state` and render them with one `each` node (`\"items\": \"{state.rows}\"`) instead of writing a node per record. Bulk data (more than a few dozen records) should come from the host, through a `sources` binding or an `api` action where the host offers one, not be typed into the spec.",
     "example": {
       "version": "1.0",
-      "state": {
-        "draft": "",
-        "items": []
-      },
       "ui": {
         "type": "flex",
         "props": {
@@ -35,6 +31,10 @@
             }
           }
         ]
+      },
+      "state": {
+        "draft": "",
+        "items": []
       }
     }
   },
@@ -625,7 +625,7 @@
     {
       "type": "analyst-bar",
       "category": "research",
-      "description": "Analyst recommendation bar — Buy/Hold/Sell distribution with consensus label and target price.",
+      "description": "Analyst recommendation bar: Buy/Hold/Sell distribution with consensus label and target price.",
       "props": {
         "buy": {
           "type": "number",
@@ -746,7 +746,7 @@
         "completeActions": {
           "type": "EventAction | EventAction[]",
           "required": false,
-          "description": "Dispatched when the final question is answered. The formatted answer summary is passed as the event value — pair with `{ action: \"emit\", target: \"chat.send\" }` to send it as the next chat message (no explicit value needed)."
+          "description": "Dispatched when the final question is answered. The formatted answer summary is passed as the event value. Pair it with `{ action: \"emit\", target: \"chat.send\" }` to send it as the next chat message (no explicit value needed)."
         },
         "skipActions": {
           "type": "EventAction | EventAction[]",
@@ -932,7 +932,7 @@
     {
       "type": "article-meta",
       "category": "display",
-      "description": "Article byline — author, avatar, publish date, read time.",
+      "description": "Article byline: author, avatar, publish date, read time.",
       "props": {
         "author": {
           "type": "string",
@@ -1274,12 +1274,74 @@
     {
       "type": "c4",
       "category": "data",
-      "description": "C4 architecture diagram (Context / Container / Component / Code) with ELK auto-layout and drill-down.",
+      "description": "C4 architecture diagram (Context / Container / Component / Code): ELK auto-layout, drill-down, live status rings, reach highlighting, curved edges, flow playback and in-place zoom down to code.",
       "props": {
         "diagram": {
-          "type": "{ title: string; level: \"context\" | \"container\" | \"component\" | \"code\"; description?: string; elements: Array<{ id: string; name: string; type: string; description?: string; external?: boolean }>; relationships: Array<{ from: string; to: string; label?: string }> }",
+          "type": "{ title: string; level: \"context\" | \"container\" | \"component\" | \"code\"; description?: string; elements: Array<{ id: string; name: string; kind?: \"person\" | \"system\" | \"container\" | \"component\" | \"code\"; type?: string; description?: string; technology?: string; external?: boolean; drillable?: boolean; children?: Element[]; code?: { startLine: number; before: string[]; after?: string[]; changed?: [number, number]; language?: string } }>; relationships: Array<{ from: string; to: string; label?: string; technology?: string; style?: \"sync\" | \"async\" | \"event\" }> }",
           "required": true,
-          "description": "C4 diagram definition."
+          "description": "C4 diagram definition. `kind` sets the shape; without it the shape is inferred from the fields present. type \"database\" or \"queue\" draws those shapes. An empty title hides the header."
+        },
+        "status": {
+          "type": "Record<string, \"changing\" | \"changed\" | \"landed\" | \"drift\" | \"failed\" | \"planned\" | \"future\" | \"added\" | \"removed\">",
+          "required": false,
+          "description": "Live state per element id, drawn as a ring and listed in the legend. \"planned\" is a dashed blueprint for something not built yet, \"future\" a dotted one further out, \"added\" a double success ring on a new element and \"removed\" a ghost of one that is gone (for a before/after comparison)."
+        },
+        "markers": {
+          "type": "Record<string, Array<{ id: string; label: string; color: string }>>",
+          "required": false,
+          "description": "Dots per element id: who or what is working there. color is any CSS colour or var(--token)."
+        },
+        "focusId": {
+          "type": "string",
+          "required": false,
+          "description": "Element the camera frames while follow is true."
+        },
+        "follow": {
+          "type": "boolean",
+          "required": false,
+          "description": "Keep the camera on focusId."
+        },
+        "selectedId": {
+          "type": "string",
+          "required": false,
+          "description": "Controlled selection. Leave unset to let clicks select."
+        },
+        "expanded": {
+          "type": "string[]",
+          "required": false,
+          "description": "Element ids drawn open on one canvas (semantic zoom). Passing it, even empty, turns the mode on; a code element with `code` opens as a code panel."
+        },
+        "scopeId": {
+          "type": "string",
+          "required": false,
+          "description": "Semantic zoom: the element being looked inside; everything outside it is ghosted."
+        },
+        "highlight": {
+          "type": "{ id: string; reach?: \"in\" | \"out\" | \"both\"; depth?: number }",
+          "required": false,
+          "description": "Light one element's reach and dim the rest. reach follows relationships upstream (in), downstream (out) or both (default), up to depth hops (default 3); edges inside it take the accent and animate, still under reduced motion. An id not on the map changes nothing."
+        },
+        "edgeShape": {
+          "type": "\"orthogonal\" | \"curved\"",
+          "required": false,
+          "description": "How edges draw along the layout's routes: orthogonal with rounded corners (default), or smooth curves with arrowheads."
+        },
+        "flow": {
+          "type": "{ id: string; name: string; description?: string; steps: Array<{ from: string; to: string; label: string; technology?: string; reverse?: boolean; implied?: boolean } | { at: string; label: string } | { note: string }> }",
+          "required": false,
+          "description": "A data flow played over the map one step at a time (pair with step). A message lights its two ends and relationship and runs a marker along it; reverse means the model draws the relationship to → from; implied (no relationship) draws a dashed hop. A process pulses its element; a note dims nothing."
+        },
+        "step": {
+          "type": "number",
+          "required": false,
+          "description": "Index of the flow's current step. Out of range, or without flow, no step is shown."
+        }
+      },
+      "events": {
+        "on_step": {
+          "type": "EventAction",
+          "required": false,
+          "description": "Fires with the index of the next step on a clicked connection (the onstep prop), e.g. { action: \"set\", target: \"step\", value: \"{event}\" }."
         }
       }
     },
@@ -1291,7 +1353,8 @@
         "events": {
           "type": "Array<{ id: string | number; title: string; start: string; end?: string; color?: string }>",
           "required": false,
-          "description": "Events with ISO dates."
+          "description": "Events with ISO dates.",
+          "data": true
         },
         "view": {
           "type": "\"month\" | \"week\"",
@@ -1432,7 +1495,8 @@
         "data": {
           "type": "Array<{ label: string; value?: number; series?: Record<string, number> }>",
           "required": true,
-          "description": "Data points (shape varies by chart type)."
+          "description": "Data points (shape varies by chart type).",
+          "data": true
         },
         "type": {
           "type": "\"bar\" | \"line\" | \"area\" | \"pie\" | \"donut\" | \"candlestick\" | \"sparkline\" | \"heatmap\" | \"gauge\" | \"radar\"",
@@ -1452,7 +1516,12 @@
         "colors": {
           "type": "string[]",
           "required": false,
-          "description": "Custom color palette."
+          "description": "Palette in order: one per series when points carry `series`, one per slice on pie/donut. On one series (bar, line) every point wears the first colour; give two or more to colour points individually. Default palette is categorical, no status colours."
+        },
+        "reference": {
+          "type": "string | string[]",
+          "required": false,
+          "description": "Series keys that are a reference, not data (a target, plan or benchmark): drawn muted and dashed, outside the palette order."
         },
         "tooltip": {
           "type": "boolean",
@@ -1644,7 +1713,7 @@
     {
       "type": "citation",
       "category": "research",
-      "description": "Citation pill — inline reference to a source with optional superscript number.",
+      "description": "Citation pill: an inline reference to a source with optional superscript number.",
       "props": {
         "source": {
           "type": "string",
@@ -1698,6 +1767,64 @@
           "required": false,
           "description": "Show prev/next chevrons and counter."
         }
+      },
+      "pocket": {
+        "state": {
+          "tourOpen": false
+        },
+        "ui": {
+          "type": "flex",
+          "props": {
+            "direction": "column",
+            "gap": "12px"
+          },
+          "children": [
+            {
+              "type": "button",
+              "props": {
+                "label": "Start tour"
+              },
+              "on_click": {
+                "action": "open",
+                "target": "tourOpen"
+              }
+            },
+            {
+              "type": "input",
+              "class": "coachmark-demo-search",
+              "props": {
+                "placeholder": "Search documents"
+              }
+            },
+            {
+              "type": "text",
+              "class": "coachmark-demo-recent",
+              "props": {
+                "text": "Recent: Q3 plan, Launch notes"
+              }
+            },
+            {
+              "type": "coachmark",
+              "props": {
+                "steps": [
+                  {
+                    "target": ".coachmark-demo-search",
+                    "title": "Search",
+                    "description": "Find any document by name.",
+                    "side": "bottom"
+                  },
+                  {
+                    "target": ".coachmark-demo-recent",
+                    "title": "Recent",
+                    "description": "Pick up where you left off.",
+                    "side": "bottom"
+                  }
+                ]
+              },
+              "bind": "state.tourOpen"
+            }
+          ]
+        }
       }
     },
     {
@@ -1715,7 +1842,7 @@
     {
       "type": "code-block",
       "category": "display",
-      "description": "Fenced code block with line numbers, light syntax highlighting, a language label and a copy button. Long lines wrap rather than scrolling.",
+      "description": "Fenced code block with line numbers, light syntax highlighting, a file title, a language label and a copy button. Long lines wrap rather than scrolling.",
       "props": {
         "code": {
           "type": "string",
@@ -1730,7 +1857,12 @@
         "language": {
           "type": "string",
           "required": false,
-          "description": "Language slug (ts, js, py, sh, etc.)."
+          "description": "Language slug (ts, js, py, sh, etc.). Without one the code is left uncoloured."
+        },
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "File name in the header, with the language label beside it."
         },
         "hideLanguage": {
           "type": "boolean",
@@ -1741,6 +1873,26 @@
           "type": "boolean",
           "required": false,
           "description": "Hide copy button."
+        },
+        "startLine": {
+          "type": "number",
+          "required": false,
+          "description": "Number of the first line, for an excerpt of a longer file. Default 1."
+        },
+        "highlight": {
+          "type": "[number, number]",
+          "required": false,
+          "description": "Inclusive [first, last] line numbers to tint."
+        },
+        "highlightTone": {
+          "type": "\"accent\" | \"added\" | \"removed\"",
+          "required": false,
+          "description": "Tint of the highlighted range. Default accent."
+        },
+        "compact": {
+          "type": "boolean",
+          "required": false,
+          "description": "Tighter header, padding and leading, for a side panel."
         }
       }
     },
@@ -2187,7 +2339,7 @@
     {
       "type": "company-header",
       "category": "research",
-      "description": "Company profile header — logo, name, ticker, exchange, price, description, sector tags, market cap.",
+      "description": "Company profile header: logo, name, ticker, exchange, price, description, sector tags, market cap.",
       "props": {
         "name": {
           "type": "string",
@@ -2269,7 +2421,7 @@
         "headline": {
           "type": "{ label: string; value: string | number; delta?: string; trend?: \"up\" | \"down\" | \"flat\"; comparison?: string; sparkline?: number[] }",
           "required": false,
-          "description": "The \"big number\" hero — center stage with sparkline + period comparison."
+          "description": "The \"big number\" hero: center stage, with sparkline and period comparison."
         },
         "secondaryMetrics": {
           "type": "Array<{ label: string; value: string | number; delta?: string; trend?: \"up\" | \"down\" | \"flat\"; sublabel?: string }>",
@@ -2311,7 +2463,7 @@
         "items": {
           "type": "Array<{ id: string; label: string; description?: string; state?: \"pending\" | \"in-progress\" | \"done\" | \"blocked\" | \"skipped\"; owner?: { id?: string; name: string; avatar?: string }; due?: string; overdue?: boolean; blockedBy?: string[]; attachments?: { name: string; url?: string }[]; actions?: EventAction | EventAction[]; toggleActions?: EventAction | EventAction[] }>",
           "required": true,
-          "description": "Checklist items. Click row → `actions`; click checkbox → `toggleActions`. Two-way bind the array with `bind: \"state.checklist\"` (default `value`/`onchange` surface) so toggles persist reactively through state — toggling flips the item state optimistically and `toggleActions` still fires as a side-effect hook (API / audit). Blocked items (state `blocked` or non-empty `blockedBy`) cannot be marked done."
+          "description": "Checklist items. Click row → `actions`; click checkbox → `toggleActions`. Two-way bind the array with `bind: \"state.checklist\"` (default `value`/`onchange` surface) so toggles persist reactively through state. Toggling flips the item state optimistically and `toggleActions` still fires as a side-effect hook (API / audit). Blocked items (state `blocked` or non-empty `blockedBy`) cannot be marked done."
         },
         "groupBy": {
           "type": "\"none\" | \"state\" | \"owner\"",
@@ -2326,7 +2478,7 @@
         "progress": {
           "type": "number",
           "required": false,
-          "description": "Override the auto-computed progress (0–100)."
+          "description": "Override the auto-computed progress (0 to 100)."
         },
         "emptyText": {
           "type": "string",
@@ -2358,7 +2510,7 @@
         "currency": {
           "type": "string",
           "required": false,
-          "description": "ISO 4217 code for numeric prices. Default \"USD\". Never put a symbol in the data."
+          "description": "ISO 4217 code for numeric prices. Default \"USD\". Never put a symbol in the data. Whole prices print without cents ($1,890)."
         },
         "items": {
           "type": "Array<{ id: string; name: string; subtitle?: string; price?: number; image?: string; product_id?: string; rating?: number; actions?: EventAction | EventAction[]; learn_more?: EventAction | EventAction[]; [featureKey: string]: unknown }>",
@@ -2366,7 +2518,7 @@
           "description": "2 to 6 items. `price` is a number; feature values are keyed by feature `key`. With `product_id` the server fills name, price and image. Per item, `actions` fires on Choose and `learn_more` on Learn more."
         },
         "features": {
-          "type": "Array<{ key: string; label: string; section?: string; kind?: \"text\" | \"number\" | \"boolean\" | \"rating\" | \"icon\" | \"price\" | \"color\"; better?: \"higher\" | \"lower\"; unit?: string; icon?: \"battery\" | \"weight\" | \"display\" | \"cpu\" | \"memory\" | \"storage\" | \"camera\" | \"speed\" | \"price\" | \"ports\" | \"wifi\" | \"keyboard\" | \"audio\" | \"security\" | \"warranty\" | \"size\" | \"rating\" | \"support\"; highlight?: boolean }>",
+          "type": "Array<{ key: string; label: string; section?: string; kind?: \"text\" | \"number\" | \"boolean\" | \"rating\" | \"icon\" | \"price\" | \"color\"; better?: \"higher\" | \"lower\"; unit?: string; icon?: \"battery\" | \"weight\" | \"display\" | \"cpu\" | \"memory\" | \"storage\" | \"camera\" | \"speed\" | \"motor\" | \"power\" | \"price\" | \"ports\" | \"wifi\" | \"keyboard\" | \"audio\" | \"security\" | \"warranty\" | \"size\" | \"rating\" | \"support\"; highlight?: boolean }>",
           "required": false,
           "description": "Rows, grouped into section chips by `section`. `better` marks the best numeric cell. An `icon`-kind value is one of the `icon` words (or a list of them). `highlight` puts the row on the item card. Inferred from item keys when omitted."
         },
@@ -2393,7 +2545,7 @@
         "defaultView": {
           "type": "\"card\" | \"table\"",
           "required": false,
-          "description": "Detailed view below 720px until the visitor picks one. Default \"card\"; wider always shows the table."
+          "description": "View under the item cards below 720px until the visitor picks one. Default \"table\" (the cards above already list each item); \"card\" shows per-item cards. Wider always shows the table."
         },
         "showDiffToggle": {
           "type": "boolean",
@@ -2427,7 +2579,8 @@
         "rows": {
           "type": "Array<{ feature: string; [key: string]: unknown }>",
           "required": true,
-          "description": "Table rows. `feature` is the row label; remaining keys map to column keys."
+          "description": "Table rows. `feature` is the row label; remaining keys map to column keys.",
+          "data": true
         }
       }
     },
@@ -2713,7 +2866,8 @@
         "rows": {
           "type": "Array<Record<string, unknown>>",
           "required": true,
-          "description": "Row objects."
+          "description": "Row objects.",
+          "data": true
         },
         "value": {
           "type": "string | number | null",
@@ -2940,7 +3094,7 @@
     {
       "type": "definition-list",
       "category": "display",
-      "description": "Term/definition pairs — inline (term-on-left) or stacked. Use for glossaries and metadata.",
+      "description": "Term/definition pairs, inline (term on the left) or stacked. Use for glossaries and metadata.",
       "props": {
         "items": {
           "type": "Array<{ term: string; definition: string }>",
@@ -2957,7 +3111,7 @@
     {
       "type": "diff",
       "category": "display",
-      "description": "Text diff viewer — unified or split, with line/word/char granularity.",
+      "description": "Text diff viewer, unified or split, with line/word/char granularity.",
       "props": {
         "before": {
           "type": "string",
@@ -2988,6 +3142,16 @@
           "type": "string",
           "required": false,
           "description": "Header title."
+        },
+        "oldStart": {
+          "type": "number",
+          "required": false,
+          "description": "File line number of the first \"before\" line, for an excerpt. Default 1."
+        },
+        "newStart": {
+          "type": "number",
+          "required": false,
+          "description": "File line number of the first \"after\" line, for an excerpt. Default 1."
         }
       }
     },
@@ -3081,12 +3245,48 @@
           "required": false,
           "description": "Variable name for the current index. Default \"index\"."
         }
+      },
+      "pocket": {
+        "state": {
+          "users": [
+            {
+              "name": "Ada Lovelace"
+            },
+            {
+              "name": "Grace Hopper"
+            },
+            {
+              "name": "Alan Turing"
+            }
+          ]
+        },
+        "ui": {
+          "type": "flex",
+          "props": {
+            "direction": "column",
+            "gap": "8px"
+          },
+          "children": [
+            {
+              "type": "each",
+              "items": "{state.users}",
+              "children": [
+                {
+                  "type": "text",
+                  "props": {
+                    "text": "{item.name}"
+                  }
+                }
+              ]
+            }
+          ]
+        }
       }
     },
     {
       "type": "embed",
       "category": "media",
-      "description": "Sandboxed iframe escape hatch — embeds a remote https URL or an inline srcdoc document. The iframe sandbox is renderer-controlled; the spec cannot widen it. Frame runs at an opaque origin.",
+      "description": "Sandboxed iframe escape hatch: embeds a remote https URL or an inline srcdoc document. The iframe sandbox is renderer-controlled; the spec cannot widen it. Frame runs at an opaque origin.",
       "props": {
         "mode": {
           "type": "\"url\" | \"srcdoc\"",
@@ -3096,12 +3296,12 @@
         "url": {
           "type": "string",
           "required": false,
-          "description": "Remote page URL — used when mode=url. Must be https://."
+          "description": "Remote page URL, used when mode=url. Must be https://."
         },
         "srcdoc": {
           "type": "string",
           "required": false,
-          "description": "Inline HTML document — used when mode=srcdoc. Capped at 64KB."
+          "description": "Inline HTML document, used when mode=srcdoc. Capped at 64KB."
         },
         "title": {
           "type": "string",
@@ -3357,12 +3557,12 @@
         "kpis": {
           "type": "Array<{ id?: string; label: string; value: string | number; unit?: string; delta?: string; trend?: \"up\" | \"down\" | \"flat\"; compareLabel?: string; sparkline?: number[]; color?: string; icon?: string; sublabel?: string; status?: \"normal\" | \"success\" | \"warning\" | \"critical\"; target?: string | number; progress?: number; byKey?: Record<string, KpiOverride>; actions?: EventAction | EventAction[] }>",
           "required": false,
-          "description": "KPI tiles. `status` paints a left-edge band; `progress` (0-100) renders a thin progress bar (optionally with `target`). `byKey` swaps fields (value/delta/trend/sparkline/...) when activeDateRange / activeGranularity changes — keys may be the range, the granularity, or \"<range>|<granularity>\" (most specific wins). When `actions` (or `id` + a host `onkpiclick`) is set, the tile becomes clickable for drill-through."
+          "description": "KPI tiles. `status` paints a left-edge band; `progress` (0-100) renders a thin progress bar (optionally with `target`). `byKey` swaps fields (value/delta/trend/sparkline/...) when activeDateRange / activeGranularity changes. Keys may be the range, the granularity, or \"<range>|<granularity>\" (most specific wins). When `actions` (or `id` + a host `onkpiclick`) is set, the tile becomes clickable for drill-through."
         },
         "primaryChart": {
-          "type": "{ title?: string; type?: \"bar\" | \"line\" | \"area\" | \"pie\" | \"donut\" | \"radar\" | \"heatmap\"; data: DataPoint[] | Record<string, DataPoint[]>; height?: number; colors?: string[] }",
+          "type": "{ title?: string; type?: \"bar\" | \"line\" | \"area\" | \"pie\" | \"donut\" | \"radar\" | \"heatmap\"; data: DataPoint[] | Record<string, DataPoint[]>;height?: number; colors?: string[]; reference?: string | string[] }",
           "required": false,
-          "description": "Hero chart (left, 2/3 width when activity rail is present). `data` may be a flat array, or a record keyed by range/granularity/\"<range>|<granularity>\" — the component picks the most specific match for the active state."
+          "description": "Hero chart. `data` is an array or a record keyed by range, granularity or \"<range>|<granularity>\". `colors` is per series on many; one series wears one colour unless you give two or more. `reference` names series (a target pace, a plan) to draw muted and dashed."
         },
         "activity": {
           "type": "Array<{ id?: string; time: string; label: string; actor?: string; icon?: string; severity?: \"info\" | \"success\" | \"warning\" | \"destructive\"; category?: string; unread?: boolean; actions?: EventAction | EventAction[] }>",
@@ -3742,7 +3942,7 @@
         "action": {
           "type": "string",
           "required": false,
-          "description": "Native submit URL. When set, the form does a real browser POST/GET so it works with NO client JS — for static / prerendered hosts. When omitted, the form stays client-side (validate then on_submit)."
+          "description": "Native submit URL. When set, the form does a real browser POST/GET so it works with NO client JS (for static / prerendered hosts). When omitted, the form stays client-side (validate then on_submit)."
         },
         "method": {
           "type": "\"post\" | \"get\"",
@@ -3765,7 +3965,7 @@
       "pockets": [
         {
           "name": "native-post-static",
-          "description": "Native browser POST — works with no client JS. For static / prerendered hosts (paw-sites). The form submits straight to `action`; inputs serialize by their `name`.",
+          "description": "Native browser POST that works with no client JS. For static / prerendered hosts (paw-sites). The form submits straight to `action`; inputs serialize by their `name`.",
           "state": {},
           "ui": {
             "type": "form",
@@ -3985,7 +4185,7 @@
         "progress": {
           "type": "number",
           "required": false,
-          "description": "0–100. Shown next to the title."
+          "description": "0 to 100. Shown next to the title."
         },
         "valid": {
           "type": "boolean",
@@ -4391,6 +4591,11 @@
           "type": "string",
           "required": true,
           "description": "Expression evaluated for truthiness, e.g. \"{state.isAdmin}\"."
+        },
+        "else_children": {
+          "type": "UINode[]",
+          "required": false,
+          "description": "Rendered instead of `children` when `condition` is falsy."
         }
       }
     },
@@ -4642,7 +4847,7 @@
         "currency": {
           "type": "string",
           "required": false,
-          "description": "Currency symbol prepended to numeric amounts. Default \"$\"."
+          "description": "Currency symbol prepended to amounts, or an ISO code (\"USD\") formatted as money. Default \"$\"."
         },
         "lines": {
           "type": "Array<{ id?: string | number; description: string; quantity?: number; unitPrice?: number; total?: number; note?: string }>",
@@ -4652,7 +4857,7 @@
         "summary": {
           "type": "Array<{ label: string; value: number; isNegative?: boolean }>",
           "required": false,
-          "description": "Tax / discount / shipping rows shown after subtotal."
+          "description": "Tax / discount / shipping rows shown after subtotal. `amount` is accepted for `value`; a non-number shows a dash."
         },
         "subtotal": {
           "type": "number",
@@ -4694,12 +4899,13 @@
         "lines": {
           "type": "Array<{ id?: string | number; description: string; quantity?: number; unitPrice?: number; total?: number; note?: string }>",
           "required": true,
-          "description": "Line items."
+          "description": "Line items.",
+          "data": true
         },
         "currency": {
           "type": "string",
           "required": false,
-          "description": "Currency symbol. Default \"$\"."
+          "description": "Currency symbol (\"$\") or ISO code (\"USD\"). Default \"$\"."
         },
         "summary": {
           "type": "Array<{ label: string; value: number; isNegative?: boolean }>",
@@ -4709,12 +4915,14 @@
         "subtotal": {
           "type": "number",
           "required": false,
-          "description": "Override auto-computed subtotal."
+          "description": "Override auto-computed subtotal.",
+          "data": true
         },
         "total": {
           "type": "number",
           "required": false,
-          "description": "Override auto-computed grand total."
+          "description": "Override auto-computed grand total.",
+          "data": true
         },
         "showRowTotals": {
           "type": "boolean",
@@ -4751,7 +4959,8 @@
         "budget": {
           "type": "number",
           "required": false,
-          "description": "Trip budget. Planned spend (stop and leg costs) is shown against it: warning past 90%, alert when over."
+          "description": "Trip budget. Planned spend (stop and leg costs) is shown against it: warning past 90%, alert when over.",
+          "data": true
         },
         "route": {
           "type": "string[]",
@@ -4761,7 +4970,8 @@
         "days": {
           "type": "Array<{ id?: string; label: string; when?: string; theme?: string; stay?: string; stops: Array<{ id?: string; time?: string; title: string; kind: \"sight\" | \"food\" | \"stay\" | \"transit\" | \"activity\" | \"shop\" | \"nature\" | \"nightlife\" | \"flight\"; place?: string; cost?: number; minutes?: number; must?: boolean; done?: boolean; image?: string }> }>",
           "required": true,
-          "description": "The days. `when` is a display label (\"Fri 16 Oct\"); `time` shows as written (\"08:30\"). `must` tags a must-see. Two-way bind with `bind: \"{state.days}\"` so ticking a stop or adding one persists."
+          "description": "The days. `when` is a display label (\"Fri 16 Oct\"); `time` shows as written (\"08:30\"). `must` tags a must-see. Two-way bind with `bind: \"{state.days}\"` so ticking a stop or adding one persists.",
+          "data": true
         },
         "open": {
           "type": "number",
@@ -4809,22 +5019,26 @@
         "initial": {
           "type": "number",
           "required": false,
-          "description": "Starting balance. Default 0. For a lump sum with no deposits, set this and deposit: 0."
+          "description": "Starting balance. Default 0. For a lump sum with no deposits, set this and deposit: 0.",
+          "data": true
         },
         "deposit": {
           "type": "number",
           "required": true,
-          "description": "Added at the end of every month. Write 0 for none. Two-way bind with `bind: \"{state.deposit}\"`."
+          "description": "Added at the end of every month. Write 0 for none. Two-way bind with `bind: \"{state.deposit}\"`.",
+          "data": true
         },
         "rate": {
           "type": "number",
           "required": true,
-          "description": "Interest in percent a year: 5 means 5%, never 0.05. Capped at 100."
+          "description": "Interest in percent a year: 5 means 5%, never 0.05. Capped at 100.",
+          "data": true
         },
         "years": {
           "type": "number",
           "required": true,
-          "description": "How long. Fractions round to whole months. Capped at 100."
+          "description": "How long. Fractions round to whole months. Capped at 100.",
+          "data": true
         },
         "compounding": {
           "type": "\"monthly\" | \"yearly\"",
@@ -4834,12 +5048,14 @@
         "goal": {
           "type": "number",
           "required": false,
-          "description": "Target balance: draws a goal line and says the year it is reached."
+          "description": "Target balance: draws a goal line and says the year it is reached.",
+          "data": true
         },
         "inflation": {
           "type": "number",
           "required": false,
-          "description": "Percent a year; adds the final balance in today's money."
+          "description": "Percent a year; adds the final balance in today's money.",
+          "data": true
         }
       },
       "events": {
@@ -5049,7 +5265,8 @@
         "rows": {
           "type": "Array<{ key: string; value: string }>",
           "required": true,
-          "description": "Key/value pairs."
+          "description": "Key/value pairs.",
+          "data": true
         },
         "columns": {
           "type": "number",
@@ -5220,12 +5437,12 @@
         "center": {
           "type": "[number, number]",
           "required": false,
-          "description": "Initial map center as [lat, lng]. Default [0, 0]."
+          "description": "Initial map center as [lat, lng] (a {lat, lng} object also works, as does any point below). Default [0, 0]."
         },
         "zoom": {
           "type": "number",
           "required": false,
-          "description": "Initial zoom level (0–20). Default 2."
+          "description": "Initial zoom level (0 to 20). Default 2."
         },
         "minZoom": {
           "type": "number",
@@ -5250,7 +5467,7 @@
         "tiles": {
           "type": "\"osm\" | \"carto-voyager\" | \"carto-light\" | \"carto-dark\" | \"osm-hot\" | \"custom\"",
           "required": false,
-          "description": "Tile provider preset. Default \"carto-voyager\". All presets are key-free OpenStreetMap-derived tiles. Use \"custom\" with `tileUrl`."
+          "description": "Tile provider preset. Default \"carto-voyager\", or what the page set with setMapDefaultTiles. All presets are key-free OpenStreetMap-derived tiles. Use \"custom\" with `tileUrl`."
         },
         "tileUrl": {
           "type": "string",
@@ -5265,12 +5482,17 @@
         "markers": {
           "type": "Array<{ id: string; lat: number; lng: number; label?: string; popup?: string; icon?: string; color?: string; actions?: EventAction | EventAction[] }>",
           "required": false,
-          "description": "Static markers. `actions` runs on click (route through ripple emit/api/navigate)."
+          "description": "Static markers. A marker without `id` gets its index. `actions` runs on click (route through ripple emit/api/navigate)."
         },
         "paths": {
           "type": "Array<{ id: string; points: [number, number][]; color?: string; weight?: number; dashed?: boolean; animate?: boolean; label?: string }>",
           "required": false,
           "description": "Polyline paths. Set `animate: true` for a flowing dashed-route effect (great for itineraries)."
+        },
+        "route": {
+          "type": "[number, number][]",
+          "required": false,
+          "description": "One path as a bare point list, drawn after `paths`."
         },
         "polygons": {
           "type": "Array<{ id: string; points: [number, number][]; color?: string; fillColor?: string; fillOpacity?: number; weight?: number; label?: string }>",
@@ -5280,7 +5502,7 @@
         "trackers": {
           "type": "Array<{ id: string; lat: number; lng: number; heading?: number; label?: string; color?: string; icon?: string; trail?: [number, number][]; follow?: boolean }>",
           "required": false,
-          "description": "Live moving targets — vehicle, courier, ship, person. Position changes interpolate smoothly. `heading` rotates the directional arrow. `trail` draws recent positions. `follow: true` keeps the camera on the target."
+          "description": "Live moving targets: vehicle, courier, ship, person. Position changes interpolate smoothly. `heading` rotates the directional arrow. `trail` draws recent positions. `follow: true` keeps the camera on the target."
         },
         "interactive": {
           "type": "boolean",
@@ -5409,7 +5631,7 @@
     {
       "type": "master-detail",
       "category": "layout",
-      "description": "List left, detail right; selected item flows into the detail spec. Master items support only valueKey/labelKey/descriptionKey/badgeKey — for bespoke list cards, hand-roll a grid.",
+      "description": "List left, detail right; selected item flows into the detail spec. Master items support only valueKey/labelKey/descriptionKey/badgeKey. For bespoke list cards, hand-roll a grid.",
       "props": {
         "items": {
           "type": "Array<Record<string, unknown>>",
@@ -5556,7 +5778,8 @@
         "days": {
           "type": "Array<{ id?: string; day: string; meals: Array<{ id?: string; slot: \"breakfast\" | \"lunch\" | \"dinner\" | \"snack\"; recipe: string }> }>",
           "required": true,
-          "description": "`day` is a display label (\"Mon\"). `recipe` is a recipe id from `recipes`. Swapping a meal writes a new days array."
+          "description": "`day` is a display label (\"Mon\"). `recipe` is a recipe id from `recipes`. Swapping a meal writes a new days array.",
+          "data": true
         }
       }
     },
@@ -5615,12 +5838,14 @@
         "value": {
           "type": "string | number",
           "required": true,
-          "description": "The number or formatted string to display."
+          "description": "The number or formatted string to display.",
+          "data": true
         },
         "trend": {
           "type": "string",
           "required": false,
-          "description": "Change badge text, e.g. \"+12%\" or \"-3\". Leading +/- drives badge color (green/red)."
+          "description": "Change badge text, e.g. \"+12%\" or \"-3\". Leading +/- drives badge color (green/red).",
+          "data": true
         },
         "description": {
           "type": "string",
@@ -5792,7 +6017,7 @@
         "shadowIntensity": {
           "type": "number",
           "required": false,
-          "description": "Strength of the contact shadow under the model (0 to 1)."
+          "description": "Strength of the contact shadow under the model (0 to 1). Default 1."
         }
       },
       "events": {
@@ -6334,10 +6559,25 @@
           "required": false,
           "description": "Host: the confirmed booking. Shows the confirmation and no more actions."
         },
+        "contact": {
+          "type": "boolean",
+          "required": false,
+          "description": "Host: false skips the contact details stage (no name, email or phone); review takes the optional note and the button reads \"Send to chat\". Default true."
+        },
+        "sent": {
+          "type": "{ text: string }",
+          "required": false,
+          "description": "Host: the request went to the chat as a message instead of a store (nothing is booked). Shows \"Sent to chat\" with the text and no more actions."
+        },
         "selection": {
           "type": "{ service_id?: string; start?: string; party?: number; customer?: { name?: string; email?: string; phone?: string }; notes?: string }",
           "required": false,
           "description": "Bindable: the request in progress."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "A soft pop when Book is pressed. Default true; false mutes this widget."
         }
       },
       "events": {
@@ -6439,9 +6679,9 @@
           "description": "The answer up front, at most 140 chars. Omit it and the total time leads."
         },
         "exercises": {
-          "type": "Array<{ id?: string; name: string; cue?: string; kind?: \"cardio\" | \"strength\" | \"core\" | \"mobility\" | \"rest\" }>",
+          "type": "Array<{ id?: string; name: string; cue?: string; kind?: \"cardio\" | \"strength\" | \"core\" | \"mobility\" | \"rest\"; figure?: string }>",
           "required": true,
-          "description": "In order, one round. `cue` is a one-line form tip. A \"rest\" kind is a rest block (restSec long) with no extra rest beside it."
+          "description": "In order, one round. `cue` is a one-line form tip. A \"rest\" kind is a rest block (restSec long) with no extra rest beside it. Each row shows an animated figure matched from `name`; `figure` (an id like \"cat-cow\") overrides the match."
         },
         "workSec": {
           "type": "number",
@@ -6457,6 +6697,11 @@
           "type": "number",
           "required": false,
           "description": "Times through the list. Default 1. Total time = rounds × exercises × workSec plus the rests."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "Quiet cues: a tick in the last 3 seconds of each interval, a chime between intervals and one when done. Default true; false mutes this widget."
         }
       }
     },
@@ -6473,7 +6718,8 @@
         "habits": {
           "type": "Array<{ id: string; name: string; icon?: \"read\" | \"run\" | \"walk\" | \"bike\" | \"gym\" | \"stretch\" | \"water\" | \"sleep\" | \"meditate\" | \"journal\" | \"code\" | \"music\" | \"veg\" | \"no-sugar\" | \"vitamins\"; target_per_week: number }>",
           "required": true,
-          "description": "1 to 8 habits. target_per_week is 1 to 7 (7 = every day). Any other icon value shows a plain dot."
+          "description": "1 to 8 habits. target_per_week is 1 to 7 (7 = every day). Any other icon value shows a plain dot.",
+          "data": true
         },
         "week_start": {
           "type": "\"mon\" | \"sun\"",
@@ -6489,6 +6735,11 @@
           "type": "Record<string, number[]>",
           "required": false,
           "description": "Demo ticks per habit id as day offsets back from today (0 = today, 1 = yesterday). Leave out for a fresh tracker."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "A soft pop when a day is ticked. Default true; false mutes this widget."
         }
       }
     },
@@ -6544,6 +6795,11 @@
           "type": "string",
           "required": false,
           "description": "The writing line prompt. Default \"Write a note…\"."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "A very quiet pop when a note is saved. Default true; false mutes this widget."
         }
       }
     },
@@ -6698,6 +6954,11 @@
           "type": "{ phase: \"focus\" | \"short\" | \"long\"; remaining_s: number; running: boolean; rounds_done: number; task: string; log: string[] }",
           "required": false,
           "description": "Two-way bind with `bind: \"{state.focus}\"`. Written on start, pause, reset, skip, phase end and edits (not every second), so remaining_s is as of the last event. `log` holds the ISO time each focus round finished."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "A soft chime when a phase ends. Default true; false mutes this widget."
         }
       }
     },
@@ -6734,6 +6995,641 @@
       }
     },
     {
+      "type": "iso-scene",
+      "category": "composite",
+      "description": "Live isometric drawing of a machine from a parts list that spins, slides, swings, pulses or flows, with sliders, readouts and labels. Aim for 12-30 parts; detail is added automatically.",
+      "props": {
+        "title": {
+          "type": "string",
+          "required": false,
+          "description": "Up to 80 characters."
+        },
+        "caption": {
+          "type": "string",
+          "required": false,
+          "description": "One plain sentence under the drawing. Up to 200 characters."
+        },
+        "look": {
+          "type": "\"soft\" | \"color\"",
+          "required": false,
+          "description": "soft (default): Blueprint look, blue-grey parts in four soft tones, navy ink (white in dark), flows in brand blue, colors as faint tints. color: saturated fills."
+        },
+        "detail": {
+          "type": "\"auto\" | \"none\"",
+          "required": false,
+          "description": "auto (default) adds small parts that belong to yours: feet, hubs, bolts, spider arms, pins, collars, clamps. none draws only what you wrote."
+        },
+        "scale": {
+          "type": "number",
+          "required": false,
+          "description": "Zoom, 0.4 to 2.5. Default 1 (fits the drawing)."
+        },
+        "params": {
+          "type": "Array<{ key: string; label: string; min: number; max: number; step?: number; unit?: string; value: number }>",
+          "required": false,
+          "description": "Up to 6 sliders. `key` is an identifier that speeds and readouts can use, e.g. \"cadence / 60\"."
+        },
+        "parts": {
+          "type": "Array<{ id: string; kind: \"slab\" | \"box\" | \"cylinder\" | \"disc\" | \"gear\" | \"tube\" | \"sphere\" | \"cone\" | \"rod\" | \"arrow\" | \"plate\" | \"chain\"; at?: [x, y, z]; w?: number; d?: number; h?: number; r?: number; teeth?: number; axis?: \"x\" | \"y\" | \"z\"; path?: [x, y, z][]; from?: [x, y, z]; to?: [x, y, z]; around?: [string, string]; label?: string; detail?: \"knob\" | \"none\"; ghost?: boolean; texture?: \"guilloche\" | \"ribs\"; color?: \"neutral\" | \"accent\" | \"red\" | \"blue\" | \"green\" | \"amber\" | \"metal\"; on?: string }>",
+          "required": true,
+          "description": "Up to 150; aim for 12-30. Units are free (keep the scene within about 300 across); z is up. `at` is the centre. slab/box/plate: w, d, h (slab r rounds corners, plate shows `label`, `texture` decorates a plate or slab top). cylinder/disc/gear/cone: r, h along `axis` (default z). tube: `path` points, r. rod and arrow: from, to. chain: `around` two gear ids; it wraps both and moves with the one that spins. `on`: id of a parent part this one moves with. `ghost: true` draws a housing see-through; a solid that holds a moving part is see-through unless `ghost: false`. `detail: \"knob\"` knurls a knob, \"none\" skips added detail. Unknown kinds are skipped."
+        },
+        "motions": {
+          "type": "Array<{ part: string; kind: \"spin\" | \"slide\" | \"swing\" | \"pulse\" | \"flow\" | \"link\"; axis?: \"x\" | \"y\" | \"z\"; speed?: number | string; range?: number | [number, number]; phase?: number; from?: string; to?: string; driven?: string; throw?: number }>",
+          "required": false,
+          "description": "Up to 20. speed is turns or cycles per second, a number or an expression over params written without braces, e.g. \"cadence / 60\". range: swing degrees (default 25), slide distance (8), pulse growth 0..0.6 (0.12); or [min, max] to move between the two. phase 0..1. flow animates tubes, rods and arrows. link: a rod whose ends ride the parts `from` and `to` (crank pin to piston). A slide with `driven`: id of a spinning crank, and `throw`: crank radius, follows that crank instead of its own speed."
+        },
+        "readouts": {
+          "type": "Array<{ label: string; value: string | number; unit?: string; decimals?: number }>",
+          "required": false,
+          "description": "Up to 4 live numbers, each an expression over params without braces, e.g. \"rate * 70 / 1000\"."
+        },
+        "labels": {
+          "type": "Array<{ part?: string; at?: [x, y, z]; label: string; note?: string }>",
+          "required": false,
+          "description": "Up to 10 numbered pins on a part (they follow it) or a point, listed with their notes under the drawing."
+        },
+        "value": {
+          "type": "Record<string, number>",
+          "required": false,
+          "description": "Two-way bind with `bind: \"{state.scene}\"`: the param values, written when a slider moves."
+        }
+      },
+      "pockets": [
+        {
+          "name": "Bicycle drivetrain on a stand",
+          "description": "About 15 parts: frame tubes, chainring, cog, a chain around both, cranks and pedals.",
+          "state": {
+            "bike": {}
+          },
+          "ui": {
+            "type": "iso-scene",
+            "bind": "state.bike",
+            "props": {
+              "title": "Bicycle drivetrain",
+              "params": [
+                {
+                  "key": "cadence",
+                  "label": "Cadence",
+                  "min": 30,
+                  "max": 120,
+                  "step": 5,
+                  "unit": "rpm",
+                  "value": 80
+                }
+              ],
+              "parts": [
+                {
+                  "id": "base",
+                  "kind": "slab",
+                  "at": [
+                    50,
+                    0,
+                    -16
+                  ],
+                  "w": 200,
+                  "d": 64,
+                  "h": 4,
+                  "r": 6
+                },
+                {
+                  "id": "stand",
+                  "kind": "box",
+                  "at": [
+                    0,
+                    -12,
+                    2
+                  ],
+                  "w": 8,
+                  "d": 8,
+                  "h": 32,
+                  "color": "metal"
+                },
+                {
+                  "id": "chainstay",
+                  "kind": "rod",
+                  "from": [
+                    0,
+                    -9,
+                    30
+                  ],
+                  "to": [
+                    110,
+                    -9,
+                    30
+                  ],
+                  "r": 2.6,
+                  "color": "accent"
+                },
+                {
+                  "id": "seat-tube",
+                  "kind": "rod",
+                  "from": [
+                    0,
+                    -9,
+                    30
+                  ],
+                  "to": [
+                    -14,
+                    -9,
+                    92
+                  ],
+                  "r": 2.6,
+                  "color": "accent"
+                },
+                {
+                  "id": "seat-stay",
+                  "kind": "rod",
+                  "from": [
+                    110,
+                    -9,
+                    30
+                  ],
+                  "to": [
+                    -12,
+                    -9,
+                    84
+                  ],
+                  "r": 2.2,
+                  "color": "accent"
+                },
+                {
+                  "id": "down-tube",
+                  "kind": "rod",
+                  "from": [
+                    0,
+                    -9,
+                    30
+                  ],
+                  "to": [
+                    70,
+                    -9,
+                    96
+                  ],
+                  "r": 2.8,
+                  "color": "accent"
+                },
+                {
+                  "id": "ring",
+                  "kind": "gear",
+                  "at": [
+                    0,
+                    0,
+                    30
+                  ],
+                  "r": 22,
+                  "h": 3,
+                  "teeth": 40,
+                  "axis": "y",
+                  "color": "metal"
+                },
+                {
+                  "id": "cog",
+                  "kind": "gear",
+                  "at": [
+                    110,
+                    0,
+                    30
+                  ],
+                  "r": 9,
+                  "h": 3,
+                  "teeth": 16,
+                  "axis": "y",
+                  "color": "metal"
+                },
+                {
+                  "id": "chain",
+                  "kind": "chain",
+                  "around": [
+                    "ring",
+                    "cog"
+                  ],
+                  "r": 1.4
+                },
+                {
+                  "id": "crank",
+                  "kind": "rod",
+                  "from": [
+                    0,
+                    8,
+                    30
+                  ],
+                  "to": [
+                    0,
+                    8,
+                    -2
+                  ],
+                  "r": 2.4,
+                  "color": "metal",
+                  "on": "ring"
+                },
+                {
+                  "id": "pedal",
+                  "kind": "box",
+                  "at": [
+                    0,
+                    14,
+                    -2
+                  ],
+                  "w": 10,
+                  "d": 12,
+                  "h": 3,
+                  "on": "crank"
+                },
+                {
+                  "id": "crank-back",
+                  "kind": "rod",
+                  "from": [
+                    0,
+                    -14,
+                    30
+                  ],
+                  "to": [
+                    0,
+                    -14,
+                    62
+                  ],
+                  "r": 2.4,
+                  "color": "metal",
+                  "on": "ring"
+                },
+                {
+                  "id": "pedal-back",
+                  "kind": "box",
+                  "at": [
+                    0,
+                    -20,
+                    62
+                  ],
+                  "w": 10,
+                  "d": 12,
+                  "h": 3,
+                  "on": "crank-back"
+                },
+                {
+                  "id": "derailleur",
+                  "kind": "box",
+                  "at": [
+                    112,
+                    6,
+                    12
+                  ],
+                  "w": 8,
+                  "d": 4,
+                  "h": 12,
+                  "color": "metal"
+                },
+                {
+                  "id": "axle",
+                  "kind": "cylinder",
+                  "at": [
+                    110,
+                    -4,
+                    30
+                  ],
+                  "r": 2,
+                  "h": 22,
+                  "axis": "y",
+                  "on": "cog"
+                }
+              ],
+              "motions": [
+                {
+                  "part": "ring",
+                  "kind": "spin",
+                  "axis": "y",
+                  "speed": "cadence / 60"
+                },
+                {
+                  "part": "cog",
+                  "kind": "spin",
+                  "axis": "y",
+                  "speed": "cadence / 60 * 2.5"
+                }
+              ],
+              "readouts": [
+                {
+                  "label": "Road speed",
+                  "value": "cadence * 2.1 * 2.5 * 60 / 1000",
+                  "unit": "km/h",
+                  "decimals": 1
+                }
+              ],
+              "labels": [
+                {
+                  "part": "ring",
+                  "label": "Chainring",
+                  "note": "40 teeth"
+                },
+                {
+                  "part": "cog",
+                  "label": "Rear cog",
+                  "note": "16 teeth, 2.5 turns per pedal turn"
+                },
+                {
+                  "part": "chain",
+                  "label": "Chain"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Hand water pump",
+          "description": "About 15 parts: a see-through barrel, a piston on a link rod from the handle, check valve, spout and bucket.",
+          "state": {
+            "pump": {}
+          },
+          "ui": {
+            "type": "iso-scene",
+            "bind": "state.pump",
+            "props": {
+              "title": "Hand water pump",
+              "params": [
+                {
+                  "key": "rate",
+                  "label": "Strokes",
+                  "min": 10,
+                  "max": 60,
+                  "step": 5,
+                  "unit": "/min",
+                  "value": 30
+                }
+              ],
+              "parts": [
+                {
+                  "id": "base",
+                  "kind": "slab",
+                  "at": [
+                    10,
+                    0,
+                    -2
+                  ],
+                  "w": 130,
+                  "d": 70,
+                  "h": 4,
+                  "r": 6
+                },
+                {
+                  "id": "pedestal",
+                  "kind": "box",
+                  "at": [
+                    0,
+                    0,
+                    6
+                  ],
+                  "w": 34,
+                  "d": 34,
+                  "h": 12,
+                  "color": "metal"
+                },
+                {
+                  "id": "barrel",
+                  "kind": "cylinder",
+                  "at": [
+                    0,
+                    0,
+                    40
+                  ],
+                  "r": 14,
+                  "h": 56,
+                  "ghost": true
+                },
+                {
+                  "id": "valve",
+                  "kind": "disc",
+                  "at": [
+                    0,
+                    0,
+                    16
+                  ],
+                  "r": 10,
+                  "h": 2
+                },
+                {
+                  "id": "piston",
+                  "kind": "cylinder",
+                  "at": [
+                    0,
+                    0,
+                    40
+                  ],
+                  "r": 12,
+                  "h": 8,
+                  "color": "amber"
+                },
+                {
+                  "id": "cap",
+                  "kind": "disc",
+                  "at": [
+                    0,
+                    0,
+                    69.5
+                  ],
+                  "r": 16,
+                  "h": 3,
+                  "color": "metal"
+                },
+                {
+                  "id": "post",
+                  "kind": "box",
+                  "at": [
+                    -28,
+                    0,
+                    76
+                  ],
+                  "w": 5,
+                  "d": 5,
+                  "h": 10,
+                  "color": "metal"
+                },
+                {
+                  "id": "handle",
+                  "kind": "rod",
+                  "from": [
+                    -28,
+                    0,
+                    82
+                  ],
+                  "to": [
+                    -88,
+                    0,
+                    96
+                  ],
+                  "r": 2.4,
+                  "color": "metal"
+                },
+                {
+                  "id": "nose",
+                  "kind": "rod",
+                  "from": [
+                    -28,
+                    0,
+                    82
+                  ],
+                  "to": [
+                    0,
+                    0,
+                    82
+                  ],
+                  "r": 2.4,
+                  "color": "metal",
+                  "on": "handle"
+                },
+                {
+                  "id": "grip",
+                  "kind": "cylinder",
+                  "at": [
+                    -88,
+                    0,
+                    96
+                  ],
+                  "r": 3,
+                  "h": 12,
+                  "axis": "y",
+                  "detail": "knob",
+                  "on": "handle"
+                },
+                {
+                  "id": "pump-rod",
+                  "kind": "rod",
+                  "from": [
+                    0,
+                    0,
+                    44
+                  ],
+                  "to": [
+                    0,
+                    0,
+                    82
+                  ],
+                  "r": 1.6
+                },
+                {
+                  "id": "spout",
+                  "kind": "tube",
+                  "path": [
+                    [
+                      14,
+                      0,
+                      58
+                    ],
+                    [
+                      36,
+                      0,
+                      58
+                    ],
+                    [
+                      42,
+                      0,
+                      50
+                    ]
+                  ],
+                  "r": 3.5,
+                  "color": "blue"
+                },
+                {
+                  "id": "water",
+                  "kind": "arrow",
+                  "from": [
+                    42,
+                    0,
+                    46
+                  ],
+                  "to": [
+                    44,
+                    0,
+                    24
+                  ],
+                  "color": "blue"
+                },
+                {
+                  "id": "bucket",
+                  "kind": "cylinder",
+                  "at": [
+                    46,
+                    0,
+                    10
+                  ],
+                  "r": 11,
+                  "h": 20,
+                  "color": "blue"
+                }
+              ],
+              "motions": [
+                {
+                  "part": "handle",
+                  "kind": "swing",
+                  "axis": "y",
+                  "range": 12,
+                  "speed": "rate / 60"
+                },
+                {
+                  "part": "piston",
+                  "kind": "slide",
+                  "axis": "z",
+                  "range": [
+                    -8,
+                    8
+                  ],
+                  "speed": "rate / 60",
+                  "phase": 0.5
+                },
+                {
+                  "part": "pump-rod",
+                  "kind": "link",
+                  "from": "piston",
+                  "to": "nose"
+                },
+                {
+                  "part": "valve",
+                  "kind": "swing",
+                  "axis": "x",
+                  "range": 18,
+                  "speed": "rate / 60"
+                },
+                {
+                  "part": "spout",
+                  "kind": "flow",
+                  "speed": "rate / 60"
+                },
+                {
+                  "part": "water",
+                  "kind": "flow",
+                  "speed": "rate / 60"
+                }
+              ],
+              "readouts": [
+                {
+                  "label": "Water per minute",
+                  "value": "rate * 0.4",
+                  "unit": "L",
+                  "decimals": 1
+                }
+              ],
+              "labels": [
+                {
+                  "part": "handle",
+                  "label": "Handle",
+                  "note": "push down to lift the piston"
+                },
+                {
+                  "part": "piston",
+                  "label": "Piston",
+                  "note": "lifts water up the barrel"
+                },
+                {
+                  "part": "valve",
+                  "label": "Check valve",
+                  "note": "keeps water from falling back"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
       "type": "figure",
       "category": "composite",
       "description": "A hand-built live isometric figure, with sliders, readouts and numbered labels. Catalog ids: heart, bike-gears, rocket-engine, ion-thruster, tokamak, fission-reactor, particle-collider. Bind value.",
@@ -6762,63 +7658,6 @@
           "type": "Record<string, number>",
           "required": false,
           "description": "Two-way bind with `bind: \"{state.figure}\"`: the slider values, written when one moves."
-        }
-      }
-    },
-    {
-      "type": "iso-scene",
-      "category": "composite",
-      "description": "Live isometric drawing of a machine or system from a parts list: gears, tubes, slabs that spin, slide, swing, pulse or flow, with param sliders, readouts and numbered labels. Bind value.",
-      "props": {
-        "title": {
-          "type": "string",
-          "required": false,
-          "description": "Up to 80 characters."
-        },
-        "caption": {
-          "type": "string",
-          "required": false,
-          "description": "One plain sentence under the drawing. Up to 200 characters."
-        },
-        "look": {
-          "type": "\"soft\" | \"color\"",
-          "required": false,
-          "description": "soft (default): near-white parts in four soft tones, colors as faint tints. color: saturated fills."
-        },
-        "scale": {
-          "type": "number",
-          "required": false,
-          "description": "Zoom, 0.4 to 2.5. Default 1 (fits the drawing)."
-        },
-        "params": {
-          "type": "Array<{ key: string; label: string; min: number; max: number; step?: number; unit?: string; value: number }>",
-          "required": false,
-          "description": "Up to 6 sliders. `key` is an identifier that speeds and readouts can use, e.g. \"cadence / 60\"."
-        },
-        "parts": {
-          "type": "Array<{ id: string; kind: \"slab\" | \"box\" | \"cylinder\" | \"disc\" | \"gear\" | \"tube\" | \"sphere\" | \"cone\" | \"rod\" | \"arrow\" | \"plate\"; at?: [x, y, z]; w?: number; d?: number; h?: number; r?: number; teeth?: number; axis?: \"x\" | \"y\" | \"z\"; path?: [x, y, z][]; from?: [x, y, z]; to?: [x, y, z]; label?: string; detail?: \"knurl\"; texture?: \"guilloche\" | \"ribs\"; color?: \"neutral\" | \"accent\" | \"red\" | \"blue\" | \"green\" | \"amber\" | \"metal\"; on?: string }>",
-          "required": true,
-          "description": "Up to 150. Units are free (keep the scene within about 300 across); z is up. `at` is the centre. slab/box/plate: w, d, h (slab r rounds corners, plate shows `label`, `texture` decorates a plate or slab top). `detail: \"knurl\"` ribs a knob. cylinder/disc/gear/cone: r, h along `axis` (default z). tube: `path` points, r. rod and arrow: from, to. `on`: id of a parent part this one moves with. Unknown kinds are skipped."
-        },
-        "motions": {
-          "type": "Array<{ part: string; kind: \"spin\" | \"slide\" | \"swing\" | \"pulse\" | \"flow\"; axis?: \"x\" | \"y\" | \"z\"; speed: number | string; range?: number; phase?: number }>",
-          "required": false,
-          "description": "Up to 20. speed is turns or cycles per second, a number or an expression over params written without braces, e.g. \"cadence / 60\". range: swing degrees (default 25), slide distance (8), pulse growth 0..0.6 (0.12). phase 0..1. flow animates tubes, rods and arrows."
-        },
-        "readouts": {
-          "type": "Array<{ label: string; value: string | number; unit?: string; decimals?: number }>",
-          "required": false,
-          "description": "Up to 4 live numbers, each an expression over params without braces, e.g. \"rate * 70 / 1000\"."
-        },
-        "labels": {
-          "type": "Array<{ part?: string; at?: [x, y, z]; label: string; note?: string }>",
-          "required": false,
-          "description": "Up to 10 numbered pins on a part (they follow it) or a point, listed with their notes under the drawing."
-        },
-        "value": {
-          "type": "Record<string, number>",
-          "required": false,
-          "description": "Two-way bind with `bind: \"{state.scene}\"`: the param values, written when a slider moves."
         }
       }
     },
@@ -6900,6 +7739,11 @@
           "type": "{ guesses: string[]; status: \"playing\" | \"won\" | \"lost\"; hint_used: boolean }",
           "required": false,
           "description": "The game so far, written by the widget on every guess and hint. Bind with `bind: \"{state.game}\"` to read it elsewhere; the widget never reads it back."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "A short chime when the word is solved. Default true; false mutes this widget."
         }
       },
       "events": {
@@ -6944,6 +7788,11 @@
           "type": "{ index: number; answers: (number | null)[]; score: number; done: boolean }",
           "required": false,
           "description": "Progress, written by the widget: the current question, the picked choice per answered question (null = ran out of time), the score and whether every question is answered. Bind with `bind: \"{state.quiz}\"`."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "Quiet cues for a right or wrong answer and a finished quiz. Default true; false mutes this widget."
         }
       },
       "events": {
@@ -6983,6 +7832,11 @@
           "type": "{ moves: number; matched: string[]; completed: boolean; seconds: number }",
           "required": false,
           "description": "The game so far, written by the widget on each move. `matched` lists pair ids. Bind with `bind: \"{state.game}\"` to show it elsewhere."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "Quiet cues for a pair found and a game won. Default true; false mutes this widget."
         }
       },
       "events": {
@@ -7032,6 +7886,11 @@
           "type": "{ board: string[]; turn: \"player\" | \"computer\" | null; result: \"player\" | \"computer\" | \"draw\" | null; series: { player: number; computer: number; draws: number } }",
           "required": false,
           "description": "The game so far, written by the widget on every move. `board` is row-major (\"\" empty). Bind with `bind: \"{state.game}\"` to show it elsewhere."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "A short chime when the player wins a game. Default true; false mutes this widget."
         }
       },
       "events": {
@@ -7055,12 +7914,19 @@
         "start": {
           "type": "string",
           "required": false,
-          "description": "Start time \"HH:MM\" (24 h). Without it items show offsets like +0:15."
+          "description": "Start time \"HH:MM\" (24 h). Without it items show offsets like +0:15.",
+          "data": true
         },
         "items": {
           "type": "Array<{ id?: string; title: string; owner?: string; minutes: number; notes?: string; done?: boolean }>",
           "required": true,
-          "description": "1 to 30 items in running order. minutes 1 to 240. Keep notes to one short line."
+          "description": "1 to 30 items in running order. minutes 1 to 240. Keep notes to one short line.",
+          "data": true
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "A soft chime when the running item's time is up. Default true; false mutes this widget."
         }
       }
     },
@@ -7092,7 +7958,8 @@
         "events": {
           "type": "Array<{ id?: string; day: string; start: string; end: string; title: string; place?: string; color?: \"blue\" | \"green\" | \"orange\" | \"purple\" | \"pink\" | \"teal\" | \"red\" | \"yellow\" | \"gray\" }>",
           "required": true,
-          "description": "Up to 60 events. start and end are \"HH:MM\" (24 h). Same color for the same kind of event; leave it out to colour by title."
+          "description": "Up to 60 events. start and end are \"HH:MM\" (24 h). Same color for the same kind of event; leave it out to colour by title.",
+          "data": true
         }
       }
     },
@@ -7114,17 +7981,20 @@
         "now": {
           "type": "{ temp: number; condition: \"sunny\" | \"partly-cloudy\" | \"cloudy\" | \"rain\" | \"heavy-rain\" | \"thunder\" | \"snow\" | \"fog\" | \"wind\" | \"night-clear\"; feelsLike?: number; humidity?: number; wind?: string }",
           "required": false,
-          "description": "Current conditions. humidity is a percent; wind is text like \"14 km/h NW\"."
+          "description": "Current conditions. humidity is a percent; wind is text like \"14 km/h NW\".",
+          "data": true
         },
         "days": {
           "type": "Array<{ day: string; condition: \"sunny\" | \"partly-cloudy\" | \"cloudy\" | \"rain\" | \"heavy-rain\" | \"thunder\" | \"snow\" | \"fog\" | \"wind\" | \"night-clear\"; high: number; low: number; rainChance?: number; sunrise?: string; sunset?: string }>",
           "required": true,
-          "description": "1 to 14 days, first is today. day is \"Mon\" or an ISO date. Other condition words map to the closest icon."
+          "description": "1 to 14 days, first is today. day is \"Mon\" or an ISO date. Other condition words map to the closest icon.",
+          "data": true
         },
         "hourly": {
           "type": "Array<{ time: string; temp: number; condition: \"sunny\" | \"partly-cloudy\" | \"cloudy\" | \"rain\" | \"heavy-rain\" | \"thunder\" | \"snow\" | \"fog\" | \"wind\" | \"night-clear\"; rainChance?: number }>",
           "required": false,
-          "description": "Up to 48 hours, time like \"14:00\" or \"2 PM\"."
+          "description": "Up to 48 hours, time like \"14:00\" or \"2 PM\".",
+          "data": true
         },
         "note": {
           "type": "string",
@@ -7450,14 +8320,22 @@
       "description": "Multi-tier pricing comparison cards with feature checklists, popular badge, and CTAs.",
       "props": {
         "tiers": {
-          "type": "Array<{ id: string; name: string; price: string | number; period?: string; description?: string; features?: Array<string | { label: string; included?: boolean }>; cta?: string; popular?: boolean }>",
+          "type": "Array<{ id: string; name: string; price: string | number; period?: string; description?: string; features?: Array<string | { label: string; included?: boolean }>; cta?: string; popular?: boolean; actions?: EventAction | EventAction[] }>",
           "required": true,
-          "description": "Pricing tiers."
+          "description": "Pricing tiers, 1 to 4 in a row; a narrow card stacks them. `period` is \"month\", not \"/month\". A tier's `actions` fire on its CTA instead of on_select.",
+          "data": true
         },
         "currency": {
           "type": "string",
           "required": false,
-          "description": "Currency symbol prepended to numeric prices. Default \"$\"."
+          "description": "ISO 4217 code for numeric prices (\"EUR\", \"USD\"), or a symbol written as is. Default \"$\"."
+        }
+      },
+      "events": {
+        "on_select": {
+          "type": "EventAction | EventAction[]",
+          "required": false,
+          "description": "Fires with { id, name } when the visitor clicks a tier's CTA (a tier with its own `actions` fires those instead)."
         }
       }
     },
@@ -7503,12 +8381,14 @@
         "value": {
           "type": "number",
           "required": false,
-          "description": "Current progress (0 to max)."
+          "description": "Current progress (0 to max).",
+          "data": true
         },
         "max": {
           "type": "number",
           "required": false,
-          "description": "Maximum value. Default 100."
+          "description": "Maximum value. Default 100.",
+          "data": true
         },
         "size": {
           "type": "number",
@@ -7565,7 +8445,7 @@
         "progress": {
           "type": "number",
           "required": false,
-          "description": "0–100 overall progress percentage."
+          "description": "Overall progress percentage, 0 to 100."
         },
         "dueDate": {
           "type": "string",
@@ -7595,7 +8475,7 @@
         "team": {
           "type": "Array<{ name: string; avatar?: string; role?: string; load?: number; status?: \"available\" | \"busy\" | \"overloaded\" | \"off\" }>",
           "required": false,
-          "description": "Team members. `load` is 0–100 (>100 highlights overload)."
+          "description": "Team members. `load` is 0 to 100 (over 100 highlights overload)."
         },
         "updates": {
           "type": "Array<{ time: string; actor?: string; label: string; icon?: string; type?: string }>",
@@ -7788,17 +8668,20 @@
         "min": {
           "type": "number",
           "required": true,
-          "description": "Minimum value (left bound)."
+          "description": "Minimum value (left bound).",
+          "data": true
         },
         "max": {
           "type": "number",
           "required": true,
-          "description": "Maximum value (right bound)."
+          "description": "Maximum value (right bound).",
+          "data": true
         },
         "current": {
           "type": "number",
           "required": true,
-          "description": "Current value (marker position)."
+          "description": "Current value (marker position).",
+          "data": true
         },
         "label": {
           "type": "string",
@@ -7958,22 +8841,26 @@
         "minutes": {
           "type": "number",
           "required": false,
-          "description": "Total time. Summed from step minutes when omitted."
+          "description": "Total time. Summed from step minutes when omitted.",
+          "data": true
         },
         "serves": {
           "type": "number",
           "required": true,
-          "description": "Servings the quantities are written for. Scaling multiplies qty by servings / serves."
+          "description": "Servings the quantities are written for. Scaling multiplies qty by servings / serves.",
+          "data": true
         },
         "kcal": {
           "type": "number",
           "required": false,
-          "description": "Calories PER SERVING."
+          "description": "Calories PER SERVING.",
+          "data": true
         },
         "protein_g": {
           "type": "number",
           "required": false,
-          "description": "Protein grams PER SERVING."
+          "description": "Protein grams PER SERVING.",
+          "data": true
         },
         "tags": {
           "type": "string[]",
@@ -7988,7 +8875,8 @@
         "ingredients": {
           "type": "Array<{ id?: string; name: string; qty?: number; unit?: string; note?: string; aisle?: \"produce\" | \"protein\" | \"dairy\" | \"grains\" | \"pantry\" | \"frozen\" | \"other\" }>",
           "required": true,
-          "description": "qty is a NUMBER (1.5, not \"1 1/2\"); the widget prints 1½. unit is separate (\"cup\", \"g\", \"tbsp\"); omit it for counted items (\"2\" eggs). note: \"finely grated\"."
+          "description": "qty is a NUMBER (1.5, not \"1 1/2\"); the widget prints 1½. unit is separate (\"cup\", \"g\", \"tbsp\"); omit it for counted items (\"2\" eggs). note: \"finely grated\".",
+          "data": true
         },
         "steps": {
           "type": "Array<{ id?: string; text: string; minutes?: number; tip?: string }>",
@@ -8416,6 +9304,11 @@
           "required": false,
           "description": "Allow multiple selections."
         },
+        "allowEmpty": {
+          "type": "boolean",
+          "required": false,
+          "description": "Single mode: an empty value stays unselected until the user picks, instead of auto-selecting the first option. Use for a real \"not chosen yet\" choice."
+        },
         "size": {
           "type": "\"sm\" | \"md\"",
           "required": false,
@@ -8600,6 +9493,11 @@
           "required": false,
           "description": "Slide direction. Default \"right\"."
         },
+        "size": {
+          "type": "\"sm\" | \"md\" | \"lg\" | \"xl\" | \"2xl\" | \"3xl\" | \"4xl\"",
+          "required": false,
+          "description": "Max width of a left/right sheet on wider screens. Default \"sm\"; \"2xl\"-\"4xl\" fit a review or a diff."
+        },
         "title": {
           "type": "string",
           "required": false,
@@ -8609,6 +9507,61 @@
           "type": "string",
           "required": false,
           "description": "Sheet header description."
+        }
+      },
+      "pocket": {
+        "state": {
+          "filtersOpen": false,
+          "inStock": true
+        },
+        "ui": {
+          "type": "flex",
+          "props": {
+            "direction": "column",
+            "gap": "12px"
+          },
+          "children": [
+            {
+              "type": "button",
+              "props": {
+                "label": "Open filters",
+                "variant": "secondary"
+              },
+              "on_click": {
+                "action": "open",
+                "target": "filtersOpen"
+              }
+            },
+            {
+              "type": "sheet",
+              "props": {
+                "side": "right",
+                "title": "Filters",
+                "description": "Narrow the product list."
+              },
+              "bind": "state.filtersOpen",
+              "children": [
+                {
+                  "type": "switch",
+                  "props": {
+                    "label": "In stock only"
+                  },
+                  "bind": "state.inStock"
+                },
+                {
+                  "type": "button",
+                  "props": {
+                    "label": "Apply"
+                  },
+                  "on_click": {
+                    "action": "set",
+                    "target": "filtersOpen",
+                    "value": false
+                  }
+                }
+              ]
+            }
+          ]
         }
       }
     },
@@ -8750,7 +9703,7 @@
     {
       "type": "soul-status",
       "category": "display",
-      "description": "Agent soul state — avatar, name, energy, mood, status. Compact pill or expanded card.",
+      "description": "Agent soul state: avatar, name, energy, mood, status. Compact pill or expanded card.",
       "props": {
         "name": {
           "type": "string",
@@ -8822,7 +9775,7 @@
         "color": {
           "type": "string",
           "required": false,
-          "description": "Accent color (CSS) — used if favicon fails."
+          "description": "Accent color (CSS), used if the favicon fails."
         },
         "favicon": {
           "type": "string",
@@ -8876,7 +9829,8 @@
         "values": {
           "type": "number[]",
           "required": true,
-          "description": "Numeric values, oldest to newest."
+          "description": "Numeric values, oldest to newest.",
+          "data": true
         },
         "labels": {
           "type": "(string | number)[]",
@@ -8947,7 +9901,7 @@
     {
       "type": "stat",
       "category": "display",
-      "description": "Labeled metric with delta, direction, and sentiment colors. Richer than `metric` — supports formatting.",
+      "description": "Labeled metric with delta, direction, and sentiment colors. Richer than `metric`: supports formatting.",
       "props": {
         "label": {
           "type": "string",
@@ -8957,12 +9911,18 @@
         "value": {
           "type": "number | string",
           "required": true,
-          "description": "Main value."
+          "description": "Main value.",
+          "data": true
         },
         "format": {
           "type": "\"number\" | \"currency\" | \"percent\" | \"compact\"",
           "required": false,
           "description": "Number format."
+        },
+        "decimals": {
+          "type": "number",
+          "required": false,
+          "description": "Max decimals shown. Default rounds by size: whole numbers from 100, 1 decimal from 10, else 2."
         },
         "currency": {
           "type": "string",
@@ -8972,12 +9932,14 @@
         "delta": {
           "type": "number",
           "required": false,
-          "description": "Absolute change."
+          "description": "Absolute change.",
+          "data": true
         },
         "deltaPercent": {
           "type": "number",
           "required": false,
-          "description": "Percent change."
+          "description": "Percent change.",
+          "data": true
         },
         "deltaFormat": {
           "type": "\"absolute\" | \"percent\" | \"both\"",
@@ -9031,12 +9993,12 @@
     {
       "type": "steps",
       "category": "display",
-      "description": "Numbered process steps — vertical (default) or horizontal — with optional descriptions.",
+      "description": "Numbered process steps, vertical (default) or horizontal, with optional descriptions and a per-step status (done, current, upcoming, failed).",
       "props": {
         "steps": {
-          "type": "Array<{ title: string; description?: string; number?: number | string }>",
+          "type": "Array<{ title: string; description?: string; number?: number | string; status?: 'done' | 'current' | 'upcoming' | 'failed' }>",
           "required": true,
-          "description": "Step items."
+          "description": "Step items. `status` marks progress: done and failed pips show a check or cross, the current step is announced as current. Omit it for a plain numbered list."
         },
         "orientation": {
           "type": "\"vertical\" | \"horizontal\"",
@@ -9117,12 +10079,13 @@
         "rows": {
           "type": "Array<Record<string, unknown>>",
           "required": true,
-          "description": "Row objects."
+          "description": "Row objects.",
+          "data": true
         },
         "columns": {
-          "type": "Array<{ header?: string; accessorKey?: string; sortable?: boolean; href?: string }>",
+          "type": "Array<{ header?: string; accessorKey?: string; sortable?: boolean; href?: string; align?: \"left\" | \"center\" | \"right\" }>",
           "required": true,
-          "description": "Column definitions. `href` names a row field holding a URL; that column's cell text then links to it (new tab). Keep the URL in its own row field, not in the visible text."
+          "description": "Column definitions. `href` names a row field holding a URL; that column's cell text then links to it (new tab). Keep the URL in its own row field, not in the visible text. `align` overrides the default (all-number columns right)."
         },
         "variant": {
           "type": "\"default\" | \"compact\" | \"striped\" | \"minimal\"",
@@ -9149,7 +10112,7 @@
     {
       "type": "tabs",
       "category": "layout",
-      "description": "Tabbed panels. Tab labels go in the `tabs` prop; panel content goes in `children` — one child per tab, matched by index (children[0] renders for tabs[0]).",
+      "description": "Tabbed panels. Tab labels go in the `tabs` prop; panel content goes in `children`, one child per tab, matched by index (children[0] renders for tabs[0]).",
       "props": {
         "tabs": {
           "type": "Array<{ value: string; label: string }>",
@@ -9380,7 +10343,8 @@
         "events": {
           "type": "Array<{ date: string; title: string; detail?: string; type?: \"default\" | \"success\" | \"warning\" | \"error\" | \"info\"; color?: string }>",
           "required": true,
-          "description": "Timeline events."
+          "description": "Timeline events.",
+          "data": true
         },
         "maxItems": {
           "type": "number",
@@ -9390,7 +10354,7 @@
         "density": {
           "type": "\"comfortable\" | \"compact\"",
           "required": false,
-          "description": "Visual density. \"comfortable\" (default) shows a connecting rail and roomy spacing — milestones/roadmap. \"compact\" hides the rail and tightens rows — activity streams (\"Deploy succeeded · 2m ago\")."
+          "description": "Visual density. \"comfortable\" (default) shows a connecting rail and roomy spacing (milestones, roadmap). \"compact\" hides the rail and tightens rows, for activity streams (\"Deploy succeeded · 2m ago\")."
         }
       }
     },
@@ -9963,6 +10927,11 @@
           "type": "string",
           "required": false,
           "description": "Add-input placeholder."
+        },
+        "sound": {
+          "type": "boolean",
+          "required": false,
+          "description": "A soft pop when an item is checked off. Default true; false mutes this widget."
         }
       },
       "events": {
@@ -10235,7 +11204,7 @@
         "dot": {
           "type": "number",
           "required": false,
-          "description": "Dot diameter in px — drives overall size. Default 6."
+          "description": "Dot diameter in px; drives the overall size. Default 6."
         }
       }
     },
@@ -10301,7 +11270,7 @@
       "type": "glyph-grid",
       "category": "display",
       "staticSafe": true,
-      "description": "N×N matrix of cells lit per a bitmap pattern — a 2D brightness array or a named glyph. Lit cells take the accent color with a subtle pulse (frozen under reduced-motion). Pure CSS, SSR-safe.",
+      "description": "N×N matrix of cells lit per a bitmap pattern: a 2D brightness array or a named glyph. Lit cells take the accent color with a subtle pulse (frozen under reduced-motion). Pure CSS, SSR-safe.",
       "props": {
         "pattern": {
           "type": "number[][]",
@@ -10344,7 +11313,7 @@
       "type": "fill-grid",
       "category": "display",
       "staticSafe": true,
-      "description": "Discrete heap/segment meter — a row (or matrix) of M cells, the first N filled per value/max, the rest faint ghost cells. Pure CSS, SSR-safe.",
+      "description": "Discrete heap/segment meter: a row (or matrix) of M cells, the first N filled per value/max, the rest faint ghost cells. Pure CSS, SSR-safe.",
       "props": {
         "value": {
           "type": "number",
@@ -10449,7 +11418,7 @@
         "done": {
           "type": "boolean",
           "required": false,
-          "description": "Streaming finished — clears busy/caret even if streaming was left true."
+          "description": "Streaming finished. Clears busy/caret even if streaming was left true."
         },
         "size": {
           "type": "string",
@@ -10476,7 +11445,7 @@
         "args": {
           "type": "object",
           "required": false,
-          "description": "Invocation arguments — rendered as formatted JSON."
+          "description": "Invocation arguments, rendered as formatted JSON."
         },
         "result": {
           "type": "any",
@@ -10491,7 +11460,7 @@
         "durationMs": {
           "type": "number",
           "required": false,
-          "description": "Call duration in ms — shown as a compact label."
+          "description": "Call duration in ms, shown as a compact label."
         },
         "time": {
           "type": "string",
@@ -10501,7 +11470,7 @@
         "error": {
           "type": "string",
           "required": false,
-          "description": "Error message — shown when status is \"error\"."
+          "description": "Error message, shown when status is \"error\"."
         },
         "open": {
           "type": "boolean",
@@ -10523,7 +11492,7 @@
         "streaming": {
           "type": "boolean",
           "required": false,
-          "description": "Agent is still reasoning — collapsed, the summary names the last thinking step, else \"Reasoning…\"."
+          "description": "Agent is still reasoning. Collapsed, the summary names the last thinking step, else \"Reasoning…\"."
         },
         "collapsed": {
           "type": "boolean",
@@ -10535,7 +11504,7 @@
     {
       "type": "approval-gate",
       "category": "ai",
-      "description": "Human-in-the-loop approval card: shows a proposed agent action with a risk badge, an optional diff and tool-call list, and Approve/Deny/Edit controls that resolve and persist the decision.",
+      "description": "Human-in-the-loop approval card: a proposed agent action with an optional risk badge, diff and tool-call list, and Approve/Deny/Edit controls that resolve and persist the decision.",
       "props": {
         "title": {
           "type": "string",
@@ -10550,7 +11519,7 @@
         "risk": {
           "type": "string",
           "required": false,
-          "description": "Risk level: 'low' | 'medium' | 'high'. Drives the badge + tone."
+          "description": "Risk level: 'low' | 'medium' | 'high'. Drives the badge + tone; omitted, no badge."
         },
         "decision": {
           "type": "string",
@@ -10575,7 +11544,7 @@
         "toolCalls": {
           "type": "array",
           "required": false,
-          "description": "Proposed tool calls — each rendered with the ToolCall widget."
+          "description": "Proposed tool calls, each rendered with the ToolCall widget."
         },
         "body": {
           "type": "string",
@@ -10585,7 +11554,7 @@
         "decidedBy": {
           "type": "string",
           "required": false,
-          "description": "Who decided — shown in the resolved stamp (\"Approved by Ada\")."
+          "description": "Who decided, shown in the resolved stamp (\"Approved by Ada\")."
         },
         "disabled": {
           "type": "boolean",
@@ -10596,6 +11565,16 @@
           "type": "boolean",
           "required": false,
           "description": "Deny first asks for an optional reason, passed to the host as ondeny({ actionId, reason }). Default false."
+        },
+        "requireDenyReason": {
+          "type": "boolean",
+          "required": false,
+          "description": "Deny first asks for a reason and Confirm stays disabled until one is typed; ⌘↩ confirms, Return is a newline. Default false."
+        },
+        "denyReasonHint": {
+          "type": "string",
+          "required": false,
+          "description": "The line shown while a required reason is missing. Default: \"A reason is needed to <deny label>.\""
         }
       }
     }

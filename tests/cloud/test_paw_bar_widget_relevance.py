@@ -447,9 +447,10 @@ def test_the_prompt_is_byte_stable_and_the_core_comes_first():
 
 # The chat prompt as it stood before its intents and craft lines came from the
 # ripple manifest: the net prompt may not grow past it (build-loop GC 9), and
-# the worst case keeps the 800-char margin under the 32,000 cap.
-_CORE_CHARS = 18_630
-_WORST_CHARS = 31_056
+# the worst case keeps the 800-char margin under the 32,000 cap. The 0.8.2
+# manifest's longer upstream prop descriptions add 45 chars to the core and worst case.
+_CORE_CHARS = 18_675
+_WORST_CHARS = 31_101
 
 
 def test_core_plus_the_worst_case_section_stays_under_the_cap():

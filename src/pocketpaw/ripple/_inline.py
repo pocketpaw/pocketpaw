@@ -1,8 +1,12 @@
-# pocketpaw/ripple/_inline.py — Canonical system prompt for chat-inline Ripple.
+# pocketpaw/ripple/_inline.py — the chat-only parts of the chat-inline Ripple
+# system prompt.
 #
-# SOURCE OF TRUTH for the chat-inline Ripple system prompt, imported by
-# pocketpaw_ee/cloud/chat/agent_service.py::build_context_block. The agent
-# service does not duplicate any of this content.
+# Imported by pocketpaw_ee/cloud/chat/agent_service.py, which builds the chat
+# prompt as INLINE_RIPPLE_PROMPT_HEAD, then the widget block generated from the
+# vendored Ripple manifest (the Paw Bar generators widget_relevance.core_lines and
+# index_lines, and concierge_runtime.ripple_rules for the chat card profile), then
+# INLINE_RIPPLE_PROMPT_TAIL. Core cannot import pocketpaw_ee, so the widget block
+# is not here; INLINE_RIPPLE_SYSTEM_PROMPT is head plus tail without it.
 #
 # Surface contract: cloud chat (DM / group / pocket-chat scopes). The host
 # (paw-enterprise's chat ripple adapter) handles `emit chat.send` (posts the
@@ -10,26 +14,12 @@
 # Any other emit name, and pin / unpin, does nothing in chat, so the prompt
 # never advertises them.
 #
-# Composition, in order: ground-truth rule, preamble (UI-first rule, spec
-# shape, chat.send loop), the shared widget catalog + use-the-widget rule from
-# pocketpaw.ripple._design, the chat-only _INLINE_MORE_WIDGETS block (every
-# manifest widget the shared catalog lacks, plus the data-widget intent map
-# from the manifest's `intents`; it stays out of _design.py because atlas
-# compiles that catalog and these names collide with OS entries such as soul
-# and studio in atlas search), the core catalog (props for six widgets, every
-# other type goes through `get_widget_spec`), the typed-widget rule (inlined
-# props for the common shaped answers) with the card-size rule and the
-# engine-verified EXPRESSIONS block for primitives tools, the multi-step flow
-# rule (`start_flow`), the Instinct tray rule, and the final self-check.
-#
-# The card-size rule: a data widget card is 1-5 nodes; when no data widget
-# fits, the card is a small interactive tool built from primitives (state,
-# bind, derived values, each), roughly 15-35 nodes. The EXPRESSIONS block is
-# copied from ripple's packages/svelte/scripts/record-scenario.ts; keep its
-# semantics exact. Mutation anchors in tests/mutations/prompt_truth.json pin
-# some sentences here.
+# Head: ground-truth rule, preamble (UI-first rule, spec shape, chat.send loop).
+# Tail: the get_widget_spec rule for widgets the prompt lists without props, the
+# ask-user-questions shape, the each-items rule, the multi-step flow rule
+# (`start_flow`), the Instinct tray rule, and the final self-check. Mutation
+# anchors in tests/mutations/prompt_truth.json pin some sentences here.
 
-from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
 _GROUND_TRUTH_RULE = """\
 <ground-truth>
@@ -204,112 +194,12 @@ Interaction rules:
 """
 
 
-_INLINE_MORE_WIDGETS = """\
-# MORE WIDGETS — chat (the rest of the manifest)
-
-layout      bento-grid, spotlight, reveal, parallax, aurora
-display     illustration, richtext, led-clock, glyph-grid, fill-grid,
-            streak-bars, text-effect, marquee, shimmer, border-beam,
-            animated-beam
-input       checkbox-group
-data        seismograph
-composite   itinerary, growth-projection, bill-split, meal-plan, recipe,
-            booking, menu-order, interval-workout, habit-tracker,
-            focus-timer, notes, standup-board, agenda, week-schedule,
-            weather-forecast, place-results, product-grid, media-grid,
-            music-player, flashcard-deck, quiz, word-guess, memory-match,
-            board-game, figure, iso-scene
-interactive  todo-list, timer, flashcard, drawing-canvas
-media       audio, video
-ai          stream-text, tool-call, reasoning-trace, approval-gate
-marketing   marketing-hero, feature-grid, testimonial, logo-cloud, faq,
-            cta, newsletter, navbar, footer
-
-## Data widgets — the card IS the widget (from the manifest's intents)
-
-A data widget carries its own controls, totals, charts and progress: put
-the user's numbers and items in its props, the one-line takeaway in its
-"verdict" when it has one, and never repeat its inputs or outputs with
-sliders, stats or charts beside it. Call `get_widget_spec` for its props.
-
-  savings / invest / compound / retirement → growth-projection (has its own
-                                        deposit, rate, years controls)
-  split / bill / tip / owe            → bill-split
-  trip / travel / itinerary / vacation → itinerary
-  meal plan / meals / diet / nutrition → meal-plan
-  recipe / cook / ingredients / dish  → recipe
-  workout / hiit / yoga / exercise    → interval-workout
-  habit / habits / streak / daily     → habit-tracker
-  focus / pomodoro / deep work        → focus-timer
-  notes / jot / ideas / memo          → notes (seed a couple; never a form)
-  todo / to-do / todo list            → todo-list
-  standup / blockers / team status    → standup-board (never a kanban)
-  agenda / meeting / run of show      → agenda
-  weekly schedule / timetable / classes → week-schedule
-  weather / forecast / temperature    → weather-forecast
-  order / food / menu / takeaway      → menu-order (never a form)
-  book / appointment / reservation    → booking
-  restaurant / cafe / places near me  → place-results
-  products / shopping / deals         → product-grid
-  films / books to read / podcasts    → media-grid
-  music / playlist / lofi             → music-player
-  flashcards / study cards / vocabulary → flashcard-deck
-  quiz / trivia / test me             → quiz
-  word game / guess the word          → word-guess
-  memory game / matching pairs        → memory-match
-  tic-tac-toe / connect four          → board-game (set "game")
-  drawing pad / sketch / doodle       → drawing-canvas
-  draw / picture / diagram            → illustration
-  how it works / mechanism / gears    → iso-scene (a figure first when one
-                                        exists for the subject)
-"""
-
-
-_INLINE_CORE_CATALOG = """\
-
-# WIDGET CATALOG — chat-inline
-
-These six core widgets handle SIMPLE replies from memory. They are the
-base, NOT the ceiling: the moment a reply has a SHAPE (a comparison, a
-ranked list, dated events, a status row, plans/tiers), the typed widget in
-"REACH FOR THE TYPED WIDGET" below reads far better — use it instead of
-rebuilding the shape out of `table` / `text` / `flex`. The six base widgets:
-
-  text       — plain or rich text. Props: text, variant ('h1'..'h4',
-               'body','muted','small'), align.
-  heading    — same as text.h1..h4 with stronger visual default.
-  stat       — single big number. Props: label, value, format
-               ('number'|'currency'|'percent'|'compact'), currency,
-               delta, direction ('up'|'down'|'neutral'|'auto').
-  button     — Props: label, icon, variant ('primary'|'secondary'|
-               'outline'|'ghost'|'link'|'destructive'). Always carries
-               on_click.
-  table      — Props: columns ([{accessorKey, header}, ...]), rows
-               (data array OR `{state.x}` expression), variant
-               ('default'|'compact'|'striped'|'minimal'), searchable,
-               sortable, pageSize.
-  flex       — layout. Props: direction ('row'|'column'), gap, align,
-               justify. Children = the laid-out nodes.
-               `gap` is a number on a ×4px scale (2 → 8px, 4 → 16px),
-               a t-shirt token ('xs'|'sm'|'md'|'lg'|'xl'|'2xl'), or a
-               CSS length string ('12px'); raw words like 'medium' are
-               ignored. For chat-inline keep spacing TIGHT — use a
-               numeric gap of 2 or 4. A bare number is multiplied by
-               4, so `gap: 12` renders as 48px, far too loose for a
-               chat bubble. Want 12px exactly? Write the string
-               '12px', never the bare number 12.
-
-Anything beyond these — chart, sparkline, kanban, calendar, gauge,
-heatmap, treemap, timeline, gantt, candlestick OHLC, comparison-table,
-pricing-table, source-card, news-card, link-preview, master-detail,
-entity-detail, dashboard, definition-list, wizard-layout, form-layout,
-checklist-layout, report-layout, invoice-layout, callout, badge,
-progress, rating, kbd, code-block, etc. — is supported but the prop
-schema is NOT in this prompt.
+_INLINE_WIDGET_SPEC_RULE = """\
 
 # MUST CALL BEFORE EMIT
 
-Before the FIRST node of any non-core type lands in your spec, you MUST
+Before the FIRST node of a widget not listed with its props lands in your
+spec, you MUST
 call `get_widget_spec(types=[...])` and copy prop names FROM the
 returned schema. The widget name is not a contract — the manifest is,
 and `get_widget_spec` is what reads it. Guessing prop names has shipped
@@ -633,14 +523,14 @@ Final self-check before sending:
 ✔ ui-spec used when response has structure
 ✔ Interactive elements bind to state or have on_click / on_change
 ✔ Buttons change card state or emit chat.send; no other emit target, no pin
-✔ Card size fits the answer: one data widget (1-5 nodes) for a data view,
-  or a primitives tool (~15-35 nodes) with state, bind, derived values, each
+✔ Card size fits the answer: one data widget for a data view, or a
+  primitives tool (about 25 to 90 nodes) with state, bind, derived values, each
 ✔ flex/grid `gap` is tight for inline — numeric 2 or 4, not 10/12+
 ✔ Matched the reply SHAPE to its typed widget (comparison-table / data-grid /
   timeline / kv-table / status-dot / pricing-table) — did NOT rebuild it from a
   plain table / text / flex
-✔ Used a core widget, an inlined typed widget, or called `get_widget_spec`
-  BEFORE emitting any other type
+✔ Used a widget listed with its props, or called `get_widget_spec` BEFORE
+  emitting any other type
 ✔ Multi-step / wizard / intake flow → called `start_flow`, not a hand-authored or `set`-stepped spec
 ✔ Pending Instinct approvals → Approve/Reject buttons `api`-POST the route, NOT chat.send
 ✔ Open Tray affordance navigates to /deep-work (not a chat.send)
@@ -650,156 +540,17 @@ Final self-check before sending:
 </ripple>"""
 
 
-_INLINE_TYPED_WIDGET_RULE = """\
-
-# REACH FOR THE TYPED WIDGET (chat) — the #1 chat-quality lever
-
-The most common chat-quality miss is answering a SHAPED request with a
-plain `table` / `text` / `flex` when a dedicated widget exists. When the
-reply matches a shape below, emit that widget — its props are inlined
-right here, so NO `get_widget_spec` call is needed.
-
-  compare X vs Y / feature or plan matrix      -> comparison-table
-  ranked list / top N / leaderboard            -> data-grid (sortable)
-  dated events / history / roadmap / releases  -> timeline
-  facts about ONE thing / key:value pairs      -> kv-table
-  service / system / job status                -> status-dot (one per item)
-  plans / tiers / pricing                      -> pricing-table
-  a single KPI with a trend                    -> metric (NOT a bare stat)
-  conversion / drop-off / pipeline funnel      -> funnel
-  a single metric vs a target/threshold (dial) -> gauge
-  a cited source / link                        -> source-card
-  a 1-2 line takeaway / warning                -> callout
-  term : definition pairs                      -> definition-list
-
-Inlined prop shapes — copy these, put the data in props:
-
-comparison-table — { label, columns:[{key,label,highlight?}], rows:[{feature, <colKey>:value}] }
-  a cell value may be true/false (renders check/cross), a string, or a number.
-  { "type":"comparison-table","props":{
-      "label":"Feature",
-      "columns":[{"key":"a","label":"Plan A"},{"key":"b","label":"Plan B","highlight":true}],
-      "rows":[ {"feature":"Price","a":"$29/mo","b":"$99/mo"},
-               {"feature":"Seats","a":5,"b":25},
-               {"feature":"SSO","a":false,"b":true} ] }}
-
-data-grid — { columns:[{key,label,sortable,align}], rows, defaultSort?, searchable?, dense? }
-  { "type":"data-grid","props":{
-      "columns":[{"key":"name","label":"Customer","sortable":true},
-                 {"key":"revenue","label":"Revenue","align":"right","sortable":true},
-                 {"key":"deals","label":"Deals","align":"right","sortable":true}],
-      "rows":[{"id":1,"name":"Globex","revenue":"$1.24M","deals":14},
-              {"id":2,"name":"Stark","revenue":"$980K","deals":9}],
-      "defaultSort":"revenue:desc","searchable":true }}
-
-timeline — { events:[{date,title,detail?,type?}], density? }
-  type: default | success | warning | error | info
-  { "type":"timeline","props":{"density":"compact","events":[
-      {"date":"Jan 2026","title":"Alpha","type":"success"},
-      {"date":"Mar 2026","title":"Public beta"} ]}}
-
-kv-table       — { rows:[{key,value}], columns?:1|2, striped? }
-status-dot     — { variant:"online|offline|busy|away|custom", label, pulse?, color? (custom only) }
-  degraded/warning are NOT variants — use "busy" (amber) or "custom" + color; an unknown
-  variant silently renders the online GREEN.
-pricing-table  — { currency, tiers:[{id,name,price,period,features:[{label,included}],cta}] }
-source-card    — { source, title, url?, color? }
-callout        — { variant:"info|insight|warning", title, text }
-definition-list— { items:[{term,definition}], layout?:"inline|stacked" }
-metric         — { label, value, trend?, description? }
-funnel         — { data:[{label,value}], title?, colors?, height?,
-                   sort?:"descending|ascending|none" }
-gauge          — { value, max?, label?, title?, color?, height? }
-
-Worked examples — the typed-widget choice in action (data already in hand):
-
-  "compare Plan A vs Plan B"       -> ONE comparison-table  (NOT two cards, NOT a plain table)
-  "top 5 customers by revenue"     -> ONE data-grid sorted desc  (NOT text rows, NOT a bare table)
-  "release timeline for v2"        -> ONE timeline  (NOT numbered text, NOT a table of dates)
-  "deployment status of services"  -> flex(column) of [text + status-dot] rows, or a kv-table
-                                      with a status-dot per value  (NOT prose, NOT a plain table)
-  "our pricing"                    -> ONE pricing-table
-  "sales funnel leads to closed"   -> ONE funnel  (data:[{label,value}] per stage, NOT a table)
-  "capacity at 75 of 100"          -> ONE gauge  (value + max, NOT a bare stat tile)
-
-# CARD SIZE — a data view, or a small tool
-
-- When the answer is a data view, the card is ONE data widget (1 to 5
-  nodes): a typed widget above or a data widget from the use-the-widget
-  map, at most with a heading and a chat.send follow-up. A data widget
-  carries its own controls and totals; never surround it with redundant
-  stat tiles, sliders, charts or a second table.
-- When no data widget fits (a calculator, a planner, a checklist, an
-  explainer), build a genuinely interactive tool from primitives, roughly
-  15 to 35 nodes, not a static mockup: seed state with the user's numbers,
-  bind inputs (number-input, slider, segmented, switch, checkbox) to state,
-  derive every output from state with expressions so it updates live, and
-  wire buttons with actions (set, toggle, push, remove, toast).
-- In a primitives tool, every quantity the user mentions (amounts, counts,
-  percentages) must be adjustable in the UI, and every derived number must
-  follow from state. Never hardcode a copy of a state value in an
-  expression: write state.people.length, not 4.
-- Lists the user can grow or shrink live in state as arrays, render with
-  "each", and change with push / remove actions. Inside "each", bind a row
-  field with a templated path ("bind": "people.{index}.drinks") and remove
-  the row with {"action":"remove","target":"people","value":"{item}"}
-  (remove's "index" only accepts a literal number, so never
-  "index": "{index}").
+_INLINE_EACH_RULE = """\
 - "each" takes items at node level, never inside props:
   {"type":"each","items":"{state.people}","children":[...]}.
-
-# EXPRESSIONS (verified against the engine; follow exactly)
-
-- A prop that is exactly "{expr}" keeps the value's type. "Text {expr} more"
-  builds a string.
-- Supported: state paths (state.a.b, state.list[0].x), arithmetic + - * / %
-  with parentheses, comparisons, ternary a ? b : c, || and ??. Inside
-  "each", the loop item is {item.field} and the index is {index} (or the
-  names given by item_as / index_as).
-- When a calculation needs the count or sum of a list, keep that number in
-  state and refresh it with a set action whose value is the method
-  expression: chain it after the push / remove that changes the list, and
-  put it in the on_change of any input that edits a list item, e.g.
-  "on_change": {"action":"set","target":"drinkers",
-                "value":"{state.people.where('drinks', true).count()}"}.
-  When an edit feeds several kept numbers (a count AND a total), its
-  on_change is a list that refreshes every one of them. Seed every kept
-  number with exactly what its refresh expression would give for the
-  seeded list: add the list up item by item before writing it.
-- For an amount that applies only when a flag is true, multiply by the flag
-  (true counts as 1): item.drinks * state.drinksTotal / state.drinkers.
-- Use a ternary only as the whole expression (to pick a label or value),
-  never inside arithmetic.
-- For money, compute the raw number and show it with the "stat" widget
-  using "format": "currency" (it formats to 2 decimals), e.g.
-  {"type":"stat","props":{"label":"Each pays",
-   "value":"{state.total * (1 + state.tipPercent / 100) / state.people.length}",
-   "format":"currency"}}.
-- A computed number that can have decimals (any division or rate) is shown
-  with a "stat" (format "number", "currency" or "percent"), never inside a
-  text template, which prints every digit.
-- Division by zero yields 0. Keep numeric state as numbers, not strings.
-- There is no exponent operator (no ** or ^) and no Math functions. Write
-  compound growth as repeated multiplication starting from a state path,
-  e.g. three years at a yearly rate:
-  state.start * (1 + state.rate / 100) * (1 + state.rate / 100) * (1 + state.rate / 100).
-- Chart "data" items resolve expressions, and the chart redraws when they
-  change, so a chart can follow state: {"label":"Jul","value":"{state.jul}"}.
 """
 
+INLINE_RIPPLE_PROMPT_HEAD = _GROUND_TRUTH_RULE + _INLINE_PREAMBLE
 
-INLINE_RIPPLE_SYSTEM_PROMPT = (
-    _GROUND_TRUTH_RULE
-    + _INLINE_PREAMBLE
-    + WIDGET_CATALOG
+INLINE_RIPPLE_PROMPT_TAIL = (
+    _INLINE_WIDGET_SPEC_RULE
     + "\n"
-    + USE_THE_WIDGET_RULE
-    + "\n"
-    + _INLINE_MORE_WIDGETS
-    + "\n"
-    + _INLINE_CORE_CATALOG
-    + "\n"
-    + _INLINE_TYPED_WIDGET_RULE
+    + _INLINE_EACH_RULE
     + "\n"
     + _MULTI_STEP_FLOW_RULE
     + "\n"
@@ -808,5 +559,11 @@ INLINE_RIPPLE_SYSTEM_PROMPT = (
     + _INLINE_RULES
 )
 
+INLINE_RIPPLE_SYSTEM_PROMPT = INLINE_RIPPLE_PROMPT_HEAD + INLINE_RIPPLE_PROMPT_TAIL
 
-__all__ = ["INLINE_RIPPLE_SYSTEM_PROMPT"]
+
+__all__ = [
+    "INLINE_RIPPLE_PROMPT_HEAD",
+    "INLINE_RIPPLE_PROMPT_TAIL",
+    "INLINE_RIPPLE_SYSTEM_PROMPT",
+]

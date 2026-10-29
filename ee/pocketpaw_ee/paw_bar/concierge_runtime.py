@@ -1657,6 +1657,63 @@ _RIPPLE_RULES = (
 )
 
 
+# The chat variant swaps the Paw Bar-only parts of _RIPPLE_RULES, found by their
+# opening words: the real-actions rule names the profile's host events, the ask
+# example emits chat.send, match-the-card loses the store-backed menu and booking
+# text, and the flow-cards rule goes (chat guides with start_flow). Every other
+# rule is shared as is. A part the Paw Bar text no longer holds fails at import.
+_CHAT_STORE_TEXT = (
+    "A menu or an order is a menu-order: items by product_id from the store-menu "
+    "block (and name); the server fills the rest. A booking is a booking. For a "
+    "table leave out services and days (the server fills them); for any other "
+    "booking (a dentist, a haircut) write its services and a few days of slots. ",
+    "Never write on_checkout or on_book, or an image. ",
+)
+_CHAT_ASK = {**_RIPPLE_ASK, "target": "chat.send", "value": _RIPPLE_ASK["value"]["text"]}
+
+
+def _rule(start: str) -> str:
+    """The one _RIPPLE_RULES entry that opens with ``start``."""
+    (found,) = (r for r in _RIPPLE_RULES if r.startswith(start))
+    return found
+
+
+def _chat_rules(host_events: Sequence[str]) -> tuple[str, ...]:
+    match = _rule("   - Match the card to the answer.")
+    for part in _CHAT_STORE_TEXT:
+        assert part in match, part
+    booking = "A booking is a booking with its services and a few days of slots. "
+    chat_match = match.replace(_CHAT_STORE_TEXT[0], booking).replace(_CHAT_STORE_TEXT[1], "")
+    ask = _rule("   - A click can send a follow-up as the visitor:")
+    ask_json = json.dumps(_RIPPLE_ASK, separators=(",", ":"))
+    assert ask_json in ask
+    swaps = {
+        _rule(f"   - {CRAFT_RULES['real-actions']}"): _craft(
+            "real-actions",
+            "They are set, toggle, push, remove, open, toast, validate, flow (steps run "
+            "in order), branch (if, then, else), navigate (an in-app path) and api (only "
+            f"where a rule below names it), and emit of {', '.join(host_events)}. There "
+            "is no add_to_cart, checkout, confirm, delay or other emit or action; one "
+            "drops the card, even as a step. A handler may be a list of actions.",
+        ),
+        match: chat_match,
+        ask: ask.replace(ask_json, json.dumps(_CHAT_ASK, separators=(",", ":"))).replace(
+            "as the visitor", "as the user"
+        ),
+        _rule("   - Flow cards:"): "",
+    }
+    return tuple(swaps.get(r, r) for r in _RIPPLE_RULES if swaps.get(r, r))
+
+
+def ripple_rules(profile: Any = None) -> tuple[str, ...]:
+    """The ripple authoring rules for ``profile``: _RIPPLE_RULES unchanged for the
+    Paw Bar profiles, the chat variant when the profile's host events are chat's."""
+    host_events = tuple(getattr(profile, "host_events", ()))
+    if "chat.send" not in host_events:
+        return _RIPPLE_RULES
+    return _chat_rules(host_events)
+
+
 # The ripple landing's chat message when a visitor confirms a slot on a booking
 # card the store does not back (ripple routes/pawbar/book.ts slotMessage). The
 # model answered it with the same booking card again, even with a note saying not
@@ -1728,7 +1785,7 @@ def _cards_paragraph(
             "   Every widget by category (those this message likely needs are listed "
             "with their props at the end):",
             *(f"   {line}" for line in widget_relevance.index_lines()),
-            *_RIPPLE_RULES,
+            *ripple_rules(profile),
             *_form_lines(declared, lead_capture),
         ]
         # The per-turn part goes last, so everything above stays byte-stable.

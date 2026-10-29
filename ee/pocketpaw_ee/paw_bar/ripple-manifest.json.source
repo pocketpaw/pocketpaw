@@ -1,78 +1,17 @@
-ripple-manifest.json: @ripple-ui/svelte 0.8.0 manifest, vendored from qbtrix/ripple-iui
-branch feat/play-wave (illustration, bill-split and the button's choice-card icon and
-description, plus memory-match, word-guess, quiz, habit-tracker, focus-timer,
-board-game and the illustration's annotations) at 1b218f7, pending a release.
-It is that commit's packages/svelte/static/manifest.json (generatedAt
-2026-10-09T21:00:37.569Z, 205 widgets, upstream sha256
-3e4657f3b0eabcdb2831f8e2b8f7ea8a704b0aa14279698b3673d289ca059e8c), with every
-widget's "example" removed. One entry is newer: "model-viewer" is
-the one from branch feat/3d-widget at db6cd37 (its static/manifest.json, generatedAt
-2026-10-11T18:48:57.273Z: asset, annotations, focus and on_select), swapped in alone
-because a full refresh from there changes 35 other widgets this slice does not touch.
-Two entries are added the same way, each alone: "notes" from branch feat/notes-widget
-at e402715 (qbtrix/ripple-iui#218, generatedAt 2026-10-12T04:44:27.731Z, upstream
-sha256 00823d14b2b5e92b4fbfe51b197b9fd42d53d35091214685be1e950a6cf5dbfa) and
-"music-player" from branch feat/music-player at 820fcbd (#217, generatedAt
-2026-10-12T04:42:27.975Z, upstream sha256
-a20b933cdaf41a27d081717e3017ab42969f5be93b3b9e8c9321ce1b2e71db30), each placed after
-the widget that precedes it upstream (207 widgets). Six data widgets are added the
-same way: "agenda", "week-schedule" and "weather-forecast" from branch
-feat/forecast-schedule-agenda at 041ec69 (#224, generatedAt 2026-10-12T05:46:37.164Z,
-upstream sha256 7faf9a1b180c0d071f83c6776c0ff5abcdacf63ff480c933608e0b33f011a2ea),
-after board-game; "place-results", "product-grid" and "media-grid" from branch
-feat/places-products-media at 4500074 (#223, generatedAt 2026-10-12T05:39:54.325Z,
-upstream sha256 2058fe56281a94ed056bb2c5ee760259aa31ca0c0fc194d9f8f1a161b4685205),
-after notes (213 widgets). Two drawing widgets are added the same way, after
-music-player as upstream: "figure" from main at 1796fc9 (#248, all seven hand-built
-figures, generatedAt 2026-10-13T06:42:11.500Z, upstream sha256
-019ffb6ecc67b08c657425fceaaa1f97cfb6e4d880ce3147bd7abb7aabc93e4a) and "iso-scene"
-from branch feat/iso-scene at cc1dd8c (#236, generatedAt 2026-10-12T14:43:17.980Z,
-upstream sha256 54bc615ec08001f282db7a535d597d30bbeb13712e701e35aec617180e0f08cc)
-(215 widgets). Three top-level keys are added the same way, alone, after widgets:
-"waivers", "intents" and "craft" (the build loop's waivers, intent map, craft
-rules and critic lenses, from packages/core/src/manifest/craft.ts) from branch
-feat/core-loop at 0420fdd (generatedAt 2026-10-13T15:33:48.272Z, upstream sha256
-d6e7ce5f9ce33f6732230dce683ce7ed51f41c18a341cd53894538ebd0d28904); no widget
-changes, because a full refresh from there changes 56 widgets this slice does not
-touch. widget_relevance reads "intents" and concierge_runtime renders rule text
-from "craft". One data widget is added the same way, alone: "standup-board" from branch
-feat/standup-board at e9a00de (generatedAt 2026-10-14T03:32:52.525Z, upstream sha256
-b17b1c9f4c889033f1728964e4d4a1fc81d1aa58d4080ffa01b83a3f1156629d), after
-habit-tracker as upstream (216 widgets), with its "intents" entry (after agenda) and
-its clippedText "waivers" entry; that branch's longer spec "description" is not
-pulled. Five entries are swapped the same way, each alone, from branch
-feat/widget-polish at 539fa99 (generatedAt 2026-10-14T09:34:15.214Z, upstream sha256
-4c4abed755b48f9cc8f117d9fa433a952c51d0b6e9b450580a6c0c068a9c0bbd): "gantt" (shorter
-height description), "progress" (new optional label), "treemap" (no per-node color),
-"virtual-list" (shorter row and height descriptions) and "color-picker" (brand blue in
-its pocket). gantt's and progress's data flags come along with them. Four more are
-swapped the same way, each alone, from branch feat/widget-polish-2 at 834b73a
-(generatedAt 2026-10-14T17:18:56.770Z, upstream sha256
-a539662b6f3b9c40344a8fe770bed7f57082b44eca7034bb3002aedcbe5e4aa4): "audit-log"
-(shorter groupBy description), "funnel" (fitted height, colors ignored), "heatmap"
-(max height, colorRange ignored) and "saved-views" (chips, shorter descriptions);
-funnel's and heatmap's data flags come along with them. Four more are swapped the
-same way, each alone, from branch feat/widget-polish-3 at 5b97065 (generatedAt
-2026-10-15T09:56:53.261Z, upstream sha256
-05339169b91a466602bc8df656d41803369932d8e243f43dbbaf2e732769b7c8): "gauge" (max
-height description), "order-status" (shorter title, map height and tiles
-descriptions), "pipeline-dashboard" (shorter description, sales or hiring) and
-"sankey" (max height description); gauge's data flags come along with it.
-sources-bar changed only its example and org-chart nothing, so neither is pulled.
-Two more are swapped the same way, each alone, from branch feat/widget-polish-4 at
-d226eb7 (generatedAt 2026-10-15T14:57:48.631Z, upstream sha256
-aaf32ff364371db66258c6e679a90ef57a0ae31c6ec9542ab9dc9e9dcf2cc49d): "gauge" (new
-optional currency and unit) and "bill-split" ("rows" for "cards" in its description);
-bill-split's data flags come along with it. The other wave-4 widgets changed only
-their examples or nothing, so none is pulled.
-interval-workout's optional per-exercise "figure" (#216) is not pulled: nothing here
-checks exercise rows, and the widget matches figures by name. The server never reads the examples, and one carries a
-sample Stripe-style key that GitHub push protection refuses.
+ripple-manifest.json: the @ripple-ui/svelte 0.8.2 release manifest, the one the npm
+package Paw OS and the Ripple site render ships with. It is the release asset
+(gh release download v0.8.2 -R qbtrix/ripple-iui --pattern manifest.json; asset sha256
+bcca322d6ac8fa5732669642f1adb6405372054ca5c5d0304ed74c667b58b8ba, generatedAt
+2026-10-28T15:31:10.672Z, 216 widgets, with the "waivers", "intents" and "craft" keys),
+equal to tag v0.8.2's packages/svelte/static/manifest.json once examples are dropped,
+with every widget's "example" removed. The server never reads the examples, and one
+carries a sample Stripe-style key that GitHub push protection refuses. ripple main
+after the release (d8c5d8b) adds math and mermaid to markdown's description and a
+theme note to chart's colors; neither is in the npm 0.8.2 build, so neither is pulled.
+widget_relevance reads "intents" and concierge_runtime renders rule text from "craft".
 
-Refresh (once the data widgets ship in a release, use the release asset):
-  gh release download -R qbtrix/ripple-iui --pattern manifest.json -D <dir>
-  (until then: packages/svelte/static/manifest.json at the PR head, after
-  `bun run build:manifest` if it is stale)
+Refresh from a release:
+  gh release download <tag> -R qbtrix/ripple-iui --pattern manifest.json -D <dir>
   python -I - <dir>/manifest.json ee/pocketpaw_ee/paw_bar/ripple-manifest.json <<'PY'
   import json, sys
   m = json.load(open(sys.argv[1], encoding="utf-8"))
