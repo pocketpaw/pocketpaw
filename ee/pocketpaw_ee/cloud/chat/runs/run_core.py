@@ -2501,10 +2501,10 @@ async def _drive_agent_loop(
         # (2026-10-29). Any other id on that backend is still checked.
         if (
             ctx.model_override
-            and (getattr(ctx, "credential_source", None) or byok_creds.source) != "byok"
             and not (
                 backend_name == "claude_agent_sdk" and ctx.model_override.startswith("claude-")
             )
+            and (getattr(ctx, "credential_source", None) or byok_creds.source) != "byok"
             and await _model_is_unknown_to_gateway(ctx.model_override)
         ):
             yield (

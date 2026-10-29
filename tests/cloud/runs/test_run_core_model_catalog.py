@@ -232,7 +232,7 @@ async def test_a_claude_model_on_the_claude_sdk_backend_skips_the_catalog(monkey
     model.not_available. A Claude id on the Claude SDK backend is not free text
     billed through the gateway's catalog; it skips the check.
 
-    Mutation that must break this: drop the claude_agent_sdk term from the guard.
+    Mutation that must break this: drop the whole Claude SDK skip clause.
     """
     pool, out = await _drive(
         monkeypatch,
@@ -246,6 +246,7 @@ async def test_a_claude_model_on_the_claude_sdk_backend_skips_the_catalog(monkey
 
 
 async def test_a_non_claude_model_on_the_claude_sdk_backend_is_still_checked(monkeypatch):
+    """Mutation that must break this: skip every id on the Claude SDK backend."""
     pool, out = await _drive(
         monkeypatch,
         _ctx(model_override="gpt-9-ultra-expensive"),
@@ -258,6 +259,7 @@ async def test_a_non_claude_model_on_the_claude_sdk_backend_is_still_checked(mon
 
 
 async def test_a_claude_model_on_another_backend_is_still_checked(monkeypatch):
+    """Mutation that must break this: skip every Claude id, whatever the backend."""
     pool, out = await _drive(
         monkeypatch,
         _ctx(model_override="claude-sonnet-5-5"),
