@@ -1310,13 +1310,16 @@ def _extract_ripple_attachment(full_text: str) -> tuple[str, dict[str, Any] | No
     in-flight conversations keep rendering — that branch ages out per RFC 13 open
     question #6. On either path, the spec is normalized through
     ``normalize_ripple_spec`` and the fence is stripped from the message body.
-    A truncated / unparseable fence leaves the text untouched and returns no
+    A ``ui-spec`` body that is not JSON gets the card gate's JSON repair once
+    (``_repair_fence_json``); one it cannot fix leaves the text untouched and returns no
     attachment (the frontend's ``ui-spec-error`` segment surfaces it).
     """
     # Canonical path: ``ui-spec`` fence + {version, ui}.
     match = RIPPLE_UISPEC_RE.search(full_text)
     if match is not None:
         candidate = _parse_fence_json(match.group(1))
+        if candidate is None:
+            candidate = _repair_fence_json(match.group(1))
         if _looks_like_ripple_spec(candidate):
             return _normalize_and_strip(full_text, match, candidate)
         # A ui-spec fence that doesn't parse / isn't a spec falls through; we do
@@ -1348,10 +1351,64 @@ def _parse_fence_json(raw: str) -> Any:
         return None
 
 
+def _repair_fence_json(raw: str) -> Any:
+    """A ``ui-spec`` body that is not JSON, parsed after the shared card gate's
+    JSON repair (missing or surplus closers, a small slip; ``card_spec._repaired``
+    on ``CHAT_PROFILE``), else None. Never raises."""
+    try:
+        from pocketpaw_ee.paw_bar.card_spec import _repaired
+        from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
+
+        fixed = _repaired(raw, CHAT_PROFILE)
+        if fixed is None:
+            return None
+        logger.info("ripple_chat_card.repaired", extra={"json_repaired": True})
+        return json.loads(fixed)
+    except Exception:
+        logger.debug("Ripple fence repair failed", exc_info=True)
+        return None
+
+
+def _gate_chat_card(spec: dict[str, Any]) -> dict[str, Any]:
+    """``spec`` after the Paw Bar card gate on ``CHAT_PROFILE`` (one gate, no
+    second copy). Passed: its ``ui`` with the gate's flat-prop lift and alias
+    renames applied (``card_spec._lift_flat_props``), every other key kept.
+    Refused: unchanged, with one ``ripple_chat_card.refused`` line; nothing is
+    dropped before launch. ``render_card``'s own output is never shipped: it
+    keeps only ``ui``/``state`` and its store fill strips a comparison's prices.
+    Any error returns ``spec`` unchanged. Never raises."""
+    if not isinstance(spec.get("ui"), dict):
+        return spec  # the deprecated {widgets} shape has no ui to gate
+    try:
+        from pocketpaw_ee.paw_bar.card_spec import (
+            _lift_flat_props,
+            rejection_reason,
+            render_card,
+        )
+        from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
+
+        body = json.dumps(spec)
+        verbs = CHAT_PROFILE.host_events
+        if render_card(body, None, verbs=verbs, profile=CHAT_PROFILE) is None:
+            reason = rejection_reason(body, verbs=verbs, profile=CHAT_PROFILE)
+            logger.info("ripple_chat_card.refused", extra={"reason": reason})
+            return spec
+        ui, lifted = _lift_flat_props(json.loads(body)["ui"], CHAT_PROFILE)
+        if ui == spec["ui"]:
+            return spec
+        # lifted_props 0 means only an alias was renamed.
+        logger.info("ripple_chat_card.repaired", extra={"lifted_props": lifted})
+        return {**spec, "ui": ui}
+    except Exception:
+        logger.warning("ripple_chat_card.gate_failed", exc_info=True)
+        return spec
+
+
 def _normalize_and_strip(
     full_text: str, match: re.Match[str], candidate: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
-    """Normalize ``candidate`` and remove its fence from ``full_text``."""
+    """Normalize ``candidate``, run it through the shared card gate
+    (``_gate_chat_card``) and remove its fence from ``full_text``."""
     spec: dict[str, Any] = candidate
     try:
         from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
@@ -1361,6 +1418,7 @@ def _normalize_and_strip(
             spec = normalized
     except Exception:
         logger.debug("Ripple normalize failed", exc_info=True)
+    spec = _gate_chat_card(spec)
     remaining = (full_text[: match.start()] + full_text[match.end() :]).strip()
     return remaining, spec
 

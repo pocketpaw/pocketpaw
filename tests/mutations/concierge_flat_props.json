@@ -74,8 +74,8 @@
   {
     "label": "LIFT-9: the pawbar profile does not lift",
     "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
-    "find": "    table = _LIFTABLE_BY_PROFILE.get(profile.name, {})",
-    "replace": "    table = _LIFTABLE_BY_PROFILE.get(profile.name, {}) if profile.strict else {}",
+    "find": "    table = _LIFTABLE_BY_PROFILE.get(profile.name) or (",
+    "replace": "    table = {} if not profile.strict else _LIFTABLE_BY_PROFILE.get(profile.name) or (",
     "tests": [
       "tests/cloud/test_paw_bar_flat_props.py"
     ]
