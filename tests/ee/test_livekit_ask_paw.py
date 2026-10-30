@@ -238,7 +238,7 @@ async def test_answer_speaks_sentences_in_order_and_records_the_qa(
     prompts: list[str] = []
 
     async def fake_stream(system, user):
-        prompts.append(user)
+        prompts.append(system)
         for d in ("We launch on March", " 3. Priya owns it", "."):
             yield d
 
@@ -1109,11 +1109,11 @@ async def test_a_question_with_no_search_terms_looks_up_the_latest_call_lines(
         _fact("The pricing page owner is Priya.", "default")
     ]
 
-    _, user = await _ask(redis, "hi")
+    system, _ = await _ask(redis, "hi")
 
     query = grounding.kb.await_args.args[1]
     assert "hi" in query and "pricing page" in query
-    assert "The pricing page owner is Priya." in user
+    assert "The pricing page owner is Priya." in system
 
 
 async def test_a_real_question_is_looked_up_as_asked(redis, grounding) -> None:
@@ -1146,12 +1146,12 @@ async def test_recent_group_chat_reaches_the_prompt_with_names(redis, grounding)
     ]
     grounding.names.return_value = {"u2": "Sam"}
 
-    system, user = await _ask(redis, "hi")
+    system, _ = await _ask(redis, "hi")
 
     assert grounding.chat.await_args.args[0] == GROUP
-    assert "<group-chat>" in user
-    assert "Sam: Can we move the demo to Thursday?" in user
-    assert "Scout: Thursday works, I'll update the deck." in user
+    assert "<group-chat>" in system
+    assert "Sam: Can we move the demo to Thursday?" in system
+    assert "Scout: Thursday works, I'll update the deck." in system
     assert "recent group chat" in " ".join(system.split()).lower()
 
 
@@ -1161,21 +1161,21 @@ async def test_group_chat_is_left_out_while_a_guest_is_in_the_call(redis, ground
     }
     grounding.chat.return_value = [_msg("Members-only pricing: 40% off for Acme.")]
 
-    _, user = await _ask(redis, "hi")
+    system, _ = await _ask(redis, "hi")
 
     grounding.chat.assert_not_awaited()
-    assert "Acme" not in user
-    assert "<group-chat>\n(none)\n</group-chat>" in user
+    assert "Acme" not in system
+    assert "<group-chat>\n(none)\n</group-chat>" in system
 
 
 async def test_group_chat_is_left_out_when_the_room_cannot_be_checked(redis, grounding) -> None:
     grounding.room.side_effect = RuntimeError("livekit down")
     grounding.chat.return_value = [_msg("Members-only note.")]
 
-    _, user = await _ask(redis, "hi")
+    system, _ = await _ask(redis, "hi")
 
     grounding.chat.assert_not_awaited()
-    assert "Members-only note." not in user
+    assert "Members-only note." not in system
 
 
 async def test_paws_own_lines_are_labelled_as_its_own_not_as_the_call(redis) -> None:
@@ -1203,10 +1203,10 @@ async def test_paws_chat_replies_are_labelled_as_its_own(redis, grounding) -> No
     ]
     grounding.names.return_value = {"u2": "Sam"}
 
-    _, user = await _ask(redis, "what did we decide")
+    system, _ = await _ask(redis, "what did we decide")
 
-    assert "Sam: Pricing ships Friday." in user
-    assert "Paw (you, earlier): **Q (Admin):** hi **Paw:** Hi there!" in user
+    assert "Sam: Pricing ships Friday." in system
+    assert "Paw (you, earlier): **Q (Admin):** hi **Paw:** Hi there!" in system
 
 
 async def test_one_long_chat_message_does_not_push_out_the_older_ones(redis, grounding) -> None:
@@ -1217,11 +1217,11 @@ async def test_one_long_chat_message_does_not_push_out_the_older_ones(redis, gro
     ]
     grounding.names.return_value = {"u2": "Sam"}
 
-    _, user = await _ask(redis, "what did we decide")
+    system, _ = await _ask(redis, "what did we decide")
 
-    assert "Older decision: demo moves to Thursday." in user
-    assert "Newest: thanks all." in user
-    assert "x" * 1000 not in user
+    assert "Older decision: demo moves to Thursday." in system
+    assert "Newest: thanks all." in system
+    assert "x" * 1000 not in system
 
 
 async def test_the_prompt_says_paws_own_lines_are_not_evidence(redis, grounding) -> None:
@@ -1270,14 +1270,14 @@ async def test_group_chat_keeps_people_and_only_paws_latest_reply(redis, groundi
     ]
     grounding.names.return_value = {"u2": "Sam"}
 
-    _, user = await _ask(redis, "what was the last message")
+    system, _ = await _ask(redis, "what was the last message")
 
     assert grounding.chat.await_args.kwargs["limit"] == 40
-    assert "Sam: Ship the Hunts README today." in user
-    assert "Meeting Notes" not in user
-    assert "I don't have that." not in user
-    assert "**Paw:** README ships today." in user
-    assert "Sam: ​" not in user
+    assert "Sam: Ship the Hunts README today." in system
+    assert "Meeting Notes" not in system
+    assert "I don't have that." not in system
+    assert "**Paw:** README ships today." in system
+    assert "Sam: ​" not in system
 
 
 async def test_the_prompt_says_the_chat_is_oldest_first(redis, grounding) -> None:
@@ -1306,3 +1306,19 @@ async def test_in_a_typed_only_call_only_paws_newest_answer_is_kept(redis) -> No
     assert "I can't answer that." not in text and "Sorry." not in text
     assert "Paw (you, earlier): The README ships today." in text
     assert "Paw (you, earlier): Sam owns it." in text
+
+
+async def test_context_rides_in_the_system_prompt_and_the_user_turn_is_the_question(
+    redis, grounding
+) -> None:
+    await redis.rpush(
+        f"livekit:transcript:{GROUP}",
+        json.dumps({"speaker": "Sam", "text": "Pricing ships Friday.", "ts": 1}),
+    )
+
+    system, user = await _ask(redis, "what did Sam say")
+
+    assert user == "Ann says to you: what did Sam say"
+    assert system.startswith(assistant.ASK_PAW_PROMPT)
+    assert "<call-context>" in system and "Sam: Pricing ships Friday." in system
+    assert "<group-chat>" in system and "<workspace-knowledge>" in system

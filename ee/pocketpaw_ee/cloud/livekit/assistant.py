@@ -535,19 +535,25 @@ def _who(group_id: str, ask_id: str, user_id: str, asked_by_name: str) -> dict[s
     }
 
 
-def _build_user_prompt(
+def _build_prompts(
     *, question: str, asked_by_name: str, call: str, chat: str, kb: str, facts: list[str]
-) -> str:
+) -> tuple[str, str]:
+    """(system, user): the context rides in the system prompt, the user turn is the question.
+
+    The managed Deepgram agent loses a user turn past a few thousand characters but
+    keeps a system prompt up to 25,000, so a long context in the user turn read as
+    no context at all.
+    """
     sections = [
+        ASK_PAW_PROMPT.rstrip(),
         f"<call-context>\n{call or '(nothing transcribed yet)'}\n</call-context>",
         f"<group-chat>\n{chat or '(none)'}\n</group-chat>",
         f"<workspace-knowledge>\n{kb or '(none found)'}\n</workspace-knowledge>",
         "<workspace-memory>\n"
         + ("\n".join(f"- {f}" for f in facts) if facts else "(none found)")
         + "\n</workspace-memory>",
-        f"{asked_by_name} says to you: {question}",
     ]
-    return "\n\n".join(sections)
+    return "\n\n".join(sections), f"{asked_by_name} says to you: {question}"
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +591,7 @@ async def answer_call_question(
         )
         gathered = time.monotonic()
 
-        prompt = _build_user_prompt(
+        system, prompt = _build_prompts(
             question=question,
             asked_by_name=asked_by_name,
             call=call,
@@ -594,7 +600,7 @@ async def answer_call_question(
             facts=facts,
         )
         first_sentence_at: float | None = None
-        async for sentence in split_sentences(stream_text(ASK_PAW_PROMPT, prompt)):
+        async for sentence in split_sentences(stream_text(system, prompt)):
             if await ask_lock_holder(group_id) != ask_id:
                 raise _AskStopped
             if not spoken:
