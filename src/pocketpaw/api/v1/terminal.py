@@ -11,6 +11,11 @@ output is read from its PTY and broadcast to all connected SSE clients via
 an in-memory publish/subscribe pattern.
 
 Created: 2026-06-16
+Updated: 2026-09-04 — the lsof probe that seeds the shell's initial CWD now runs
+    through asyncio.to_thread. It is a blocking subprocess.run with a 5s
+    timeout, and ensure_running() is awaited from the SSE, input and resize
+    endpoints, so on a host where lsof is missing or slow the first terminal
+    connect stalled the whole single-process event loop.
 """
 
 from __future__ import annotations
@@ -28,13 +33,33 @@ import struct
 import subprocess
 import termios
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from pocketpaw.api.deps import require_scope
+from pocketpaw.api.v1.terminal_gate import require_terminal_enabled
+
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Terminal"])
+# Two dependencies, in this order, and both are load-bearing. See
+# api/v1/terminal_gate.py for the whole argument; the short version:
+#
+#   require_terminal_enabled  404s the routes unless the deployment opted in,
+#                             so a box that does not want a remote shell does
+#                             not advertise one. Declared FIRST so the 404
+#                             reaches everyone, authenticated or not.
+#   require_scope("admin")    the identity check. Genuine localhost and the
+#                             master token carry full_access and pass; an
+#                             anonymous caller does not. This is the one that
+#                             closes the unauthenticated RCE, and it is
+#                             separately tested with the terminal ENABLED,
+#                             because a test that only ever hits the 404 above
+#                             would pass with this line deleted.
+router = APIRouter(
+    tags=["Terminal"],
+    dependencies=[Depends(require_terminal_enabled), Depends(require_scope("admin"))],
+)
 
 # ---------------------------------------------------------------------------
 # Singleton shell process — one PTY-backed bash per server lifetime.
@@ -129,7 +154,8 @@ class ShellProcess:
         # Seed the initial CWD by reading /proc/<pid>/cwd (Linux) or
         # using lsof (macOS). Fall back to $HOME.
         try:
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["lsof", "-p", str(self._proc.pid), "-d", "cwd", "-Fn"],
                 capture_output=True,
                 text=True,

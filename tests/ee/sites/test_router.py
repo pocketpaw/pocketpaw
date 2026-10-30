@@ -50,6 +50,14 @@
 # route returns {pocket_id, body_html, css} AND threads the request Origin header as
 # the builder_origin the armed build needs. A non-svelte pocket (real service, mocked
 # ripple pocket read) is a 422.
+#
+# Updated 2026-07-17 (fix/sites-prewarm-origin): POST /sites/publish and POST
+# /sites/by-pocket/{pocket_id}/leaf-edits now thread the request Origin header into the
+# service as ``prewarm_origin`` so the background native-artifact pre-warm builds with
+# the same origin a browser view resolves. New tests patch publish_pocket /
+# apply_leaf_edits and assert the route forwards the request Origin as prewarm_origin
+# (and, for publish, that builder_origin is NOT set from the header — the public deploy
+# stays plain), plus the no-Origin-header case forwards None.
 
 from __future__ import annotations
 
@@ -102,10 +110,9 @@ class _FakeUser:
         self.workspaces = [_FakeMembership(workspace=workspace_id, role="member")]
 
 
-def _build_app(workspace_id: str, monkeypatch) -> FastAPI:
+def _build_app(workspace_id: str) -> FastAPI:
     from datetime import UTC, datetime
 
-    import pocketpaw_ee.cloud.workspace.service as ws_svc
     from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
     from pocketpaw_ee.cloud._core.deps import current_workspace_id
     from pocketpaw_ee.cloud._core.http import add_error_handler
@@ -113,7 +120,25 @@ def _build_app(workspace_id: str, monkeypatch) -> FastAPI:
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.sites.router import router as sites_router
 
-    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="go"))
+    # NO plan patch here. The tree's conftest already patches `get_workspace_plan` for
+    # every test in `tests/ee/sites/` (`_default_sites_plan`), so this module's own
+    # `monkeypatch.setattr` on the SAME target was redundant — and actively harmful.
+    #
+    # Two patches on one attribute unwind in the wrong order. The conftest's `patch()`
+    # starts first and saves the REAL function; `monkeypatch.setattr` then runs and
+    # saves the conftest's MOCK as its "original". At teardown the conftest's patch
+    # exits first and correctly restores the real function — and then monkeypatch undoes
+    # its own, putting the mock back. The mock outlives every fixture that installed it
+    # and stays for the rest of the process.
+    #
+    # Measured 2026-08-12: this leaked ACROSS TEST TREES. With `tests/ee/sites/` ahead of
+    # `tests/cloud/sites/test_site_billing.py` in the run, a `free` workspace read back
+    # as `go`, so the entitlement test's `pytest.raises(Forbidden)` saw a publish that
+    # was cheerfully allowed. The failure named the billing test and pointed at the plan
+    # gate — neither of which had anything to do with it.
+    #
+    # `monkeypatch` is deliberately NOT a parameter any more: this function patches
+    # nothing, and an unused fixture arg is an invitation to patch that target again.
 
     fake_user = _FakeUser(workspace_id)
     app = FastAPI()
@@ -163,7 +188,7 @@ async def _seeded_site(beanie_test_db) -> Any:
 @pytest.mark.asyncio
 async def test_get_domains_returns_owning_workspace_domains(_seeded_site, monkeypatch):
     site = _seeded_site
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get(f"/api/v1/sites/{site.script_name}/domains")
     assert resp.status_code == 200, resp.text
@@ -179,7 +204,7 @@ async def test_get_domains_cross_tenant_is_404(_seeded_site, monkeypatch):
     """A different workspace cannot read the owner's domains — tenant scoping in
     the service surfaces as a 404, never another tenant's data."""
     site = _seeded_site
-    app = _build_app("ws_intruder", monkeypatch)
+    app = _build_app("ws_intruder")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get(f"/api/v1/sites/{site.script_name}/domains")
     assert resp.status_code == 404
@@ -198,14 +223,13 @@ async def test_get_domains_cross_tenant_is_404(_seeded_site, monkeypatch):
 async def test_preview_by_pocket_returns_ripple_content(beanie_test_db, monkeypatch):
     """GET /sites/by-pocket/{id}/preview returns {pocket_id, engine, content} with
     the pocket's rippleSpec for a ripple pocket."""
-    from unittest.mock import AsyncMock
 
     spec = {"type": "container", "ui": {"children": []}}
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(return_value={"name": "x", "engine": "ripple", "rippleSpec": spec}),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk1/preview")
     assert resp.status_code == 200, resp.text
@@ -217,7 +241,6 @@ async def test_preview_by_pocket_returns_ripple_content(beanie_test_db, monkeypa
 async def test_preview_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypatch):
     """A missing / access-denied pocket surfaces as a 404 (the pockets service's
     NotFound flows through the standard error handler)."""
-    from unittest.mock import AsyncMock
 
     from pocketpaw_ee.cloud._core.errors import NotFound
 
@@ -225,7 +248,7 @@ async def test_preview_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypat
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_missing/preview")
     assert resp.status_code == 404
@@ -234,7 +257,7 @@ async def test_preview_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypat
 @pytest.mark.asyncio
 async def test_status_by_pocket_unpublished_is_draft(beanie_test_db, monkeypatch):
     """An unpublished pocket (no Site doc) reads {status: draft, is_live: false}."""
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_unpublished/status")
     assert resp.status_code == 200, resp.text
@@ -248,7 +271,7 @@ async def test_status_by_pocket_unpublished_is_draft(beanie_test_db, monkeypatch
 async def test_status_by_pocket_published_is_live(_seeded_site, monkeypatch):
     """A published pocket (the seeded site is under pk1 / ws_owner) reads
     {status: published, is_live: true} and carries a deployed_at ISO string (P2b)."""
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk1/status")
     assert resp.status_code == 200, resp.text
@@ -267,7 +290,7 @@ async def test_status_by_pocket_published_is_live(_seeded_site, monkeypatch):
 async def test_status_by_pocket_unpublished_deployed_at_is_none(beanie_test_db, monkeypatch):
     """P2b: an unpublished pocket (no Site doc) reads deployed_at None — the DTO
     exposes None before the first deploy."""
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_never_deployed/status")
     assert resp.status_code == 200, resp.text
@@ -314,7 +337,7 @@ async def test_dev_preview_by_pocket_returns_url(beanie_test_db, monkeypatch):
     )
     monkeypatch.setattr(dev_server_mod, "_MANAGER", mgr)
 
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(
             "/api/v1/sites/by-pocket/pk1/dev-preview",
@@ -366,7 +389,7 @@ async def test_dev_preview_by_pocket_defaults_origin_from_config(beanie_test_db,
     )
     monkeypatch.setattr(dev_server_mod, "_MANAGER", mgr)
 
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/api/v1/sites/by-pocket/pk1/dev-preview")
     assert resp.status_code == 200, resp.text
@@ -379,7 +402,6 @@ async def test_dev_preview_by_pocket_missing_pocket_is_404(beanie_test_db, monke
     """A missing / access-denied pocket surfaces as a 404: the DEFAULT materialize
     reads the pocket via the pockets service, whose NotFound flows through the
     standard error handler."""
-    from unittest.mock import AsyncMock
 
     import pocketpaw_ee.sites.dev_server as dev_server_mod
     from pocketpaw_ee.cloud._core.errors import NotFound
@@ -392,7 +414,7 @@ async def test_dev_preview_by_pocket_missing_pocket_is_404(beanie_test_db, monke
         AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
     )
 
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/api/v1/sites/by-pocket/pk_missing/dev-preview")
     assert resp.status_code == 404
@@ -441,7 +463,7 @@ async def test_post_reserve_returns_reconciled_list(beanie_test_db, monkeypatch)
         local_server._server.server_close()
         local_server._server = None
 
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
             resp = await c.post("/api/v1/sites/reserve")
@@ -485,7 +507,7 @@ async def test_make_editable_route_republishes_with_builder_origin(beanie_test_d
         )
 
     monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(
             "/api/v1/sites/by-pocket/pk1/editable",
@@ -524,7 +546,7 @@ async def test_make_editable_route_empty_body_falls_back_to_config(beanie_test_d
     # fallback) BEFORE it calls publish_pocket, so patching publish_pocket still
     # exercises the genuine fallback and the resolved origin reaches the response.
     monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         # No Origin header and no body field -> the configured env fallback fires.
         resp = await c.post("/api/v1/sites/by-pocket/pk1/editable", json={})
@@ -556,7 +578,7 @@ async def test_make_editable_route_uses_origin_header(beanie_test_db, monkeypatc
         )
 
     monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(
             "/api/v1/sites/by-pocket/pk1/editable",
@@ -592,7 +614,7 @@ async def test_make_editable_route_body_beats_origin_header(beanie_test_db, monk
         )
 
     monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(
             "/api/v1/sites/by-pocket/pk1/editable",
@@ -624,13 +646,12 @@ async def test_audit_by_pocket_surfaces_known_issues(beanie_test_db, monkeypatch
     """A site with an img-without-alt, an empty href, and a missing title surfaces
     a finding for each — each carrying a non-empty fix_prompt the UI can feed to
     the existing edit path."""
-    from unittest.mock import AsyncMock
 
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(return_value={"name": "x", "engine": "svelte", "source": _AUDIT_DIRTY_SOURCE}),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/api/v1/sites/by-pocket/pk_dirty/audit")
     assert resp.status_code == 200, resp.text
@@ -650,7 +671,6 @@ async def test_audit_by_pocket_surfaces_known_issues(beanie_test_db, monkeypatch
 @pytest.mark.asyncio
 async def test_audit_by_pocket_clean_site_has_no_findings(beanie_test_db, monkeypatch):
     """A clean site returns an empty findings list."""
-    from unittest.mock import AsyncMock
 
     clean = {
         "src/app.html": (
@@ -671,7 +691,7 @@ async def test_audit_by_pocket_clean_site_has_no_findings(beanie_test_db, monkey
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(return_value={"name": "x", "engine": "svelte", "source": clean}),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/api/v1/sites/by-pocket/pk_clean/audit")
     assert resp.status_code == 200, resp.text
@@ -682,7 +702,6 @@ async def test_audit_by_pocket_clean_site_has_no_findings(beanie_test_db, monkey
 async def test_audit_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypatch):
     """A missing / access-denied pocket surfaces as a 404 (the pockets service's
     NotFound flows through the standard error handler)."""
-    from unittest.mock import AsyncMock
 
     from pocketpaw_ee.cloud._core.errors import NotFound
 
@@ -690,7 +709,7 @@ async def test_audit_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypatch
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/api/v1/sites/by-pocket/pk_missing/audit")
     assert resp.status_code == 404
@@ -720,7 +739,7 @@ async def test_revert_by_pocket_creates_draft(beanie_test_db, monkeypatch):
         scope_type="pocket", scope_id="pk_rev", workspace_id="ws_owner", content={"v": "two"}
     )
 
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(f"/api/v1/sites/by-pocket/pk_rev/versions/{v1.version_no}/revert")
     assert resp.status_code == 200, resp.text
@@ -745,7 +764,7 @@ async def test_revert_by_pocket_unknown_version_is_404(beanie_test_db, monkeypat
     await versions.write_draft(
         scope_type="pocket", scope_id="pk_rev2", workspace_id="ws_owner", content={"v": 1}
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/api/v1/sites/by-pocket/pk_rev2/versions/999/revert")
     assert resp.status_code == 404
@@ -760,7 +779,7 @@ async def test_revert_by_pocket_cross_tenant_is_404(beanie_test_db, monkeypatch)
     foreign = await versions.write_draft(
         scope_type="pocket", scope_id="pk_rev3", workspace_id="ws_other", content={"v": 1}
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(f"/api/v1/sites/by-pocket/pk_rev3/versions/{foreign.version_no}/revert")
     assert resp.status_code == 404
@@ -793,7 +812,6 @@ _DATA_DYNAMIC_WIRE = {
 async def test_data_tables_by_pocket_lists_schema(beanie_test_db, monkeypatch):
     """GET .../data lists the dynamic site's tables from the spec's objects; in
     local mode (no CF creds) available=False but the schema is still listed."""
-    from unittest.mock import AsyncMock
 
     monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("PAW_SITES_LOCAL", raising=False)
@@ -801,7 +819,7 @@ async def test_data_tables_by_pocket_lists_schema(beanie_test_db, monkeypatch):
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(return_value=_DATA_DYNAMIC_WIRE),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_dyn/data")
     assert resp.status_code == 200, resp.text
@@ -815,14 +833,13 @@ async def test_data_tables_by_pocket_lists_schema(beanie_test_db, monkeypatch):
 @pytest.mark.asyncio
 async def test_data_tables_by_pocket_non_dynamic_is_422(beanie_test_db, monkeypatch):
     """A NON-dynamic pocket has no data store → 422 (not_dynamic)."""
-    from unittest.mock import AsyncMock
 
     monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(return_value={"name": "x", "pattern": "landing", "rippleSpec": {"type": "c"}}),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_landing/data")
     assert resp.status_code == 422
@@ -832,7 +849,6 @@ async def test_data_tables_by_pocket_non_dynamic_is_422(beanie_test_db, monkeypa
 async def test_data_rows_by_pocket_local_mode_degrades(beanie_test_db, monkeypatch):
     """GET .../data/{table} in local mode returns the clean unavailable shape with
     the table's declared columns listed and no rows."""
-    from unittest.mock import AsyncMock
 
     monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("PAW_SITES_LOCAL", raising=False)
@@ -840,7 +856,7 @@ async def test_data_rows_by_pocket_local_mode_degrades(beanie_test_db, monkeypat
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(return_value=_DATA_DYNAMIC_WIRE),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_dyn/data/entry")
     assert resp.status_code == 200, resp.text
@@ -854,14 +870,13 @@ async def test_data_rows_by_pocket_local_mode_degrades(beanie_test_db, monkeypat
 @pytest.mark.asyncio
 async def test_data_rows_by_pocket_unknown_table_is_404(beanie_test_db, monkeypatch):
     """An unknown table is rejected with a 404 (the SQL-safety gate)."""
-    from unittest.mock import AsyncMock
 
     monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(return_value=_DATA_DYNAMIC_WIRE),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_dyn/data/unknown_table")
     assert resp.status_code == 404
@@ -898,14 +913,14 @@ async def test_leaf_edits_route_persists_and_returns_verdicts(beanie_test_db, mo
     )
     assert err is None, err
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         new = dict(source)
         new["src/lib/components/Hero.svelte"] = "<h1>Brighter</h1>"
         return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}
 
     monkeypatch.setattr("pocketpaw_ee.sites.generator_client.apply_leaf_edits", _fake_apply)
 
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(
             f"/api/v1/sites/by-pocket/{pocket_id}/leaf-edits",
@@ -926,13 +941,12 @@ async def test_leaf_edits_route_persists_and_returns_verdicts(beanie_test_db, mo
 async def test_leaf_edits_route_non_svelte_is_422(beanie_test_db, monkeypatch):
     """A ripple pocket has no svelte source map → 422 (the service ValidationError
     maps to a 422); the CLI bridge is never reached."""
-    from unittest.mock import AsyncMock
 
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(return_value={"name": "x", "engine": "ripple", "rippleSpec": {"type": "c"}}),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(
             "/api/v1/sites/by-pocket/pk_ripple/leaf-edits",
@@ -945,7 +959,6 @@ async def test_leaf_edits_route_non_svelte_is_422(beanie_test_db, monkeypatch):
 async def test_leaf_edits_route_missing_pocket_is_404(beanie_test_db, monkeypatch):
     """A missing / access-denied pocket surfaces as a 404 (the pockets service's
     NotFound flows through the standard error handler)."""
-    from unittest.mock import AsyncMock
 
     from pocketpaw_ee.cloud._core.errors import NotFound
 
@@ -953,7 +966,7 @@ async def test_leaf_edits_route_missing_pocket_is_404(beanie_test_db, monkeypatc
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(
             "/api/v1/sites/by-pocket/pk_missing/leaf-edits",
@@ -988,7 +1001,7 @@ async def test_native_artifact_route_returns_body_and_css(beanie_test_db, monkey
         }
 
     monkeypatch.setattr(sites_service, "get_native_artifact", _fake_get_native_artifact)
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get(
             "/api/v1/sites/by-pocket/pk1/native-artifact",
@@ -1006,16 +1019,273 @@ async def test_native_artifact_route_returns_body_and_css(beanie_test_db, monkey
 
 
 @pytest.mark.asyncio
+async def test_native_artifact_route_carries_the_build_pending_shape(beanie_test_db, monkeypatch):
+    """SP-2: a cold miss answers with a build to POLL, and the route has to carry the
+    handle. ``NativeArtifactResponse`` defaults ``build_status`` to "none", so a response
+    model that had not been widened would 200 with the pending fields silently dropped —
+    the client would see an empty render and no reason, forever."""
+
+    async def _pending(**kw):
+        return {
+            "pocket_id": "pk1",
+            "body_html": "",
+            "css": "",
+            "build_status": "queued",
+            "build_reason": None,
+            "build_job_id": "site-preview-pk1-deadbeef",
+        }
+
+    monkeypatch.setattr(sites_service, "get_native_artifact", _pending)
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk1/native-artifact")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["build_status"] == "queued"
+    assert body["build_job_id"] == "site-preview-pk1-deadbeef"
+    assert body["body_html"] == ""
+
+
+@pytest.mark.asyncio
 async def test_native_artifact_route_non_svelte_is_422(beanie_test_db, monkeypatch):
     """A ripple pocket has no svelte build → 422 (the service ValidationError maps to
     422); no build is triggered (the service raises before constructing a generator)."""
-    from unittest.mock import AsyncMock
 
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.pockets.service.get",
         AsyncMock(return_value={"name": "x", "engine": "ripple", "rippleSpec": {"type": "c"}}),
     )
-    app = _build_app("ws_owner", monkeypatch)
+    app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_ripple/native-artifact")
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# fix/sites-prewarm-origin: POST /sites/publish + POST .../leaf-edits thread the
+# request Origin header into the service as ``prewarm_origin`` so the background
+# native-artifact pre-warm warms the origin a browser view will ask for. The publish
+# route must NOT arm the public deploy from the header (builder_origin stays unset).
+# ---------------------------------------------------------------------------
+
+
+def _stub_published_site_doc():
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    return _SiteDoc(
+        id=ObjectId(),
+        workspace="ws_owner",
+        pocket_id="pk1",
+        owner="user-test-1",
+        name="Owner Site",
+        script_name="site1",
+        deployed=True,
+        signed_key="k",
+        builder_origin="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_route_threads_origin_as_prewarm_origin(beanie_test_db, monkeypatch):
+    """POST /sites/publish forwards the request Origin header as ``prewarm_origin`` (so
+    the pre-warm warms the origin a browser view resolves) WITHOUT setting
+    ``builder_origin`` from it — the public deploy stays plain. publish_pocket is patched
+    (a real publish would spawn bun)."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_publish_pocket(*, prewarm_origin=None, builder_origin=None, **kw):
+        captured["prewarm_origin"] = prewarm_origin
+        captured["builder_origin"] = builder_origin
+        return _stub_published_site_doc()
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/sites/publish",
+            json={"pocket_id": "pk1"},
+            headers={"Origin": "https://paw.hzd.interacly.com"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert captured["prewarm_origin"] == "https://paw.hzd.interacly.com"
+    # The public deploy is unchanged — the header must NOT arm it.
+    assert captured["builder_origin"] in (None, "")
+
+
+@pytest.mark.asyncio
+async def test_publish_route_no_origin_header_prewarm_origin_none(beanie_test_db, monkeypatch):
+    """POST /sites/publish with NO Origin header forwards ``prewarm_origin=None`` so the
+    pre-warm keeps its PAW_SITES_BUILDER_ORIGIN env fallback (a call with no browser
+    origin, e.g. server-to-server)."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_publish_pocket(*, prewarm_origin=None, **kw):
+        captured["prewarm_origin"] = prewarm_origin
+        return _stub_published_site_doc()
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/publish", json={"pocket_id": "pk1"})
+    assert resp.status_code == 200, resp.text
+    assert captured["prewarm_origin"] is None
+
+
+@pytest.mark.asyncio
+async def test_leaf_edits_route_threads_origin_as_prewarm_origin(beanie_test_db, monkeypatch):
+    """POST /sites/by-pocket/{id}/leaf-edits forwards the request Origin header as
+    ``prewarm_origin`` so the background native-artifact pre-warm warms the origin the
+    browser's native-artifact view (called from the same dashboard) will ask for.
+    apply_leaf_edits is patched to capture the forwarded origin."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_apply_leaf_edits(*, prewarm_origin=None, **kw):
+        captured["prewarm_origin"] = prewarm_origin
+        return [{"uid": "Hero:headline:0", "applied": True, "reason": None}]
+
+    monkeypatch.setattr(sites_service, "apply_leaf_edits", _fake_apply_leaf_edits)
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/sites/by-pocket/pk1/leaf-edits",
+            json={"edits": [{"uid": "Hero:headline:0", "op": {"kind": "setText", "html": "y"}}]},
+            headers={"Origin": "https://paw.hzd.interacly.com"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert captured["prewarm_origin"] == "https://paw.hzd.interacly.com"
+
+
+def test_zz_no_module_double_patches_the_plan_gate():
+    """No module in this tree may patch ``get_workspace_plan`` while the conftest is
+    also patching it. Two patches on one attribute unwind in the wrong order and the
+    mock outlives every fixture that installed it.
+
+    That is not a theory. It escaped this whole tree and broke
+    ``tests/cloud/sites/test_site_billing.py``'s entitlement test, where a ``free``
+    workspace read back as ``go`` and a publish that should have been Forbidden was
+    allowed. The failure named a test and a subsystem that were both innocent, and it
+    only appeared when the two trees ran in the same process — so nobody running one
+    file ever saw it. FIVE modules here had the same double-patch.
+
+    Checked by SCANNING THE TREE'S SOURCE, not at runtime: the conftest's own legitimate
+    patch is active during any test, so a runtime probe cannot tell a correct patch from
+    a doubled one. The source can.
+
+    A module that genuinely needs a plan other than the conftest's ``go`` opts OUT of the
+    default (``_OWNS_ITS_OWN_PLAN_PATCH`` in the conftest) and then owns the target
+    alone — never both.
+    """
+    import pathlib as _p
+
+    tree = _p.Path(__file__).parent
+    conftest = (tree / "conftest.py").read_text(encoding="utf-8")
+    opted_out = {
+        line.split('"')[1]
+        for line in conftest.splitlines()
+        if line.strip().startswith('"test_') and "#" in line
+    }
+
+    offenders: dict[str, list[str]] = {}
+    for path in sorted(tree.glob("test_*.py")):
+        if path.stem in opted_out:
+            continue
+        hits = [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if "get_workspace_plan" in line
+            and ("setattr(" in line or "patch(" in line)
+            and not line.lstrip().startswith("#")
+        ]
+        if hits:
+            offenders[path.name] = hits
+
+    assert not offenders, (
+        "these modules patch get_workspace_plan while the conftest also patches it; the "
+        "two unwind in the wrong order and leak a permissive plan gate into every later "
+        f"test in the run: {offenders}. Either drop the patch and take the conftest "
+        "default, or add the module to _OWNS_ITS_OWN_PLAN_PATCH in conftest.py."
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /sites/by-pocket/{pocket_id}/versions — the owner-facing timeline. What it
+# puts on the wire is read by a person, so a raw status token or a raw user id
+# is a defect here even though both are technically correct.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_versions_timeline_names_the_author(beanie_test_db, monkeypatch):
+    """The author goes over the wire as a name, not the ObjectId on the row.
+
+    ``author`` is stored as ``str(user.id)``, so every row in the timeline was
+    captioned with 24 characters of hex. One batched lookup covers the whole
+    timeline; an id the resolver cannot name keeps its raw value rather than
+    going blank.
+    """
+    from pocketpaw_ee.sites import router as sites_router
+    from pocketpaw_ee.versions import service as versions
+
+    await versions.write_draft(
+        scope_type="pocket",
+        scope_id="pk_names",
+        workspace_id="ws_owner",
+        content={"v": 1},
+        author="6a1f0c2e4b09d3f1a2b3c4d5",
+    )
+    await versions.write_draft(
+        scope_type="pocket",
+        scope_id="pk_names",
+        workspace_id="ws_owner",
+        content={"v": 2},
+        author="an-agent",  # not an ObjectId — the resolver skips these
+    )
+
+    async def _fake_names(user_ids):
+        assert user_ids == {"6a1f0c2e4b09d3f1a2b3c4d5", "an-agent"}, user_ids
+        return {"6a1f0c2e4b09d3f1a2b3c4d5": "Jo Blogs"}
+
+    monkeypatch.setattr(sites_router, "resolve_display_names", _fake_names)
+
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_names/versions")
+    assert resp.status_code == 200, resp.text
+
+    authors = [v["author"] for v in resp.json()["versions"]]
+    assert authors == ["Jo Blogs", "an-agent"]
+
+
+@pytest.mark.asyncio
+async def test_versions_timeline_splits_legacy_reverted_rows(beanie_test_db, monkeypatch):
+    """Rows written before the lifecycle split do not reach the client saying
+    "reverted" — the endpoint resolves them by lineage on the way out.
+
+    v1 has a descendant, so an edit replaced it; v2 is where the lineage
+    stopped. Both are stored as the same word.
+    """
+    from pocketpaw_ee.versions import service as versions
+    from pocketpaw_ee.versions.models import ArtifactVersion
+
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id="pk_legacy", workspace_id="ws_owner", content={"v": 1}
+    )
+    v2 = await versions.write_draft(
+        scope_type="pocket", scope_id="pk_legacy", workspace_id="ws_owner", content={"v": 2}
+    )
+    for row_id in (v1.id, v2.id):
+        row = await ArtifactVersion.get(row_id)
+        assert row is not None
+        row.status = "reverted"
+        await row.save()
+
+    app = _build_app("ws_owner")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_legacy/versions")
+    assert resp.status_code == 200, resp.text
+
+    statuses = [v["status"] for v in resp.json()["versions"]]
+    assert statuses == ["superseded", "discarded"]
+    assert "reverted" not in statuses

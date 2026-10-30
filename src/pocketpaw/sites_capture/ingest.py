@@ -1,7 +1,10 @@
 # src/pocketpaw/sites_capture/ingest.py — pure, dependency-free ingest hardening
 # generalized from ee/paw_bar/router.py. Origin pinning, honeypot, and mapping
 # interpolation live here so the cloud entity and any other caller share one
-# implementation. Rate-limit COUNTING stays in the store (it needs persistence);
+# implementation. Changes (2026-10-01, CN-7): ``interpolate`` is public and
+# paw-bar's legacy ingest imports it instead of carrying its own copy. The two
+# origin policies stay separate on purpose (capture fails closed, paw-bar's demo
+# allowlist fails open). Rate-limit COUNTING stays in the store (it needs persistence);
 # this module only holds the stateless predicates + interpolation.
 
 from __future__ import annotations
@@ -38,11 +41,14 @@ def is_honeypot_tripped(payload: dict[str, Any], *, honeypot_field: str) -> bool
 
 def interpolate_mapping(mapping: SiteEventMapping, context: dict[str, Any]) -> dict[str, Any]:
     """Resolve `{{ a.b }}` placeholders in every mapping field — verbatim
-    generalization of paw-bar's `_interpolate` / `_lookup`."""
-    return {key: _interpolate(template, context) for key, template in mapping.fields.items()}
+    generalization of paw-bar's old `_interpolate` / `_lookup`."""
+    return {key: interpolate(template, context) for key, template in mapping.fields.items()}
 
 
-def _interpolate(template: str, context: dict[str, Any]) -> Any:
+def interpolate(template: str, context: dict[str, Any]) -> Any:
+    """Resolve `{{ a.b }}` placeholders against ``context``. A template that is
+    one whole placeholder returns the raw value (types preserved); a mixed
+    string substitutes stringified values, missing paths as ""."""
     full = re.fullmatch(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}", template)
     if full:
         return _lookup(full.group(1), context)

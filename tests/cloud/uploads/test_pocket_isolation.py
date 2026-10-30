@@ -46,9 +46,9 @@ async def test_pocket_a_listing_returns_only_pocket_a_files(beanie_upload_db):
     await _seed("w1", name="b-secret.pdf", pocket_id="B")
 
     svc = UnifiedFilesService()
-    files, _warnings = await svc.list_unified("w1", source="chat", limit=50, pocket_id="A")
+    page = await svc.list_unified("w1", source="chat", limit=50, pocket_id="A")
 
-    assert [f.filename for f in files] == ["a-secret.pdf"]
+    assert [f.filename for f in page.files] == ["a-secret.pdf"]
 
 
 @pytest.mark.asyncio
@@ -57,9 +57,9 @@ async def test_pocket_b_listing_returns_only_pocket_b_files(beanie_upload_db):
     await _seed("w1", name="b-secret.pdf", pocket_id="B")
 
     svc = UnifiedFilesService()
-    files, _warnings = await svc.list_unified("w1", source="chat", limit=50, pocket_id="B")
+    page = await svc.list_unified("w1", source="chat", limit=50, pocket_id="B")
 
-    assert [f.filename for f in files] == ["b-secret.pdf"]
+    assert [f.filename for f in page.files] == ["b-secret.pdf"]
 
 
 @pytest.mark.asyncio
@@ -75,9 +75,9 @@ async def test_workspace_listing_excludes_all_pocket_files(beanie_upload_db):
     await _seed("w1", name="b-secret.pdf", pocket_id="B")
 
     svc = UnifiedFilesService()
-    files, _warnings = await svc.list_unified("w1", source="chat", limit=50, pocket_id=None)
+    page = await svc.list_unified("w1", source="chat", limit=50, pocket_id=None)
 
-    assert [f.filename for f in files] == ["ws-doc.pdf"]
+    assert [f.filename for f in page.files] == ["ws-doc.pdf"]
 
 
 @pytest.mark.asyncio
@@ -90,9 +90,9 @@ async def test_cross_workspace_isolation_holds_within_pocket_filter(
     await _seed("w2", name="w2-pa.pdf", pocket_id="P")
 
     svc = UnifiedFilesService()
-    files, _ = await svc.list_unified("w1", source="chat", limit=50, pocket_id="P")
+    page = await svc.list_unified("w1", source="chat", limit=50, pocket_id="P")
 
-    assert [f.filename for f in files] == ["w1-pa.pdf"]
+    assert [f.filename for f in page.files] == ["w1-pa.pdf"]
 
 
 @pytest.mark.asyncio

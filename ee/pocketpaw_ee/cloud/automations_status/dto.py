@@ -40,6 +40,10 @@ class SweepDescriptorOut(BaseModel):
     kind: str
     env_flag: str
     env_flag_on: bool
+    #: Whether the sweep's start hook actually ran in THIS process. Distinct
+    #: from ``env_flag_on``: the pair "flag on, not running" is what a broken
+    #: wiring looks like, and it is what this deployment looked like for months.
+    running: bool = False
     interval_env: str | None = None
     description: str = ""
 

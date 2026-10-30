@@ -6,6 +6,11 @@ during app startup, which tests don't invoke). Tests that want to assert
 on emitted events request the ``recording_bus`` fixture explicitly to read
 ``bus.events``.
 
+Also installs, session-wide and autouse, ``local_store_home``: it redirects
+``pocketpaw.stores._DATA_DIR`` at a tmp directory so a test that reaches an
+unpatched local-store factory writes there instead of into the developer's real
+``~/.pocketpaw`` (see the fixture for what made this visible).
+
 Also exposes:
 - ``mongo_db`` — Beanie initialized against a fresh mongomock-motor DB
   for the test. Used by service-level tests that exercise real Beanie
@@ -13,6 +18,16 @@ Also exposes:
 - ``cloud_app_client`` — a FastAPI app with the enterprise chat routers
   mounted and auth/license dependencies overridden, used by HTTP-layer
   tests so they don't need a real JWT.
+- ``override_workspace_role`` — pins a caller ROLE + workspace on a bare test
+  app so ``require_action(...)`` guards run their real role check. Router-level
+  tests mount the router with no auth stack, so without it every guarded route
+  answers 401 before the role check runs.
+- ``override_cloud_user`` — the one way to sign a fake user into a bare test
+  app. It overrides BOTH ``current_active_user`` (``require_action`` and the
+  ``_core.deps`` identity deps) and ``current_optional_user`` (what
+  ``request_context`` reads, which also 401s an inactive user). Overriding only
+  the first leaves every ``request_context`` route answering 401, so a 403
+  assertion behind it never reaches the guard.
 """
 
 from __future__ import annotations
@@ -31,22 +46,18 @@ os.environ.setdefault("POCKETPAW_REDIS_URL", "redis://test:6379/0")
 
 import pytest
 
-# Every test under ``tests/cloud/`` exercises ``ee.cloud.*``, which pulls
-# ``beanie`` (the cloud-extras stack) on import. Skip the whole tree with
-# a clear reason when those extras aren't installed, instead of letting
-# pytest emit a per-file collection error that's easy to miss in a
-# verbose log. CI installs everything via ``uv sync --dev --all-extras``
-# so this is a no-op there; locally it just makes the contract explicit.
-pytest.importorskip(
-    "beanie",
-    reason="ee/cloud tests require the cloud extras — install with `uv sync --dev --all-extras`",
-)
-pytest.importorskip("mongomock_motor", reason="mongomock-motor is required for cloud tests")
+# Every test under ``tests/cloud/`` exercises ``pocketpaw_ee.cloud.*``. When the
+# enterprise install is missing this FAILS collection with the install command
+# (tests/conftest.py); it used to skip the whole tree, and that silent skip read
+# as a green run.
+from tests.conftest import require_enterprise_install
 
-import pytest_asyncio
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
-from pocketpaw_ee.cloud._core.realtime.events import Event
+require_enterprise_install("tests/cloud")
+
+import pytest_asyncio  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+from pocketpaw_ee.cloud._core.realtime.events import Event  # noqa: E402
 
 
 class RecordingBus:
@@ -67,6 +78,148 @@ class RecordingBus:
         # Tests can install their own subscribers via the real InProcessBus
         # in a dedicated fixture; the recording bus stays inert by design.
         return
+
+
+@pytest.fixture(autouse=True, scope="session")
+def never_the_real_upload_bucket():
+    """Force the upload adapter to local disk for the whole cloud suite.
+
+    Added 2026-08-29. ``uploads/router.py`` builds ``_ADAPTER`` AT IMPORT via
+    ``build_adapter``, which calls ``load_dotenv()`` — and dotenv walks UP from
+    the cwd, so a worktree with no ``.env`` of its own still finds the
+    workspace one, where ``POCKETPAW_UPLOAD_ADAPTER=s3``. The process-wide
+    singleton is therefore a LIVE S3 client pointed at a real bucket, and any
+    test that reaches it writes real objects over the network. This is not
+    hypothetical: three unguarded runs during the 2026-08-29 files sprint put
+    74 test fixtures into ``interacly-dev-private``.
+
+    ``load_dotenv()`` does not override variables already in the environment
+    (``src/pocketpaw/uploads/factory.py``), so setting it here wins and
+    ``_build_s3()`` is never called — no S3 client is even constructed. Session
+    scope and an env var rather than a monkeypatch because the damage happens
+    at IMPORT time, before any function-scoped fixture could run.
+
+    Sibling of ``local_store_home`` below, same principle: a suite that writes
+    to the world it runs in is one accident away from mattering.
+    """
+    os.environ["POCKETPAW_UPLOAD_ADAPTER"] = "local"
+    yield
+
+
+@pytest.fixture(autouse=True, scope="session")
+def local_store_home(tmp_path_factory):
+    """Point the local store factory at a session tmp dir, never ``~/.pocketpaw``.
+
+    Added 2026-08-01 (AL-2). ``pocketpaw.stores`` resolves every workspace-keyed
+    SQLite file under ``_DATA_DIR``, which defaults to the DEVELOPER'S HOME. A
+    cloud test that reaches an unpatched factory therefore writes real files into
+    the machine's live PocketPaw data directory — which the AL-2 agent-ledger
+    emitters made visible immediately: one run of ``-k paw_bar`` left 25
+    ``~/.pocketpaw/workspaces/<mongomock ObjectId>/agent_ledger.db`` files behind.
+    Nothing was corrupted (the ids are per-run and random), but a suite that
+    writes into the machine it runs on is one deploy-shaped accident away from
+    mattering, and on a box serving a live demo that accident is expensive.
+
+    SESSION-scoped and NOT paired with a cache reset, deliberately: one directory
+    for the whole run keeps any handle the bounded LRU already cached valid, so
+    this changes WHERE files land and nothing else about how tests behave.
+    """
+    from pocketpaw import stores
+
+    original = stores._DATA_DIR
+    stores._DATA_DIR = tmp_path_factory.mktemp("pocketpaw-home")
+    yield stores._DATA_DIR
+    stores._DATA_DIR = original
+
+
+@pytest.fixture(autouse=True)
+def inert_delegate_bridge():
+    """Keep the Code Mode delegate bridge off the network in unit tests.
+
+    ``get_delegate_bridge()`` auto-enables whenever ``POCKETPAW_REDIS_URL`` is
+    set — and this conftest sets it to the stub ``redis://test:6379/0`` purely so
+    the arq worker module imports (see the note at the top of this file).
+    Without this fixture that stub hands every test a LIVE Redis bridge pointed
+    at a host that does not resolve, so each delegate pays a connect timeout
+    before pushing its frame and any test that reads the pushed frame races it.
+
+    Tests covering the cross-process path inject their own bridge explicitly,
+    which is the honest way to test a two-process rendezvous anyway.
+    """
+    from pocketpaw_ee.cloud.codeagent import bridge as bridge_mod
+
+    bridge_mod.set_delegate_bridge(bridge_mod.NullDelegateBridge())
+    yield
+    bridge_mod._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _site_pages_are_serving(monkeypatch):
+    """Never let a cloud test's site capture make a REAL request to the internet.
+
+    A site screenshot polls the site's own url before rendering it (a deploy is live
+    at Cloudflare before it is live at the edge, and a picture of the 404 in between
+    lands on the card permanently). Publish-driven tests live in this tree too, and
+    the poll's retry schedule runs to ~90s — so one test that happens to await after
+    a publish would stall CI on a DNS lookup for a hostname that does not exist,
+    which is a miserable thing to diagnose.
+
+    Nothing in this tree reaches the probe today (the capture is a detached task and
+    these tests end before it runs), so this is insurance, not a fix. It defaults the
+    probe to ready and zeroes both delay schedules; the gate's own tests live in
+    tests/ee/sites/test_capture_readiness.py and patch these same attributes.
+    """
+    try:
+        from pocketpaw_ee.sites import screenshot as screenshot_mod
+    except Exception:  # noqa: BLE001 — OSS-only install: nothing to stub
+        yield
+        return
+
+    async def _serving(_url: str, **_kw) -> bool:
+        return True
+
+    monkeypatch.setattr(screenshot_mod, "_url_is_serving", _serving)
+    monkeypatch.setattr(screenshot_mod, "_READY_DELAYS", ())
+    monkeypatch.setattr(screenshot_mod, "_READY_DELAYS_MANUAL", ())
+
+    # A connected site's card refresh reads the customer's homepage. Keep it
+    # offline: background refreshes are closed unrun, and an inline one (the
+    # preview-refresh path) resolves no DNS. test_connected_card.py patches both.
+    from pocketpaw_ee.sites import connected_card
+
+    async def _offline(host: str) -> list[str]:
+        raise OSError(f"tests are offline ({host})")
+
+    monkeypatch.setattr(connected_card, "_default_card_scheduler", lambda coro: coro.close())
+    monkeypatch.setattr(connected_card, "_resolver", _offline)
+    yield
+
+
+@pytest.fixture
+def payments_open(monkeypatch):
+    """Open payments, live Dodo mode, for ``billing.service``.
+
+    The production default is closed (early access): no checkout opens and no
+    webhook grants. Suites that exercise paid flows request this. It resolves
+    ``pocketpaw.config.get_settings`` at call time, so a test that patches the
+    config still sees its own settings with the two payment keys flipped.
+    """
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.billing import service as billing_service
+
+    import pocketpaw.config as config
+
+    flip = {"payments_open": True, "dodo_environment": "live_mode"}
+
+    def _open(*a, **k):
+        settings = config.get_settings(*a, **k)
+        if hasattr(settings, "model_copy"):
+            return settings.model_copy(update=flip)
+        # Some suites patch the config with a bare namespace.
+        return SimpleNamespace(**{**vars(settings), **flip})
+
+    monkeypatch.setattr(billing_service, "get_settings", _open)
 
 
 @pytest.fixture(autouse=True)
@@ -114,6 +267,21 @@ async def mongo_db() -> Any:
     yield db
 
 
+@pytest.fixture
+def any_repo_root(monkeypatch):
+    """Let mandate create accept any repo path. Mandate tests bind tmp dirs,
+    which sit outside the default belt allowlist roots; tests of the
+    containment rule itself don't use this."""
+    from pathlib import Path
+
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    async def _roots(workspace_id: str) -> list[Path]:
+        return [Path("/")]
+
+    monkeypatch.setattr(belt_service, "resolve_allowlist_roots", _roots)
+
+
 def _fixed_user() -> str:
     return "u1"
 
@@ -124,6 +292,82 @@ def _fixed_workspace() -> str:
 
 def _no_op_license() -> None:
     return None
+
+
+def fake_workspace_user(role: str = "admin", workspace_id: str = "w1", user_id: str = "u1") -> Any:
+    """User stand-in shaped like ``ee.cloud.models.user.User`` — only the fields
+    the RBAC chain reads (``id``, ``active_workspace``, ``workspaces``).
+
+    ``role`` is the caller's WorkspaceRole in ``workspace_id`` (member | admin |
+    owner), which is what ``check_workspace_action`` compares against the ACTIONS
+    matrix. Nothing here is faked past the identity: the guard itself runs for real.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        id=user_id,
+        active_workspace=workspace_id,
+        is_active=True,
+        workspaces=[SimpleNamespace(workspace=workspace_id, role=role)],
+    )
+
+
+def override_cloud_user(app: FastAPI, user: Any):
+    """Sign ``user`` into ``app`` for both auth deps; return a cleanup callable.
+
+    ``request_context`` depends on ``current_optional_user`` and returns 401 when
+    the user is None or not ``is_active``; ``require_action`` and the identity
+    deps in ``_core.deps`` depend on ``current_active_user``. A fake user with no
+    ``is_active`` attribute gets ``is_active=True``; pass ``is_active=False``
+    explicitly to exercise the inactive-user 401. Call it again to switch users.
+    """
+    from pocketpaw_ee.cloud.auth import current_active_user, current_optional_user
+
+    if not hasattr(user, "is_active"):
+        user.is_active = True
+
+    async def _user():
+        return user
+
+    deps = (current_active_user, current_optional_user)
+    for dep in deps:
+        app.dependency_overrides[dep] = _user
+
+    def _cleanup() -> None:
+        for dep in deps:
+            app.dependency_overrides.pop(dep, None)
+
+    return _cleanup
+
+
+def override_workspace_role(
+    app: FastAPI,
+    role: str = "admin",
+    workspace_id: str = "w1",
+    user_id: str = "u1",
+) -> None:
+    """Pin a caller ROLE + active workspace on a bare test app.
+
+    Router-level tests mount a single router on a plain ``FastAPI()`` with no auth
+    stack, so ``current_active_user`` (fastapi-users) finds no session and any
+    ``require_action`` guard 401s before its role check ever runs. Overriding both
+    deps here lets the guard execute for real against the given role — pass
+    ``role="member"`` to assert a 403, ``role="admin"``/``"owner"`` to assert
+    success.
+
+    Also installs ``add_error_handler``: a denied guard raises the cloud-native
+    ``Forbidden`` (a CloudError), which without the handler escapes as an
+    unhandled exception instead of the 403 envelope production returns. The call
+    is idempotent, so an app that already registered it is unaffected.
+    """
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+
+    add_error_handler(app)
+    override_cloud_user(
+        app, fake_workspace_user(role=role, workspace_id=workspace_id, user_id=user_id)
+    )
+    app.dependency_overrides[current_workspace_id] = lambda: workspace_id
 
 
 @pytest_asyncio.fixture
@@ -260,3 +504,18 @@ async def make_plan_session(mongo_db):  # noqa: ARG001 — fixture forces Beanie
         return str(doc.id), resolved_project_id
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _clear_paw_bar_frame_site_memo():
+    """The public Paw Bar frame memoises key -> Site for 30 s in-process. Many test
+    files reuse one embed key with a different Site each time, so a memo left over
+    from the previous test would serve that test's Site."""
+    try:
+        from pocketpaw_ee.paw_bar import router as paw_bar_router
+    except Exception:  # noqa: BLE001 — OSS-only installs have no pocketpaw_ee
+        yield
+        return
+    paw_bar_router._frame_site_memo.clear()
+    yield
+    paw_bar_router._frame_site_memo.clear()

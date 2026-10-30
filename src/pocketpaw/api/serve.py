@@ -1,5 +1,9 @@
 """API server for ``pocketpaw serve``.
 
+Changed 2026-09-05: the app is handed to ``instrument_fastapi_app`` after the
+routers are mounted, so a deployed request has a span with its route, status and
+duration on it. Off unless POCKETPAW_LOGFIRE_ENABLED is set.
+
 Starts the versioned ``/api/v1/`` routers **and** a ``/ws`` WebSocket endpoint
 with auth middleware and CORS — no web dashboard frontend assets.  Ideal for
 external clients (Tauri desktop app, scripts) that provide their own UI.
@@ -32,10 +36,10 @@ def create_api_app():
     from contextlib import asynccontextmanager
 
     from fastapi import FastAPI, Query, WebSocket
-    from fastapi.middleware.cors import CORSMiddleware
 
+    from pocketpaw.api.cors import install_cors
     from pocketpaw.api.v1 import mount_v1_routers
-    from pocketpaw.config import Settings, get_access_token
+    from pocketpaw.config import get_access_token
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -65,6 +69,28 @@ def create_api_app():
 
     app.add_middleware(AuthMiddleware)
 
+    # --- Body-size ceiling ----------------------------------------------
+    # Registered after AuthMiddleware so it sits OUTSIDE it. That ordering is
+    # load-bearing twice over: the upload limits in uploads/service.py only run
+    # after Starlette has spooled the entire multipart body to disk, and
+    # AuthMiddleware itself reads the body on the login paths. A ceiling inside
+    # either of those cannot stop the buffering it exists to prevent.
+    #
+    # mount_cloud() and install_cors() add their layers after this one, so the
+    # final order is [EE PreviewHostDispatch →] CORS → CSRF → RequestLog → Timing →
+    # EEAuthBridge → this → Auth (the preview dispatch routes whole draft hosts away
+    # before any of these run; see install_cors). None of those four cloud layers
+    # touches the body, so it is still
+    # unread when this runs — and CORS being outermost means a 413 keeps its
+    # headers, which matters because a header-less rejection reads to the
+    # browser as a CORS failure rather than as the size limit it is.
+    #
+    # See H5 in the backend-perf audit. Pure ASGI, so it adds no fifth
+    # BaseHTTPMiddleware layer (audit M8 counts the four that already exist).
+    from pocketpaw.security.body_limit import BodySizeLimitMiddleware
+
+    app.add_middleware(BodySizeLimitMiddleware)
+
     # --- Mount Mission Control + Deep Work routers ----------------------
     from pocketpaw.deep_work.api import router as deep_work_router
     from pocketpaw.mission_control.api import router as mission_control_router
@@ -93,25 +119,11 @@ def create_api_app():
     # CSRFMiddleware added inside `mount_cloud()`. Without this, a CSRF
     # 403 short-circuits before CORS can attach Access-Control-Allow-
     # Origin and the browser reports a misleading CORS error.
-    _BUILTIN_ORIGINS = [
-        "tauri://localhost",
-        "https://tauri.localhost",
-        "http://localhost:1420",
-    ]
-    try:
-        _custom = Settings.load().api_cors_allowed_origins
-    except Exception:
-        _custom = []
-    _ORIGINS = list(set(_BUILTIN_ORIGINS + _custom))
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_ORIGINS,
-        allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # `install_cors` also registers the CORS-aware unhandled-error handler: a 500
+    # is minted by ServerErrorMiddleware, which sits OUTSIDE this middleware, so
+    # without that handler every crash comes back header-less and the browser
+    # blames CORS instead of showing the real failure. See api/cors.py.
+    install_cors(app)
 
     # --- WebSocket handler helper ----------------------------------------
     async def _handle_ws(
@@ -158,6 +170,15 @@ def create_api_app():
     ):
         """WebSocket v1 short path — for clients using /v1/ws."""
         await _handle_ws(websocket, token, resume_session)
+
+    # --- Request tracing (last) ------------------------------------------
+    # After every router is mounted, because the instrumentor reads the route
+    # table to label a span by route TEMPLATE. Instrument before mounting and
+    # /api/v1/pockets/{id} becomes one span name per pocket id. No-op unless
+    # POCKETPAW_LOGFIRE_ENABLED is set.
+    from pocketpaw.observability import instrument_fastapi_app
+
+    instrument_fastapi_app(app)
 
     return app
 

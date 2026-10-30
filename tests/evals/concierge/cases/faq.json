@@ -1,0 +1,4 @@
+{
+  "about": "Placeholder for CR-8 (owner FAQs as knowledge, PR #2267), not in this branch's base. When the stack is combined, add cases here: a question an owner FAQ answers (expect.sources names the FAQ item), and an FAQ that disagrees with a KB page.",
+  "cases": []
+}

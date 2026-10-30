@@ -61,6 +61,10 @@
 # Async orchestration; depends on the SZD-4 DiscoveryRun + the SZD-5a/5b propose
 # helpers + the OSS InstinctStore (for the supersede sweep). No direct Fabric /
 # Pocket writes.
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``;
+#   the read-merge-write helper is the shared ``cloud/_core/proposals.update_action_blob``.
 
 from __future__ import annotations
 
@@ -632,34 +636,21 @@ async def _stamp_discovery_marker(
 ) -> None:
     """Write the ``discovery_run`` marker onto a filed proposal's blob.
 
-    Direct-SQL blob back-write — the same pattern the propose helpers use for
-    ``_persist_chain_ids``. Best-effort: a stamp failure leaves the proposal
+    Store-API blob back-write — the same pattern the propose helpers use for
+    ``persist_chain_ids``. Best-effort: a stamp failure leaves the proposal
     un-marked (it just won't be auto-superseded by the next run; a human can still
     reject it). A failed stamp must NOT fail the proposal that was already filed.
     """
-    import json as _json
 
-    import aiosqlite
+    from pocketpaw_ee.cloud._core.proposals import update_action_blob
 
     try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(blob_key)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob[DISCOVERY_MARKER_KEY] = dict(marker)
-        params[blob_key] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await update_action_blob(
+            store=store,
+            action_id=action_id,
+            param_key=blob_key,
+            updates={DISCOVERY_MARKER_KEY: dict(marker)},
+        )
     except Exception:  # noqa: BLE001 — marker stamp is best-effort
         logger.warning(
             "discovery: failed to stamp discovery_run marker onto action %s "

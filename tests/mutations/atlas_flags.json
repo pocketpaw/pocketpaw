@@ -1,0 +1,53 @@
+[
+  {
+    "label": "atlas overlay: mark flagged entries always-available (mode ignored)",
+    "file": "src/pocketpaw/atlas/overlay.py",
+    "find": "        return OverlaidEntry(entry=entry, available=mode != \"off\", mode=mode)",
+    "replace": "        return OverlaidEntry(entry=entry, available=True, mode=mode)",
+    "tests": [
+      "tests/atlas/test_overlay_flags.py::TestSourceTruthMode::test_off_is_unavailable_with_mode_off",
+      "tests/atlas/test_overlay_flags.py::TestVerifyLoopMode::test_both_off_is_unavailable",
+      "tests/atlas/test_overlay_flags.py::TestFlagDemotion::test_off_primitive_ranks_below_available_primitive_at_equal_score",
+      "tests/atlas/test_overlay_flags.py::TestFabricCapabilityCardsInheritMode::test_off_card_demotes_at_equal_score_like_the_primitive"
+    ]
+  },
+  {
+    "label": "atlas describe: drop the enable_hint pointer for an off primitive",
+    "file": "src/pocketpaw/agents/sdk_mcp_atlas.py",
+    "find": "        if overlaid.available is False:\n            payload[\"enable_hint\"] = FLAG_ENABLE_HINTS.get(",
+    "replace": "        if False:\n            payload[\"enable_hint\"] = FLAG_ENABLE_HINTS.get(",
+    "tests": [
+      "tests/atlas/test_overlay_flags.py::TestDescribeRendering::test_describe_source_truth_off_shows_mode_and_enable_pointer",
+      "tests/atlas/test_overlay_flags.py::TestFabricCapabilityCardsInheritMode::test_describe_off_card_renders_mode_and_enable_hint",
+      "tests/atlas/test_compile.py::TestFactualClaimGuard::test_off_flagged_primitive_describe_declares_mode_and_enable_pointer"
+    ]
+  },
+  {
+    "label": "atlas overlay: let the grant check filter on the flag (available becomes a gate)",
+    "file": "src/pocketpaw/atlas/overlay.py",
+    "find": "        return provider.is_granted(entry) is True\n    except Exception as exc:  # noqa: BLE001 — a raising provider must filter, not leak",
+    "replace": "        return provider.is_granted(entry) is True and entry.id not in FLAGGED_PRIMITIVE_IDS\n    except Exception as exc:  # noqa: BLE001 — a raising provider must filter, not leak",
+    "tests": [
+      "tests/atlas/test_overlay_flags.py::TestDiscoveryOnly::test_default_provider_grants_regardless_of_mode",
+      "tests/atlas/test_overlay_flags.py::TestDiscoveryOnly::test_off_primitives_are_still_described_and_listed"
+    ]
+  },
+  {
+    "label": "atlas fabric aggregate: remove the mode=off short-circuit (reads statements while off)",
+    "file": "src/pocketpaw/atlas/fabric.py",
+    "find": "        if mode == \"off\":\n            out[\"note\"] = SOURCE_TRUTH_OFF_NOTE\n            return out",
+    "replace": "        if False:\n            out[\"note\"] = SOURCE_TRUTH_OFF_NOTE\n            return out",
+    "tests": [
+      "tests/atlas/test_fabric_introspection.py::TestSourceTruthAggregateOffMode::test_off_short_circuits_with_zero_store_reads"
+    ]
+  },
+  {
+    "label": "atlas fabric describe: await the aggregate unconditionally (a sync impl is silently dropped)",
+    "file": "src/pocketpaw/atlas/fabric.py",
+    "find": "        source_truth = await result if inspect.isawaitable(result) else result",
+    "replace": "        source_truth = await result",
+    "tests": [
+      "tests/atlas/test_fabric_introspection.py::TestSourceTruthAggregate::test_sync_aggregate_is_folded_in_not_silently_dropped"
+    ]
+  }
+]

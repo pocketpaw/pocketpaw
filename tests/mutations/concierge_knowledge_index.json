@@ -1,0 +1,47 @@
+[
+  {
+    "label": "article read skips the kb list membership check",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    if not any(str(a[\"id\"]) == article_id for a in await _scope_articles(kb_scope)):\n        raise HTTPException(404, \"Article not found\")",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_knowledge_index.py"
+    ]
+  },
+  {
+    "label": "agent scope read from the pocket instead of the bound agent",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "        kb_scope = f\"agent:{agent_id}\"\n    else:",
+    "replace": "        kb_scope = _scope(site)\n    else:",
+    "tests": [
+      "tests/cloud/test_paw_bar_knowledge_index.py"
+    ]
+  },
+  {
+    "label": "a pocket article can be removed one by one",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": "    if scope != \"agent\":\n        raise HTTPException(409, \"remove_the_source\")",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_knowledge_index.py"
+    ]
+  },
+  {
+    "label": "other articles include what a page or source already holds",
+    "file": "ee/pocketpaw_ee/paw_bar/knowledge_routes.py",
+    "find": " if str(a[\"id\"]) not in known]",
+    "replace": "]",
+    "tests": [
+      "tests/cloud/test_paw_bar_knowledge_index.py"
+    ]
+  },
+  {
+    "label": "a page past the cap is dropped without a skip",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "                skip(path, \"page_cap\")\n",
+    "replace": "\n",
+    "tests": [
+      "tests/cloud/test_site_kb_ingest.py"
+    ]
+  }
+]

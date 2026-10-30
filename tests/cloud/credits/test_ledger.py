@@ -24,6 +24,7 @@ import asyncio
 import pytest
 from pocketpaw_ee.cloud._core.errors import InsufficientCredits, ValidationError
 from pocketpaw_ee.cloud.credits import service as credits
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 
 WS = "ws_credit_test"
@@ -59,8 +60,8 @@ async def test_debit_lowers_balance(mongo_db):
     # The spend is recorded as a signed-negative ledger movement.
     entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == WS).to_list()
     spend = [e for e in entries if e.idempotency_key == "d1"][0]
-    assert spend.amount_delta == -300
-    assert spend.balance_after == 700
+    assert spend.amount_delta_micro == credits_to_micro(-300)
+    assert spend.balance_after_micro == credits_to_micro(700)
     assert spend.kind == "spend"
 
 
@@ -172,11 +173,13 @@ async def test_reconcile_repairs_drift(mongo_db):
     # Simulate a crash that left the balance doc stale (e.g. a $inc that landed
     # but a later mutation corrupted the cached balance).
     coll = CreditBalance.get_pymongo_collection()
-    await coll.update_one({"workspace": WS}, {"$set": {"balance_credits": 999999}})
+    await coll.update_one({"workspace": WS}, {"$set": {"balance_micro": credits_to_micro(999999)}})
     assert await credits.balance(WS) == 999999  # corrupted
 
     repaired = await credits.reconcile(WS)
-    assert repaired == 700
+    assert repaired.balance == 700
+    assert repaired.redriven == 0
+    assert repaired.voided == 0
     assert await credits.balance(WS) == 700
 
 
@@ -189,13 +192,18 @@ async def test_reconcile_recreates_lost_balance_row(mongo_db):
     assert await credits.balance(WS) == 0  # row gone → reads as 0
 
     repaired = await credits.reconcile(WS)
-    assert repaired == 800
+    assert repaired.balance == 800
+    assert repaired.redriven == 0
+    assert repaired.voided == 0
     assert await credits.balance(WS) == 800
 
 
 async def test_reconcile_is_noop_when_in_agreement(mongo_db):
     await credits.grant(WS, 600, cause="top_up", idempotency_key="g1")
-    assert await credits.reconcile(WS) == 600
+    result = await credits.reconcile(WS)
+    assert result.balance == 600
+    assert result.redriven == 0
+    assert result.voided == 0
     assert await credits.balance(WS) == 600
 
 
@@ -305,8 +313,8 @@ async def test_allow_negative_debit_can_go_below_zero(mongo_db):
     # conditional (so reconcile re-drives it unconditionally).
     entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == WS).to_list()
     spend = [e for e in entries if e.idempotency_key == "meter"][0]
-    assert spend.amount_delta == -300
-    assert spend.balance_after == -200
+    assert spend.amount_delta_micro == credits_to_micro(-300)
+    assert spend.balance_after_micro == credits_to_micro(-200)
     assert spend.applied is True
     assert spend.conditional is False
     assert spend.kind == "spend"
@@ -330,8 +338,8 @@ async def test_reconcile_redrives_unapplied_grant(mongo_db):
     phantom = CreditLedgerEntry(
         workspace=WS,
         kind="grant",
-        amount_delta=250,
-        balance_after=0,
+        amount_delta_micro=credits_to_micro(250),
+        balance_after_micro=0,
         applied=False,
         conditional=False,
         cause="promo",
@@ -342,12 +350,14 @@ async def test_reconcile_redrives_unapplied_grant(mongo_db):
     assert await credits.balance(WS) == 500  # phantom not yet applied
 
     repaired = await credits.reconcile(WS)
-    assert repaired == 750  # 500 + re-driven 250
+    assert repaired.balance == 750  # 500 + re-driven 250
+    assert repaired.redriven == 1
+    assert repaired.voided == 0
     assert await credits.balance(WS) == 750
 
     reloaded = await CreditLedgerEntry.get(phantom.id)
     assert reloaded.applied is True
-    assert reloaded.balance_after == 750
+    assert reloaded.balance_after_micro == credits_to_micro(750)
 
 
 async def test_reconcile_redrives_or_voids_unapplied_strict_debit(mongo_db):
@@ -359,8 +369,8 @@ async def test_reconcile_redrives_or_voids_unapplied_strict_debit(mongo_db):
     over = CreditLedgerEntry(
         workspace=WS,
         kind="spend",
-        amount_delta=-1000,
-        balance_after=0,
+        amount_delta_micro=-credits_to_micro(1000),
+        balance_after_micro=0,
         applied=False,
         conditional=True,
         cause="compute_spend",
@@ -370,7 +380,9 @@ async def test_reconcile_redrives_or_voids_unapplied_strict_debit(mongo_db):
     await over.insert()
 
     repaired = await credits.reconcile(WS)
-    assert repaired == 100  # over-funds phantom voided, never counted
+    assert repaired.balance == 100  # over-funds phantom voided, never counted
+    assert repaired.redriven == 0
+    assert repaired.voided == 1
     assert await credits.balance(WS) == 100
     # The voided entry no longer exists.
     assert await CreditLedgerEntry.get(over.id) is None
@@ -379,8 +391,8 @@ async def test_reconcile_redrives_or_voids_unapplied_strict_debit(mongo_db):
     within = CreditLedgerEntry(
         workspace=WS,
         kind="spend",
-        amount_delta=-40,
-        balance_after=0,
+        amount_delta_micro=-credits_to_micro(40),
+        balance_after_micro=0,
         applied=False,
         conditional=True,
         cause="compute_spend",
@@ -390,11 +402,13 @@ async def test_reconcile_redrives_or_voids_unapplied_strict_debit(mongo_db):
     await within.insert()
 
     repaired2 = await credits.reconcile(WS)
-    assert repaired2 == 60  # 100 - re-driven 40
+    assert repaired2.balance == 60  # 100 - re-driven 40
+    assert repaired2.redriven == 1
+    assert repaired2.voided == 0
     assert await credits.balance(WS) == 60
     reloaded = await CreditLedgerEntry.get(within.id)
     assert reloaded.applied is True
-    assert reloaded.balance_after == 60
+    assert reloaded.balance_after_micro == credits_to_micro(60)
 
 
 async def test_reconcile_never_invents_balance_from_phantom(mongo_db):
@@ -408,8 +422,8 @@ async def test_reconcile_never_invents_balance_from_phantom(mongo_db):
     phantom = CreditLedgerEntry(
         workspace=WS,
         kind="spend",
-        amount_delta=-1000,
-        balance_after=0,
+        amount_delta_micro=-credits_to_micro(1000),
+        balance_after_micro=0,
         applied=False,
         conditional=True,
         cause="compute_spend",
@@ -419,9 +433,11 @@ async def test_reconcile_never_invents_balance_from_phantom(mongo_db):
     await phantom.insert()
 
     repaired = await credits.reconcile(WS)
-    assert repaired == 100, "reconcile must not invent a balance from a phantom debit"
-    assert repaired != -950
-    assert repaired != -900
+    assert repaired.balance == 100, "reconcile must not invent a balance from a phantom debit"
+    assert repaired.balance != -950
+    assert repaired.balance != -900
+    assert repaired.redriven == 0
+    assert repaired.voided == 1
     assert await credits.balance(WS) == 100
     # The phantom strict debit was never authorized to land — voided, not counted.
     assert await CreditLedgerEntry.get(phantom.id) is None

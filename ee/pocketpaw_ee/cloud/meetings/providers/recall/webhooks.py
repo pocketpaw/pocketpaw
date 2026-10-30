@@ -127,19 +127,48 @@ async def recall_webhook(request: Request) -> dict:
 def _verify_signature(headers: Headers, body: bytes) -> None:
     """Verify the Svix signature Recall.ai attaches to every webhook.
 
-    No-op (with a loud warning) when ``RECALL_WEBHOOK_SECRET`` is unset —
-    so a fresh deployment can be wired up before the secret is pasted in.
-    Raises ``Forbidden`` when a secret IS configured and the signature
-    fails. The signing scheme is Svix's: HMAC-SHA256 over
-    ``{id}.{timestamp}.{body}`` keyed by the base64 secret.
+    FAILS CLOSED. An unset ``RECALL_WEBHOOK_SECRET`` is a 403, not a warning.
+
+    It used to be a no-op that accepted the request, so that a fresh deployment
+    could be wired up before the secret was pasted in. Three facts together made
+    that untenable rather than merely lenient:
+
+      * this route is on ``dashboard_auth.exempt_paths``, so there is no auth in
+        front of it at all — the signature IS the trust boundary;
+      * an accepted event drives ``update_bot_status_for_recall_bot``,
+        ``start_async_transcript`` and ``ingest_transcript_for_recall_bot``, so
+        it mutates meeting state and ingests transcript content, selected only
+        by a ``bot_id`` from the body;
+      * ``RECALL_WEBHOOK_SECRET`` appeared nowhere outside this file and its
+        tests — not in ``deploy/coolify/.env.example``, not in any doc — so an
+        operator following the documented deploy had no way to learn it exists.
+        The warning was written for someone who would never read it.
+
+    The wiring-up case is preserved, but it now has to be ASKED for:
+    ``RECALL_WEBHOOK_ALLOW_UNSIGNED=1`` accepts unsigned webhooks and says so on
+    every request. Silence is safe; leniency is deliberate.
+
+    Raises ``Forbidden`` when the signature fails. The signing scheme is Svix's:
+    HMAC-SHA256 over ``{id}.{timestamp}.{body}`` keyed by the base64 secret.
     """
     secret = os.environ.get("RECALL_WEBHOOK_SECRET", "").strip()
     if not secret:
-        logger.warning(
-            "RECALL_WEBHOOK_SECRET is not set — accepting the Recall webhook "
-            "WITHOUT signature verification. Set it in production."
+        if os.environ.get("RECALL_WEBHOOK_ALLOW_UNSIGNED", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            logger.warning(
+                "RECALL_WEBHOOK_ALLOW_UNSIGNED is set — accepting this Recall "
+                "webhook WITHOUT signature verification. This route has no auth "
+                "in front of it; unset this and set RECALL_WEBHOOK_SECRET."
+            )
+            return
+        raise Forbidden(
+            "meeting.webhook_unsigned",
+            "Recall webhook signature cannot be verified: RECALL_WEBHOOK_SECRET is not set.",
         )
-        return
 
     svix_id = headers.get("svix-id") or headers.get("webhook-id")
     svix_ts = headers.get("svix-timestamp") or headers.get("webhook-timestamp")

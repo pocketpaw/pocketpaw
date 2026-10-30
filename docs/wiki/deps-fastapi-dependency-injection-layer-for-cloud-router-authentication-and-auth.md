@@ -84,10 +84,7 @@ This module contains only functions, no classes. Each function is a FastAPI depe
 **Example usage in a router**:
 ```python
 @router.delete("/workspaces/{workspace_id}/files/{file_id}")
-async def delete_file(
-    file_id: str,
-    user: User = Depends(require_role("admin"))
-):
+async def delete_file(file_id: str, user: User = Depends(require_role("admin"))):
     # At this point, user is guaranteed to be an admin in the current workspace
     # FastAPI has already executed the role check dependency
     pass

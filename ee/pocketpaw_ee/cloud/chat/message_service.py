@@ -1,8 +1,39 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Chat domain — message business logic (CRUD, reactions, threads, pins, search).
 
 Sole owner of writes to the ``Message`` Beanie document. Module-level
-``async def`` API. The doc → domain mapping helpers (formerly in
-``repositories.py``) live alongside the public API as private helpers.
+``async def`` API; the doc -> domain mapping helpers live here as private helpers.
+
+Invariants a reader must not break:
+
+- A CONCIERGE turn persists no ``Message``: ``persist_assistant_message_for_scope``
+  returns an unsaved doc for that kind (its transcript derives from ``ChatRunDoc``),
+  so a message-id-addressable feature must key concierge off the RUN doc.
+- ``MessageReaction`` carries the post-toggle ``reactions`` array in the same shape
+  as ``dto.message_to_wire_dict``, so realtime peers and the REST response patch a
+  message row identically.
+- ``run_status`` marks an assistant row a failed / cancelled / interrupted run cut
+  off; ``steps`` / ``steps_omitted`` carry the reply's thinking and tool calls via
+  ``steps_wire_fields``. Both wire keys appear only when set.
+- ``ask_user`` holds the question an agent reply asked through the ``ask_user``
+  tool; ``persist_user_message_for_scope`` marks it answered on the user's next
+  message in that scope. The ``askUser`` wire key appears only when set.
+- Per-member fan-out on send is batched or bounded: notifications (message and
+  mention kinds) go through ``notifications_service.create_many`` (one
+  ``insert_many``, external webhook delivery in a background task), and the
+  per-member unread / mention-counter writes go through ``map_bounded``. One room
+  can hold thousands of members; an unbounded gather opens that many Mongo
+  writes at once on the loop every user shares.
+- ``send_message`` is the only place that bumps group stats and writes mention
+  notifications for a user message. The ``message.sent`` bus event it emits is
+  for agent routing, not for a second stats or mention write.
+- Reads stay bounded and index-shaped: thread and reply lists page on the
+  ``(thread_id|reply_to, createdAt)`` indexes with a limit, search escapes the
+  user's text (``re.escape``) and caps the result count.
+- Member-gated reads check ``MEMBER_ONLY_GROUP_TYPES`` (private, dm, meeting).
+  A ``meeting`` room is hidden: a user mention in one only notifies members.
+  (2026-10-01, feat/meetings-instant)
 """
 
 from __future__ import annotations
@@ -15,30 +46,8 @@ from typing import cast
 
 from beanie import PydanticObjectId
 
-from pocketpaw_ee.cloud.chat import group_service, unread_service
-from pocketpaw_ee.cloud.chat.domain import Attachment as _AttachmentDomain
-from pocketpaw_ee.cloud.chat.domain import Mention as _MentionDomain
-from pocketpaw_ee.cloud.chat.domain import Message as _MessageDomain
-from pocketpaw_ee.cloud.chat.domain import Reaction as _ReactionDomain
-from pocketpaw_ee.cloud.chat.group_service import (
-    _get_group_or_404,
-    _require_can_post,
-    _require_domain_group_admin,
-    _require_group_member,
-)
-from pocketpaw_ee.cloud.chat.schemas import (
-    EditMessageRequest,
-    SendMessageRequest,
-)
-from pocketpaw_ee.cloud.models.message import Attachment as _AttachmentDoc
-from pocketpaw_ee.cloud.models.message import Mention as _MentionDoc
-from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
-from pocketpaw_ee.cloud.models.message import Reaction as _ReactionDoc
-from pocketpaw_ee.cloud.models.notification import NotificationSource
-from pocketpaw_ee.cloud.models.user import User as _UserDoc
-from pocketpaw_ee.cloud.notifications import service as notifications_service
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
     GroupUpdated,
     MessageDeleted,
     MessageEdited,
@@ -50,11 +59,41 @@ from pocketpaw_ee.cloud.realtime.events import (
     ThreadCreated,
     UnreadUpdate,
 )
+from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
+from pocketpaw_ee.cloud.chat import group_service, unread_service
+from pocketpaw_ee.cloud.chat.domain import MEETING_GROUP_TYPE, MEMBER_ONLY_GROUP_TYPES
+from pocketpaw_ee.cloud.chat.domain import Attachment as _AttachmentDomain
+from pocketpaw_ee.cloud.chat.domain import Mention as _MentionDomain
+from pocketpaw_ee.cloud.chat.domain import Message as _MessageDomain
+from pocketpaw_ee.cloud.chat.domain import MessageStep as _MessageStepDomain
+from pocketpaw_ee.cloud.chat.domain import Reaction as _ReactionDomain
+from pocketpaw_ee.cloud.chat.dto import preview_attachment
+from pocketpaw_ee.cloud.chat.group_service import (
+    _get_group_or_404,
+    _require_can_post,
+    _require_domain_group_admin,
+    _require_group_member,
+)
+from pocketpaw_ee.cloud.chat.runs.steps import steps_wire_fields
+from pocketpaw_ee.cloud.chat.schemas import (
+    EditMessageRequest,
+    SendMessageRequest,
+)
+from pocketpaw_ee.cloud.models.message import Attachment as _AttachmentDoc
+from pocketpaw_ee.cloud.models.message import Mention as _MentionDoc
+from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
+from pocketpaw_ee.cloud.models.message import Reaction as _ReactionDoc
+from pocketpaw_ee.cloud.models.notification import NotificationSource
+from pocketpaw_ee.cloud.models.user import User as _UserDoc
+from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.shared.time import iso_utc
 
 logger = logging.getLogger(__name__)
+
+# Ceiling on one page of ``GET /messages/{id}/thread`` replies.
+THREAD_REPLY_LIMIT = 200
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +139,11 @@ def _message_doc_to_domain(doc: _MessageDoc) -> _MessageDomain:
         session_key=doc.session_key,
         role=doc.role,
         created_at=getattr(doc, "createdAt", None),
+        run_status=getattr(doc, "run_status", None),
+        steps=tuple(
+            _MessageStepDomain(**s.model_dump()) for s in (getattr(doc, "steps", None) or [])
+        ),
+        steps_omitted=getattr(doc, "steps_omitted", 0) or 0,
     )
 
 
@@ -167,15 +211,40 @@ async def _list_for_group_paged(
     return [_message_doc_to_domain(d) async for d in cursor]
 
 
-async def _list_replies(parent_message_id: str) -> list[_MessageDomain]:
-    """All non-deleted group-context replies to a parent, oldest first."""
-    cursor = _MessageDoc.find(
-        {
-            "context_type": "group",
-            "reply_to": parent_message_id,
-            "deleted": False,
-        }
-    ).sort([("createdAt", 1)])  # type: ignore[list-item]
+def _parse_cursor(cursor: str | None) -> tuple[datetime | None, PydanticObjectId | None]:
+    """``"{iso_timestamp}|{object_id}"`` -> ``(time, oid)``; ``(None, None)`` if malformed."""
+    if not cursor:
+        return None, None
+    parts = cursor.split("|", 1)
+    if len(parts) != 2:
+        return None, None
+    try:
+        return datetime.fromisoformat(parts[0]), PydanticObjectId(parts[1])
+    except Exception:
+        return None, None
+
+
+async def _list_replies(
+    parent_message_id: str, *, after: str | None = None, limit: int = 200
+) -> list[_MessageDomain]:
+    """Non-deleted group-context replies to a parent, oldest first, at most
+    ``limit``, starting after the ``after`` cursor when given."""
+    query: dict = {
+        "context_type": "group",
+        "reply_to": parent_message_id,
+        "deleted": False,
+    }
+    after_time, after_oid = _parse_cursor(after)
+    if after_time is not None:
+        query["$or"] = [
+            {"createdAt": {"$gt": after_time}},
+            {"createdAt": after_time, "_id": {"$gt": after_oid}},
+        ]
+    cursor = (
+        _MessageDoc.find(query)
+        .sort([("createdAt", 1), ("_id", 1)])  # type: ignore[list-item]
+        .limit(limit)
+    )
     return [_message_doc_to_domain(d) async for d in cursor]
 
 
@@ -232,6 +301,8 @@ async def _create_group_message_doc(
     reply_to: str | None = None,
     thread_id: str | None = None,
     is_thread_parent: bool = False,
+    steps: list[dict] | None = None,
+    steps_omitted: int = 0,
 ) -> _MessageDomain:
     """Insert a new group-context message."""
     mention_docs = [_MentionDoc(**m) for m in mentions or []]
@@ -249,6 +320,8 @@ async def _create_group_message_doc(
         reply_to=reply_to,
         thread_id=thread_id,
         is_thread_parent=is_thread_parent,
+        steps=steps or [],
+        steps_omitted=steps_omitted,
     )
     await doc.insert()
     return _message_doc_to_domain(doc)
@@ -325,12 +398,13 @@ def _reply_preview(parent: _MessageDoc | None) -> dict | None:
         "sender": parent.sender,
         "senderType": parent.sender_type,
         "agent": parent.agent,
+        "attachment": preview_attachment(parent.attachments),
     }
 
 
 def _message_response(msg: _MessageDoc, *, parent: _MessageDoc | None = None) -> dict:
     """Convert a Message Beanie document to a frontend-compatible dict."""
-    return {
+    out = {
         "_id": str(msg.id),
         "group": msg.group,
         "sender": msg.sender,
@@ -350,6 +424,15 @@ def _message_response(msg: _MessageDoc, *, parent: _MessageDoc | None = None) ->
         "deleted": msg.deleted,
         "createdAt": iso_utc(msg.createdAt),
     }
+    # Only a cut-off agent reply carries this; normal payloads stay unchanged.
+    if getattr(msg, "run_status", None):
+        out["runStatus"] = msg.run_status
+    out.update(
+        steps_wire_fields(getattr(msg, "steps", None), getattr(msg, "steps_omitted", 0) or 0)
+    )
+    if getattr(msg, "ask_user", None) is not None:
+        out["askUser"] = msg.ask_user.to_wire()
+    return out
 
 
 async def _get_group_message_or_404(message_id: str) -> _MessageDoc:
@@ -444,19 +527,23 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
     await emit(MessageNew(data={**response, "group_id": group_id}))
     await emit(MessageSent(data={**response, "group_id": group_id, "sender_id": user_id}))
 
-    unread_tasks = [
-        emit(UnreadUpdate(data={"group_id": group_id, "user_id": member, "delta": 1}))
-        for member in group.members
-        if member != user_id
-    ]
-    if unread_tasks:
-        await asyncio.gather(*unread_tasks)
+    others = [member for member in group.members if member != user_id]
+    await map_bounded(
+        others,
+        lambda member: emit(
+            UnreadUpdate(data={"group_id": group_id, "user_id": member, "delta": 1})
+        ),
+    )
 
     group_name = getattr(group, "name", "") or ""
 
     # --- In-app notification: create for DM and group messages ---
     group_type = getattr(group, "type", "")
     is_dm = group_type == "dm"
+
+    # Every notification this message creates, delivered externally as ONE
+    # background batch (one delivery-config read per message).
+    created_notifs: list = []
 
     # Only create notifications for non-self messages
     notif_recipients = [m for m in group.members if m != user_id]
@@ -475,24 +562,21 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
             else sender_name
         )
 
-        notif_tasks = [
-            notifications_service.create(
-                workspace_id=str(group.workspace),
-                recipient=member,
-                kind="message",
-                title=title,
-                body=body.content[:200],
-                actor_id=user_id,
-                source=NotificationSource(
-                    type="message",
-                    id=domain_msg.id,
-                    pocket_id=None,
-                    room_id=group_id,
-                ),
-            )
-            for member in notif_recipients
-        ]
-        await asyncio.gather(*notif_tasks)
+        created_notifs += await notifications_service.create_many(
+            workspace_id=str(group.workspace),
+            recipients=notif_recipients,
+            kind="message",
+            title=title,
+            body=body.content[:200],
+            actor_id=user_id,
+            source=NotificationSource(
+                type="message",
+                id=domain_msg.id,
+                pocket_id=None,
+                room_id=group_id,
+            ),
+            deliver_external=False,
+        )
     broadcast_types = {"here", "channel", "everyone"}
     recipients: set[str] = set()
 
@@ -502,17 +586,23 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
         mtype = mention.get("type")
         if mtype == "user":
             target = mention.get("id")
-            if target and target != user_id:
+            # A meeting room is hidden: a mention never reaches a non-member.
+            if (
+                target
+                and target != user_id
+                and (group_type != MEETING_GROUP_TYPE or target in group.members)
+            ):
                 recipients.add(target)
         elif mtype in broadcast_types:
             for member in group.members:
                 if member != user_id:
                     recipients.add(member)
 
-    async def _fan_out_mention(target: str) -> None:
-        await notifications_service.create(
+    if recipients:
+        mentioned = sorted(recipients)
+        created_notifs += await notifications_service.create_many(
             workspace_id=str(group.workspace),
-            recipient=target,
+            recipients=mentioned,
             kind="mention",
             title=(f"You were mentioned in #{group_name}" if group_name else "You were mentioned"),
             body=body.content[:200],
@@ -523,11 +613,11 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
                 pocket_id=None,
                 room_id=group_id,
             ),
+            deliver_external=False,
         )
-        await unread_service.bump_mention(target, group_id)
+        await map_bounded(mentioned, lambda target: unread_service.bump_mention(target, group_id))
 
-    if recipients:
-        await asyncio.gather(*(_fan_out_mention(t) for t in recipients))
+    notifications_service.schedule_external_many(created_notifs)
 
     return response
 
@@ -537,11 +627,14 @@ async def create_agent_message(
     agent_id: str,
     content: str,
     attachments: list[_AttachmentDoc] | None = None,
+    steps: list[dict] | None = None,
+    steps_omitted: int = 0,
 ) -> _MessageDoc:
     """Create a message from an agent in a group.
 
     Used by agent_bridge to persist agent responses. Returns the
-    persisted Beanie Message document for legacy callers.
+    persisted Beanie Message document for legacy callers. ``steps`` /
+    ``steps_omitted`` are the reply's recorded thinking and tool calls.
     """
     attachment_dicts = (
         [a.model_dump() if hasattr(a, "model_dump") else dict(a) for a in attachments or []]
@@ -555,6 +648,8 @@ async def create_agent_message(
         agent=agent_id,
         content=content,
         attachments=attachment_dicts,
+        steps=steps,
+        steps_omitted=steps_omitted,
     )
     bumped_at = domain_msg.created_at or datetime.now(UTC)
     await group_service.bump_message_stats(group_id, last_message_at=bumped_at)
@@ -631,6 +726,9 @@ async def toggle_reaction(message_id: str, user_id: str, emoji: str) -> dict:
                 "group_id": cast(str, domain_msg.group),
                 "emoji": emoji,
                 "user_id": user_id,
+                "reactions": [
+                    {"emoji": r.emoji, "users": list(r.users)} for r in domain_msg.reactions
+                ],
             }
         )
     )
@@ -709,14 +807,24 @@ async def patch_ui_state(
       * ``group``  — caller must be a group member.
       * ``pocket`` / ``session`` — caller must own the linked Session.
 
-    Last-write-wins on the entire ``spec_id`` (no field-level merge);
-    Ripple's ``onStateChange`` always carries the full state snapshot.
+    ``spec_id`` picks the target: ``spec_<n>`` splices into the n-th content
+    fence, ``att_<n>`` merges into ``meta["state"]`` of the n-th ripple
+    attachment (agent replies store their spec there, fence stripped).
+    A ``spec_<n>`` with no matching fence falls back to ``att_<n>``: a live
+    stream still shows the fence client-side after the server stripped it.
+    Patch keys are shallow-merged over the stored state. Known limit: a reply
+    with 2+ fences keeps the later ones in content, so ``spec_0`` there still
+    hits a content fence rather than the attachment.
 
     Emits ``message.ui_state.updated`` with routing keys (``group_id`` for
     group messages, ``user_id`` for pocket/session messages) so other tabs /
-    members of the room re-fetch / re-render content via the WS bridge.
+    members of the room re-fetch / re-render content via the WS bridge. For
+    ``att_`` patches the payload also carries the full updated ``attachments``.
     """
-    from pocketpaw_ee.cloud.chat.ripple_content_patcher import patch_content_with_state
+    from pocketpaw_ee.cloud.chat.ripple_content_patcher import (
+        patch_attachments_with_state,
+        patch_content_with_state,
+    )
 
     # Treat malformed ids (e.g. ``m<timestamp>`` placeholders the FE assigns
     # before the cloud ObjectId arrives) as 404 — InvalidId would otherwise
@@ -752,28 +860,48 @@ async def patch_ui_state(
     else:
         raise NotFound("message", message_id)
 
-    new_content = patch_content_with_state(msg.content or "", spec_id, state)
-    if new_content is None:
-        # Fence not found / malformed JSON — surface a 404 so the FE can
-        # fall back to in-memory state rather than silently dropping the
-        # patch. (A 500 would be wrong: nothing crashed, the target just
-        # doesn't exist in the document we have.)
+    # Where the spec lives decides where the state is written: ``att_<n>`` is
+    # a ripple attachment (the run pipeline strips agent fences into one),
+    # ``spec_<n>`` is a fence still inside the content.
+    new_attachments = None
+    new_content: str | None
+    if spec_id.startswith("att_"):
+        new_attachments = patch_attachments_with_state(msg.attachments, spec_id, state)
+        new_content = msg.content or ""
+    else:
+        new_content = patch_content_with_state(msg.content or "", spec_id, state)
+        if new_content is None and spec_id.startswith("spec_"):
+            # During a live run the client still renders the extracted spec as
+            # a fence in the streaming bubble, so a click before any reload
+            # sends ``spec_<n>``. The server already moved that fence into the
+            # ripple attachment, so retry there with the same index.
+            new_attachments = patch_attachments_with_state(
+                msg.attachments, "att_" + spec_id[len("spec_") :], state
+            )
+            if new_attachments is not None:
+                new_content = msg.content or ""
+    if new_content is None or (spec_id.startswith("att_") and new_attachments is None):
+        # Spec not found / malformed — surface a 404 so the FE can fall back
+        # to in-memory state rather than silently dropping the patch. (A 500
+        # would be wrong: nothing crashed, the target just doesn't exist in
+        # the document we have.)
         raise NotFound("ui_spec", f"{message_id}/{spec_id}")
 
-    msg.content = new_content
+    data: dict = {
+        "message_id": message_id,
+        "spec_id": spec_id,
+        "state": state,
+        "content": new_content,
+    }
+    if new_attachments is not None:
+        # Reassign the whole list so Beanie sees the change and writes it.
+        msg.attachments = [_AttachmentDoc(**a) for a in new_attachments]
+        data["attachments"] = [a.model_dump(mode="json") for a in msg.attachments]
+    else:
+        msg.content = new_content
     await msg.save()
 
-    await emit(
-        MessageUiStateUpdated(
-            data={
-                "message_id": message_id,
-                "spec_id": spec_id,
-                "state": state,
-                "content": new_content,
-                **route_key,
-            }
-        )
-    )
+    await emit(MessageUiStateUpdated(data={**data, **route_key}))
     return {"ok": True}
 
 
@@ -794,7 +922,7 @@ async def get_messages(
     from pocketpaw_ee.cloud.chat.runs import service as run_service
 
     group = await _get_group_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     before_time: datetime | None = None
@@ -809,11 +937,19 @@ async def get_messages(
                 before_time = None
                 before_id = None
 
-    messages = await _list_for_group_paged(
-        group_id,
-        before_time=before_time,
-        before_id=before_id,
-        limit=limit + 1,
+    # History and the active-run lookup are independent reads.
+    messages, active = await asyncio.gather(
+        _list_for_group_paged(
+            group_id,
+            before_time=before_time,
+            before_id=before_id,
+            limit=limit + 1,
+        ),
+        run_service.find_active_run_for_scope(
+            workspace_id=group.workspace,
+            context_type=("dm", "group"),
+            scope_id=group_id,
+        ),
     )
     has_more = len(messages) > limit
     if has_more:
@@ -834,11 +970,6 @@ async def get_messages(
         if last.created_at is not None:
             next_cursor = f"{last.created_at.isoformat()}|{last.id}"
 
-    active = await run_service.find_active_run_for_scope(
-        workspace_id=group.workspace,
-        context_type=("dm", "group"),
-        scope_id=group_id,
-    )
     active_run = {"run_id": active.run_id, "status": active.status} if active else None
 
     return {
@@ -849,16 +980,25 @@ async def get_messages(
     }
 
 
-async def get_thread(message_id: str, user_id: str) -> list[dict]:
-    """Get all replies to a message, sorted ascending by creation time."""
+async def get_thread(
+    message_id: str,
+    user_id: str,
+    *,
+    after: str | None = None,
+    limit: int = THREAD_REPLY_LIMIT,
+) -> list[dict]:
+    """Replies to a message, oldest first: at most ``limit`` (capped at
+    ``THREAD_REPLY_LIMIT``), after the ``"{createdAt}|{_id}"`` cursor of the
+    last reply seen. The response stays a plain list."""
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
 
     msg = await _get_group_message_domain_or_404(message_id)
     group = await _get_group_or_404(cast(str, msg.group))
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
-    replies = await _list_replies(msg.id)
+    limit = max(1, min(limit, THREAD_REPLY_LIMIT))
+    replies = await _list_replies(msg.id, after=after, limit=limit)
     return [message_to_wire_dict(r) for r in replies]
 
 
@@ -919,7 +1059,7 @@ async def get_active_threads(group_id: str, user_id: str) -> list[dict]:
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
 
     group = await _get_group_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     if not group.active_threads:
@@ -1053,7 +1193,7 @@ async def get_thread_messages(
         raise NotFound("thread", thread_id)
 
     group = await _get_group_or_404(parent.group)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     # Build response: parent + thread replies
@@ -1136,7 +1276,7 @@ async def search_messages(group_id: str, user_id: str, query: str) -> list[dict]
     from pocketpaw_ee.cloud.chat.dto import message_to_wire_dict
 
     group = await _get_group_or_404(group_id)
-    if group.type in ("private", "dm"):
+    if group.type in MEMBER_ONLY_GROUP_TYPES:
         _require_group_member(group, user_id)
 
     domain_messages = await _search_in_group(group_id, query, limit=50)
@@ -1300,7 +1440,34 @@ async def persist_user_message_for_scope(
             workspace_id=workspace_id,
         )
     await msg.insert()
+    await _answer_pending_ask(kind, scope_id, session_key, content)
     return str(msg.id)
+
+
+async def _answer_pending_ask(kind: str, scope_id: str, session_key: str, content: str) -> None:
+    """Mark the scope's pending ``ask_user`` question answered by ``content``.
+
+    Only the newest agent reply can hold a pending ask (the client offers chips
+    on the latest reply alone), so this reads that one row through the
+    ``(session_key|group, createdAt)`` index. Any reply answers it, a clicked
+    chip or typed text, so the chips never come back after a reload once the
+    user has moved on. Best-effort: a failure here must never fail the send.
+    """
+    if kind in ("pocket", "session"):
+        query: dict = {"session_key": session_key, "role": "assistant"}
+    else:
+        query = {"group": scope_id, "sender_type": "agent"}
+    try:
+        latest = await _MessageDoc.find(query).sort("-createdAt").limit(1).to_list()
+        ask = latest[0].ask_user if latest else None
+        if ask is None or ask.answered:
+            return
+        await _MessageDoc.get_pymongo_collection().update_one(
+            {"_id": latest[0].id},
+            {"$set": {"ask_user.answered": True, "ask_user.answer": content}},
+        )
+    except Exception:
+        logger.warning("marking the pending ask answered failed for %s", scope_id, exc_info=True)
 
 
 async def persist_assistant_message_for_scope(
@@ -1313,9 +1480,57 @@ async def persist_assistant_message_for_scope(
     target_agent_id: str,
     content: str,
     attachments: list[dict] | None = None,
+    run_status: str | None = None,
+    steps: list[dict] | None = None,
+    steps_omitted: int = 0,
+    ask_user: dict | None = None,
 ) -> _MessageDoc:
-    """Persist an agent's reply in an agent-stream context."""
+    """Persist an agent's reply in an agent-stream context.
+
+    A CONCIERGE reply is the one context with NO Message home — see the branch
+    below; it returns an unsaved doc rather than writing an orphan row.
+
+    ``run_status`` is set only for the partial text of a run that did not
+    complete (``failed`` | ``cancelled`` | ``interrupted``), so the history
+    reader and the UI can tell a cut-off reply from a finished one.
+
+    ``steps`` / ``steps_omitted`` are the thinking blocks and tool calls the
+    reply streamed (see ``chat/runs/steps.py``); display-only.
+
+    ``ask_user`` is the ``MessageAskUser`` dict when the reply asked the user a
+    question through the ``ask_user`` tool; display-only.
+    """
     att_models = [_AttachmentDoc(**a) if isinstance(a, dict) else a for a in (attachments or [])]
+    if kind == "concierge":
+        # Forcing a Message home for a concierge turn was a defect. ContextType
+        # has no "concierge" value, so this fell through to the else branch and
+        # wrote Message(context_type="group", group=<pocket_id>, session_key
+        # unset): a row NO surface reads, keyed by a pocket id in a field that
+        # means "room id" (a collision risk the day those id spaces meet).
+        # Concierge transcripts derive from ChatRunDoc (the admin transcript
+        # reads + _load_concierge_history), never from Messages, and nothing
+        # dereferences ``assistant_message_id`` as a Message lookup — it only
+        # rides the run doc and the SSE tail.
+        #
+        # So persist NOTHING and hand back an in-memory doc, keeping the caller
+        # contract intact (``msg.id`` for mark_completed + the SSE tail,
+        # ``msg.createdAt`` for the broadcast). The id is a real unique
+        # ObjectId with no row behind it — deliberate, and the reason any future
+        # message-id-addressable feature (reactions, thumbs writeback) must key
+        # off the RUN doc for concierge rather than this id.
+        msg = _MessageDoc(
+            context_type="session",
+            session_key=session_key,
+            role="assistant",
+            sender=None,
+            sender_type="agent",
+            agent=target_agent_id,
+            content=content,
+            attachments=att_models,
+            workspace_id=workspace_id,
+        )
+        msg.id = PydanticObjectId()
+        return msg
     if kind in ("pocket", "session"):
         msg = _MessageDoc(
             context_type=kind,  # type: ignore[arg-type]
@@ -1327,6 +1542,10 @@ async def persist_assistant_message_for_scope(
             content=content,
             attachments=att_models,
             workspace_id=workspace_id,
+            run_status=run_status,
+            steps=steps or [],
+            steps_omitted=steps_omitted,
+            ask_user=ask_user,
         )
     else:
         msg = _MessageDoc(
@@ -1338,6 +1557,10 @@ async def persist_assistant_message_for_scope(
             content=content,
             attachments=att_models,
             workspace_id=workspace_id,
+            run_status=run_status,
+            steps=steps or [],
+            steps_omitted=steps_omitted,
+            ask_user=ask_user,
         )
     await msg.insert()
     return msg

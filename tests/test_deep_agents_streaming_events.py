@@ -102,20 +102,19 @@ async def _drive_stream(backend: DeepAgentsBackend, chunks: list[dict]) -> list:
 
     backend._sdk_available = True
     backend._cached_agent = fake_agent
-    # Mirror the _get_or_create_agent cache-key shape (model, skills,
-    # memory, is_pocket_session). The default test prompt "hi" carries
-    # no <pocket-scope> marker so is_pocket_session is False.
-    backend._cached_model_key = (
-        backend.settings.deep_agents_model,
-        tuple(backend.settings.deep_agents_skills or []),
-        tuple(backend.settings.deep_agents_memory or []),
-        False,
-    )
 
+    # Stub the factory rather than hand-mirroring its cache-key shape. The
+    # fixture used to rebuild the key tuple itself, which meant every change to
+    # the key silently dropped these tests through to the REAL
+    # ``create_deep_agent`` with a MagicMock model — a confusing
+    # ``TypeError: '>' not supported between MagicMock and int`` from inside
+    # deepagents, nowhere near the actual cause. These tests are about the
+    # STREAM, so the agent is a stub and the key is not their business.
     events = []
     with (
         patch.object(backend, "_build_model", return_value=MagicMock()),
         patch.object(backend, "_build_mcp_tools", return_value=[]),
+        patch.object(backend, "_get_or_create_agent", return_value=fake_agent),
     ):
         async for evt in backend.run("hi"):
             events.append(evt)

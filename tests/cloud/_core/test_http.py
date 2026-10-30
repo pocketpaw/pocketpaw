@@ -111,3 +111,116 @@ async def test_cloud_error_handler_returns_envelope_directly() -> None:
     assert response.status_code == 404
     body = bytes(response.body).decode("utf-8")
     assert '"workspace.not_found"' in body
+
+
+# ---------------------------------------------------------------------------
+# SmokeGateFailed — the sites build failure that used to escape as a bare 500
+# ---------------------------------------------------------------------------
+#
+# `SmokeGateFailed` is a plain RuntimeError subclass, not a CloudError, and the
+# service layer deliberately re-raises it raw on the preview/arm path so
+# `edit_svelte_component` can roll the component source back. Nothing above that
+# mapped it, so `POST /sites/by-pocket/{id}/editable` answered a failed build
+# with an opaque, unhandled 500 — which additionally lost its CORS headers and
+# reached the browser as a bogus CORS error.
+#
+# Mutation that must break these: drop the `add_exception_handler(SmokeGateFailed,
+# ...)` line in `_core/http.py::add_error_handler`.
+
+
+def _build_smoke_app(*, with_cors: bool = False) -> FastAPI:
+    from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+
+    app = FastAPI()
+    add_error_handler(app)
+
+    @app.get("/arm")
+    def _arm() -> dict:
+        raise SmokeGateFailed("build failed (exit 1)")
+
+    if with_cors:
+        from fastapi.middleware.cors import CORSMiddleware
+
+        # Added last = outermost, exactly as the real app factories install it.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["https://paw.example.com"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    return app
+
+
+def test_smoke_gate_failed_maps_to_generator_failed_envelope() -> None:
+    client = TestClient(_build_smoke_app(), raise_server_exceptions=False)
+    resp = client.get("/arm")
+    assert resp.status_code == 500
+    assert resp.json()["error"]["code"] == "sites.generator_failed"
+
+
+def test_smoke_gate_failed_carries_a_detail_the_frontend_reads() -> None:
+    """friendlyErrorMessage (paw-enterprise) reads `detail`, not `error`."""
+    client = TestClient(_build_smoke_app(), raise_server_exceptions=False)
+    assert client.get("/arm").json()["detail"]
+
+
+def test_smoke_gate_failed_does_not_leak_the_build_log() -> None:
+    """Build output can carry paths and env details — logs only."""
+    client = TestClient(_build_smoke_app(), raise_server_exceptions=False)
+    assert "exit 1" not in client.get("/arm").text
+
+
+def test_smoke_gate_failed_response_keeps_cors_headers() -> None:
+    """The whole point: a mapped handler runs INSIDE CORSMiddleware, so the
+    browser sees the real error instead of a fabricated CORS failure."""
+    client = TestClient(_build_smoke_app(with_cors=True), raise_server_exceptions=False)
+    resp = client.get("/arm", headers={"Origin": "https://paw.example.com"})
+    assert resp.status_code == 500
+    assert resp.headers.get("access-control-allow-origin") == "https://paw.example.com"
+
+
+# ---------------------------------------------------------------- details
+
+
+def _details_app() -> FastAPI:
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    app = FastAPI()
+    add_error_handler(app)
+
+    @app.get("/plain")
+    def _plain() -> dict:
+        raise ValidationError("sites.bundle_invalid", "nope")
+
+    @app.get("/details")
+    def _details() -> dict:
+        raise ValidationError(
+            "sites.do_data_loss_unconfirmed", "confirm it", details={"classes": ["A", "B"]}
+        )
+
+    return app
+
+
+def test_envelopes_without_details_are_byte_identical() -> None:
+    client = TestClient(_build_app())
+    nf = client.get("/notfound")
+    assert nf.content == (
+        b'{"error":{"code":"workspace.not_found","message":"workspace \'abc\' not found"}}'
+    )
+    plain = TestClient(_details_app()).get("/plain")
+    assert plain.status_code == 422
+    assert plain.content == b'{"error":{"code":"sites.bundle_invalid","message":"nope"}}'
+
+
+def test_details_appear_in_the_envelope_only_when_set() -> None:
+    resp = TestClient(_details_app()).get("/details")
+    assert resp.status_code == 422
+    assert resp.json() == {
+        "error": {
+            "code": "sites.do_data_loss_unconfirmed",
+            "message": "confirm it",
+            "details": {"classes": ["A", "B"]},
+        }
+    }
+    assert CloudError(400, "x", "y").details is None

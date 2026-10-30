@@ -10,7 +10,7 @@
       "title": "Agent Configuration Document Model"
     },
     "agent-knowledge-service-eecloudagentsknowledgepy": {
-      "summary": "A thin service wrapper that scopes the core KnowledgeEngine to individual agents. Each agent gets its own isolated knowledge namespace via `agent:{agent_id}` scoping, enabling per-agent text, URL, and file ingestion plus search.",
+      "summary": "The agent knowledge service over the kb-go binary. Callers pass a scope string (`agent:{id}`, `workspace:{id}`, `pocket:{id}`); kb-go compiles, stores, indexes and searches. Text, URL and file ingestion plus search.",
       "title": "Agent Knowledge Service (ee/cloud/agents/knowledge.py)"
     },
     "agents-domain-business-logic-service-eecloudagentsservicepy": {
@@ -1448,8 +1448,8 @@
         "agent-bridge-routing-chat-messages-to-ai-agents-in-group-conversations"
       ]
     },
-    "knowledgeengine": {
-      "name": "KnowledgeEngine",
+    "kb-go": {
+      "name": "kb-go",
       "articles": [
         "agent-knowledge-service-eecloudagentsknowledgepy"
       ]

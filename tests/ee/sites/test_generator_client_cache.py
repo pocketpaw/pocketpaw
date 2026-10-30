@@ -164,3 +164,43 @@ async def test_failed_install_does_not_poison_cache(tmp_path, monkeypatch):
     with pytest.raises(SmokeGateFailed):
         await client.build(**_build_kwargs())
     assert runner.install_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_static_build_stamps_the_content_it_rendered(tmp_path, monkeypatch):
+    """The stamp ``draft_markup`` checks before serving an on-disk build: written
+    after a successful build, and it names exactly the content that was built."""
+    from pocketpaw_ee.sites.generator_client import (
+        draft_source_hash,
+        read_draft_source_stamp,
+    )
+
+    monkeypatch.setenv("PAW_SITES_BUILD_DIR", str(tmp_path))
+    client = GeneratorClient(_runner=_CountingRunner())
+
+    await client.build(**_build_kwargs())
+
+    expected = draft_source_hash(engine="ripple", source=None, ripple_spec={"type": "container"})
+    assert read_draft_source_stamp(build_home() / "pocket_abc") == expected
+
+
+@pytest.mark.asyncio
+async def test_a_failed_build_leaves_no_stamp(tmp_path, monkeypatch):
+    """A failed build leaves the PREVIOUS output on disk; with its stamp gone, nothing
+    serves that output as the current draft."""
+    from pocketpaw_ee.sites.generator_client import read_draft_source_stamp
+
+    monkeypatch.setenv("PAW_SITES_BUILD_DIR", str(tmp_path))
+    runner = _CountingRunner()
+    client = GeneratorClient(_runner=runner)
+    await client.build(**_build_kwargs())
+    assert read_draft_source_stamp(build_home() / "pocket_abc")
+
+    async def _broken_smoke(project_dir: str) -> tuple[bool, str]:
+        return False, "boom"
+
+    runner.smoke = _broken_smoke  # type: ignore[method-assign]
+    with pytest.raises(SmokeGateFailed):
+        await client.build(**{**_build_kwargs(), "ripple_spec": {"type": "changed"}})
+
+    assert read_draft_source_stamp(build_home() / "pocket_abc") == ""

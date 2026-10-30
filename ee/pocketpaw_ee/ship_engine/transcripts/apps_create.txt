@@ -1,0 +1,5 @@
+# transcript: `dokku apps:create demo` on a fresh box.
+EXIT: 0
+--- stdout ---
+-----> Creating demo...
+--- stderr ---

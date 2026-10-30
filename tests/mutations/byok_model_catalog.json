@@ -1,0 +1,58 @@
+[
+  {
+    "label": "the BYOK skip is dropped — every custom-gateway model is refused against OUR catalog again",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            and (getattr(ctx, \"credential_source\", None) or byok_creds.source) != \"byok\"\n            and await _model_is_unknown_to_gateway(ctx.model_override)",
+    "replace": "            and await _model_is_unknown_to_gateway(ctx.model_override)",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_byok_model_is_not_checked_against_our_catalog"]
+  },
+  {
+    "label": "the check is skipped for EVERYONE — free text bills the platform key again",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        if (\n            ctx.model_override\n            and not (",
+    "replace": "        if (\n            False\n            and not (",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_platform_turn_is_still_checked"]
+  },
+  {
+    "label": "the skip keys on a stored-key probe again — a key that no longer decrypts skips the guard while OUR key pays",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            and (getattr(ctx, \"credential_source\", None) or byok_creds.source) != \"byok\"",
+    "replace": "            and not bool(byok_creds.api_key or byok_creds.source)",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_stored_key_that_degrades_to_platform_is_still_checked"]
+  },
+  {
+    "label": "a BYOK turn still pays the catalog network call on its critical path",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            and (getattr(ctx, \"credential_source\", None) or byok_creds.source) != \"byok\"\n            and await _model_is_unknown_to_gateway(ctx.model_override)",
+    "replace": "            and await _model_is_unknown_to_gateway(ctx.model_override)\n            and (getattr(ctx, \"credential_source\", None) or byok_creds.source) != \"byok\"",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_byok_turn_never_reads_the_catalog"]
+  },
+  {
+    "label": "the model id is never forwarded — the picker becomes a dead control",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        if ctx.model_override:\n            run_kwargs[\"model_override\"] = ctx.model_override",
+    "replace": "        if False:\n            run_kwargs[\"model_override\"] = ctx.model_override",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_catalogued_model_runs"]
+  },
+  {
+    "label": "the Claude SDK skip is dropped: every Claude pick on that backend is refused against a catalog that lists no Anthropic model",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "backend_name == \"claude_agent_sdk\" and ctx.model_override.startswith(\"claude-\")",
+    "replace": "False",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_claude_model_on_the_claude_sdk_backend_skips_the_catalog"]
+  },
+  {
+    "label": "the Claude SDK skip drops its id check: any free text on that backend skips the catalog",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "backend_name == \"claude_agent_sdk\" and ctx.model_override.startswith(\"claude-\")",
+    "replace": "backend_name == \"claude_agent_sdk\"",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_non_claude_model_on_the_claude_sdk_backend_is_still_checked"]
+  },
+  {
+    "label": "the Claude SDK skip drops its backend check: a Claude id on any backend skips the catalog",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "backend_name == \"claude_agent_sdk\" and ctx.model_override.startswith(\"claude-\")",
+    "replace": "ctx.model_override.startswith(\"claude-\")",
+    "tests": ["tests/cloud/runs/test_run_core_model_catalog.py::test_a_claude_model_on_another_backend_is_still_checked"]
+  }
+]

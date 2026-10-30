@@ -1,0 +1,20 @@
+{"id": "a01", "business": {"name": "Joe's Pizza", "domain": "joespizzaatx.com"}, "text": "For pizza in Austin, try Home Slice Pizza on South Congress or Joe's Pizza near Zilker.", "mentioned": true}
+{"id": "a02", "business": {"name": "Joe's Pizza", "domain": "joespizzaatx.com"}, "text": "Home Slice Pizza, Via 313 and Bufalina are the usual picks in Austin.", "mentioned": false}
+{"id": "a03", "business": {"name": "Joe's Pizza", "domain": "joespizzaatx.com"}, "text": "Locals rate Joe Pizza on Barton Springs highly.", "mentioned": null}
+{"id": "a04", "business": {"name": "Joe's Pizza", "domain": "joespizzaatx.com"}, "text": "Order online at joespizzaatx.com for delivery.", "mentioned": true}
+{"id": "a05", "business": {"name": "Joe's Pizza", "domain": "joespizzaatx.com"}, "text": "JOES PIZZA has a lunch special on weekdays.", "mentioned": true}
+{"id": "a06", "business": {"name": "Bright Smile Dental", "aliases": ["Bright Smile Dentistry"], "domain": "brightsmileatx.com"}, "text": "Bright Smile Dentistry in North Loop is known for gentle cleanings.", "mentioned": true}
+{"id": "a07", "business": {"name": "Bright Smile Dental", "domain": "brightsmileatx.com"}, "text": "Top dentists in Austin include Castle Dental and Austin Dental Works.", "mentioned": false}
+{"id": "a08", "business": {"name": "Bright Smile Dental", "domain": "brightsmileatx.com"}, "text": "Brite Smile Dental gets good reviews for kids.", "mentioned": null}
+{"id": "a09", "business": {"name": "The Daily Grind Cafe", "domain": "dailygrind.coffee"}, "text": "Daily Grind Cafe roasts its own beans and opens at 6am.", "mentioned": true}
+{"id": "a10", "business": {"name": "The Daily Grind Cafe", "domain": "dailygrind.coffee"}, "text": "For coffee try Houndstooth, Merit or Epoch.", "mentioned": false}
+{"id": "a11", "business": {"name": "Café Olé & Grill", "domain": "cafeole.com"}, "text": "Cafe Ole and Grill serves breakfast tacos all day.", "mentioned": true}
+{"id": "a12", "business": {"name": "Smith Plumbing LLC", "domain": "smithplumbing.com"}, "text": "Smith Plumbing is a reliable 24/7 option in Round Rock.", "mentioned": true}
+{"id": "a13", "business": {"name": "Smith Plumbing LLC", "domain": "smithplumbing.com"}, "text": "Radiant Plumbing and Reliant are the most recommended plumbers.", "mentioned": false}
+{"id": "a14", "business": {"name": "Ace", "domain": "acehw.com"}, "text": "Acme Hardware is open late on Sundays.", "mentioned": false}
+{"id": "a15", "business": {"name": "Green Leaf Yoga", "domain": "greenleafyoga.studio"}, "text": "Green Leaf Yoga Studio offers a free first class [1].", "mentioned": true}
+{"id": "a16", "business": {"name": "Green Leaf Yoga", "domain": "greenleafyoga.studio"}, "text": "Black Swan Yoga and Wanderlust are popular in Austin.", "mentioned": false}
+{"id": "a17", "business": {"name": "Lone Star Auto Repair", "domain": "lonestarauto.com"}, "text": "Lonestar Auto Repair on Lamar fixed my brakes fast.", "mentioned": null}
+{"id": "a18", "business": {"name": "Lone Star Auto Repair", "domain": "lonestarauto.com"}, "text": "Many people suggest Lone Star Auto Repair for honest quotes.", "mentioned": true}
+{"id": "a19", "business": {"name": "Lone Star Auto Repair", "domain": "lonestarauto.com"}, "text": "The Lone Star State has many auto shops; Christian Brothers Automotive is popular.", "mentioned": false}
+{"id": "a20", "business": {"name": "Joe's Pizza", "domain": "joespizzaatx.com"}, "text": "Pizza Joe's is a chain in Pennsylvania, not in Austin.", "mentioned": false}

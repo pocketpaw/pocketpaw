@@ -608,16 +608,17 @@ class DecisionProjection:
         Weights decay 0.95 → 0.85 → 0.75 by recency rank."""
         if not decision.pocket_id:
             return []
-        siblings = [
-            d
-            for d in self._store.iter_decisions(
-                pocket_id=decision.pocket_id,
-            )
-            if d.id != decision.id and d.action == decision.action and d.ts < decision.ts
-        ]
-        # iter_decisions already sorts by ts DESC — take the top 3.
+        # The filter + top-3 run in SQL (ts DESC, id DESC) so a replay
+        # hydrates 3 rows per completion, not the whole pocket.
+        siblings = self._store.iter_decisions(
+            pocket_id=decision.pocket_id,
+            action=decision.action,
+            before=decision.ts,
+            exclude_id=decision.id,
+            limit=3,
+        )
         out: list[DecisionRef] = []
-        for i, sib in enumerate(siblings[:3]):
+        for i, sib in enumerate(siblings):
             weight = round(0.95 - (i * 0.1), 2)
             out.append(
                 DecisionRef(

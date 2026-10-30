@@ -1,0 +1,555 @@
+[
+  {
+    "label": "the GitHub patrol takes issues without a charter label",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "if not wanted & {n.lower() for n in names}:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_labelled_open_issues_become_sightings"
+    ]
+  },
+  {
+    "label": "an empty issue_labels still lists issues",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "if not slug or not wanted:",
+    "replace": "if not slug:",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_no_issue_labels_takes_nothing"
+    ]
+  },
+  {
+    "label": "an unsafe GitHub slug reaches gh",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "if any(p in {\".\", \"..\"} or p.startswith(\"-\") for p in slug.split(\"/\")):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_unsafe_slug_never_reaches_gh"
+    ]
+  },
+  {
+    "label": "GitHub label objects never reach the severity map as names",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "\"severity\": _issue_severity({\"labels\": names}),",
+    "replace": "\"severity\": _issue_severity(issue),",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_labelled_open_issues_become_sightings"
+    ]
+  },
+  {
+    "label": "an issue filed by hand is sighted again by the patrol",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if key in seen_keys or (ref and ref in seen_refs):",
+    "replace": "if key in seen_keys:",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_run_patrols_dedupes_on_the_issue_across_patrols"
+    ]
+  },
+  {
+    "label": "the continuous due check never senses issues",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if \"issues\" in (doc.patrols or []):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_continuous_due_check_runs_the_issues_patrol_first"
+    ]
+  },
+  {
+    "label": "a tester seat is taken as a dev",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if seat.role != role:",
+    "replace": "if seat.role == \"reviewer\":",
+    "tests": [
+      "tests/cloud/test_belt_crew.py::test_a_tester_seat_is_found_by_role_and_never_takes_dev_work"
+    ]
+  },
+  {
+    "label": "the tester runs with POCKETPAW_FACTORY_CLOUD_TESTER off",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if not self.tester:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_is_off_by_default"
+    ]
+  },
+  {
+    "label": "a run gets a second tester",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if (await _blob(store, run_ref) or {}).get(\"tester\"):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_run_gets_one_tester_at_most"
+    ]
+  },
+  {
+    "label": "a mandate without a tester seat gets a tester",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if not seat:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_no_tester_seat_launches_no_tester"
+    ]
+  },
+  {
+    "label": "the tester session is not recorded on the blob",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "await _patch(store, run_ref, tester=entry)",
+    "replace": "await _patch(store, run_ref)",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_landed_run_launches_one_tester"
+    ]
+  },
+  {
+    "label": "the tester update reads running instead of landed",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "workspace_id=workspace_id, action_id=run_ref, status=\"landed\", stage=\"test\"",
+    "replace": "workspace_id=workspace_id, action_id=run_ref, status=\"running\", stage=\"test\"",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_landed_run_launches_one_tester"
+    ]
+  },
+  {
+    "label": "an app repo's tester never looks at snapshots",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "app = any((launch / \"Sources\").glob(\"*App\"))",
+    "replace": "app = False",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_looks_at_snapshots_on_an_app_repo"
+    ]
+  },
+  {
+    "label": "non-PNG bytes are kept as screenshots",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if not data.startswith(_PNG):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_landed_run_keeps_its_snapshot_pngs"
+    ]
+  },
+  {
+    "label": "screenshot names are not sanitized",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "name = _UNSAFE_NAME.sub(\"_\", path.name)",
+    "replace": "name = path.name",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_landed_run_keeps_its_snapshot_pngs"
+    ]
+  },
+  {
+    "label": "the 40-file screenshot cap is gone",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if len(kept) >= _SHOT_FILES:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_screenshots_are_capped_by_count_and_bytes"
+    ]
+  },
+  {
+    "label": "the 20 MB screenshot cap is gone",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if total + path.stat().st_size > _SHOT_BYTES:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_screenshots_are_capped_by_count_and_bytes"
+    ]
+  },
+  {
+    "label": "screenshots wait for the land even when the PR is known",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if not shot and pr.get(\"state\") != \"MERGED\":",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_screenshots_are_fetched_once_the_pr_is_known"
+    ]
+  },
+  {
+    "label": "the screenshot route serves a name the run does not list",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "if name not in listed:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_console.py::test_run_screenshots_are_listed_and_served"
+    ]
+  },
+  {
+    "label": "the screenshot route follows a link out of the run dir",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "if path.parent != base or not path.is_file():",
+    "replace": "if not path.is_file():",
+    "tests": [
+      "tests/cloud/test_belt_console.py::test_run_screenshots_are_listed_and_served"
+    ]
+  },
+  {
+    "label": "the single approve approves a queued station run",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "if _is_queued_station_run(before):",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_queued_run_approve.py::test_single_approve_refuses_a_queued_run"
+    ]
+  },
+  {
+    "label": "the instinct bulk-approve approves a queued station run",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "            queued.append(action_id)",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_belt_queued_run_approve.py::test_router_bulk_approve_skips_queued_runs"
+    ]
+  },
+  {
+    "label": "the Mission Control bulk-approve approves a queued station run",
+    "file": "ee/pocketpaw_ee/cloud/mission_control/service.py",
+    "find": "                eligible.remove(action_id)\n                blocked.append(action_id)",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_belt_queued_run_approve.py::test_mission_control_bulk_approve_skips_queued_runs"
+    ]
+  },
+  {
+    "label": "a code_change with no diff counts as approvable",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "bool(blob.get(\"station_pending\")) or not str(blob.get(\"diff\") or \"\").strip()",
+    "replace": "bool(blob.get(\"station_pending\"))",
+    "tests": [
+      "tests/cloud/test_belt_queued_run_approve.py::test_mission_control_bulk_approve_skips_queued_runs"
+    ]
+  },
+  {
+    "label": "belt_plan_resolved names nobody as the resolver",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "\"resolved_by\": str(getattr(approver, \"id\", \"\") or \"\"),",
+    "replace": "\"resolved_by\": \"\",",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_resolve_mixed_verdicts_dispatches_kept_tasks_one_terminal",
+      "tests/cloud/test_belt_plan_policy.py::test_auto_gate_approves_through_the_resolve_path"
+    ]
+  },
+  {
+    "label": "mark_shift stops announcing belt_mandate_updated",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    await _emit_mandate_updated(workspace_id, doc.mandate_id, doc.no, state)",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_resolve_mixed_verdicts_dispatches_kept_tasks_one_terminal"
+    ]
+  },
+  {
+    "label": "the new belt topics reach nobody",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "if t in {\"belt_plan\", \"belt_plan_resolved\", \"belt_mandate_updated\"}:",
+    "replace": "if t == \"belt_plan\":",
+    "tests": [
+      "tests/cloud/test_belt_mandates.py::test_belt_plan_resolved_and_mandate_updated_fan_out_to_the_workspace"
+    ]
+  },
+  {
+    "label": "the foreman timeout ignores POCKETPAW_MANDATE_FOREMAN_TIMEOUT",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "return await run_claude_no_tools(prompt, timeout=_cli_timeout(), run=self.run)",
+    "replace": "return await run_claude_no_tools(prompt, timeout=_CLI_TIMEOUT, run=self.run)",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_the_foreman_timeout_comes_from_the_env"
+    ]
+  },
+  {
+    "label": "a failed foreman call leaves the shift in planning",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "                state=\"done\",\n                outcome=f\"{_FOREMAN_FAILED}: {exc}\",",
+    "replace": "                state=\"planning\",\n                outcome=f\"{_FOREMAN_FAILED}: {exc}\",",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_a_failed_foreman_call_finishes_the_shift"
+    ]
+  },
+  {
+    "label": "the foreman failure log hides the prompt size",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            len(foreman_mod.build_prompt(context)),",
+    "replace": "            0,",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_a_failed_foreman_call_finishes_the_shift"
+    ]
+  },
+  {
+    "label": "three foreman failures in a row never back off",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "                return False  # the foreman keeps failing: back off to the stall timeout",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_three_foreman_failures_wait_the_stall_timeout"
+    ]
+  },
+  {
+    "label": "two foreman failures already back off",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            if len(recent) == _FOREMAN_FAILURE_RUN and all(",
+    "replace": "            if len(recent) >= 1 and all(",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_two_foreman_failures_still_retry_after_the_gap"
+    ]
+  },
+  {
+    "label": "a shift the foreman failed reads as proposed in pawprints",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        if shift.state == \"done\" and not shift.plan_action_id:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_belt_foreman_failure.py::test_a_failed_foreman_call_finishes_the_shift"
+    ]
+  },
+  {
+    "label": "the runs list drops each run's screenshots",
+    "file": "ee/pocketpaw_ee/cloud/belt/service.py",
+    "find": "            for s in blob.get(\"screenshots\") or []\n            if isinstance(s, dict)\n        ],\n        \"lead\": _lead_row(blob),",
+    "replace": "            for s in []\n        ],\n        \"lead\": _lead_row(blob),",
+    "tests": [
+      "tests/cloud/test_belt_console.py::test_run_screenshots_are_listed_and_served"
+    ]
+  },
+  {
+    "label": "a recent shift never names who approved its plan",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "            approved_by = getattr(action, \"approved_by\", None) or None",
+    "replace": "            approved_by = None",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_auto_gate_approves_through_the_resolve_path",
+      "tests/cloud/test_belt_mandates.py::test_resolve_mixed_verdicts_dispatches_kept_tasks_one_terminal"
+    ]
+  },
+  {
+    "label": "a recent shift drops the auto gate's decision",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "                policy = {\"decision\": found.get(\"decision\"), \"reason\": found.get(\"reason\")}",
+    "replace": "                policy = None",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_auto_gate_approves_through_the_resolve_path"
+    ]
+  },
+  {
+    "label": "Mission Control never says whether a Belt run is ready",
+    "file": "ee/pocketpaw_ee/cloud/mission_control/service.py",
+    "find": "            not _is_queued_station_run(action) if _code_change_blob(action) is not None else None",
+    "replace": "            None",
+    "tests": [
+      "tests/cloud/test_belt_queued_run_approve.py::test_mission_control_items_say_which_belt_runs_are_ready"
+    ]
+  },
+  {
+    "label": "the tester PR is looked up by the worker's marker",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "marker = TEST_MARKER if tester else MARKER",
+    "replace": "marker = MARKER",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_pr_is_nudged_fixed_and_recorded_merged"
+    ]
+  },
+  {
+    "label": "a tester's fixer update reads the landed run as running",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "status=\"landed\" if tester else \"running\",\n            stage=\"test\" if tester else \"fix\",",
+    "replace": "status=\"running\",\n            stage=\"fix\",",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_pr_is_nudged_fixed_and_recorded_merged"
+    ]
+  },
+  {
+    "label": "a tester's fixes go on the run's fixes",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "await (_patch_tester if tester else _patch)(store, run_ref, fixes=fixes)",
+    "replace": "await _patch(store, run_ref, fixes=fixes)",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_pr_is_nudged_fixed_and_recorded_merged"
+    ]
+  },
+  {
+    "label": "a tester PR's screenshots replace the run's",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "shot = tester",
+    "replace": "shot = False",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_the_tester_pr_is_nudged_fixed_and_recorded_merged"
+    ]
+  },
+  {
+    "label": "a tester with no PR is never done",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if tester:  # a tester may only file issues: no PR is done",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_tester_with_no_pr_is_done_after_the_no_pr_timeout"
+    ]
+  },
+  {
+    "label": "the tester holds the line: it runs before the land is executed",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "        await store.mark_executed(\n            run_ref, f\"Merged {url}",
+    "replace": "        await self._test(store, run_ref, blob, url)\n        await store.mark_executed(\n            run_ref, f\"Merged {url}",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_tester_tracking_never_holds_the_mandate_due_check"
+    ]
+  },
+  {
+    "label": "resume picks up a tester PR already merged",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "and tester.get(\"state\") in (None, \"open\")",
+    "replace": "and True",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_landed_runs_open_tester_pr"
+    ]
+  },
+  {
+    "label": "resume picks up a tester older than the run timeout",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "and time.time() - at < timeout\n    )\n\n\n_COUNTS",
+    "replace": "and True\n    )\n\n\n_COUNTS",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_landed_runs_open_tester_pr"
+    ]
+  },
+  {
+    "label": "resume tracks tester PRs with the tester off",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                    if self.tester\n",
+    "replace": "                    if True\n",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_landed_runs_open_tester_pr"
+    ]
+  },
+  {
+    "label": "a stood-down line never wakes when a run it waited on settles",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        if not settled:\n",
+    "replace": "        if True:\n",
+    "tests": [
+      "tests/cloud/test_belt_continuous_cadence.py::test_a_stood_down_shift_wakes_when_a_run_settles_after_it"
+    ]
+  },
+  {
+    "label": "a run settled before the stand-down wakes the line",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "and _aware(datetime.fromisoformat(r[\"updated_at\"])) >= stood_down_at",
+    "replace": "and True",
+    "tests": [
+      "tests/cloud/test_belt_continuous_cadence.py::test_a_stood_down_shift_wakes_when_a_run_settles_after_it"
+    ]
+  },
+  {
+    "label": "the Depends on line is read off the cut summary",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "_depends_on(str(s.evidence.get(\"text\") or s.summary))",
+    "replace": "_depends_on(s.summary)",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states"
+    ]
+  },
+  {
+    "label": "the issue states never reach the foreman",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "        issue_states=issue_states,\n",
+    "replace": "        issue_states={},\n",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states"
+    ]
+  },
+  {
+    "label": "the foreman prompt drops the Depends on note",
+    "file": "ee/pocketpaw_ee/cloud/mandates/foreman.py",
+    "find": "rows.append(_sighting_line(s) + note)",
+    "replace": "rows.append(_sighting_line(s))",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_sees_a_cut_depends_on_line_and_the_issue_states"
+    ]
+  },
+  {
+    "label": "an open PR closing the issue never puts its sighting in flight",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "\"in_flight\": open_pr is not None\n",
+    "replace": "\"in_flight\": False\n",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_an_open_pr_that_closes_the_issue_keeps_its_sighting_in_flight",
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_does_not_plan_an_issue_an_open_pr_closes"
+    ]
+  },
+  {
+    "label": "the continuous due check never reads open PRs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "since=last.createdAt if last else None,\n        repo_id=doc.surface.repo_id,",
+    "replace": "since=last.createdAt if last else None,\n        repo_id=\"\",",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_an_open_pr_that_closes_the_issue_keeps_its_sighting_in_flight"
+    ]
+  },
+  {
+    "label": "the foreman's backlog never reads open PRs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "persist=True,\n        repo_id=doc.surface.repo_id,",
+    "replace": "persist=True,\n        repo_id=\"\",",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_does_not_plan_an_issue_an_open_pr_closes"
+    ]
+  },
+  {
+    "label": "the digest's backlog never reads open PRs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "repo_id=m[\"repo_id\"]",
+    "replace": "repo_id=\"\"",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_does_not_plan_an_issue_an_open_pr_closes"
+    ]
+  },
+  {
+    "label": "any #n in a PR body reads as closing it",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\\s+#",
+    "replace": "#",
+    "tests": [
+      "tests/cloud/test_belt_github_issues_patrol.py::test_an_open_pr_that_closes_the_issue_keeps_its_sighting_in_flight"
+    ]
+  },
+  {
+    "label": "a run with no PR of its own never adopts one",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "                return int(pr[\"number\"]), True\n",
+    "replace": "                return None, False\n",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_run_adopts_an_open_pr_that_closes_its_issue",
+      "tests/cloud/test_belt_cloud_station.py::test_a_silent_run_adopts_a_closing_pr_instead_of_being_released"
+    ]
+  },
+  {
+    "label": "a run adopts a closed or merged PR",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "if pr.get(\"state\") == \"OPEN\" and issue in closed_by(",
+    "replace": "if issue in closed_by(",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_run_adopts_an_open_pr_that_closes_its_issue"
+    ]
+  },
+  {
+    "label": "the adopted PR is not recorded on the run",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "pr_no = number if adopted else None",
+    "replace": "pr_no = None",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_run_adopts_an_open_pr_that_closes_its_issue"
+    ]
+  },
+  {
+    "label": "a resumed run forgets the PR it adopted",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "number: int | None = None if tester else blob.get(\"adopted_pr\")",
+    "replace": "number: int | None = None",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_resume_keeps_an_adopted_pr_that_merged_while_down"
+    ]
+  },
+  {
+    "label": "the brief never says to stop at an open PR for the issue",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "f\"If an open pull request on {slug} already closes #{issue.group(1)}, don't open \"",
+    "replace": "\"\"",
+    "tests": [
+      "tests/cloud/test_belt_cloud_station.py::test_a_run_adopts_an_open_pr_that_closes_its_issue"
+    ]
+  }
+]

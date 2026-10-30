@@ -171,6 +171,7 @@ _CHANNEL_CONFIG_KEYS: dict[str, dict[str, str]] = {
         "access_token": "whatsapp_access_token",
         "phone_number_id": "whatsapp_phone_number_id",
         "verify_token": "whatsapp_verify_token",
+        "app_secret": "whatsapp_app_secret",
         "allowed_phone_numbers": "whatsapp_allowed_phone_numbers",
     },
     "telegram": {

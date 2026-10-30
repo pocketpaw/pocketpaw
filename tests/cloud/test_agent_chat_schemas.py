@@ -15,6 +15,16 @@ def test_request_requires_content():
         CloudAgentChatRequest(content="")
 
 
+def test_request_accepts_long_content():
+    """The agent endpoint takes a full site-authoring prompt.
+
+    This field used to cap at 10_000; 100_001 chars proves the cap is gone
+    rather than merely raised.
+    """
+    body = "x" * 100_001
+    assert CloudAgentChatRequest(content=body).content == body
+
+
 def test_request_accepts_minimal_body():
     req = CloudAgentChatRequest(content="hello")
     assert req.content == "hello"

@@ -3,6 +3,9 @@
 #   emits for every successful upload (chat-scoped or workspace-only)
 #   and always carries workspace_id + storage_key. Tests updated to
 #   match.
+#
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Tests that EEUploadService emits file.ready / file.deleted."""
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from pocketpaw_ee.cloud.realtime.events import FileDeleted, FileReady
+from pocketpaw_ee.cloud._core.realtime.events import FileDeleted, FileReady
 from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
 from pocketpaw.uploads.service import BulkUploadResult

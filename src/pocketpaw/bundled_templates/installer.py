@@ -5,7 +5,7 @@
 # ``~/.pocketpaw/templates/<slug>/`` so the create specialist can
 # instantiate-and-customize a matching template instead of generating a
 # pocket from scratch. Idempotent via SHA-256 hash comparison — the same
-# mirror pattern as ``bundled_kb.installer`` and ``bundled_skills.installer``.
+# mirror pattern as ``bundled_skills.installer``.
 """Auto-install bundled pocket templates into the user's PocketPaw dir.
 
 Why this exists
@@ -138,8 +138,8 @@ def _install_one(slug_src: Path, destination_root: Path) -> TemplateInstallResul
     """Mirror one bundled template directory to the user's PocketPaw dir.
 
     Same SHA-256-hash-compare-per-file pattern as
-    ``bundled_kb.installer._install_one`` — keep the three installers
-    symmetric so the file-mirror logic is one mental model.
+    ``bundled_skills.installer`` — keep the installers symmetric so the
+    file-mirror logic is one mental model.
     """
 
     name = slug_src.name

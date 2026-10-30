@@ -21,6 +21,9 @@
 #     stands (the runner never approves or executes).
 #   * FAILURE — a ``DevelopFn`` that raises leaves the action SAFE (still queued,
 #     no diff, station_pending intact) and never crashes.
+#   * LANDING — after a human approves, the real executor applies the diff; the
+#     commit subject is ``feat: <task title>`` and the body carries the why and
+#     the develop report (never the report as the subject).
 #   * The ``DevelopFn`` is injectable: the test passes a deterministic fake — the
 #     runner NEVER calls a real LLM or spawns a real agent.
 
@@ -139,6 +142,12 @@ async def test_headless_runner_produces_pending_diff(store: InstinctStore):
     assert cc.get("correlation_id")
     # CRITICAL — still PENDING. Not auto-approved, not executed.
     assert after.status == ActionStatus.PENDING
+    # The fake reported no count, so it is counted from the diff's headers, and
+    # the run detail shows it before anything lands.
+    assert cc["files_changed"] == 1
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    assert (await belt_service.get_run(WS, action_id))["files_changed"] == 1
 
     # An operator trail entry was written — the first place LLM-produced content
     # enters the store without a human typing it.
@@ -199,6 +208,10 @@ async def test_headless_runner_handles_develop_failure(store: InstinctStore):
     # The action is NOT auto-approved / executed; it carries a failure note.
     assert after.status in (ActionStatus.PENDING, ActionStatus.FAILED)
     assert "headless" in (cc.get("headless_error") or "").lower() or after.error
+    # The runs read model exposes the reason as ``error``.
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    assert "model unavailable" in (await belt_service.get_run(WS, action_id))["error"]
 
 
 async def test_headless_runner_rejects_empty_diff(store: InstinctStore):
@@ -422,3 +435,181 @@ async def test_headless_diff_applies_after_human_approval(
     # A real belt branch was created carrying the headless-produced change.
     branches = _git(local_repo, "branch", "--list", "feat/belt-*")
     assert branches.strip(), "expected a feat/belt-* branch from the applied diff"
+
+    # The commit subject is the task TITLE, not the develop report; the body
+    # carries the why and the report.
+    branch = landed.parameters["_code_change"]["branch"]
+    assert _git(local_repo, "log", "-1", "--format=%s", branch).strip() == "feat: Add a hello file"
+    body = _git(local_repo, "log", "-1", "--format=%b", branch)
+    assert "demonstrate the headless runner" in body and "flip the greeting" in body
+
+
+def test_commit_subject_keeps_a_typed_title_and_stays_short():
+    from pocketpaw_ee.cloud.belt.executor import _commit_title
+
+    report = "features shipped up\ncheck `uv run pytest`: pass\nreview: pass"
+    assert _commit_title("t", report, title="fix(ledger): count refunds") == (
+        "fix(ledger): count refunds"
+    )
+    long = _commit_title("t", report, title="Record every shipped feature " * 6)
+    assert long.startswith("feat: Record every shipped feature") and len(long) <= 72
+    assert "check" not in long
+    # A hand-proposed change (no title) keeps the summary-based subject.
+    assert _commit_title("task", "Friendlier greeting. More.") == (
+        "feat(belt): Friendlier greeting"
+    )
+
+
+async def test_develop_request_aims_at_the_expected_outcome(store: InstinctStore):
+    """The develop report overwrites ``summary``; the develop request still aims
+    at the task's expected outcome."""
+    action_id = await _queue_station_run(store)
+    seen: list[DevelopRequest] = []
+
+    async def fake_develop(req: DevelopRequest) -> DevelopResult:
+        seen.append(req)
+        return DevelopResult(diff=CANNED_DIFF, base_branch="main", summary="REPORT")
+
+    await HeadlessDevelopRunner(develop_fn=fake_develop).run(action_id)
+    blob = (await store.get_action(action_id)).parameters["_code_change"]
+    assert blob["summary"] == "REPORT" and blob["title"] == "Add a hello file"
+    assert seen[0].summary == "hello.txt exists"
+
+
+# ---------------------------------------------------------------------------
+# RE-DEVELOP — two runs of one shift developed from the same base touch the
+# same lines. The first lands and a human merges it, so the base moves; the
+# second no longer applies. It goes back through the develop station once and
+# returns to the per-diff gate; a second conflict fails with the reason.
+# ---------------------------------------------------------------------------
+
+
+def _diff_against_head(repo: Path, body: str) -> str:
+    """A real ``git diff`` of app.py rewritten to ``body`` (index lines carry
+    real blob ids, so ``--3way`` behaves as it does on station output)."""
+    (repo / "app.py").write_text(body, encoding="utf-8")
+    diff = _git(repo, "diff")
+    _git(repo, "checkout", "--", "app.py")
+    return diff
+
+
+async def _second_run_on_a_moved_base(store: InstinctStore, repo: Path) -> tuple[str, str]:
+    """Develop two runs from the same base, land the first and merge its branch
+    into main (a local-only landing only makes a branch; the base moves when a
+    human merges it). Returns the second run's id and its now-stale diff."""
+    from pocketpaw_ee.cloud.belt.executor import execute_approved_change
+
+    diff_one = _diff_against_head(repo, "def hello():\n    return 'one'\n")
+    diff_two = _diff_against_head(repo, "def hello():\n    return 'two'\n")
+    first = await _queue_station_run(store, repo=str(repo))
+    second = await _queue_station_run(store, repo=str(repo))
+    for run_id, diff in ((first, diff_one), (second, diff_two)):
+
+        async def develop(req: DevelopRequest, diff: str = diff) -> DevelopResult:
+            return DevelopResult(diff=diff, base_branch="main", summary="report")
+
+        await HeadlessDevelopRunner(develop_fn=develop).run(run_id)
+
+    await execute_approved_change(await store.approve(first))
+    landed = await store.get_action(first)
+    assert landed.status == ActionStatus.EXECUTED, landed.error
+    _git(repo, "merge", "--ff-only", landed.parameters["_code_change"]["branch"])
+    return second, diff_two
+
+
+async def _approve_and_drain(store: InstinctStore, action_id: str) -> None:
+    import asyncio
+
+    import pocketpaw_ee.cloud.belt.headless as headless
+    from pocketpaw_ee.cloud.belt.executor import execute_approved_change
+
+    await execute_approved_change(await store.approve(action_id))
+    await asyncio.gather(*headless._BACKGROUND_DEVELOPS)
+
+
+async def test_moved_base_redevelops_and_returns_to_the_gate(
+    store: InstinctStore, local_repo: Path, allowlist, monkeypatch
+):
+    import pocketpaw_ee.cloud.belt.headless as headless
+    from pocketpaw_ee.cloud.belt import service as belt_service
+    from pocketpaw_ee.cloud.belt.executor import _short_id, execute_approved_change
+
+    second, _stale = await _second_run_on_a_moved_base(store, local_repo)
+    fresh = _diff_against_head(local_repo, "def hello():\n    return 'one and two'\n")
+    calls: list[DevelopRequest] = []
+
+    async def redevelop(req: DevelopRequest) -> DevelopResult:
+        calls.append(req)
+        return DevelopResult(diff=fresh, base_branch="main", summary="report 2")
+
+    seen_queued: list[dict] = []
+
+    async def peek_then_redevelop(req: DevelopRequest) -> DevelopResult:
+        seen_queued.append(await belt_service.get_run(WS, second))
+        return await redevelop(req)
+
+    monkeypatch.setattr(headless, "_PRODUCTION_DEVELOP_FN", peek_then_redevelop)
+    await _approve_and_drain(store, second)
+    # While it re-develops, the run reads as a queued re-develop with no stale
+    # diff or report on it.
+    queued = seen_queued[0]
+    assert (queued["status"], queued["redevelop"], queued["diff"]) == ("queued", 1, "")
+    assert queued["summary"] == "hello.txt exists"
+
+    # Back through the develop station once, aimed at the task's expected outcome.
+    assert len(calls) == 1 and calls[0].summary == "hello.txt exists"
+    action = await store.get_action(second)
+    blob = action.parameters["_code_change"]
+    # Back at the per-diff gate with the regenerated diff, for a FRESH approval.
+    assert action.status == ActionStatus.PENDING, action.error
+    assert blob["station_pending"] is False and blob["diff"] == fresh
+    assert blob["redevelop"] == 1
+    row = await belt_service.get_run(WS, second)
+    assert (row["status"], row["error"]) == ("proposed", None)
+    # The failed attempt left no belt branch behind.
+    assert f"feat/belt-{_short_id(second)}" not in _git(local_repo, "branch")
+
+    await execute_approved_change(await store.approve(second))
+    landed = await store.get_action(second)
+    assert landed.status == ActionStatus.EXECUTED, landed.error
+    branch = landed.parameters["_code_change"]["branch"]
+    assert "one and two" in _git(local_repo, "show", f"{branch}:app.py")
+
+
+async def test_a_second_moved_base_fails_with_the_reason(
+    store: InstinctStore, local_repo: Path, allowlist, monkeypatch
+):
+    import pocketpaw_ee.cloud.belt.headless as headless
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    second, stale = await _second_run_on_a_moved_base(store, local_repo)
+    calls: list[DevelopRequest] = []
+
+    async def stale_again(req: DevelopRequest) -> DevelopResult:
+        calls.append(req)
+        return DevelopResult(diff=stale, base_branch="main", summary="report 2")
+
+    monkeypatch.setattr(headless, "_PRODUCTION_DEVELOP_FN", stale_again)
+    await _approve_and_drain(store, second)
+    assert (await store.get_action(second)).status == ActionStatus.PENDING
+    await _approve_and_drain(store, second)
+
+    assert len(calls) == 1, "a run re-develops at most once"
+    failed = await store.get_action(second)
+    assert failed.status == ActionStatus.FAILED
+    assert "base moved twice" in failed.error
+    assert "base moved twice" in (await belt_service.get_run(WS, second))["error"]
+
+
+async def test_moved_base_without_a_develop_loop_fails_with_the_reason(
+    store: InstinctStore, local_repo: Path, allowlist, monkeypatch
+):
+    import pocketpaw_ee.cloud.belt.headless as headless
+
+    second, _stale = await _second_run_on_a_moved_base(store, local_repo)
+    monkeypatch.setattr(headless, "_PRODUCTION_DEVELOP_FN", None)
+    await _approve_and_drain(store, second)
+
+    failed = await store.get_action(second)
+    assert failed.status == ActionStatus.FAILED
+    assert "not wired" in failed.error and "moved main" in failed.error

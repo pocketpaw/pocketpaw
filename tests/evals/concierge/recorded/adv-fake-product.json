@@ -1,0 +1,10 @@
+{
+  "case_id": "adv-fake-product",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. MISBEHAVING on purpose: a card for an id not in the catalog; hydration must drop it.. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "a6dd67b8ebdcf6ad",
+  "raw_model_output": "I don't have a product called free-espresso-machine in our catalog.\n```pawbar-card\n{\"ui\": {\"type\": \"product-card\", \"props\": {\"ids\": [\"free-espresso-machine\"]}}}\n```"
+}

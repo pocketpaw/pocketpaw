@@ -8,26 +8,70 @@ pockets have a connected Drive account. Once that lands we can fan a
 Drive listing in here without changing the response shape the FE already
 consumes. See ``docs/plans/cluster-E-reality.md`` for the handshake.
 
+2026-09-16 (graph rebuild): ``files_graph`` now also reports ``ghost_edges`` —
+which file named each unresolved wikilink. It already knew (the ghost is
+discovered while scanning one row's ``link_names``) and dropped the fact on
+the floor, which left every client drawing ghosts as free-floating nodes with
+nothing to attach them to.
+
+2026-09-05 (files vault, feat/files-links): ``file_links`` and ``files_graph``
+resolve the ``[[wikilinks]]`` the FileReady listener stored in
+``FileUpload.link_names``. Resolution is by ``normalize_link_name(filename)``
+over the live rows of the file's own scope (its pocket, or workspace-only),
+so pocket-private filenames never surface as another scope's backlinks.
+
 2026-05-03 (Stage 3.E "Files as Knowledge"): ``list_unified`` accepts an
 optional ``pocket_id``. When set, the chat-uploads slice is filtered to
 that pocket only. When ``None`` (the default), the listing returns
 workspace-only rows — the workspace Files panel never sees pocket files,
 which is the privacy contract for pocket-scoped uploads.
+
+2026-08-29 (T3 "Files content search"): the record→row projection that was
+inlined in ``list_chat_uploads`` is now the module-level
+``unified_from_record``. ``files/content_search.py`` projects the rows a kb
+hit resolves to through the SAME function — a second hand-written copy is how
+summary/collections/tags/agent_id got dropped three separate times in this
+pipeline, and the fix was always "one projection, one place".
+
+2026-08-13 (Files pagination): ``list_unified`` now returns a
+``UnifiedPage`` (files + warnings + total + has_more) and accepts an
+``offset`` for offset-based paging. ``total`` comes from a cheap count
+query on the dominant chat-uploads source so ``has_more`` is accurate
+even when the fetch is capped at the mongo 500-row limit. Each source is
+fetched with ``offset + limit`` rows so slicing the merged, deduped set
+at ``[offset:offset+limit]`` stays correct within that cap. Callers that
+only need the flat list keep working via ``page.files``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
+from pocketpaw.uploads.file_store import FileRecord
+from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud.files.dto import (
+    Backlink,
+    FileLinksResponse,
+    FilesGraphResponse,
+    GraphEdge,
+    GraphNode,
+    LinkTarget,
+)
+from pocketpaw_ee.cloud.uploads.links import normalize_link_name
 from pocketpaw_ee.cloud.uploads.mongo_store import LIST_WORKSPACE_ONLY, MongoFileStore
 
 logger = logging.getLogger(__name__)
 
 
 FileSource = Literal["chat", "local", "drive"]
+
+# Files vault: how many live files one links/graph read considers.
+GRAPH_CAP = 2000
 
 
 @dataclass
@@ -42,6 +86,90 @@ class UnifiedFile:
     url: str | None  # None for local fs (FE uses Tauri for those)
     created: datetime | None
     chat_id: str | None = None
+    # Library metadata. THIS is the shape the flat ``GET /files`` listing
+    # returns — the one the Files panel renders. FL-1/FC-1/BA-1 each added
+    # their field to ``files/dto.py::FileEntry`` (the v2 /files/browse tree)
+    # and to the uploads provider, but not here, so the values were written,
+    # stored and then dropped one layer before the client: a summary that
+    # exists in Mongo and renders as an empty panel. Defaults keep every
+    # non-upload source (drive, local, kb) unchanged.
+    tags: list[str] = field(default_factory=list)
+    collections: list[str] = field(default_factory=list)
+    summary: str | None = None
+    agent_id: str | None = None
+    # Where the row LIVES. Absent until 2026-08-29, so the flat listing never
+    # told a client which folder a file was in — and a Move UI that guards on
+    # `folder_path ?? "/"` therefore decided every file was already at the
+    # root and quietly did nothing. Non-upload sources have no folders and
+    # keep the "/" default.
+    folder_path: str = "/"
+
+    def to_json(self) -> dict:
+        """The wire shape of one flat-listing row.
+
+        The router used to hand-build this dict inline, which re-dropped
+        summary/collections/tags/agent_id AFTER the service started carrying
+        them — the third hop in the same pipeline to silently narrow the row.
+        Serialization lives on the dataclass now so a new field has exactly
+        one place to be forgotten, and the carrier test pins this method.
+        """
+        return {
+            "id": self.id,
+            "source": self.source,
+            "filename": self.filename,
+            "mime": self.mime,
+            "size": self.size,
+            "url": self.url,
+            "created": self.created.isoformat() if self.created else None,
+            "chat_id": self.chat_id,
+            "tags": self.tags,
+            "collections": self.collections,
+            "summary": self.summary,
+            "agent_id": self.agent_id,
+            "folder_path": self.folder_path,
+        }
+
+
+@dataclass
+class UnifiedPage:
+    """One page of the unified Files listing plus pagination metadata.
+
+    ``total`` is the number of rows matching the query (independent of the
+    per-source fetch cap), so ``has_more`` stays correct on a full page.
+    """
+
+    files: list[UnifiedFile]
+    warnings: list[str]
+    total: int
+    has_more: bool
+
+
+def unified_from_record(rec: FileRecord) -> UnifiedFile:
+    """Project one uploads ``FileRecord`` into a flat-listing row.
+
+    THE record→row projection, extracted 2026-08-29 so there is exactly one.
+    It used to be inlined in ``list_chat_uploads``; content search
+    (``files/content_search.py``) needs the same projection for the rows a kb
+    hit resolves to, and a second hand-written copy is precisely how
+    summary/collections/tags/agent_id were dropped three times in this
+    pipeline already. A new field added to ``UnifiedFile`` now has one hop to
+    be threaded through, not two.
+    """
+    return UnifiedFile(
+        id=rec.id,
+        source="chat",
+        filename=rec.filename,
+        mime=rec.mime,
+        size=rec.size,
+        url=f"/api/v1/uploads/{rec.id}",
+        created=rec.created,
+        chat_id=rec.chat_id,
+        folder_path=getattr(rec, "folder_path", None) or "/",
+        tags=list(rec.tags or []),
+        collections=list(rec.collections or []),
+        summary=rec.summary,
+        agent_id=rec.agent_id,
+    )
 
 
 def _dedupe(files: list[UnifiedFile]) -> list[UnifiedFile]:
@@ -59,6 +187,18 @@ def _dedupe(files: list[UnifiedFile]) -> list[UnifiedFile]:
             continue
         seen.add(key)
         out.append(f)
+    return out
+
+
+def _stem_map(rows: list[dict]) -> dict[str, dict]:
+    """``normalize_link_name(filename)`` -> row. Rows arrive newest first, so
+    the first occurrence wins.
+    # ponytail: two files sharing a stem resolve to the newest; a per-folder
+    # or path-qualified resolver is the upgrade if that ever bites.
+    """
+    out: dict[str, dict] = {}
+    for r in rows:
+        out.setdefault(normalize_link_name(r["filename"]), r)
     return out
 
 
@@ -87,19 +227,7 @@ class UnifiedFilesService:
             records = await self._uploads.list_by_workspace(
                 workspace_id, limit=limit, pocket_id=LIST_WORKSPACE_ONLY
             )
-        return [
-            UnifiedFile(
-                id=rec.id,
-                source="chat",
-                filename=rec.filename,
-                mime=rec.mime,
-                size=rec.size,
-                url=f"/api/v1/uploads/{rec.id}",
-                created=rec.created,
-                chat_id=rec.chat_id,
-            )
-            for rec in records
-        ]
+        return [unified_from_record(rec) for rec in records]
 
     async def list_drive(self, workspace_id: str, *, limit: int) -> list[UnifiedFile]:
         """Drive source — stubbed until Cluster C lands connector status.
@@ -113,18 +241,120 @@ class UnifiedFilesService:
         )
         return []
 
+    async def _count_chat_uploads(self, workspace_id: str, pocket_id: str | None) -> int:
+        """Count live chat uploads under the same scope ``list_chat_uploads``
+        lists. Mirrors its tri-state ``pocket_id`` handling so ``total`` and
+        ``has_more`` describe exactly the rows that can be paged through."""
+        if pocket_id:
+            return await self._uploads.count_by_workspace(workspace_id, pocket_id=pocket_id)
+        return await self._uploads.count_by_workspace(workspace_id, pocket_id=LIST_WORKSPACE_ONLY)
+
+    async def file_links(
+        self,
+        workspace_id: str,
+        file_id: str,
+        *,
+        can_read_pocket: Callable[[str], Awaitable[bool]] | None = None,
+    ) -> FileLinksResponse:
+        """Outgoing wikilink targets + backlinks for one file (files vault).
+
+        Tenant-filtered on the row lookup and on the scan; a missing or
+        cross-workspace id is ``file.not_found``.
+
+        ``can_read_pocket`` is the caller's pocket-membership check. It is
+        REQUIRED in practice even though the signature allows ``None``: the
+        scan below runs in the file's own pocket scope, so without it a
+        workspace member outside a private pocket reads that pocket's
+        filenames out of the links and backlinks. A pocket the caller cannot
+        read answers ``file.not_found``, same as a row in another workspace —
+        the caller asked for a file, and a file they may not read is not there.
+        """
+        doc = await self._uploads.get_doc_scoped(file_id, workspace_id)
+        if doc is None:
+            raise NotFound("file", file_id)
+        if doc.pocket_id and (can_read_pocket is None or not await can_read_pocket(doc.pocket_id)):
+            raise NotFound("file", file_id)
+        rows = await self._uploads.iter_link_rows(
+            workspace_id, pocket_id=doc.pocket_id or LIST_WORKSPACE_ONLY, limit=GRAPH_CAP
+        )
+        by_stem = _stem_map(rows)
+        outgoing = []
+        for name in doc.link_names or []:
+            hit = by_stem.get(name)
+            outgoing.append(
+                LinkTarget(
+                    name=name,
+                    file_id=hit["file_id"] if hit else None,
+                    filename=hit["filename"] if hit else None,
+                )
+            )
+        my_stem = normalize_link_name(doc.filename)
+        backlinks = [
+            Backlink(file_id=r["file_id"], filename=r["filename"], mime=r["mime"])
+            for r in rows
+            if r["file_id"] != doc.file_id and my_stem in r["link_names"]
+        ]
+        return FileLinksResponse(outgoing=outgoing, backlinks=backlinks)
+
+    async def files_graph(
+        self, workspace_id: str, *, pocket_id: str | None = None
+    ) -> FilesGraphResponse:
+        """The library as nodes + link edges, same scope rules as ``GET /files``."""
+        rows = await self._uploads.iter_link_rows(
+            workspace_id, pocket_id=pocket_id or LIST_WORKSPACE_ONLY, limit=GRAPH_CAP
+        )
+        truncated = len(rows) > GRAPH_CAP
+        rows = rows[:GRAPH_CAP]
+        by_stem = _stem_map(rows)
+        edges: dict[tuple[str, str], None] = {}
+        ghosts: dict[str, None] = {}
+        ghost_edges: dict[tuple[str, str], None] = {}
+        for r in rows:
+            for name in r["link_names"]:
+                hit = by_stem.get(name)
+                if hit is None:
+                    ghosts[name] = None
+                    ghost_edges[(r["file_id"], name)] = None
+                else:
+                    edges[(r["file_id"], hit["file_id"])] = None
+        return FilesGraphResponse(
+            nodes=[
+                GraphNode(
+                    id=r["file_id"],
+                    filename=r["filename"],
+                    mime=r["mime"] or "application/octet-stream",
+                    tags=r["tags"],
+                    collections=r["collections"],
+                )
+                for r in rows
+            ],
+            edges=[GraphEdge(source=s, target=t) for s, t in edges],
+            ghosts=list(ghosts),
+            ghost_edges=[GraphEdge(source=s, target=t) for s, t in ghost_edges],
+            truncated=truncated,
+        )
+
     async def list_unified(
         self,
         workspace_id: str,
         *,
         source: FileSource | None,
         limit: int,
+        offset: int = 0,
         pocket_id: str | None = None,
-    ) -> tuple[list[UnifiedFile], list[str]]:
-        """Return (files, warnings).
+    ) -> UnifiedPage:
+        """Return a ``UnifiedPage`` for the given offset/limit window.
 
         ``source`` is optional — omit for "everything we can reach". When
         a specific source is requested, only that source is queried.
+
+        Pagination: each source is fetched with ``offset + limit`` rows
+        (capped at the mongo 500-row fetch limit), then the merged,
+        deduped set is sliced at ``[offset : offset + limit]``. ``total``
+        is the real matching count from a cheap count query so ``has_more``
+        is accurate even when the fetch is capped. Sources that can't be
+        paged (local files enumerated client-side, the stubbed Drive
+        branch) report ``total=0`` / ``has_more=False``.
 
         Stage 3.E: when ``pocket_id`` is set, the chat slice is filtered
         to that pocket. When ``None`` (the default), the chat slice
@@ -132,14 +362,19 @@ class UnifiedFilesService:
         workspace Files panel. The Drive branch is workspace-level for
         now (a Drive-per-pocket connector is Phase 4 territory).
         """
-        per_source = max(1, min(limit, 500))
+        # Fetch enough rows per source to satisfy the requested window.
+        per_source = max(1, min(offset + limit, 500))
         warnings: list[str] = []
         merged: list[UnifiedFile] = []
 
+        total = 0
         if source in (None, "chat"):
-            merged.extend(
-                await self.list_chat_uploads(workspace_id, limit=per_source, pocket_id=pocket_id)
+            # The page read and the ``total`` count are independent; overlap them.
+            chat_rows, total = await asyncio.gather(
+                self.list_chat_uploads(workspace_id, limit=per_source, pocket_id=pocket_id),
+                self._count_chat_uploads(workspace_id, pocket_id),
             )
+            merged.extend(chat_rows)
 
         if source in (None, "drive"):
             drive_hits = await self.list_drive(workspace_id, limit=per_source)
@@ -167,4 +402,7 @@ class UnifiedFilesService:
         merged.sort(key=lambda f: f.created or datetime.min, reverse=True)
         merged = _dedupe(merged)
 
-        return merged[:limit], warnings
+        page = merged[offset : offset + limit]
+        has_more = offset + len(page) < total
+
+        return UnifiedPage(files=page, warnings=warnings, total=total, has_more=has_more)

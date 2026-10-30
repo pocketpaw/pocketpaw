@@ -1,99 +1,38 @@
-"""Pocket-specialist runtime - the only public entry point for the tool surfaces.
+"""Pocket-specialist runtime: the only public entry point for the create and edit
+tool surfaces. It picks the backend, wires its tools, emits progress events and
+assembles the result. A create always persists a pocket.
 
-Orchestrates backend selection, tool wiring, event emission, and result
-assembly. Always persists a pocket - see feedback_pocket_always_ships.md.
+Dispatch follows ``pocket_specialist_mode``: ``run_specialist`` routes through
+``pick_adapter`` and ``run_edit_specialist`` through ``pick_edit_adapter``. In
+``agent`` mode nothing is spawned: the chat agent drafts the spec (or the granular
+ops) and the adapter validates and applies it. In ``subagent`` mode the edit runs
+an isolated backend in ``_run_edit_subagent_pipeline``.
 
-Changes: 2026-06-10 (W2c — surface Tier-0 agent-parked writes for approval)
-— ``PocketSpecialistEditOutput.action`` gains the ``instinct_pending``
-literal. The pocket router uses it when a Tier-0 declarative write parks
-at the deny-by-default Instinct gate and is proposed for human approval:
-``ok=False`` (nothing landed) but NOT a failure — the write awaits a human
-in the Tray. The MCP handler's ``is_error`` check flags only ``failed``,
-so a pending write reaches the chat agent intact (do not retry / claim
-success), exactly like the ``draft_kit`` protocol state.
-Changes: 2026-05-21 (#1163) — the edit-specialist stream loop now inspects
-``event.type == "error"`` (the deep_agents backend yields error events
-instead of raising), so a backend failure surfaces as ``ok=False`` with a
-populated ``error`` field instead of a silent ``ok=True, ops=[]``. A
-genuine 0-ops outcome with no error now surfaces the planner's final text
-reply via the new ``PocketSpecialistEditOutput.warnings`` field so the
-caller learns WHY the specialist declined. Service-rejected granular ops
-are no longer counted as applied — their rejection reasons are folded
-into ``warnings`` whether or not other ops landed. The 0-ops reason is
-joined with "" because deep_agents emits message events as token-level
-chunks. Added targeted observability logging for error events and
-tool_use / applied / rejected counts.
-Changes: 2026-05-21 (#1170) — ``run_edit_specialist`` now dispatches
-through ``pick_edit_adapter`` so it honors ``pocket_specialist_mode``,
-mirroring how ``run_specialist`` (create) routes through ``pick_adapter``.
-In ``agent`` mode the edit path no longer spawns a sub-agent backend —
-the chat agent computes the granular ops inline and the new
-``EditAgentModeAdapter`` applies them deterministically. The historical
-backend-spawn flow moved into the private ``_run_edit_subagent_pipeline``.
-A new ``PocketSpecialistEditInput.ops`` field carries the chat agent's
-pre-computed ops on the agent-mode second call.
-Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — the subagent-mode edit
-pipeline now fetches the pocket's non-secret backend summary and fills it
-into the ``<current-pocket>`` block via ``fill_current_pocket`` so the
-specialist sees whether a backend is configured before authoring a
-``sources`` block. The token is never surfaced.
-Changes: 2026-05-22 (feat/bundled-templates, Increment 2a) — built-in
-pocket templates. ``PocketSpecialistHints`` gains ``template_id`` (the
-highest-authority structural plan — when set, the specialist instantiates
-and customizes that template instead of cold-generating).
-``PocketSpecialistCreateInput`` gains ``backend_summary`` (a non-secret
-``{base_url, auth_type, configured}`` summary — unused in 2a, added now so
-2b's per-backend API-skill loading does not re-touch this model).
-``_build_system_prompt`` accepts ``backend_summary`` and, when a
-``template_id`` hint is set, splices the loaded template skeleton +
-customization rules in via ``_load_template_block``.
-Changes: 2026-05-22 (feat/api-skills, Increment 2b) — per-backend API
-skills. When a pocket has a backend configured, the specialist now loads
-that backend's installed API skill (a SKILL.md under
-``~/.pocketpaw/skills/api-<domain-slug>/``) and splices an endpoint
-reference into the prompt via ``_load_api_skill_for_backend`` +
-``_format_api_skill_block``, so the agent authors ``sources`` / ``actions``
-against real relative paths instead of hallucinating endpoints. Wired into
-``_build_system_prompt`` for the create path and into
-``_run_edit_subagent_pipeline`` for the edit path (the edit path already
-fetches ``backend_summary`` from ``get_pocket_backend``).
-Changes: 2026-05-25 (PR #1222 R1 Blocker 1) — the SKILL branch no
-longer writes per-request tenancy to ``os.environ``. The runtime now
-calls ``backend.attach_subprocess_env({...})`` with workspace_id,
-user_id, and the process-local internal token; the backend merges
-that dict into the subprocess env at spawn time. The prior code
-mutated the parent process's env on every request, racing across
-concurrent edits (one request's tenancy could leak into another's
-subprocess if their spawns interleaved). The new path is per-request
-isolated by the isolated-backend instance the runtime already created.
-Changes: 2026-05-24 (MVP skill+merge endpoint) — the edit subagent
-pipeline now branches on ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL``. When
-truthy, the pipeline:
+Prompts: a ``template_id`` hint is the highest-authority plan (a built-in template
+is instantiated and customized), and a pocket with a configured backend gets that
+backend's installed API skill spliced in (``_load_api_skill_for_backend``). The
+backend summary the specialist sees is non-secret; the token never appears.
 
-  1. Uses ``POCKET_EDIT_SPECIALIST_PROMPT_MCP_SKILL`` (the prompt
-     variant that points at the new bundled ``pocketpaw-pocket-
-     specialist`` skill plus the ``POST /spec/merge`` endpoint), and
-  2. SKIPS ``backend.attach_specialist_tools(make_edit_pocket_tools)``
-     so the 17-tool granular-op surface is NOT attached, and
-  3. Calls ``backend.attach_subprocess_env`` with
-     ``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
-     ``POCKETPAW_INTERNAL_TOKEN`` so the Claude Code subprocess
-     inherits them for ``curl`` against the local API (with the
-     loopback internal bypass headers documented in the merge
-     endpoint).
+Edit results: ``ok`` is True only when the backend stream ended with no error
+event (deep_agents yields errors instead of raising). A service-rejected op never
+counts as applied; its reason, like a 0-ops run's final reply, goes to
+``warnings``. ``action="instinct_pending"`` means a Tier-0 write is parked at the
+Instinct gate for human approval: nothing landed, and it is not a failure.
 
-The flag defaults False so existing behavior is unchanged — both paths
-coexist until the captain greenlights deletion of the granular surface
-after the live-test cycle.
-Changes: 2026-06-04 (feat/sites-landing-brain) — ``PocketSpecialistHints``
-gains ``type`` + ``pattern`` (create intent). The marketing-site brain
-sets type="site" + pattern="landing"; ``_validate_and_persist`` forwards
-them to the persist tool so they land on the pocket. Both default to the
-service defaults (type="custom", pattern=None) when unset — additive.
+``POCKETPAW_POCKET_SPECIALIST_USE_SKILL`` (default off) moves the subagent edit to
+the skill path: the ``POCKET_EDIT_SPECIALIST_PROMPT_MCP_SKILL`` prompt, no
+granular-op tools, tenancy and the internal token handed over through
+``attach_subprocess_env`` (never the parent ``os.environ``), and the built-ins its
+skill names (Bash, Read, Write, Edit, Grep) declared through ``allow_sdk_tools``,
+because the prompt's ``<pocket-scope>`` locks the Claude SDK backend to Agent /
+WebSearch / WebFetch / Skill. The agent-mode skill kits in ``adapters.py`` are
+acted on inside the chat turn, which declares no such tools, so they cannot run
+in a pocket session.
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import time
@@ -1008,6 +947,7 @@ async def _run_edit_subagent_pipeline(
     )
 
     ops_capture: dict[str, Any] = {"ops": []}
+    run_kwargs: dict[str, Any] = {}
     if use_skill:
         # Don't attach the granular ops — the agent applies edits via
         # curl to ``POST /spec/merge`` using Claude Code's native Bash.
@@ -1043,6 +983,15 @@ async def _run_edit_subagent_pipeline(
                 "POCKETPAW_POCKET_SPECIALIST_USE_SKILL flag.",
                 backend_name,
             )
+        # The skill path edits with ``curl`` through ``Bash``, and its prompt opens
+        # with ``<pocket-scope>``, which locks the Claude SDK backend to Agent /
+        # WebSearch / WebFetch / Skill. Declare exactly the built-ins the
+        # pocketpaw-pocket-specialist SKILL.md tells the agent it has, through the
+        # additive allowlist, and only to a backend whose ``run`` takes it
+        # (deep_agents, the default, does not and would raise TypeError). The
+        # operator's tool policy still wins: a shell-denying policy drops Bash.
+        if "allow_sdk_tools" in inspect.signature(backend.run).parameters:
+            run_kwargs["allow_sdk_tools"] = frozenset({"Bash", "Read", "Write", "Edit", "Grep"})
         log.info(
             "[pocket-specialist:edit] skill+merge path engaged "
             "(workspace=%s user=%s token_present=%s)",
@@ -1105,7 +1054,7 @@ async def _run_edit_subagent_pipeline(
     # The planner's running text — used to explain a genuine 0-ops run.
     final_text_parts: list[str] = []
     try:
-        async for event in backend.run(user_message, system_prompt=system_prompt):
+        async for event in backend.run(user_message, system_prompt=system_prompt, **run_kwargs):
             if event.type == "error":
                 # #1163 root cause A — deep_agents converts internal
                 # failures into error events rather than raising. Capture

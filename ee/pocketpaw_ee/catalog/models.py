@@ -7,6 +7,9 @@
 # explicitly out of scope). Pricing is per-million-tokens for text modalities;
 # None whenever the proxy/models.dev don't expose a cost. ``status`` is
 # "available" unless the proxy signals the model can't currently be served.
+# ``availability`` is per-workspace and per-request: the router overlays it from
+# ``catalog.availability`` (out of credit after a provider 402, or ok) on a copy
+# of the cached entry. It is None when the caller has no workspace session.
 #
 # These are plain Pydantic models (no Beanie / Mongo) — the catalog is assembled
 # from upstream reads on demand and TTL-cached in-process, never persisted.
@@ -15,7 +18,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -45,6 +50,20 @@ class Pricing(BaseModel):
     output_per_mtok: float | None = None
 
 
+class ModelAvailability(BaseModel):
+    """Whether this workspace can run the model right now.
+
+    ``out_of_credit`` means a recent run on this provider (or on the workspace's
+    own key) failed for lack of credit. It clears itself after a short TTL, or at
+    once on the next run that succeeds. ``since`` is when it was first seen;
+    ``message`` is a plain sentence for the picker, never provider text.
+    """
+
+    status: Literal["ok", "out_of_credit"] = "ok"
+    since: datetime | None = None
+    message: str | None = None
+
+
 class ModelCatalogEntry(BaseModel):
     """One routable (or known-but-disabled) model, grouped by modality.
 
@@ -64,6 +83,7 @@ class ModelCatalogEntry(BaseModel):
     logo: str | None = None
     description: str | None = None
     status: str = "available"  # "available" | "disabled"
+    availability: ModelAvailability | None = None
 
 
 class ModelCatalogList(BaseModel):
@@ -77,6 +97,7 @@ class ModelCatalogList(BaseModel):
 __all__ = [
     "Modality",
     "Pricing",
+    "ModelAvailability",
     "ModelCatalogEntry",
     "ModelCatalogList",
 ]

@@ -57,6 +57,7 @@ from pocketpaw_ee.cloud.license import require_license  # noqa: E402
 from pocketpaw_ee.instinct.router import router  # noqa: E402
 
 from pocketpaw.instinct.store import InstinctStore  # noqa: E402
+from tests.conftest import aseed_gated_action, seed_gated_action  # noqa: E402
 
 TRIGGER = {"type": "agent", "source": "claude", "reason": "rule router test"}
 
@@ -167,9 +168,9 @@ def _propose_rule_action(client: TestClient, *, workspace_id: str, name: str = "
     """Seed a pending Action carrying an ``_instinct_rule`` blob over HTTP and return
     its id. The blob's top-level ``workspace_id`` is what the cross-workspace gate
     reads."""
-    resp = client.post(
-        "/instinct/actions",
-        json={
+    resp = seed_gated_action(
+        client,
+        {
             "pocket_id": workspace_id,
             "title": f"governed rule {name}",
             "trigger": TRIGGER,
@@ -192,9 +193,9 @@ def _propose_rule_action(client: TestClient, *, workspace_id: str, name: str = "
 
 
 def _propose_pocket_write_action(client: TestClient, *, workspace_id: str) -> str:
-    resp = client.post(
-        "/instinct/actions",
-        json={
+    resp = seed_gated_action(
+        client,
+        {
             "pocket_id": "pocket-A",
             "title": "ws write",
             "trigger": TRIGGER,
@@ -436,9 +437,9 @@ async def test_bulk_approve_mixed_batch_routes_each_kind(
     with patch("pocketpaw_ee.instinct.router._store", return_value=shared_store):
         async with await _async_router_client(shared_store, user, monkeypatch) as client:
             # Seed the sibling pocket-write over the same async client.
-            pw_resp = await client.post(
-                "/instinct/actions",
-                json={
+            pw_resp = await aseed_gated_action(
+                client,
+                {
                     "pocket_id": "pocket-A",
                     "title": "ws-A write",
                     "trigger": TRIGGER,
@@ -476,9 +477,9 @@ async def test_bulk_reject_mixed_batch_routes_each_kind(
     user = _FakeUser("user-A", "ws-A")
     with patch("pocketpaw_ee.instinct.router._store", return_value=shared_store):
         async with await _async_router_client(shared_store, user, monkeypatch) as client:
-            pw_resp = await client.post(
-                "/instinct/actions",
-                json={
+            pw_resp = await aseed_gated_action(
+                client,
+                {
                     "pocket_id": "pocket-A",
                     "title": "ws-A write",
                     "trigger": TRIGGER,

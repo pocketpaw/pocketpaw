@@ -1,12 +1,27 @@
-# Canonical engine-capability module for Paw Sites.
+# ee/pocketpaw_ee/sites/engines.py — the single source of truth for "what can this
+# site engine do". Callers branch on a capability predicate here, never on an engine
+# string, so a new engine that combines capabilities in a new way adds a predicate
+# instead of overloading one (react split "builds" from "emits a worker"; svelte's two
+# adapters split the name-only predicates from the artifact-resolving ones).
 #
-# Created 2026-07-10 (HE-2): the single source of truth for "what can this site
-# engine do", replacing scattered ``== "svelte"`` / ``!= "svelte"`` string-equality
-# checks across the sites + cloud/surface code. Workspace-charter principle: one
-# canonical reference module beats phased propagation.
+# Five engines: ripple (rippleSpec), svelte / html / react (source maps over a scaffold
+# the generator owns) and project (the author owns the whole repo: package.json,
+# framework config, wrangler config; built only in the Daytona sandbox by
+# ``paw-sites-gen project-build``, deployed only from its ``paw-build.json``).
+#
+# Invariants: every predicate routes through :func:`normalize_engine`, which falls an
+# unknown engine back to ripple (never raises; a non-empty unknown value logs a warning
+# once). Only the ``resolve_*`` functions read the filesystem, plus
+# :func:`engine_capabilities` for ``project``, whose visual-edit flags ask the generator
+# (``visual_edit.visual_edit_supported``, cached); everything else is pure.
+# The FE mirror is paw-enterprise ``core/sites/engines.ts``; :func:`site_capabilities`
+# (the engine's :func:`engine_capabilities` plus the site's ``has_database`` and
+# ``data_viewer``) is the wire shape every site read carries, and
+# :func:`site_has_database` is the one answer to "does this site own a D1 database".
+# :func:`is_upgradable` names the engines "Upgrade this site" converts to ``project``.
 """Engine capability predicates for Paw Sites.
 
-Three site-generation engines are modeled:
+Five site-generation engines are modeled:
 
 * ``"ripple"`` — the DEFAULT. The pocket's authored content is a ``rippleSpec`` (a
   widget tree). Publishing runs a per-site Node build (``bun install`` + Vite +
@@ -20,17 +35,50 @@ Three site-generation engines are modeled:
   (HE-1/3/4/6) — this module already KNOWS about it (that is the point) so the rest
   of the codebase can branch on a capability instead of a string as html lands, but
   no behaviour changes for html today.
+* ``"react"`` — the pocket's content is a ``{path: contents}`` source map of
+  hand-written React files. Publishing runs a per-site Node build (``bun install`` +
+  Vite), but that build is a plain **SSG**: it emits a static ``dist/`` with the
+  markup prerendered by ``react-dom/server`` and NO server entry. So react is the
+  first engine that is source-map-backed AND build-requiring AND server-less — the
+  combination that motivated :func:`emits_server_worker`.
+* ``"project"`` — the pocket's content is a ``{path: contents}`` source map of a WHOLE
+  project the author owns (package.json, framework config, ``wrangler.jsonc``, ...).
+  Nothing in it is generator-owned: no scaffold, no ripple, author packages allowed.
+  It builds only in the Daytona sandbox (``paw-sites-gen project-build``), which
+  stages ``paw-build.json`` plus the files it names under ``.paw/out``; publishing
+  deploys from that manifest (``bundle_deploy``), never from the author's config.
 
-The four predicates split the engine question into orthogonal capabilities:
+The five predicates split the engine question into orthogonal capabilities:
 
 * :func:`is_source_engine` — is the content a ``{path: contents}`` source map
-  (svelte, html) or a rippleSpec (ripple)?
+  (svelte, html, react) or a rippleSpec (ripple)?
 * :func:`content_key` — which pocket-dict key holds the authored content
   (``"source"`` vs ``"rippleSpec"``)?
 * :func:`needs_node_build` — does publishing run a per-site Node build (ripple,
-  svelte) or not (html)?
+  svelte, react) or not (html)?
 * :func:`static_output_rel` — where, relative to the generated project dir, do the
   deployable static assets land?
+* :func:`emits_server_worker` — does that output include a ``_worker.js`` server
+  entry that must be deployed as a Worker *script* (ripple, svelte), or is it a
+  purely static asset tree deployed as an assets-only Worker (html, react)?
+* :func:`expects_server_worker` — a tri-state sibling of the above, for a caller holding
+  only a finished artifact: is a worker's ABSENCE an anomaly (ripple), is its PRESENCE one
+  (react, html), or is either shape legitimate (svelte, since SL-1 split its adapters)?
+
+SL-1 added ARTIFACT-RESOLVING siblings for the last two, and they are the ones to
+reach for when a generated project dir is in hand:
+
+* :func:`resolve_static_output_rel` — where did THIS build's output actually land?
+* :func:`resolve_emits_server_worker` — did THIS build actually emit a worker?
+
+Both exist because the svelte track no longer has one output shape. A static landing
+site builds on ``adapter-static`` (``build``, no worker); a dynamic/auth site builds
+on ``adapter-cloudflare`` (``.svelte-kit/cloudflare``, worker load-bearing). That is a
+property of the SITE, not of the engine string, so the name-only predicates above
+cannot answer it and the two resolvers read the artifact instead. They are also the
+only functions in this module that touch the filesystem — see
+:func:`resolve_static_output_rel` for why that exception is narrower than threading a
+flag through every caller would be.
 
 Unknown-engine policy — **fall back to ripple, never raise.** The codebase reads
 ``pocket.get("engine") or "ripple"`` in roughly a dozen places: an empty or missing
@@ -46,56 +94,362 @@ validation should validate the engine string at their own entry point.
 
 from __future__ import annotations
 
+import logging
+import os
+from collections.abc import Mapping
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
 _DEFAULT_ENGINE = "ripple"
+
+#: Where a ``project`` sandbox build stages its deployable bundle, relative to the
+#: project dir. A dot-dir so it never collides with an author's own ``dist``/``build``.
+PROJECT_STAGE_REL = ".paw/out"
 
 # Engines whose pocket content is a {path: contents} source map (as opposed to a
 # rippleSpec). The one place the "source map vs rippleSpec" fact is encoded.
-_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({"svelte", "html"})
+_SOURCE_MAP_ENGINES: frozenset[str] = frozenset({"svelte", "html", "react", "project"})
 
-# Engines that require a per-site Node build (bun install + Vite/SvelteKit build +
-# workerd smoke render) before deploy. Note html is source-map-backed yet needs NO
-# build — "source map" and "node build" are deliberately distinct capabilities.
-_NODE_BUILD_ENGINES: frozenset[str] = frozenset({"ripple", "svelte"})
+# Engines that require a per-site Node build (bun install + a Vite/SvelteKit build +
+# for the SvelteKit tracks a workerd smoke render) before deploy. Note html is
+# source-map-backed yet needs NO build — "source map" and "node build" are
+# deliberately distinct capabilities.
+_NODE_BUILD_ENGINES: frozenset[str] = frozenset({"ripple", "svelte", "react", "project"})
+
+# Engines whose build emits a ``_worker.js`` SERVER entry that must be deployed as a
+# Worker script (with ``main`` + ``nodejs_compat``), as opposed to a purely static
+# tree deployed as an assets-only Worker.
+#
+# This is NOT a synonym for ``_NODE_BUILD_ENGINES``, and conflating the two is the
+# specific bug RX-1 had to avoid: react runs a full Node build and still emits no
+# server entry, because its build is an SSG that prerenders to static HTML. Pointing
+# a wrangler config's ``main`` at a ``dist/_worker.js`` that a react build never
+# writes fails the deploy outright. html reaches the same assets-only shape from the
+# other direction (no build at all), which is why this predicate is about the OUTPUT
+# and never about how the output was produced.
+_SERVER_WORKER_ENGINES: frozenset[str] = frozenset({"ripple", "svelte"})
 
 # Per-engine deployable static-output dir, relative to the generated project dir.
 # ripple/svelte emit the SvelteKit Cloudflare adapter output (``_CF_OUTPUT_REL`` in
 # ``sites/workers_deploy.py`` today); html has no build, so the project dir itself
 # IS the static root (``"."``) — the emitted ``index.html`` is the deploy root and
-# the served artifact stays byte-identical to the authored source (HE-1/HE-4).
+# the served artifact stays byte-identical to the authored source (HE-1/HE-4);
+# react emits Vite's default client-build dir (``dist``), which the generator's
+# prerender pass rewrites in place so the served index.html carries the rendered
+# markup. The react SSR bundle deliberately builds OUTSIDE this dir, so the
+# prerenderer is never uploaded to the edge.
 _STATIC_OUTPUT_REL: dict[str, str] = {
     "ripple": ".svelte-kit/cloudflare",
     "svelte": ".svelte-kit/cloudflare",
     "html": ".",
+    "react": "dist",
+    # Not an assets dir: where the sandbox build STAGES the deployable bundle
+    # (``paw-build.json`` + the assets and worker modules it names). The assets live
+    # at the manifest's ``assetsDir`` inside it; :func:`resolve_static_output_rel`
+    # reads that off disk.
+    "project": PROJECT_STAGE_REL,
 }
+
+# SL-1 — where a STATIC svelte site's output lands instead. adapter-static's default.
+#
+# THIS IS WHY THE MAP ABOVE STOPPED BEING SUFFICIENT FOR SVELTE. The svelte track now
+# builds on one of two adapters, chosen by a property of the SITE (does it read a
+# per-tenant D1?) rather than of the engine:
+#
+#   * static landing site  → adapter-static      → ``build``, and NO ``_worker.js``
+#   * dynamic / auth site  → adapter-cloudflare  → ``.svelte-kit/cloudflare``
+#
+# adapter-cloudflare emitted a ``_worker.js`` Server shell for EVERY build, including
+# one with zero server routes, and that shell imports two files that sit OUTSIDE the
+# deployable dir — so a static site shipped a worker that could not start. Dropping
+# the adapter for static sites removed the worker; it also moved the output dir, which
+# is what these two resolvers exist to absorb.
+_SVELTE_STATIC_OUTPUT_REL = "build"
+
+#: The project engine's build manifest (paw-sites ``buildPawManifest``). Same name as
+#: ``bundle_deploy.PAW_BUILD_FILENAME``; spelled here so this module imports nothing.
+PAW_BUILD_FILENAME = "paw-build.json"
+
+
+#: Every engine a pocket may carry. A new engine is added HERE (and to the sets above
+#: that describe it) or it reads as ripple; ``tests/ee/sites/test_engines.py`` fails on
+#: any engine literal in the codebase that is not in this set.
+KNOWN_ENGINES: frozenset[str] = _SOURCE_MAP_ENGINES | {_DEFAULT_ENGINE}
+
+#: Unknown engine values already warned about, so a bad row on a hot read path logs
+#: once per process rather than once per request.
+_WARNED_UNKNOWN: set[str] = set()
 
 
 def normalize_engine(engine: str | None) -> str:
     """Normalize a pocket's raw engine value to a known engine string.
 
-    Empty / ``None`` / unknown → ``"ripple"`` (see the module docstring for why we
-    fall back rather than raise). A known engine passes through unchanged. Every
-    other predicate in this module routes through here, so the fallback policy lives
-    in exactly one place.
+    ``None`` / empty → ``"ripple"``, silently: that is every legacy pocket. A
+    non-empty value outside :data:`KNOWN_ENGINES` (a typo, or an engine this build
+    predates) also reads as ``"ripple"`` (see the module docstring for why we fall
+    back rather than raise), but logs a warning the first time it is seen, so a
+    missing registration shows up instead of quietly turning a site into ripple. A
+    known engine passes through unchanged. Every other predicate in this module
+    routes through here, so the fallback policy lives in exactly one place.
     """
-    if engine in _SOURCE_MAP_ENGINES or engine == _DEFAULT_ENGINE:
+    if engine in KNOWN_ENGINES:
         return engine  # type: ignore[return-value]  # narrowed to a known non-None str
+    if engine and isinstance(engine, str) and engine not in _WARNED_UNKNOWN:
+        _WARNED_UNKNOWN.add(engine)
+        logger.warning("sites.engines: unknown engine %r, treating it as ripple", engine)
     return _DEFAULT_ENGINE
 
 
 def is_source_engine(engine: str | None) -> bool:
     """True when the engine's content is a ``{path: contents}`` source map.
 
-    ``"svelte"`` and ``"html"`` are source engines; ``"ripple"`` is not (its content
-    is a rippleSpec). Accepts ``str | None`` because most call sites pass
+    ``"svelte"``, ``"html"`` and ``"react"`` are source engines; ``"ripple"`` is not
+    (its content is a rippleSpec). Accepts ``str | None`` because most call sites pass
     ``pocket.get("engine")`` directly.
     """
     return normalize_engine(engine) in _SOURCE_MAP_ENGINES
 
 
+#: Engines with a NATIVE EDIT LANE — a framework build that the generator can arm
+#: (stamping ``data-uid`` + embedding the ``paw-edit-manifest``), whose rendered
+#: output the native editor shadow-renders so a click resolves back to source.
+#:
+#: NOT the same question as :func:`is_source_engine`, and the difference is the
+#: whole reason this is its own set. ``html`` is a source engine but is absent
+#: here: its served artifact IS its source, so it is selected through the
+#: in-frame agent over its own srcdoc and never needs an armed build to render.
+#: ``react`` joined in RX-2, when the generator gained the seam RX-1 left empty.
+_NATIVE_EDIT_ENGINES: frozenset[str] = frozenset({"svelte", "react"})
+
+
+def has_native_edit_lane(engine: str | None) -> bool:
+    """True when this engine can be ARMED into a native-editable build.
+
+    The guard for ``/native-artifact`` and its background pre-warm. Both of those
+    read a BUILT tree, so the engine must be one the generator actually builds and
+    arms — which is why ``html`` (served straight from its source map) answers
+    False even though it is a source engine.
+    """
+    return normalize_engine(engine) in _NATIVE_EDIT_ENGINES
+
+
+#: Engines with a WRITE-BACK LANE — a generator-side applier that can splice a
+#: ``{uid, op}`` leaf edit back into the authored source at byte offsets.
+#:
+#: STRICTLY DIFFERENT from :func:`has_native_edit_lane`, and neither is a subset of
+#: the other — which is the whole reason both exist:
+#:
+#:   * ``html`` is HERE but not there. It has an applier (``applyHtmlLeafEdit``) and
+#:     no armed build; it is selected through its own srcdoc.
+#:   * ``react`` is there but NOT here. RX-2 built its read half (stamped uids, a
+#:     manifest, a shadow-renderable artifact) so it can be selected and refined
+#:     through chat, but the TSX splice does not exist. Offering direct manipulation
+#:     on react would hand the operator a save that can only fail.
+#:
+#: Mirrors ``hasWriteBackLane`` in paw-enterprise ``core/sites/engines.ts``. The two
+#: must agree or the UI offers a tool the API answers 422 to.
+_WRITE_BACK_ENGINES: frozenset[str] = frozenset({"svelte", "html"})
+
+
+def has_write_back_lane(engine: str | None) -> bool:
+    """True when a leaf edit can be spliced back into this engine's source.
+
+    The guard for ``apply_leaf_edits``. Before HE-9 this question was asked inline as
+    ``engine != "svelte"``, which is why the html lane stayed dark for months after
+    both of its halves had shipped: the generator could splice html and nothing on
+    this side would let it.
+    """
+    return normalize_engine(engine) in _WRITE_BACK_ENGINES
+
+
+#: The generator lane id a write-back engine's edits are spliced with. Only engines
+#: in ``_WRITE_BACK_ENGINES`` appear here, and the CLI rejects an unrecognized lane
+#: rather than falling back, so a new engine that forgets to register lands as a
+#: clean 422 instead of a batch of confusing per-uid rejections.
+_ENGINE_LANE: dict[str, str] = {"svelte": "svelte", "html": "html"}
+
+
+def write_back_lane(engine: str | None) -> str | None:
+    """The ``lane`` to send the generator for this engine, or None when it has no
+    write-back lane. ``svelte`` is spelled out rather than left implicit: the CLI
+    defaults an absent lane to svelte, but a caller that MEANS svelte should say so."""
+    return _ENGINE_LANE.get(normalize_engine(engine))
+
+
+#: Engines whose AUTHOR owns the whole build: package.json, lockfile, framework and
+#: wrangler config. Nothing in the source map is generator-owned.
+_AUTHORED_PROJECT_ENGINES: frozenset[str] = frozenset({"project"})
+
+
+def has_generator_scaffold(engine: str | None) -> bool:
+    """True when the generator owns this engine's build shell and the author fills
+    only the content (a rippleSpec, or ``src/`` over a generated vite/svelte/wrangler
+    config). False for ``project``, whose tree is entirely the author's.
+
+    Ripple's widget runtime only ever ships inside a generated scaffold, so this is
+    also the "may this site carry ripple" answer: a project site never does.
+    """
+    return normalize_engine(engine) not in _AUTHORED_PROJECT_ENGINES
+
+
+def takes_author_packages(engine: str | None) -> bool:
+    """True when the author's own ``package.json`` IS the dependency list: any
+    package, any version, installed in the sandbox. Only ``project``.
+
+    The scaffold engines can still declare packages, but through
+    ``paw.dependencies.json``, which the generator vets against its policy
+    (``dependency_manifest``). A project has no such file and no such policy.
+    """
+    return normalize_engine(engine) in _AUTHORED_PROJECT_ENGINES
+
+
+def build_requires_sandbox(engine: str | None) -> bool:
+    """True when EVERY build of this engine runs in the Daytona sandbox and never on
+    the API host. Only ``project``: its install runs author scripts and its build runs
+    author config, so a host build would be remote code execution.
+
+    A scaffold engine needs the sandbox only when its source asks for it
+    (``dependency_manifest.requires_sandbox``); that is a property of the source, not
+    of the engine, and is checked where the source is in hand.
+    """
+    return normalize_engine(engine) in _AUTHORED_PROJECT_ENGINES
+
+
+def has_spec_edit_lane(engine: str | None) -> bool:
+    """True when the content is a rippleSpec the builder renders and addresses
+    itself: its sections and widgets are picked straight off the spec, with no armed
+    build. Only ``ripple``; the complement of :func:`is_source_engine`."""
+    return not is_source_engine(engine)
+
+
+#: Engines the owner can convert in place into a ``project`` on the ``static`` starter
+#: (``POST /sites/by-pocket/{id}/upgrade``, ``sites.site_upgrade``): their source map
+#: already is a static tree, so the conversion only adds the starter's manifest.
+_UPGRADABLE_ENGINES: frozenset[str] = frozenset({"html"})
+
+
+def is_upgradable(engine: str | None) -> bool:
+    """True when "Upgrade this site" can turn this engine into a ``project``. Only
+    ``html`` (which covers imported sites). Reads the raw value, never
+    :func:`normalize_engine`: an unknown engine must not pass as one of these."""
+    return engine in _UPGRADABLE_ENGINES
+
+
+def engine_capabilities(engine: str | None) -> dict[str, bool]:
+    """The edit/build capabilities the frontend gates its tools on, as a wire dict.
+
+    Every flag is a composition of the predicates above; there is no per-engine table.
+
+    * ``select`` — a click on the rendered page maps back to content: ripple's own
+      spec, an armed native edit lane (svelte, react) or html's write-back lane.
+    * ``text`` — an in-place text edit can be spliced back into source.
+    * ``code`` — the content is a file tree the generic file editor can open.
+    * ``build_log`` — drafts build in the sandbox and keep a per-build log
+      (``GET /sites/by-pocket/{id}/builds/{job_id}/log``).
+    * ``design`` — the Design rail's property inspector: needs both an armed build to
+      inspect and a write-back lane to save into (svelte only).
+    * ``sections`` — a click can resolve to a whole section: ripple's spec sections,
+      or the ``data-paw-section`` anchors an armed build stamps (svelte, react).
+    * ``structure`` — an element can be deleted, duplicated or moved up / down in its
+      source (``POST /sites/by-pocket/{id}/visual-edit``). Project only.
+    * ``upgradable`` — the owner can convert the site into a ``static`` project
+      (:func:`is_upgradable`). Html only.
+
+    ``project`` answers ``code``/``build_log`` True and ``design``/``sections`` False.
+    Its ``select``/``text``/``structure`` are True only when the generator has
+    ``visual-edit``: its drafts carry ``data-paw-src`` stamps and an edit is written back
+    to the stamped file. Otherwise they are False and edits go through files and the agent.
+    """
+    has_scaffold = has_generator_scaffold(engine)
+    native = has_native_edit_lane(engine)
+    write_back = has_write_back_lane(engine)
+    spec = has_spec_edit_lane(engine)
+    visual = False
+    if build_requires_sandbox(engine):
+        from pocketpaw_ee.sites.visual_edit import visual_edit_supported
+
+        visual = visual_edit_supported()
+    return {
+        "select": spec or (has_scaffold and (native or write_back)) or visual,
+        "text": (has_scaffold and write_back) or visual,
+        "code": is_source_engine(engine),
+        "build_log": build_requires_sandbox(engine),
+        "design": native and write_back,
+        "sections": spec or native,
+        "structure": visual,
+        "upgradable": is_upgradable(engine),
+    }
+
+
+#: Recipes whose binding gives a ``project`` site its own D1 database (paw-sites
+#: ``recipes/d1-drizzle/recipe.json`` declares ``bindings: [{type: d1}]``).
+D1_RECIPES: frozenset[str] = frozenset({"d1-drizzle"})
+
+
+def spec_is_dynamic(pattern: str | None, ripple_spec: Mapping[str, object] | None) -> bool:
+    """True when a ripple pocket is a DYNAMIC site (reads/writes a per-tenant D1).
+
+    ``pattern == "dynamic"`` is authoritative (the create-dynamic-site tool stamps it).
+    As a safety net, a spec declaring top-level ``sources`` / ``actions`` / ``auth`` is
+    dynamic too, mirroring the generator's own classifier."""
+    if pattern == "dynamic":
+        return True
+    if not isinstance(ripple_spec, Mapping):
+        return False
+    return bool(ripple_spec.get("sources") or ripple_spec.get("actions") or ripple_spec.get("auth"))
+
+
+def project_recipes(site_meta: Mapping[str, object] | None) -> list[str]:
+    """The recipe ids recorded in ``site_meta.project.recipes`` (strings only)."""
+    project = site_meta.get("project") if isinstance(site_meta, Mapping) else None
+    recipes = project.get("recipes") if isinstance(project, Mapping) else None
+    return [r for r in recipes if isinstance(r, str)] if isinstance(recipes, list) else []
+
+
+def site_has_database(
+    *,
+    d1_database_id: str | None = None,
+    site_meta: Mapping[str, object] | None = None,
+    pattern: str | None = None,
+    ripple_spec: Mapping[str, object] | None = None,
+) -> bool:
+    """Does this site own a D1 database? True when ANY of:
+
+    * the Site already has a bound D1 (``Site.d1_database_id``, stamped by a dynamic
+      publish or the project bundle provisioner);
+    * a ``project`` applied a D1 recipe (:data:`D1_RECIPES`);
+    * a ripple pocket is dynamic (:func:`spec_is_dynamic`), which publish binds a D1 for.
+    """
+    if d1_database_id:
+        return True
+    if D1_RECIPES.intersection(project_recipes(site_meta)):
+        return True
+    return spec_is_dynamic(pattern, ripple_spec)
+
+
+# Engines whose database the owner's data viewer (GET /sites/by-pocket/{id}/data)
+# can read: the dynamic lanes from their declared ``objects``, project from D1 itself.
+DATA_VIEWER_ENGINES: frozenset[str] = frozenset({"ripple", "svelte", "project"})
+
+
+def site_capabilities(engine: str | None, *, has_database: bool) -> dict[str, bool]:
+    """The capabilities a site read carries: :func:`engine_capabilities` plus the
+    per-site ``has_database`` (:func:`site_has_database`) and ``data_viewer`` (the
+    site has a database AND the data endpoint serves its engine)."""
+    data_viewer = has_database and normalize_engine(engine) in DATA_VIEWER_ENGINES
+    return {
+        **engine_capabilities(engine),
+        "has_database": has_database,
+        "data_viewer": data_viewer,
+    }
+
+
 def content_key(engine: str | None) -> str:
     """The pocket-dict key holding this engine's authored content.
 
-    ``"source"`` for a source-map engine (svelte, html); ``"rippleSpec"`` for ripple.
+    ``"source"`` for a source-map engine (svelte, html, react); ``"rippleSpec"`` for
+    ripple.
     """
     return "source" if is_source_engine(engine) else "rippleSpec"
 
@@ -104,10 +458,61 @@ def needs_node_build(engine: str | None) -> bool:
     """True when publishing this engine runs a per-site Node build.
 
     ``"ripple"`` and ``"svelte"`` run ``bun install`` + a Vite/SvelteKit build + a
-    workerd smoke render. ``"html"`` does not — the generator emits a plain static
-    dir with no build step.
+    workerd smoke render. ``"react"`` runs ``bun install`` + a Vite build (client
+    bundle, SSR bundle, prerender pass) — a real build, but an SSG with no workerd
+    step. ``"html"`` does not build at all — the generator emits a plain static dir.
     """
     return normalize_engine(engine) in _NODE_BUILD_ENGINES
+
+
+def emits_server_worker(engine: str | None) -> bool:
+    """True when this engine's build output includes a ``_worker.js`` server entry.
+
+    ``"ripple"`` / ``"svelte"`` → True: adapter-cloudflare emits a SvelteKit worker
+    inside the static-output dir, so the deploy config needs ``main`` pointed at it
+    plus ``nodejs_compat``, and an ``.assetsignore`` that keeps wrangler from
+    uploading the server entry as a public asset.
+
+    ``"html"`` / ``"react"`` → False: the output is a purely static tree, deployed as
+    an assets-only Worker (``assets.directory`` and nothing else).
+
+    Deliberately SEPARATE from :func:`needs_node_build`. Those two agreed for every
+    engine until react, which builds and yet emits no server entry — so a deploy path
+    that asked "does it build?" when it meant "is there a script to run?" would point
+    ``main`` at a ``dist/_worker.js`` that does not exist and fail the deploy.
+    """
+    return normalize_engine(engine) in _SERVER_WORKER_ENGINES
+
+
+def expects_server_worker(engine: str | None) -> bool | None:
+    """Whether a build of ``engine`` SHOULD have emitted a ``_worker.js`` — or ``None``
+    when the engine name cannot say, because either answer is legitimate.
+
+    * ripple → ``True``. adapter-cloudflare, always a worker.
+    * react / html → ``False``. Purely static trees; a worker turning up is an anomaly.
+    * svelte → ``None``. Since SL-1 the track spans two adapters chosen by a property of
+      the SITE: a static landing site emits none, a dynamic/auth one emits one. Both are
+      correct builds.
+    * project → ``None``. A project may be static or carry a worker; its
+      ``paw-build.json`` says which (:func:`resolve_emits_server_worker`).
+
+    ADDED 2026-08-10 (SL-2 slice 2) for the one question :func:`emits_server_worker`
+    cannot answer: not "would a worker be deployed" but "is its ABSENCE a problem". Those
+    were the same question until SL-1 split the svelte track, and conflating them makes a
+    cross-check warn on every healthy static svelte build — which is worse than not
+    checking, because a warning that fires on correct builds is one people learn to
+    ignore, and it is the same warning that would fire on a genuinely truncated artifact.
+
+    A THIRD PREDICATE RATHER THAN A CHANGE TO THE OTHER TWO, per this module's design:
+    :func:`emits_server_worker` still honestly answers the deploy-shape question from the
+    name, and :func:`resolve_emits_server_worker` still answers it from an artifact on
+    disk. This one is for a caller that holds NEITHER a project dir nor a deploy decision
+    — only an artifact and a question about whether it looks complete.
+    """
+    normalized = normalize_engine(engine)
+    if normalized in ("svelte", "project"):
+        return None
+    return normalized in _SERVER_WORKER_ENGINES
 
 
 def static_output_rel(engine: str | None) -> str:
@@ -118,5 +523,156 @@ def static_output_rel(engine: str | None) -> str:
     * html → ``"."`` — the generator writes the static site directly into the
       project dir (a plain ``{path: contents}`` tree, no framework build subdir), so
       the project dir IS the static root.
+    * react → ``"dist"`` — Vite's client-build output, whose ``index.html`` the
+      generator's prerender pass rewrites in place to carry the server-rendered
+      markup. Explicitly NOT the SvelteKit path: nothing on the react track produces
+      ``.svelte-kit/cloudflare``.
+
+    NOT AUTHORITATIVE FOR SVELTE SINCE SL-1. The svelte row is the DYNAMIC shape; a
+    static landing site writes ``build``. Whenever a generated project dir is in hand,
+    call :func:`resolve_static_output_rel` instead. This function stays for callers
+    that legitimately want the nominal per-engine value with no filesystem in scope
+    (config templates, docs, tests) and for the three engines that still have exactly
+    one output shape each.
     """
     return _STATIC_OUTPUT_REL[normalize_engine(engine)]
+
+
+def candidate_static_output_rels(engine: str | None) -> tuple[str, ...]:
+    """Every output dir a build of ``engine`` could legitimately write, in PROBE ORDER.
+
+    One place owns the fact that svelte has two output shapes and which one wins a tie.
+    :func:`resolve_static_output_rel` probes this list on disk; the ephemeral build lane
+    validates a caller's override against it before rendering an include-list aimed at a
+    directory the engine never writes.
+
+    PROBE ORDER IS LOAD-BEARING, and for the same reason it was load-bearing when it
+    lived inline in the resolver: ``build`` comes FIRST so a project dir carrying a stale
+    ``.svelte-kit/cloudflare`` tree from a pre-SL-1 build cannot shadow what the current
+    build emitted. Reversing these two silently serves the old artifact.
+
+    Every other engine has exactly one shape, so its tuple has one element and callers
+    that only ever handled one value keep working unchanged.
+    """
+    normalized = normalize_engine(engine)
+    if normalized == "svelte":
+        return (_SVELTE_STATIC_OUTPUT_REL, _STATIC_OUTPUT_REL["svelte"])
+    return (_STATIC_OUTPUT_REL[normalized],)
+
+
+def resolve_static_output_rel(project_dir: str | os.PathLike[str], engine: str | None) -> str:
+    """Where THIS build's deployable output actually landed, relative to ``project_dir``.
+
+    Prefer this over :func:`static_output_rel` wherever a generated project dir exists.
+    Since SL-1 the svelte track spans two adapters with two different output dirs, and
+    which one ran is not recoverable from the engine name — so this reads the answer
+    off disk rather than predicting it.
+
+    ONLY svelte is probed. ripple / html / react each still have exactly one output
+    shape, so they fall straight through to the nominal map and their behaviour is
+    byte-for-byte unchanged.
+
+    PROBE ORDER IS LOAD-BEARING: ``build`` first, so a project dir carrying a stale
+    ``.svelte-kit/cloudflare`` tree from a pre-SL-1 build cannot shadow what the
+    current build emitted. Reversing these two silently serves the old artifact.
+
+    When NEITHER exists we return the nominal map value rather than raising. The caller
+    is then reporting a missing build against a concrete path, which is a truer error
+    than ``engines.py`` refusing to decide — and it keeps this predicate total, the way
+    every other one in this module is.
+
+    NOTE: this and :func:`resolve_emits_server_worker` are the ONLY functions here that
+    touch the filesystem. Every other predicate is pure. That is a deliberate, narrow
+    exception: the fact being resolved is a property of an artifact on disk, and the
+    alternative — threading a static/dynamic flag through six call sites, two of which
+    reconstruct a path from a pocket id with no generate in scope — creates a second
+    source of truth that can disagree with the artifact. Reading the artifact cannot.
+    """
+    normalized = normalize_engine(engine)
+    if normalized == "project":
+        return _project_assets_rel(Path(project_dir))
+    if normalized != "svelte":
+        return _STATIC_OUTPUT_REL[normalized]
+    root = Path(project_dir)
+    candidates = candidate_static_output_rels(normalized)
+    for candidate in candidates:
+        if (root / candidate).is_dir():
+            return candidate
+    return _STATIC_OUTPUT_REL["svelte"]
+
+
+def resolve_emits_server_worker(project_dir: str | os.PathLike[str], engine: str | None) -> bool:
+    """Whether THIS build actually emitted a ``_worker.js`` server entry.
+
+    The deploy-shape half of the same SL-1 problem, and the half with teeth. A static
+    svelte site emits NO worker, so :func:`emits_server_worker` — which answers from
+    the engine name and therefore still says True — would have ``workers_deploy``
+    point ``main`` at a ``build/_worker.js`` that does not exist and pick the
+    server-entry ``.assetsignore`` over the assets-only one. That fails the deploy
+    outright, which is the exact failure mode RX-1 introduced this predicate to
+    prevent; SL-1 just reopened it from the other side.
+
+    A static svelte site must deploy assets-only, the same way react already does.
+
+    ``_worker.js`` is tested for EXISTENCE, not for being a file: adapter-cloudflare
+    emits it as a DIRECTORY (``_worker.js/chunks/0.js``) once an app is large enough,
+    so an ``is_file()`` check would report "no worker" for a big dynamic site and
+    silently deploy it assets-only — a working site replaced by a broken one.
+    """
+    if normalize_engine(engine) == "project":
+        manifest = _read_project_manifest(Path(project_dir))
+        return manifest_has_worker(manifest) if manifest is not None else False
+    if normalize_engine(engine) not in _SERVER_WORKER_ENGINES:
+        return False
+    out_dir = Path(project_dir) / resolve_static_output_rel(project_dir, engine)
+    return (out_dir / "_worker.js").exists()
+
+
+# ---------------------------------------------------------------------------
+# project: the artifact is described by its paw-build.json
+# ---------------------------------------------------------------------------
+
+
+def safe_rel(value: object) -> str | None:
+    """A manifest path that stays inside its root, POSIX-normalized, or ``None``."""
+    if not isinstance(value, str) or not value.strip() or "\\" in value or "\x00" in value:
+        return None
+    parts = [seg for seg in value.strip().split("/") if seg not in ("", ".")]
+    if value.startswith("/") or any(seg == ".." for seg in parts):
+        return None
+    if parts and len(parts[0]) > 1 and parts[0][1] == ":":
+        return None
+    return "/".join(parts) or "."
+
+
+def _read_project_manifest(root: Path) -> dict | None:
+    import json
+
+    try:
+        data = json.loads((root / PAW_BUILD_FILENAME).read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def manifest_has_worker(manifest: dict) -> bool:
+    """True when a ``paw-build.json`` describes a worker script (server routes), not
+    just static assets. A static target writes no ``workerEntry`` and no modules."""
+    modules = manifest.get("workerModules")
+    return bool(manifest.get("workerEntry")) or (isinstance(modules, list) and bool(modules))
+
+
+def _project_assets_rel(root: Path) -> str:
+    """The assets dir of a project bundle under ``root``: the manifest's ``assetsDir``
+    when ``root`` IS the bundle (an unpacked artifact), the same under
+    :data:`PROJECT_STAGE_REL` when ``root`` is the project the build staged it in, else
+    the nominal stage dir (the caller then reports a missing build at a real path)."""
+    for base in ("", PROJECT_STAGE_REL):
+        manifest = _read_project_manifest(root / base if base else root)
+        if manifest is None:
+            continue
+        rel = safe_rel(manifest.get("assetsDir"))
+        if rel is None:
+            break
+        return rel if not base else (base if rel == "." else f"{base}/{rel}")
+    return PROJECT_STAGE_REL

@@ -1,30 +1,52 @@
-# ee/pocketpaw_ee/cloud/belt/router.py
-# Created: 2026-06-10 (feat/belt-console-backend, SC-1 + SC-2) — the Belt &
-# Pulley console REST surface. The /belt page builds against exactly these
-# endpoints (a sibling frontend PR pins the contract):
+# ee/pocketpaw_ee/cloud/belt/router.py — the Belt & Pulley console REST surface.
+#
+# The /belt pages build against exactly these endpoints:
 #   * GET  /belt/repos          — discover git repos under the allowlist roots
 #   * POST /belt/repos {path}   — add a new repo root (admin/owner-gated)
 #   * POST /belt/repos/init     — CREATE a new git repo under an allowlist root
-#                                 (admin-gated); optional GitHub remote
+#                                 (admin-gated); optional GitHub remote through the
+#                                 injectable ``RepoCreator`` (tests fake ``gh``)
 #   * GET  /belt/runs           — list this workspace's station runs (newest-first)
 #   * GET  /belt/runs/{action_id} — one run + its proposed diff (capped ~200 KB)
-#
-# Updated: 2026-06-11 (feat/belt-repo-init) — added ``POST /belt/repos/init``.
-# Same ADMIN gate as the add-repo mutation (``belt.manage``) and the same
-# realpath discipline (the service validates the name + location_root). The
-# ``RepoCreator`` is injected via a dependency so tests can fake the ``gh repo
-# create`` shell-out; production gets the default ``GhCliRepoCreator``.
+#   * GET  /belt/runs/{action_id}/feed?stage= — what one station step stored, as
+#                                 chat-shaped ``steps``
+#   * GET  /belt/runs/{action_id}/stream?after= — the run's feed live, as SSE
+#                                 (``service.open_run_stream`` has the replay rules)
+#   * GET  /belt/runs/{action_id}/blueprint — the bound repo's C4 model where the
+#                                 run starts, with the run's files joined to it
+#   * GET  /belt/runs/{action_id}/screenshots/{name} — one of the run's kept
+#                                 snapshot PNGs (``image/png``), only a name the
+#                                 run lists
+#   * POST|GET /belt/runs/{action_id}/try — open the run's CI-built app on this
+#                                 Mac (start 202 / join 200), and poll its state
+#   * POST|GET /belt/runs/{action_id}/reviews — record a review (multipart), list
+#                                 them; GET .../reviews/{review_id}/video and
+#                                 .../frames/{t_ms}.png serve its media
+#                                 (``belt/review.py`` has the rules)
+#   * GET  /belt/blueprints?repo= — one repo's app blueprint graph: apps, features,
+#                                 components, journeys, gaps (``app_blueprint_read``)
+#   * GET  /belt/blueprints/c4?repo=&app= — one app's planned C4 model with a
+#                                 status per component
+#   * GET  /belt/blueprints/suite-map?repo= — the suite feature map (layers, apps,
+#                                 features with adopters) with each row's live status
+#   * GET  /belt/architecture?repo=[&at=][&diff=] — one repo's committed C4 model
+#                                 at its trunk for the architecture viewer
+#                                 (``architecture_read``), or as of trunk commit ``at``,
+#                                 plus what changed since trunk commit ``diff``
+#                                 (``architecture_history``)
+#   * GET  /belt/architecture/history?repo= — the trunk's model commits
+#                                 (``architecture_history``)
+#   * GET  /belt/architecture/code?repo=&component=[&at=][&file=&line=] — one
+#                                 component's files at that read's sha, or one
+#                                 file's symbols and excerpt (``architecture_code``)
 #
 # Routes are THIN: they read identity (workspace + user) from the cloud deps,
-# delegate to ``ee.cloud.belt.service``, and return the wire dict the service
-# built. RBAC is enforced via ``require_action_any_workspace`` route deps —
-# ``belt.read`` (MEMBER) on the read routes, ``belt.manage`` (ADMIN) on the
-# add-repo route — mirroring how the instinct / connector / skills routers gate
-# (the instinct router lives at ``pocketpaw_ee.instinct.router``; the gate
-# pattern is the same). Errors propagate via ``CloudError`` so the central cloud
-# error handler maps them to the JSON envelope — the router never raises
-# ``HTTPException`` (entity rule 10). A service-level ``BeltConsoleError`` (the
-# add-repo validation failures) is translated to a ``CloudError`` here.
+# delegate to ``ee.cloud.belt.service``, and return what the service built. RBAC
+# is ``require_action_any_workspace``: ``belt.read`` (MEMBER) on the reads and
+# on trying and reviewing a run, ``belt.manage`` (ADMIN) on the repo mutations.
+# A service ``BeltConsoleError`` is translated to a ``CloudError`` here (never
+# ``HTTPException``) whose body also carries ``detail`` (the sentence the UI
+# shows), so a foreign or non-belt run is the same 404 on every run route.
 
 """FastAPI router for the Belt & Pulley console (repos + runs)."""
 
@@ -32,19 +54,34 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from pocketpaw_ee.cloud._core.deps import (
     current_user_id,
     current_workspace_id,
     require_action_any_workspace,
+    require_paid_or_early_access_allowed,
 )
 from pocketpaw_ee.cloud._core.errors import CloudError
+from pocketpaw_ee.cloud.belt import (
+    app_blueprint_read,
+    architecture_code,
+    architecture_history,
+    architecture_read,
+)
+from pocketpaw_ee.cloud.belt import review as belt_review
 from pocketpaw_ee.cloud.belt import service as belt_service
 from pocketpaw_ee.cloud.license import require_license
 
-router = APIRouter(prefix="/belt", tags=["Belt"], dependencies=[Depends(require_license)])
+# Belt runs spend off the credit ledger, so an unpaid early-access workspace is
+# refused on every route here (403 ``early_access.not_available``).
+router = APIRouter(
+    prefix="/belt",
+    tags=["Belt"],
+    dependencies=[Depends(require_license), Depends(require_paid_or_early_access_allowed)],
+)
 
 
 class AddRepoRequest(BaseModel):
@@ -84,18 +121,34 @@ def repo_creator_dep() -> belt_service.RepoCreator | None:
     return None
 
 
+def review_room_dep() -> belt_review.ReviewRoom:
+    """The Review Room's side effects (subprocess runner, background tries).
+    Tests override this to fake gh, tar and ``open``."""
+    return belt_review.ReviewRoom()
+
+
+class _BeltError(CloudError):
+    """The cloud envelope plus ``detail``: the UI's ``HttpError`` reads its
+    sentence from ``detail``, never from ``error.message``."""
+
+    def to_dict(self) -> dict:
+        return {**super().to_dict(), "detail": self.message}
+
+
 def _to_cloud_error(exc: belt_service.BeltConsoleError) -> CloudError:
     """Map a service ``BeltConsoleError`` to the cloud error envelope.
 
-    The service status code drives the machine-readable code so the wire stays
-    stable: 400 → ``belt.invalid_repo``, 404 → ``belt.run_not_found``, anything
-    else → ``belt.error``. The human message is the service's (already safe to
-    show — no path content beyond what the user submitted)."""
+    The service's own ``code`` wins; otherwise the status drives it so the wire
+    stays stable: 400 → ``belt.invalid_repo``, 404 → ``belt.run_not_found``,
+    anything else → ``belt.error``. The human message is the service's (already
+    safe to show — no path content beyond what the user submitted)."""
+    if exc.code:
+        return _BeltError(exc.status_code, exc.code, exc.message)
     if exc.status_code == 404:
-        return CloudError(404, "belt.run_not_found", exc.message)
+        return _BeltError(404, "belt.run_not_found", exc.message)
     if exc.status_code == 400:
-        return CloudError(400, "belt.invalid_repo", exc.message)
-    return CloudError(exc.status_code, "belt.error", exc.message)
+        return _BeltError(400, "belt.invalid_repo", exc.message)
+    return _BeltError(exc.status_code, "belt.error", exc.message)
 
 
 @router.get("/repos")
@@ -196,6 +249,305 @@ async def get_run(
         return await belt_service.get_run(workspace_id, action_id)
     except belt_service.BeltConsoleError as exc:
         raise _to_cloud_error(exc) from exc
+
+
+@router.get("/runs/{action_id}/stream")
+async def get_run_stream(
+    action_id: str,
+    after: str = Query(default="0", max_length=64),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> StreamingResponse:
+    """The run's feed as it happens (``text/event-stream``): ``start``,
+    ``stage``, ``thinking`` / ``tool_start`` / ``tool_result`` and a terminal
+    ``stream_end``, each ``id`` a cursor to resume ``after``. A foreign or
+    non-belt run is a 404 before the stream opens."""
+    try:
+        body = await belt_service.open_run_stream(workspace_id, action_id, after)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+    return StreamingResponse(
+        body,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/runs/{action_id}/feed")
+async def get_run_feed(
+    action_id: str,
+    stage: str = Query(default="develop", pattern=r"^[a-z]{1,20}$"),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """What one station step of a run did: ``{action_id, stage, steps?,
+    stepsOmitted?}``, the steps in the chat history wire shape. No ``steps``
+    key when the stage recorded none; a foreign or non-belt run is a 404."""
+    try:
+        return await belt_service.get_run_feed(workspace_id, action_id, stage)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/runs/{action_id}/blueprint")
+async def get_run_blueprint(
+    action_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The run on its line's blueprint: ``{action_id, ref, model, files}``,
+    ``model`` the bound repo's C4 model (``paths`` globs included) at the
+    run's base or ``null``, ``files`` the run's touched files as ``{path,
+    component}``. A foreign or non-belt run is a 404."""
+    try:
+        return await belt_service.get_run_blueprint(workspace_id, action_id)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/blueprints")
+async def get_app_blueprint(
+    repo: str = Query(min_length=1),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The repo's app blueprint graph (design doc 2026-10-15, section 5), cached
+    60 s. 404 ``belt.repo_not_found`` outside the allowlist; a failed refresh
+    serves the last graph with ``stale: true``, 503 when there is none yet."""
+    try:
+        return await app_blueprint_read.read_blueprint(workspace_id, repo)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/blueprints/c4")
+async def get_app_blueprint_c4(
+    repo: str = Query(min_length=1),
+    app: str = Query(pattern=r"^[a-z0-9][a-z0-9-]*$"),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """One app's planned C4 view: ``{app, model: {scope, model}, status}``,
+    ``status`` mapping each component id to planned, landed, changing or
+    failed. A bad ``app`` is 422; an app with no model is 404."""
+    try:
+        return await app_blueprint_read.read_c4(workspace_id, repo, app)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/blueprints/suite-map")
+async def get_suite_map(
+    repo: str = Query(min_length=1),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The repo's suite feature map joined to the blueprint's live statuses,
+    off the same 60 s cache. 404 ``belt.suite_map_not_found`` when dev has no
+    readable ``docs/blueprints/suite/feature-map.json``."""
+    try:
+        return await app_blueprint_read.read_suite_map(workspace_id, repo)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/architecture")
+async def get_architecture(
+    repo: str = Query(min_length=1),
+    at: str = "",
+    diff: str = "",
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """The repo's C4 model at ``origin/dev`` (``main`` without one):
+    ``{repo, slug, sha, stale, read_at, model, flows, loom, live}``. Fresh for
+    60 s, then served from cache while a background read refreshes it; the
+    first read returns ``live: null`` and fills it in behind. 404
+    ``belt.architecture_not_found`` without a readable model; a failed refresh
+    serves the last body with ``stale: true``, 503 when there is none yet.
+    ``at=<sha>``: the body as of that trunk commit, ``live: null``; 404
+    ``belt.commit_not_found`` for a sha not on the trunk. ``diff=<sha>``: the
+    same body plus ``diff`` (``architecture_diff``) against that trunk commit."""
+    try:
+        if at:
+            body = await architecture_history.read_at(repo, at)
+        else:
+            body = await architecture_read.read_architecture(workspace_id, repo)
+        return await architecture_history.read_diff(repo, diff, body) if diff else body
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/architecture/history")
+async def get_architecture_history(
+    repo: str = Query(min_length=1),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> list[dict[str, Any]]:
+    """The last 50 trunk commits touching ``docs/c4/``: ``[{sha, date, subject,
+    added, removed, changed}]``, the counts against each commit's parent."""
+    try:
+        return await architecture_history.read_history(repo)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/architecture/code")
+async def get_architecture_code(
+    repo: str = Query(min_length=1),
+    component: str = Query(min_length=1),
+    at: str = "",
+    file: str = "",
+    line: int = Query(0, ge=0),
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict[str, Any]:
+    """One component's files at the architecture read's sha: ``{sha, files,
+    expired, no_paths}``, or at trunk commit ``at``. With ``file``, that file's
+    symbols and an excerpt from ``line``. 404 ``belt.component_not_found`` for
+    an unknown id, ``belt.file_not_found`` for a file outside the component."""
+    try:
+        if file:
+            return await architecture_code.read_file(
+                workspace_id, repo, component, file, at=at, line=line
+            )
+        return await architecture_code.read_code(workspace_id, repo, component, at=at)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.get("/runs/{action_id}/screenshots/{name}")
+async def get_run_screenshot(
+    action_id: str,
+    name: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> FileResponse:
+    """One of the run's snapshot PNGs, as listed in its ``screenshots``. A
+    foreign or non-belt run, or any name the run does not list, is a 404."""
+    try:
+        path = await belt_service.get_run_screenshot(workspace_id, action_id, name)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"},
+    )
+
+
+@router.post("/runs/{action_id}/try")
+async def start_run_try(
+    action_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    room: belt_review.ReviewRoom = Depends(review_room_dep),
+) -> JSONResponse:
+    """Open the run's CI-built app on this Mac: 202 with a ``preparing``
+    ``TryState`` when a try starts, 200 with the current one when a try is
+    already preparing or opened. 409 ``belt.no_artifact``, 501
+    ``belt.try_unsupported`` (not a Mac, or GitHub unreadable)."""
+    try:
+        status, state = await room.start_try(workspace_id, action_id)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+    return JSONResponse(state, status_code=status)
+
+
+@router.get("/runs/{action_id}/try")
+async def get_run_try(
+    action_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    room: belt_review.ReviewRoom = Depends(review_room_dep),
+) -> dict[str, Any]:
+    """The run's latest ``TryState`` (``idle`` when none was started)."""
+    try:
+        return await room.get_try(workspace_id, action_id)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.post("/runs/{action_id}/reviews")
+async def post_run_review(
+    action_id: str,
+    request: Request,
+    user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    room: belt_review.ReviewRoom = Depends(review_room_dep),
+) -> JSONResponse:
+    """Record a review (multipart: ``verdict``, ``notes`` JSON, ``video``,
+    ``frames``): 201 with the ``Review``, 200 replaying the one an
+    ``Idempotency-Key`` already stored. ``by`` is the caller, never a field."""
+    email = str(getattr(user, "email", "") or "")
+    who = str(getattr(user, "full_name", "") or "") or "a teammate"
+    try:
+        status, review = await room.submit_review(
+            workspace_id,
+            action_id,
+            by=f"user:{email or user.id}",
+            who=who,
+            headers=request.headers,
+            stream=request.stream(),
+            idempotency_key=request.headers.get("idempotency-key", ""),
+        )
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+    return JSONResponse(review, status_code=status)
+
+
+@router.get("/runs/{action_id}/reviews")
+async def list_run_reviews(
+    action_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> list[dict[str, Any]]:
+    """The run's reviews, newest first (``[]`` when none)."""
+    try:
+        return await belt_review.list_reviews(workspace_id, action_id)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+_IMMUTABLE = {
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "private, max-age=31536000, immutable",
+}
+
+
+@router.get("/runs/{action_id}/reviews/{review_id}/video")
+async def get_run_review_video(
+    action_id: str,
+    review_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> FileResponse:
+    """A review's recording (``video/webm``; ``Range`` gets a 206)."""
+    try:
+        path = await belt_review.review_media(workspace_id, action_id, review_id, "video.webm")
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+    return FileResponse(path, media_type="video/webm", headers=_IMMUTABLE)
+
+
+@router.get("/runs/{action_id}/reviews/{review_id}/frames/{t_ms}.png")
+async def get_run_review_frame(
+    action_id: str,
+    review_id: str,
+    t_ms: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+) -> FileResponse:
+    """A review's still at ``t_ms`` (``image/png``)."""
+    try:
+        path = await belt_review.review_media(workspace_id, action_id, review_id, f"{t_ms}.png")
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+    return FileResponse(path, media_type="image/png", headers=_IMMUTABLE)
 
 
 __all__ = ["router"]

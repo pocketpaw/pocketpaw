@@ -102,13 +102,17 @@ This is the single impure entry point for *every* dispatch flow (executor gate 1
 ```python
 # instinct_dispatch.py, inside gate_action, just before resolve_instinct (~:341)
 effective_template = template
-if get_settings().instinct_enforce_discovered_rules:        # NEW flag, default False
+if get_settings().instinct_enforce_discovered_rules:  # NEW flag, default False
     discovered = await _load_discovered_instinct_rules(
-        workspace_id, pocket_id, action_name, row_context, workspace_context,
+        workspace_id,
+        pocket_id,
+        action_name,
+        row_context,
+        workspace_context,
     )
     if discovered:
         effective_template = _merge_discovered_rules(template, discovered)
-decision = resolve_instinct(effective_template, action_name, row_context, ...)   # unchanged call
+decision = resolve_instinct(effective_template, action_name, row_context, ...)  # unchanged call
 ```
 
 `_merge_discovered_rules` returns `template.model_copy(deep=False)` with a **copied** `InstinctRulesDef` whose `rules = list(discovered) + list(template.instinct_rules.rules)`. Discovered rules go **first** so a discovered `block` wins step-1's first-match short-circuit; for `require_approval`/`notify` order is immaterial. **The template object is never mutated** — 100% backward-compat for any other reader.
@@ -131,9 +135,9 @@ Add to `Settings` (`config.py`, alongside the instinct block at `:1343-1377`):
 instinct_enforce_discovered_rules: bool = Field(
     default=False,
     description="When true, approved workspace-discovered Instinct rules "
-        "(rules.service.get_active_rules) are merged with template rules at the "
-        "live gate. Off by default — template-rule path unchanged. "
-        "Env: POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES.",
+    "(rules.service.get_active_rules) are merged with template rules at the "
+    "live gate. Off by default — template-rule path unchanged. "
+    "Env: POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES.",
 )
 ```
 **Proof:** when `False`, `gate_action` never calls `get_active_rules`, `effective_template is template`, and `resolve_instinct` gets byte-identical args — the entire discovered branch is dead code on the default path. This is a **separate, narrower** flag than `instinct_approval_level`: enforcing *which CEL conditions fire* and activating *whether escalations can auto-resolve* are independent risk axes and must toggle independently. A workspace can enforce discovered rules while the triager stays dormant (every discovered `require_approval` still goes to a human).

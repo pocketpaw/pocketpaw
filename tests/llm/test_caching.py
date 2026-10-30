@@ -313,3 +313,87 @@ class TestConstants:
         assert CACHE_MIN_TOKENS["default"] == 1024
         assert CACHE_MIN_TOKENS["anthropic-haiku"] == 4096
         assert CACHE_MIN_TOKENS["anthropic-opus"] == 4096
+
+    def test_deepseek_floor_is_the_measured_512_not_the_documented_1024(self):
+        """DeepSeek cached a 595-token prefix (PA-9, 2026-08-03).
+
+        Measured on deepseek-v4-flash through the LiteLLM gateway: a 595-token
+        prompt reported 512 cached tokens on the warm turn, so the real floor is
+        at or below 512 and reads arrive in 512-token blocks. The documented
+        1024 was conservative in the direction that costs money — it would skip
+        prompts between 512 and 1024 that do in fact cache.
+
+        MUTATION: set ``deepseek`` back to 1024 in
+        ``src/pocketpaw/llm/caching.py``; this fails.
+        """
+        assert CACHE_MIN_TOKENS["deepseek"] == 512
+        # Below the generic default, which is the whole point of the row.
+        assert CACHE_MIN_TOKENS["deepseek"] < CACHE_MIN_TOKENS["default"]
+
+    def test_no_sonnet_floor_is_above_the_default(self):
+        """Every shipping Sonnet caches from 1024 tokens (PA-9, 2026-08-03).
+
+        This row read 2048 until PA-9, which is not the floor of any Sonnet that
+        has ever shipped. Being too STRICT is the expensive direction: it skips
+        marking prompts that would have cached, forfeiting the saving outright.
+        (Being too permissive is free — a sub-floor marker is declined at no
+        charge, measured the same day.)
+
+        MUTATION: set ``anthropic-sonnet`` back to 2048 in
+        ``src/pocketpaw/llm/caching.py``; this fails.
+        """
+        assert CACHE_MIN_TOKENS["anthropic-sonnet"] == 1024
+
+    def test_opus_floors_are_not_monotonic_across_generations(self):
+        """Opus cannot be one number, which is why the per-generation rows exist.
+
+        The floor FALLS as the generation rises — 4096 on Opus 4.5/4.6 down to
+        512 on Opus 5 — so any single "the Opus floor" value is wrong for most
+        Opus models. The family key deliberately keeps the most conservative
+        value for callers that cannot resolve a generation.
+
+        MUTATION: delete the ``anthropic-opus-5`` row (or set it to 4096) in
+        ``src/pocketpaw/llm/caching.py``; the ordering assertion fails.
+        """
+        assert CACHE_MIN_TOKENS["anthropic-opus-5"] == 512
+        assert CACHE_MIN_TOKENS["anthropic-opus-4.8"] == 1024
+        assert CACHE_MIN_TOKENS["anthropic-opus-4.5"] == 4096
+        # Newer generation, LOWER floor — the property a single key destroys.
+        assert CACHE_MIN_TOKENS["anthropic-opus-5"] < CACHE_MIN_TOKENS["anthropic-opus-4.5"]
+        # The family key must never promise more than the strictest generation.
+        assert CACHE_MIN_TOKENS["anthropic-opus"] == max(
+            CACHE_MIN_TOKENS[k] for k in CACHE_MIN_TOKENS if k.startswith("anthropic-opus-")
+        )
+
+    def test_deep_agents_char_threshold_is_deliberately_below_the_haiku_floor(self):
+        """The PA-9 headline, in executable form.
+
+        ``_ANTHROPIC_CACHE_MIN_CHARS`` gates cache marking in CHARS while the
+        floors are in TOKENS. Measured 2026-08-03 at 3.48 chars/token on our own
+        prompt text, 4000 chars is ~1,149 tokens — a quarter of Haiku 4.5's
+        4096-token floor, which sits near 14,250 chars.
+
+        This is asserted rather than fixed BECAUSE the low value is correct. A
+        sub-floor marker is declined free of charge (marked and unmarked calls
+        billed identically), so an over-permissive gate costs nothing, while
+        raising this to ~14,250 would stop marking on Opus 4.8 (floor 1024) and
+        Opus 5 (floor 512) where 4k-14k prompts cache today — turning a harmless
+        inaccuracy into a real regression. This test exists so that anyone
+        "correcting" the threshold trips a failure and reads the reasoning first.
+
+        MUTATION: set ``_ANTHROPIC_CACHE_MIN_CHARS = 20000`` in
+        ``src/pocketpaw/agents/deep_agents.py``; this fails.
+        """
+        from pocketpaw.agents.deep_agents import _ANTHROPIC_CACHE_MIN_CHARS
+
+        measured_chars_per_token = 3.48
+        threshold_tokens = _ANTHROPIC_CACHE_MIN_CHARS / measured_chars_per_token
+
+        assert threshold_tokens < CACHE_MIN_TOKENS["anthropic-haiku"], (
+            "The chars threshold now clears the Haiku floor. That is not a fix — "
+            "it stops marking on Opus 4.8/5, whose floors are 1024/512. See the "
+            "constant's comment in deep_agents.py before changing this."
+        )
+        # ...but it must still clear the lowest floor we ship against, or the
+        # gate would be excluding prompts that cache on every modern Opus.
+        assert threshold_tokens > CACHE_MIN_TOKENS["anthropic-opus-5"]

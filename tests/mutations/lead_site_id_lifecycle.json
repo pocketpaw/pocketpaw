@@ -1,0 +1,51 @@
+[
+  {
+    "label": "delete cascade purges by object id again",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "site_id=lead_site_id(site))",
+    "replace": "site_id=str(site.id))",
+    "tests": ["tests/ee/sites/test_lead_site_id_lifecycle.py::test_deleting_a_built_site_removes_its_leads_and_only_its"]
+  },
+  {
+    "label": "transfer moves leads by object id again",
+    "file": "ee/pocketpaw_ee/sites/transfer.py",
+    "find": "site_id=lead_site_id(site),",
+    "replace": "site_id=str(getattr(site, \"id\", \"\")),",
+    "tests": ["tests/ee/sites/test_lead_site_id_lifecycle.py::test_transferring_a_built_site_moves_its_leads"]
+  },
+  {
+    "label": "export collects leads by object id again",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "workspace_id=workspace_id, site_id=lead_site_id(doc), lead_model=_LeadDoc",
+    "replace": "workspace_id=workspace_id, site_id=site_id, lead_model=_LeadDoc",
+    "tests": ["tests/ee/sites/test_lead_site_id_lifecycle.py::test_exporting_a_built_site_carries_its_leads"]
+  },
+  {
+    "label": "purge drops the empty-id guard",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not site_id:\n        return 0\n    removed = 0\n",
+    "replace": "    removed = 0\n",
+    "tests": ["tests/ee/sites/test_lead_site_id_lifecycle.py::test_a_legacy_blank_site_id_lead_survives_every_delete"]
+  },
+  {
+    "label": "export drops the empty-id guard",
+    "file": "ee/pocketpaw_ee/sites/export.py",
+    "find": "    if not site_id:\n        return []\n",
+    "replace": "",
+    "tests": ["tests/ee/sites/test_lead_site_id_lifecycle.py::test_collecting_leads_for_a_blank_id_collects_nothing"]
+  },
+  {
+    "label": "connected sites lose their own lead id",
+    "file": "ee/pocketpaw_ee/cloud/leads/domain.py",
+    "find": "    if getattr(site, \"foreign_origin\", False) and getattr(site, \"id\", None) is not None:\n        return str(site.id)\n",
+    "replace": "",
+    "tests": ["tests/ee/sites/test_lead_site_id_lifecycle.py::test_two_foreign_concierges_keep_their_leads_apart"]
+  },
+  {
+    "label": "counter purge forgets the workspace prefix",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "prefix = f\"{re.escape(workspace_id)}:{re.escape(site_id)}\"",
+    "replace": "prefix = re.escape(site_id)",
+    "tests": ["tests/ee/sites/test_delete_job.py::test_purging_records_takes_both_rate_counter_scopes"]
+  }
+]

@@ -5,12 +5,16 @@
 # returns the full entry (narrative + how), unknown / missing args come back as
 # agent-readable error envelopes, and the exported tool ids follow the
 # mcp__<server>__<tool> allowlist convention.
+# Updated: 2026-10-01 (feat/atlas-canonical) — verb cards come back from
+# atlas_search with their slash, and the tool description carries the
+# "you can also type /task ..." hint.
 
 import json
 
 import pytest
 
 from pocketpaw.agents.sdk_mcp_atlas import (
+    ATLAS_SEARCH_DESCRIPTION,
     ATLAS_TOOL_IDS,
     SERVER_NAME,
     _atlas_describe_handler,
@@ -50,6 +54,29 @@ class TestAtlasSearchHandler:
         out = await _atlas_search_handler({"intent": "zzzz qqqq xyzzy"})
         assert not out.get("is_error"), "an empty result set is not a tool error"
         assert "No atlas entries matched" in _text_of(out)
+
+
+class TestVerbAwareness:
+    @pytest.mark.asyncio
+    async def test_verb_card_carries_its_slash(self):
+        out = await _atlas_search_handler({"intent": "send a message to #design"})
+        cards = json.loads(_text_of(out))["results"]
+        assert cards[0]["id"] == "verb:send"
+        assert cards[0]["kind"] == "verb"
+        assert cards[0]["slash"] == "send"
+
+    @pytest.mark.asyncio
+    async def test_cards_without_a_slash_omit_it(self):
+        out = await _atlas_search_handler({"intent": "rename this file"})
+        top = json.loads(_text_of(out))["results"][0]
+        assert top["id"] == "verb:file-rename"
+        assert "slash" not in top
+
+    def test_description_tells_the_agent_to_suggest_the_command(self):
+        assert "kind 'verb'" in ATLAS_SEARCH_DESCRIPTION
+        assert "you can also type /task" in ATLAS_SEARCH_DESCRIPTION
+        assert "Never run a verb yourself" in ATLAS_SEARCH_DESCRIPTION
+        assert "risky verbs" in ATLAS_SEARCH_DESCRIPTION
 
 
 class TestAtlasDescribeHandler:

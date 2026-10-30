@@ -1,0 +1,51 @@
+[
+  {
+    "label": "drop both router dependencies, the shipped state",
+    "file": "src/pocketpaw/api/v1/terminal.py",
+    "find": "router = APIRouter(\n    tags=[\"Terminal\"],\n    dependencies=[Depends(require_terminal_enabled), Depends(require_scope(\"admin\"))],\n)",
+    "replace": "router = APIRouter(tags=[\"Terminal\"])",
+    "tests": ["tests/v1/test_terminal_router_auth.py"]
+  },
+  {
+    "label": "keep the enabled gate but drop the scope check",
+    "file": "src/pocketpaw/api/v1/terminal.py",
+    "find": "    dependencies=[Depends(require_terminal_enabled), Depends(require_scope(\"admin\"))],",
+    "replace": "    dependencies=[Depends(require_terminal_enabled)],",
+    "tests": ["tests/v1/test_terminal_router_auth.py"]
+  },
+  {
+    "label": "keep the scope check but drop the enabled gate",
+    "file": "src/pocketpaw/api/v1/terminal.py",
+    "find": "    dependencies=[Depends(require_terminal_enabled), Depends(require_scope(\"admin\"))],",
+    "replace": "    dependencies=[Depends(require_scope(\"admin\"))],",
+    "tests": ["tests/v1/test_terminal_router_auth.py"]
+  },
+  {
+    "label": "run the guards in the wrong order",
+    "file": "src/pocketpaw/api/v1/terminal.py",
+    "find": "    dependencies=[Depends(require_terminal_enabled), Depends(require_scope(\"admin\"))],",
+    "replace": "    dependencies=[Depends(require_scope(\"admin\")), Depends(require_terminal_enabled)],",
+    "tests": ["tests/v1/test_terminal_router_auth.py"]
+  },
+  {
+    "label": "ship the terminal on by default",
+    "file": "src/pocketpaw/config.py",
+    "find": "    terminal_enabled: bool = Field(\n        default=False,",
+    "replace": "    terminal_enabled: bool = Field(\n        default=True,",
+    "tests": ["tests/v1/test_terminal_router_auth.py"]
+  },
+  {
+    "label": "let the settings API turn the shell back on",
+    "file": "src/pocketpaw/api/v1/settings.py",
+    "find": "        \"terminal_enabled\",\n    }\n)",
+    "replace": "    }\n)",
+    "tests": ["tests/v1/test_terminal_router_auth.py"]
+  },
+  {
+    "label": "advertise the surface with a 403 instead of a 404",
+    "file": "src/pocketpaw/api/v1/terminal_gate.py",
+    "find": "        raise HTTPException(status_code=404, detail=\"Not Found\")",
+    "replace": "        raise HTTPException(status_code=403, detail=\"Forbidden\")",
+    "tests": ["tests/v1/test_terminal_router_auth.py"]
+  }
+]

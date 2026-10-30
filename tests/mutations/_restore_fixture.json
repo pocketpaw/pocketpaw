@@ -1,0 +1,9 @@
+[
+  {
+    "label": "flip the restore fixture sentinel",
+    "file": "tests/fixtures/mutate_restore_target.txt",
+    "find": "RESTORE_TARGET_SENTINEL = \"original\"",
+    "replace": "RESTORE_TARGET_SENTINEL = \"mutated\"",
+    "tests": ["tests/test_mutate_sweep_marker.py::TestTheMarkerNeverOutlivesItsSweep::test_cleared_after_a_sweep_where_the_mutation_is_caught"]
+  }
+]

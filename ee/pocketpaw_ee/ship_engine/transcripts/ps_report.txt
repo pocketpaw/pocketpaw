@@ -1,0 +1,14 @@
+# transcript: `dokku ps:report demo` — one healthy web process.
+EXIT: 0
+--- stdout ---
+=====> demo ps information
+       Deployed:                      true
+       Processes:                     1
+       Ps can scale:                  true
+       Ps computed procfile path:     Procfile
+       Ps global procfile path:       Procfile
+       Ps restart policy:             on-failure:10
+       Restore:                       true
+       Running:                       true
+       Status web 1:                  running (CID: 8a5e3b2c1d)
+--- stderr ---

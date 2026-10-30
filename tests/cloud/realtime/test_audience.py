@@ -7,6 +7,7 @@ from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
 from pocketpaw_ee.cloud._core.realtime.events import (
     GroupCreated,
     GroupMemberRemoved,
+    MessageNew,
     MessageSent,
     NotificationNew,
     SessionCreated,
@@ -126,6 +127,37 @@ async def test_message_sent_only_to_sender():
     r = AudienceResolver()
     ev = MessageSent(data={"group_id": "g1", "sender_id": "u1"})
     assert await r.audience(ev) == ["u1"]
+
+
+@pytest.mark.asyncio
+async def test_message_new_reaches_every_group_member_including_sender():
+    """message.new fans out to all group members — sender included.
+
+    The sender's other devices/tabs share the same user_id; excluding the
+    sender here used to starve the second device of the persisted message
+    (phone + desktop on one account went stale until a manual reload). The
+    originating socket dedups the echo against its optimistic row.
+    """
+
+    async def members(_gid: str) -> list[str]:
+        return ["u1", "u2"]
+
+    r = AudienceResolver(group_members=members)
+    ev = MessageNew(data={"group_id": "g1", "sender": "u1"})
+    assert set(await r.audience(ev)) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_message_new_restricted_to_group_members():
+    """message.new must never leak outside the group's DB-resolved membership."""
+
+    async def members(gid: str) -> list[str]:
+        assert gid == "g1"
+        return ["u-alice"]
+
+    r = AudienceResolver(group_members=members)
+    ev = MessageNew(data={"group_id": "g1", "sender": "u-alice"})
+    assert await r.audience(ev) == ["u-alice"]
 
 
 @pytest.mark.asyncio
@@ -349,3 +381,228 @@ async def test_composio_events_route_to_single_user():
     for cls in (ComposioConnectionVerified, ComposioConnectionMismatch):
         ev = cls(data={"workspace_id": "w1", "user_id": "u1", "toolkit": "gmail"})
         assert await r.audience(ev) == ["u1"], cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_site_published_routes_to_workspace_members():
+    # The /sites gallery is per-workspace, and a publish lands async relative to
+    # the chat turn — so every workspace member with the gallery open must get the
+    # push to flip the new site to Live without a poll.
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b", "c"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import SitePublished
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = SitePublished(
+        data={
+            "workspace_id": "w1",
+            "site_id": "s1",
+            "pocket_id": "pkt1",
+            "owner": "a",
+            "plan_tier": "pro",
+        }
+    )
+    assert set(await r.audience(ev)) == {"a", "b", "c"}
+
+
+@pytest.mark.asyncio
+async def test_site_published_without_workspace_id_has_no_audience():
+    # Defensive: a malformed event with no workspace_id must not fan out anywhere
+    # (it falls through to []), never to an unscoped/global audience. The fetcher
+    # raises to prove the guard short-circuits before any member lookup.
+    async def ws_members(_wid: str) -> list[str]:
+        raise AssertionError("workspace_members must not be called without a workspace_id")
+
+    from pocketpaw_ee.cloud._core.realtime.events import SitePublished
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = SitePublished(data={"site_id": "s1", "pocket_id": "pkt1"})
+    assert await r.audience(ev) == []
+
+
+@pytest.mark.asyncio
+async def test_site_created_routes_to_workspace_members():
+    # A DRAFT is created async relative to the chat turn exactly like a publish, and
+    # it is just as much a change to what the gallery shows — a new card. It fans out
+    # to the whole workspace for the same reason: only the one tab that ran the create
+    # hears the per-run ``pocket_created`` SSE, so everyone else (a second tab, a
+    # teammate, an import) needs the bus or sees nothing until a manual refresh.
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b", "c"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import SiteCreated
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = SiteCreated(
+        data={
+            "workspace_id": "w1",
+            "site_id": "s1",
+            "pocket_id": "pkt1",
+            "owner": "a",
+            "deployed": False,
+        }
+    )
+    assert set(await r.audience(ev)) == {"a", "b", "c"}
+
+
+@pytest.mark.asyncio
+async def test_site_created_without_workspace_id_has_no_audience():
+    # Same defensive guard the publish event carries: no workspace_id → no fan-out,
+    # never an unscoped audience. The fetcher raises to prove the guard short-circuits
+    # before any member lookup.
+    async def ws_members(_wid: str) -> list[str]:
+        raise AssertionError("workspace_members must not be called without a workspace_id")
+
+    from pocketpaw_ee.cloud._core.realtime.events import SiteCreated
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = SiteCreated(data={"site_id": "s1", "pocket_id": "pkt1"})
+    assert await r.audience(ev) == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_job_events_route_to_workspace_members():
+    # A dynamic site's provisioning job finishes in the ARQ worker, long after
+    # publish — the terminal update fans out to the workspace so the gallery can
+    # advance provisioning -> live without polling job status.
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        WorkspaceJobQueued,
+        WorkspaceJobUpdated,
+    )
+
+    r = AudienceResolver(workspace_members=ws_members)
+    for cls in (WorkspaceJobQueued, WorkspaceJobUpdated):
+        ev = cls(
+            data={
+                "job_id": "j1",
+                "workspace_id": "w1",
+                "pocket_id": "pkt1",
+                "action": "provision",
+                "job_name": "provision_site",
+                "status": "done",
+            }
+        )
+        assert set(await r.audience(ev)) == {"a", "b"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_call_participant_events_route_to_group_members():
+    # A pre-join tab shows "who's already in the call" from these two events.
+    # Before this branch existed they fell through to [], so InProcessBus
+    # skipped the fan-out entirely and the roster chip went stale.
+    async def group_members(_gid: str) -> list[str]:
+        return ["u1", "u2", "u3"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        CallParticipantJoined,
+        CallParticipantLeft,
+    )
+
+    r = AudienceResolver(group_members=group_members)
+    for cls in (CallParticipantJoined, CallParticipantLeft):
+        ev = cls(
+            data={
+                "group_id": "g1",
+                "room_name": "group-call-g1",
+                "identity": "u2",
+                "name": "Bob",
+            }
+        )
+        assert set(await r.audience(ev)) == {"u1", "u2", "u3"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_call_participant_events_exclude_non_members():
+    # Membership is DB-resolved, not payload-supplied: a stranger holding a
+    # live socket never learns who is on another group's call.
+    members_by_group = {"g1": ["u-alice", "u-bob"]}
+
+    async def group_members(gid: str) -> list[str]:
+        return list(members_by_group.get(gid, []))
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        CallParticipantJoined,
+        CallParticipantLeft,
+    )
+
+    r = AudienceResolver(group_members=group_members)
+    for cls in (CallParticipantJoined, CallParticipantLeft):
+        ev = cls(data={"group_id": "g1", "identity": "u-alice", "name": "Alice"})
+        audience = await r.audience(ev)
+        assert "u-mallory" not in audience, cls.__name__
+        assert set(audience) == {"u-alice", "u-bob"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_call_participant_joined_keeps_the_joiner_in_the_audience():
+    # The joiner's own tab needs the roster too. ``identity`` is also not a
+    # safe audience key — livekit/invites.py mints ``guest-<hex>`` identities
+    # for invite links, which are not workspace user_ids.
+    async def group_members(_gid: str) -> list[str]:
+        return ["u1", "u2"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import CallParticipantJoined
+
+    r = AudienceResolver(group_members=group_members)
+    ev = CallParticipantJoined(
+        data={"group_id": "g1", "identity": "guest-deadbeef", "name": "Guest"}
+    )
+    assert set(await r.audience(ev)) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_call_participant_events_without_group_id_have_no_audience():
+    # Defensive: a malformed event must fall through to [], never to an
+    # unscoped audience. The fetcher raises to prove the guard short-circuits.
+    async def group_members(_gid: str) -> list[str]:
+        raise AssertionError("group_members must not be called without a group_id")
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        CallParticipantJoined,
+        CallParticipantLeft,
+    )
+
+    r = AudienceResolver(group_members=group_members)
+    for cls in (CallParticipantJoined, CallParticipantLeft):
+        assert await r.audience(cls(data={"identity": "u1"})) == [], cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_call_lifecycle_events_still_route_to_group_members():
+    # Pin: adding the participant types to the shared call branch (and removing
+    # the unreachable duplicate below it) must not change the lifecycle events.
+    async def group_members(_gid: str) -> list[str]:
+        return ["u1", "u2"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        CallAssistantState,
+        CallEnded,
+        CallNotesPosted,
+        CallStarted,
+    )
+
+    r = AudienceResolver(group_members=group_members)
+    for cls in (CallStarted, CallEnded, CallNotesPosted, CallAssistantState):
+        ev = cls(data={"group_id": "g1"})
+        assert set(await r.audience(ev)) == {"u1", "u2"}, cls.__name__
+    ask = CallAssistantState(data={"group_id": "g1", "state": "idle", "asked_by": "u9"})
+    assert set(await r.audience(ask)) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_file_updated_fans_out_to_workspace():
+    # The Library is per-workspace; a row's tags/links/summary landing after
+    # file.ready must reach every member's /files, not only a chat group.
+    from pocketpaw_ee.cloud._core.realtime.events import Event
+
+    async def ws_members(_wid: str) -> list[str]:
+        return ["wm1", "wm2"]
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = Event(type="file.updated", data={"file_id": "f1", "workspace_id": "w1"})
+    assert set(await r.audience(ev)) == {"wm1", "wm2"}
+    assert await r.audience(Event(type="file.updated", data={"file_id": "f1"})) == []

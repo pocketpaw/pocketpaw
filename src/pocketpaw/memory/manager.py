@@ -343,6 +343,55 @@ class MemoryManager:
             )
         return history
 
+    async def get_session_history_page(
+        self,
+        session_key: str,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        """Keyset-paginated chat history for the /chat transcript.
+
+        Returns ``{"messages": [...], "has_more": bool}`` where ``messages``
+        is the most recent ``limit`` rows ASCENDING (oldest→newest), matching
+        the cloud history shape plus ``has_more`` so the client can page
+        backward. ``before`` is a ``{createdAt}|{entry_id}`` cursor — pass
+        the oldest loaded message's cursor to fetch the previous (older)
+        page. An invalid cursor yields an empty page (defensive; the client
+        only ever echoes back a cursor it received).
+        """
+        # limit=None on purpose. This pages BACKWARD through older messages
+        # via the `before` cursor, so a bounded read would make the transcript
+        # appear to end at the bound: everything older than the newest N would
+        # be unreachable, and the client would show an empty page rather than
+        # an error. The real fix is to push the cursor into the query as a
+        # keyset filter instead of loading the session and slicing it in
+        # Python — that is a change to three store implementations and is not
+        # folded into a perf pass. Tracked with H4 in the backend-perf audit.
+        entries = await self._store.get_session(session_key, limit=None)
+        try:
+            if before:
+                before_iso, before_id = before.split("|", 1)
+                before_ts = datetime.fromisoformat(before_iso)
+                entries = [e for e in entries if (e.created_at, e.id) < (before_ts, before_id)]
+        except (ValueError, TypeError):
+            return {"messages": [], "has_more": False}
+
+        has_more = len(entries) > limit
+        page = entries[-limit:]
+        return {
+            "messages": [
+                {
+                    "_id": e.id,
+                    "role": e.role or "user",
+                    "content": e.content,
+                    "createdAt": e.created_at.isoformat(),
+                    "attachments": (e.metadata or {}).get("attachments") or [],
+                }
+                for e in page
+            ],
+            "has_more": has_more,
+        }
+
     async def search(
         self,
         query: str,
@@ -423,7 +472,11 @@ class MemoryManager:
         Returns:
             List of {"role": "...", "content": "..."} dicts.
         """
-        entries = await self._store.get_session(session_key)
+        # limit=None on purpose: this feeds summarization, and silently
+        # changing which messages are summarized would change agent behaviour
+        # in a way no test would catch. It has its own `char_budget`, so the
+        # OUTPUT is already bounded — the read is not.
+        entries = await self._store.get_session(session_key, limit=None)
         if not entries:
             return []
 

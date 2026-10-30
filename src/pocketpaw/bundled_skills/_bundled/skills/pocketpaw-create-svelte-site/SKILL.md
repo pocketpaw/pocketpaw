@@ -2,25 +2,46 @@
 name: pocketpaw-create-svelte-site
 description: |
   Build a marketing landing page as a Paw Site on the SVELTE TRACK — a
-  real, standalone website you author as premium hand-written SvelteKit
-  components, prerendered statically to the edge. Invoke when the user
-  asks for a BRAND-NEW marketing / landing site AND the create flow is on
-  the Svelte engine ("Use Svelte pages" toggle → engine="svelte"): "build
-  a dentist landing site", "make a marketing page for my bakery", "a
-  landing page for my SaaS". This is the component-authoring brain — YOU
-  write the Svelte sections (Hero, Pricing, Faq, ...) at the quality bar of
-  the proven spike, assemble them into a source map, and a deterministic
-  tool persists the pocket stamped type="site" + pattern="landing" +
-  engine="svelte" so the published page renders from your components. You
-  do NOT compose a rippleSpec, do NOT call get_widget_spec, do NOT use the
-  pocket specialist. For the ripple track (the default engine) use
-  pocketpaw-create-paw-site; for publishing an EXISTING pocket use
-  pocketpaw-create-site. Loading this skill keeps the chat agent's
+  real, standalone website you author as hand-written SvelteKit
+  components, prerendered statically to the edge. Decide by the REQUIREMENT:
+  reach for this when the site genuinely needs what a component framework
+  gives — real client-side interactivity, complex or multi-view stateful UI,
+  app-like behaviour — OR when the user EXPLICITLY asks for Svelte / SvelteKit
+  ("build it in Svelte", "use SvelteKit"). Do NOT default to it for a plain
+  static marketing/landing page ("build a dentist landing page", "a marketing
+  page for my bakery", "a landing page for my SaaS") that has no real
+  interactivity — that is the common case and belongs to
+  pocketpaw-create-paw-site (the default landing brain, which can also emit a
+  plain hand-written HTML page). Pick Svelte on need or explicit request, not
+  from the topic alone. When you DO use it: YOU write the Svelte sections
+  as components, assemble
+  them into a source map, and a deterministic tool persists the pocket stamped
+  type="site" + pattern="landing" + engine="svelte" so the published page
+  renders from your components. You do NOT compose a rippleSpec, do NOT call
+  get_widget_spec, do NOT use the pocket specialist. For publishing an EXISTING
+  pocket use pocketpaw-create-site. Loading this skill keeps the chat agent's
   always-on system prompt small while still delivering the full Svelte
-  authoring brain when a svelte-track site is actually requested.
+  authoring brain when a site actually needs Svelte.
 ---
 
 # Build a Paw Site — the Svelte-track authoring brain
+
+<!--
+  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): sites take npm
+  packages now. New "npm packages" subsection in STEP 2 (declare via
+  `dependencies` / set_site_dependencies, any package/version/tag, normal
+  imports, onMount only for browser-only libraries, none on a dynamic site),
+  a "Verify loop" section after STEP 3 (only
+  `verification.status == passed` means ready; fix → verify_site, max 3 rounds;
+  unverified said plainly; rolled-back vs staged svelte edits), and the edit
+  bullet / paw-fx entry no longer claim a dependency cannot be added.
+
+  Updated: 2026-09-17 (docs/sites-multipage-skills): STEP 2 now teaches extra
+  routes at CREATE time, not just in the edit lane — the two-key route recipe,
+  a heuristic for when a brief warrants a second page, and the
+  author-before-you-link rule (`handleHttpError` is `warn`, so a nav href with
+  no route behind it builds green and 404s on the visitor's first click).
+-->
 
 You're building a **Paw Site** on the **Svelte track**: a real, standalone
 marketing website that you **author as hand-written SvelteKit components**
@@ -38,9 +59,8 @@ This is the sibling of `pocketpaw-create-paw-site`. The difference is the
 
 **The one rule that changes everything: there is NO rippleSpec and NO
 catalog.** You are not picking widgets from a 150-widget catalog or
-drafting a spec a validator gates. You write premium Svelte — a `Hero`
-section, a `Pricing` section, a `Faq` — exactly as a senior frontend
-engineer would, and hand the files to a deterministic tool. The component
+drafting a spec a validator gates. You write Svelte components exactly as a senior
+frontend engineer would, and hand the files to a deterministic tool. The component
 files ARE the page. Nothing downgrades them; nothing validates them
 against a widget manifest.
 
@@ -62,27 +82,6 @@ the dynamic section layers the data bindings on top. (The ripple track has a
 sibling brain, `pocketpaw-create-dynamic-site`, for the same live-data idea —
 this skill is the svelte-track equivalent; keep the two data-authoring models
 in step.)
-
-## The quality bar
-
-A landing page **sells**. It reads top to bottom as a conversion funnel:
-grab attention, explain the offer, prove it, price it, capture the lead.
-The proven reference is a hand-crafted Tally invoicing landing page —
-distinctive type, a bespoke animated hero graphic, real testimonials, a
-priced pricing table, a native FAQ, a lead form. **Match that bar.** Use
-the design skills to get there:
-
-- Invoke **`frontend-design`** (or **`taste-skill`**) for the look: a real
-  type system, a considered palette, generous spacing, a hero with a
-  bespoke visual — not a centered headline on a gradient. Avoid generic
-  "AI landing page" aesthetics.
-- One **component per section**. The page is an ordered list of sections;
-  each section owns its own copy, data, styles, and motion. This is the
-  whole edit-model payoff: to refine the hero later you edit one file.
-
-Write **real, concrete copy** — never "TBD" or "Lorem ipsum". A dentist
-gets real service names, real testimonial quotes with names, real tier
-prices. The page must read like a finished business site.
 
 ## ⚠️ THE PRERENDER AUTHORING RULE (read this before you write a line)
 
@@ -140,31 +139,76 @@ If you're unsure whether the resting frame is right, ask: *"with all
 JavaScript disabled, does this section look finished?"* If not, move the
 final state into markup.
 
-## STEP 1 — Author the components (the design skills set the bar)
+## STEP 1 — Author the components
 
 Write the page as SvelteKit components under `src/lib/components/`, one per
-section, in conversion order. A strong default funnel:
-
-`Nav` → `Hero` → `TrustMarquee`/`Features` → `HowItWorks` → `Pricing` →
-`Testimonial` → `Faq` → `FinalCta` → `Footer`
+section. Which sections the page has is decided from the brief before you get
+here; this step is about how each one is written.
 
 Each component is a normal Svelte 5 file: a `<script>` (runes — `$state`,
 `$props`, `$derived`), the markup, and a scoped `<style>` block. Lean on
 data-driven loops (`{#each services as s}`) so the section's content is one
 array to edit, not hand-repeated markup.
 
-Conversion essentials the page should carry:
+One component per section. The page is an ordered list of sections and each
+owns its own copy, data, styles and motion. That is the edit-model payoff: to
+change the hero later you edit one file.
 
-- A **hero** with a real headline promise + subtitle + a primary CTA that
-  is an **anchor** (`href="#book"` / `#pricing`) — not an `on:click`
-  button (a dead button on a static page).
-- A **pricing** section with real tiers and a highlighted recommended tier.
-- A **lead form** so the published site captures leads out of the box. Use
-  plain `<input>` / `<textarea>` / `<button type="submit">` with real
-  `name`s, POSTing to the skeleton's `/api/submit` endpoint (e.g.
-  `<form method="POST" action="/api/submit">`). The skeleton provides
-  `api/submit` → Lead; it is track-agnostic and already wired.
-- Every CTA is an anchor (`#book`, `tel:`, `mailto:`).
+Two mechanical constraints, because no JavaScript runs for the visitor on
+first paint:
+
+- **Every CTA is an anchor** (`href="#book"`, `tel:`, `mailto:`), never an
+  `on:click` button. A click handler on a prerendered page is a dead button.
+- **There is no `/api/submit` route on this track.** Do not author one. A form
+  posts natively to the shared capture endpoint — see "Lead capture" below.
+
+### Lead capture (there is no `/api/submit` on this track)
+
+Earlier versions of this skill told you to POST to a generated `/api/submit`
+route. **That route no longer exists**, and on a static site it never really
+did: `adapter-static` cannot prerender a POST handler, so the scaffold deleted
+`src/routes/api` and every lead those sites collected went to a 404. The form
+now posts straight to the shared capture API, which is the same endpoint the
+html and react tracks use — one capture path for every engine.
+
+```svelte
+<form method="POST" action="__CAPTURE_API_BASE__/capture/form">
+  <input type="hidden" name="paw_site_id" value="__SITE_ID__" />
+  <input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__" />
+  <input type="hidden" name="paw_redirect" value="/thank-you" />
+
+  <input name="full_name" required />
+  <input type="email" name="email" required />
+  <input type="tel" name="phone" />
+  <textarea name="message"></textarea>
+
+  <button type="submit">Send</button>
+</form>
+```
+
+**Write the three `__TOKENS__` exactly as shown.** They are placeholders that
+publish substitutes with the real capture URL, site id and signed key. You do
+not have those values while authoring, so never invent one or leave `action`
+empty.
+
+**The visible field names are fixed**: `full_name`, `email`, `phone`,
+`message`. A field named anything else is stored empty and the business never
+sees what the visitor typed. The NAMES are the contract; the labels, grouping,
+order and styling of those inputs are yours, and the snippet above is stripped
+to the contract rather than offered as a layout to copy. Which of the four you
+show is a decision for the form you were asked for.
+
+**`paw_redirect` must be a relative path on this site** — an absolute URL is
+rejected with a 400 — so add the route it names to your source map:
+
+```
+src/routes/thank-you/+page.svelte    the confirmation page
+src/routes/thank-you/+page.ts        export const prerender = true;
+```
+
+No `use:enhance`, no `on:submit`, no `fetch`. This is a plain native browser
+POST so the lead is captured whether or not JavaScript ran — which on a
+prerendered page is the whole point.
 
 ### Sourcing photography (real images, not placeholders)
 
@@ -173,7 +217,17 @@ A marketing page needs real photography — a hero photo, section imagery. Do
 photo-free wireframe when the page calls for imagery. Instead pull real,
 free stock photos:
 
+0. Call **`list_site_assets`** (MCP tool
+   `mcp__pocketpaw_sites_manager__list_site_assets`) with the `pocket_id`
+   FIRST. These are the images the OWNER uploaded for this site — their logo,
+   their product shots, their team. They beat stock every time, and shipping a
+   stock face when the owner supplied their own is the most obvious way a
+   generated site reads as generic. Each `url` is absolute, public and
+   permanent: embed it verbatim as `src`, never copy the file into the source
+   map. If the user says "my logo" or "the photo I uploaded", it is here. An
+   empty list simply means they uploaded none — carry on to stock.
 1. Call **`search_stock_images`** (MCP tool `mcp__pocketpaw_stock__search_stock_images`)
+   for whatever the owner's own assets did not cover,
    with a **generic, descriptive** query — `"modern dental office"`,
    `"artisan bakery bread"` — not a hyper-specific one (`"dentist in Akron"`
    returns weak matches). Pass `orientation` (`landscape` for heroes/banners,
@@ -185,12 +239,30 @@ free stock photos:
 3. **Always set `alt`** from the returned `alt`, and **render the `credit`**
    line somewhere near the image or in the footer (e.g. a small muted
    "Photos by … on Unsplash" line). This is required by the providers' terms.
-4. If `search_stock_images` returns an **empty list** (no provider key
+4. **For what stock cannot supply, GENERATE it** — call
+   **`generate_site_image`** (MCP tool
+   `mcp__pocketpaw_site_media__generate_site_image`) with the `pocket_id` and a
+   concrete visual `prompt`: subject, composition, lighting, mood. This is the
+   rung for a bespoke hero, a product or concept shot, an abstract brand
+   texture — the things a stock library does not hold. It **costs money per
+   image**, so reach for it deliberately and never for ordinary photography
+   stock already covers. It returns a permanent public `url` — embed it
+   verbatim, exactly like an owner asset. On an error, relay the reason and drop
+   to the fallback below; never invent a URL.
+5. If `search_stock_images` returns an **empty list** (no provider key
    configured, or no match), fall back gracefully to the copy-and-color
    treatment — a tasteful gradient/solid hero — rather than a broken `<img>`.
    Never fabricate a photo URL.
 
 One hero photo plus a couple of section images is plenty — don't over-request.
+
+**Video and other media are allowed.** If the brief's asset manifest carries a
+`video` asset (or the user hands you one), use it at its native medium - a
+`<video autoplay muted loop playsinline>` hero backdrop over a poster or CSS
+fallback is a first-class choice, not something to skip or flatten to a still.
+There is no approved-media list here. The only asset rule is that the URL has to
+be one you were actually given rather than one you invented.
+
 
 ## STEP 2 — Assemble the `source` map (the §4.3 contract)
 
@@ -200,9 +272,13 @@ strings. The generator writes these files onto the paw-sites skeleton and
 prerenders.
 
 **The skeleton provides** everything infrastructural — `package.json`,
-`svelte.config.js`, `vite.config`, the adapter, `app.html`, and the
-`api/submit` lead endpoint. **You provide only** the route + component +
-style files. **Required keys:**
+`svelte.config.js`, `vite.config`, the adapter, and `app.html`. You may
+override `package.json`, `vite.config.*`, `svelte.config.js`, `bunfig.toml` or
+`.npmrc` at the root when the build needs it (the generator merges them with
+its toolchain), but usually you don't. It does **not** provide a lead
+endpoint: the form posts straight to the shared capture API (see "Lead
+capture"). **You provide** the route + component + style files. **Required
+keys:**
 
 ```
 src/routes/+page.svelte      the composition root — imports + renders the sections in order
@@ -215,21 +291,23 @@ src/lib/components/*.svelte   your section components (Hero.svelte, Pricing.svel
 Add as needed:
 
 ```
-src/lib/*.js                 helpers (e.g. reveal.js — a use:reveal scroll action)
+src/lib/*.js                     helpers (e.g. reveal.js — a use:reveal scroll action)
+src/routes/<slug>/+page.svelte   a second page, served at /<slug>
+src/routes/<slug>/+page.ts       export const prerender = true;  (per route)
 ```
 
 A minimal valid map therefore looks like:
 
 ```json
 {
-  "src/routes/+page.svelte": "<script>\n  import Nav from '$lib/components/Nav.svelte';\n  import Hero from '$lib/components/Hero.svelte';\n  ...\n</script>\n\n<Nav />\n<main>\n  <Hero />\n  ...\n</main>\n<Footer />\n",
+  "src/routes/+page.svelte": "<script>\n  import SectionA from '$lib/components/SectionA.svelte';\n  import SectionB from '$lib/components/SectionB.svelte';\n  ...\n</script>\n\n<SectionA />\n<main>\n  <SectionB />\n  ...\n</main>\n<SectionC />\n",
   "src/routes/+layout.svelte": "<script>\n  import '../app.css';\n  let { children } = $props();\n</script>\n\n{@render children()}\n",
   "src/routes/+page.ts": "export const prerender = true;\n",
   "src/app.css": ":root { --ink: #17130f; --green: #2ee08a; ... }\n/* fonts, reset, base type */\n",
-  "src/lib/components/Hero.svelte": "<script> ... </script>\n<section class=\"hero\"> ... </section>\n<style> ... </style>\n",
-  "src/lib/components/Pricing.svelte": "...",
-  "src/lib/components/Faq.svelte": "...",
-  "src/lib/components/Footer.svelte": "...",
+  "src/lib/components/SectionA.svelte": "<script> ... </script>\n<section> ... </section>\n<style> ... </style>\n",
+  "src/lib/components/SectionB.svelte": "...",
+  "src/lib/components/SectionC.svelte": "...",
+  "src/lib/components/SectionD.svelte": "...",
   "src/lib/reveal.js": "export function reveal(node, options = {}) { ... }\n"
 }
 ```
@@ -244,6 +322,74 @@ Notes that the tool enforces, so get them right:
   map (a missing import breaks the build).
 - Values are **strings**. Keep real newlines/indentation; this is source.
 
+### When the site needs more than one page
+
+One page is still right for a landing page: one story, one nav of `#anchors`,
+one CTA. Add a route when the brief names something a visitor would go looking
+for on its own — a service line with real copy behind it, a menu or price list,
+a catalogue, a portfolio, a genuine About / Team / Contact story, or anything the
+user asked for by name ("and a page for our team"). A section that runs three
+sentences is a section; don't split a thin page into four thin ones.
+
+A route is TWO keys, and the pair is the whole recipe:
+
+```
+src/routes/menu/+page.svelte    the page — imports the same $lib components
+src/routes/menu/+page.ts        export const prerender = true;
+```
+
+Write the `+page.ts` every time: the root page's flag is page-level and does
+**not** cascade to a child route. The skeleton already ships a second route —
+`src/routes/thank-you/`, where a submitted lead form lands — so a multi-route
+site is the ordinary shape here, not an escape hatch. Nav and
+footer are components under `src/lib/components/`, so every page imports the same
+two files rather than retyping the markup.
+
+**Author the route before you link it.** The static adapter runs with
+`handleHttpError: 'warn'`, so a nav `href="/menu"` with no `src/routes/menu/`
+behind it builds green, deploys, and 404s on the visitor's first click — nothing
+downstream catches it. Put every route in the same `source` map as the nav that
+links to it.
+
+### npm packages (when the design needs a library)
+
+The skeleton owns the toolchain (`svelte`, `@sveltejs/kit`, `vite`,
+`tailwindcss` and the rest), so never declare those. Any other npm package
+(`three`, `gsap`, `lenis`, `ogl`, a date library) you **declare**: pass
+`dependencies=[{"name": "three"}]` (optionally with a `"range"`) to
+`create_svelte_site`, or call `set_site_dependencies(pocket_id, add=[...],
+remove=[...])` on an existing site. Never write `paw.dependencies.json`
+yourself.
+
+Any public npm package works, at any exact version, range or dist-tag
+(`{"name": "bits-ui", "range": "next"}`); each is pinned to an exact version.
+`rejected` only holds what could not be resolved (a misspelt name, no matching
+version): don't import those. `warnings` carry security advisories or
+deprecation notes; mention them to the user.
+
+**Import packages the normal way.** Component and icon libraries
+(`bits-ui`, `lucide-svelte`) are fine as top-level imports. Only a browser-only
+library that touches `window` / `document` when it is imported (`three`, some
+animation and carousel libraries) goes inside `onMount` with a dynamic
+`import()`, because the page is prerendered where `window` doesn't exist:
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+  let canvas;
+  onMount(async () => {
+    const THREE = await import('three');
+    // build the scene on `canvas`; the CSS fallback under it is the resting state
+  });
+</script>
+<canvas bind:this={canvas}></canvas>
+```
+
+If a `top_level_client_import` warning names a library, move that one into
+`onMount`. Packages run because the site
+keeps its client bundle (the default). A **dynamic** svelte site takes no
+packages: they come back rejected with `engine_unsupported`.
+
 ## STEP 3 — Call `create_svelte_site`
 
 Hand the source map to the tool. It persists the pocket stamped
@@ -255,24 +401,113 @@ section). You don't pass `pattern`; the tool derives it from the bindings.
 
 ```
 mcp__pocketpaw_sites_manager__create_svelte_site(
-  source = <the source map from STEP 2>,
-  name   = "Bright Smile Dental"      // optional; defaults to "Svelte site"
+  source       = <the source map from STEP 2>,
+  name         = "<the business name>",  // optional; defaults to "Svelte site"
+  dependencies = [{"name": "three"}]     // optional; only what you import
 )
 ```
 
-It returns `{ ok, pocket_id, pocket }`. Keep `pocket_id` for STEP 4. If
+It returns `{ ok, pocket_id, pocket, verification }` (plus `packages` /
+`rejected` when you declared any). Keep `pocket_id` for STEP 4, and run the
+verify loop below before you say anything is ready. If
 `ok` is false, **relay the error** — do **not** claim a phantom create and
 do **not** fall back to drafting a rippleSpec. The tool fails closed when
 the map is missing a required §4.3 file and names which one; add it and
 retry.
 
-## STEP 4 — Publish
+## Verify loop — never call it ready unless it passed
 
-Publish the new pocket as a site:
+Every create and edit result carries `verification`: `{status, reason?,
+layers, errors, warnings}`, from a static check, a real build and a
+headless-browser load of the built pages. It is your only evidence the draft
+works.
+
+- **`passed`** — only now tell the user the site (or the change) is ready.
+- **`failed`** — fix the listed `errors` (each names `file`, `line`,
+  `message`), then call `mcp__pocketpaw_sites_manager__verify_site(pocket_id)`.
+  At most **3** fix-and-verify rounds; if errors remain, tell the user plainly
+  which ones are left. Never call it ready.
+- **`unverified`** — it could not be checked (`reason`, e.g.
+  `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
+  why. When the result has a `message`, give that sentence as written: a full
+  build queue is not an outage, so never say the build server is down. On
+  `timeout` or `waiting_for_capacity` the build is still coming, so one more
+  `verify_site` is worth it. Never report `unverified` as a pass.
+- **`warnings`** don't block a pass, but move a `top_level_client_import`
+  client-side anyway: it is how a prerender build breaks.
+- **After `edit_svelte_component`**: a static or build failure is rolled
+  back (`ok: false`, `status: "rolled_back"`, the previous file untouched), so
+  fix the errors and send the edit again. A browser-layer failure keeps the
+  edit staged: fix it with a follow-up edit, then `verify_site`.
+
+## STEP 4 — Stop at the draft (publish only when asked)
+
+**Default: create the draft, do NOT publish.** After `create_svelte_site`
+returns, the pocket exists as a reviewable **draft** — a real, editable svelte
+site the user can preview in-app right now (open **/sites** → the site's
+**Preview** tab). Publishing deploys it to the public edge (and, on a paid
+tier, can open a checkout), so taking it live is the user's call, not an
+automatic next step.
+
+So **do NOT call `publish` by default.** Instead, once `verification.status`
+is `passed`, tell the user the draft is ready, point them at the Preview, and offer to take it live — e.g. *"Your
+site is ready as a draft. Preview it under /sites, and say
+**publish** (or 'make it live') when you're happy with it."* Then stop. Keep
+iterating on the draft if they want changes; an edit is a draft too.
+
+**Publish in this same turn ONLY if the user's request already asked to go
+live** — "publish it", "make it live", "ship it", "put it online". When they
+did, publish the pocket:
 
 ```
 mcp__pocketpaw_sites_manager__publish(pocket_id = <the id from STEP 3>)
 ```
+
+### If the user then asks for a CHANGE — edit, never re-create
+
+"Shorten the headline", "make the nav sticky", "add a testimonials section",
+"add an about page" is an **edit of the site you just made**, not a new one.
+`create_svelte_site` has no update mode: calling it again mints a **second**
+site pocket at a **second url** and leaves the one the user is looking at
+untouched. Edit the existing pocket instead:
+
+```
+mcp__pocketpaw_sites_manager__edit_svelte_component(
+  pocket_id      = <the id from STEP 3>,
+  component_path = "src/lib/components/Hero.svelte",
+  edits          = [{"old_string": "<copied verbatim, must match exactly once>",
+                     "new_string": "<the replacement>"}]
+)
+```
+
+- Send a targeted **`edits`** diff, not the whole file. Pass `new_source`
+  instead only for a genuine rewrite — **exactly one** of the two per call.
+- Each `old_string` must match that file **exactly once**; include surrounding
+  context so it is unique. Read it first with `read_site_source` rather than
+  recalling it — a remembered `old_string` does not match.
+- **Adding a section is TWO calls**: `create=True` + `new_source` to write
+  `src/lib/components/Testimonials.svelte`, then a second call with `edits` on
+  `src/routes/+page.svelte` to import and render it. Stop after the first and
+  you have shipped a component nothing renders.
+- **Adding a page is THREE calls**, because a SvelteKit route is two files:
+  `create=True` for `src/routes/<slug>/+page.svelte`, again for
+  `src/routes/<slug>/+page.ts` containing `export const prerender = true;`
+  (the root page's flag is page-level and does **not** cascade to a child
+  route), then `edits` on the nav or footer to link `/<slug>`. Skip the link
+  and the page exists but nobody can find it — the tool tells you so with
+  `unreferenced: true`, and you must not report the page as added until you
+  have cleared it.
+- The generator-owned paths stay refused — `src/routes/+layout.ts`,
+  `src/lib/paw/`, the auth files and lockfiles. You write under `src/`, plus
+  the root build files (`package.json`, `vite.config.*`, `svelte.config.js`,
+  `bunfig.toml`, `.npmrc`). To add a package, call `set_site_dependencies`
+  first, then import it (browser-only libraries inside `onMount`).
+- Every edit returns `verification`; the verify loop above applies, including
+  the rolled-back vs staged split.
+- Every rule in this skill still binds — above all the **prerender rule**: an
+  edit that moves a resting value into `onMount` ships a blank section.
+- **The edit stages a DRAFT preview**; it does not publish. Say what changed
+  and publish only when they ask.
 
 The generator materializes your `source` onto the skeleton, prerenders to
 static HTML, runs the smoke gate, and deploys. Show the user the returned
@@ -285,7 +520,7 @@ is exactly why the prerender rule above is non-negotiable.)
 
 Everything above builds a **static** page. A **dynamic** svelte site is backed
 by the customer's **own live database** (a per-tenant Cloudflare D1), with
-**reads and writes**. You still author premium Svelte exactly as above — the
+**reads and writes**. You still author Svelte exactly as above — the
 difference is you also **declare a data layer** and **wire components to it**.
 
 ### How it works (the contract)
@@ -431,7 +666,7 @@ one read source (`entries`), one write action (`sign`), public (no `auth`).
 </section>
 
 <style>
-  /* real styles via the design skills — omitted here for brevity */
+  /* styles omitted here for brevity */
 </style>
 ```
 
@@ -440,21 +675,27 @@ and you call `create_svelte_site(source = <the envelope with bindings>)`. The
 tool sees the bindings, stamps `pattern="dynamic"`, and publish provisions the
 D1 + wires the read/write layer. Done.
 
-## Quality bar — done right when
+## Done when
 
-1. **You authored real Svelte.** Premium hand-written components via the
-   design skills, one per section, at the spike's quality — not a thin
-   template, not a rippleSpec, not a downgrade.
-2. **Resting state is in markup.** With JS disabled the page looks
-   finished: the hero total reads the real number, the first FAQ is open,
-   reveal content is present. Nothing important lives only in `onMount`.
+1. **You authored real Svelte components**, one per section — not a thin
+   template, not a rippleSpec.
+2. **Resting state is in markup.** With JavaScript disabled the page renders
+   its final state: any computed figure shows its real value, anything that
+   opens or reveals is already in the markup. Nothing that matters lives only
+   in `onMount`.
 3. **The source map is complete (§4.3).** `+page.svelte`, `+layout.svelte`
    (imports `app.css`), `+page.ts` (prerender), `app.css`, and the
    `src/lib/components/*.svelte` sections — every import resolvable.
-4. **It converts + captures.** CTAs are anchors, there's a real priced
-   pricing section, and a flat lead form POSTing to `/api/submit`.
-5. **You showed the live URL.** The user got the `url` from publish and a
-   pointer to /sites — not just "done". Errors were relayed, never masked.
+4. **Links and capture work.** Every CTA is an anchor, and any form you wrote
+   posts to `__CAPTURE_API_BASE__/capture/form` with its three hidden `paw_*`
+   inputs and a route for `paw_redirect` to land on.
+5. **Asset URLs are ones you were actually given**, never invented paths.
+6. **You stopped at the draft (or published only if asked).** By default the
+   user got a pointer to the in-app Preview under /sites and an offer to
+   publish — not an auto-publish. If they explicitly asked to go live, they got
+   the `url` from publish. Errors were relayed, never masked.
+7. **`verification.status` was `passed`** before you called it ready, or you
+   told the user which errors remain, or that it could not be checked and why.
 
 ## Related tools (via MCP)
 
@@ -463,8 +704,19 @@ D1 + wires the read/write layer. Done.
   `type="site"` + `engine="svelte"`, and `pattern="landing"` (static) or
   `pattern="dynamic"` (when `source` carries `objects`/`sources`/`actions`/
   `auth` bindings — see [Dynamic svelte sites](#dynamic-svelte-sites--live-data-on-the-svelte-track)).
-  Returns `{ok, pocket_id, pocket}`.
+  Returns `{ok, pocket_id, pocket, verification}`.
+- `mcp__pocketpaw_sites_manager__set_site_dependencies` — declare or drop npm
+  packages on an existing site; returns `packages`, `rejected`, `warnings`,
+  `verification`.
+- `mcp__pocketpaw_sites_manager__verify_site` — re-run the checks after a fix.
 - `mcp__pocketpaw_sites_manager__publish` — publish the pocket as a live
-  site; show the user the `url`.
+  site; show the user the `url`. Call it only when the user asks to go live
+  (draft-first — STEP 4); a plain "create a site" stops at the draft.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the
   user named one rather than describing a new site.
+- `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
+  Pass `engine="svelte"`: you get a component plus every file it needs
+  (vendored libraries included) under `src/lib/_fx/`; write them verbatim and
+  import the component as its `usage` shows (`$lib/_fx/...`). Declare nothing.
+  An effect with no svelte target comes back `engine_unsupported`: pick another.
+  On a dynamic site pass `pattern="dynamic"` and `needs_js=false`.

@@ -1,0 +1,7 @@
+# transcript: `dokku git:from-image demo <image>` failing on a missing tag.
+EXIT: 1
+--- stdout ---
+-----> Cleaning up...
+--- stderr ---
+ !     Failed to pull image registry.paw.example/demo:9f3c2e1
+ !     manifest for registry.paw.example/demo:9f3c2e1 not found

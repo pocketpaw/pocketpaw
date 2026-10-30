@@ -1,114 +1,36 @@
-# sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
-# create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
+# sites_create.py — the per-engine Paw Site tools on the ``pocketpaw_sites_manager``
+# MCP server, plus the engine-neutral secrets and integrations tools.
 #
-# Updated 2026-06-14 (feat/dynamic-sites-authoring — Paw Sites "Dynamic track",
-# RFC 12 A2) — added the create tool ``create_dynamic_site``. It mirrors
-# ``create_svelte_site`` (the agent IS the author; the payload is persisted
-# verbatim via ``agent_create`` with ``trusted=True`` and the post-create
-# session-bind + SSE side effects on the SAME ``pocketpaw_sites_manager`` server;
-# it also runs the same identity → record_tool_call → validate →
-# _require_sites_plan_or_error plan gate the other create handlers do) but the
-# payload is a rippleSpec carrying the DYNAMIC blocks (``objects`` / ``sources`` /
-# ``actions`` / ``auth``) that back the published site with the customer's own live
-# Cloudflare D1. There is no ``assemble_*`` step. It persists via
-# ``agent_create(type_="site", pattern="dynamic", ripple_spec=<spec>,
-# engine="ripple", trusted=True)``: a dynamic site IS a ripple-engine site whose
-# spec carries the dynamic declarations as sibling keys, so publish_pocket carries
-# them through generator_client.build() unchanged and the paw-sites generator
-# scaffolds the D1 migration + read/write remote functions off the same spec.
-# ``_validate_dynamic_spec`` fails the create CLOSED on a spec that isn't actually
-# dynamic (no objects, or no sources/actions/auth) so the agent fixes it instead
-# of persisting a static page through the dynamic tool.
+# Old-engine create tools: ``create_landing_site`` (ripple: copy in, structure
+# assembled in code by ``landing_assembler``), ``create_dynamic_site`` (ripple spec
+# with D1 bindings), ``create_svelte_site``, ``create_react_site`` and
+# ``create_html_site`` (the agent authors a ``{path: contents}`` source map). Their
+# edit tools are ``edit_svelte_component``, ``edit_react_component`` and
+# ``edit_html_file``; ``read_site_source`` is their reader. New sites no longer use
+# any of these: the /sites create profile denies them and routes every new site to
+# the project tools (``sites_project.py``) and the ``pocketpaw-site`` skill. They
+# stay registered for refining sites that already exist on those engines.
 #
-# Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — create_svelte_site
-# now accepts a DYNAMIC svelte site. The ``source`` envelope may carry live-data
-# bindings (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the
-# {path: contents} file map: the per-value string check now EXEMPTS those binding
-# keys (their values are lists/bools), the JSON schema's ``source`` is loosened to
-# ``additionalProperties: true``, and the handler stamps ``pattern="dynamic"`` when
-# any binding is present (else ``pattern="landing"`` for a static marketing site —
-# unchanged). The generator (generator_client._split_svelte_source) peels the
-# bindings out of ``source`` at publish and passes them as flat siblings on the
-# DSV-1 GenerateInput. Required-file validation is untouched — binding keys never
-# satisfy a §4.3 required FILE key, so they are simply ignored by the missing-keys
-# check.
+# Shared by every engine: ``verify_site`` / ``preview_site`` (the three-layer
+# verdict and a screenshot of the draft; ``play_test_site`` in sites_play_test.py
+# reuses the preview target helpers), ``set_site_dependencies`` (the only writer
+# of ``paw.dependencies.json``), ``list_site_assets``, ``request_site_secret`` /
+# ``list_site_secrets`` (names and status only, never values), and
+# ``list_site_integrations`` / ``connect_site_integration`` (one-click Connect: the
+# owner taps Connect on a chat card; no tool takes or returns a credential).
 #
-# Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — the create handlers now
-# call _require_sites_plan_or_error(workspace_id) right after input validation,
-# delegating to the shared sites.service.require_sites_plan gate. Sites is the
-# "sites" plan feature (go+); these create tools reach agent_create directly and
-# bypassed the REST router's require_plan_feature("sites") gate, so a free-plan
-# workspace could create + (then publish) a live site that GET /sites 403'd. On a
-# disallowed plan the handler now returns the plan.feature_denied MCP error
-# ("Sites requires the Go plan — upgrade, or switch workspace") so the chat
-# agent surfaces the upgrade message instead of a phantom-created site.
-# Updated: 2026-06-25 (decouple-sites-from-fabric) — the gate moved off the
-# overloaded "fabric" flag onto the dedicated "sites" flag (go+); the Fabric
-# ontology keeps "fabric" (enterprise-only).
-#
-# Updated: 2026-06-04 (feat/sites-svelte-engine) — added the SECOND deterministic
-# create tool ``create_svelte_site`` for the Paw Sites "Svelte track". It mirrors
-# ``create_landing_site`` (same direct ``agent_create`` persistence, same
-# session-bind + SSE side effects, same one server) but the payload is a
-# hand-written SvelteKit ``source`` MAP ``{relative_path: file_contents}`` (the
-# pocketpaw-create-svelte-site skill authors it via the design skills) instead of
-# a ``content`` copy object. There is no ``assemble_*`` step — the agent IS the
-# author — so the tool persists ``source`` verbatim via ``agent_create(
-# engine="svelte", source=<map>, type_="site", pattern="landing",
-# ripple_spec=None, trusted=True)``. ``trusted=True`` is correct here for a
-# different reason than the landing tool: there is NO rippleSpec to gate at all
-# (the catalog walk only runs on a non-null spec), so the source files pass
-# straight through to persistence and the generator materializes them at publish.
-#
-# Updated: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added a THIRD
-# tool ``edit_svelte_component`` for targeted edits of a PUBLISHED svelte site.
-# It takes ``pocket_id`` + ``component_path`` + the FULL ``new_source`` for one
-# file, and delegates to ``sites_service.edit_svelte_component`` (persist the one
-# file via the pockets service, then republish; roll back + leave the prior
-# deploy if the rebuild's smoke gate fails). It registers on the SAME
-# ``pocketpaw_sites_manager`` server as create + publish (see sites.py) so the
-# create → publish → edit hops sit side by side for the chat agent.
-#
-# Updated: 2026-06-18 (fix/sites-edit-draft-not-publish, BUG 2) — an edit now
-# stages a DRAFT PREVIEW, not a live publish, so the success result no longer
-# narrates "published"/"republished"/"live at". ``_edit_svelte_component_handler``
-# returns ``{ok, status:"draft", is_live:false, site:{..., preview_url, deployed},
-# component_path, message}`` with a message that says the change is a draft preview
-# (not live), the url is a PREVIEW (not the published site), and the user must click
-# "Submit for review" to publish. The tool docstring the agent reads was reworded to
-# match. The create + publish tools are unchanged (publish is a real live deploy).
-#
-# Updated: 2026-06-18 (feat/sites-diff-edit, P3) — ``edit_svelte_component`` now
-# accepts a TARGETED diff: ``edits=[{old_string, new_string}, ...]`` (search/replace
-# blocks like the built-in Edit tool) as an ALTERNATIVE to the full ``new_source``,
-# so the agent emits ONLY the change for a small edit instead of regenerating the
-# whole file (the dominant edit-latency cost). Exactly one of ``edits`` /
-# ``new_source`` is required (``new_source`` dropped from the schema's ``required``).
-# The handler validates the diff SHAPE (a non-empty list of string {old_string,
-# new_string} dicts) and forwards both fields to ``sites_service.edit_svelte_component``,
-# which applies the blocks to the pocket's CURRENT source (apply_edits) — a 0/>1
-# match raises ValidationError, relayed to the agent by code so it can retry. The
-# tool description steers the agent to PREFER ``edits`` for small changes and reserve
-# ``new_source`` for large rewrites.
-#
-# This is the decisive bypass of the dashboard-built ``pocket_specialist``
-# create machinery. The agent-mode pocket_specialist path (draft kit / plan kit /
-# subagent delegation + the validate-redraft loop) kept downgrading landing
-# sites to generic hero+grid+card widgets no matter what the prompt whitelisted,
-# because the LLM owned the page STRUCTURE. Here, the LLM provides COPY ONLY and
-# this tool assembles the marketing-widget structure in code (``landing_assembler
-# .assemble_landing_spec``), then persists it DIRECTLY through the pockets
-# service's ``agent_create`` — NO pocket_specialist, NO validate/redraft loop, NO
-# subagent. The structure cannot be downgraded.
-#
-# Mirrors the sibling ``sites.py`` (publish) server: ``create_sdk_mcp_server``
-# with an SDK import-guard, ``SERVER_NAME`` / ``*_TOOL_ID`` allowlist constants,
-# and ContextVar-sourced identity (the same ``current_workspace_id`` /
-# ``current_user_id`` accessors in ``ee.cloud.chat.agent_service`` the publish +
-# pocket-specialist servers read). Tool id namespaces under the SAME
-# ``pocketpaw_sites_manager`` server (``mcp__pocketpaw_sites_manager__
-# create_landing_site``) so the create + publish hops sit side by side for the
-# chat agent — the SKILL produces copy → create_landing_site → publish.
+# Invariants:
+#   * every handler resolves identity from the chat ContextVars, records the call,
+#     and runs ``_require_sites_plan_or_error`` (the same ``sites`` plan gate the
+#     publish path and the REST router use) before it writes; the refusal says what
+#     the call did not do (create / edit / read) in plain words a user can read;
+#   * creates persist a DRAFT and mint a draft Site doc (``_mint_draft_site``); they
+#     never publish. Edits stage a draft too, and report ``verification`` per the
+#     verify contract (static check now, build and browser verdict on the next call);
+#   * ``_INTEGRATION_NEXT_STEPS`` has one wiring line per registered provider, in
+#     client (paw.js / ``Paw.call``) and server (``pawCall`` with
+#     ``env.PAW_GATEWAY_TOKEN``) form where both exist. A provider added to the
+#     registry without a line fails ``test_integration_next_steps_cover_every_provider``.
 """Agent-side MCP surface for DETERMINISTIC Paw Site landing-page creation.
 
 A landing site is built from an LLM ``content`` copy object. This tool:
@@ -136,9 +58,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+from pocketpaw_ee.sites import dependency_manifest, html_paths, react_paths, svelte_paths
 
 from ._audit import record_tool_call
 
@@ -162,12 +87,71 @@ EDIT_SVELTE_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_svelte_component"
 # create_dynamic_site → publish (publish carries the dynamic blocks through to the
 # paw-sites generator, which scaffolds the per-tenant D1 + read/write remote fns).
 CREATE_DYNAMIC_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_dynamic_site"
+# The html-track create tool (HE-6) — also the SAME server. The skill flow is:
+# author a raw HTML/CSS/JS source map → create_html_site → publish. Publishing an
+# html site skips the Node build entirely (generator_client.needs_node_build is
+# False for html); the raw markup is materialized and served as-is.
+CREATE_HTML_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_html_site"
+
+# RX-2 — the react-track create tool. Same shape as the html id above; the
+# authoring hop is author a React source map → create_react_site → publish.
+# Publishing a react site DOES run a Node build (a Vite SSG) but deploys the
+# prerendered static output assets-only, with no server entry.
+CREATE_REACT_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_react_site"
+
+# RX-3 — the react-track EDIT tool. Same server again. Without it the agent's only
+# response to "shorten the hero headline" on a react site was to call
+# ``create_react_site`` a second time, which mints a SECOND site pocket instead of
+# changing the one the user is looking at.
+EDIT_REACT_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_react_component"
+
+# HE-10 — the html-track EDIT tool, and the last engine to get one. Same server
+# again. Its absence had the same shape as RX-3's: ``edit_svelte_component``
+# rejects an html pocket and so does ``edit_react_component``, so "change the phone
+# number in the footer" had no tool that would take it and the agent's only move was
+# a second ``create_html_site`` — a second pocket at a second url. Named for a FILE,
+# not a component, because an html site has no component model to name.
+EDIT_HTML_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_html_file"
+
+# PP-1 — declare / drop npm packages on a svelte, react or html site. Same server
+# again. The only writer of ``paw.dependencies.json``; every edit lane refuses it.
+SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
+
+# PP-2 — re-run the three-layer verification (static, build, browser) on a site's
+# current draft. Same server again.
+VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
+
+# Screenshot the current draft so the agent can see what it built. Same server.
+PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
+# Play the draft in a remote browser (sites_play_test.py). Same server.
+PLAY_TEST_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__play_test_site"
+
+# Site secrets: ask the owner for one by name, list names + status. No values.
+REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
+LIST_SITE_SECRETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_secrets"
+
+# Sites integrations: list what a site is linked to, ask the owner to connect one.
+# The agent never sees a credential; the owner taps Connect on the chat card.
+LIST_SITE_INTEGRATIONS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_integrations"
+CONNECT_SITE_INTEGRATION_TOOL_ID = f"mcp__{SERVER_NAME}__connect_site_integration"
 
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
     EDIT_SVELTE_COMPONENT_TOOL_ID,
     CREATE_DYNAMIC_SITE_TOOL_ID,
+    CREATE_HTML_SITE_TOOL_ID,
+    CREATE_REACT_SITE_TOOL_ID,
+    EDIT_REACT_COMPONENT_TOOL_ID,
+    EDIT_HTML_FILE_TOOL_ID,
+    SET_SITE_DEPENDENCIES_TOOL_ID,
+    VERIFY_SITE_TOOL_ID,
+    PREVIEW_SITE_TOOL_ID,
+    PLAY_TEST_SITE_TOOL_ID,
+    REQUEST_SITE_SECRET_TOOL_ID,
+    LIST_SITE_SECRETS_TOOL_ID,
+    LIST_SITE_INTEGRATIONS_TOOL_ID,
+    CONNECT_SITE_INTEGRATION_TOOL_ID,
 )
 
 
@@ -243,6 +227,385 @@ def _missing_source_keys(source: dict[str, Any]) -> list[str]:
         if not any(k.startswith(prefix) for k in source):
             missing.append(f"{prefix}*.svelte")
     return missing
+
+
+# ── html-track source map (HE-6) ────────────────────────────────────────────
+# An html-engine ``source`` map is a raw {relative_path: file_contents} map of
+# HTML/CSS/JS — no SvelteKit scaffold, no bundler. The only hard requirement is
+# the entry document ``index.html``: the paw-sites generator materializes the map
+# verbatim (html-scaffold.ts:materializeHtml) and the edge serves ``index.html``
+# at the site root, so a map without it is unservable. Everything else (styles,
+# scripts, extra pages, assets) is optional and passes through as authored.
+HTML_REQUIRED_KEYS = ("index.html",)
+
+
+def _missing_html_keys(source: dict[str, Any]) -> list[str]:
+    """Return the required html keys absent from ``source`` (empty list = valid).
+
+    Only ``index.html`` is required — it is the entry the generator materializes
+    and the edge serves at the site root. Used to fail the create closed with an
+    actionable message rather than persisting a site with no servable entry."""
+    return [k for k in HTML_REQUIRED_KEYS if k not in source]
+
+
+# ── react-track source map (RX-2) ───────────────────────────────────────────
+# A react-engine ``source`` map is a {relative_path: file_contents} map of
+# hand-written React files. The generator (paw-sites react-scaffold.ts) owns the
+# build shell — index.html, package.json, vite.config.ts, paw-prerender.mjs and
+# the two ``src/paw/`` entries — and materializes this map on top of it.
+#
+# The only required key is the composition root ``src/App.tsx``: BOTH generated
+# entries (client and server) import it by that exact path, so a map without it
+# builds nothing. The generator asserts the same key, but failing here names it
+# before a build is ever started.
+REACT_REQUIRED_KEYS = ("src/App.tsx",)
+
+# Paths the generator owns and a source map may NOT write. Mirrors
+# ``RESERVED_FILES`` + ``RESERVED_NAMESPACE`` in paw-sites' react-scaffold.ts,
+# which throws on a collision — this is the same guard moved to create time, so
+# the agent gets an actionable message instead of a build failure at publish.
+#
+# Reserving them is not tidiness: an author who could overwrite ``index.html`` or
+# ``paw-prerender.mjs`` could remove the prerender outlet or the pass that fills
+# it, turning the site back into a shell that is blank with JavaScript disabled —
+# exactly what this engine exists to refuse to ship. And an author who could
+# overwrite ``package.json`` would be writing the dependency manifest, which is
+# where the supply-chain release-age floor is enforced.
+#
+# RX-3: the policy itself now lives in ``pocketpaw_ee.sites.react_paths`` because
+# the EDIT lane is a second writer of the same map and two copies of a guard drift.
+# These names are re-exported here (and stay in ``__all__``) so every importer of
+# the create-time spelling keeps working.
+REACT_RESERVED_FILES = react_paths.REACT_RESERVED_FILES
+REACT_RESERVED_PREFIX = react_paths.REACT_RESERVED_PREFIX
+
+
+def _missing_react_keys(source: dict[str, Any]) -> list[str]:
+    """Return the required react keys absent from ``source`` (empty list = valid).
+
+    Only ``src/App.tsx`` is required — the composition root both generated entries
+    import. Everything else (the components it imports, its CSS, ``public/``
+    assets) is the author's business."""
+    return [k for k in REACT_REQUIRED_KEYS if k not in source]
+
+
+def _reserved_react_keys(source: dict[str, Any]) -> list[str]:
+    """Return the source-map keys that collide with a generator-owned path.
+
+    A thin alias for ``react_paths.reserved_react_keys`` (RX-3), which normalizes
+    backslashes and ``.``/``..`` segments so ``./index.html`` and
+    ``src\\paw\\x.tsx`` cannot slip past the check. Kept under this name because
+    the create handler and its tests call it."""
+    return react_paths.reserved_react_keys(source)
+
+
+# ── Author dependencies (PP-1) ──────────────────────────────────────────────
+# The JSON schema for the ``dependencies`` param every source-engine create tool
+# takes, and for ``set_site_dependencies``' ``add``. Shared so the three creates and
+# the setter describe the same shape.
+DEPENDENCY_REQUESTS_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "description": (
+        "Optional npm packages this site's code imports, as [{name, range?}] — e.g. "
+        '[{"name": "three"}, {"name": "gsap", "range": "^3.12"}, '
+        '{"name": "bits-ui", "range": "next"}]. Any public npm package works, at any '
+        "version, range or dist-tag; each is resolved on the npm registry and pinned "
+        "to an exact version. Toolchain packages (svelte, react, vite, tailwindcss, "
+        "...) are already provided — do not list them. A package that cannot be "
+        "resolved (misspelt name, no matching version) comes back in `rejected`; "
+        "security advisories come back in `warnings` and do not block."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "The npm package name."},
+            "range": {
+                "type": "string",
+                "description": (
+                    "Optional exact version, semver range or dist-tag (`next`, "
+                    "`beta`); omit for `latest`."
+                ),
+            },
+        },
+        "required": ["name"],
+        "additionalProperties": False,
+    },
+}
+
+
+#: PP-3 — appended to every source-engine create/edit description. The verdict is
+#: the agent's only evidence the draft works; "ready" on anything but ``passed``
+#: is the bug this whole pipeline exists to stop.
+VERIFY_CONTRACT = (
+    " VERIFY: the result carries `verification`. Tell the user the site is ready "
+    "ONLY when `verification.status` is `passed`. On `failed`, fix the "
+    "`verification.errors` (file/line) and call verify_site. On `unverified`, say "
+    "it could not be checked and give the `reason`; when there is a `message`, give "
+    "that sentence as written (a full build queue is not an outage)."
+)
+
+#: Appended to every EDIT tool description. An edit answers in about a second with the
+#: static check only; the build and browser check run in the background. Verifying
+#: after every edit is what made edits slow, so the rule is once per turn, at the end.
+EDIT_VERIFY_CONTRACT = (
+    " VERIFY ONCE PER TURN, AT THE END: this result's `verification` is the static "
+    "check only (`static`); the build and browser check run in the background "
+    "(`status:'pending'`, `build:'pending'`, `job_id`). Their verdict comes back on "
+    "your NEXT sites tool result as `previous_verification`; if that is `failed`, "
+    "fix its `errors` with a follow-up edit (a build failure is reported, never "
+    "rolled back). Make every edit the change needs, then call verify_site ONCE and "
+    "tell the user the site is ready only when it returns `passed`."
+)
+
+
+def _manifest_keys(source: dict[str, Any]) -> list[str]:
+    """Keys that spell the reserved dependency manifest, in any form."""
+    return sorted(k for k in source if dependency_manifest.is_dependency_manifest_path(k))
+
+
+def _manifest_in_source_error(tool_name: str, keys: list[str]) -> dict[str, Any]:
+    return _error_response(
+        f"{tool_name} `source` may not contain {', '.join(keys)} — that is the site's "
+        "dependency manifest, and only the resolver writes it. Declare packages with "
+        "the `dependencies` argument instead."
+    )
+
+
+async def _resolve_create_dependencies(
+    engine: str, raw: object, source: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Resolve a create tool's ``dependencies`` and fold them into ``source``.
+
+    Returns ``(source, report)``. ``report`` is ``None`` when the caller passed no
+    ``dependencies`` (the create body stays exactly as before), else
+    ``{packages: {name: {version}}, rejected: [...]}``. A request the resolver
+    refuses never blocks the create: it is reported, and the site is created
+    without it. The manifest is only written when at least one package resolved.
+    """
+    if raw is None:
+        return source, None
+    from pocketpaw_ee.sites import dependency_resolver
+
+    requests, rejected = dependency_resolver.coerce_requests(raw)
+    report: dict[str, Any] = {
+        "packages": {},
+        "rejected": [r.as_dict() for r in rejected],
+        "warnings": [],
+    }
+    if not requests:
+        return source, report
+    if engine == "svelte" and _has_svelte_bindings(source):
+        # PP-2: a dynamic (worker-rendered) svelte site refuses author packages at
+        # declaration time — the same rule ``set_site_dependencies`` applies — so the
+        # site is created without them and never reaches a publish-time 422.
+        from pocketpaw_ee.sites.service import DYNAMIC_PACKAGES_REASON
+
+        report["rejected"] += [
+            {"name": r.name, "code": "engine_unsupported", "reason": DYNAMIC_PACKAGES_REASON}
+            for r in requests
+        ]
+        return source, report
+    result = await dependency_resolver.resolve_dependencies(requests, engine)
+    report["rejected"] += [r.as_dict() for r in result.rejected]
+    report["warnings"] += list(getattr(result, "warnings", None) or [])
+    if not result.packages:
+        return source, report
+    entries = {name: pkg.manifest_entry() for name, pkg in result.packages.items()}
+    report["packages"] = {name: {"version": e["version"]} for name, e in sorted(entries.items())}
+    return {
+        **source,
+        dependency_manifest.DEPENDENCY_MANIFEST_PATH: dependency_manifest.render_manifest(entries),
+    }, report
+
+
+def _with_dependency_report(body: dict[str, Any], report: dict[str, Any] | None) -> dict[str, Any]:
+    """Add ``packages`` / ``rejected`` to a create body when dependencies were asked for."""
+    if report is None:
+        return body
+    body = {**body, "packages": report["packages"], "rejected": report["rejected"]}
+    if report.get("warnings"):
+        body["warnings"] = report["warnings"]
+    if report["rejected"]:
+        body["message"] = (
+            "The site was created, but some packages were refused (see `rejected`). "
+            "Do not import them — pick an alternative or drop the feature, and tell "
+            "the user if it changes what they asked for."
+        )
+    return body
+
+
+# ── Verification (PP-2) ─────────────────────────────────────────────────────
+# Every create and edit result carries ``verification`` — the §5 verdict of
+# docs/design/drafts/2026-09-24-sites-deps-verify-contract.md — so the agent can
+# tell the user the truth about whether the draft works. It is computed by
+# ``pocketpaw_ee.sites.verify`` and bounded here by a HARD deadline: the verify
+# waits ``PAW_SITES_VERIFY_WAIT_SEC`` for the sandbox layers, and this adds the static
+# check's own budget on top, so a tool call can never hang on a wedged queue. On
+# expiry the result is ``unverified`` / ``timeout`` and the build keeps running — the
+# next ``verify_site`` attaches to the same job.
+
+#: Seconds on top of the sandbox wait for the static check and bookkeeping.
+VERIFY_HARD_DEADLINE_SLACK_SEC = 45
+
+#: ripple sites (landing and dynamic) have no verify lane — see ``verify``'s header.
+RIPPLE_NOT_VERIFIABLE_NOTE = (
+    "ripple sites are assembled from vetted components (landing) or rendered by a "
+    "Worker (dynamic); there is no authored code for the verify pipeline to check."
+)
+
+
+async def _verification_for(workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """Run ``verify.verify_site`` for a just-written pocket; never raises, never hangs."""
+    import asyncio
+
+    from pocketpaw_ee.sites import verify
+
+    deadline = verify.verify_wait_seconds() + VERIFY_HARD_DEADLINE_SLACK_SEC
+    try:
+        return await asyncio.wait_for(
+            verify.verify_site(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id),
+            timeout=deadline,
+        )
+    except TimeoutError:
+        return verify.unverifiable("timeout")
+    except Exception:  # noqa: BLE001 — a verify that could not run is reported, not raised
+        logger.warning("sites: verification failed to run for %s", pocket_id, exc_info=True)
+        return verify.unverifiable("verify_unavailable")
+
+
+def _ripple_verification() -> dict[str, Any]:
+    from pocketpaw_ee.sites import verify
+
+    return verify.unverifiable("engine_not_verifiable", note=RIPPLE_NOT_VERIFIABLE_NOTE)
+
+
+#: The edit path waits only for the static check (about a second); this bounds a
+#: wedged checker or store so an edit can never hang.
+EDIT_VERIFY_DEADLINE_SEC = 30
+
+
+def _half_step_verification() -> dict[str, Any]:
+    from pocketpaw_ee.sites import verify
+
+    return verify.half_step_verdict()
+
+
+async def _edit_verification(workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+    """``verify.verify_edit`` for a just-edited pocket: the static check now, the sandbox
+    layers enqueued (``status: pending``). Never raises, never hangs."""
+    import asyncio
+
+    from pocketpaw_ee.sites import verify
+
+    try:
+        return await asyncio.wait_for(
+            verify.verify_edit(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id),
+            timeout=EDIT_VERIFY_DEADLINE_SEC,
+        )
+    except TimeoutError:
+        return verify.unverifiable("timeout")
+    except Exception:  # noqa: BLE001 — a verify that could not run is reported, not raised
+        logger.warning("sites: edit verification failed to run for %s", pocket_id, exc_info=True)
+        return verify.unverifiable("verify_unavailable")
+
+
+async def _settled_previous(pocket_id: Any) -> dict[str, Any] | None:
+    """The finished background verdict of this pocket's last edit, once. Never raises.
+
+    Read only for a pocket the CALLER can read, in the caller's workspace: the verify
+    store is keyed by pocket id alone, and a build verdict is still that pocket's
+    diagnostics, so an id from another tenant answers nothing.
+    """
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return None
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return None
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import verify
+
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except Exception:  # noqa: BLE001 — missing or foreign: nothing to report
+        return None
+    # ``get`` gates by owner / sharing / visibility, not by workspace, so the chat's
+    # workspace must match too (the same rule ``handlers/sites._refine_engine`` keeps).
+    if str(pocket.get("workspace") or "") != str(workspace_id):
+        return None
+    try:
+        return verify.settled_verdict(pocket_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("sites: could not read the previous verdict for %s", pocket_id)
+        return None
+
+
+def _attach_previous(out: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    """Put ``previous_verification`` on a tool result: into the JSON body of a success,
+    as an extra text block on an error or an image result."""
+    content = list(out.get("content") or [])
+    if not out.get("is_error") and len(content) == 1 and content[0].get("type") == "text":
+        try:
+            body = json.loads(content[0]["text"])
+        except (ValueError, TypeError):
+            body = None
+        if isinstance(body, dict):
+            body["previous_verification"] = previous
+            return {
+                **out,
+                "content": [
+                    {**content[0], "text": json.dumps(body, separators=(",", ":"), default=str)}
+                ],
+            }
+    note = (
+        "previous_verification (the background build + browser check of your last "
+        "edit): " + json.dumps(previous, separators=(",", ":"), default=str)
+    )
+    return {**out, "content": [*content, {"type": "text", "text": note}]}
+
+
+def _log_edit_tool(tool_name: str, pocket_id: Any, out: dict[str, Any], started: float) -> None:
+    status = "error" if out.get("is_error") else "ok"
+    verification = ""
+    content = out.get("content") or []
+    if status == "ok" and content and content[0].get("type") == "text":
+        try:
+            body = json.loads(content[0]["text"])
+            verification = str(((body or {}).get("verification") or {}).get("status") or "")
+        except (ValueError, TypeError, AttributeError):
+            verification = ""
+    logger.info(
+        "sites.edit_tool: tool=%s pocket=%s result=%s verification=%s elapsed_ms=%d",
+        tool_name,
+        pocket_id,
+        status,
+        verification,
+        (time.monotonic() - started) * 1000,
+    )
+
+
+def _with_previous_verification(tool_name: str, *, timed: bool = True) -> Any:
+    """Decorate a pocket-scoped sites tool handler so its result carries the settled
+    background verdict of the pocket's previous edit (read BEFORE the handler runs, so
+    the handler's own edit cannot overwrite it), and, for edit tools, log the call's
+    elapsed ms."""
+    import functools
+
+    def wrap(handler: Any) -> Any:
+        @functools.wraps(handler)
+        async def run(args: dict) -> dict:
+            started = time.monotonic()
+            pocket_id = args.get("pocket_id") if isinstance(args, dict) else None
+            previous = await _settled_previous(pocket_id)
+            out = await handler(args)
+            if previous is not None:
+                out = _attach_previous(out, previous)
+            if timed:
+                _log_edit_tool(tool_name, pocket_id, out, started)
+            return out
+
+        return run
+
+    return wrap
 
 
 # ── Dynamic-track spec surface (RFC 12 A2) ──────────────────────────────────
@@ -322,7 +685,27 @@ def _identity() -> tuple[str | None, str | None]:
         return None, None
 
 
-async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
+#: What a refused call did NOT do, by kind of tool. Tool results can show in the
+#: chat's activity feed, so this is a plain sentence for the user; how the agent
+#: must react (one sentence, then stop) lives in the /sites preamble's blocked rule.
+_PLAN_REFUSAL_OUTCOME = {
+    "create": "Nothing was created.",
+    "edit": "Nothing was changed.",
+    "read": "",
+}
+
+
+def _plan_refusal_op(tool: str) -> str:
+    """``create`` / ``edit`` / ``read`` for a tool name, so the refusal never claims
+    a create on a read or an edit."""
+    if tool.startswith("create_") or tool == "start_site_from_template":
+        return "create"
+    if tool.startswith(("list_", "read_", "get_", "verify_", "preview_", "play_test_")):
+        return "read"
+    return "edit"
+
+
+async def _require_sites_plan_or_error(workspace_id: str, tool: str = "") -> dict | None:
     """Gate the create on the workspace's plan. Returns an MCP ``_error_response``
     when the plan lacks the Sites ("sites") feature (so the agent surfaces the
     upgrade message instead of a phantom-created site), or ``None`` when the plan
@@ -332,7 +715,10 @@ async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
     the in-process create path is gated by the SAME plan check + feature table as
     the publish path and the HTTP ``require_plan_feature("sites")`` dependency. A
     free-plan workspace was the bug: create + publish ran in-process and bypassed
-    the router gate, deploying a live site that GET /sites then 403'd."""
+    the router gate, deploying a live site that GET /sites then 403'd.
+
+    ``tool`` is the calling tool's name; it picks the outcome sentence (nothing
+    created / nothing changed / none for a read). Unnamed reads as an edit."""
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites.service import require_sites_plan
 
@@ -340,9 +726,10 @@ async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
         await require_sites_plan(workspace_id)
     except CloudError as exc:
         # Forbidden('plan.feature_denied') / NotFound('workspace'). Relay the
-        # code + message so the agent tells the user to upgrade / switch
-        # workspace, not "site created".
-        return _error_response(f"{exc.code}: {exc.message}")
+        # code + message (it names the upgrade path) so the agent tells the user
+        # to upgrade / switch workspace, not "site created".
+        outcome = _PLAN_REFUSAL_OUTCOME[_plan_refusal_op(tool)]
+        return _error_response(f"{exc.code}: {exc.message} {outcome}".rstrip())
     return None
 
 
@@ -371,6 +758,33 @@ async def _bind_session_and_emit(pocket_id: str, view: dict[str, Any], user_id: 
     except Exception:  # noqa: BLE001
         logger.warning(
             "create_landing_site: post-create side effects failed (non-fatal)",
+            exc_info=True,
+        )
+
+
+async def _mint_draft_site(workspace_id: str, user_id: str, pocket_id: str, name: str) -> None:
+    """Mint the DRAFT Site doc for a freshly created site pocket so it lists in the
+    /sites gallery immediately (fix/sites-draft-visible).
+
+    Draft-first create persists a site POCKET but no Site doc, and the gallery reads
+    Site docs — so without this a plain create shows in neither the All nor the Draft
+    filter until a publish first mints one. This creates ONE canonical Site doc
+    (``deployed=False`` — a draft, NOT a deploy, NO build, NO billing) keyed on the
+    stable per-pocket id publish upserts, so a later publish flips this SAME doc live
+    (one doc per pocket). Best-effort: the pocket already exists in Mongo (the primary
+    contract), so a mint failure logs and returns rather than undoing a successful
+    create — the site is simply not yet listable (the prior behaviour), never a hard
+    error. The plan gate already ran before ``agent_create``, so this adds no gate."""
+    try:
+        from pocketpaw_ee.sites.service import create_draft_site
+
+        await create_draft_site(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, name=name
+        )
+    except Exception:  # noqa: BLE001 — draft-doc mint is best-effort, never fails a create
+        logger.warning(
+            "create-site: draft Site doc mint failed for pocket %s (non-fatal)",
+            pocket_id,
             exc_info=True,
         )
 
@@ -415,7 +829,9 @@ async def _create_landing_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_landing_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -473,6 +889,11 @@ async def _create_landing_site_handler(args: dict) -> dict:
     if err is not None or view is None or new_pocket_id is None:
         return _error_response(f"create failed: {err or 'create returned no view'}")
 
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
+
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
     return _success_response(
@@ -485,6 +906,8 @@ async def _create_landing_site_handler(args: dict) -> dict:
                 "type": view.get("type"),
                 "pattern": view.get("pattern"),
             },
+            # PP-2: honest, not faked — ripple has no verify lane.
+            "verification": _ripple_verification(),
         }
     )
 
@@ -519,7 +942,9 @@ def make_create_landing_site_tool(tool: Any) -> Any:
             "contact {address, phone, email}; footer {copyright}. Variable-length "
             "services/testimonials/tiers are handled. Returns {ok, pocket_id, "
             "pocket}; hand `pocket_id` to "
-            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an "
             "error means relay the reason, do NOT report a created pocket."
         ),
         {
@@ -615,7 +1040,9 @@ async def _create_dynamic_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_dynamic_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -656,6 +1083,11 @@ async def _create_dynamic_site_handler(args: dict) -> dict:
     if err is not None or view is None or new_pocket_id is None:
         return _error_response(f"create failed: {err or 'create returned no view'}")
 
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
+
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
     return _success_response(
@@ -668,6 +1100,8 @@ async def _create_dynamic_site_handler(args: dict) -> dict:
                 "type": view.get("type"),
                 "pattern": view.get("pattern"),
             },
+            # PP-2: honest, not faked — ripple has no verify lane.
+            "verification": _ripple_verification(),
         }
     )
 
@@ -703,7 +1137,9 @@ def make_create_dynamic_site_tool(tool: Any) -> Any:
             "spec must declare `objects` AND at least one source/action/auth, and "
             "every source/action must reference a declared object. Returns {ok, "
             "pocket_id, pocket}; hand `pocket_id` to "
-            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an "
             "error means relay the reason, do NOT report a created pocket."
         ),
         {
@@ -777,7 +1213,7 @@ async def _create_svelte_site_handler(args: dict) -> dict:
         ok=True,
     )
 
-    args = coerce_json_object_args(args, ("source",))
+    args = coerce_json_object_args(args, ("source", "dependencies"))
     source = args.get("source")
     if not isinstance(source, dict) or not source:
         return _error_response(
@@ -810,10 +1246,27 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             "+layout.svelte (imports app.css), +page.ts (prerender=true), app.css, "
             "and at least one section component."
         )
+    # The manifest and the prerender shell are the generator's (contract §2). The
+    # generator throws on them at build time; naming them here is the actionable form.
+    if manifest_keys := _manifest_keys(source):
+        return _manifest_in_source_error("create_svelte_site", manifest_keys)
+    reserved = svelte_paths.reserved_svelte_keys(
+        {k: v for k, v in source.items() if k not in SVELTE_BINDING_KEYS}
+    )
+    if reserved:
+        return _error_response(
+            "create_svelte_site `source` may not write generator-owned paths: "
+            f"{', '.join(reserved)}. src/routes/+layout.ts/.js, lockfiles, the auth "
+            "files and the `src/lib/paw/` namespace are generated. Author routes under "
+            "`src/routes/` (a +layout.svelte is fine), components under `src/lib/`, "
+            "and package.json / vite.config.* / svelte.config.js at the root."
+        )
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_svelte_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -840,6 +1293,14 @@ async def _create_svelte_site_handler(args: dict) -> dict:
     # pipeline (publish, refine, /sites listing) keys on. ``trusted=True``
     # short-circuits the strict catalog gate, which only runs on a non-null
     # rippleSpec anyway — the svelte path passes ``ripple_spec=None``.
+    # PP-1: resolve any declared npm packages BEFORE the persist, so the manifest
+    # lands with the first version of the source map. A refused package is reported
+    # and the create goes ahead without it; a registry outage refuses the package,
+    # never silently accepts it.
+    source, dep_report = await _resolve_create_dependencies(
+        "svelte", args.get("dependencies"), source
+    )
+
     from pocketpaw_ee.cloud.pockets.service import agent_create
 
     try:
@@ -864,20 +1325,31 @@ async def _create_svelte_site_handler(args: dict) -> dict:
     if err is not None or view is None or new_pocket_id is None:
         return _error_response(f"create failed: {err or 'create returned no view'}")
 
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
+
     await _bind_session_and_emit(new_pocket_id, view, user_id)
 
+    # PP-2: verify the draft that was just created (static, build, browser).
+    verification = await _verification_for(workspace_id, user_id, new_pocket_id)
     return _success_response(
-        {
-            "ok": True,
-            "pocket_id": new_pocket_id,
-            "pocket": {
-                "id": new_pocket_id,
-                "name": view.get("name"),
-                "type": view.get("type"),
-                "pattern": view.get("pattern"),
-                "engine": view.get("engine"),
+        _with_dependency_report(
+            {
+                "ok": True,
+                "pocket_id": new_pocket_id,
+                "pocket": {
+                    "id": new_pocket_id,
+                    "name": view.get("name"),
+                    "type": view.get("type"),
+                    "pattern": view.get("pattern"),
+                    "engine": view.get("engine"),
+                },
+                "verification": verification,
             },
-        }
+            dep_report,
+        )
     )
 
 
@@ -909,15 +1381,23 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
             "composes the section components), 'src/routes/+layout.svelte' "
             "(<script>import '../app.css'</script>), 'src/routes/+page.ts' "
             "(export const prerender = true), 'src/app.css' (tokens/fonts/base), "
-            "and at least one 'src/lib/components/*.svelte' section (Hero, "
-            "Pricing, Faq, ...); add 'src/lib/*.js' helpers (e.g. reveal.js) as "
+            "and at least one 'src/lib/components/*.svelte' section; add "
+            "'src/lib/*.js' helpers (e.g. reveal.js) as "
             "needed. CRITICAL authoring rule: every component must render its "
             "resting/final state in MARKUP — never set it only in onMount — "
             "because the page is PRERENDERED and onMount does not run at prerender "
             "time (a count-up initialized to 0 bakes '$0.00'; initialize it to the "
-            "final value). Returns {ok, pocket_id, pocket}; hand `pocket_id` to "
-            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
-            "error means relay the reason, do NOT report a created pocket."
+            "final value). PACKAGES: declare npm packages in `dependencies` (or later "
+            "with set_site_dependencies; not on a dynamic site) — any npm package, "
+            "version or dist-tag — and import them normally; only a browser-only "
+            "library that touches window at import time goes inside onMount or a "
+            "dynamic import(). You may also write package.json, vite.config.* and "
+            "svelte.config.js at the project root. Returns {ok, pocket_id, pocket, "
+            "verification}; hand `pocket_id` to "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an "
+            "error means relay the reason, do NOT report a created pocket." + VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -952,6 +1432,7 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
                     "type": "string",
                     "description": "Optional one-line pocket description.",
                 },
+                "dependencies": DEPENDENCY_REQUESTS_SCHEMA,
                 "icon": {"type": "string", "description": "Optional lucide icon name."},
                 "color": {"type": "string", "description": "Optional accent color hex."},
             },
@@ -965,6 +1446,532 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
     return create_svelte_site
 
 
+async def _create_html_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__create_html_site`` (the html track, HE-6).
+
+    Reads workspace/user identity from the per-stream ContextVars, validates the
+    ``source`` map (a raw {relative_path: file_contents} HTML/CSS/JS map that MUST
+    carry ``index.html``), and persists it DIRECTLY via ``agent_create``
+    (engine="html", source=<map>, type="site", pattern="landing", ripple_spec=None,
+    trusted=True). Returns ``{ok, pocket_id, pocket}`` on success; sets ``is_error``
+    when identity is missing, ``source`` is absent/malformed/incomplete, or the
+    persist fails.
+
+    Like ``create_svelte_site`` there is no ``assemble_*`` step — the agent authored
+    the markup, so the map is persisted verbatim and the generator materializes it
+    at publish. Unlike svelte, an html publish skips the Node build entirely
+    (``generator_client.needs_node_build("html")`` is False): the raw files are
+    served as authored. html has NO live-data binding siblings — the whole map is
+    {path: str}, so every value must be a content string."""
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "create_html_site requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_html_site",
+        status="ok",
+        ok=True,
+    )
+
+    args = coerce_json_object_args(args, ("source", "dependencies"))
+    source = args.get("source")
+    if not isinstance(source, dict) or not source:
+        return _error_response(
+            "create_html_site requires a `source` object — the raw HTML/CSS/JS "
+            "source map { relative_path: file_contents } you authored. It must "
+            "include `index.html` (the page the edge serves); add stylesheets, "
+            "scripts, and assets as sibling entries. You write the markup; this "
+            "tool persists it."
+        )
+    # The whole map is {path: contents} — every value is a file content string.
+    # html has no live-data binding siblings (that is the svelte/ripple dynamic
+    # track), so unlike create_svelte_site there is no exemption list.
+    bad = [k for k, v in source.items() if not isinstance(v, str)]
+    if bad:
+        return _error_response(
+            "create_html_site `source` file values must be content strings; these "
+            f"keys are not strings: {', '.join(sorted(bad)[:8])}."
+        )
+    missing = _missing_html_keys(source)
+    if missing:
+        return _error_response(
+            "create_html_site `source` is missing required files: "
+            f"{', '.join(missing)}. An html site needs an `index.html` entry "
+            "document — the edge serves it at the site root."
+        )
+    # PP-1: the dependency manifest (which becomes the page's importmap) is written
+    # only by the resolver, and ``_paw/`` is the generator's editing namespace.
+    if manifest_keys := _manifest_keys(source):
+        return _manifest_in_source_error("create_html_site", manifest_keys)
+    if reserved := html_paths.reserved_html_keys(source):
+        return _error_response(
+            "create_html_site `source` may not write inside the generator-owned "
+            f"`_paw/` namespace: {', '.join(reserved)}."
+        )
+
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_html_site")
+    ) is not None:
+        return gate
+
+    name_raw = args.get("name")
+    name = name_raw.strip() if isinstance(name_raw, str) and name_raw.strip() else "HTML site"
+    description_raw = args.get("description")
+    description = description_raw if isinstance(description_raw, str) else ""
+    icon_raw = args.get("icon")
+    icon = icon_raw if isinstance(icon_raw, str) else ""
+    color_raw = args.get("color")
+    color = color_raw if isinstance(color_raw, str) else ""
+
+    # Persist DIRECTLY through the pockets service — NO pocket_specialist, NO
+    # rippleSpec, NO catalog gate (there is no spec to gate). ``engine="html"``
+    # + ``source`` stamp the html track so the generator materializes the map
+    # verbatim and publish skips the Node build; ``type_="site"`` +
+    # ``pattern="landing"`` keep the site identity the rest of the pipeline
+    # (publish, /sites listing) keys on. ``trusted=True`` short-circuits the strict
+    # catalog gate, which only runs on a non-null rippleSpec anyway — the html
+    # path passes ``ripple_spec=None``.
+    # PP-1: resolve any declared npm packages BEFORE the persist, so the manifest
+    # lands with the first version of the source map. A refused package is reported
+    # and the create goes ahead without it; a registry outage refuses the package,
+    # never silently accepts it.
+    source, dep_report = await _resolve_create_dependencies(
+        "html", args.get("dependencies"), source
+    )
+
+    from pocketpaw_ee.cloud.pockets.service import agent_create
+
+    try:
+        view, new_pocket_id, err = await agent_create(
+            workspace_id=workspace_id,
+            owner_id=user_id,
+            name=name,
+            description=description,
+            type_="site",
+            pattern="landing",
+            icon=icon,
+            color=color,
+            ripple_spec=None,
+            engine="html",
+            source=source,
+            trusted=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_html_site: persist raised", exc_info=True)
+        return _error_response(f"create failed: {exc}")
+
+    if err is not None or view is None or new_pocket_id is None:
+        return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
+
+    await _bind_session_and_emit(new_pocket_id, view, user_id)
+
+    # PP-2: verify the draft that was just created (static, build, browser).
+    verification = await _verification_for(workspace_id, user_id, new_pocket_id)
+    return _success_response(
+        _with_dependency_report(
+            {
+                "ok": True,
+                "pocket_id": new_pocket_id,
+                "pocket": {
+                    "id": new_pocket_id,
+                    "name": view.get("name"),
+                    "type": view.get("type"),
+                    "pattern": view.get("pattern"),
+                    "engine": view.get("engine"),
+                },
+                "verification": verification,
+            },
+            dep_report,
+        )
+    )
+
+
+def make_create_html_site_tool(tool: Any) -> Any:
+    """Build the ``create_html_site`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as publish +
+    create_landing_site + create_svelte_site + create_dynamic_site (see
+    ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "create_html_site",
+        (
+            "Create a Paw Site landing page on the HTML TRACK — a raw, "
+            "hand-authored static site (plain HTML/CSS/JS, no framework, no build "
+            "step). Use this ONLY when the user EXPLICITLY asks for a plain / "
+            "raw / single-file HTML site or 'no framework' ('give me a bare HTML "
+            "landing page', 'just an index.html', 'no Svelte'). For a normal "
+            "marketing request the default is create_landing_site (ripple) — do "
+            "NOT pick this one by default. You AUTHOR the markup yourself and pass "
+            "it as a `source` MAP { relative_path: file_contents }; the tool "
+            "persists the map and stamps the pocket type='site', pattern='landing', "
+            "engine='html'. You do NOT compose a rippleSpec, do NOT author Svelte, "
+            "do NOT call pocket_specialist. The map MUST include `index.html` (the "
+            "page the edge serves at the root); add stylesheets, scripts, extra "
+            "pages, and assets as sibling entries — every value is a content "
+            "STRING. Publishing an html site skips the Node build entirely: the raw "
+            "files are served exactly as authored, so the page must be complete on "
+            "its own (inline or linked CSS/JS, real copy — never 'TBD'/'Lorem "
+            "ipsum'). PACKAGES: declare npm packages in `dependencies` (or later "
+            "with set_site_dependencies); the page gets a generated importmap, so "
+            'import them by bare name inside <script type="module">. Returns {ok, '
+            "pocket_id, pocket, verification}; hand `pocket_id` to "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an "
+            "error means relay the reason, do NOT report a created pocket." + VERIFY_CONTRACT
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "object",
+                    "description": (
+                        "The raw HTML/CSS/JS source map you authored — a "
+                        "{ relative_path: file_contents } map, paths relative to the "
+                        "site root, every value a content STRING. MUST include "
+                        "`index.html` (the entry document served at the root). Add "
+                        "styles, scripts, and assets as sibling entries."
+                    ),
+                    "additionalProperties": {"type": "string"},
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional pocket/site name. Defaults to 'HTML site'.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional one-line pocket description.",
+                },
+                "dependencies": DEPENDENCY_REQUESTS_SCHEMA,
+                "icon": {"type": "string", "description": "Optional lucide icon name."},
+                "color": {"type": "string", "description": "Optional accent color hex."},
+            },
+            "required": ["source"],
+            "additionalProperties": False,
+        },
+    )
+    async def create_html_site(args):  # type: ignore[no-untyped-def]
+        return await _create_html_site_handler(args)
+
+    return create_html_site
+
+
+async def _create_react_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__create_react_site`` (the react track, RX-2).
+
+    Reads workspace/user identity from the per-stream ContextVars, validates the
+    ``source`` map (a {relative_path: file_contents} map of hand-written React
+    files that MUST carry the ``src/App.tsx`` composition root and MUST NOT write
+    a generator-owned path), and persists it DIRECTLY via ``agent_create``
+    (engine="react", source=<map>, type="site", pattern="landing",
+    ripple_spec=None, trusted=True). Returns ``{ok, pocket_id, pocket}`` on
+    success; sets ``is_error`` when identity is missing, ``source`` is
+    absent/malformed/incomplete, or the persist fails.
+
+    Like ``create_svelte_site`` and ``create_html_site`` there is no ``assemble_*``
+    step — the agent authored the components, so the map is persisted verbatim and
+    the generator materializes it at publish. Unlike html, a react publish DOES run
+    a per-site Node build (``needs_node_build("react")`` is True) — but that build
+    is an SSG that prerenders to a static ``dist/`` with no server entry, which is
+    why react deploys assets-only like html does (``emits_server_worker`` is False
+    for both — see ``sites/engines.py``).
+
+    ``interactive`` is the react-track spelling of the per-site
+    ``keeps_client_bundle`` declaration. It is a SEPARATE argument rather than an
+    inference over the source because "does this component need the browser?" is a
+    question about authorial intent that reading JSX cannot answer reliably: a
+    ``useState`` that never changes needs nothing, and a component that only
+    registers a ``matchMedia`` listener does.
+
+    It is TRI-STATE (feat/sites-js-by-default). OMITTING it records NO decision
+    and lets publish apply ``sites_keep_client_bundle_default`` — ``True`` by
+    default, so an omitted ``interactive`` now ships the bundle rather than
+    withholding it. That inverts the old failure mode: leaving it off used to
+    silently break an interactive page (built, deployed, menu never opens), and
+    now the silent cost is the opposite and much cheaper — a purely static page
+    ships a bundle it never needed. Pass ``interactive=False`` EXPLICITLY to opt
+    such a page out; an explicit value beats the default in both directions.
+
+    react has NO live-data binding siblings (that is the svelte/ripple dynamic
+    track), so the whole map is {path: str} and every value must be a content
+    string — no exemption list."""
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "create_react_site requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_react_site",
+        status="ok",
+        ok=True,
+    )
+
+    args = coerce_json_object_args(args, ("source", "dependencies"))
+    source = args.get("source")
+    if not isinstance(source, dict) or not source:
+        return _error_response(
+            "create_react_site requires a `source` object — the React source map "
+            "{ relative_path: file_contents } you authored. It must include "
+            "`src/App.tsx` (the composition root); add your section components "
+            "under `src/components/` and your stylesheet as sibling entries. You "
+            "write the components; this tool persists them."
+        )
+    # The whole map is {path: contents} — every value is a file content string.
+    # react has no live-data binding siblings (that is the svelte/ripple dynamic
+    # track), so unlike create_svelte_site there is no exemption list.
+    bad = [k for k, v in source.items() if not isinstance(v, str)]
+    if bad:
+        return _error_response(
+            "create_react_site `source` file values must be content strings; these "
+            f"keys are not strings: {', '.join(sorted(bad)[:8])}."
+        )
+    missing = _missing_react_keys(source)
+    if missing:
+        return _error_response(
+            "create_react_site `source` is missing required files: "
+            f"{', '.join(missing)}. A react site needs a `src/App.tsx` composition "
+            "root — the generated client and server entries both import it, so "
+            "without it there is nothing to render or prerender."
+        )
+    # Fail here rather than at publish: the generator throws on a reserved-path
+    # collision, and a build-time throw names the path far from the authoring turn
+    # that caused it.
+    if manifest_keys := _manifest_keys(source):
+        return _manifest_in_source_error("create_react_site", manifest_keys)
+    reserved = _reserved_react_keys(source)
+    if reserved:
+        return _error_response(
+            "create_react_site `source` may not write generator-owned paths: "
+            f"{', '.join(reserved)}. index.html, paw-prerender.mjs, lockfiles and the "
+            "`src/paw/` namespace are generated — they carry the prerender contract "
+            "that keeps the page from shipping blank without JavaScript. Author under "
+            "`src/` (outside `src/paw/`) and `public/`; package.json and "
+            "vite.config.* at the root are yours too."
+        )
+
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_react_site")
+    ) is not None:
+        return gate
+
+    name_raw = args.get("name")
+    name = name_raw.strip() if isinstance(name_raw, str) and name_raw.strip() else "React site"
+    description_raw = args.get("description")
+    description = description_raw if isinstance(description_raw, str) else ""
+    icon_raw = args.get("icon")
+    icon = icon_raw if isinstance(icon_raw, str) else ""
+    color_raw = args.get("color")
+    color = color_raw if isinstance(color_raw, str) else ""
+    # RX-2: the authored "this site's own JavaScript is load-bearing" declaration,
+    # spelled ``interactive`` on the wire because that is the authoring question
+    # the agent can actually answer. Persisted as the engine-agnostic
+    # ``keeps_client_bundle`` (MT-1) so publish reads ONE field for every engine.
+    # TRI-STATE (feat/sites-js-by-default): an OMITTED ``interactive`` persists as
+    # ``None`` — no declaration — which publish resolves from
+    # ``sites_keep_client_bundle_default``. Coercing the absent case to ``False``
+    # here would record a decision the agent never made and lock every react site
+    # that skips the argument out of the default.
+    _interactive_raw = args.get("interactive")
+    interactive = None if _interactive_raw is None else bool(_interactive_raw)
+
+    # Persist DIRECTLY through the pockets service — NO pocket_specialist, NO
+    # rippleSpec, NO catalog gate (there is no spec to gate). ``engine="react"``
+    # + ``source`` stamp the react track so the generator materializes the map onto
+    # its Vite skeleton and prerenders it; ``type_="site"`` + ``pattern="landing"``
+    # keep the site identity the rest of the pipeline (publish, /sites listing)
+    # keys on. ``trusted=True`` short-circuits the strict catalog gate, which only
+    # runs on a non-null rippleSpec anyway — the react path passes
+    # ``ripple_spec=None``.
+    # PP-1: resolve any declared npm packages BEFORE the persist, so the manifest
+    # lands with the first version of the source map. A refused package is reported
+    # and the create goes ahead without it; a registry outage refuses the package,
+    # never silently accepts it.
+    source, dep_report = await _resolve_create_dependencies(
+        "react", args.get("dependencies"), source
+    )
+
+    from pocketpaw_ee.cloud.pockets.service import agent_create
+
+    try:
+        view, new_pocket_id, err = await agent_create(
+            workspace_id=workspace_id,
+            owner_id=user_id,
+            name=name,
+            description=description,
+            type_="site",
+            pattern="landing",
+            icon=icon,
+            color=color,
+            ripple_spec=None,
+            engine="react",
+            source=source,
+            keeps_client_bundle=interactive,
+            trusted=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_react_site: persist raised", exc_info=True)
+        return _error_response(f"create failed: {exc}")
+
+    if err is not None or view is None or new_pocket_id is None:
+        return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    # Mint the DRAFT Site doc so the new site lists in the /sites gallery right away
+    # (draft-first create persists the pocket but no Site doc; the gallery reads Site
+    # docs). Best-effort — a draft, NOT a publish, and it never fails the create.
+    await _mint_draft_site(workspace_id, user_id, new_pocket_id, name)
+
+    await _bind_session_and_emit(new_pocket_id, view, user_id)
+
+    # PP-2: verify the draft that was just created (static, build, browser).
+    verification = await _verification_for(workspace_id, user_id, new_pocket_id)
+    return _success_response(
+        _with_dependency_report(
+            {
+                "ok": True,
+                "pocket_id": new_pocket_id,
+                "pocket": {
+                    "id": new_pocket_id,
+                    "name": view.get("name"),
+                    "type": view.get("type"),
+                    "pattern": view.get("pattern"),
+                    "engine": view.get("engine"),
+                },
+                "verification": verification,
+            },
+            dep_report,
+        )
+    )
+
+
+def make_create_react_site_tool(tool: Any) -> Any:
+    """Build the ``create_react_site`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as publish +
+    create_landing_site + create_svelte_site + create_html_site +
+    create_dynamic_site (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "create_react_site",
+        (
+            "Create a Paw Site landing page on the REACT TRACK — hand-written React "
+            "components, PRERENDERED to static HTML at build time. Use this ONLY "
+            "when the user EXPLICITLY asks for React ('build it in React', 'a React "
+            "landing page') or the page genuinely needs React-shaped client "
+            "interactivity. For a normal marketing request the default is "
+            "create_html_site — do NOT pick this one by default. You AUTHOR the "
+            "components yourself and pass them as a `source` MAP { relative_path: "
+            "file_contents }; the tool persists the map and stamps the pocket "
+            "type='site', pattern='landing', engine='react'. You do NOT compose a "
+            "rippleSpec, do NOT call get_widget_spec, do NOT call pocket_specialist. "
+            "The map MUST include `src/App.tsx` (the composition root both generated "
+            "entries import); add section components under `src/components/*.tsx` "
+            "and a stylesheet App.tsx imports — every value is a content STRING. The "
+            "prerender shell is GENERATED and reserved: the map may NOT write "
+            "index.html, paw-prerender.mjs, or anything under `src/paw/`; it MAY "
+            "write package.json, vite.config.*, bunfig.toml and .npmrc at the root. "
+            "The project provides react, react-dom and vite; it is ONE page. Declare "
+            "any other npm package (any version or dist-tag) in `dependencies` (or "
+            "later with set_site_dependencies) and import it normally; only a "
+            "browser-only library that touches window at import time needs a "
+            "dynamic import() inside useEffect. CRITICAL "
+            "authoring rule: the page is PRERENDERED, so every component must render "
+            "its resting/final state in its RETURNED MARKUP — useEffect does not run "
+            "at prerender time (a count-up initialized to 0 bakes '0'; initialize it "
+            "to the final value). SECOND RULE: sites ship their client JavaScript by "
+            "DEFAULT, so React hydrates and a menu toggle, tabs or a counter work "
+            "without any extra argument. Still pass `interactive=true` explicitly "
+            "whenever a component needs the browser — it records the intent and "
+            "survives a deployment that turns the default off. Pass "
+            "`interactive=false` for a purely static page (CSS-only hover/keyframe "
+            "motion, anchors, a native form POST) to opt out of shipping a bundle it "
+            "never uses (never with packages). Returns {ok, "
+            "pocket_id, pocket, verification}; hand `pocket_id` to "
+            "`mcp__pocketpaw_sites_manager__publish` to publish ONLY when the user "
+            "asks to go live (draft-first: a plain create stops at the draft for "
+            "in-app preview). ok=false with an error means relay the reason, do NOT "
+            "report a created pocket." + VERIFY_CONTRACT
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "object",
+                    "description": (
+                        "The React source map you authored — a { relative_path: "
+                        "file_contents } map, paths relative to the project root, "
+                        "every value a content STRING. MUST include `src/App.tsx` "
+                        "(the composition root, which imports your stylesheet and "
+                        "renders the sections). Add `src/components/*.tsx` sections "
+                        "and `public/*` assets as sibling entries. May NOT write "
+                        "index.html, package.json, vite.config.ts, paw-prerender.mjs "
+                        "or anything under `src/paw/` — those are generated."
+                    ),
+                    "additionalProperties": {"type": "string"},
+                },
+                "interactive": {
+                    "type": "boolean",
+                    "description": (
+                        "TRUE when this site's own JavaScript is load-bearing — any "
+                        "changing useState/useReducer, any onClick/onChange/onSubmit "
+                        "that does something, any useEffect, a canvas you draw into. "
+                        "The page is prerendered either way; this decides whether "
+                        "React HYDRATES on top of the baked markup. OMIT it and the "
+                        "deployment's default decides — which ships the bundle and "
+                        "hydrates, so an interactive component left unflagged still "
+                        "works. Pass TRUE anyway when the browser is genuinely "
+                        "needed: it records the intent instead of relying on a "
+                        "setting. Pass FALSE for a purely static page (CSS-only "
+                        "motion, anchors, a native form POST) — an explicit value "
+                        "wins over the default, so this is the way to ship no "
+                        "JavaScript at all."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional pocket/site name. Defaults to 'React site'.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional one-line pocket description.",
+                },
+                "dependencies": DEPENDENCY_REQUESTS_SCHEMA,
+                "icon": {"type": "string", "description": "Optional lucide icon name."},
+                "color": {"type": "string", "description": "Optional accent color hex."},
+            },
+            "required": ["source"],
+            "additionalProperties": False,
+        },
+    )
+    async def create_react_site(args):  # type: ignore[no-untyped-def]
+        return await _create_react_site_handler(args)
+
+    return create_react_site
+
+
+@_with_previous_verification("edit_svelte_component")
 async def _edit_svelte_component_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__edit_svelte_component``.
 
@@ -1049,25 +2056,50 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
                 )
     name_raw = args.get("name")
     name = name_raw if isinstance(name_raw, str) else ""
+    create = bool(args.get("create"))
+    if create and not has_new_source:
+        return _error_response(
+            "edit_svelte_component `create` needs `new_source` — the full contents "
+            "of the new file. There is nothing for `edits` to search against in a "
+            "file that does not exist yet."
+        )
 
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites import service as sites_service
     from pocketpaw_ee.sites.generator_client import SmokeGateFailed
 
     try:
-        doc = await sites_service.edit_svelte_component(
+        edited = await sites_service.edit_svelte_component(
             workspace_id=workspace_id,
             user_id=user_id,
             pocket_id=pocket_id,
             component_path=component_path,
             new_source=new_source if has_new_source else None,
             edits=edits if has_edits else None,
+            create=create,
             name=name,
         )
+    except sites_service.EditVerificationFailed as exc:
+        # PP-2: the edit failed its STATIC check and was ROLLED BACK — the draft keeps
+        # its previous contents. Not an MCP error: the agent needs the structured
+        # verdict to fix the code, so it comes back as data with ok=false.
+        return _success_response(
+            {
+                "ok": False,
+                "status": "rolled_back",
+                "is_live": False,
+                "component_path": component_path,
+                "created": create,
+                "verification": exc.verdict,
+                "message": (
+                    "The edit did not compile, so it was NOT staged — the draft still "
+                    "has the previous version of this file. Fix the errors in "
+                    "`verification.errors` and send the edit again."
+                ),
+            }
+        )
     except SmokeGateFailed as exc:
-        # The rebuilt site failed the workerd smoke render — the edit was rolled
-        # back and the live site stays on the prior deploy. Tell the agent so it
-        # can fix the component and retry, NOT report a successful edit.
+        # Any other gate failure keeps the pre-PP-2 contract: rolled back, reported.
         return _error_response(
             f"the edit did not pass the build smoke test, so it was not staged "
             f"(the previous version is unchanged): {exc}"
@@ -1080,31 +2112,54 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
         logger.warning("edit_svelte_component failed", exc_info=True)
         return _error_response(f"edit failed: {exc}")
 
-    # An edit stages a DRAFT PREVIEW — it does NOT publish or go live. The chat
-    # agent narrates this payload, so it must make the draft-not-live state
-    # unambiguous: ``status="draft"`` / ``is_live=False``, the url is a PREVIEW (not
-    # the live site), and the user must Submit for review to publish. The wording
-    # deliberately avoids "published"/"republished"/"live at" so the agent does not
-    # tell the user the change is live.
+    # An edit stages a DRAFT — it does NOT publish or go live. The chat agent narrates
+    # this payload, so it must make the draft-not-live state unambiguous:
+    # ``status="draft"`` / ``is_live=False``, and the user must Submit for review to
+    # publish. PP-2: there is no local preview deploy any more (the verify pipeline
+    # replaced it), so ``site.preview_url`` is null — the builder shows the draft from
+    # the verified build.
+    # A create is HALF of adding a page or a section — the other half is the edit
+    # that links or imports it. Saying so in the ``message`` (not only in the flag)
+    # is what keeps the agent from reading a clean success as "done".
+    orphan_note = (
+        " NOTE: nothing in the site reaches this file yet — no other file links to "
+        "or imports it, so visitors cannot get to it. You are half-done: make the "
+        "follow-up edit that wires it in (a nav/footer link for a route, an import "
+        "for a component) before you tell the user it was added."
+        if edited.unreferenced
+        else ""
+    )
+    doc = edited.site
+    verification = edited.verification
+    build_passed = any(
+        layer.get("name") == "build" and layer.get("status") == "passed"
+        for layer in verification.get("layers") or []
+    )
     return _success_response(
         {
             "ok": True,
             "status": "draft",
             "is_live": False,
             "component_path": component_path,
-            "site": {
-                "id": str(doc.id),
-                "pocket_id": doc.pocket_id,
-                "name": doc.name,
-                # The preview URL — a draft preview of the edit, NOT the live site.
-                "preview_url": doc.url,
-                "deployed": doc.deployed,
-            },
+            "created": create,
+            "unreferenced": edited.unreferenced,
+            "site": (
+                {
+                    "id": str(doc.id),
+                    "pocket_id": doc.pocket_id,
+                    "name": doc.name,
+                    "preview_url": None,
+                    "deployed": doc.deployed,
+                }
+                if doc is not None
+                else None
+            ),
+            "preview_built": build_passed,
+            "verification": verification,
             "message": (
-                "Your change is staged as a draft preview — it is NOT live yet. "
-                "The preview_url shows a preview of the edit, not the live site. "
-                "To take it live, the user clicks 'Submit for review' (which sends "
-                "the draft for approval)."
+                "Your change is saved to the site's draft — it is NOT live yet. The "
+                "builder preview shows the draft; to take it live, the user clicks "
+                "'Submit for review'." + orphan_note
             ),
         }
     )
@@ -1121,11 +2176,15 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
     @tool(
         "edit_svelte_component",
         (
-            "Edit ONE component of an EXISTING svelte Paw Site and stage it as a "
-            "DRAFT PREVIEW. Use this when the user asks to change a section of a "
-            "svelte site — 'add a background color to the nav', 'make the hero "
-            "headline bolder', 'change the pricing copy', 'restyle the FAQ'. The "
-            "edit is NOT published and does NOT go live — it is staged for review. "
+            "Change ONE file of an EXISTING svelte Paw Site and stage it as a "
+            "DRAFT PREVIEW. Use this WHENEVER the user asks to alter a svelte site "
+            "that already exists — 'add a background color to the nav', 'make the "
+            "hero headline bolder', 'change the pricing copy', 'restyle the FAQ', "
+            "'add an about page', 'add a testimonials section'. NEVER call "
+            "`create_svelte_site` again for a change: that mints a SECOND site "
+            "pocket at a SECOND url and leaves the one the user is looking at "
+            "untouched. The edit is NOT published and does NOT go live — it is "
+            "staged for review. "
             "Give the edit ONE of two ways (exactly one, not both):\n"
             "  * `edits` — PREFER THIS for small/targeted changes. A list of "
             "search/replace blocks [{old_string, new_string}, ...], exactly like "
@@ -1133,27 +2192,60 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
             "current file and must match EXACTLY ONCE (include enough surrounding "
             "context to be unique), and `new_string` is what it becomes. You send "
             "ONLY the change, not the whole file — far fewer tokens and faster. If "
-            "you have not read the file this turn, read it first so old_string "
-            "matches.\n"
+            "you have not read the file this turn, call `read_site_source` "
+            "(pocket_id + file_path) FIRST and copy old_string out of what it "
+            "returns — a remembered or guessed old_string does not match, and "
+            "rewriting the file instead silently drops whatever you did not carry "
+            "over.\n"
             "  * `new_source` — the FULL new file contents as a string (REPLACES "
             "the whole file, not a patch). Reserve this for LARGE rewrites where "
             "most of the file changes; for a small tweak use `edits`.\n"
+            "To ADD A PAGE: a SvelteKit route is TWO files, so call this three "
+            "times — `create=true` with `new_source` for "
+            "`src/routes/<slug>/+page.svelte`, again for "
+            "`src/routes/<slug>/+page.ts` containing `export const prerender = "
+            "true;` (the root page's prerender flag is page-level and does NOT "
+            "cascade to a child route), then once with `edits` on the nav/footer "
+            "component to link `/<slug>`. To ADD A SECTION: `create=true` for the "
+            "new `src/lib/components/<Name>.svelte`, then `edits` on "
+            "`src/routes/+page.svelte` to import and render it. `create=true` "
+            "REQUIRES the path to be new; editing an existing file with it is "
+            "rejected so you cannot overwrite a component by accident. Without "
+            "`create` the path must already exist, so a typo is an error and never "
+            "a stray new file.\n"
+            "You may write under `src/` and the root build files `package.json`, "
+            "`vite.config.*`, `svelte.config.js`, `bunfig.toml`, `.npmrc`. "
+            "`src/lib/paw/`, `src/routes/+layout.ts`, `src/hooks.server.ts`, "
+            "`src/lib/auth.ts` and `src/app.d.ts` are GENERATED and rejected — they "
+            "carry the prerender configuration and a gated site's session gate. To "
+            "add an npm package call set_site_dependencies, then import it normally "
+            "(only a browser-only library that touches window at import time goes "
+            "inside onMount).\n"
             "Other args: `pocket_id` (the svelte site pocket), `component_path` (the "
-            "relative path of the file to edit — it must already exist in the source "
-            "map, e.g. 'src/lib/components/Hero.svelte'), optional `name`. CRITICAL "
+            "relative path of the file to write, e.g. "
+            "'src/lib/components/Hero.svelte'), optional `create`, optional `name`. "
+            "CRITICAL "
             "authoring rule (same as create_svelte_site): the component must render "
             "its resting/final state in MARKUP — never set it only in onMount — "
             "because the page is PRERENDERED. Returns {ok, status:'draft', "
-            "is_live:false, site: {id, name, preview_url, deployed:false, "
-            "pocket_id}, component_path, message}. Relay the `message` to the user: "
-            "the change is a DRAFT PREVIEW (not live), `preview_url` is a PREVIEW "
-            "(not the published site), and to publish it the user clicks 'Submit for "
+            "is_live:false, site: {id, name, preview_url:null, deployed:false, "
+            "pocket_id}, component_path, created, unreferenced, verification, "
+            "message}. "
+            "`unreferenced:true` means nothing in the site links to or imports the "
+            "file you just created — visitors cannot reach it — so the follow-up "
+            "call is still outstanding and you must NOT report the page or section "
+            "as added yet. Relay the `message` to the user: "
+            "the change is a DRAFT (not live), shown in the builder preview, and to "
+            "publish it the user clicks 'Submit for "
             "review'. Do NOT tell the user the change is published or live. ok=false "
-            "with an error means the edit was NOT staged: an `edits` old_string that "
-            "matched 0 or >1 times means make it more specific and retry, a "
-            "smoke-test failure leaves the previous version unchanged (fix the "
-            "component and retry), and a not-found / not-a-svelte-site error means "
-            "relay the reason. Do NOT report a successful edit when ok=false."
+            "means the edit was NOT staged: `status:'rolled_back'` means it failed "
+            "the static check and the previous version is unchanged (fix "
+            "`verification.errors` and send the edit again); an `edits` old_string "
+            "that matched 0 or >1 times means make it more specific and retry; a "
+            "not-found / not-a-svelte-site error means relay the reason. A build or "
+            "browser failure found in the background keeps the edit staged: fix it "
+            "with a follow-up edit. Do NOT report a successful edit "
+            "when ok=false." + EDIT_VERIFY_CONTRACT
         ),
         {
             "type": "object",
@@ -1167,9 +2259,12 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Relative path of the file to edit — must already exist "
-                        "in the site's source map (e.g. "
-                        "'src/lib/components/Hero.svelte')."
+                        "Relative path of the file to write (e.g. "
+                        "'src/lib/components/Hero.svelte', "
+                        "'src/routes/about/+page.svelte'). Must already exist in "
+                        "the site's source map unless `create` is true. Only "
+                        "`src/` may be written, and the generated build-config / "
+                        "auth files are reserved."
                     ),
                 },
                 "edits": {
@@ -1207,6 +2302,18 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
                         "changes prefer `edits`."
                     ),
                 },
+                "create": {
+                    "type": "boolean",
+                    "description": (
+                        "Create a NEW file at `component_path` instead of editing "
+                        "an existing one. Requires `new_source`, and the path must "
+                        "NOT already exist. Use it to add a page "
+                        "(`src/routes/<slug>/+page.svelte` AND "
+                        "`src/routes/<slug>/+page.ts`) or a section "
+                        "(`src/lib/components/<Name>.svelte`), then edit the nav or "
+                        "`src/routes/+page.svelte` to wire it in."
+                    ),
+                },
                 "name": {
                     "type": "string",
                     "description": (
@@ -1225,17 +2332,1953 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
     return edit_svelte_component
 
 
+@_with_previous_verification("edit_react_component")
+async def _edit_react_component_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__edit_react_component`` (RX-3).
+
+    Reads workspace/user identity from the per-stream ContextVars, runs the same
+    plan gate the create handlers run, validates the inputs, and delegates to
+    ``sites_service.edit_react_component`` — which resolves the edit and persists
+    the one file as a reviewable DRAFT.
+
+    It does NOT republish and does NOT enqueue a build, so unlike the svelte edit
+    handler there is no ``SmokeGateFailed`` case to map: nothing is built, so
+    nothing can fail a smoke gate, and there would be nothing to roll back if it
+    could (a react publish enqueues its build and returns before any outcome
+    exists). The success body says draft, and publishing stays the user's call.
+
+    Returns ``{ok, status:"draft", is_live:false, pocket_id, component_path,
+    created, message}``; sets ``is_error`` when identity is missing, the plan lacks
+    Sites, the inputs are malformed, or the service rejects the edit (a reserved
+    path, a wrong-engine pocket, a missing/colliding component, an ambiguous
+    ``old_string``) — each relayed by code so the agent can fix and retry rather
+    than report a change that did not happen.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "edit_react_component requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_edit_react_component",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "edit_react_component requires a `pocket_id` — the id of the react site "
+            "pocket whose component you are editing."
+        )
+    component_path = args.get("component_path")
+    if not isinstance(component_path, str) or not component_path:
+        return _error_response(
+            "edit_react_component requires a `component_path` — the relative path of "
+            "the file to write (e.g. 'src/components/Hero.tsx'). It must already "
+            "exist in the site's source map unless you pass `create=true`."
+        )
+    args = coerce_json_object_args(args, ("edits",))
+    edits = args.get("edits")
+    new_source = args.get("new_source")
+    has_edits = edits is not None
+    has_new_source = new_source is not None
+    if has_edits == has_new_source:
+        return _error_response(
+            "edit_react_component requires exactly one of `edits` (a targeted "
+            "search/replace diff — PREFERRED for small changes) or `new_source` "
+            "(the FULL new file contents — for large rewrites and for `create`). "
+            "Provide one, not both and not neither."
+        )
+    if has_new_source and not isinstance(new_source, str):
+        return _error_response(
+            "edit_react_component `new_source` must be the FULL new contents of the "
+            "file as a string (the tool replaces the whole file, not a patch)."
+        )
+    if has_edits:
+        # Validate the diff SHAPE here so a malformed payload gets a clear error
+        # before the service runs. The MATCH-uniqueness contract belongs to the
+        # service's apply_edits (relayed below as a ValidationError).
+        if not isinstance(edits, list) or not edits:
+            return _error_response(
+                "edit_react_component `edits` must be a non-empty list of "
+                "{old_string, new_string} blocks (like the built-in Edit tool)."
+            )
+        for i, block in enumerate(edits):
+            if (
+                not isinstance(block, dict)
+                or not isinstance(block.get("old_string"), str)
+                or not isinstance(block.get("new_string"), str)
+            ):
+                return _error_response(
+                    f"edit_react_component `edits` block {i} must be an object with "
+                    "string `old_string` and `new_string`."
+                )
+    create = bool(args.get("create"))
+    if create and not has_new_source:
+        return _error_response(
+            "edit_react_component `create=true` needs `new_source` — the full "
+            "contents of the new file. There is nothing for `edits` to search "
+            "against in a file that does not exist yet."
+        )
+
+    # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
+    # the same feature the create tools are. Without this a workspace that lost the
+    # plan could keep editing a site its own /sites list 403s.
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="edit_react_component")
+    ) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.edit_react_component(
+            user_id=user_id,
+            pocket_id=pocket_id,
+            component_path=component_path,
+            new_source=new_source if has_new_source else None,
+            edits=edits if has_edits else None,
+            create=create,
+        )
+    except CloudError as exc:
+        # ValidationError (reserved path / outside src+public / not a react site /
+        # already exists / a bad diff) or NotFound (unknown pocket or component).
+        # Relay the code + message so the agent knows WHICH guard rejected it.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edit_react_component failed", exc_info=True)
+        return _error_response(f"edit failed: {exc}")
+
+    # The edit is a DRAFT. The chat agent narrates this payload, so — exactly like
+    # the svelte edit tool — it must not contain a completed-state publish claim.
+    #
+    # ``unreferenced`` (2026-09-01) makes the SECOND half of the two-call contract
+    # visible on the call that creates the first half. A created component that
+    # nothing imports is not in the bundle: the page renders exactly as it did
+    # before. The old payload said "Saved to the site's draft" for that case too,
+    # which is true and is the whole problem — an agent reading an unqualified
+    # success has no reason to make call 2, and reports a section the user cannot
+    # find. So the message carries the outstanding step and, explicitly, the
+    # instruction NOT to report the work as done yet.
+    #
+    # It is advice, not an error: ``ok`` stays True and the file really was written.
+    # A refusal here would make "add a testimonials section" impossible, since call
+    # 1 is unreferenced at the instant it lands, every time.
+    unreferenced = bool(result.get("unreferenced"))
+    message = (
+        "Saved to the site's draft — it is NOT online yet, and no build was "
+        "started. Tell the user the change is in the draft they can preview "
+        "under /sites, and offer to publish it; only call the publish tool "
+        "when they ask."
+    )
+    if unreferenced:
+        message = (
+            f"HALF DONE — `{result['component_path']}` was created, but NOTHING "
+            "IMPORTS IT, so the page renders exactly as it did before and the user "
+            "will see no change. Make your NEXT call an `edits` call on "
+            "`src/App.tsx` (or whichever component should contain it) that imports "
+            "and renders it. Do NOT tell the user the section/image is added until "
+            "that second call succeeds — the file exists, but nothing shows it.\n"
+        ) + message
+    return _success_response(
+        {
+            "ok": True,
+            "status": "draft",
+            "is_live": False,
+            "pocket_id": result["pocket_id"],
+            "component_path": result["component_path"],
+            "created": result["created"],
+            "unreferenced": unreferenced,
+            "message": message,
+            # The edit stays a draft (nothing to roll back from). Static check now, the
+            # build in the background; an unreferenced create is a half step and is
+            # verified with the edit that wires it in.
+            "verification": (
+                _half_step_verification()
+                if unreferenced
+                else await _edit_verification(workspace_id, user_id, pocket_id)
+            ),
+        }
+    )
+
+
+def make_edit_react_component_tool(tool: Any) -> Any:
+    """Build the ``edit_react_component`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as create + publish +
+    ``edit_svelte_component`` (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "edit_react_component",
+        (
+            "Change an EXISTING react Paw Site. Use this WHENEVER the user asks to "
+            "alter a react site that already exists — 'shorten the hero headline', "
+            "'make the pricing cards darker', 'fix the typo in the FAQ', 'add a "
+            "testimonials section'. NEVER call `create_react_site` again for a "
+            "change: that mints a SECOND site pocket and leaves the one the user is "
+            "looking at untouched. The change is saved to the site's DRAFT — it is "
+            "NOT published, nothing is built, and nothing goes live.\n"
+            "Give the change ONE of two ways (exactly one, not both):\n"
+            "  * `edits` — PREFER THIS for small/targeted changes. A list of "
+            "search/replace blocks [{old_string, new_string}, ...], exactly like "
+            "the built-in Edit tool: each `old_string` is copied VERBATIM from the "
+            "current file and must match EXACTLY ONCE (include enough surrounding "
+            "context to be unique), and `new_string` is what it becomes. You send "
+            "ONLY the change, not the whole file — far fewer tokens and faster. If "
+            "you have not read the file this turn, call `read_site_source` "
+            "(pocket_id + file_path) FIRST and copy old_string out of what it "
+            "returns — a remembered or guessed old_string does not match, and "
+            "rewriting the file instead silently drops whatever you did not carry "
+            "over.\n"
+            "  * `new_source` — the FULL new file contents as a string (REPLACES "
+            "the whole file). For large rewrites, and the only form `create` "
+            "accepts.\n"
+            "To ADD a section: call this twice — once with `create=true` and "
+            "`new_source` for the new `src/components/<Name>.tsx`, then once with "
+            "`edits` on `src/App.tsx` to import and render it. `create=true` "
+            "REQUIRES the path to be new; editing an existing file with it is "
+            "rejected so you cannot overwrite a component by accident. Without "
+            "`create` the path must already exist, so a typo is an error and never "
+            "a stray new file.\n"
+            "You may write under `src/` (outside `src/paw/`) and `public/`, plus the "
+            "root build files `package.json`, `vite.config.*`, `bunfig.toml`, "
+            "`.npmrc`. `index.html`, `paw-prerender.mjs` and `src/paw/` are "
+            "GENERATED and rejected — they carry the prerender contract. To add an "
+            "npm package call set_site_dependencies, then import it normally (only a "
+            "browser-only library that touches window at import time needs a "
+            "dynamic import() inside useEffect). "
+            "PRERENDER RULE (same as create_react_site): every "
+            "component must render its resting/final state in its RETURNED MARKUP, "
+            "because `useEffect` does not run at prerender time.\n"
+            "Args: `pocket_id` (the react site pocket), `component_path`, and one "
+            "of `edits` / `new_source`, plus optional `create`. Returns {ok, "
+            "status:'draft', is_live:false, pocket_id, component_path, created, "
+            "unreferenced, verification, message}. `unreferenced:true` means the file you just "
+            "created is imported by NOTHING — it is not in the bundle and the page "
+            "is unchanged, so the second call is still outstanding and you must not "
+            "report the section as added yet. Relay the `message`: the change is in "
+            "the DRAFT the user can "
+            "preview under /sites, and publishing is their call — do NOT tell them "
+            "it is live. ok=false with an error means NOTHING was saved: an "
+            "old_string that matched 0 or >1 times means make it more specific and "
+            "retry; a reserved-path, wrong-engine, already-exists or not-found "
+            "error means relay the reason. Do NOT report a successful edit when "
+            "ok=false." + EDIT_VERIFY_CONTRACT
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the react site pocket to edit.",
+                },
+                "component_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Relative path of the file to write (e.g. "
+                        "'src/components/Hero.tsx'). Must already exist in the "
+                        "site's source map unless `create` is true. Only `src/` "
+                        "(outside `src/paw/`) and `public/` may be written."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "PREFERRED for small changes: a list of search/replace "
+                        "blocks applied to the file's CURRENT contents. Each "
+                        "`old_string` must match exactly once. Send this INSTEAD of "
+                        "`new_source` so you emit only the diff. Not valid with "
+                        "`create`."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace, copied verbatim from the "
+                                    "current file; must match exactly once."
+                                ),
+                            },
+                            "new_string": {
+                                "type": "string",
+                                "description": "Replacement text (may be empty to delete).",
+                            },
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": False,
+                    },
+                },
+                "new_source": {
+                    "type": "string",
+                    "description": (
+                        "The FULL new contents of the file as a string (REPLACES the "
+                        "whole file — not a diff). Use for large rewrites, and "
+                        "always with `create`."
+                    ),
+                },
+                "create": {
+                    "type": "boolean",
+                    "description": (
+                        "Create a NEW file at `component_path` instead of editing an "
+                        "existing one. Requires `new_source`, and the path must NOT "
+                        "already exist. Use it to add a section, then edit "
+                        "`src/App.tsx` to render it."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "component_path"],
+            "additionalProperties": False,
+        },
+    )
+    async def edit_react_component(args):  # type: ignore[no-untyped-def]
+        return await _edit_react_component_handler(args)
+
+    return edit_react_component
+
+
+async def _read_site_source_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__read_site_source``.
+
+    The READ half of the edit lane. The three ``edit_*`` tools all prefer their
+    ``edits`` (search/replace) form and all tell the agent to read the file first
+    — and until this tool existed nothing on /sites could, because the surface's
+    allowlist excludes the ``pockets`` server and its profile drops the file/shell
+    built-ins. The agent's only reachable move was a full-file ``new_source``
+    rewrite composed from memory, which is how a site loses its capture-form
+    plumbing without a single error being raised.
+
+    Two modes. With neither ``file_path`` nor ``file_paths`` it returns the cheap
+    MANIFEST (paths + byte sizes, no contents) as one JSON block. With either (or
+    both: combined, deduplicated, request order kept) it returns a short JSON
+    metadata block (``ok``, ``pocket_id``, ``engine``, ``files`` as path + bytes,
+    ``message``) followed by ONE plain-text block per file: a
+    ``=== FILE: <path> (<n> bytes) ===`` header line, a newline, then the file's
+    contents byte-for-byte. The contents are never JSON-escaped: escaping every
+    newline and quote inflated large files past Claude Code's MCP output cap, the
+    agent got a truncated file, and it re-read in a loop. An unknown path fails the
+    whole call with a NotFound naming the missing paths and the real ones.
+
+    Plan-gated like its edit siblings: reading is a step of the edit flow, so a
+    workspace whose plan no longer unlocks Sites should not keep using it.
+
+    Returns ``{ok, pocket_id, engine, ...}``; sets ``is_error`` when identity is
+    missing, the plan lacks Sites, ``pocket_id`` is absent, or the service rejects
+    the read (a ripple pocket with no source map, an unknown file) — each relayed
+    by code so the agent can correct itself rather than guess again.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "read_site_source requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_read_site_source",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "read_site_source requires a `pocket_id` — the id of the site pocket "
+            "whose source you are reading."
+        )
+    file_path = args.get("file_path")
+    if file_path is not None and (not isinstance(file_path, str) or not file_path):
+        return _error_response(
+            "read_site_source `file_path` must be a non-empty string (the relative "
+            "path of one file). Omit it entirely to list the site's files instead."
+        )
+    file_paths = args.get("file_paths")
+    if file_paths is not None and (
+        not isinstance(file_paths, list)
+        or not file_paths
+        or not all(isinstance(p, str) and p for p in file_paths)
+    ):
+        return _error_response(
+            "read_site_source `file_paths` must be a non-empty list of non-empty "
+            "strings (relative file paths). Omit it to list the site's files instead."
+        )
+
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="read_site_source")
+    ) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.read_site_source(
+            user_id=user_id,
+            pocket_id=pocket_id,
+            file_path=file_path,
+            file_paths=file_paths,
+        )
+    except CloudError as exc:
+        # ValidationError (a ripple pocket has no source map) or NotFound (unknown
+        # pocket or file). Relay code + message so the agent knows WHICH guard hit.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("read_site_source failed", exc_info=True)
+        return _error_response(f"read failed: {exc}")
+
+    if file_path is None and file_paths is None:
+        body: dict[str, Any] = {"ok": True, **result}
+        body["message"] = (
+            "These are the site's files. Read every file you plan to change in ONE "
+            "call with `file_paths`, then copy `old_string` out of what comes back."
+        )
+        return _success_response(body)
+
+    read = result["files"]
+    meta = {
+        "ok": True,
+        "pocket_id": result["pocket_id"],
+        "engine": result["engine"],
+        "files": [{"path": f["path"], "bytes": f["bytes"]} for f in read],
+        "message": (
+            "Each file follows in its own block, COMPLETE and VERBATIM after its "
+            "`=== FILE: <path> (<n> bytes) ===` header line (the header is not part "
+            "of the file). Copy `old_string` from it exactly for the matching edit "
+            "tool's `edits`, and prefer that over `new_source` — a full rewrite "
+            "drops anything you did not carry over, including the capture form's "
+            "hidden paw_* inputs. Do not re-read these files this turn."
+        ),
+    }
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": json.dumps(meta, separators=(",", ":"), default=str)}
+    ]
+    for f in read:
+        content.append(
+            {
+                "type": "text",
+                "text": f"=== FILE: {f['path']} ({f['bytes']} bytes) ===\n{f['contents']}",
+            }
+        )
+    return {"content": content}
+
+
+@_with_previous_verification("edit_html_file")
+async def _edit_html_file_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__edit_html_file`` (HE-10).
+
+    Reads workspace/user identity from the per-stream ContextVars, runs the same
+    plan gate the create handlers run, validates the inputs, and delegates to
+    ``sites_service.edit_html_file`` — which resolves the edit and persists the one
+    file as a reviewable DRAFT.
+
+    Mirrors ``_edit_react_component_handler`` almost line for line, and the places
+    it does NOT are the html-specific ones: the argument is ``file_path`` (an html
+    site has files, not components), and the path guidance names the ``_paw/``
+    namespace rather than react's build shell.
+
+    Like the react handler it does NOT republish, so there is no ``SmokeGateFailed``
+    case to map. The reason differs and is worth keeping straight: react cannot roll
+    back because its build is async, whereas html has no build to gate on AT ALL —
+    which means a republish here would push unvalidated markup straight to a live
+    site. Draft-only is the safer contract, not merely the convenient one.
+
+    Returns ``{ok, status:"draft", is_live:false, pocket_id, file_path, created,
+    message}``; sets ``is_error`` when identity is missing, the plan lacks Sites,
+    the inputs are malformed, or the service rejects the edit (a reserved or
+    escaping path, a wrong-engine pocket, a missing/colliding file, an ambiguous
+    ``old_string``) — each relayed by code so the agent can fix and retry rather
+    than report a change that did not happen.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "edit_html_file requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_edit_html_file",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "edit_html_file requires a `pocket_id` — the id of the html site "
+            "pocket whose file you are editing."
+        )
+    file_path = args.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return _error_response(
+            "edit_html_file requires a `file_path` — the relative path of the file "
+            "to write (e.g. 'index.html' or 'css/site.css'). It must already exist "
+            "in the site's source map unless you pass `create=true`."
+        )
+    args = coerce_json_object_args(args, ("edits",))
+    edits = args.get("edits")
+    new_source = args.get("new_source")
+    has_edits = edits is not None
+    has_new_source = new_source is not None
+    if has_edits == has_new_source:
+        return _error_response(
+            "edit_html_file requires exactly one of `edits` (a targeted "
+            "search/replace diff — PREFERRED for small changes) or `new_source` "
+            "(the FULL new file contents — for large rewrites and for `create`). "
+            "Provide one, not both and not neither."
+        )
+    if has_new_source and not isinstance(new_source, str):
+        return _error_response(
+            "edit_html_file `new_source` must be the FULL new contents of the file "
+            "as a string (the tool replaces the whole file, not a patch)."
+        )
+    if has_edits:
+        # Validate the diff SHAPE here so a malformed payload gets a clear error
+        # before the service runs. The MATCH-uniqueness contract belongs to the
+        # service's apply_edits (relayed below as a ValidationError).
+        if not isinstance(edits, list) or not edits:
+            return _error_response(
+                "edit_html_file `edits` must be a non-empty list of "
+                "{old_string, new_string} blocks (like the built-in Edit tool)."
+            )
+        for i, block in enumerate(edits):
+            if (
+                not isinstance(block, dict)
+                or not isinstance(block.get("old_string"), str)
+                or not isinstance(block.get("new_string"), str)
+            ):
+                return _error_response(
+                    f"edit_html_file `edits` block {i} must be an object with "
+                    "string `old_string` and `new_string`."
+                )
+    create = bool(args.get("create"))
+    if create and not has_new_source:
+        return _error_response(
+            "edit_html_file `create=true` needs `new_source` — the full contents of "
+            "the new file. There is nothing for `edits` to search against in a file "
+            "that does not exist yet."
+        )
+
+    # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
+    # the same feature the create tools are. Without this a workspace that lost the
+    # plan could keep editing a site its own /sites list 403s.
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="edit_html_file")
+    ) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.edit_html_file(
+            user_id=user_id,
+            pocket_id=pocket_id,
+            file_path=file_path,
+            new_source=new_source if has_new_source else None,
+            edits=edits if has_edits else None,
+            create=create,
+        )
+    except CloudError as exc:
+        # ValidationError (reserved `_paw/` path / escapes the site dir / not an
+        # html site / already exists / a bad diff) or NotFound (unknown pocket or
+        # file). Relay the code + message so the agent knows WHICH guard rejected it.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edit_html_file failed", exc_info=True)
+        return _error_response(f"edit failed: {exc}")
+
+    # The edit is a DRAFT. The chat agent narrates this payload, so — exactly like
+    # both sibling edit tools — it must not contain a completed-state publish claim.
+    #
+    # ``unreferenced`` is the react tool's signal on the html track, and it matters
+    # more here rather than less: an unreached react component is invisible, while an
+    # unreached html page is WRITTEN AND DEPLOYED and simply cannot be navigated to,
+    # so "the page is live but nothing links to it" is a state the agent can very
+    # plausibly describe as done. The wiring step differs from react's — a link from
+    # an existing page, not an import — so the message names that instead.
+    unreferenced = bool(result.get("unreferenced"))
+    message = (
+        "Saved to the site's draft — it is NOT online yet. Tell the user the "
+        "change is in the draft they can preview under /sites, and offer to "
+        "publish it; only call the publish tool when they ask."
+    )
+    if unreferenced:
+        message = (
+            f"HALF DONE — `{result['file_path']}` was created, but NOTHING IN THE "
+            "SITE LINKS TO IT, so no visitor can reach it and the pages they can "
+            "reach are unchanged. Make your NEXT call an `edits` call adding the "
+            "link — usually the nav in `index.html`, or a stylesheet/image "
+            "reference on the page that should show it. Do NOT tell the user the "
+            "page is added until that second call succeeds.\n"
+        ) + message
+    return _success_response(
+        {
+            "ok": True,
+            "status": "draft",
+            "is_live": False,
+            "pocket_id": result["pocket_id"],
+            "file_path": result["file_path"],
+            "created": result["created"],
+            "unreferenced": unreferenced,
+            "message": message,
+            # html has no build, so no rollback. The edit path runs the static check
+            # only; the browser check runs when verify_site is called.
+            "verification": (
+                _half_step_verification()
+                if unreferenced
+                else await _edit_verification(workspace_id, user_id, pocket_id)
+            ),
+        }
+    )
+
+
+@_with_previous_verification("set_site_dependencies")
+async def _set_site_dependencies_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__set_site_dependencies`` (PP-1).
+
+    Identity → ``record_tool_call`` → argument shape → plan gate → the sites
+    service's ``set_site_dependencies``, which resolves every add against the npm
+    registry and the policy and rewrites ``paw.dependencies.json``. Returns
+    ``{ok, pocket_id, packages: {name: {version}}, rejected: [{name, code, reason}],
+    changed}``. A refused package is NOT an error: ``ok`` stays true and the reason
+    is in ``rejected``, so the agent can fix the request or change course.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "set_site_dependencies requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_set_site_dependencies",
+        status="ok",
+        ok=True,
+    )
+
+    args = coerce_json_object_args(args, ("add", "remove"))
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "set_site_dependencies requires a `pocket_id` — the id of the svelte, "
+            "react or html site pocket."
+        )
+    add = args.get("add")
+    remove = args.get("remove")
+    if add is not None and not isinstance(add, list):
+        return _error_response("set_site_dependencies `add` must be a list of {name, range?}.")
+    if remove is not None and not isinstance(remove, list):
+        return _error_response("set_site_dependencies `remove` must be a list of package names.")
+    if not add and not remove:
+        return _error_response(
+            "set_site_dependencies needs `add` (packages to declare) or `remove` "
+            "(package names to drop)."
+        )
+
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="set_site_dependencies")
+    ) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        result = await sites_service.set_site_dependencies(
+            user_id=user_id, pocket_id=pocket_id, add=add, remove=remove
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("set_site_dependencies failed", exc_info=True)
+        return _error_response(f"set_site_dependencies failed: {exc}")
+
+    body: dict[str, Any] = {"ok": True, **result}
+    # PP-2 (contract §8): the dependency change is a source change, so check the draft
+    # it produced (a removed package still imported is a static error); the build runs
+    # in the background like any edit's.
+    body["verification"] = await _edit_verification(workspace_id, user_id, pocket_id)
+    if result["rejected"]:
+        body["message"] = (
+            "Some requests were refused (see `rejected`). Do not import a refused "
+            "package; the others are declared on the site's draft."
+        )
+    else:
+        body["message"] = (
+            "Declared on the site's draft. Import packages the normal way (top-level "
+            "imports are fine for component libraries); only a browser-only library "
+            "that touches `window` at import time needs onMount / useEffect or a "
+            "dynamic import on a prerendered page."
+        )
+    return _success_response(body)
+
+
+def make_set_site_dependencies_tool(tool: Any) -> Any:
+    """Build the ``set_site_dependencies`` SDK tool object (PP-1).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as the create and edit
+    tools (see ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "set_site_dependencies",
+        (
+            "Declare or drop npm packages on an EXISTING svelte, react or html Paw "
+            "Site (not ripple/landing sites). `add` is [{name, range?}]; `remove` is "
+            "a list of names. Any public npm package works, at any exact version, "
+            "semver range or dist-tag (`next`, `beta`); each is resolved on the npm "
+            "registry and pinned to an exact version. paw.dependencies.json is "
+            "written only by this tool; you may also edit package.json and the "
+            "build config (vite.config.*, svelte.config.js) with the edit tools. "
+            "Toolchain packages (svelte, react, vite, tailwindcss, ...) are "
+            "provided already; do not declare them. Not available on a dynamic "
+            "(live-data) svelte site. Returns {ok, packages, rejected, warnings, "
+            "changed, verification}; a package in `rejected` (misspelt, no matching "
+            "version) must not be imported, and `warnings` (security advisories, "
+            "deprecation) are worth passing on to the user." + EDIT_VERIFY_CONTRACT
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "Id of the svelte, react or html site pocket.",
+                },
+                "add": {
+                    **DEPENDENCY_REQUESTS_SCHEMA,
+                    "description": "Packages to declare, as [{name, range?}].",
+                },
+                "remove": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Names of declared packages to drop.",
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def set_site_dependencies(args):  # type: ignore[no-untyped-def]
+        return await _set_site_dependencies_handler(args)
+
+    return set_site_dependencies
+
+
+async def _verify_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__verify_site`` (PP-2).
+
+    Identity → ``record_tool_call`` → ``pocket_id`` → plan gate → the verify pipeline.
+    Returns ``{ok, pocket_id, verification}`` (contract §8). ``ok`` means the check
+    RAN and answered; whether the site passed is ``verification.status``. A re-verify
+    of unchanged source is served from the per-hash cache, and one whose build is
+    still running attaches to that build instead of starting another.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "verify_site requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_verify_site",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "verify_site requires a `pocket_id` — the id of the site pocket to check."
+        )
+
+    if (gate := await _require_sites_plan_or_error(workspace_id, tool="verify_site")) is not None:
+        return gate
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        # Read first so a missing / foreign pocket is an error, not an "unverified".
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    if (pocket.get("engine") or "ripple") == "ripple":
+        return _success_response(
+            {"ok": True, "pocket_id": pocket_id, "verification": _ripple_verification()}
+        )
+
+    verification = await _verification_for(workspace_id, user_id, pocket_id)
+    return _success_response({"ok": True, "pocket_id": pocket_id, "verification": verification})
+
+
+def make_verify_site_tool(tool: Any) -> Any:
+    """Build the ``verify_site`` SDK tool object (PP-2). Same server as the create and
+    edit tools (see ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "verify_site",
+        (
+            "Check whether a svelte, react or html Paw Site's current DRAFT actually "
+            "works: a static check of the source, a real build in the isolated build "
+            "sandbox, and a headless-browser load of the built pages. Returns "
+            "{ok, verification: {status: passed|failed|unverified, layers, errors, "
+            "warnings, checks}}; `checks.warnings` are warn-only page checks with "
+            "sites-check ids that never change the status. Edits return only the "
+            "static check and build in the background, so call this ONCE at the end "
+            "of a turn's edits (it waits for the build and browser check), after a "
+            "fix, or when a previous result was `unverified` with reason `timeout` "
+            "(the build keeps running, and this attaches to it). "
+            "`errors` name file, line and message — fix them and verify again. Only "
+            "`passed` means the site works; `unverified` means it could not be checked."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "Id of the site pocket to verify.",
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def verify_site(args):  # type: ignore[no-untyped-def]
+        return await _verify_site_handler(args)
+
+    return verify_site
+
+
+# The two widths a draft is photographed at. Desktop matches the card capture;
+# phone width is where a marketing page most often breaks.
+_PREVIEW_VIEWPORTS = {
+    "desktop": {"width": 1280, "height": 800},
+    "mobile": {"width": 390, "height": 844},
+}
+# Three tiles: the fold and the first sections, where layout decisions show. Every
+# tile is re-read by the model on every later call in the turn, so six tiles cost
+# twice the tokens for the lower half of the page.
+_PREVIEW_MAX_TILES = 3
+#: Browser Rendering's wait. ``load`` fires once the document and its assets are in;
+#: ``networkidle0`` also waited out analytics and font polling for nothing.
+_PREVIEW_WAIT_UNTIL = "load"
+#: A page photographed at its URL runs its own scripts, and an app (a game, a three.js
+#: scene, a client router) often draws after ``load``. This pause (ms) before the
+#: shutter lets it settle; ``wait_ms`` overrides it, up to ``_PREVIEW_MAX_WAIT_MS``.
+_PREVIEW_URL_SETTLE_MS = 1_500
+_PREVIEW_MAX_WAIT_MS = 8_000
+#: A ``path`` is one route on the draft's own origin: a single leading slash, then
+#: no whitespace, backslash or fragment. ``//``, ``..`` and a scheme are refused
+#: separately so the capture can never be pointed at another host.
+_PREVIEW_PATH_RE = re.compile(r"/[^\s\\#]{0,511}")
+_PREVIEW_BUILD_PENDING = frozenset({"queued", "building", "running", "pending"})
+
+
+def _native_document(body_html: str, css: str) -> str:
+    """A standalone document around a cached svelte/react render, which the preview
+    store keeps as ``{body_html, css}`` for the editor's shadow-render."""
+    return (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<style>{css}</style></head><body>{body_html}</body></html>"
+    )
+
+
+def _preview_path(raw: Any) -> tuple[str, str]:
+    """``(path, "")`` for a usable route on the draft (``""`` when none was given), or
+    ``("", reason)``. Only a same-origin path is allowed: the capture must never be
+    steered to another host."""
+    if raw is None or raw == "":
+        return "", ""
+    if (
+        not isinstance(raw, str)
+        or not _PREVIEW_PATH_RE.fullmatch(raw)
+        or raw.startswith("//")
+        or "://" in raw
+        or ".." in raw.split("?", 1)[0].split("/")
+    ):
+        return "", (
+            "`path` must be one route on the draft, starting with a single `/` (like "
+            "`/play` or `/about`), with no scheme, host, `//`, backslash or `..`; got "
+            f"{raw!r}."
+        )
+    return raw, ""
+
+
+def _preview_wait_ms(raw: Any) -> tuple[int | None, str]:
+    """``(ms, "")`` clamped to 0..``_PREVIEW_MAX_WAIT_MS`` (``None`` when not given),
+    or ``(None, reason)`` for a value that is not a whole number."""
+    if raw is None:
+        return None, ""
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, int | float)
+        or (isinstance(raw, float) and not raw.is_integer())
+    ):
+        return None, f"`wait_ms` must be a whole number of milliseconds; got {raw!r}."
+    return max(0, min(int(raw), _PREVIEW_MAX_WAIT_MS)), ""
+
+
+def _project_preview_target(
+    artifact: dict[str, Any], tool: str = "preview_site"
+) -> tuple[str, str]:
+    """A project draft's page address, or ``("", reason)``.
+
+    The draft is served from its preview origin (``preview_origin.py``): the real
+    page, root-absolute assets and scripts included. A published site whose drafts
+    were purged answers with its live URL. Without an address the reason says why
+    and what to do (call ``tool`` again after the build), and never that the site
+    is broken."""
+    url = artifact.get("preview_url")
+    if isinstance(url, str) and url.startswith(("https://", "http://")):
+        return url, ""
+    mode = artifact.get("preview_mode")
+    status = artifact.get("build_status") or "none"
+    if mode == "server_only":
+        return "", (
+            "this site's draft is server-only: there is no static draft page to "
+            "photograph before publish. Do not describe the page as visually checked; "
+            "say it was not. This does not mean the site is broken."
+        )
+    if status == "failed":
+        return "", (
+            "the draft's last build failed, so there is no page to photograph. Read the "
+            f"build log, fix, call run_site_build again, then call {tool} again."
+        )
+    if status in _PREVIEW_BUILD_PENDING or mode is None:
+        return "", (
+            f"the draft has no built page yet (build {status}). Call run_site_build and "
+            f"wait for `built`, then call {tool} again. This does not mean the "
+            "site is broken."
+        )
+    return "", (
+        "this deployment has no draft preview address, so there is no page to "
+        "photograph. Say the page was not visually checked. This does not mean the "
+        "site is broken."
+    )
+
+
+def _join_preview_url(base: str, path: str) -> str:
+    """``base`` (an origin root) with ``path`` appended; ``base`` alone for no path."""
+    if not path:
+        return base
+    return base.split("?", 1)[0].split("#", 1)[0].rstrip("/") + path
+
+
+async def _project_draft_url(
+    *, workspace_id: str, user_id: str, pocket_id: str, tool: str = "preview_site"
+) -> tuple[str, str]:
+    """A project pocket's draft address (``(url, "")``) or ``("", reason)``: the only
+    page ``preview_site`` and ``play_test_site`` ever open."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    artifact = await sites_service.get_native_artifact(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+    return _project_preview_target(artifact, tool)
+
+
+async def _draft_document(
+    *, workspace_id: str, user_id: str, pocket_id: str, pocket: dict[str, Any]
+) -> tuple[str, str, str]:
+    """What to photograph: ``(html, url, "")`` with exactly one of the two set, or
+    ``("", "", reason)``.
+
+    A ``project`` pocket (every new site) is photographed at its preview URL. html
+    sites (and any pocket already built on this host) come from ``draft_markup``, the
+    card capture's source. svelte and react fall back to the cached preview render: a
+    cache miss queues that build and answers "building", so the agent verifies first
+    and asks again instead of photographing nothing.
+    """
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.sites import service as sites_service
+    from pocketpaw_ee.sites.draft_markup import build_draft_markup
+    from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
+
+    engine = normalize_engine(pocket.get("engine"))
+    if engine == "project":
+        url, reason = await _project_draft_url(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        )
+        return "", url, reason
+
+    stub = SimpleNamespace(pocket_id=pocket_id, owner=user_id, id=pocket_id, name="")
+    markup = await build_draft_markup(stub, pocket=pocket)
+    if markup:
+        return markup, "", ""
+
+    if not has_native_edit_lane(engine):
+        return "", "", "this site has no rendered draft to photograph yet."
+
+    artifact = await sites_service.get_native_artifact(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+    if artifact.get("body_html"):
+        return _native_document(artifact["body_html"], artifact.get("css") or ""), "", ""
+    status = artifact.get("build_status") or "building"
+    return (
+        "",
+        "",
+        f"the draft's render is not ready (build {status}). Call verify_site to wait for "
+        "the build, then call preview_site again.",
+    )
+
+
+@_with_previous_verification("preview_site", timed=False)
+async def _preview_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__preview_site``.
+
+    Identity -> ``record_tool_call`` -> ``pocket_id`` -> plan gate -> draft document ->
+    Browser Rendering screenshot -> tiles. Returns image blocks plus one line of text,
+    or an error that says why there is no picture. Never stores the image.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "preview_site requires workspace and user context (call from a cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_preview_site",
+        status="ok",
+        ok=True,
+    )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "preview_site requires a `pocket_id` — the id of the site pocket to look at."
+        )
+    device = args.get("device") if args.get("device") in _PREVIEW_VIEWPORTS else "desktop"
+    path, bad = _preview_path(args.get("path"))
+    if bad:
+        return _error_response(bad)
+    wait_ms, bad = _preview_wait_ms(args.get("wait_ms"))
+    if bad:
+        return _error_response(bad)
+
+    if (gate := await _require_sites_plan_or_error(workspace_id, tool="preview_site")) is not None:
+        return gate
+
+    from pocketpaw.tools.builtin import reference_images
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+
+    try:
+        document, url, reason = await _draft_document(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, pocket=pocket
+        )
+    except Exception as exc:  # noqa: BLE001 — a preview is never a gate on the build
+        logger.warning("sites.preview_site: draft assembly failed", exc_info=True)
+        return _error_response(f"could not assemble the draft: {exc}")
+    if not document and not url:
+        return _error_response(reason)
+
+    # A url capture runs the page's own scripts, so it waits for them to settle; an
+    # html capture keeps the plain ``load`` unless the agent asked for a pause.
+    if url:
+        target: dict[str, Any] = {"url": _join_preview_url(url, path)}
+        settle = _PREVIEW_URL_SETTLE_MS if wait_ms is None else wait_ms
+    else:
+        target = {"html": document}
+        settle = wait_ms or 0
+    try:
+        from pocketpaw_ee.sites.service import _cf_client
+
+        image = await _cf_client().capture_screenshot(
+            **target,
+            viewport=dict(_PREVIEW_VIEWPORTS[device]),
+            goto_options={"waitUntil": _PREVIEW_WAIT_UNTIL, "timeout": 20_000},
+            screenshot_options={"fullPage": True},
+            wait_for_timeout=settle,
+        )
+    except CloudError as exc:
+        return _error_response(
+            f"screenshots are unavailable on this deployment ({exc.message}). Rely on "
+            "verify_site and re-read your source against the design instead."
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sites.preview_site: capture failed", exc_info=True)
+        return _error_response(f"the screenshot failed: {exc}")
+    if not image:
+        return _error_response("the screenshot came back empty.")
+
+    try:
+        tiles = reference_images.to_tiles(
+            image,
+            max_tiles=_PREVIEW_MAX_TILES,
+            tile_ratio=2.0 if device == "mobile" else 1.25,
+        )
+    except reference_images.ReferenceImageError as exc:
+        return _error_response(str(exc))
+
+    where = f" at {path}" if path and url else ""
+    note = (
+        f"Draft of {pocket_id}{where} at {device} width: {len(tiles)} image(s), top of the "
+        "page first. Look at it as the visitor will: does the fold carry the offer and the "
+        "product, does anything overlap, crop or crowd, does it match the references you "
+        "locked? Fix what is off, then look again."
+    )
+    if path and not url:
+        note += f" `path` {path} was ignored: this site's draft is one page."
+    if url:
+        note += (
+            " A blank or half-drawn canvas may only need longer to render: look again "
+            "with a higher `wait_ms` before you treat it as a bug."
+        )
+    return {"content": [*reference_images.image_blocks(tiles), {"type": "text", "text": note}]}
+
+
+def make_preview_site_tool(tool: Any) -> Any:
+    """Build the ``preview_site`` SDK tool object. Same server as the create, edit and
+    verify tools (see ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "preview_site",
+        (
+            "LOOK at a Paw Site's current DRAFT: returns a full-page screenshot as "
+            "images you can see. Works on every site, template-built apps included: "
+            "those are photographed at their draft preview URL with their own scripts "
+            "running. Args: `pocket_id` (required); optional `device`: `desktop` "
+            "(default, 1280px) or `mobile` (390px); `path`: a route on the draft such "
+            "as `/play` or `/about` (starts with one `/`; template-built sites only, "
+            "ignored on a one-page draft); `wait_ms`: extra milliseconds before the "
+            "shot (0-8000, default 1500 on template-built sites) for 3D, canvas or "
+            "animated scenes. Look after each milestone (every successful "
+            "run_site_build, or once verify_site returns `passed`), not only at the "
+            "end, and before you tell the user the page is ready: a page that builds "
+            "cleanly can still look wrong. Fix what you see and look again; one or two "
+            "rounds is normal. An error means no picture could be taken; it never means "
+            "the site is broken, but then do not describe the page as visually checked."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "Id of the site pocket to look at.",
+                },
+                "device": {
+                    "type": "string",
+                    "enum": ["desktop", "mobile"],
+                    "description": "Viewport width to render at (default desktop).",
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Route on the draft to photograph, e.g. `/play` (default the "
+                        "home page). Template-built sites only."
+                    ),
+                },
+                "wait_ms": {
+                    "type": "integer",
+                    "description": (
+                        "Milliseconds to wait after load before the shot, for 3D or "
+                        "animated pages (clamped to 0-8000)."
+                    ),
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def preview_site(args):  # type: ignore[no-untyped-def]
+        return await _preview_site_handler(args)
+
+    return preview_site
+
+
+def make_read_site_source_tool(tool: Any) -> Any:
+    """Build the ``read_site_source`` SDK tool object.
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as create + publish +
+    the three edit tools, so read → edit → publish sit on one allowlisted server
+    (see ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "read_site_source",
+        (
+            "READ the current source of an EXISTING Paw Site. READ-ONLY — it "
+            "changes nothing and never publishes. Works on every source-bearing "
+            "engine (html, react, svelte); only a ripple site has no source map.\n"
+            "CALL THIS BEFORE EVERY EDIT. The edit tools "
+            "(`edit_html_file` / `edit_react_component` / "
+            "`edit_svelte_component`) take an `edits` list whose `old_string` must "
+            "be copied VERBATIM from the file and match EXACTLY ONCE — you cannot "
+            "write one for a file you have not read this turn. Guessing instead, or "
+            "falling back to a whole-file `new_source` written from memory, is how a "
+            "site silently loses content the user never asked you to touch — most "
+            "damagingly a `<form>`'s `action` and its hidden `paw_site_id` / "
+            "`paw_key` / `paw_redirect` inputs, after which the page still renders, "
+            "still submits, and every future enquiry goes nowhere.\n"
+            "TWO MODES:\n"
+            "  * NO `file_path` / `file_paths` — the MANIFEST: every file's path and "
+            "byte size, no contents. Start here when you do not know what the site "
+            "contains; it is cheap and it tells you the real paths (html sites keep "
+            "`index.html` at the ROOT, react sites live under `src/`).\n"
+            "  * WITH `file_paths` — read ALL the files you plan to change in ONE "
+            "call, e.g. file_paths=['index.html', 'styles.css']. Each comes back "
+            "COMPLETE and VERBATIM, however large, so never re-read a file you "
+            "already have and never read files one call at a time. (`file_path` "
+            "reads a single file and still works; both may be given.)\n"
+            "Args: `pocket_id` (required — the site pocket), optional `file_paths` "
+            "and/or `file_path`. The manifest returns JSON {ok, pocket_id, engine, "
+            "files:[{path, bytes}], file_count, bindings, keeps_client_bundle}. A "
+            "file read returns a JSON block {ok, pocket_id, engine, files:[{path, "
+            "bytes}], message} followed by one text block per file: a header line "
+            "`=== FILE: <path> (<n> bytes) ===`, then the file's exact contents (the "
+            "header is not part of the file). `bindings` names a DYNAMIC svelte "
+            "site's live-data keys (objects / sources / actions / auth) — they are "
+            "configuration, NOT files, so never ask for one as a path. ok=false "
+            "means nothing was read: `pocket.no_source_map` means it is a ripple site "
+            "(use the pocket tools), and a not-found (any unknown path fails the "
+            "whole call) names the missing paths and the paths that DO exist — "
+            "retry with real ones rather than guessing again."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the site pocket whose source you are reading.",
+                },
+                "file_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Optional. The relative path of ONE file to read in full "
+                        "(e.g. 'index.html', 'src/App.tsx'). Prefer `file_paths` "
+                        "when you need more than one file. OMIT both to list the "
+                        "site's files with their sizes and no contents."
+                    ),
+                },
+                "file_paths": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string", "minLength": 1},
+                    "description": (
+                        "Optional. Relative paths of EVERY file you plan to change, "
+                        "read in full in one call (e.g. ['index.html', "
+                        "'styles.css']). Duplicates are ignored; order is kept."
+                    ),
+                },
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def read_site_source(args):  # type: ignore[no-untyped-def]
+        return await _read_site_source_handler(args)
+
+    return read_site_source
+
+
+def make_edit_html_file_tool(tool: Any) -> Any:
+    """Build the ``edit_html_file`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as create + publish +
+    the two sibling edit tools (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "edit_html_file",
+        (
+            "Change an EXISTING html Paw Site (a raw HTML/CSS/JS site — the kind "
+            "`create_html_site` makes, and the kind a site imported from a URL is). "
+            "Use this WHENEVER the user asks to alter an html site that already "
+            "exists — 'change the phone number in the footer', 'shorten the hero "
+            "headline', 'fix the typo on the about page', 'add a contact page'. "
+            "NEVER call `create_html_site` again for a change: that mints a SECOND "
+            "site pocket at a SECOND url and leaves the one the user is looking at "
+            "untouched. The change is saved to the site's DRAFT — it is NOT "
+            "published and nothing goes live.\n"
+            "Give the change ONE of two ways (exactly one, not both):\n"
+            "  * `edits` — PREFER THIS, and prefer it harder here than on the other "
+            "tracks. A list of search/replace blocks [{old_string, new_string}, "
+            "...], exactly like the built-in Edit tool: each `old_string` is copied "
+            "VERBATIM from the current file and must match EXACTLY ONCE (include "
+            "enough surrounding context to be unique), and `new_string` is what it "
+            "becomes. An html page is ONE flat document with no components, so a "
+            "full rewrite means re-emitting the entire page to change a phone "
+            "number. If you have not read the file this turn, call "
+            "`read_site_source` (pocket_id + file_path) FIRST and copy old_string "
+            "out of what it returns — a remembered or guessed old_string does not "
+            "match, and rewriting the page instead is what drops the capture "
+            "form.\n"
+            "  * `new_source` — the FULL new file contents as a string (REPLACES "
+            "the whole file). For large rewrites, and the only form `create` "
+            "accepts.\n"
+            "To ADD a page: call this twice — once with `create=true` and "
+            "`new_source` for the new file (e.g. `about.html`), then once with "
+            "`edits` on `index.html` to link to it. `create=true` REQUIRES the path "
+            "to be new; editing an existing file with it is rejected so you cannot "
+            "overwrite a page by accident. Without `create` the path must already "
+            "exist, so a typo is an error and never a stray new file.\n"
+            "PATHS: an html site's files are project-relative and MOST LIVE AT THE "
+            "ROOT — `index.html` is the page the edge serves, alongside things like "
+            "`styles.css`, `about.html`, `img/logo.svg`. This is NOT like the react "
+            "track: do NOT prefix paths with `src/`. The ONLY forbidden paths are "
+            "the generated `_paw/` namespace and anything that climbs out of the "
+            "site with `..`. To add an npm package call set_site_dependencies and "
+            'import it by bare name in <script type="module"> (the importmap is '
+            "generated).\n"
+            "KEEP THE FORM PLUMBING. If the file contains a `<form>` posting to a "
+            "`/capture/form` endpoint, leave its `action` and its hidden "
+            "`paw_site_id` / `paw_key` / `paw_redirect` inputs EXACTLY as they are "
+            "unless the user asks to change the form itself — they are what makes "
+            "submissions arrive as leads, and a rewrite that drops them silently "
+            "sends every future enquiry nowhere.\n"
+            "Args: `pocket_id` (the html site pocket), `file_path`, and one of "
+            "`edits` / `new_source`, plus optional `create`. Returns {ok, "
+            "status:'draft', is_live:false, pocket_id, file_path, created, "
+            "unreferenced, verification, message}. `unreferenced:true` means nothing in the site "
+            "links to the file you just created — no visitor can reach it — so the "
+            "second call adding the link is still outstanding and you must not "
+            "report the page as added yet. Relay the `message`: the change is in "
+            "the DRAFT the user can "
+            "preview under /sites, and publishing is their call — do NOT tell them "
+            "it is live. ok=false with an error means NOTHING was saved: an "
+            "old_string that matched 0 or >1 times means make it more specific and "
+            "retry; a reserved-path, wrong-engine, already-exists or not-found "
+            "error means relay the reason. Do NOT report a successful edit when "
+            "ok=false." + EDIT_VERIFY_CONTRACT
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the html site pocket to edit.",
+                },
+                "file_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Relative path of the file to write (e.g. 'index.html', "
+                        "'styles.css', 'about.html'). Files usually sit at the site "
+                        "ROOT — do NOT prefix with 'src/'. Must already exist in the "
+                        "site's source map unless `create` is true. The generated "
+                        "`_paw/` namespace is not writable."
+                    ),
+                },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "PREFERRED for small changes: a list of search/replace "
+                        "blocks applied to the file's CURRENT contents. Each "
+                        "`old_string` must match exactly once. Send this INSTEAD of "
+                        "`new_source` so you emit only the diff. Not valid with "
+                        "`create`."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace, copied verbatim from the "
+                                    "current file; must match exactly once."
+                                ),
+                            },
+                            "new_string": {
+                                "type": "string",
+                                "description": "Replacement text (may be empty to delete).",
+                            },
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": False,
+                    },
+                },
+                "new_source": {
+                    "type": "string",
+                    "description": (
+                        "The FULL new contents of the file as a string (REPLACES the "
+                        "whole file — not a diff). Use for large rewrites, and "
+                        "always with `create`."
+                    ),
+                },
+                "create": {
+                    "type": "boolean",
+                    "description": (
+                        "Create a NEW file at `file_path` instead of editing an "
+                        "existing one. Requires `new_source`, and the path must NOT "
+                        "already exist. Use it to add a page, then edit "
+                        "`index.html` to link to it."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "file_path"],
+            "additionalProperties": False,
+        },
+    )
+    async def edit_html_file(args):  # type: ignore[no-untyped-def]
+        return await _edit_html_file_handler(args)
+
+    return edit_html_file
+
+
+# ── Site secrets (lane A2) ───────────────────────────────────────────────────
+# The agent ASKS for a secret by name; the owner types the value into the builder's
+# secure input card. Neither tool accepts or returns a value, and the schemas carry
+# ``additionalProperties: false`` so a ``value`` arg is refused by the SDK too.
+
+
+def _secret_tool_identity(tool_name: str, pocket_id: Any) -> tuple[str, str, dict | None]:
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return (
+            "",
+            "",
+            _error_response(
+                f"{tool_name} requires workspace and user context (call from a cloud chat session)."
+            ),
+        )
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id if isinstance(pocket_id, str) else None,
+        tool_server="pocketpaw_sites",
+        tool_name=f"_{tool_name}",
+        status="ok",
+        ok=True,
+    )
+    if not isinstance(pocket_id, str) or not pocket_id.strip():
+        return "", "", _error_response(f"{tool_name} requires a `pocket_id`.")
+    return workspace_id, user_id, None
+
+
+async def _request_site_secret_handler(args: dict) -> dict:
+    """MCP handler for ``request_site_secret``: leave a pending request, never a value."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import site_secrets
+
+    pocket_id = args.get("pocket_id")
+    workspace_id, user_id, err = _secret_tool_identity("request_site_secret", pocket_id)
+    if err is not None:
+        return err
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="request_site_secret")
+    ) is not None:
+        return gate
+    pocket_id = pocket_id.strip()
+    try:
+        view = await site_secrets.request_secret(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            name=str(args.get("name") or ""),
+            description=str(args.get("description") or ""),
+            requested_by="agent",
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+
+    if view.status == "set":
+        message = (
+            f"{view.name} is already set for this site. Read it in the Worker as "
+            f"env.{view.name}; publishing binds it. Do not ask the user to paste it."
+        )
+    else:
+        message = (
+            f"Requested {view.name}. The site owner will fill it in the builder's secure "
+            f"input; you never see the value. Read it in the Worker as env.{view.name}, "
+            "keep it out of source, .dev.vars and paw-build.json, and tell the user to set "
+            "it before publishing (publish refuses while a required secret is missing)."
+        )
+        _push_secret_request_sse(pocket_id, view)
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": pocket_id,
+            "secret": view.model_dump(mode="json"),
+            "message": message,
+        }
+    )
+
+
+def _push_secret_request_sse(pocket_id: str, view: Any) -> None:
+    """Per-run SSE so the chat that asked can render the input card inline. Best
+    effort, names only; the bus event ``site.secret_requested`` reaches the builder."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import push_sse_event
+
+        push_sse_event(
+            "site_secret_requested",
+            {"pocket_id": pocket_id, "secret": view.model_dump(mode="json")},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("request_site_secret: SSE push failed (non-fatal)", exc_info=True)
+
+
+async def _list_site_secrets_handler(args: dict) -> dict:
+    """MCP handler for ``list_site_secrets``: names and status only."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import site_secrets
+
+    pocket_id = args.get("pocket_id")
+    workspace_id, user_id, err = _secret_tool_identity("list_site_secrets", pocket_id)
+    if err is not None:
+        return err
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="list_site_secrets")
+    ) is not None:
+        return gate
+    try:
+        listing = await site_secrets.list_secrets(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id.strip()
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": listing.pocket_id,
+            "secrets": [
+                {"name": s.name, "status": s.status, "description": s.description}
+                for s in listing.secrets
+            ],
+        }
+    )
+
+
+def make_request_site_secret_tool(tool: Any) -> Any:
+    """Build the ``request_site_secret`` SDK tool. Same server as the create tools."""
+
+    @tool(
+        "request_site_secret",
+        (
+            "Ask the site owner for a runtime secret (an API key, a webhook signing "
+            "secret) the site's Worker needs. Creates a pending request the owner fills "
+            "in the builder's secure input; you NEVER receive, write or ask for the "
+            "value, and must not put one in source, .dev.vars or chat. `name` is the "
+            "env var the Worker reads (UPPER_SNAKE_CASE, max 64 chars, e.g. "
+            "STRIPE_SECRET_KEY); `description` tells the owner what it is and where to "
+            "get it. Publishing binds every set secret as env.<NAME>."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {"type": "string", "description": "Id of the site pocket."},
+                "name": {
+                    "type": "string",
+                    "description": "UPPER_SNAKE_CASE env var name, max 64 chars.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What the secret is for and where the owner finds it.",
+                },
+            },
+            "required": ["pocket_id", "name", "description"],
+            "additionalProperties": False,
+        },
+    )
+    async def request_site_secret(args):  # type: ignore[no-untyped-def]
+        return await _request_site_secret_handler(args)
+
+    return request_site_secret
+
+
+def make_list_site_secrets_tool(tool: Any) -> Any:
+    """Build the ``list_site_secrets`` SDK tool. Same server as the create tools."""
+
+    @tool(
+        "list_site_secrets",
+        (
+            "List the site's secrets by name with their status: `set` (the owner filled "
+            "it in; publishing binds it as env.<NAME>) or `pending` (requested, waiting "
+            "for the owner). Values are never returned."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {"type": "string", "description": "Id of the site pocket."},
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def list_site_secrets(args):  # type: ignore[no-untyped-def]
+        return await _list_site_secrets_handler(args)
+
+    return list_site_secrets
+
+
+# ── Site integrations ────────────────────────────────────────────────────────
+# One-click Connect for Sites (pocketpaw_ee.integrations). The agent asks; the
+# owner taps Connect on the chat card (SSE ``site_integration_requested``) and the
+# OAuth popup finishes it. No tool takes or returns a credential.
+
+_INTEGRATION_WIRING = (
+    "Wire it in the page, never with fetch code or keys: paw.js is injected by the "
+    'generator. Payments: <button data-paw-checkout="<product ref>">. Newsletter: '
+    "<form data-paw-subscribe> with an email input. Anything else: "
+    "Paw.call(provider, action, args). Project Workers call the gateway server-side "
+    "with env.PAW_GATEWAY_TOKEN."
+)
+
+#: The server half every gateway provider shares: framework templates call the same
+#: action from server code through the paw-integrations recipe's ``pawCall``.
+_SERVER_CALL = (
+    " Server code (framework templates): apply the paw-integrations recipe and call "
+    "pawCall(env, {call}) per request{then}; the platform sets env.PAW_GATEWAY_TOKEN, so "
+    "never request it or write it into a file."
+)
+
+
+def _gateway_wiring(client: str, call: str, then: str = "") -> str:
+    """A provider's wiring line: the paw.js form, then the same call server-side."""
+    return (
+        "Client (paw.js is injected into any page that uses it): "
+        + client
+        + (_SERVER_CALL.format(call=call, then=then))
+    )
+
+
+#: The wiring line ``connect_site_integration`` returns for each provider, so the
+#: per-provider detail lives here and not in a skill. One entry per registered
+#: provider (``test_integration_next_steps_cover_every_provider``); the action names
+#: and args are the providers' own ``ActionSpec`` models, not prose.
+_INTEGRATION_NEXT_STEPS = {
+    "newsletter": _gateway_wiring(
+        '<form data-paw-subscribe> with an <input type="email" name="email">, or '
+        "Paw.call('newsletter', 'subscribe', {email}).",
+        "'newsletter', 'subscribe', { email }",
+    ),
+    "stripe": _gateway_wiring(
+        'a buy button is <button data-paw-checkout="<catalog product id>"> (add '
+        'data-qty="2" for a fixed quantity). The price is read from the catalog at '
+        "checkout, so a printed price is display only: never put a price or currency "
+        "in the button.",
+        "'stripe', 'create_checkout', { product_ref, qty }",
+        " and redirect to result.url",
+    ),
+    "razorpay": _gateway_wiring(
+        "data-paw-checkout is Stripe only, so the buy button runs "
+        "Paw.call('razorpay', 'create_checkout', {product_ref, qty}) and opens "
+        "result.url. Send the catalog product id, never a price.",
+        "'razorpay', 'create_checkout', { product_ref, qty }",
+        " and redirect to result.url",
+    ),
+    "shopify": _gateway_wiring(
+        "a product grid renders Paw.call('shopify', 'list_products', {limit, cursor}) "
+        "(prices are in minor units); a buy button runs Paw.call('shopify', "
+        "'create_cart_checkout', {variant_id, qty}) and opens result.url.",
+        "'shopify', 'list_products' | 'create_cart_checkout', args",
+    ),
+    "google_sheets": _gateway_wiring(
+        "the form submits Paw.call('google_sheets', 'append_row', {fields}) with "
+        "string values; each key becomes a column.",
+        "'google_sheets', 'append_row', { fields }",
+    ),
+    "hubspot": _gateway_wiring(
+        "the lead form submits Paw.call('hubspot', 'create_contact', {email, "
+        "firstname, lastname, phone, company, message}).",
+        "'hubspot', 'create_contact', args",
+    ),
+    "zoho_crm": _gateway_wiring(
+        "the lead form submits Paw.call('zoho_crm', 'create_lead', {email, "
+        "first_name, last_name, phone, company, message}).",
+        "'zoho_crm', 'create_lead', args",
+    ),
+    "airtable": _gateway_wiring(
+        "the form submits Paw.call('airtable', 'create_record', {fields}); keys must "
+        "match the table's text field names.",
+        "'airtable', 'create_record', { fields }",
+    ),
+    "mailchimp": _gateway_wiring(
+        "the signup form submits Paw.call('mailchimp', 'subscribe', {email, "
+        "first_name, last_name}).",
+        "'mailchimp', 'subscribe', args",
+    ),
+    "brevo": _gateway_wiring(
+        "the signup form submits Paw.call('brevo', 'subscribe', {email, first_name, last_name}).",
+        "'brevo', 'subscribe', args",
+    ),
+    "notion": _gateway_wiring(
+        "a blog or news list renders Paw.call('notion', 'list_entries', {limit, "
+        "cursor}) and an entry page Paw.call('notion', 'get_entry', {id}); set text "
+        "with textContent, never innerHTML.",
+        "'notion', 'list_entries' | 'get_entry', args",
+    ),
+    "supabase": "Once the owner picks a project, its URL and publishable key are "
+    "provisioned as the SUPABASE_URL and SUPABASE_ANON_KEY site secrets; apply the "
+    "supabase recipe and skip its step that requests them. SUPABASE_SERVICE_ROLE_KEY "
+    "is off by default: only if an admin job needs it, ask the owner to turn on Admin "
+    "access for Supabase in Connections.",
+    "resend": "Nothing to write in the site: Resend is the owner's own sender for "
+    "this site's lead notifications (new lead, handoff, booking). Once connected, ask "
+    "the owner to set 'Send from' to an address on a domain they verified in Resend; "
+    "until then the site reads setup_required and mail goes out from Paw. Visitors "
+    "can't send mail through it, and it never replaces a contact form's own handling.",
+    "calendly": "Search the web for Calendly's current inline embed snippet and use "
+    "it with the owner's link: in the page HTML on static, in a page component on a "
+    "framework template. There are no gateway calls.",
+    "cal_com": "Search the web for Cal.com's current inline embed snippet and use it "
+    "with the owner's link: in the page HTML on static, in a page component on a "
+    "framework template. There are no gateway calls.",
+    "turnstile": "Nothing to write: paw.js shows the challenge itself when a write "
+    "call (data-paw-checkout, data-paw-subscribe, Paw.call) needs one, and server "
+    "calls with env.PAW_GATEWAY_TOKEN skip it. The widget is made for the site's "
+    "address, so after a FIRST publish, publish once more to put it on the live page.",
+    "social_login": "Visitor sign-in with Google or GitHub, framework templates "
+    "only: apply the better-auth, paw-integrations and paw-social-login recipes "
+    "(site plan). The buttons are plain links, "
+    '<a href="/api/paw-auth/start?provider=google&callbackURL=/account">, one per '
+    "provider the owner turned on (list_site_integrations, settings.providers). No "
+    "OAuth client id or secret goes anywhere. On a static site, say sign-in needs a "
+    "framework template.",
+}
+
+
+async def _list_site_integrations_handler(args: dict) -> dict:
+    """MCP handler for ``list_site_integrations``: bindings + the provider catalog."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.integrations import bindings
+
+    pocket_id = args.get("pocket_id")
+    workspace_id, user_id, err = _secret_tool_identity("list_site_integrations", pocket_id)
+    if err is not None:
+        return err
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="list_site_integrations")
+    ) is not None:
+        return gate
+    try:
+        linked = await bindings.list_for_pocket(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id.strip()
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": pocket_id.strip(),
+            "integrations": [v.model_dump(mode="json") for v in linked],
+            "providers": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "kind": p.kind,
+                    "category": p.category,
+                    "availability": p.availability,
+                    "public_actions": [a.name for a in p.actions if a.public],
+                }
+                for p in bindings.list_provider_views()
+            ],
+        }
+    )
+
+
+async def _connect_site_integration_handler(args: dict) -> dict:
+    """MCP handler for ``connect_site_integration``: binding + Connect card, no secrets."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.integrations import bindings
+
+    pocket_id = args.get("pocket_id")
+    workspace_id, user_id, err = _secret_tool_identity("connect_site_integration", pocket_id)
+    if err is not None:
+        return err
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="connect_site_integration")
+    ) is not None:
+        return gate
+    pocket_id = pocket_id.strip()
+    provider_id = str(args.get("provider") or "").strip().lower()
+    purpose = str(args.get("purpose") or "")
+    try:
+        provider = bindings.provider_or_404(provider_id)
+        if provider.availability() != "available":
+            return _error_response(f"{provider.name} isn't available yet. Pick another option.")
+        view = await bindings.request_from_agent(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            provider_id=provider_id,
+            purpose=purpose,
+        )
+    except CloudError as exc:
+        known = ", ".join(p.id for p in bindings.list_provider_views())
+        return _error_response(f"{exc.code}: {exc.message} Known providers: {known}.")
+
+    _push_integration_request_sse(pocket_id, bindings.provider_view(provider), purpose, view)
+    if provider.kind == "embed":
+        url = str(view.settings.get("url") or "")
+        message = (
+            f"{provider.name} is an embed: no account to connect and no gateway calls. "
+            + (
+                f"The owner's booking link is {url}. "
+                if url and view.status == "connected"
+                else "The card in chat asks the owner for their public booking link; "
+                "list_site_integrations shows it as settings.url once set. "
+            )
+            + f"Put {provider.name}'s standard inline embed markup in the page with that "
+            "link. Never invent a link. " + _INTEGRATION_NEXT_STEPS.get(provider.id, "")
+        ).strip()
+    elif view.status == "connected":
+        wiring = _INTEGRATION_NEXT_STEPS.get(provider.id, _INTEGRATION_WIRING)
+        message = f"{provider.name} is ready on this site. " + wiring
+    else:
+        wiring = _INTEGRATION_NEXT_STEPS.get(provider.id, _INTEGRATION_WIRING)
+        message = (
+            f"Asked the owner to connect {provider.name}: they tap Connect on the card in "
+            "chat and approve on the provider's page. You never see or ask for "
+            "credentials or API keys. Keep building; calls answer `not_connected` until "
+            "they finish. " + wiring
+        )
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": pocket_id,
+            "site_integration": view.model_dump(mode="json"),
+            "message": message,
+        }
+    )
+
+
+def _push_integration_request_sse(pocket_id: str, provider: Any, purpose: str, view: Any) -> None:
+    """Per-run SSE so the chat renders the Connect card. Best effort, no secrets."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import push_sse_event
+
+        push_sse_event(
+            "site_integration_requested",
+            {
+                "pocket_id": pocket_id,
+                "provider": provider.model_dump(mode="json"),
+                "purpose": purpose,
+                "site_integration": view.model_dump(mode="json") if view is not None else None,
+            },
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("connect_site_integration: SSE push failed (non-fatal)", exc_info=True)
+
+
+def make_list_site_integrations_tool(tool: Any) -> Any:
+    """Build the ``list_site_integrations`` SDK tool. Same server as the create tools."""
+
+    @tool(
+        "list_site_integrations",
+        (
+            "List the integrations a site is linked to (status connected, "
+            "needs_connection, needs_reconnect or disabled) and the providers it could "
+            "use, with their public actions. No credentials are ever returned."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {"type": "string", "description": "Id of the site pocket."},
+            },
+            "required": ["pocket_id"],
+            "additionalProperties": False,
+        },
+    )
+    async def list_site_integrations(args):  # type: ignore[no-untyped-def]
+        return await _list_site_integrations_handler(args)
+
+    return list_site_integrations
+
+
+def make_connect_site_integration_tool(tool: Any) -> Any:
+    """Build the ``connect_site_integration`` SDK tool. Same server as the create tools."""
+
+    @tool(
+        "connect_site_integration",
+        (
+            "Link a third-party service (payments, newsletter, CRM, booking...) to a Paw "
+            "Site the owner's way: one tap, no API keys. Shows the owner a Connect card in "
+            "chat; built-ins (like `newsletter`) are on at once. Use this, NEVER "
+            "request_site_secret, for a service the site needs. `provider` is a provider "
+            "id from list_site_integrations; `purpose` is one short sentence the owner "
+            "reads on the card (e.g. 'Take payments for the three course packages')."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {"type": "string", "description": "Id of the site pocket."},
+                "provider": {"type": "string", "description": "Provider id, e.g. newsletter."},
+                "purpose": {
+                    "type": "string",
+                    "description": "Why the site needs it, in the owner's terms.",
+                },
+            },
+            "required": ["pocket_id", "provider", "purpose"],
+            "additionalProperties": False,
+        },
+    )
+    async def connect_site_integration(args):  # type: ignore[no-untyped-def]
+        return await _connect_site_integration_handler(args)
+
+    return connect_site_integration
+
+
 __all__ = [
+    "CONNECT_SITE_INTEGRATION_TOOL_ID",
     "CREATE_DYNAMIC_SITE_TOOL_ID",
+    "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
+    "CREATE_REACT_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
+    "EDIT_HTML_FILE_TOOL_ID",
+    "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
+    "HTML_REQUIRED_KEYS",
+    "LIST_SITE_INTEGRATIONS_TOOL_ID",
+    "LIST_SITE_SECRETS_TOOL_ID",
+    "PLAY_TEST_SITE_TOOL_ID",
+    "REACT_REQUIRED_KEYS",
+    "REACT_RESERVED_FILES",
+    "REACT_RESERVED_PREFIX",
+    "REQUEST_SITE_SECRET_TOOL_ID",
     "SERVER_NAME",
+    "SET_SITE_DEPENDENCIES_TOOL_ID",
     "SITES_CREATE_TOOL_IDS",
     "SVELTE_REQUIRED_EXACT_KEYS",
     "SVELTE_REQUIRED_PREFIXES",
+    "make_connect_site_integration_tool",
     "make_create_dynamic_site_tool",
+    "make_create_html_site_tool",
     "make_create_landing_site_tool",
+    "make_create_react_site_tool",
     "make_create_svelte_site_tool",
+    "make_edit_html_file_tool",
+    "make_edit_react_component_tool",
     "make_edit_svelte_component_tool",
+    "make_list_site_integrations_tool",
+    "make_list_site_secrets_tool",
+    "make_read_site_source_tool",
+    "make_request_site_secret_tool",
+    "make_set_site_dependencies_tool",
 ]

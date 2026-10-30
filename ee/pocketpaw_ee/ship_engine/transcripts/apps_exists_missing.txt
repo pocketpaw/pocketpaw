@@ -1,0 +1,5 @@
+# transcript: `dokku apps:exists demo` when the app does not exist yet.
+EXIT: 1
+--- stdout ---
+--- stderr ---
+ !     App demo does not exist

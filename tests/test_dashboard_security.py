@@ -4,7 +4,8 @@ Covers:
   - Tunnel auth bypass fix (_is_genuine_localhost)
   - Rate limiting (burst, refill, 429 responses, per-IP isolation)
   - Session tokens (create, verify, expired, tampered, master regen)
-  - Security headers
+  - Security headers (2026-10-03: a response's own CSP / Permissions-Policy survive
+    the middleware; X-Frame-Options is skipped only when that CSP has frame-ancestors)
   - CORS rejection of non-matching origins
   - WebSocket tunnel auth
 """
@@ -278,6 +279,101 @@ class TestIsGenuineLocalhost:
         req = self._make_request("127.0.0.1", headers={"cf-connecting-ip": "8.8.8.8"})
         assert _is_genuine_localhost(req) is False
 
+    @patch("pocketpaw.dashboard_auth.Settings")
+    def test_remote_host_does_not_load_settings(self, mock_settings_cls):
+        """Hot path: remote traffic must not pay for Settings.load() (~5 ms)."""
+        from pocketpaw.dashboard_auth import _is_genuine_localhost
+
+        assert _is_genuine_localhost(self._make_request("203.0.113.7")) is False
+        mock_settings_cls.load.assert_not_called()
+
+    @patch("pocketpaw.dashboard_auth.Settings")
+    def test_proxied_loopback_does_not_load_settings(self, mock_settings_cls):
+        """A same-host reverse proxy gives 127.0.0.1 + X-Forwarded-For on every request."""
+        from pocketpaw.dashboard_auth import _is_genuine_localhost
+
+        req = self._make_request("127.0.0.1", headers={"x-forwarded-for": "8.8.8.8"})
+        assert _is_genuine_localhost(req) is False
+        mock_settings_cls.load.assert_not_called()
+
+
+class TestAccessTokenCache:
+    """get_access_token caches the file but honours a rotation on the next call."""
+
+    def test_rotation_is_seen_on_next_call(self, tmp_path):
+        from pocketpaw.config import get_access_token, regenerate_token
+
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            old = get_access_token()
+            assert get_access_token() == old
+            new = regenerate_token()
+            assert new != old
+            assert get_access_token() == new
+
+    def test_rotation_swaps_in_a_new_file(self, tmp_path):
+        """A rotation must change the inode, so a same-tick, same-size rewrite by
+        another process still changes the cache key (and leaves no temp file)."""
+        from pocketpaw.config import get_access_token, regenerate_token
+
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            get_access_token()
+            before = (tmp_path / "access_token").stat().st_ino
+            regenerate_token()
+            assert (tmp_path / "access_token").stat().st_ino != before
+        assert [p.name for p in tmp_path.iterdir()] == ["access_token"]
+
+    def test_external_rewrite_is_seen_on_next_call(self, tmp_path):
+        import os
+
+        from pocketpaw.config import get_access_token
+
+        path = tmp_path / "access_token"
+        path.write_text("token-one")
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            assert get_access_token() == "token-one"
+            st = path.stat()
+            path.write_text("token-two")
+            # Force a distinct mtime: Windows ticks are coarse enough that two
+            # writes in one test can share one.
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+            assert get_access_token() == "token-two"
+
+    def test_cached_read_skips_the_file_read(self, tmp_path):
+        from pathlib import Path
+
+        from pocketpaw.config import get_access_token
+
+        (tmp_path / "access_token").write_text("cached-token")
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            assert get_access_token() == "cached-token"
+            with patch.object(Path, "read_text", side_effect=AssertionError("re-read")):
+                assert get_access_token() == "cached-token"
+
+    async def test_rotated_token_accepted_old_rejected_by_middleware(self, tmp_path):
+        from types import SimpleNamespace
+
+        from pocketpaw.config import get_access_token, regenerate_token
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        def req(token):
+            r = MagicMock()
+            r.method = "GET"
+            r.url.path = "/api/identity"
+            r.client.host = "203.0.113.7"
+            r.query_params = {}
+            r.headers = {"Authorization": f"Bearer {token}"}
+            r.cookies = {}
+            r.state = SimpleNamespace()
+            return r
+
+        with patch("pocketpaw.config.get_config_dir", return_value=tmp_path):
+            old = get_access_token()
+            assert await _auth_dispatch(req(old)) is None
+            new = regenerate_token()
+            assert await _auth_dispatch(req(new)) is None
+            rejected = await _auth_dispatch(req(old))
+            assert rejected is not None and rejected.status_code == 401
+
 
 # ---------------------------------------------------------------------------
 # Dashboard integration tests (auth middleware, headers, CORS, session exchange)
@@ -307,6 +403,54 @@ class TestSecurityHeaders:
         # Regular HTTP request — no HSTS
         resp = test_client.get("/")
         assert "Strict-Transport-Security" not in resp.headers
+
+    def test_response_own_headers_survive(self):
+        """A route that authors its own CSP and Permissions-Policy keeps them, and
+        gets no X-Frame-Options when that CSP has frame-ancestors. A CSP without it
+        still gets DENY. The paw-bar frame
+        relies on this to embed on customer sites with the mic available."""
+        from fastapi import FastAPI
+        from fastapi.responses import HTMLResponse
+        from starlette.testclient import TestClient
+
+        from pocketpaw.dashboard import security_headers_middleware
+
+        app = FastAPI()
+        csp = "frame-ancestors brewco.com:*; sandbox allow-scripts"
+        perms = "microphone=(self)"
+
+        @app.get("/framed")
+        def framed():
+            return HTMLResponse(
+                "", headers={"Content-Security-Policy": csp, "Permissions-Policy": perms}
+            )
+
+        @app.get("/scripted")
+        def scripted():
+            return HTMLResponse("", headers={"Content-Security-Policy": "script-src 'self'"})
+
+        @app.get("/plain")
+        def plain():
+            return HTMLResponse("")
+
+        app.middleware("http")(security_headers_middleware)
+        client = TestClient(app)
+
+        resp = client.get("/framed")
+        assert resp.headers["Content-Security-Policy"] == csp
+        assert resp.headers["Permissions-Policy"] == perms
+        assert "X-Frame-Options" not in resp.headers
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
+
+        # Own CSP without frame-ancestors: CSP kept, framing still fails closed.
+        resp = client.get("/scripted")
+        assert resp.headers["Content-Security-Policy"] == "script-src 'self'"
+        assert resp.headers["X-Frame-Options"] == "DENY"
+
+        resp = client.get("/plain")
+        assert resp.headers["X-Frame-Options"] == "DENY"
+        assert "frame-ancestors 'none'" in resp.headers["Content-Security-Policy"]
+        assert "microphone=()" in resp.headers["Permissions-Policy"]
 
 
 class TestFrontendSvgSafety:
@@ -790,3 +934,44 @@ class TestFullAccessApiLimiterExemption:
             assert resp is not None
             assert resp.status_code == 429
             mock_auth_limiter.check.assert_called_once_with("127.0.0.1")
+
+
+class TestPawbarAppExempt:
+    """The public concierge iframe loads pawbar.js/css from /pawbar-app with no
+    session — the mount must pass the auth middleware anonymously, like /static."""
+
+    def _request(self, path):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        req = MagicMock()
+        req.method = "GET"
+        req.url.path = path
+        req.client.host = "203.0.113.7"
+        req.headers = {}
+        req.cookies = {}
+        req.query_params = {}
+        # Real (attribute-less) state: a MagicMock here fabricates a truthy
+        # ``full_access`` and short-circuits the cascade to valid.
+        req.state = SimpleNamespace()
+        return req
+
+    @pytest.mark.asyncio
+    async def test_pawbar_app_assets_pass_anonymously(self):
+        from unittest.mock import patch
+
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        with patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok"):
+            result = await _auth_dispatch(self._request("/pawbar-app/pawbar.js"))
+        assert result is None  # allowed through, no 401
+
+    @pytest.mark.asyncio
+    async def test_unrelated_root_path_still_rejected(self):
+        from unittest.mock import patch
+
+        from pocketpaw.dashboard_auth import _auth_dispatch
+
+        with patch("pocketpaw.dashboard_auth.get_access_token", return_value="tok"):
+            result = await _auth_dispatch(self._request("/pawbar-secrets/x.js"))
+        assert result is not None  # control: prefix must not over-match

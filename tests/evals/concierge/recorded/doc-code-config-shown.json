@@ -1,0 +1,10 @@
+{
+  "case_id": "doc-code-config-shown",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved verbatim quote from the docs. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "d564c02ba18e8d04",
+  "raw_model_output": "A minimal brewkit.yaml looks like this:\n```yaml\nsite: demo\nroast_profile: medium\ngrind_size: 18\n```\ngrind_size is in clicks on the reference grinder."
+}

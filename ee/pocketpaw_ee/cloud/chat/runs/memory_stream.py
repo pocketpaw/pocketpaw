@@ -8,6 +8,8 @@ other replicas. Only sound when the executor is also in-process. See
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -33,6 +35,8 @@ class _RunBuffer:
 class InMemoryStreamTransport:
     def __init__(self) -> None:
         self._buffers: dict[str, _RunBuffer] = {}
+        # scope key -> (stop token, monotonic expiry)
+        self._scope_stops: dict[str, tuple[str, float]] = {}
 
     def _buf(self, run_id: str) -> _RunBuffer:
         b = self._buffers.get(run_id)
@@ -111,3 +115,16 @@ class InMemoryStreamTransport:
     async def stream_exists(self, run_id: str) -> bool:
         b = self._buffers.get(run_id)
         return bool(b and b.entries)
+
+    async def request_scope_stop(self, scope_key: str, ttl_seconds: int) -> None:
+        self._scope_stops[scope_key] = (uuid.uuid4().hex, time.monotonic() + ttl_seconds)
+
+    async def scope_stop_token(self, scope_key: str) -> str | None:
+        entry = self._scope_stops.get(scope_key)
+        if entry is None:
+            return None
+        token, expires_at = entry
+        if time.monotonic() >= expires_at:
+            self._scope_stops.pop(scope_key, None)
+            return None
+        return token

@@ -1,13 +1,36 @@
 # Meetings — FastAPI router.
 # Created: 2026-05-19. Mounted at /api/v1/meetings via mount_cloud().
 # See docs/plans/2026-05-19-meetings-integration-design.md.
+# 2026-10-01 (feat/meetings-instant, MC-1): POST /meetings/instant.
+# 2026-10-01 (feat/meetings-by-code, MC-2): POST /meetings with source=livekit
+# and no group_id creates a meeting for later; GET /meetings/by-code/{code}
+# (public, per-IP rate limit) and POST /meetings/by-code/{code}/join.
+# 2026-10-01 (feat/meetings-lobby, MC-3): the lobby — guest knock / status /
+# cancel (public, rate-limited, per-knock secret in the X-Knock-Secret header)
+# and member list / admit / deny;
+# PATCH /meetings/{id} (host: access, title, description).
+# 2026-10-01 (feat/meetings-ics, MC-4): PATCH /meetings/{id} also reschedules
+# (scheduled_start, duration_minutes); GET /meetings/{id}/joining-info (text/plain)
+# and GET /meetings/{id}/ics (text/calendar download), both open to the meeting's
+# workspace like GET /meetings/{id}.
 #
 # Routes:
 #   GET    /meetings                          — list workspace meetings
 #   POST   /meetings                          — create a meeting
+#   POST   /meetings/instant                  — start a meeting now (code + link)
+#   GET    /meetings/by-code/{code}           — PUBLIC join-page lookup (6 fields)
+#   POST   /meetings/by-code/{code}/join      — member joins by code, call starts
+#   POST   /meetings/by-code/{code}/knock     — PUBLIC guest asks to join
+#   GET    /meetings/by-code/{code}/knocks/{knock_id} — PUBLIC guest poll (secret)
+#   DELETE /meetings/by-code/{code}/knocks/{knock_id} — PUBLIC guest cancels (secret)
 #   GET    /meetings/search/                  — cross-provider search
 #   GET    /meetings/{meeting_id}             — get one meeting
+#   PATCH  /meetings/{meeting_id}             — host edits access/title/description/time
+#   GET    /meetings/{meeting_id}/joining-info — joining info as text/plain
+#   GET    /meetings/{meeting_id}/ics         — one-event .ics download
 #   DELETE /meetings/{meeting_id}             — cancel a meeting
+#   GET    /meetings/{meeting_id}/knocks      — guests waiting (room members)
+#   POST   /meetings/{meeting_id}/knocks/{knock_id}/admit|deny — someone in the call
 #   GET    /meetings/{meeting_id}/transcript  — transcript metadata
 #   POST   /meetings/{meeting_id}/bot         — dispatch a Recall.ai bot
 #   GET    /meetings/{meeting_id}/bot         — bot lifecycle status
@@ -31,10 +54,18 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, field_serializer
 
+from pocketpaw_ee.cloud._core.rate_limit import (
+    client_ip,
+    rate_limit_meeting_knock,
+    rate_limit_meeting_knock_poll,
+    rate_limit_meeting_lookup,
+)
 from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.meetings import lobby_service
 from pocketpaw_ee.cloud.meetings import service as meetings_service
 from pocketpaw_ee.cloud.meetings.dto import (
     CompleteGoogleMeetOAuthRequest,
@@ -43,13 +74,22 @@ from pocketpaw_ee.cloud.meetings.dto import (
     DisconnectResponse,
     GoogleMeetAuthUrlResponse,
     GoogleMeetRedirectUriResponse,
+    JoinMeetingByCodeResponse,
+    KnockCreatedResponse,
+    KnockDecisionResponse,
+    KnockRequest,
+    KnockStatusResponse,
+    KnockSummaryResponse,
     ListMeetingsRequest,
     MeetingDetailResponse,
+    MeetingLookupResponse,
     MeetingResponse,
     MeetingsSettingsResponse,
+    StartInstantMeetingRequest,
     StoreGoogleMeetCredentialsRequest,
     StoreZoomCredentialsRequest,
     TranscriptResponse,
+    UpdateMeetingRequest,
     UpdateMeetingsSettingsRequest,
 )
 from pocketpaw_ee.cloud.meetings.providers.recall import client as recall_client
@@ -88,8 +128,108 @@ async def create_meeting(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> MeetingResponse:
-    """Create a meeting via the configured provider adapter."""
+    """Create a meeting via the configured provider adapter.
+
+    ``source="livekit"`` with no ``group_id`` creates a meeting for later: a
+    hidden meeting room plus a code and link, no call started.
+    """
     return await meetings_service.create_meeting(workspace_id, user_id, body)
+
+
+@router.post("/instant", response_model=MeetingResponse)
+async def start_instant_meeting(
+    body: StartInstantMeetingRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> MeetingResponse:
+    """Start a meeting now: hidden meeting room, meeting code + link, live call.
+
+    402 ``billing.call_limit`` when the plan has no call time left today; then
+    nothing is created.
+    """
+    return await meetings_service.start_instant_meeting(workspace_id, user_id, body)
+
+
+@router.get(
+    "/by-code/{code}",
+    response_model=MeetingLookupResponse,
+    dependencies=[Depends(rate_limit_meeting_lookup)],
+)
+async def lookup_meeting_by_code(code: str) -> MeetingLookupResponse:
+    """PUBLIC — no sign-in. What the ``/m/<code>`` page shows before joining.
+
+    Accepts the code with or without dashes, any case. 404 for an unknown code;
+    429 ``meetings.lookup_rate_limited`` past 30 lookups a minute per IP.
+    """
+    return await meetings_service.lookup_meeting_by_code(code)
+
+
+@router.post("/by-code/{code}/join", response_model=JoinMeetingByCodeResponse)
+async def join_meeting_by_code(
+    code: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> JoinMeetingByCodeResponse:
+    """Join a meeting by code as a member of its workspace; starts the call if needed.
+
+    403 ``livekit.room_forbidden`` (another workspace, or a chat-room meeting you
+    aren't in), 410 ``meeting.ended``, 402 ``billing.call_limit``, 404 unknown.
+    """
+    return await meetings_service.join_meeting_by_code(workspace_id, user_id, code)
+
+
+# ---------------------------------------------------------------------------
+# Lobby, guest side — PUBLIC. The knock's secret authorises every later read;
+# it is read ONLY from the X-Knock-Secret header (a query string would end up in
+# access logs).
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/by-code/{code}/knock",
+    response_model=KnockCreatedResponse,
+    dependencies=[Depends(rate_limit_meeting_knock)],
+)
+async def knock(code: str, body: KnockRequest, request: Request) -> KnockCreatedResponse:
+    """PUBLIC — a guest asks to join. Keep ``secret``; it is shown only here.
+
+    404 unknown code, 410 ``meeting.ended``, 403 ``meeting.email_not_allowed``,
+    422 bad name/email, 429 ``meetings.knock_rate_limited``, 429
+    ``meeting.knock_cooldown`` for a minute after this address was denied.
+    """
+    return await lobby_service.knock(code, body, client_ip=client_ip(request))
+
+
+@router.get(
+    "/by-code/{code}/knocks/{knock_id}",
+    response_model=KnockStatusResponse,
+    response_model_exclude_none=True,
+    dependencies=[Depends(rate_limit_meeting_knock_poll)],
+)
+async def knock_status(
+    code: str,
+    knock_id: str,
+    x_knock_secret: str | None = Header(default=None),
+) -> KnockStatusResponse:
+    """PUBLIC — the guest's poll (every 2s). ``{status}``, plus ``token``,
+    ``room_name``, ``identity`` and ``livekit_url`` when they can connect now.
+    404 for an unknown knock or a wrong/missing secret."""
+    return await lobby_service.knock_status(code, knock_id, x_knock_secret)
+
+
+@router.delete(
+    "/by-code/{code}/knocks/{knock_id}",
+    response_model=KnockStatusResponse,
+    response_model_exclude_none=True,
+    dependencies=[Depends(rate_limit_meeting_knock_poll)],
+)
+async def cancel_knock(
+    code: str,
+    knock_id: str,
+    x_knock_secret: str | None = Header(default=None),
+) -> KnockStatusResponse:
+    """PUBLIC — the guest stops waiting. 409 ``meeting.knock_decided`` once answered."""
+    return await lobby_service.cancel_knock(code, knock_id, x_knock_secret)
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +338,87 @@ async def get_meeting(
 ) -> MeetingDetailResponse:
     """One meeting's detail. 404 if not in this workspace."""
     return await meetings_service.get_meeting(workspace_id, meeting_id)
+
+
+@router.patch("/{meeting_id}", response_model=MeetingResponse)
+async def update_meeting(
+    meeting_id: str,
+    body: UpdateMeetingRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> MeetingResponse:
+    """Host only: ``access`` ("ask" | "open"), ``title``, ``description``,
+    ``scheduled_start``, ``duration_minutes`` (1-1440).
+
+    403 ``meeting.host_only``; 409 ``meeting.not_reschedulable`` when moving a
+    meeting that has started / ended / been cancelled, or a Zoom/Meet one; 422 for
+    any other field (``status`` included).
+    """
+    return await meetings_service.update_meeting(workspace_id, user_id, meeting_id, body)
+
+
+@router.get("/{meeting_id}/joining-info", response_class=PlainTextResponse)
+async def get_joining_info(
+    meeting_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> PlainTextResponse:
+    """Title, time (UTC), ``Join: <link>``, ``Meeting code: <code>``, description.
+
+    Any member of the meeting's workspace (404 otherwise); 409 ``meeting.no_link``
+    for a meeting without a code.
+    """
+    return PlainTextResponse(await meetings_service.get_joining_info(workspace_id, meeting_id))
+
+
+@router.get("/{meeting_id}/ics", response_class=Response)
+async def download_ics(
+    meeting_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> Response:
+    """The meeting as a one-event ``.ics`` attachment. Same access as joining info;
+    409 ``meeting.not_scheduled`` for a meeting with no date."""
+    filename, body = await meetings_service.get_meeting_ics(workspace_id, meeting_id)
+    return Response(
+        body,
+        media_type="text/calendar",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{meeting_id}/knocks", response_model=list[KnockSummaryResponse])
+async def list_knocks(
+    meeting_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> list[KnockSummaryResponse]:
+    """Guests waiting to join, oldest first. Members of the meeting room only
+    (403 ``livekit.room_forbidden``)."""
+    return await lobby_service.list_knocks(workspace_id, user_id, meeting_id)
+
+
+@router.post("/{meeting_id}/knocks/{knock_id}/admit", response_model=KnockDecisionResponse)
+async def admit_knock(
+    meeting_id: str,
+    knock_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> KnockDecisionResponse:
+    """Let a guest in. The caller must be in the call (403 ``meeting.not_in_call``);
+    409 ``meeting.knock_decided`` when already answered, cancelled or expired."""
+    return await lobby_service.decide_knock(workspace_id, user_id, meeting_id, knock_id, admit=True)
+
+
+@router.post("/{meeting_id}/knocks/{knock_id}/deny", response_model=KnockDecisionResponse)
+async def deny_knock(
+    meeting_id: str,
+    knock_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> KnockDecisionResponse:
+    """Turn a guest away. Same rules as admit."""
+    return await lobby_service.decide_knock(
+        workspace_id, user_id, meeting_id, knock_id, admit=False
+    )
 
 
 @router.delete("/{meeting_id}", response_model=MeetingResponse)

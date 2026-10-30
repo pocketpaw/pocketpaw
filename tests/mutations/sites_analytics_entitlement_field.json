@@ -1,0 +1,60 @@
+[
+  {
+    "label": "the field stops asking the predicate and grants analytics to everyone",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    analytics = site_analytics_entitled(\n        plan_tier=plan_tier, subscription_status=subscription_status\n    )",
+    "replace": "    analytics = True",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_a_free_site_reports_no_analytics",
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_wire_field_agrees_with_the_predicate_the_publish_seam_reads"
+    ]
+  },
+  {
+    "label": "the field refuses everyone — a paying site sees a greyed-out panel",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    analytics = site_analytics_entitled(\n        plan_tier=plan_tier, subscription_status=subscription_status\n    )",
+    "replace": "    analytics = False",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_a_paid_site_reports_that_its_visitors_may_be_counted",
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_wire_field_agrees_with_the_predicate_the_publish_seam_reads"
+    ]
+  },
+  {
+    "label": "a second copy of the rule appears and reads the tier alone",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
+    "find": "    analytics = site_analytics_entitled(\n        plan_tier=plan_tier, subscription_status=subscription_status\n    )",
+    "replace": "    analytics = site_plan_catalog.site_scoped_tier(plan_tier) is not None",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_a_lapsed_paid_site_loses_analytics_though_it_keeps_the_tier",
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_wire_field_agrees_with_the_predicate_the_publish_seam_reads"
+    ]
+  },
+  {
+    "label": "the wire stops echoing the resolver and hardcodes the grant",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        analytics=resolved.analytics,",
+    "replace": "        analytics=True,",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_a_free_site_reports_no_analytics",
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_wire_field_agrees_with_the_predicate_the_publish_seam_reads"
+    ]
+  },
+  {
+    "label": "the response default flips to granting, so an omitted field enables the panel",
+    "file": "ee/pocketpaw_ee/sites/dto.py",
+    "find": "    analytics: bool = False\n    concierge_entitled: bool = False",
+    "replace": "    analytics: bool = True\n    concierge_entitled: bool = False",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_response_defaults_refuse_rather_than_grant"
+    ]
+  },
+  {
+    "label": "the agreement test decays into a tautology — the catalog grants nobody analytics",
+    "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
+    "find": "    \"site\": frozenset({\"custom_domain\", \"analytics\"}),",
+    "replace": "    \"site\": frozenset({\"custom_domain\"}),",
+    "tests": [
+      "tests/cloud/sites/test_billing_state_on_the_wire.py::test_the_cases_are_not_all_the_same_answer"
+    ]
+  }
+]

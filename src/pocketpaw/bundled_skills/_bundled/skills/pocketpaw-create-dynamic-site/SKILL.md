@@ -192,9 +192,21 @@ source referencing an undeclared object); fix the spec and retry. If the request
 is actually a static marketing page (no live data), the tool steers you to
 `create_landing_site` — follow that.
 
-## STEP 3 — Publish
+## STEP 3 — Stop at the draft (publish only when asked)
 
-Publish the new pocket as a site:
+**Default: create the draft, do NOT publish.** After `create_dynamic_site`
+returns, the pocket exists as a reviewable **draft** the user can preview in-app
+(open **/sites** → the site's **Preview** tab). Publishing provisions the live
+D1 + deploys to the public edge (and, on a paid tier, can open a checkout), so
+taking it live is the user's call, not an automatic step.
+
+So **do NOT call `publish` by default.** Tell the user the draft is ready, point
+them at the Preview, and offer to take it live — e.g. *"Your site is ready as a
+draft. Preview it under /sites, and say **publish** (or 'make it live') when
+you're happy with it."* Then stop.
+
+**Publish in this same turn ONLY if the user's request already asked to go
+live** — "publish it", "make it live", "ship it", "put it online":
 
 ```
 mcp__pocketpaw_sites_manager__publish(pocket_id = <the id from STEP 2>)
@@ -220,8 +232,10 @@ deploys. Show the user the returned `url` plus a pointer to **/sites**. Relay an
    form inputs.
 3. **The object is lean.** Only the columns the writer provides plus the
    primary key — no auto-set columns forced into the write form.
-4. **You showed the live URL.** The user got the `url` from publish and a
-   pointer to /sites — not just "done". Errors were relayed, never masked.
+4. **You stopped at the draft (or published only if asked).** By default the
+   user got a pointer to the in-app Preview under /sites and an offer to
+   publish — not an auto-publish. If they explicitly asked to go live, they got
+   the `url` from publish. Errors were relayed, never masked.
 
 ## Related tools (via MCP)
 
@@ -229,6 +243,8 @@ deploys. Show the user the returned `url` plus a pointer to **/sites**. Relay an
   Pass the dynamic `spec` you authored; the tool persists the pocket stamped
   `type="site"` + `pattern="dynamic"`. Returns `{ok, pocket_id, pocket}`.
 - `mcp__pocketpaw_sites_manager__publish` — publish the pocket as a live site
-  (generates the D1 + remote functions); show the user the `url`.
+  (generates the D1 + remote functions); show the user the `url`. Call it only
+  when the user asks to go live (draft-first — STEP 3); a plain "create a site"
+  stops at the draft.
 - `mcp__pocketpaw_sites_manager__create_landing_site` — for a STATIC marketing
   page instead (no live data).

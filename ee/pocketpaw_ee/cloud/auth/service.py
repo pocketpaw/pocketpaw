@@ -10,22 +10,28 @@ Public API is module-level ``async def`` functions:
 - ``set_active_workspace(ctx, workspace_id)``
 - ``set_avatar_path(ctx, avatar_path)``
 - ``get_home_pocket_id(user_id)`` / ``claim_home_pocket_id(user_id, id, *, expected)``
+- ``resolve_display_names(user_ids)`` / ``resolve_identities(user_ids)`` /
+  ``resolve_public_names(user_ids)``: batch id -> name lookups, one query each.
+  ``resolve_identities`` adds the avatar (a separate function: a dozen callers
+  read ``resolve_display_names`` as a plain ``dict[str, str]``).
+  ``resolve_public_names`` never falls back to the email, for anonymous
+  surfaces (a Discover card's opt-in creator name).
 
-Updated: 2026-05-21 — added the ``home_pocket_id`` get + atomic-claim
-pair. The pockets service owns home-pocket provisioning but stores the
-resolved id here so it survives across sessions and devices; routing the
-read/write through this service keeps ``models.user`` writes inside the
-auth entity. ``claim_home_pocket_id`` is a compare-and-swap (not a plain
-write) so a first-login provision race resolves to a single home pocket.
+The pockets service owns home-pocket provisioning but stores the resolved id
+here, so ``models.user`` writes stay inside the auth entity;
+``claim_home_pocket_id`` is a compare-and-swap so a first-login provision race
+resolves to a single home pocket.
 """
 
 from __future__ import annotations
+
+import re
 
 from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
-from pocketpaw_ee.cloud.auth.domain import AuthUser, WorkspaceMembershipRef
+from pocketpaw_ee.cloud.auth.domain import AuthUser, UserIdentity, WorkspaceMembershipRef
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 
 # ---------------------------------------------------------------------------
@@ -49,6 +55,14 @@ def _to_domain(doc: _UserDoc) -> AuthUser:
         is_verified=doc.is_verified,
         is_superuser=doc.is_superuser,
         mfa_enabled=doc.mfa_enabled,
+        is_guest=bool(getattr(doc, "is_guest", False)),
+        # Direct attribute access, not getattr-with-default: the field is
+        # declared on the User document, so a missing one is a schema bug that
+        # should raise here rather than read back as "no platform access" on
+        # every request forever.
+        platform_role=doc.platform_role,
+        early_access_granted_at=doc.early_access_granted_at,
+        notify_plans_at=doc.notify_plans_at,
     )
 
 
@@ -118,6 +132,23 @@ async def get_home_pocket_id(user_id: str) -> str | None:
     return doc.home_pocket_id
 
 
+async def get_active_workspace(user_id: str) -> str | None:
+    """Return the user's ``active_workspace`` id, or None if unset.
+
+    Takes a plain ``user_id`` (not a ``RequestContext``) so callers outside the
+    HTTP request cycle — notably the Web Cursor terminal WebSocket, which only
+    holds the ``user_id`` decoded from a ws_ticket — can resolve the caller's
+    workspace without minting a context. This is the same membership field the
+    ``request_context`` dependency reads (``user.active_workspace``); exposing it
+    here keeps ``models.user`` reads inside the auth entity (Rule 2). Returns
+    None when the user has no active workspace so the caller can fail closed.
+    """
+    doc = await _UserDoc.get(PydanticObjectId(user_id))
+    if doc is None:
+        raise NotFound("user", user_id)
+    return doc.active_workspace
+
+
 async def claim_home_pocket_id(user_id: str, new_pocket_id: str, *, expected: str | None) -> bool:
     """Atomically set ``home_pocket_id`` to ``new_pocket_id`` — but only if
     it still holds ``expected``. Returns ``True`` when the swap took.
@@ -159,9 +190,10 @@ async def suggest_workspace_members(workspace_id: str, q: str, *, limit: int = 8
     full_name / email. Used by the chat ``/mentions/suggest`` endpoint."""
     query: dict = {"workspaces.workspace": workspace_id}
     if q:
+        pattern = re.escape(q)  # literal substring: no injection, no ReDoS
         query["$or"] = [
-            {"full_name": {"$regex": q, "$options": "i"}},
-            {"email": {"$regex": q, "$options": "i"}},
+            {"full_name": {"$regex": pattern, "$options": "i"}},
+            {"email": {"$regex": pattern, "$options": "i"}},
         ]
     docs = await _UserDoc.find(query).limit(limit).to_list()
     return [
@@ -201,11 +233,67 @@ async def resolve_display_names(user_ids: set[str]) -> dict[str, str]:
     }
 
 
+async def resolve_public_names(user_ids: set[str]) -> dict[str, str]:
+    """Batch-resolve user ids -> the name an ANONYMOUS viewer may see, in one
+    query: the trimmed ``full_name`` only. A user with no name, a non-ObjectId
+    id and an unknown id are all absent from the map; the email is never a
+    fallback, because the caller puts this on a public page."""
+    object_ids: list[PydanticObjectId] = []
+    for uid in user_ids:
+        try:
+            object_ids.append(PydanticObjectId(uid))
+        except Exception:
+            continue
+    if not object_ids:
+        return {}
+    docs = await _UserDoc.find({"_id": {"$in": object_ids}}).to_list()
+    return {str(u.id): name for u in docs if (name := (u.full_name or "").strip())}
+
+
+async def resolve_identities(user_ids: set[str]) -> dict[str, UserIdentity]:
+    """Batch-resolve user ids → the name AND avatar a message header needs.
+
+    :func:`resolve_display_names`' sibling, for the surfaces that put a face next
+    to the name (the Paw Bar concierge thread attributes each takeover reply to
+    the teammate who typed it). Kept separate rather than widening that function's
+    return type, because a dozen callers already read it as a plain str map.
+
+    Same tolerances: a non-ObjectId id is skipped, an id with no matching user is
+    simply absent from the map, and the caller decides what an absence renders as.
+    Unlike ``resolve_display_names`` the name here falls back to the EMPTY string
+    rather than the raw id — an unresolvable author on a message header should
+    read as anonymous, not as a 24-character hex string in the sender slot.
+
+    ``avatar`` is stored as the app serves it (an ``/uploads/...`` path for an
+    uploaded picture, an absolute URL for an OAuth one). Clients resolve it the
+    same way they resolve their own profile picture; nothing here rewrites it.
+    """
+    object_ids: list[PydanticObjectId] = []
+    for uid in user_ids:
+        try:
+            object_ids.append(PydanticObjectId(uid))
+        except Exception:
+            continue
+    if not object_ids:
+        return {}
+    docs = await _UserDoc.find({"_id": {"$in": object_ids}}).to_list()
+    return {
+        str(u.id): UserIdentity(
+            id=str(u.id),
+            name=(u.full_name or "").strip() or (u.email or "").strip(),
+            avatar=(u.avatar or "").strip(),
+        )
+        for u in docs
+    }
+
+
 __all__ = [
+    "UserIdentity",
     "claim_home_pocket_id",
     "get_home_pocket_id",
     "get_profile",
     "resolve_display_names",
+    "resolve_public_names",
     "set_active_workspace",
     "set_avatar_path",
     "suggest_workspace_members",

@@ -12,8 +12,35 @@
 # construction against a tmp-path WorkspaceFabricStore is import-guarded
 # (pytest.importorskip) so the test runs where pocketpaw_ee is installed
 # (or via PYTHONPATH=ee) and skips cleanly elsewhere.
+#
+# Updated: 2026-08-17 (feat/ast-2-atlas-trust-aggregate, AST-2) — the
+# TestSourceTruthAggregate section: describe on a TRACKED type (a real OSS
+# FabricStore in tmp_path with two competing ``arr`` statements) carries the
+# additive ``source_truth`` roll-up (properties.arr.disputed == 1, winner mix,
+# tracked=True); an UNTRACKED type answers tracked=False with ZERO
+# get_statements reads and at most one keys lookup (spy proxy); a missing /
+# raising source-truth store leaves the key ABSENT and the registry payload
+# intact (helper, handler and builder levels); search NEVER calls the
+# aggregate; >500 tracked keys → sampled=True (with a rough timing print);
+# and the store's type-scoped ``list_statement_keys`` is pinned directly.
+#
+# Updated: 2026-08-17 (AST-5a — pre-merge review fixes, each a reproduced
+# defect turned into a failing-first test): the aggregate walks a saturated
+# type with O(1) store connections (ONE bulk ``get_statements_for_type`` +
+# ONE ``statement_coverage_for_type``, ZERO per-key ``get_statements``) and
+# the cap can no longer hide data — the exact 600-object / 50-late-object
+# repro shows ``late`` PRESENT with objects=50, object_count=600, sampled=True
+# with a note and ``sampled_keys``; mode ``off`` short-circuits with ZERO store
+# reads and ``live=False`` (shadow/enforce → ``live=True``); the store's
+# type-scoped reads scope the joined object row's workspace too (a legacy
+# NULL-workspace type shared by two tenants no longer rolls B into A). The
+# ``_fresh_store`` fixture now pins the AGGREGATE's mode to shadow (settings)
+# while the store's own write-side helper stays off (so create_object writes no
+# statements and only explicit appends are tracked).
 
 import json
+import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -24,9 +51,14 @@ from pocketpaw.agents.sdk_mcp_atlas import (
 from pocketpaw.atlas.fabric import (
     FABRIC_ID_PREFIX,
     FABRIC_KIND,
+    SOURCE_TRUTH_OFF_NOTE,
+    SOURCE_TRUTH_POINTER,
+    SOURCE_TRUTH_SAMPLE_CAP,
     FabricIntrospector,
+    RegistryFabricIntrospector,
     build_workspace_fabric_introspector,
     describe_fabric_id,
+    describe_fabric_id_async,
     search_entity_types,
 )
 
@@ -307,8 +339,6 @@ class TestEeAdapterReadPath:
         pytest.importorskip("pocketpaw_ee")
         from pocketpaw_ee.fabric import WorkspaceFabricRegistry, WorkspaceFabricStore
 
-        from pocketpaw.atlas.fabric import RegistryFabricIntrospector
-
         store = WorkspaceFabricStore(tmp_path / "fabric_registry.db")
         store.register_entity_type("ws-1", "Customer")
         store.register_property("ws-1", "Customer", "email")
@@ -422,8 +452,6 @@ class TestEeAdapter:
         # Another workspace's ontology must be invisible.
         store.register_entity_type("ws-2", "Secret")
 
-        from pocketpaw.atlas.fabric import RegistryFabricIntrospector
-
         adapter = RegistryFabricIntrospector(
             WorkspaceFabricRegistry(store=store, workspace_id="ws-1")
         )
@@ -442,3 +470,696 @@ class TestEeAdapter:
         assert cards and cards[0]["id"] == "fabric:Customer"
         payload = describe_fabric_id(adapter, "fabric:Customer")
         assert payload is not None and payload["properties"] == ["churn_risk", "email"]
+
+
+# ---------------------------------------------------------------------------
+# AST-2 — the type-level source-truth aggregate on describe
+# ---------------------------------------------------------------------------
+
+
+class _DictRegistry:
+    """Registry-shaped fake for RegistryFabricIntrospector (no pocketpaw_ee)."""
+
+    def __init__(self, schema: dict | None = None) -> None:
+        self._schema = _SCHEMA if schema is None else schema
+
+    def list_entity_types(self):
+        return sorted(self._schema)
+
+    def entity_type_exists(self, name):
+        return name in self._schema
+
+    def get_entity_properties(self, name):
+        return set(self._schema.get(name, {}).get("properties", []))
+
+    def list_entity_links(self, name):
+        return list(self._schema.get(name, {}).get("links", []))
+
+
+_COUNTED = (
+    "get_type_by_name",
+    "list_statement_keys",
+    "get_statements",
+    "statement_coverage_for_type",
+    "get_statements_for_type",
+)
+
+
+class _CountingStore:
+    """Transparent proxy over a real FabricStore that counts every store read
+    the aggregate may issue — each counted method opens ONE aiosqlite
+    connection, so the counts ARE the connection count."""
+
+    def __init__(self, store) -> None:
+        self._store = store
+        self.calls = dict.fromkeys(_COUNTED, 0)
+
+    def __getattr__(self, name):
+        target = getattr(self._store, name)
+        if name not in _COUNTED:
+            return target
+
+        async def _counted(*args, **kwargs):
+            self.calls[name] += 1
+            return await target(*args, **kwargs)
+
+        return _counted
+
+    @property
+    def total(self) -> int:
+        return sum(self.calls.values())
+
+
+def _set_aggregate_mode(monkeypatch, mode: str) -> None:
+    """Pin the mode the ATLAS AGGREGATE reads (``settings.fabric_source_truth_mode``).
+    Independent of the store's write-side ``_source_truth_mode`` helper, which
+    ``_fresh_store`` keeps at ``off`` so create_object writes no statements."""
+    from pocketpaw.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "fabric_source_truth_mode", mode)
+
+
+async def _fresh_store(tmp_path, monkeypatch, *, aggregate_mode: str = "shadow"):
+    """A FabricStore whose WRITE side is 'off' (create_object writes NO
+    statements, so only the statements the test appends explicitly are
+    tracked) while the atlas AGGREGATE reads ``aggregate_mode`` (default
+    shadow — AST-5a short-circuits the aggregate entirely when off)."""
+    from pocketpaw.fabric.store import FabricStore
+
+    monkeypatch.setattr("pocketpaw.fabric.store._source_truth_mode", lambda: "off")
+    _set_aggregate_mode(monkeypatch, aggregate_mode)
+    return FabricStore(tmp_path / "fabric.db")
+
+
+async def _seed_disputed_customer(store):
+    """One Customer whose ``arr`` has two competing OPEN statements from two
+    writer classes (connector 120 vs inferred 150) — cross-tier, materially
+    different, both open-validity → the resolver reports a dispute with the
+    connector as winner. Returns the store's type + object."""
+    obj_type = await store.define_type(name="Customer", properties=[])
+    obj = await store.create_object(obj_type.id, {"name": "Acme", "arr": 120})
+    crm = await store.upsert_source("connector_run", connector="crm", run_id="r1")
+    agent = await store.upsert_source("agent_session", session_id="s1")
+    await store.append_statement(obj.id, "arr", 120, crm.id, "connector")
+    await store.append_statement(obj.id, "arr", 150, agent.id, "inferred")
+    return obj_type, obj
+
+
+class TestSourceTruthAggregate:
+    @pytest.mark.asyncio
+    async def test_tracked_type_reports_dispute_and_winner_mix(self, tmp_path, monkeypatch):
+        store = await _fresh_store(tmp_path, monkeypatch)
+        await _seed_disputed_customer(store)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=store)
+
+        payload = await describe_fabric_id_async(adapter, "fabric:Customer")
+
+        assert payload is not None
+        # The registry payload is untouched by the additive field.
+        assert payload["properties"] == ["churn_risk", "email", "plan"]
+        st = payload["source_truth"]
+        assert st["tracked"] is True
+        assert st["sampled"] is False
+        assert st["sampled_keys"] == 1
+        assert st["object_count"] == 1
+        assert st["mode"] == "shadow" and st["live"] is True
+        assert st["pointer"] == SOURCE_TRUTH_POINTER
+        assert "note" not in st
+        # Only the TRACKED property appears; "name" (untracked) is absent.
+        assert set(st["properties"]) == {"arr"}
+        arr = st["properties"]["arr"]
+        assert arr["objects"] == 1
+        assert arr["disputed"] == 1  # open connector vs inferred rival, different values
+        assert arr["stale"] == 0 and arr["aging"] == 0  # both observed moments ago
+        assert arr["winner_writer_mix"] == {"connector": 1}  # ladder: connector > inferred
+
+    @pytest.mark.asyncio
+    async def test_stale_winner_counted(self, tmp_path, monkeypatch):
+        """A lone connector value observed long ago is the (stale) winner —
+        the aggregate counts it under ``stale`` and it is not disputed."""
+        store = await _fresh_store(tmp_path, monkeypatch)
+        obj_type = await store.define_type(name="Customer", properties=[])
+        obj = await store.create_object(obj_type.id, {"arr": 1})
+        crm = await store.upsert_source("connector_run", connector="crm", run_id="r1")
+        long_ago = datetime.now(UTC) - timedelta(days=400)
+        await store.append_statement(obj.id, "arr", 1, crm.id, "connector", observed_at=long_ago)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=store)
+
+        st = (await describe_fabric_id_async(adapter, "fabric:Customer"))["source_truth"]
+
+        assert st["properties"]["arr"] == {
+            "objects": 1,
+            "disputed": 0,
+            "stale": 1,
+            "aging": 0,
+            "winner_writer_mix": {"connector": 1},
+        }
+
+    @pytest.mark.asyncio
+    async def test_untracked_type_zero_statement_reads(self, tmp_path, monkeypatch):
+        """Type exists in the store but has NO statements: the type lookup +
+        exactly one coverage read (the indexed existence check) and ZERO
+        statement reads of any kind."""
+        store = await _fresh_store(tmp_path, monkeypatch)
+        obj_type = await store.define_type(name="Competitor", properties=[])
+        await store.create_object(obj_type.id, {"pricing_page": "x"})
+        spy = _CountingStore(store)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=spy)
+
+        payload = await describe_fabric_id_async(adapter, "fabric:Competitor")
+
+        st = payload["source_truth"]
+        assert st == {
+            "mode": "shadow",
+            "live": True,
+            "tracked": False,
+            "sampled": False,
+            "sampled_keys": 0,
+            "object_count": 0,
+            "properties": {},
+            "pointer": SOURCE_TRUTH_POINTER,
+        }
+        assert spy.calls == {
+            "get_type_by_name": 1,
+            "list_statement_keys": 0,
+            "get_statements": 0,
+            "statement_coverage_for_type": 1,
+            "get_statements_for_type": 0,
+        }, spy.calls
+
+    @pytest.mark.asyncio
+    async def test_type_unknown_to_store_zero_reads_at_all(self, tmp_path, monkeypatch):
+        """Registry knows the type, the statement store never saw it: no
+        statement read of any kind."""
+        store = await _fresh_store(tmp_path, monkeypatch)
+        spy = _CountingStore(store)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=spy)
+
+        st = (await describe_fabric_id_async(adapter, "fabric:Customer"))["source_truth"]
+
+        assert st["tracked"] is False
+        assert spy.total == 1 and spy.calls["get_type_by_name"] == 1, spy.calls
+
+    @pytest.mark.asyncio
+    async def test_other_types_statements_do_not_leak_in(self, tmp_path, monkeypatch):
+        """Competitor's tracked keys never count toward Customer's roll-up
+        (the keys walk is type-scoped, not a full-fabric scan)."""
+        store = await _fresh_store(tmp_path, monkeypatch)
+        await _seed_disputed_customer(store)
+        comp = await store.define_type(name="Competitor", properties=[])
+        rival = await store.create_object(comp.id, {"pricing_page": "x"})
+        src = await store.upsert_source("document", document_uri="doc://1")
+        await store.append_statement(rival.id, "pricing_page", "y", src.id, "agent")
+        spy = _CountingStore(store)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=spy)
+
+        st = (await describe_fabric_id_async(adapter, "fabric:Customer"))["source_truth"]
+
+        assert set(st["properties"]) == {"arr"}
+        assert st["object_count"] == 1
+        # Type lookup + one coverage read + ONE bulk read; never a per-key walk.
+        assert spy.calls == {
+            "get_type_by_name": 1,
+            "list_statement_keys": 0,
+            "get_statements": 0,
+            "statement_coverage_for_type": 1,
+            "get_statements_for_type": 1,
+        }, spy.calls
+
+    @pytest.mark.asyncio
+    async def test_no_store_bound_field_absent(self):
+        adapter = RegistryFabricIntrospector(_DictRegistry())
+        payload = await describe_fabric_id_async(adapter, "fabric:Customer")
+        assert payload is not None
+        assert "source_truth" not in payload
+        assert payload["properties"] == ["churn_risk", "email", "plan"]
+
+    @pytest.mark.asyncio
+    async def test_raising_store_field_absent_payload_intact(self, monkeypatch):
+        _set_aggregate_mode(monkeypatch, "shadow")
+
+        class BrokenStore:
+            async def get_type_by_name(self, *a, **k):
+                raise RuntimeError("fabric.db missing")
+
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=BrokenStore())
+        payload = await describe_fabric_id_async(adapter, "fabric:Customer")
+        assert payload is not None
+        assert "source_truth" not in payload
+        assert payload["properties"] == ["churn_risk", "email", "plan"]
+
+    @pytest.mark.asyncio
+    async def test_plain_introspector_without_method_unchanged(self):
+        """An introspector lacking the optional method (the two-method fake)
+        answers exactly as before — no source_truth, no error."""
+        payload = await describe_fabric_id_async(FakeIntrospector(), "fabric:Customer")
+        assert payload == describe_fabric_id(FakeIntrospector(), "fabric:Customer")
+        assert "source_truth" not in payload
+
+    @pytest.mark.asyncio
+    async def test_search_never_calls_the_aggregate(self):
+        calls = {"aggregate": 0}
+
+        class Introspector(FakeIntrospector):
+            async def entity_type_source_truth(self, name):
+                calls["aggregate"] += 1
+                return {"tracked": True}
+
+        introspector = Introspector()
+        assert search_entity_types(introspector, "customer churn")
+        out = await _atlas_search_handler({"intent": "customer churn"}, introspector=introspector)
+        assert not out.get("is_error")
+        assert calls["aggregate"] == 0, "search must stay properties-only (FINDING B)"
+
+    @pytest.mark.asyncio
+    async def test_handler_merges_source_truth_for_fabric_id(self):
+        canned = {
+            "mode": "shadow",
+            "tracked": True,
+            "sampled": False,
+            "object_count": 41,
+            "properties": {"arr": {"objects": 41, "disputed": 3, "stale": 12, "aging": 0}},
+            "pointer": SOURCE_TRUTH_POINTER,
+        }
+
+        class Introspector(FakeIntrospector):
+            async def entity_type_source_truth(self, name):
+                assert name == "Customer"
+                return canned
+
+        out = await _atlas_describe_handler({"id": "fabric:Customer"}, introspector=Introspector())
+        assert not out.get("is_error")
+        payload = json.loads(_text_of(out))
+        assert payload["source_truth"] == canned
+        assert payload["properties"] == ["churn_risk", "email", "plan"]
+
+        # The two-method fake still answers without the field.
+        plain = json.loads(
+            _text_of(
+                await _atlas_describe_handler(
+                    {"id": "fabric:Customer"}, introspector=FakeIntrospector()
+                )
+            )
+        )
+        assert "source_truth" not in plain
+
+    @pytest.mark.asyncio
+    async def test_sync_aggregate_is_folded_in_not_silently_dropped(self):
+        """A SYNC ``entity_type_source_truth`` returning a dict is folded in.
+
+        Mutation that breaks this: replace the ``inspect.isawaitable`` branch
+        with an unconditional ``await`` — a sync method's dict then raises
+        TypeError inside the blanket except and the field silently vanishes,
+        indistinguishable from "no store bound" (review finding V4).
+        """
+        canned = {"mode": "shadow", "live": True, "tracked": False, "properties": {}}
+
+        class SyncIntrospector(FakeIntrospector):
+            def entity_type_source_truth(self, name):  # deliberately NOT async
+                assert name == "Customer"
+                return canned
+
+        payload = await describe_fabric_id_async(SyncIntrospector(), "fabric:Customer")
+        assert payload is not None
+        assert payload["source_truth"] == canned
+
+    @pytest.mark.asyncio
+    async def test_sample_cap_marks_sampled(self, tmp_path, monkeypatch, capsys):
+        """More tracked keys than the cap → sampled=True, the walk stops at
+        the cap, and the per-property ``objects`` totals stay EXACT (uncapped
+        coverage). Seeds cap+10 keys and prints the aggregate's wall-clock so
+        the per-describe cost of a saturated type is known."""
+        store = await _fresh_store(tmp_path, monkeypatch)
+        obj_type = await store.define_type(name="Customer", properties=[])
+        src = await store.upsert_source("connector_run", connector="crm", run_id="r1")
+        objects = 51
+        props_per_object = 10  # 51 * 10 = 510 keys > cap (500)
+        obj_ids = []
+        for i in range(objects):
+            obj = await store.create_object(obj_type.id, {"idx": i})
+            obj_ids.append(obj.id)
+        _bulk_seed(
+            tmp_path,
+            [
+                (f"st-{i}-{p}", oid, f"p{p}", i, src.id, "connector")
+                for i, oid in enumerate(obj_ids)
+                for p in range(props_per_object)
+            ],
+        )
+        spy = _CountingStore(store)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=spy)
+
+        t0 = time.perf_counter()
+        st = (await describe_fabric_id_async(adapter, "fabric:Customer"))["source_truth"]
+        elapsed = time.perf_counter() - t0
+        print(
+            f"\n[AST-2 sample-cap] {objects * props_per_object} tracked keys → "
+            f"walked {st['sampled_keys']} in {elapsed:.3f}s "
+            f"({spy.total} store connections)"
+        )
+
+        assert st["tracked"] is True
+        assert st["sampled"] is True
+        assert st["sampled_keys"] == SOURCE_TRUTH_SAMPLE_CAP
+        assert st["object_count"] == objects
+        # Exact per-property coverage — every property lists every object.
+        assert sum(p["objects"] for p in st["properties"].values()) == objects * props_per_object
+        assert f"first {SOURCE_TRUTH_SAMPLE_CAP} of {objects * props_per_object}" in st["note"]
+        assert spy.calls["get_statements"] == 0
+        assert spy.calls["get_statements_for_type"] == 1
+
+
+def _bulk_seed(tmp_path, rows, *, workspace_id=None, disputed=False) -> None:
+    """Fixture-speed bulk insert straight into the tmp DB (schema already
+    ensured by the store): rows are ``(id, object_id, property, value,
+    source_ref_id, writer_class)``. ``disputed=True`` appends a rival
+    open ``inferred`` statement with a different value on every row."""
+    import sqlite3
+
+    now = datetime.now(UTC).isoformat()
+
+    def _row(sid, oid, prop, value, src, writer):
+        return (
+            sid,
+            oid,
+            prop,
+            json.dumps(value),
+            src,
+            writer,
+            now,
+            now,
+            now,
+            None,
+            "normal",
+            None,
+            0,
+            workspace_id,
+        )
+
+    payload = []
+    for sid, oid, prop, value, src, writer in rows:
+        payload.append(_row(sid, oid, prop, value, src, writer))
+        if disputed:
+            payload.append(_row(f"{sid}-rival", oid, prop, f"rival-{value}", src, "inferred"))
+    with sqlite3.connect(tmp_path / "fabric.db") as db:
+        db.executemany(
+            "INSERT INTO fabric_statements (id, object_id, property, value, "
+            "source_ref_id, writer_class, observed_at, recorded_at, valid_from, "
+            "valid_to, rank, rank_reason, pinned, workspace_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            payload,
+        )
+
+
+class TestSourceTruthAggregateHonesty:
+    """AST-5a review fixes V1 + V3 (+ V5): the cap can't hide data, the walk
+    is O(1) in store connections, the type-scoped reads are tenant-scoped on
+    the joined object row."""
+
+    async def _seed_600_with_50_late(self, tmp_path, monkeypatch):
+        """The exact review repro: 600 Customer objects with one ``arr``
+        statement each, plus a DISPUTED ``late`` on the 50 lexically-LAST
+        object_ids — the ones an object_id-ordered 500-key prefix never
+        reaches. Returns (store, sorted object ids)."""
+        import sqlite3
+
+        store = await _fresh_store(tmp_path, monkeypatch)
+        obj_type = await store.define_type(name="Customer", properties=[])
+        src = await store.upsert_source("connector_run", connector="crm", run_id="r1")
+        # Objects straight into the DB too (600 create_object round-trips is
+        # fixture time, not the read under test).
+        obj_ids = [f"obj_{i:04d}" for i in range(600)]
+        with sqlite3.connect(tmp_path / "fabric.db") as db:
+            db.executemany(
+                "INSERT INTO fabric_objects (id, type_id, type_name, properties)"
+                " VALUES (?, ?, ?, ?)",
+                [(oid, obj_type.id, "Customer", "{}") for oid in obj_ids],
+            )
+        obj_ids.sort()
+        _bulk_seed(
+            tmp_path,
+            [(f"arr-{oid}", oid, "arr", 100, src.id, "connector") for oid in obj_ids],
+        )
+        _bulk_seed(
+            tmp_path,
+            [(f"late-{oid}", oid, "late", "yes", src.id, "connector") for oid in obj_ids[-50:]],
+            disputed=True,
+        )
+        return store, obj_ids
+
+    @pytest.mark.asyncio
+    async def test_late_property_on_last_objects_is_not_hidden_by_the_cap(
+        self, tmp_path, monkeypatch
+    ):
+        """Before AST-5a: sampled=True, object_count=500 (true 600),
+        arr.objects=500, ``late`` ABSENT → the payload read "tracked, clean".
+        Now: exact object_count, ``late`` PRESENT with its exact 50 objects,
+        and the note says what the walked counts cover."""
+        store, _ = await self._seed_600_with_50_late(tmp_path, monkeypatch)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=store)
+
+        st = (await describe_fabric_id_async(adapter, "fabric:Customer"))["source_truth"]
+
+        # The review's three observations, in the order they were reported.
+        assert set(st["properties"]) == {"arr", "late"}, "late must not vanish"
+        assert st["properties"]["late"]["objects"] == 50
+        assert st["object_count"] == 600
+        assert st["properties"]["arr"]["objects"] == 600
+        assert st["tracked"] is True and st["live"] is True
+        assert st["sampled"] is True
+        assert st["sampled_keys"] == SOURCE_TRUTH_SAMPLE_CAP
+        assert "first 500 of 650 tracked keys by object_id" in st["note"]
+        # The walked prefix (500 keys by object_id) reaches only ``arr`` rows,
+        # so the disputes on ``late`` are honestly NOT claimed as counted.
+        assert st["properties"]["arr"]["disputed"] == 0
+        assert st["properties"]["arr"]["winner_writer_mix"] == {"connector": 500}
+
+    @pytest.mark.asyncio
+    async def test_saturated_walk_uses_constant_store_connections(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Before AST-5a the walk opened one aiosqlite connection PER KEY
+        (500 serial opens). Now: ZERO get_statements, ONE bulk read, ONE
+        coverage read, ONE type lookup — three connections total, and the
+        wall-clock is printed for the report."""
+        store, _ = await self._seed_600_with_50_late(tmp_path, monkeypatch)
+        spy = _CountingStore(store)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=spy)
+
+        t0 = time.perf_counter()
+        st = (await describe_fabric_id_async(adapter, "fabric:Customer"))["source_truth"]
+        elapsed = time.perf_counter() - t0
+        print(
+            f"\n[AST-5a bulk-read] 650 tracked keys → walked {st['sampled_keys']} "
+            f"in {elapsed:.3f}s ({spy.total} store connections)"
+        )
+
+        assert spy.calls["get_statements"] == 0
+        assert spy.calls["list_statement_keys"] == 0
+        assert spy.calls["get_statements_for_type"] == 1
+        assert spy.calls["statement_coverage_for_type"] == 1
+        assert spy.total == 3, spy.calls
+
+    @pytest.mark.asyncio
+    async def test_bulk_read_matches_per_key_read_order(self, tmp_path, monkeypatch):
+        """The grouped bulk read hands resolve() exactly what get_statements
+        would per key — same statements, same (recorded_at, id) order — so
+        the roll-up is unchanged by the read path."""
+        store = await _fresh_store(tmp_path, monkeypatch)
+        obj_type, obj = await _seed_disputed_customer(store)
+        grouped = await store.get_statements_for_type(obj_type.id)
+        assert list(grouped) == [(obj.id, "arr")]
+        assert [s.id for s in grouped[(obj.id, "arr")]] == [
+            s.id for s in await store.get_statements(obj.id, "arr")
+        ]
+        # key_cap stops after N distinct keys.
+        assert await store.get_statements_for_type(obj_type.id, key_cap=0) == {}
+
+    @pytest.mark.asyncio
+    async def test_other_workspace_objects_do_not_roll_in(self, tmp_path, monkeypatch):
+        """V5: a legacy NULL-workspace type shared by two tenants — ws-B's
+        objects/statements must not count toward ws-A's aggregate, on the
+        bulk read, the coverage read AND list_statement_keys(type_id=)."""
+        store = await _fresh_store(tmp_path, monkeypatch)
+        obj_type = await store.define_type(name="Customer", properties=[])  # legacy: ws NULL
+        src = await store.upsert_source("connector_run", connector="crm", run_id="r1")
+        a = await store.create_object(obj_type.id, {"arr": 1}, workspace_id="ws-A")
+        b = await store.create_object(obj_type.id, {"arr": 2}, workspace_id="ws-B")
+        await store.append_statement(a.id, "arr", 1, src.id, "connector", workspace_id="ws-A")
+        await store.append_statement(b.id, "arr", 2, src.id, "connector", workspace_id="ws-B")
+        # Statement row on a ws-B object but with a legacy NULL statement
+        # workspace: only the object-row scope can exclude it.
+        _bulk_seed(tmp_path, [("legacy-b", b.id, "hq", "Berlin", src.id, "connector")])
+
+        adapter = RegistryFabricIntrospector(
+            _DictRegistry(), source_truth=store, workspace_id="ws-A"
+        )
+        st = (await describe_fabric_id_async(adapter, "fabric:Customer"))["source_truth"]
+        assert st["object_count"] == 1
+        assert set(st["properties"]) == {"arr"}
+        assert st["properties"]["arr"]["objects"] == 1
+
+        keys = await store.list_statement_keys(workspace_id="ws-A", type_id=obj_type.id)
+        assert keys == [(a.id, "arr")]
+        cov = await store.statement_coverage_for_type(obj_type.id, workspace_id="ws-A")
+        assert cov == {"object_count": 1, "properties": {"arr": 1}}
+        grouped = await store.get_statements_for_type(obj_type.id, workspace_id="ws-A")
+        assert list(grouped) == [(a.id, "arr")]
+        # Unscoped (OSS / single-tenant) still sees everything.
+        assert len(await store.list_statement_keys(type_id=obj_type.id)) == 3
+
+
+class TestSourceTruthAggregateOffMode:
+    """AST-5a review fix V2: mode off = no provenance reads anywhere, so the
+    aggregate must not report shadow-era leftovers as tracked."""
+
+    @pytest.mark.asyncio
+    async def test_off_short_circuits_with_zero_store_reads(self, tmp_path, monkeypatch):
+        store = await _fresh_store(tmp_path, monkeypatch, aggregate_mode="off")
+        await _seed_disputed_customer(store)  # shadow-era history sits in the DB
+        spy = _CountingStore(store)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=spy)
+
+        payload = await describe_fabric_id_async(adapter, "fabric:Customer")
+
+        assert payload["source_truth"] == {
+            "mode": "off",
+            "live": False,
+            "tracked": False,
+            "sampled": False,
+            "sampled_keys": 0,
+            "object_count": 0,
+            "properties": {},
+            "pointer": SOURCE_TRUTH_POINTER,
+            "note": SOURCE_TRUTH_OFF_NOTE,
+        }
+        assert spy.total == 0, spy.calls
+        assert "shadow phase" in SOURCE_TRUTH_OFF_NOTE
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["shadow", "enforce"])
+    async def test_live_modes_walk_and_report_live_true(self, tmp_path, monkeypatch, mode):
+        store = await _fresh_store(tmp_path, monkeypatch, aggregate_mode=mode)
+        await _seed_disputed_customer(store)
+        spy = _CountingStore(store)
+        adapter = RegistryFabricIntrospector(_DictRegistry(), source_truth=spy)
+
+        st = (await describe_fabric_id_async(adapter, "fabric:Customer"))["source_truth"]
+
+        assert st["mode"] == mode and st["live"] is True
+        assert st["tracked"] is True
+        assert st["properties"]["arr"]["disputed"] == 1
+        assert spy.calls["get_statements_for_type"] == 1
+        assert "note" not in st
+
+
+class TestStoreTypeScopedKeys:
+    """The store read helper behind the aggregate: ``list_statement_keys``
+    with ``type_id`` / ``limit`` (additive kwargs)."""
+
+    @pytest.mark.asyncio
+    async def test_type_id_scopes_and_limit_caps(self, tmp_path, monkeypatch):
+        store = await _fresh_store(tmp_path, monkeypatch)
+        cust_type, cust = await _seed_disputed_customer(store)
+        comp = await store.define_type(name="Competitor", properties=[])
+        rival = await store.create_object(comp.id, {"pricing_page": "x"})
+        src = await store.upsert_source("document", document_uri="doc://1")
+        await store.append_statement(rival.id, "pricing_page", "y", src.id, "agent")
+        await store.append_statement(rival.id, "hq", "Berlin", src.id, "agent")
+
+        # Unscoped (existing behavior): every tracked key.
+        assert len(await store.list_statement_keys()) == 3
+        # Type-scoped: only that type's keys.
+        assert await store.list_statement_keys(type_id=cust_type.id) == [(cust.id, "arr")]
+        comp_keys = await store.list_statement_keys(type_id=comp.id)
+        assert comp_keys == [(rival.id, "hq"), (rival.id, "pricing_page")]
+        # limit caps the walk.
+        assert await store.list_statement_keys(type_id=comp.id, limit=1) == [(rival.id, "hq")]
+        # Unknown type → nothing.
+        assert await store.list_statement_keys(type_id="nope") == []
+
+    @pytest.mark.asyncio
+    async def test_type_scoped_query_uses_indexes(self, tmp_path, monkeypatch):
+        """EXPLAIN QUERY PLAN: the type-scoped walk is an indexed SEARCH on
+        both sides (idx_objects_type → idx_statements_object[_property]) —
+        never a full table SCAN on either."""
+        import sqlite3
+
+        store = await _fresh_store(tmp_path, monkeypatch)
+        await _seed_disputed_customer(store)
+        with sqlite3.connect(tmp_path / "fabric.db") as db:
+            plan = db.execute(
+                "EXPLAIN QUERY PLAN SELECT DISTINCT s.object_id, s.property "
+                "FROM fabric_statements s JOIN fabric_objects o ON o.id = s.object_id "
+                "WHERE o.type_id = ? ORDER BY s.object_id, s.property LIMIT ?",
+                ("t", 501),
+            ).fetchall()
+        text = " | ".join(str(r[3]) for r in plan)
+        assert "SCAN" not in text, text
+        assert "idx_objects_type" in text, text
+        assert "idx_statements_object" in text, text
+
+
+class TestBuilderBindsSourceTruth:
+    def test_builder_degrades_source_truth_alone(self, tmp_path, monkeypatch):
+        """get_fabric_store raising must NOT null the introspector: the registry
+        payload still answers and only source_truth is absent."""
+        pytest.importorskip("pocketpaw_ee")
+        import pocketpaw_ee.fabric as ee_fabric
+
+        registry_store = ee_fabric.WorkspaceFabricStore(tmp_path / "fabric_registry.db")
+        registry_store.register_entity_type("ws-1", "Customer")
+        registry_store.register_property("ws-1", "Customer", "email")
+        monkeypatch.setattr(ee_fabric, "WorkspaceFabricStore", lambda: registry_store)
+
+        def boom(**_kw):
+            raise RuntimeError("fabric.db unavailable")
+
+        monkeypatch.setattr("pocketpaw.stores.get_fabric_store", boom)
+
+        introspector = build_workspace_fabric_introspector("ws-1")
+        assert introspector is not None
+        payload = describe_fabric_id(introspector, "fabric:Customer")
+        assert payload is not None and payload["properties"] == ["email"]
+
+        import asyncio
+
+        async_payload = asyncio.run(describe_fabric_id_async(introspector, "fabric:Customer"))
+        assert async_payload is not None
+        assert "source_truth" not in async_payload
+
+    def test_builder_binds_workspace_store(self, tmp_path, monkeypatch):
+        """Happy path: the builder hands the introspector the workspace's
+        FabricStore, and describe carries source_truth."""
+        pytest.importorskip("pocketpaw_ee")
+        import pocketpaw_ee.fabric as ee_fabric
+
+        registry_store = ee_fabric.WorkspaceFabricStore(tmp_path / "fabric_registry.db")
+        registry_store.register_entity_type("ws-1", "Customer")
+        monkeypatch.setattr(ee_fabric, "WorkspaceFabricStore", lambda: registry_store)
+
+        from pocketpaw.fabric.store import FabricStore
+
+        monkeypatch.setattr("pocketpaw.fabric.store._source_truth_mode", lambda: "off")
+        _set_aggregate_mode(monkeypatch, "shadow")  # AST-5a: off would short-circuit
+        fabric_store = FabricStore(tmp_path / "fabric.db")
+        seen = {}
+
+        def fake_get_fabric_store(*, workspace_id=None):
+            seen["workspace_id"] = workspace_id
+            return fabric_store
+
+        monkeypatch.setattr("pocketpaw.stores.get_fabric_store", fake_get_fabric_store)
+
+        introspector = build_workspace_fabric_introspector("ws-1")
+        assert introspector is not None
+        assert seen == {"workspace_id": "ws-1"}
+
+        import asyncio
+
+        async def _run():
+            await _seed_disputed_customer(fabric_store)
+            return await describe_fabric_id_async(introspector, "fabric:Customer")
+
+        payload = asyncio.run(_run())
+        assert payload["source_truth"]["properties"]["arr"]["disputed"] == 1

@@ -13,7 +13,10 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.cloud.pockets import service as pockets_service  # noqa: E402
-from pocketpaw_ee.cloud.ripple_validator import CatalogViolationError  # noqa: E402
+from pocketpaw_ee.cloud.ripple_validator import (  # noqa: E402
+    CatalogUnavailableError,
+    CatalogViolationError,
+)
 
 from pocketpaw.security.audit import get_audit_logger  # noqa: E402
 
@@ -153,4 +156,76 @@ async def test_gate_catalog_audits_embed_even_when_manifest_unavailable(
         deregister()
 
     # The embed audit fires regardless of whether the manifest was reachable.
+    assert any(e.get("action") == "pocket.embed_ingest" for e in captured)
+
+
+def _require_manifest_on(monkeypatch) -> None:
+    """Flip ripple_catalog_gate_require_manifest=True by stubbing get_settings
+    (it is lru_cached, so patch the accessor, not an env var)."""
+
+    class _S:
+        ripple_catalog_gate_require_manifest = True
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+
+
+async def test_gate_catalog_fails_closed_when_required_and_manifest_unavailable(
+    monkeypatch,
+) -> None:
+    """Flag ON + strict + no manifest → FAIL CLOSED: raise instead of skip,
+    so an unverifiable agent-generated spec is never persisted."""
+
+    async def _no_manifest() -> None:
+        return None
+
+    monkeypatch.setattr(pockets_service, "_catalog_allowed_types", _no_manifest)
+    _require_manifest_on(monkeypatch)
+
+    spec = {"ui": {"type": "ghost-widget", "props": {}}}
+    with pytest.raises(CatalogUnavailableError):
+        await pockets_service._gate_catalog(spec, strict=True, actor="u1", workspace_id="w1")
+
+
+async def test_gate_catalog_logged_still_skips_when_required_and_manifest_unavailable(
+    monkeypatch,
+) -> None:
+    """Flag ON but strict=False (human/import path) → still a no-op. The
+    logged path never blocks; fail-closed is strict-only."""
+
+    async def _no_manifest() -> None:
+        return None
+
+    monkeypatch.setattr(pockets_service, "_catalog_allowed_types", _no_manifest)
+    _require_manifest_on(monkeypatch)
+
+    spec = {"ui": {"type": "ghost-widget", "props": {}}}
+    # Must NOT raise — logged mode is best-effort regardless of the flag.
+    await pockets_service._gate_catalog(spec, strict=False, actor="u1", workspace_id="w1")
+
+
+async def test_gate_catalog_fail_closed_still_audits_embed(monkeypatch) -> None:
+    """Even when failing closed, the embed-ingest audit (which runs before the
+    gate) still fires — the fail-closed raise doesn't swallow the audit."""
+
+    async def _no_manifest() -> None:
+        return None
+
+    monkeypatch.setattr(pockets_service, "_catalog_allowed_types", _no_manifest)
+    _require_manifest_on(monkeypatch)
+
+    captured, deregister = _capture_audit()
+    try:
+        spec = {
+            "ui": {
+                "type": "embed",
+                "props": {"mode": "url", "url": "https://www.figma.com/file/x"},
+            }
+        }
+        with pytest.raises(CatalogUnavailableError):
+            await pockets_service._gate_catalog(
+                spec, strict=True, actor="u1", workspace_id="w1", pocket_id="p9"
+            )
+    finally:
+        deregister()
+
     assert any(e.get("action") == "pocket.embed_ingest" for e in captured)

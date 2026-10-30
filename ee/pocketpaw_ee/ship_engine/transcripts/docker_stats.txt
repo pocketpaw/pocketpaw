@@ -1,0 +1,7 @@
+# transcript: `docker stats ... --filter name=demo.` — one running web container.
+# Real per-app CPU% + memory% (SHIP-12). ps:report gives only process STATE;
+# this is the resource usage the app Metrics tab shows.
+EXIT: 0
+--- stdout ---
+12.34% 5.60%
+--- stderr ---

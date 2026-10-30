@@ -64,11 +64,10 @@ async def test_get_budget_status_returns_payload() -> None:
 
     with (
         patch("pocketpaw.api.v1.budget.Settings") as mock_settings_cls,
-        patch("pocketpaw.api.v1.budget.get_settings") as mock_get_settings,
+        patch("pocketpaw.api.v1.budget.clear_settings_cache"),
         patch("pocketpaw.api.v1.budget.sync_budget_state", return_value=(_snapshot(), False)),
     ):
         mock_settings_cls.load.return_value = settings
-        mock_get_settings.cache_clear = MagicMock()
 
         response = await get_budget_status()
 
@@ -95,7 +94,7 @@ async def test_set_budget_override_updates_until_window_end() -> None:
 
     with (
         patch("pocketpaw.api.v1.budget.Settings") as mock_settings_cls,
-        patch("pocketpaw.api.v1.budget.get_settings") as mock_get_settings,
+        patch("pocketpaw.api.v1.budget.clear_settings_cache"),
         patch("pocketpaw.api.v1.budget.sync_budget_state", return_value=(_snapshot(), False)),
         patch(
             "pocketpaw.api.v1.budget.set_budget_override_until_window_end",
@@ -103,7 +102,6 @@ async def test_set_budget_override_updates_until_window_end() -> None:
         ) as mock_set_override,
     ):
         mock_settings_cls.load.return_value = settings
-        mock_get_settings.cache_clear = MagicMock()
 
         response = await set_budget_override(BudgetOverrideRequest(cap_usd=30.0, reason="incident"))
 
@@ -126,12 +124,11 @@ async def test_clear_budget_override_route_clears_and_returns_status() -> None:
 
     with (
         patch("pocketpaw.api.v1.budget.Settings") as mock_settings_cls,
-        patch("pocketpaw.api.v1.budget.get_settings") as mock_get_settings,
+        patch("pocketpaw.api.v1.budget.clear_settings_cache"),
         patch("pocketpaw.api.v1.budget.sync_budget_state", return_value=(_snapshot(), False)),
         patch("pocketpaw.api.v1.budget.clear_budget_override") as mock_clear_override,
     ):
         mock_settings_cls.load.return_value = settings
-        mock_get_settings.cache_clear = MagicMock()
 
         response = await clear_budget_override_route()
 

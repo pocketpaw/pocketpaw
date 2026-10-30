@@ -4,12 +4,20 @@
 #   1. ``list_site_plans()`` returns tiers with an annual price + cloudflare
 #      features; ``get_site_plan`` resolves a known key and rejects an unknown one.
 #   2. publish_pocket with a workspace that HAS the Sites entitlement → succeeds,
-#      stamps ``Site.plan_tier``, and emits ``SitePublished``.
+#      stamps ``Site.plan_tier``, and emits ``SitePublished``. Asserted by
+#      ``test_publish_with_no_dodo_configured_charges_the_wallet`` below, which
+#      also covers what used to be criterion 2's own case: that case asserted the
+#      PENDING stamp a paid publish left behind while it waited for a hosted
+#      checkout, and a paid publish goes live in the request now.
 #   3. publish_pocket with a workspace LACKING the Sites entitlement → Forbidden,
 #      no Site doc created.
-#   4. a PER-SITE ``subscription.active`` webhook (metadata carries a ``site_id``)
-#      → updates the SITE's subscription_status to active, does NOT grant workspace
-#      credits, and does NOT change Workspace.plan.
+#   4. RETIRED 2026-09-05 (fix/sites-plan-credits). A per-site
+#      ``subscription.active`` webhook used to drive the site's lifecycle. Paw
+#      Sites left Dodo — a paid site is charged to the workspace credit balance —
+#      so nothing creates such a subscription and the handler only ACKS now. The
+#      half of that criterion still worth guarding, that a site-carrying delivery
+#      must never reach the workspace credit-grant path, is asserted in
+#      tests/cloud/billing/test_dodo_webhook.py.
 #
 # The Sites publish entitlement gate is the EXISTING ``require_sites_plan`` (the
 # "sites" plan feature, go+), which ``publish`` runs FIRST — before any
@@ -72,7 +80,15 @@ class _FakeBillingProvider:
         self.calls: list[dict] = []
 
     async def create_subscription(
-        self, *, plan_key, product_id, workspace_id, customer_email, metadata
+        self,
+        *,
+        plan_key,
+        product_id,
+        workspace_id,
+        customer_email,
+        metadata,
+        return_url=None,
+        cancel_url=None,
     ) -> SubscriptionCheckout:
         self.calls.append(
             {
@@ -108,6 +124,29 @@ async def _make_workspace(plan: str) -> str:
     )
     await ws.insert()
     return str(ws.id)
+
+
+async def _fill_plan_slots(workspace_id: str, count: int = 1) -> None:
+    """Occupy ``count`` of the workspace's plan-carried site slots with decoys.
+
+    Stamped exactly as a carried site is — plan rail, staff tier, active — because
+    ``plan_site_slots`` counts on ``billing_rail``, and a decoy with the wrong
+    shape leaves the slot open and sends the test down the free rail while looking
+    like it did the opposite."""
+    from pocketpaw_ee.cloud.models.site import Site as _S
+
+    for i in range(count):
+        await _S(
+            workspace=workspace_id,
+            pocket_id=f"decoy-{workspace_id}-{i}",
+            owner="u1",
+            name=f"Decoy {i}",
+            deployed=True,
+            url="http://local/decoy/",
+            plan_tier="staff",
+            subscription_status="active",
+            billing_rail="plan",
+        ).insert()
 
 
 async def _make_pocket(*, workspace_id: str, owner: str = "u1") -> str:
@@ -166,21 +205,27 @@ def _site_subscription_body(
 def test_list_site_plans_returns_tiers_with_price_and_cf_features():
     tiers = site_plans.list_site_plans()
     keys = [t.key for t in tiers]
-    assert keys == ["basic", "pro", "business"]  # cheapest first
+    # Cheapest first, per-site rungs before the org flats.
+    # Three per-site rungs; the studio/agency org flats were retired 2026-09-06.
+    assert keys == ["free", "site", "staff"]
+    # The per-site view is the subset a publish may choose from — the org flats
+    # cover a whole workspace and their keys are not legal ``Site.plan_tier``
+    # values.
+    assert [t.key for t in site_plans.list_site_scoped_plans()] == ["free", "site", "staff"]
 
     by_key = {t.key: t for t in tiers}
-    # Each tier carries an annual price (USD) + a cloudflare_features set.
-    assert by_key["basic"].annual_price_usd == 0
-    assert by_key["pro"].annual_price_usd > 0
-    assert isinstance(by_key["pro"].cloudflare_features, frozenset)
+    # Each tier carries a monthly price (USD) + a cloudflare_features set.
+    assert by_key["free"].monthly_price_usd == 0
+    assert by_key["site"].monthly_price_usd > 0
+    assert isinstance(by_key["site"].cloudflare_features, frozenset)
     # Higher tiers resell more Cloudflare features (a growing ladder).
-    assert by_key["basic"].cloudflare_features == frozenset()
-    assert "custom_domain" in by_key["pro"].cloudflare_features
-    assert by_key["pro"].cloudflare_features <= by_key["business"].cloudflare_features
+    assert by_key["free"].cloudflare_features == frozenset()
+    assert "custom_domain" in by_key["site"].cloudflare_features
+    assert by_key["site"].cloudflare_features <= by_key["staff"].cloudflare_features
 
 
 def test_get_site_plan_resolves_and_rejects():
-    assert site_plans.get_site_plan("pro").key == "pro"
+    assert site_plans.get_site_plan("site").key == "site"
     # An unknown / missing key resolves to None (not silently substituted).
     assert site_plans.get_site_plan("platinum") is None
     assert site_plans.get_site_plan(None) is None
@@ -192,81 +237,105 @@ def test_get_site_plan_resolves_and_rejects():
 # ---------------------------------------------------------------------------
 
 
-async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recording_bus, monkeypatch):
-    # pro HAS the "sites" (Sites) feature → the gate passes.
-    ws = await _make_workspace(plan="pro")
-    pocket_id = await _make_pocket(workspace_id=ws)
+async def test_publish_with_no_dodo_configured_charges_the_wallet(
+    mongo_db, recording_bus, monkeypatch
+):
+    """WITH NO DODO CONFIGURED AT ALL — the ordinary state of a self-hosted
+    deployment, and until this branch the state in which a paid tier could not be
+    bought.
 
-    # Configure a Dodo product for the "pro" site tier so the per-site sub fires.
+    It used to publish live, open no subscription and record the FREE FLOOR. That
+    was the least-bad option while a gateway was the only thing that could take
+    money, but the customer picked a paid plan and got the plan below it with no
+    error anywhere. The wallet needs no configuration, so the tier they chose is
+    charged for and recorded."""
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    monkeypatch.setattr(sites_service, "GeneratorClient", _FakeGenerator)
+    from pocketpaw_ee.sites import local_server
+
     monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
-    )
-    fake_provider = _FakeBillingProvider()
-    fake_cf = _FakeCF()
-
-    doc = await sites_service.publish_pocket(
-        workspace_id=ws,
-        user_id="u1",
-        pocket_id=pocket_id,
-        site_plan_key="pro",
-        _generator=_FakeGenerator(),
-        _cloudflare=fake_cf,
-        _bundle_reader=lambda d: b"x",
-        _billing_provider=fake_provider,
+        local_server, "deploy_local", lambda site_id, project_dir, **kw: f"http://local/{site_id}/"
     )
 
-    # charge-first: a PAID tier (pro) is published as PENDING — stamped with its
-    # tier + subscription id, but NOT deployed live until subscription.active.
-    assert doc.plan_tier == "pro"
-    assert doc.subscription_id == SITE_SUB_ID
-    assert doc.subscription_status == "pending"
-    assert doc.deployed is False
-    # The deploy was DEFERRED — the generator/Cloudflare were not invoked.
-    assert fake_cf.put_calls == []
-
-    # The per-site Dodo sub was opened with the site_id on its metadata (the
-    # discriminator the renewal webhook routes on).
-    assert len(fake_provider.calls) == 1
-    call = fake_provider.calls[0]
-    assert call["plan_key"] == "pro"
-    assert call["product_id"] == "prod_site_pro"
-    assert call["metadata"]["site_id"] == str(doc.id)
-    assert call["metadata"]["workspace_id"] == ws
-
-    # The persisted doc reflects the pending stamp.
-    persisted = await Site.find_one(Site.id == doc.id)
-    assert persisted is not None
-    assert persisted.plan_tier == "pro"
-    assert persisted.deployed is False
-
-    # charge-first: SitePublished is DEFERRED to activation (the site is not live
-    # yet) — it is NOT emitted at publish time for a paid pending site.
-    published = [e for e in recording_bus.events if e.type == "site.published"]
-    assert published == []
-
-
-async def test_publish_degrades_gracefully_when_dodo_unconfigured(mongo_db, recording_bus):
-    """With no Dodo product configured for the tier (v1 default), publish records
-    the intended tier WITHOUT a live charge — no subscription_id, no crash."""
     ws = await _make_workspace(plan="pro")
+    # Pro CARRIES three sites (2026-09-06), so the wallet is only reached once
+    # those are spoken for. Filling them is what makes this an OVERFLOW purchase,
+    # which is the only kind the wallet buys now.
+    await _fill_plan_slots(ws, 3)
+    await credits_service.grant(
+        workspace=ws, amount=5000, cause="top_up", idempotency_key=f"seed-nodo-{ws}"
+    )
     pocket_id = await _make_pocket(workspace_id=ws)
 
     doc = await sites_service.publish_pocket(
         workspace_id=ws,
         user_id="u1",
         pocket_id=pocket_id,
-        site_plan_key="pro",
-        _generator=_FakeGenerator(),
-        _cloudflare=_FakeCF(),
+        site_plan_key="site",
+        purchase_authorized=True,
         _bundle_reader=lambda d: b"x",
-        # No _billing_provider injected and no product configured → no live sub.
+        # No _billing_provider injected and no product configured. Nothing is
+        # needed: the wallet is the rail.
     )
 
-    assert doc.plan_tier == "pro"
+    assert doc.plan_tier == "site", "the tier the buyer chose, not the floor below it"
+    assert doc.subscription_status == "active"
+    assert doc.billing_rail == "credits"
     assert doc.subscription_id is None
-    assert doc.subscription_status == "none"
-    # The publish still emits SitePublished (the site IS published, just no charge).
+    assert await credits_service.balance(ws) == 5000 - 700
+    # The publish still emits SitePublished — the site IS live.
     assert any(e.type == "site.published" for e in recording_bus.events)
+
+
+async def test_a_plan_with_a_free_slot_carries_the_site_instead_of_charging(
+    mongo_db,  # noqa: ARG001
+    monkeypatch,
+    recording_bus,  # noqa: ARG001
+):
+    """The other side of the test above, and the common case now.
+
+    The same publish on the same plan — but with a slot free, so the workspace
+    subscription carries the site instead of the wallet buying it. Nothing is
+    debited, no renewal is scheduled, and the buyer gets ``staff`` rather than the
+    ``site`` rung they picked: the plan includes the concierge, and handing them
+    the cheaper rung would withhold something they are already paying for while
+    both options cost the same nothing."""
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    monkeypatch.setattr(sites_service, "GeneratorClient", _FakeGenerator)
+    from pocketpaw_ee.sites import local_server
+
+    monkeypatch.setattr(
+        local_server, "deploy_local", lambda site_id, project_dir, **kw: f"http://local/{site_id}/"
+    )
+
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    ws = await _make_workspace(plan="pro")
+    await credits_service.grant(
+        workspace=ws, amount=5000, cause="top_up", idempotency_key=f"seed-carry-{ws}"
+    )
+    pocket_id = await _make_pocket(workspace_id=ws)
+
+    doc = await sites_service.publish_pocket(
+        workspace_id=ws,
+        user_id="u1",
+        pocket_id=pocket_id,
+        site_plan_key="site",
+        purchase_authorized=True,
+        _bundle_reader=lambda d: b"x",
+    )
+
+    assert doc.billing_rail == "plan"
+    assert doc.plan_tier == "staff", "the plan carries staff, not the rung asked for"
+    assert doc.subscription_status == "active"
+    assert doc.deployed is True
+    # No renewal date: the PLAN renews, the site does not. A date here would put
+    # the renewal sweep on a site the wallet never bought.
+    assert doc.renewal_date is None
+    assert doc.period_paid_usd == 0
+    assert await credits_service.balance(ws) == 5000, "a carried site costs nothing"
 
 
 async def test_publish_defaults_to_base_tier(mongo_db):
@@ -302,7 +371,8 @@ async def test_publish_without_entitlement_is_forbidden_and_creates_no_site(mong
             workspace_id=ws,
             user_id="u1",
             pocket_id=pocket_id,
-            site_plan_key="pro",
+            site_plan_key="site",
+            purchase_authorized=True,
             _generator=_FakeGenerator(),
             _cloudflare=_FakeCF(),
             _bundle_reader=lambda d: b"x",
@@ -319,100 +389,7 @@ async def test_publish_without_entitlement_is_forbidden_and_creates_no_site(mong
 # ---------------------------------------------------------------------------
 
 
-async def test_per_site_active_webhook_updates_site_not_workspace(mongo_db, monkeypatch):
-    # charge-first: a paid (pro) publish creates a PENDING site; the
-    # subscription.active webhook deploys it live + marks the sub active. Force
-    # local deploy mode and fake the generator/local-server so the webhook-driven
-    # activation needs no Bun/workerd/Cloudflare.
-    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
-    monkeypatch.setattr(sites_service, "GeneratorClient", _FakeGenerator)
-    from pocketpaw_ee.sites import local_server
-
-    monkeypatch.setattr(
-        local_server, "deploy_local", lambda site_id, project_dir: f"http://local/{site_id}/"
-    )
-
-    ws = await _make_workspace(plan="pro")
-    pocket_id = await _make_pocket(workspace_id=ws)
-    monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
-    )
-    doc = await sites_service.publish_pocket(
-        workspace_id=ws,
-        user_id="u1",
-        pocket_id=pocket_id,
-        site_plan_key="pro",
-        _generator=_FakeGenerator(),
-        _billing_provider=_FakeBillingProvider(),
-    )
-    site_id = str(doc.id)
-    # Published PENDING — not yet deployed.
-    assert doc.deployed is False
-    assert doc.subscription_status == "pending"
-
-    # The workspace plan + credit balance BEFORE the webhook.
-    from pocketpaw_ee.cloud.workspace import service as workspace_service
-
-    plan_before = await workspace_service.get_workspace_plan(ws)
-    assert await credits.balance(ws) == 0
-
-    # A verified PER-SITE subscription.active (metadata carries site_id).
-    body = _site_subscription_body(
-        event_type="subscription.active", workspace_id=ws, site_id=site_id
-    )
-    result = await billing.handle_webhook(
-        payload=body.encode(),
-        headers=_sign(body, msg_id="evt_site_active_1"),
-        provider=_provider(),
-    )
-
-    # The per-site path never grants workspace credits.
-    assert result == {"ok": True, "granted": False}
-    assert await credits.balance(ws) == 0  # NO workspace credit grant
-
-    # The workspace plan is UNCHANGED (per-site subs don't touch Workspace.plan).
-    assert await workspace_service.get_workspace_plan(ws) == plan_before
-
-    # charge-first: the SITE is now DEPLOYED live + its sub flipped to active + a
-    # renewal date was set.
-    updated = await Site.find_one(Site.id == doc.id)
-    assert updated is not None
-    assert updated.deployed is True
-    assert updated.subscription_status == "active"
-    assert updated.annual_renewal_date is not None
-
-
-async def test_per_site_cancelled_webhook_marks_site_cancelled(mongo_db, monkeypatch):
-    ws = await _make_workspace(plan="pro")
-    pocket_id = await _make_pocket(workspace_id=ws)
-    monkeypatch.setattr(
-        site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
-    )
-    doc = await sites_service.publish_pocket(
-        workspace_id=ws,
-        user_id="u1",
-        pocket_id=pocket_id,
-        site_plan_key="pro",
-        _generator=_FakeGenerator(),
-        _cloudflare=_FakeCF(),
-        _bundle_reader=lambda d: b"x",
-        _billing_provider=_FakeBillingProvider(),
-    )
-
-    cancel_body = _site_subscription_body(
-        event_type="subscription.cancelled", workspace_id=ws, site_id=str(doc.id)
-    )
-    result = await billing.handle_webhook(
-        payload=cancel_body.encode(),
-        headers=_sign(cancel_body, msg_id="evt_site_cancel_1"),
-        provider=_provider(),
-    )
-
-    assert result == {"ok": True, "granted": False}
-    updated = await Site.find_one(Site.id == doc.id)
-    assert updated.subscription_status == "cancelled"
-
-
+@pytest.mark.usefixtures("payments_open")
 async def test_workspace_plan_sub_still_routes_to_workspace_path(mongo_db):
     """A subscription delivery WITHOUT a site_id is the unchanged BC-7 workspace
     path — it grants workspace credits / changes the plan, proving BC-9 routing
@@ -430,7 +407,10 @@ async def test_workspace_plan_sub_still_routes_to_workspace_path(mongo_db):
             "data": {
                 "subscription_id": "sub_ws_plan",
                 "product_id": "prod_pro_recurring",
-                # NO site_id → workspace-plan path.
+                # NO site_id → workspace-plan path. ``plan_key`` here is a
+                # WORKSPACE tier (billing.plans: free/go/pro/pro_max/enterprise),
+                # not a site tier — the two catalogs share a field name on the
+                # webhook metadata and nothing else.
                 "metadata": {"workspace_id": ws, "plan_key": "pro"},
             },
         }

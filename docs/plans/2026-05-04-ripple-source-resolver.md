@@ -112,6 +112,7 @@ def register(name: str) -> Callable[[SourceFn], SourceFn]:
     def deco(fn: SourceFn) -> SourceFn:
         _REGISTRY[name] = fn
         return fn
+
     return deco
 
 
@@ -177,6 +178,7 @@ git commit -m "feat(ripple): scaffold \$source resolver walker (no sources yet)"
 ```python
 # Append to backend/tests/cloud/test_ripple_resolver.py
 from ee.cloud.ripple_resolver import register
+
 
 # Module-level: register a test-only source. Re-registration overwrites,
 # so this is safe across test reloads.
@@ -267,19 +269,36 @@ async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
     import ee.cloud.ripple_sources  # noqa: F401
 
     fake_docs = [
-        type("D", (), {
-            "id": "p1", "name": "Bookings", "type": "business",
-            "icon": "calendar", "color": "#0A84FF",
-        })(),
-        type("D", (), {
-            "id": "p2", "name": "Notes", "type": "deep-work",
-            "icon": "note", "color": "#30D158",
-        })(),
+        type(
+            "D",
+            (),
+            {
+                "id": "p1",
+                "name": "Bookings",
+                "type": "business",
+                "icon": "calendar",
+                "color": "#0A84FF",
+            },
+        )(),
+        type(
+            "D",
+            (),
+            {
+                "id": "p2",
+                "name": "Notes",
+                "type": "deep-work",
+                "icon": "note",
+                "color": "#30D158",
+            },
+        )(),
     ]
 
     class _FakeFind:
-        def __init__(self, docs): self._docs = docs
-        async def to_list(self): return self._docs
+        def __init__(self, docs):
+            self._docs = docs
+
+        async def to_list(self):
+            return self._docs
 
     with patch(
         "ee.cloud.ripple_sources._PocketDoc.find",
@@ -289,10 +308,14 @@ async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
         out = await resolve_ripple_spec(spec, ctx)
 
     assert out["state"]["all"] == [
-        {"id": "p1", "name": "Bookings", "type": "business",
-         "icon": "calendar", "color": "#0A84FF"},
-        {"id": "p2", "name": "Notes", "type": "deep-work",
-         "icon": "note", "color": "#30D158"},
+        {
+            "id": "p1",
+            "name": "Bookings",
+            "type": "business",
+            "icon": "calendar",
+            "color": "#0A84FF",
+        },
+        {"id": "p2", "name": "Notes", "type": "deep-work", "icon": "note", "color": "#30D158"},
     ]
     # Tenancy invariant: every find call must include workspace.
     args, kwargs = find_mock.call_args
@@ -407,10 +430,12 @@ async def test_workspace_members_source_returns_member_list(ctx):
 
     with patch(
         "ee.cloud.ripple_sources._list_workspace_members",
-        new=AsyncMock(return_value=[
-            {"id": "u1", "name": "Alex", "email": "a@x", "role": "owner"},
-            {"id": "u2", "name": "Brit", "email": "b@x", "role": "member"},
-        ]),
+        new=AsyncMock(
+            return_value=[
+                {"id": "u1", "name": "Alex", "email": "a@x", "role": "owner"},
+                {"id": "u2", "name": "Brit", "email": "b@x", "role": "member"},
+            ]
+        ),
     ):
         spec = {"state": {"team": {"$source": "workspace.members"}}}
         out = await resolve_ripple_spec(spec, ctx)
@@ -431,6 +456,7 @@ Expected: FAIL — `_list_workspace_members` doesn't exist yet.
 
 ```python
 # Append to backend/ee/cloud/ripple_sources.py
+
 
 async def _list_workspace_members(workspace_id: str) -> list[dict[str, Any]]:
     """Indirection so tests can patch a single seam.
@@ -634,9 +660,7 @@ from ee.ripple._pockets import (
 )
 
 
-@pytest.mark.parametrize(
-    "prompt", [POCKET_CREATION_PROMPT_MCP, POCKET_CREATION_PROMPT_CLI]
-)
+@pytest.mark.parametrize("prompt", [POCKET_CREATION_PROMPT_MCP, POCKET_CREATION_PROMPT_CLI])
 def test_creation_prompts_contain_state_sources_block(prompt: str) -> None:
     assert "<state-sources>" in prompt
     assert "</state-sources>" in prompt
@@ -647,9 +671,7 @@ def test_creation_prompts_contain_state_sources_block(prompt: str) -> None:
     assert '"$source"' in prompt
 
 
-@pytest.mark.parametrize(
-    "prompt", [POCKET_CREATION_PROMPT_MCP, POCKET_CREATION_PROMPT_CLI]
-)
+@pytest.mark.parametrize("prompt", [POCKET_CREATION_PROMPT_MCP, POCKET_CREATION_PROMPT_CLI])
 def test_state_sources_block_appears_before_examples(prompt: str) -> None:
     """Agents anchor on examples; the rule must come first so the example
     can demonstrate it."""
@@ -712,7 +734,7 @@ def _assemble_creation(*, mcp: bool) -> str:
         _TOOLS_MCP if mcp else _TOOLS_CLI,
         _CREATION_OVERVIEW_MCP if mcp else _CREATION_OVERVIEW_CLI,
         _INTERACTIVE_DEFAULT_BLOCK,
-        _STATE_SOURCES_BLOCK,           # <-- new
+        _STATE_SOURCES_BLOCK,  # <-- new
         _CREATION_EXAMPLES_MCP if mcp else _CREATION_EXAMPLES_CLI,
         _RESEARCH_PROTOCOL,
         RIPPLE_DESIGN_RULES,

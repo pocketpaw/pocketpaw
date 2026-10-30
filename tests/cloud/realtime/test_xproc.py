@@ -27,6 +27,7 @@ def fake_redis(monkeypatch):
     talks to an in-memory store."""
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(xproc, "get_redis", lambda: redis)
+    monkeypatch.setattr(xproc, "get_blocking_redis", lambda: redis)
     xproc._reset_for_tests()
     yield redis
     xproc._reset_for_tests()

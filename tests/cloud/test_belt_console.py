@@ -23,6 +23,11 @@
 #     reject / executed / failed) on the WORKSPACE REALTIME BUS (captured via the
 #     conftest recording_bus) with an additional per-stream SSE push; the
 #     audience resolver fans belt_run_updated out to workspace members.
+#   * GET /belt/blueprints, /belt/blueprints/c4 and /belt/blueprints/suite-map — a
+#     member reads the app blueprint graph, one app's C4 view and the suite
+#     feature map over B3's fake git and gh; 404
+#     outside the allowlist, 422 on a bad app id, a status per component and
+#     per component path, stale passed through, 503 with no graph yet.
 #
 # `pocketpaw_ee` is import-skipped on an OSS-only install. The Mongo-backed
 # add-repo persistence rides the conftest ``mongo_db`` fixture (mongomock-motor
@@ -501,9 +506,35 @@ async def test_list_runs_shape_and_status_derivation(store):
         "base_branch",
         "created_at",
         "correlation_id",
+        "files_changed",
+        "error",
     ):
         assert key in row
     assert row["correlation_id"] == "corr-123"
+    # A failed run says why; a run that hasn't failed carries no error.
+    assert by_task["t-failed"]["error"] == "apply conflict"
+    assert row["error"] is None
+
+
+async def test_a_headless_run_reads_running_at_its_live_stage(store):
+    """A queued station run reads ``queued`` at ``station`` until a develop
+    starts it (``headless_state`` "queued" = handed over, not started), then
+    ``running`` at the stage its ``headless_state`` names."""
+    from pocketpaw_ee.cloud.belt.service import list_runs
+
+    run = await _propose_run(store, task="t-live", base_branch="", diff="")
+    params = dict(run.parameters)
+    for state, want in (
+        (None, ("queued", "station")),
+        ("queued", ("queued", "station")),
+        ("develop", ("running", "develop")),
+        ("review", ("running", "review")),
+    ):
+        blob = {**params["_code_change"], "station_pending": True, "headless_state": state}
+        await store.update_parameters(run.id, {**params, "_code_change": blob})
+        row = (await list_runs("w1"))["runs"][0]
+        assert (row["status"], row["stage"]) == want, state
+        assert row["headless_state"] == state
 
 
 async def test_list_runs_newest_first(store):
@@ -571,6 +602,69 @@ async def test_get_run_missing_is_404(store):
     with TestClient(_build_app(role="member")) as client:
         res = client.get("/api/v1/belt/runs/act-does-not-exist")
     assert res.status_code == 404, res.text
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+
+async def _run_with_screenshots(store, root: Path, workspace_id: str = "w1"):
+    action = await _propose_run(store, workspace_id=workspace_id, task="shots")
+    params = dict(action.parameters)
+    params["_code_change"] = {
+        **params["_code_change"],
+        "screenshots": [
+            {"name": "home-dark.png", "bytes": len(PNG), "sha": "f" * 64},
+            {"name": "link.png", "bytes": len(PNG), "sha": "f" * 64},
+        ],
+        "tester": {"session_url": "https://claude.ai/code/session_T", "at": 1.0},
+    }
+    await store.update_parameters(action.id, params)
+    run_dir = root / action.id
+    run_dir.mkdir(parents=True)
+    (run_dir / "home-dark.png").write_bytes(PNG)
+    (run_dir / "unlisted.png").write_bytes(PNG)  # on disk, but not on the blob
+    (root / "secret.png").write_bytes(PNG)
+    (run_dir / "link.png").symlink_to(root / "secret.png")  # listed, but leads out
+    return action
+
+
+async def test_run_screenshots_are_listed_and_served(store, tmp_path, monkeypatch):
+    root = tmp_path / "shots"
+    monkeypatch.setenv("POCKETPAW_FACTORY_SCREENSHOT_DIR", str(root))
+    action = await _run_with_screenshots(store, root)
+    base = f"/api/v1/belt/runs/{action.id}"
+    with TestClient(_build_app(role="member")) as client:
+        detail = client.get(base).json()
+        png = client.get(f"{base}/screenshots/home-dark.png")
+        unlisted = client.get(f"{base}/screenshots/unlisted.png")
+        escape = client.get(f"{base}/screenshots/..%2Fsecret.png")
+        link = client.get(f"{base}/screenshots/link.png")
+        missing = client.get("/api/v1/belt/runs/act-nope/screenshots/home-dark.png")
+        rows = client.get("/api/v1/belt/runs").json()["runs"]
+
+    assert detail["screenshots"] == [
+        {"name": "home-dark.png", "bytes": len(PNG)},
+        {"name": "link.png", "bytes": len(PNG)},
+    ]
+    assert detail["tester"] == {"session_url": "https://claude.ai/code/session_T", "at": 1.0}
+    (row,) = [r for r in rows if r["action_id"] == action.id]
+    assert row["screenshots"] == detail["screenshots"]  # the list's thumbnails
+    assert png.status_code == 200, png.text
+    assert png.headers["content-type"] == "image/png"
+    assert png.content == PNG
+    assert unlisted.status_code == 404
+    assert escape.status_code == 404
+    assert link.status_code == 404
+    assert missing.status_code == 404
+
+
+async def test_run_screenshots_are_workspace_scoped(store, tmp_path, monkeypatch):
+    root = tmp_path / "shots"
+    monkeypatch.setenv("POCKETPAW_FACTORY_SCREENSHOT_DIR", str(root))
+    action = await _run_with_screenshots(store, root, workspace_id="w-other")
+    with TestClient(_build_app(role="member", workspace_id="w1")) as client:
+        res = client.get(f"/api/v1/belt/runs/{action.id}/screenshots/home-dark.png")
+    assert res.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +847,8 @@ async def test_executor_emits_landed_and_persists_pr_result(
     assert blob["pr_url"] == "https://github.com/acme/repo/pull/7"
     assert blob["branch"].startswith("feat/belt-")
     assert blob["files_changed"] == 1
+    # The event names the landing branch, so the run chip updates without a refetch.
+    assert landed[0]["branch"] == blob["branch"]
 
 
 async def test_executor_local_only_emits_landed_without_pr_url(
@@ -826,6 +922,7 @@ async def test_executor_local_only_emits_landed_without_pr_url(
     assert blob["commit_sha"]
     assert "pr_url" not in blob or blob["pr_url"] is None
     assert blob["files_changed"] == 1
+    assert landed[0]["branch"] == blob["branch"]
 
 
 async def test_executor_emits_failed_on_apply_conflict(monkeypatch, recording_bus, sse, tmp_path):
@@ -874,3 +971,140 @@ async def test_executor_emits_failed_on_apply_conflict(monkeypatch, recording_bu
     failed = [e for e in _bus_belt_events(recording_bus) if e["status"] == "failed"]
     assert failed and failed[0]["stage"] == "done"
     assert failed[0]["workspace_id"] == "w1"
+
+
+# ---------------------------------------------------------------------------
+# GET /belt/blueprints, /belt/blueprints/c4 — the app blueprint reads
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def bp(settings_allowlist, monkeypatch):
+    """B3's fake git and gh behind the real reader, on an allowlisted repo."""
+    from pocketpaw_ee.cloud.belt import app_blueprint_read as abr
+
+    from tests.cloud.test_belt_app_blueprint_read import Fake
+
+    for name in ("_CACHE", "_LOCKS", "_BLOBS"):
+        monkeypatch.setattr(abr, name, {})
+    fake = Fake((settings_allowlist / "acme-api").resolve())
+    monkeypatch.setattr(abr, "_git", lambda path: fake.git)
+    monkeypatch.setattr("pocketpaw_ee.cloud.mandates.patrols._default_gh", fake.gh)
+    monkeypatch.setattr(abr, "_lead_runs", fake.runs)
+    monkeypatch.setattr(abr, "_touched", fake.touched)
+    return fake
+
+
+def _bp_get(path: str, fake, **params):
+    with TestClient(_build_app(role="member")) as client:
+        return client.get(f"/api/v1/belt/{path}", params={"repo": str(fake.repo), **params})
+
+
+def test_member_reads_the_blueprint_graph(bp):
+    res = _bp_get("blueprints", bp)
+    assert res.status_code == 200, res.text
+    g = res.json()
+    assert (g["slug"], g["sha"], g["stale"]) == ("qbtrix/creative-apps", "62a8577", False)
+    assert {f["id"]: f["status"] for f in g["features"]}["halo/layer-keys"] == "building"
+
+
+def test_blueprint_repo_outside_the_allowlist_is_404(bp, tmp_path):
+    _make_repo(tmp_path / "elsewhere")
+    for path, extra in (("blueprints", {}), ("blueprints/c4", {"app": "halo"})):
+        with TestClient(_build_app(role="member")) as client:
+            q = {"repo": str(tmp_path / "elsewhere"), **extra}
+            res = client.get(f"/api/v1/belt/{path}", params=q)
+        assert res.status_code == 404, res.text
+        assert res.json()["error"]["code"] == "belt.repo_not_found"
+    assert bp.calls == []
+
+
+def test_blueprint_c4_rejects_a_bad_app_id(bp):
+    for app in ("../x", "Halo", "-x", ""):
+        assert _bp_get("blueprints/c4", bp, app=app).status_code == 422, app
+    assert bp.calls == []
+
+
+def test_blueprint_c4_returns_the_model_and_a_status_per_component(bp):
+    res = _bp_get("blueprints/c4", bp, app="halo")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["app"] == "halo"
+    assert body["model"]["scope"] == "creative-apps/halo (planned)"
+    assert body["model"]["model"]["systems"]
+    status = body["status"]
+    assert status["halo-window"] == "changing"  # owned by building halo/layer-keys
+    assert status["halo-project"] == "landed"  # every path on dev
+    assert status["halo-frames"] == "planned"  # partial
+    assert status["halo-text"] == "planned"
+    assert set(status.values()) <= {"planned", "landed", "changing", "failed"}
+    missing = _bp_get("blueprints/c4", bp, app="nope")
+    assert missing.status_code == 404 and missing.json()["error"]["code"] == "belt.app_not_found"
+
+
+def test_blueprint_c4_marks_each_path_of_a_partial_component(bp):
+    status = _bp_get("blueprints/c4", bp, app="halo").json()["status"]
+    assert status["halo-frames"] == "planned"  # partial: one of two files on dev
+    assert status["Sources/HaloModel/FrameRenderer.swift"] == "landed"
+    assert status["Sources/HaloModel/HaloRenderFrame.swift"] == "planned"
+
+
+def test_blueprint_c4_paints_a_stuck_owner_failed(bp, monkeypatch):
+    async def gh(argv):
+        code, out, err = await bp.gh(argv)
+        if argv[1:3] == ["issue", "list"] and "qbtrix/creative-apps" in argv:
+            out = out.replace('"feature-lead"', '"needs-human"')
+        return code, out, err
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.mandates.patrols._default_gh", gh)
+    status = _bp_get("blueprints/c4", bp, app="halo").json()["status"]
+    assert status["halo-window"] == "failed"
+    assert status["halo-project"] == "landed"
+
+
+def test_blueprint_failed_refresh_passes_stale_through(bp, monkeypatch):
+    from pocketpaw_ee.cloud.belt import app_blueprint_read as abr
+
+    monkeypatch.setattr(abr, "TTL", 0.0)
+    with TestClient(_build_app(role="member")) as client:
+        q = {"repo": str(bp.repo)}
+        assert client.get("/api/v1/belt/blueprints", params=q).json()["stale"] is False
+        bp.limited = True
+        res = client.get("/api/v1/belt/blueprints", params=q)
+        c4 = client.get("/api/v1/belt/blueprints/c4", params={**q, "app": "halo"})
+    assert res.status_code == 200 and res.json()["stale"] is True
+    assert c4.status_code == 200 and c4.json()["status"]["halo-window"] == "changing"
+
+
+def test_member_reads_the_suite_map(bp):
+    from tests.cloud.test_belt_app_blueprint_read import MAP, suite_map
+
+    bp.files[MAP] = suite_map([("keys", "halo/layer-keys"), ("new", None)])
+    bp.tree()
+    res = _bp_get("blueprints/suite-map", bp)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [f["status"] for f in body["features"]] == ["building", "new"]
+    assert body["layers"] == [{"id": "kernel", "name": "SuiteKernel"}]
+
+
+def test_suite_map_without_a_map_file_is_404(bp):
+    res = _bp_get("blueprints/suite-map", bp)
+    assert res.status_code == 404, res.text
+    assert res.json()["error"]["code"] == "belt.suite_map_not_found"
+
+
+def test_suite_map_repo_outside_the_allowlist_is_404(bp, tmp_path):
+    _make_repo(tmp_path / "elsewhere")
+    with TestClient(_build_app(role="member")) as client:
+        q = {"repo": str(tmp_path / "elsewhere")}
+        res = client.get("/api/v1/belt/blueprints/suite-map", params=q)
+    assert res.status_code == 404 and res.json()["error"]["code"] == "belt.repo_not_found"
+    assert bp.calls == []
+
+
+def test_blueprint_with_no_graph_yet_is_503(bp):
+    bp.limited = True
+    res = _bp_get("blueprints", bp)
+    assert res.status_code == 503, res.text
+    assert res.json()["error"]["code"] == "belt.blueprint_unavailable"

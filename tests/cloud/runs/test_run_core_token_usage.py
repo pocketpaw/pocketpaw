@@ -7,8 +7,22 @@
 #     mark_completed / mark_terminal) AND the ``stream_end`` SSE frame, replacing
 #     the old hardcoded ``{}``. Covers the success, empty-text, and cancelled
 #     paths.
+#
+# Updated 2026-09-02 (fix/metering-partial-usage-capture) — the three terminal
+# states that could never carry usage now do, and latest-wins grew a floor.
+#   * failed / interrupted: ``mark_terminal`` was called without ``usage=`` on
+#     both (``_handle_interrupted_cleanup`` did not even take the parameter), so
+#     a run that crashed or was killed by the host persisted no counts and the
+#     sweeper billed it zero however much context it had already paid for.
+#     ``cancelled`` always passed usage; it is pinned here too so the three
+#     cannot drift apart again.
+#   * the floor: every backend reports a RUN-CUMULATIVE payload, so keeping the
+#     LATEST is right and summing would bill the conversation once per turn. The
+#     floor is what makes that safe — a payload smaller than the one already
+#     held can only be a regression, and a regression must not halve a bill.
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -265,3 +279,209 @@ async def test_execute_run_empty_text_path_carries_usage(monkeypatch):
     # The empty-text completion path forwarded the usage to mark_completed.
     assert len(mark_calls) == 1
     assert mark_calls[0]["usage"]["input_tokens"] == 1200
+
+
+# ---------------------------------------------------------------------------
+# A partial run consumed tokens too (C1)
+#
+# ``metering/sweeper.py`` bills all four terminal states on purpose. Three of
+# them could never carry usage, so it faithfully billed them zero.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_failed_run_carries_the_tokens_it_burned(monkeypatch):
+    """A run that crashes after the model answered is not a free run.
+
+    ``mark_terminal(status="failed")`` omitted ``usage=`` entirely, so every
+    crashed run persisted whatever ``usage`` the doc already had — nothing —
+    and swept through ``bill_run`` at $0 no matter how much context it had
+    already paid for.
+    """
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    marked: list[dict[str, Any]] = []
+
+    async def _track_terminal(
+        run_id, *, status, partial_text="", error=None, assistant_message_id=None, usage=None
+    ):
+        marked.append({"status": status, "usage": usage})
+
+    async def fake_agent_events(spec, ctx):
+        yield ("chunk", {"content": "partial", "type": "text"})
+        yield ("token_usage", dict(_USAGE_META))
+        yield ("error", {"code": "agent.run_failed", "message": "provider exploded"})
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _track_terminal
+    )
+
+    await run_core.execute_run(_spec())
+
+    assert [m["status"] for m in marked] == ["failed"]
+    assert marked[0]["usage"] is not None, "a failed run persisted no usage at all"
+    assert marked[0]["usage"]["input_tokens"] == 1200
+    assert marked[0]["usage"]["output_tokens"] == 350
+
+
+async def test_an_interrupted_run_carries_the_tokens_it_burned(monkeypatch):
+    """Host cancel (worker shutdown / SIGTERM) is the third unbilled state.
+
+    ``_handle_interrupted_cleanup`` did not take a ``usage`` parameter at all,
+    so the shielded finalisation wrote a terminal doc with no counts.
+    """
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    marked: list[dict[str, Any]] = []
+
+    async def _track_terminal(
+        run_id, *, status, partial_text="", error=None, assistant_message_id=None, usage=None
+    ):
+        marked.append({"status": status, "usage": usage})
+
+    async def fake_agent_events(spec, ctx):
+        yield ("chunk", {"content": "partial", "type": "text"})
+        yield ("token_usage", dict(_USAGE_META))
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _track_terminal
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_core.execute_run(_spec())
+
+    assert [m["status"] for m in marked] == ["interrupted"]
+    assert marked[0]["usage"] is not None, "an interrupted run persisted no usage at all"
+    assert marked[0]["usage"]["input_tokens"] == 1200
+
+
+async def test_a_cancelled_run_carries_the_tokens_it_burned(monkeypatch):
+    """The one terminal state that already passed ``usage=`` — pinned so the
+    other two can never quietly drift back apart from it."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    marked: list[dict[str, Any]] = []
+
+    async def _track_terminal(
+        run_id, *, status, partial_text="", error=None, assistant_message_id=None, usage=None
+    ):
+        marked.append({"status": status, "usage": usage})
+
+    async def fake_agent_events(spec, ctx):
+        yield ("chunk", {"content": "partial", "type": "text"})
+        yield ("token_usage", dict(_USAGE_META))
+        # The user hits stop. The run loop notices at the NEXT event boundary,
+        # which is why the adapter has to have delivered usage BEFORE this.
+        await transport.request_cancel("r1")
+        yield ("chunk", {"content": "more", "type": "text"})
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.runs.run_core.run_service.mark_terminal", _track_terminal
+    )
+
+    await run_core.execute_run(_spec())
+
+    assert [m["status"] for m in marked] == ["cancelled"]
+    assert marked[0]["usage"]["input_tokens"] == 1200
+
+
+# ---------------------------------------------------------------------------
+# latest-wins, floored (N1)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_shrinking_payload_cannot_halve_the_bill(monkeypatch):
+    """Every backend emits RUN-CUMULATIVE usage, so keeping the LATEST payload
+    is right. The floor is what makes that safe: a payload smaller than the one
+    already held can only be a regression, and it must not be able to overwrite
+    a bill downward."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    async def _persist_stub(spec, ctx, full_text, attachments, usage=None):
+        return "assistant-msg-1"
+
+    async def fake_agent_events(spec, ctx):
+        yield ("chunk", {"content": "hi", "type": "text"})
+        yield ("token_usage", dict(_USAGE_META))
+        # A regressed adapter reports a single turn instead of the run total.
+        yield ("token_usage", {**_USAGE_META, "input_tokens": 10, "output_tokens": 1})
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _persist_stub)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+
+    await run_core.execute_run(_spec())
+
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    end = events[-1]
+    assert end.event == "stream_end"
+    assert end.data["usage"]["input_tokens"] == 1200
+
+
+async def test_a_growing_payload_replaces_the_one_before_it(monkeypatch):
+    """The floor must not freeze the bill at the first payload — cumulative
+    usage grows, and the LAST (largest) snapshot is the run's real total."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    async def _persist_stub(spec, ctx, full_text, attachments, usage=None):
+        return "assistant-msg-1"
+
+    async def fake_agent_events(spec, ctx):
+        yield ("chunk", {"content": "hi", "type": "text"})
+        yield ("token_usage", {**_USAGE_META, "input_tokens": 100, "output_tokens": 10})
+        yield ("token_usage", {**_USAGE_META, "input_tokens": 900, "output_tokens": 80})
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", fake_agent_events)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _persist_stub)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+
+    await run_core.execute_run(_spec())
+
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    assert events[-1].data["usage"]["input_tokens"] == 900
+
+
+def test_the_run_loops_total_agrees_with_the_meters():
+    """``_usage_total`` mirrors ``metering.service._total_tokens`` on purpose —
+    the floor decides which payload gets BILLED, so it has to rank payloads the
+    same way the biller measures them. Two definitions that drift would let a
+    payload the meter thinks is bigger lose to one it thinks is smaller."""
+    from pocketpaw_ee.cloud.metering.service import _total_tokens
+
+    payloads = [
+        {},
+        {"input_tokens": 10},
+        {"input_tokens": 10, "output_tokens": 5, "cached_input_tokens": 3},
+        {"total_tokens": 999, "input_tokens": 1},
+        {"model": "m", "backend": "b"},
+        {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0},
+        {"input_tokens": "12", "output_tokens": None},
+    ]
+    for p in payloads:
+        assert run_core._usage_total(p) == _total_tokens(p), p

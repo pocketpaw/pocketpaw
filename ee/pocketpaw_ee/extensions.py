@@ -1,205 +1,216 @@
 """Entry-point provider classes for the OSS-EE extension surfaces.
 
-Core (`pocketpaw`) defines the Protocols in `pocketpaw.extensions` and
-discovers implementations via `importlib.metadata.entry_points`. This module
-collects every `pocketpaw_ee` provider in one place; the entry-points that
-point at these classes are declared in `pyproject.toml` (and will migrate to
-`ee/pyproject.toml` in Phase 4).
+Core (`pocketpaw`) defines the Protocols in `pocketpaw.extensions` and discovers
+implementations via `importlib.metadata.entry_points`; the entry-points that
+point at these classes are declared in `pyproject.toml`. This module collects
+every `pocketpaw_ee` provider in one place: the cloud event bus, embeddings,
+Mongo memory backend, capabilities, auth, routes (`mount_cloud`), the
+lifecycle hook, storage, models, the pocket writer, the connector state store,
+Composio tools, the per-workspace store bridge (delegating to the OSS
+`build_workspace_store` so the path allowlist stays in OSS), the agent extension
+(including the per-tenant agent cwd jail, which fails closed in cloud), and one
+`pocketpaw.mcp_servers` provider per in-process MCP server the
+claude_agent_sdk cloud backend gets (each class docstring says what it exposes
+and whether it is ambient, opt-in or surface-scoped).
 
-Each provider does its heavy `pocketpaw_ee` imports lazily inside methods so
-that merely loading this module — which the registry does on first access —
-stays cheap and free of import cycles.
+Heavy `pocketpaw_ee` imports happen lazily inside methods, so loading this
+module (which the registry does on first access) stays cheap and cycle-free.
 
-Updated: 2026-05-22 (RFC 04 M3) — ``CloudLifecycleHook`` now starts the
-pocket interval-refresh scheduler in ``on_startup`` and cancels it in
-``on_shutdown``. The scheduler is a single asyncio task owned at module
-scope inside ``cloud.pockets.refresh_scheduler``; it is self-gated on
-``POCKETPAW_POCKET_REFRESH_SCHEDULER_ENABLED`` so the start call is a
-no-op unless a deployment opts in.
-
-Updated: 2026-05-28 (feat/wave-3d-temporal-scheduler) — ``CloudLifecycleHook``
-also starts the RFC 03 v2 temporal trigger sweep scheduler in
-``on_startup`` and cancels it in ``on_shutdown``. The scheduler lives at
-``cloud._core.temporal_scheduler`` and is self-gated on
-``POCKETPAW_TEMPORAL_SWEEP_ENABLED`` (default OFF) so pytest runs and
-multi-replica deployments don't double-fire. Cadence is configurable via
-``POCKETPAW_TEMPORAL_SWEEP_INTERVAL_SECONDS`` (default 3600, floor 60).
-
-Updated: 2026-06-10 (feat/studio-code-migration) — added ``CloudMediaMcpProvider``
-(``pocketpaw.mcp_servers`` entry ``media``) exposing the STUDIO image +
-video generation in-process server (``pocketpaw_media``) to the
-claude_agent_sdk cloud chat backend, mirroring ``CloudSitesMcpProvider``.
-
-Updated: 2026-06-10 (feat/belt-loom-mcp, BS-1) — added ``CloudLoomMcpProvider``
-(``pocketpaw.mcp_servers`` entry ``loom``) registering the external loom
-codebase-orientation binary as a STDIO MCP server (server name ``loom``;
-5 read tools: orient / locate / why / what_depends_on / boundaries) on the
-claude_agent_sdk cloud chat backend. Unlike the sibling providers this one
-returns a stdio config DICT (Path A), not an in-process SDK server object —
-the registration loop passes it through untouched. Ambient (not opt-in); the
-/belt surface scopes access via its profile allowlist. Returns None — and the
-loop skips it — when ``loom_model_path`` is unset or the binary is missing,
-so chat never breaks.
-
-Updated: 2026-06-10 (feat/belt-gate, BS-3) — added ``CloudBeltMcpProvider``
-(``pocketpaw.mcp_servers`` entry ``belt``) exposing the Belt & Pulley
-code-change gate in-process server (``pocketpaw_belt``; one tool
-``belt_propose_change``) to the claude_agent_sdk cloud chat backend, mirroring
-``CloudMediaMcpProvider``. The develop station proposes a diff through Instinct;
-the ee instinct router fires ``ee.cloud.belt.executor.execute_approved_change``
-on approval. Ambient (not opt-in).
-
-Updated: 2026-06-11 (feat/external-action-mcp-tool) — added
-``CloudExternalActionsMcpProvider`` (``pocketpaw.mcp_servers`` entry
-``external_actions``) exposing the gated external-action proposal server
-(``pocketpaw_external_actions``; one tool ``propose_external_action``) to the
-claude_agent_sdk cloud chat backend, mirroring ``CloudBeltMcpProvider``. A chat
-agent proposes a connector call through Instinct; the ee instinct router fires
-``ee.cloud.external_actions.executor.execute_approved_external_action`` on
-approval. Propose-only — the tool never fires the connector itself. Ambient
-(not opt-in).
-
-Updated: 2026-06-12 (connector-store-unification CS-3) — added
-``CloudConnectorStateStoreProvider`` (``pocketpaw.connector_state_stores``)
-supplying the ``WorkspaceConnector``-backed ``CloudConnectorStateStore`` as the
-ConnectorRegistry's default durable state store, so cloud connector config
-rehydrates from the tenant DB after a process restart (no /connect needed).
-
-Updated: 2026-06-26 (ART-2) — ``CloudAgentExtension`` gained ``agent_cwd``: a
-per-tenant agent working-directory jail. It delegates to
-``pocketpaw_ee.cloud.agent_jail.resolve_agent_cwd``, which returns a
-per-workspace/session dir (``~/.pocketpaw/workspaces/<ws>/agent/<session>/``) so
-a cloud tenant's file ops never co-mingle in the shared home dir, and FAILS
-CLOSED when a cloud run has no resolvable workspace. OSS / dedicated installs
-return ``None`` and keep ``settings.file_jail_path``.
-
-Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) — added
-``CloudFabricMcpProvider`` (entry ``fabric``; server ``pocketpaw_fabric``,
-tools ``fabric_query`` / ``fabric_stats``) and ``CloudInstinctMcpProvider``
-(entry ``instinct``; server ``pocketpaw_instinct``, tools ``instinct_pending``
-/ ``instinct_audit``), both mirroring ``CloudExternalActionsMcpProvider``. On
-the claude_agent_sdk backend, registry tools (BaseTool) never reach the agent —
-only MCP servers do — so without these the cloud chat agent had no path to the
-Fabric ontology or Instinct gate visibility. Both are READ-ONLY and
-workspace-scoped via the chat ContextVars. Gated proposing stays on
-``pocketpaw_external_actions``. Ambient (not opt-in).
-
-Updated: 2026-06-26 (ISO-3 — workspace store bridge) — added ``CloudStoreProvider``
-(``pocketpaw.stores`` entry-point) so the dormant ``StoreProvider`` seam ISO-1 lit
-up is now live under EE. It returns the standard per-workspace SQLite file store
-(Fabric / Instinct at ``~/.pocketpaw/workspaces/<id>/<name>.db``) by delegating to
-the OSS helper ``pocketpaw.stores.build_workspace_store`` — so the path + the
-path-traversal allowlist stay authoritative in OSS and the provider can never drift
-from or weaken them. It returns ``None`` for the legacy (no-workspace) path, leaving
-the OSS factory's shared singleton in place. This activates the entry-point end to
-end and gives EE the single hook to later swap in a cloud-backed store without
-touching core.
-
-Updated: 2026-07-11 (feat/paw-cli, C2) — ``CloudFabricMcpProvider`` is no longer
-read-only: the ``pocketpaw_fabric`` server grew three ontology modification
-tools (``fabric_link_create`` / ``fabric_link_delete`` at MEMBER tier,
-``fabric_type_update`` RBAC-gated on ``fabric.admin``), mirroring the REST
-routes. ``tool_ids()`` picks them up automatically via ``FABRIC_TOOL_IDS``.
+`CloudLifecycleHook.on_startup` opens the cloud DB, seeds admin/workspace and
+the default + code agents, fires a one-shot Fabric read-model backfill, then
+starts the loops that cannot wait for `mount_cloud`'s lifespan: meeting-job
+recovery, the pocket refresh scheduler, the temporal sweep, the 5-minute
+sweeper (`_sweeps`, incl. partner tiers), the xproc consumer, local-site
+re-serve and the dev-server reaper; with several web processes the scheduled
+ones run under a Redis lease. `on_shutdown` stops them and closes the arq pool
+and Redis clients. `CloudAuthProvider.redeem_dashboard_ws_ticket` lets the OSS
+dashboard socket redeem a first-frame ws_ticket without importing EE.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import suppress
 from typing import Any
 
 _run_sweeper_logger = logging.getLogger(__name__)
+
+# Heartbeat cadence for the sweep loop below. 300s is the historical value and
+# stays the default; it was hardcoded, while every sibling sweeper in the
+# codebase (fabric_ingest, mandates, decisions) already reads its interval from
+# env. Made configurable for the same reason they are: this loop is the ONLY
+# thing between a finished run and a visible charge, so an operator tuning
+# billing latency should not have to edit source.
+#
+# The floor is deliberate. Each tick queries unbilled runs, iterates every
+# provisioned tenant and, in the LiteLLM cutover modes, calls the proxy admin API
+# once per tenant. A one-second interval would hammer the proxy rather than speed
+# anything up, so a lower value is clamped and logged rather than honoured.
+_DEFAULT_SWEEP_INTERVAL_SECONDS = 300
+_MIN_SWEEP_INTERVAL_SECONDS = 30
+_ENV_SWEEP_INTERVAL = "POCKETPAW_SWEEPER_INTERVAL_SECONDS"
+
+
+def _sweep_interval_seconds() -> int:
+    """Read the sweep cadence from env, default 300s, floored at 30s."""
+    raw = os.environ.get(_ENV_SWEEP_INTERVAL, "").strip()
+    if not raw:
+        return _DEFAULT_SWEEP_INTERVAL_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        _run_sweeper_logger.warning(
+            "%s=%r is not an int — falling back to %ds",
+            _ENV_SWEEP_INTERVAL,
+            raw,
+            _DEFAULT_SWEEP_INTERVAL_SECONDS,
+        )
+        return _DEFAULT_SWEEP_INTERVAL_SECONDS
+    if value < _MIN_SWEEP_INTERVAL_SECONDS:
+        _run_sweeper_logger.warning(
+            "%s=%d is below the %ds floor — clamping. Each tick hits the proxy "
+            "admin API once per provisioned tenant.",
+            _ENV_SWEEP_INTERVAL,
+            value,
+            _MIN_SWEEP_INTERVAL_SECONDS,
+        )
+        return _MIN_SWEEP_INTERVAL_SECONDS
+    return value
+
+
 _sweeper_task: asyncio.Task[None] | None = None
 _xproc_consumer_task: asyncio.Task[None] | None = None
+# CN-6: held so the one-shot Fabric read-model backfill isn't GC'd mid-run.
+_fabric_read_model_task: asyncio.Task[None] | None = None
+# With several web processes (POCKETPAW_REALTIME_BUS=redis-streams) the sweeps
+# run on one process per cluster, and the jail GC on one process per HOST since
+# it reclaims local disk. ``None`` means no lease: this process runs them all.
+_sweep_lease: Any = None
+_jail_lease: Any = None
+
+
+def _sweeps() -> tuple[list[Any], list[Any]]:
+    """(cluster-wide sweeps, per-host sweeps), in run order.
+
+    Each runs in its own try, so one failing cannot suppress the rest:
+    - ``sweep_stale_runs``: interrupt queued/running runs that stopped beating.
+    - ``sweep_unbilled_runs``: BC-3 metering of newly-terminal runs (self-gated
+      off in the WU-F ``live`` cutover mode).
+    - ``run_cutover_sweep``: WU-F per-tenant LiteLLM spend (off/shadow/live).
+    - ``sweep_pending_sites``: log paid sites stuck pending (visibility only).
+    - ``sweep_site_renewals``: charge wallet-paid site plans that came due; an
+      unaffordable site drops to the free floor and stays live. Also releases
+      plan-carried sites past the workspace's current site allowance.
+    - ``sweep_partner_tiers``: PH-15 monthly Paw Partners tier review (lowers a
+      tier the active sold sites no longer earn); acts once per partner per month.
+      After the renewals, so a site that just lapsed no longer counts.
+    - ``sweep_subscription_grace``: M5 dunning, revoke plans held past grace.
+    - ``sweep_draft_workers``: retry pending site-draft cleanups, reap draft Workers
+      idle past their TTL, delete unregistered ``paw-draft-*`` scripts (no-op unless
+      PAW_SITES_DRAFT_WORKERS is on).
+    - ``sweep_do_usage``: daily Durable Object usage per site from Cloudflare GraphQL
+      analytics; flips ``do_throttled`` past the plan's ceiling. Fails open; at most
+      once an interval; no-op unless PAW_SITES_DURABLE_OBJECTS is on.
+    - ``sweep_do_teardowns``: retry DO teardowns a site delete could not finish, with
+      backoff, then hand them to an operator (same flag).
+    - ``backfill_tenant_keys`` (tick only): mint LiteLLM tenant keys for up to 50
+      live workspaces with none, since workspace create never retries a failed
+      mint. Skipped on the boot pass, where a down proxy would hold startup.
+    - ``sweep_agent_jails`` (per host): ART-3 TTL/LRU GC of idle agent jails,
+      never one backing a queued/running run.
+    """
+    from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
+    from pocketpaw_ee.cloud.billing.service import sweep_subscription_grace
+    from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+    from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
+    from pocketpaw_ee.cloud.llm_provisioning.service import backfill_tenant_keys
+    from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
+    from pocketpaw_ee.cloud.partners.service import sweep_partner_tiers
+    from pocketpaw_ee.sites.do_metering import sweep_do_teardowns, sweep_do_usage
+    from pocketpaw_ee.sites.draft_worker import sweep_draft_workers
+    from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
+    from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
+
+    cluster = [
+        sweep_stale_runs,
+        sweep_unbilled_runs,
+        run_cutover_sweep,
+        sweep_pending_sites,
+        sweep_site_renewals,
+        sweep_partner_tiers,
+        sweep_subscription_grace,
+        sweep_draft_workers,
+        sweep_do_usage,
+        sweep_do_teardowns,
+        backfill_tenant_keys,
+    ]
+    return cluster, [sweep_agent_jails]
+
+
+# Sweeps that only run on the interval, never on the boot pass.
+_TICK_ONLY_SWEEPS = frozenset({"backfill_tenant_keys"})
+
+
+async def _run_sweeps(*, boot: bool = False) -> None:
+    from pocketpaw_ee.cloud._core.lease import may_run
+    from pocketpaw_ee.cloud._core.periodic import sweep_tick
+
+    cluster, per_host = _sweeps()
+    interval = _sweep_interval_seconds()
+    for lease, fns in ((_sweep_lease, cluster), (_jail_lease, per_host)):
+        if not may_run(lease):
+            continue
+        for fn in fns:
+            if boot and fn.__name__ in _TICK_ONLY_SWEEPS:
+                continue
+            try:
+                async with sweep_tick(fn.__name__, interval):
+                    await fn()
+            except Exception:
+                _run_sweeper_logger.exception("%s tick failed", fn.__name__)
 
 
 async def _sweeper_loop() -> None:
-    from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
-    from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
-    from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
-    from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
-    from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
-
+    interval = _sweep_interval_seconds()
+    _run_sweeper_logger.info("sweeper loop started (interval=%ds)", interval)
     while True:
-        try:
-            await asyncio.sleep(300)
-            await sweep_stale_runs()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _run_sweeper_logger.exception("sweep_stale_runs tick failed")
-        # ART-3 jail lifecycle: TTL-GC idle agent jails + LRU-evict under the
-        # disk watermark, so scratch disk scales with active concurrency not user
-        # count. Own try so a jail-GC failure can't suppress the other sweeps (or
-        # vice versa); never evicts a jail backing a queued/running run.
-        try:
-            await sweep_agent_jails()
-        except Exception:
-            _run_sweeper_logger.exception("sweep_agent_jails tick failed")
-        # BC-3 metering: bill every newly-terminal run's compute cost on the same
-        # heartbeat. Kept in its own try so a metering failure can't suppress the
-        # stale-run sweep (or vice versa) on the next tick. Self-gated OFF in the
-        # WU-F ``live`` cutover mode (LiteLLM is then the sole meter).
-        try:
-            await sweep_unbilled_runs()
-        except Exception:
-            _run_sweeper_logger.exception("sweep_unbilled_runs tick failed")
-        # WU-F billing cutover: per-tenant LiteLLM spend sweep. No-op in ``off``;
-        # a read-only reconciliation compare in ``shadow``; debits proxy spend in
-        # ``live``. Own try so a cutover-sweep failure can't suppress the other
-        # sweeps (or vice versa) on the next tick.
-        try:
-            await run_cutover_sweep()
-        except Exception:
-            _run_sweeper_logger.exception("run_cutover_sweep tick failed")
-        # Charge-first (review fix C): surface PAID sites stuck pending past the
-        # threshold (a lost/delayed subscription.active webhook). VISIBILITY ONLY —
-        # logs at WARNING, never auto-deploys or auto-cancels. Its own try so a
-        # failure here can't suppress the other sweeps (or vice versa).
-        try:
-            await sweep_pending_sites()
-        except Exception:
-            _run_sweeper_logger.exception("sweep_pending_sites tick failed")
+        await asyncio.sleep(interval)
+        await _run_sweeps()
 
 
 async def start_run_sweeper() -> None:
-    """Sweep once on boot, then tick every 5 minutes until shutdown.
+    """Sweep once on boot (catching what the prior process left: orphaned runs,
+    unbilled runs, renewals and grace deadlines that came due while it was down,
+    idle jails), then tick every ``_sweep_interval_seconds``. See ``_sweeps``.
 
-    Boot runs the stale-run sweep (interrupt orphaned runs), the BC-3 compute-cost
-    metering sweep (bill any terminal runs left unbilled by the prior process), the
-    WU-F LiteLLM billing-cutover sweep (no-op / shadow-compare / live-ingest per the
-    cutover mode), the charge-first pending-site reconciliation sweep (surface paid
-    sites stuck pending), and the ART-3 agent-jail GC (reclaim scratch left by a
-    prior process's idle runs); the 5-minute loop then ticks all of them.
+    With the multi-worker switch the leases are taken before the boot pass, so
+    the boot pass (billing writes included) also runs on one process only.
     """
-    from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
-    from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
-    from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
-    from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
-    from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
+    global _sweeper_task, _sweep_lease, _jail_lease
+    from pocketpaw_ee.cloud._core.lease import gate
 
-    global _sweeper_task
-    with suppress(Exception):
-        await sweep_stale_runs()
-    with suppress(Exception):
-        await sweep_unbilled_runs()
-    with suppress(Exception):
-        await run_cutover_sweep()
-    with suppress(Exception):
-        await sweep_pending_sites()
-    with suppress(Exception):
-        await sweep_agent_jails()
+    _sweep_lease = gate("run_sweeper")
+    _jail_lease = gate("agent_jail_gc", per_host=True)
+    for lease in (_sweep_lease, _jail_lease):
+        if lease is not None:
+            await lease.start()
+    await _run_sweeps(boot=True)
     _sweeper_task = asyncio.create_task(_sweeper_loop())
 
 
 async def stop_run_sweeper() -> None:
-    global _sweeper_task
+    global _sweeper_task, _sweep_lease, _jail_lease
     if _sweeper_task is not None:
         _sweeper_task.cancel()
         with suppress(asyncio.CancelledError):
             await _sweeper_task
         _sweeper_task = None
+    for lease in (_sweep_lease, _jail_lease):
+        if lease is not None:
+            await lease.stop()
+    _sweep_lease = _jail_lease = None
 
 
 async def start_xproc_consumer() -> None:
@@ -274,6 +285,11 @@ class CloudAuthProvider:
 
         return current_optional_user
 
+    async def redeem_dashboard_ws_ticket(self, ticket: str) -> bool:
+        from pocketpaw_ee.cloud.auth.ws_tickets import redeem_dashboard_ws_ticket
+
+        return await redeem_dashboard_ws_ticket(ticket)
+
 
 class CloudRouteProvider:
     """`pocketpaw.routes` — mounts the multi-tenant cloud API."""
@@ -282,6 +298,16 @@ class CloudRouteProvider:
         from pocketpaw_ee.cloud import mount_cloud
 
         mount_cloud(app)
+
+
+# Lease-wrapped loops CloudLifecycleHook started, by name (see ``_core/lease.py``).
+_LEASED: dict[str, Any] = {}
+
+
+async def _stop_leased(name: str) -> None:
+    item = _LEASED.pop(name, None)
+    if item is not None:
+        await item.stop()
 
 
 class CloudLifecycleHook:
@@ -309,6 +335,17 @@ class CloudLifecycleHook:
         await seed_workspace(admin)
         # Back-fill the pocketpaw agent for workspaces that predate agent seeding.
         await ensure_default_agent_all_workspaces()
+        # Back-fill the dedicated /code agent (exclusive file-tool set) beside it
+        # so an existing workspace resolves /code turns without a first-turn seed.
+        from pocketpaw_ee.cloud.agents.service import (
+            ensure_code_agent_all_workspaces,
+            ensure_growth_researcher_agent_all_workspaces,
+            ensure_growth_writer_agent_all_workspaces,
+        )
+
+        await ensure_code_agent_all_workspaces()
+        await ensure_growth_researcher_agent_all_workspaces()
+        await ensure_growth_writer_agent_all_workspaces()
 
         # Persist Haiku-generated chat titles into MongoDB.
         try:
@@ -320,11 +357,27 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Cloud chat-title listener registration failed: %s", exc)
 
-        # Start meeting reminder + auto-start background loop.
+        # Every loop this hook starts below runs on one process when the web
+        # tier is several (POCKETPAW_REALTIME_BUS=redis-streams): see _LEASED.
+        from pocketpaw_ee.cloud._core.lease import leased
+
+        # Meeting reminders: re-schedule the APScheduler jobs of future meetings
+        # from Mongo. Leased, so N processes do not each recover every job and
+        # send N reminders. The lease's stop is a no-op: the scheduler also holds
+        # jobs scheduled by requests on this process, which must keep firing.
         try:
             from pocketpaw_ee.cloud.meetings.scheduling.reminders import start_reminder_loop
 
-            start_reminder_loop()
+            async def _recover_meeting_jobs() -> None:
+                start_reminder_loop()
+
+            async def _keep_meeting_jobs() -> None:
+                return None
+
+            _LEASED["meeting_reminders"] = leased(
+                "meeting_reminders", _recover_meeting_jobs, _keep_meeting_jobs
+            )
+            await _LEASED["meeting_reminders"].start()
             logger.info("Meeting reminder + auto-start loop started")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to start meeting reminder loop: %s", exc)
@@ -351,6 +404,22 @@ class CloudLifecycleHook:
             asyncio.create_task(_reindex_meeting_transcripts())
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to schedule transcript reindex: %s", exc)
+
+        # CN-6: backfill the Fabric read model from the journal (Person objects
+        # journaled before the projection existed). One-shot, idempotent
+        # upserts; a cancel at shutdown just means the next boot redoes it.
+        global _fabric_read_model_task
+
+        async def _sync_fabric_read_model() -> None:
+            try:
+                from pocketpaw.fabric import default_journal_store
+
+                mirrored = await default_journal_store().sync_read_model()
+                logger.info("Fabric read model synced from journal: %d objects", mirrored)
+            except Exception:
+                logger.exception("Fabric read-model backfill failed")
+
+        _fabric_read_model_task = asyncio.create_task(_sync_fabric_read_model())
         # Pocket interval-refresh scheduler (RFC 04 M3). A single asyncio
         # task that periodically re-runs pocket data sources whose refresh
         # policy includes `"interval"`. Self-gated on
@@ -359,9 +428,19 @@ class CloudLifecycleHook:
         # exactly one replica). The task lives at module scope inside the
         # scheduler so this no-`app` lifecycle hook can still own it.
         try:
-            from pocketpaw_ee.cloud.pockets.refresh_scheduler import start_scheduler
+            from pocketpaw_ee.cloud._core import sweep_runtime
+            from pocketpaw_ee.cloud.pockets.refresh_scheduler import (
+                start_scheduler,
+                stop_scheduler,
+            )
 
-            await start_scheduler()
+            _LEASED["pocket_refresh"] = leased("pocket_refresh", start_scheduler, stop_scheduler)
+            await _LEASED["pocket_refresh"].start()
+            # These two sweeps start HERE, not in mount_cloud, so the lifespan
+            # that records the rest never sees them. Marked by hand under the
+            # name /api/v1/automations/status looks them up by, so that endpoint
+            # cannot report them running when this call raised above.
+            sweep_runtime.mark_started("_start_pocket_refresh")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler start failed: %s", exc)
 
@@ -375,11 +454,19 @@ class CloudLifecycleHook:
         # scope inside the scheduler so this no-``app`` lifecycle hook
         # can still own it.
         try:
+            from pocketpaw_ee.cloud._core import sweep_runtime
             from pocketpaw_ee.cloud._core.temporal_scheduler import (
                 start_scheduler as start_temporal_scheduler,
             )
+            from pocketpaw_ee.cloud._core.temporal_scheduler import (
+                stop_scheduler as stop_temporal_scheduler,
+            )
 
-            await start_temporal_scheduler()
+            _LEASED["temporal_sweeps"] = leased(
+                "temporal_sweeps", start_temporal_scheduler, stop_temporal_scheduler
+            )
+            await _LEASED["temporal_sweeps"].start()
+            sweep_runtime.mark_started("_start_temporal_sweeps")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Temporal sweep scheduler start failed: %s", exc)
 
@@ -392,6 +479,15 @@ class CloudLifecycleHook:
             await start_run_sweeper()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Run sweeper start failed: %s", exc)
+
+        # Notification outbox: sends queued owner email / signed webhooks /
+        # Slack, retrying with backoff. Safe on every process (atomic claims).
+        try:
+            from pocketpaw_ee.cloud.notifications.outbox import start_outbox_sweeper
+
+            await start_outbox_sweeper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Notification outbox sweeper start failed: %s", exc)
 
         # Cross-process bus/WS bridge consumer. Tier 2's arq worker can't
         # reach this process's InProcessBus or WsManager directly; it XADDs
@@ -442,34 +538,40 @@ class CloudLifecycleHook:
         import logging
 
         logger = logging.getLogger(__name__)
-        # Shut down the meeting APScheduler if it was started.
+        # Shut down the meeting APScheduler if it was started, and hand the
+        # recovery lease to a sibling.
         try:
             from pocketpaw_ee.cloud.meetings.scheduling.reminders import shutdown_scheduler
 
+            await _stop_leased("meeting_reminders")
             await shutdown_scheduler()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Meeting scheduler shutdown error: %s", exc)
 
-        # Most cloud teardown is handled inside mount_cloud's own shutdown
-        # hook. The interval-refresh scheduler is owned by this lifecycle
-        # hook (it was started in on_startup), so it is cancelled here so
-        # the background task does not outlive the process.
+        # NOTE: this method runs only because the host lifecycle calls it --
+        # see dashboard_lifecycle.shutdown_event. It was called by nothing at
+        # all until 2026-09-05, and the comment that used to sit here said
+        # "most cloud teardown is handled inside mount_cloud's own shutdown
+        # hook", which was wrong twice over: mount_cloud's shutdown hooks were
+        # themselves dropped, and a reader checking whether teardown was
+        # covered found a sentence saying yes.
+        #
+        # mount_cloud now owns its own teardown through the composed lifespan
+        # (_install_cloud_lifespan). What is cancelled below is what THIS hook
+        # started in on_startup.
         import logging
 
         logger = logging.getLogger(__name__)
         try:
-            from pocketpaw_ee.cloud.pockets.refresh_scheduler import stop_scheduler
+            from pocketpaw_ee.cloud._core import sweep_runtime
 
-            await stop_scheduler()
+            await _stop_leased("pocket_refresh")
+            sweep_runtime.mark_stopped("_start_pocket_refresh")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler stop failed: %s", exc)
 
         try:
-            from pocketpaw_ee.cloud._core.temporal_scheduler import (
-                stop_scheduler as stop_temporal_scheduler,
-            )
-
-            await stop_temporal_scheduler()
+            await _stop_leased("temporal_sweeps")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Temporal sweep scheduler stop failed: %s", exc)
 
@@ -477,6 +579,13 @@ class CloudLifecycleHook:
             await stop_run_sweeper()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Run sweeper stop failed: %s", exc)
+
+        try:
+            from pocketpaw_ee.cloud.notifications.outbox import stop_outbox_sweeper
+
+            await stop_outbox_sweeper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Notification outbox sweeper stop failed: %s", exc)
 
         try:
             await stop_xproc_consumer()
@@ -492,14 +601,24 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Paw Sites dev-server stop failed: %s", exc)
 
-        # Close the arq enqueuer pool if this web process ever built one
-        # (POCKETPAW_CLOUD_RUN_EXECUTOR=arq). No-op otherwise.
+        # Close the process-wide arq enqueue pool (chat runs, jobs, site build and
+        # delete, ship, growth all share it) if this web process ever built one.
+        # No-op otherwise.
         try:
-            from pocketpaw_ee.cloud.chat.runs.arq_executor import close_pool
+            from pocketpaw_ee.cloud._core.redis_client import close_arq_pool
 
-            await close_pool()
+            await close_arq_pool()
         except Exception as exc:  # noqa: BLE001
             logger.warning("arq pool close failed: %s", exc)
+
+        # Last: the shared and blocking Redis clients. Everything above that
+        # still talks to Redis has stopped by now.
+        try:
+            from pocketpaw_ee.cloud._core.redis_client import close_redis
+
+            await close_redis()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Redis client close failed: %s", exc)
         return None
 
 
@@ -664,6 +783,33 @@ class CloudPocketMcpProvider:
         return list(POCKET_TOOL_IDS)
 
 
+class CloudPawBarActionsMcpProvider:
+    """`pocketpaw.mcp_servers` — the Paw Bar per-verb action tools (C1).
+
+    Builds nothing on a normal run: ``build_pawbar_actions_server`` returns None
+    unless the active context is a CONCIERGE run bound to a widget
+    (``current_pawbar_run()`` set by ``run_core``), so on every other surface this
+    provider is a no-op and the tool set is empty. ``tool_ids`` mirrors the same
+    per-run context so the SDK allowlist only ever gains the current widget's
+    verbs — which the ``_concierge_profile`` allow-list then keeps past the
+    concierge lockdown.
+
+    Since the escape hatch (slice 3) that context also exists for a concierge
+    widget that declares NO actions, because every site concierge carries the
+    built-in ``pawbar_request_human`` tool. That tool raises a handoff and does
+    nothing else, so the surface stays zero-authority."""
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.pawbar import build_pawbar_actions_server
+
+        return build_pawbar_actions_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.pawbar import pawbar_tool_ids
+
+        return list(pawbar_tool_ids())
+
+
 class CloudDecisionsMcpProvider:
     """`pocketpaw.mcp_servers` — the decision-graph in-process server.
 
@@ -756,6 +902,100 @@ class CloudSitesMcpProvider:
         return list(SITES_TOOL_IDS)
 
 
+class CloudTimelineMcpProvider:
+    """`pocketpaw.mcp_servers` — the /studio/editor timeline server
+    (``pocketpaw_timeline``). Hosts ``edit_timeline`` + ``export_timeline``.
+
+    Ambient like the media provider: the tools refuse on their own when no
+    editor is open (the timeline ContextVar is unset on every other surface),
+    so ambient registration costs nothing and the STUDIO_EDITOR profile is what
+    actually scopes them onto the surface.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.timeline import build_timeline_server
+
+            return build_timeline_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.timeline import TIMELINE_TOOL_IDS
+
+        return list(TIMELINE_TOOL_IDS)
+
+
+class CloudCraftMcpProvider:
+    """`pocketpaw.mcp_servers` — the craft studio server (``pocketpaw_craft``).
+    Hosts ``edit_vector`` / ``edit_photo`` / ``edit_design``. Ambient and inert
+    off-surface exactly like the timeline provider: each tool refuses when its
+    app's projection is not bound, and each STUDIO_<APP> profile scopes its one
+    tool onto its surface.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.craft import build_craft_server
+
+            return build_craft_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.craft import CRAFT_TOOL_IDS
+
+        return list(CRAFT_TOOL_IDS)
+
+
+class CloudSurfacesMcpProvider:
+    """`pocketpaw.mcp_servers` — the open-surface server (``pocketpaw_surfaces``).
+    Hosts ``open_surface``, which only returns an envelope run_core promotes to
+    an ``open_surface`` chat event; the browser does the opening.
+
+    Ambient, NOT in ``ALWAYS_ALLOWED_MCP_SERVERS``: reachable on every surface
+    with no MCP allowlist (the GENERIC / default profile) and on /studio/editor,
+    whose allowlist names it; filtered out of the other allowlisted surfaces.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.surfaces import build_surfaces_server
+
+            return build_surfaces_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.surfaces import SURFACES_TOOL_IDS
+
+        return list(SURFACES_TOOL_IDS)
+
+
+class CloudRoomsMcpProvider:
+    """`pocketpaw.mcp_servers` — the chat-rooms READ server (``pocketpaw_rooms``).
+    Hosts ``list_rooms`` + ``read_room``: the user's own PocketPaw channels,
+    groups and DMs, through the same group/message services the chat API uses.
+
+    Ambient, NOT in ``ALWAYS_ALLOWED_MCP_SERVERS``: reachable on every surface
+    with no MCP allowlist (GENERIC, CHAT, HOME, ...) and filtered out of every
+    allowlisted one, the public concierge included.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.rooms import build_rooms_server
+
+            return build_rooms_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.rooms import ROOMS_TOOL_IDS
+
+        return list(ROOMS_TOOL_IDS)
+
+
 class CloudMediaMcpProvider:
     """`pocketpaw.mcp_servers` — the STUDIO media-generation in-process server
     (``pocketpaw_media``). Hosts ``image_generate`` + ``video_generate``.
@@ -784,6 +1024,127 @@ class CloudMediaMcpProvider:
         return list(MEDIA_TOOL_IDS)
 
 
+class CloudSiteMediaMcpProvider:
+    """`pocketpaw.mcp_servers` — the SITE-authoring media server
+    (``pocketpaw_site_media``). Hosts ``generate_site_image`` and
+    ``generate_site_video``, thin wrappers over ``sites.media_generation`` (which
+    the builder UI's ``/sites/by-pocket/{id}/assets/generate`` route shares).
+
+    Separate from ``CloudMediaMcpProvider`` because a site asset needs a
+    different SINK: media.py writes the private adapter and hands back a
+    backend-relative ``/api/v1/media/<name>``, which resolves against the
+    published site's own domain and 404s. This one writes ``sites.public_assets``
+    and returns absolute public URLs (a video also gets its poster frame), skips the
+    chat-canvas gallery pocket, and records the generation in the /studio history
+    tagged ``source="sites"``.
+
+    Ambient like the media server. NOTE that the /sites allow-list entry does not
+    confine it: ``allow_mcp_tool_ids`` is None (= unrestricted) on every surface
+    spec that sets no profile, so this is reachable from /chat as well. The tools
+    guard themselves instead, by refusing a pocket the caller's workspace does not
+    own. Do not read the allow-list entry as a boundary.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.site_media import build_site_media_server
+
+            return build_site_media_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.site_media import SITE_MEDIA_TOOL_IDS
+
+        return list(SITE_MEDIA_TOOL_IDS)
+
+
+class CloudOtherHandMcpProvider:
+    """`pocketpaw.mcp_servers` — the Otherhand illustration server
+    (``pocketpaw_other_hand``). Hosts ``illustrate`` only.
+
+    Ambient like the media server, and gated where it matters instead: the
+    Otherhand surface allow-lists the tool id, so no other surface's agent can
+    reach it, and a per-workspace daily budget bounds what it can spend even
+    there. Registering it here rather than per-surface keeps one road for every
+    in-process server; the surface profile is the door.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.other_hand import build_other_hand_server
+
+            return build_other_hand_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.other_hand import OTHER_HAND_TOOL_IDS
+
+        return list(OTHER_HAND_TOOL_IDS)
+
+
+class CloudBrowserMcpProvider:
+    """`pocketpaw.mcp_servers` — the /browser surface's agentic browser
+    (``pocketpaw_browser``). Hosts navigate / snapshot / click / type / scroll /
+    screenshot / close.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) like every sibling in-process server
+    — ``OPT_IN_MCP_SERVERS`` is a per-AGENT lever, and the browser is scoped per
+    SURFACE: the BROWSER ``SurfaceProfile`` allows these ids and every other
+    surface DENIES them, so /chat (where send-capable connector tools live)
+    cannot reach the browser at all.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.browser import build_browser_server
+
+            return build_browser_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same degrade as the siblings.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
+
+        return list(BROWSER_TOOL_IDS)
+
+
+class CloudFilesMcpProvider:
+    """`pocketpaw.mcp_servers` — the uploaded-files in-process server
+    (``pocketpaw_files``). Hosts ``list_uploads`` + ``read_upload``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``), because the capability it adds is
+    one every chat agent is already assumed to have: answering a question about
+    a file the user uploaded. Attachments are inlined into the prompt only for
+    the turn they were attached to, so without these tools a document is
+    unreachable from the very next turn on — and the claude_agent_sdk backend,
+    whose Read/Glob/Bash point at a local jail while the files sit in S3, would
+    go looking on disk and report that no file exists. Gating that behind an
+    opt-in would leave the default chat agent with the same hole.
+
+    The cloud chat agent runs on the claude_agent_sdk backend, which only sees
+    in-process MCP servers (a plain BaseTool is invisible to it), so these MUST
+    be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.files import build_files_server
+
+            return build_files_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the files server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.files import FILES_TOOL_IDS
+
+        return list(FILES_TOOL_IDS)
+
+
 class CloudStockImagesMcpProvider:
     """`pocketpaw.mcp_servers` — the stock-photo search in-process server
     (``pocketpaw_stock``). Hosts ``search_stock_images`` only.
@@ -810,6 +1171,210 @@ class CloudStockImagesMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.stock_images import STOCK_TOOL_IDS
 
         return list(STOCK_TOOL_IDS)
+
+
+class CloudInspoMcpProvider:
+    """`pocketpaw.mcp_servers` — the design-research in-process server
+    (``pocketpaw_inspo``). Hosts ``research_page_design`` and
+    ``get_reference_design_system``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) for the same reason stock is: the
+    /sites authoring agent runs on the claude_agent_sdk backend, which sees only
+    in-process MCP servers, and the create preamble names these tools
+    unconditionally. An opt-in here would put the preamble back in the state
+    where it commands a tool the agent may not have.
+
+    Registration is not reachability. ``surface_registry`` unions
+    ``INSPO_TOOL_IDS`` into the /sites allow-list, and every surface that pins
+    its own list without naming them cannot call them.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.inspo import build_inspo_server
+
+            return build_inspo_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same degrade as the siblings.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.inspo import INSPO_TOOL_IDS
+
+        return list(INSPO_TOOL_IDS)
+
+
+class CloudReferoMcpProvider:
+    """`pocketpaw.mcp_servers` — the Refero design-research in-process server
+    (``pocketpaw_refero``). Hosts ``search_styles`` / ``get_style`` /
+    ``search_screens``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled site-authoring skills
+    can ground a generated page in a real shipped design system without an
+    explicit opt-in — the same regime the stock-images + icons + palette servers
+    use. The cloud chat agent runs on the claude_agent_sdk backend, which only
+    sees in-process MCP servers (a plain BaseTool is invisible to it), so design
+    research MUST be surfaced here as well as through the BaseTools in
+    ``pocketpaw.tools.builtin.refero``.
+
+    Ambient does NOT mean reachable everywhere: a surface with a restrictive
+    allow-list sees these ids only if it names them, and ``/sites`` is the one
+    that does.
+
+    Registering the server costs nothing when Refero is unconfigured — the tools
+    exist but return empty results, exactly like stock images with no provider
+    key. That is deliberate: the alternative, hiding the server when no token is
+    set, makes the tool surface differ between deploys and turns a missing
+    setting into "the model hallucinated a tool".
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.refero import build_refero_server
+
+            return build_refero_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the refero server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.refero import REFERO_TOOL_IDS
+
+        return list(REFERO_TOOL_IDS)
+
+
+class CloudIconsMcpProvider:
+    """`pocketpaw.mcp_servers` — the icon-search in-process server
+    (``pocketpaw_icons``). Hosts ``search_icons`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-svelte-site`` skill can source real open-source icons for
+    a generated marketing site without an explicit opt-in — the same regime the
+    stock-images + sites manager + media servers use. The cloud chat agent runs
+    on the claude_agent_sdk backend, which only sees in-process MCP servers (a
+    plain BaseTool is invisible to it), so icon search MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.icons import build_icons_server
+
+            return build_icons_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the icons server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.icons import ICON_TOOL_IDS
+
+        return list(ICON_TOOL_IDS)
+
+
+class CloudFxMcpProvider:
+    """`pocketpaw.mcp_servers` — the paw-fx effects-registry in-process server
+    (``pocketpaw_fx``). Hosts ``search_effects`` / ``get_effect`` /
+    ``list_effect_categories``. Ambient (NOT in ``OPT_IN_MCP_SERVERS``), same
+    regime as icons: pure read over a local registry dir, no identity.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.fx import build_fx_server
+
+            return build_fx_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.fx import FX_TOOL_IDS
+
+        return list(FX_TOOL_IDS)
+
+
+class CloudPaletteMcpProvider:
+    """`pocketpaw.mcp_servers` — the palette-extraction in-process server
+    (``pocketpaw_palette``). Hosts ``extract_palette`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-svelte-site`` skill can derive a coherent color system
+    from a brand photo/logo for a generated marketing site without an explicit
+    opt-in — the same regime the icons + stock-images + sites manager + media
+    servers use. The cloud chat agent runs on the claude_agent_sdk backend,
+    which only sees in-process MCP servers (a plain BaseTool is invisible to
+    it), so palette extraction MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.palette import build_palette_server
+
+            return build_palette_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the palette server is
+            # unavailable, same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.palette import PALETTE_TOOL_IDS
+
+        return list(PALETTE_TOOL_IDS)
+
+
+class CloudAskMcpProvider:
+    """`pocketpaw.mcp_servers` — the interactive ``ask_user`` in-process server
+    (``pocketpaw_ask``). Hosts ``ask_user`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``), same regime as the icons + palette
+    + stock-images site-authoring servers. The cloud chat agent runs on the
+    claude_agent_sdk backend, which only sees in-process MCP servers
+    (the harness ``AskUserQuestion`` tool is NOT exposed to it), so an
+    interactive question tool MUST be surfaced here. It matters most on surfaces
+    where inline Ripple is OFF (e.g. /sites svelte-create): without it the agent
+    can only ask clarifying questions as plain text. run_core turns a call to
+    this tool into an ``ask_user_question`` stream frame the client renders as
+    clickable option chips.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.ask import build_ask_server
+
+            return build_ask_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the ask server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
+
+        return list(ASK_TOOL_IDS)
+
+
+class CloudLensMcpProvider:
+    """`pocketpaw.mcp_servers` — the agent-health read server (``pocketpaw_lens``).
+    Hosts lens_overview / lens_runs / lens_run / lens_issues / lens_monitors.
+
+    SURFACE-SCOPED, neither ambient nor ``OPT_IN_MCP_SERVERS``: it is in core's
+    ``SURFACE_SCOPED_MCP_SERVERS``, so a backend registers it only when the run's
+    surface grants its tool ids (the ``agent_health`` surface). Normal chats do
+    not load it.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.lens import build_lens_server
+
+            return build_lens_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.lens import LENS_TOOL_IDS
+
+        return list(LENS_TOOL_IDS)
 
 
 class CloudDeliverMcpProvider:
@@ -901,6 +1466,40 @@ class CloudBeltMcpProvider:
         return list(BELT_TOOL_IDS)
 
 
+class CloudCodeMcpProvider:
+    """`pocketpaw.mcp_servers` — the Code Mode delegate in-process server
+    (``pocketpaw_code``). Hosts the four /code file tools: ``readFile`` /
+    ``search`` / ``listDir`` / ``writeFile``.
+
+    The main chat agent drives the /code surface and reaches the user's project
+    through these tools, one call at a time. No handler opens a file: each parks
+    on a future while the BROWSER runs the matching file-session verb and posts
+    the result back to ``POST /codeagent/resolve``, because a WebContainer
+    project lives in the tab and has no server-side row a backend could reach.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``), the same regime as the sibling belt
+    / loom / media servers: the /code surface scopes access via its profile,
+    which allows these tool ids and DENIES the file/shell built-ins outright.
+    ``build_code_server`` returns None — and the loop skips it — when the
+    claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.code import build_code_server
+
+            return build_code_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same degrade path as the other
+            # in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.code import CODE_TOOL_IDS
+
+        return list(CODE_TOOL_IDS)
+
+
 class CloudExternalActionsMcpProvider:
     """`pocketpaw.mcp_servers` — the gated external-action proposal in-process
     server (``pocketpaw_external_actions``). Hosts ``propose_external_action``
@@ -937,6 +1536,77 @@ class CloudExternalActionsMcpProvider:
         )
 
         return list(EXTERNAL_ACTIONS_TOOL_IDS)
+
+
+class CloudShipMcpProvider:
+    """`pocketpaw.mcp_servers` — the /ship managed-deploy in-process server
+    (``pocketpaw_ship``). Hosts the deploy verbs a chat agent may drive.
+
+    Reads and reversible writes (list / provision / create app / deploy / add
+    domain / create db / logs / metrics) execute through
+    ``ee.cloud.ship.service``. The DESTRUCTIVE verbs do not: ``ship_request_
+    destroy`` files an Instinct proposal and a PROD deploy proposes rather than
+    deploying, so a teardown only ever happens after a human approves it and the
+    ee instinct router fires
+    ``ee.cloud.ship.executor.execute_approved_ship_action``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — surfaces scope access via their
+    profile allowlist, the same regime the sibling belt / loom / external-action
+    servers use. ``build_ship_server`` returns None — and the loop skips it —
+    when the claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.ship import build_ship_server
+
+            return build_ship_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same posture as the siblings.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.ship import SHIP_TOOL_IDS
+
+        return list(SHIP_TOOL_IDS)
+
+
+class CloudGrowthMcpProvider:
+    """`pocketpaw.mcp_servers` — the /growth outbound in-process server
+    (``pocketpaw_growth``). Hosts the prospect + draft verbs the chat agent on
+    the /growth rail may drive.
+
+    Reads (prospect list / one prospect with its drafts / draft list / LinkedIn
+    queue) and AUTHORING writes (upsert a researched prospect, write a draft,
+    revise a draft still in ``draft``) execute through
+    ``ee.cloud.growth.service``. The OUTBOUND verbs do not, and there is no tool
+    that sends: ``growth_propose_send`` / ``growth_propose_send_batch`` file
+    Instinct proposals and return ``status="proposed"``. Nothing reaches
+    ``approved`` or ``sent`` from here — those are ``GATE_OWNED_TARGETS``,
+    walked only by ``ee.cloud.growth.executor`` after a human approval and by
+    the dispatch worker. The tools carry the same per-action RBAC tiers as the
+    HTTP routes (read / write / manage), so a proposal the executor could never
+    approve is never filed.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — surfaces scope access via their
+    profile allowlist, the same regime the sibling belt / ship / external-action
+    servers use. ``build_growth_server`` returns None — and the loop skips it —
+    when the claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.growth import build_growth_server
+
+            return build_growth_server()
+        except ImportError:
+            # claude_agent_sdk not installed — same posture as the siblings.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.growth import GROWTH_TOOL_IDS
+
+        return list(GROWTH_TOOL_IDS)
 
 
 class CloudWorkspaceAdminMcpProvider:

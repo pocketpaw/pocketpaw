@@ -1,0 +1,5 @@
+# transcript: `dokku mongo:export demo-db > <path>` — dump redirected to the
+# dest file, so stdout is empty.
+EXIT: 0
+--- stdout ---
+--- stderr ---

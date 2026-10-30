@@ -18,6 +18,12 @@ pocket's orientation data (name, description, type, template/pattern, ripple
 summary) for ALL pocket types using the already-fetched Pocket doc — no
 extra DB round-trips. Home keeps its backend_summary alongside the new
 field; non-pocket scopes carry ``pocket_summary=None``.
+
+Updated: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) — added the CODE
+surface routing tests: an unhinted CODE-surface session/pocket resolution
+routes ``target`` to the dedicated ``code`` agent (``_get_code_agent_id``,
+patched here), an explicit ``agent_id_hint`` is still honored, and non-CODE
+surfaces are byte-identical.
 """
 
 from __future__ import annotations
@@ -745,3 +751,127 @@ async def test_resolve_group_scope_has_no_pocket_summary():
             scope="group", scope_id="g1", user_id="u_caller", agent_id_hint=None
         )
     assert ctx.pocket_summary is None
+
+
+# ===========================================================================
+# CX-3 — the /code surface routes to the dedicated ``code`` agent.
+#
+# On the CODE surface, an unhinted turn resolves ``target`` to the code agent
+# (via ``_get_code_agent_id``, which lazy-seeds) instead of the session's stored
+# agent / the default ``pocketpaw`` agent. An explicit ``agent_id_hint`` is still
+# honored, and every non-CODE surface is byte-identical. These are unit-scoped
+# (the code-agent id is patched); the lazy-seed + end-to-end routing against real
+# Mongo lives in tests/cloud/agents/test_code_agent_seed.py.
+# ===========================================================================
+
+
+def _fake_session(agent):
+    from pocketpaw_ee.cloud.models.session import Session
+
+    return Session.model_construct(
+        id="s1",
+        sessionId="ws",
+        workspace="w1",
+        owner="u1",
+        agent=agent,
+        pocket=None,
+        deleted_at=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_code_surface_routes_session_to_code_agent():
+    """CODE surface + no hint ⇒ ``target`` is the code agent, overriding the
+    session's stored agent."""
+    code_mock = AsyncMock(return_value="code-agent-id")
+    with (
+        patch(
+            "pocketpaw_ee.cloud.chat.agent_service._get_session",
+            AsyncMock(return_value=_fake_session(agent="a1")),
+        ),
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_code_agent_id", code_mock),
+    ):
+        ctx = await resolve_scope_context(
+            scope="session",
+            scope_id="s1",
+            user_id="u1",
+            agent_id_hint=None,
+            surface="code",
+        )
+    assert ctx.target_agent_id == "code-agent-id"
+    code_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_code_surface_respects_explicit_agent_hint():
+    """An explicit ``agent_id_hint`` is honored even on CODE — the override only
+    replaces the DEFAULT resolution, never a caller's pinned agent."""
+    code_mock = AsyncMock(return_value="code-agent-id")
+    with (
+        patch(
+            "pocketpaw_ee.cloud.chat.agent_service._get_session",
+            AsyncMock(return_value=_fake_session(agent="a1")),
+        ),
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_code_agent_id", code_mock),
+    ):
+        ctx = await resolve_scope_context(
+            scope="session",
+            scope_id="s1",
+            user_id="u1",
+            agent_id_hint="a2",
+            surface="code",
+        )
+    assert ctx.target_agent_id == "a2"
+    code_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_code_surface_does_not_route_to_code_agent():
+    """A non-CODE surface (or no surface hint) leaves session resolution
+    byte-identical — the code-agent seam is never touched."""
+    code_mock = AsyncMock(return_value="code-agent-id")
+    with (
+        patch(
+            "pocketpaw_ee.cloud.chat.agent_service._get_session",
+            AsyncMock(return_value=_fake_session(agent="a1")),
+        ),
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_code_agent_id", code_mock),
+    ):
+        ctx = await resolve_scope_context(
+            scope="session",
+            scope_id="s1",
+            user_id="u1",
+            agent_id_hint=None,
+            surface="generic",
+        )
+    assert ctx.target_agent_id == "a1"
+    code_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_code_surface_routes_pocket_to_code_agent():
+    """CODE surface + no hint also overrides the pocket's default agent."""
+    pocket = SimpleNamespace(
+        id="p1",
+        workspace="w1",
+        owner="u_caller",
+        team=["u_caller"],
+        agents=["agent_primary"],
+        tool_specs=[],
+        visibility="workspace",
+        shared_with=[],
+    )
+    code_mock = AsyncMock(return_value="code-agent-id")
+    with (
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)),
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_code_agent_id", code_mock),
+    ):
+        ctx = await resolve_scope_context(
+            scope="pocket",
+            scope_id="p1",
+            user_id="u_caller",
+            agent_id_hint=None,
+            surface="code",
+        )
+    assert ctx.target_agent_id == "code-agent-id"
+    code_mock.assert_awaited_once()

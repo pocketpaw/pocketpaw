@@ -1,0 +1,735 @@
+# tests/cloud/test_paw_bar_agent_provisioning.py — the DEDICATED concierge agent
+# per site (feat/site-dedicated-agent), and the triggers that no longer mint one.
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): nothing provisions an
+#   agent automatically any more; the owner's explicit create is the one caller of
+#   ``ensure_site_agent``. So the widget-create and enable-PATCH tests now assert
+#   the bar stays UNBOUND, the identity-seeding test provisions through
+#   ``ensure_site_agent`` directly, and three groups are gone with the code they
+#   pinned: the publish-time ``ensure_site_widget`` tests (including its default
+#   booking action), the first-publish transient-doc tests, and the widget-create
+#   idempotency / failure-soft tests. What replaced them is pinned in
+#   tests/cloud/test_paw_bar_concierge_manual_create.py.
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
+# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): the ASG-1 identity
+#   fields exist on the Agent model now, so the "absent" test asserts seeding
+#   instead, and the PUBLIC frame is pinned to carry the bound agent's starters
+#   only for a widget bound to the key's own site (another site's widget, another
+#   tenant's agent, an unbound or unknown widget all give []).
+#   Also pinned: a hostile starter stays escaped in the frame HTML, a lookup past
+#   the time budget renders with [], and the owner preview refuses a cross-tenant
+#   agent too.
+# Created 2026-07-23: covers ensure_site_agent + the two triggers.
+#   * Pure helpers: slug/name/persona derivation + conversation-starter rules
+#     (catalog, gated-action labels, generic fallback, cap 4).
+#   * Widget-create trigger: a widget with NO agent_id on a site-backed pocket
+#     auto-creates a dedicated agent named "<Site> Concierge", binds it, and emits
+#     AgentCreated (created THROUGH the agents service, not a direct write).
+#   * Idempotency: a re-run adopts the same agent; a manual agent_id is honored and
+#     never replaced; a plain (non-site) widget stays unbound.
+#   * Concierge-enable trigger: flipping the kill switch ON provisions an unbound
+#     site widget.
+#   * Regression: an unbound widget's chat still 409s (no fallback-to-universal).
+#   * Identity seeding: the provisioned agent carries welcome_message (the site
+#     greeting) and conversation_starters (derived from the widget spec); starters
+#     ride the frame config payload.
+#   * Default booking action (2026-08-01 live regression): a widget MINTED by
+#     ensure_site_widget carries one gated booking_request action (five str
+#     args, "Book a service visit" label); an EXISTING widget's actions are
+#     never modified by any ensure_site_widget pass (mint-only).
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from pocketpaw.paw_bar.models import (
+    PawBarActionSpec,
+    PawBarBlock,
+    PawBarCatalogItem,
+    PawBarSpec,
+    PawBarWidget,
+)
+from pocketpaw.paw_bar.store import PawBarStore
+
+_WS = "ws-1"
+_POCKET = "pocket-1"
+_OWNER = "user:maya"
+_VALID_KEY = "site_key_" + "a" * 24
+_ORIGIN = "https://brewco.com"
+_CUST = "cust-0001"
+
+
+# --------------------------------------------------------------------------- #
+# Spec / widget / site builders
+# --------------------------------------------------------------------------- #
+
+
+def _spec(
+    *,
+    with_catalog: bool = False,
+    with_actions: bool = False,
+    pocket_id: str = _POCKET,
+) -> PawBarSpec:
+    catalog = (
+        [PawBarCatalogItem(id="oat_latte", name="Oat Milk Latte", price_cents=500)]
+        if with_catalog
+        else []
+    )
+    actions = (
+        [
+            PawBarActionSpec(verb="book_table", policy="gated", label="Book a table"),
+            PawBarActionSpec(verb="request_quote", policy="gated", label="Request a quote"),
+        ]
+        if with_actions
+        else []
+    )
+    return PawBarSpec(
+        widget_id="pp_seed",
+        pocket_id=pocket_id,
+        blocks=[PawBarBlock(type="text", content="Hi from Brew & Co")],
+        catalog=catalog,
+        actions=actions,
+    )
+
+
+def _widget(**ov: Any) -> PawBarWidget:
+    d: dict[str, Any] = dict(
+        pocket_id=_POCKET,
+        owner=_OWNER,
+        name="Brew & Co",
+        spec=_spec(),
+        allowed_domains=["brewco.com"],
+        agent_id="",
+        workspace_id=_WS,
+        rate_limit_per_min=60,
+        per_customer_limit_per_min=10,
+    )
+    d.update(ov)
+    return PawBarWidget(**d)
+
+
+async def _site(**ov: Any):
+    from pocketpaw_ee.cloud.models.site import Site
+
+    d = dict(
+        workspace=_WS,
+        pocket_id=_POCKET,
+        owner=_OWNER,
+        name="Brew & Co",
+        signed_key=_VALID_KEY,
+        allowed_origins=["brewco.com"],
+    )
+    d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
+    s = Site(**d)
+    await s.insert()
+    return s
+
+
+def _create_payload(**ov: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "pocket_id": _POCKET,
+        "owner": _OWNER,
+        "name": "Brew & Co",
+        "spec": _spec(with_catalog=True, with_actions=True).model_dump(),
+        "allowed_domains": ["brewco.com"],
+        "rate_limit_per_min": 60,
+        "per_customer_limit_per_min": 10,
+    }
+    payload.update(ov)
+    return payload
+
+
+@pytest_asyncio.fixture
+async def client(tmp_path, mongo_db):
+    """A public+admin app client backed by a tmp paw-bar store (widget) + Beanie
+    (Site + Agent). ``current_workspace_id`` is pinned to ws-1. ``get_paw_bar_store``
+    is patched at the source so BOTH the router and the provisioning module resolve
+    the SAME tmp store. Yields ``(client, store)``."""
+    from unittest.mock import patch
+
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.paw_bar.router import router
+
+    from tests.cloud.conftest import override_workspace_role
+
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(router)
+    # The admin routes gate on the caller's workspace ROLE since
+    # fix/paw-bar-role-gates, so pin an ADMIN alongside the workspace.
+    override_workspace_role(app, role="admin", workspace_id=_WS)
+
+    store = PawBarStore(tmp_path / "provisioning.db")
+    with patch("pocketpaw_ee.api.get_paw_bar_store", return_value=store):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            yield c, store
+
+
+# --------------------------------------------------------------------------- #
+# Pure helpers — naming + conversation-starter derivation
+# --------------------------------------------------------------------------- #
+
+
+class TestHelpers:
+    def test_name_and_slug_and_persona(self) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        assert ap.concierge_name("Brew & Co") == "Brew & Co Concierge"
+        assert ap.concierge_name("") == "Site Concierge"
+        assert ap.concierge_name("  ") == "Site Concierge"
+        assert ap.concierge_slug("abc123") == "concierge-abc123"
+        assert "Brew & Co" in ap.concierge_persona("Brew & Co")
+        assert "this site" in ap.concierge_persona("")
+
+    def test_starters_from_catalog_and_gated_actions(self) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        widget = _widget(spec=_spec(with_catalog=True, with_actions=True))
+        starters = ap.derive_conversation_starters(widget)
+        assert starters[0] == "What do you sell?"
+        assert "Book a table?" in starters
+        assert "Request a quote?" in starters
+
+    def test_starters_generic_fallback_when_empty(self) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        widget = _widget(spec=_spec())  # no catalog, no actions
+        assert ap.derive_conversation_starters(widget) == ["What can you help me with?"]
+
+    def test_starters_capped_at_four(self) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        actions = [
+            PawBarActionSpec(verb=f"do_{i}", policy="gated", label=f"Action {i}") for i in range(6)
+        ]
+        spec = PawBarSpec(
+            widget_id="pp_seed",
+            pocket_id=_POCKET,
+            catalog=[PawBarCatalogItem(id="x", name="X")],
+            actions=actions,
+        )
+        starters = ap.derive_conversation_starters(_widget(spec=spec))
+        assert len(starters) == 4
+        assert starters[0] == "What do you sell?"
+
+    def test_starters_ignore_unlabeled_or_auto_actions(self) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        spec = PawBarSpec(
+            widget_id="pp_seed",
+            pocket_id=_POCKET,
+            actions=[
+                PawBarActionSpec(verb="add_to_cart", policy="auto", label="Add to cart"),
+                PawBarActionSpec(verb="silent_verb", policy="gated", label=""),
+            ],
+        )
+        # auto action + label-less gated action → neither yields a starter → generic.
+        assert ap.derive_conversation_starters(_widget(spec=spec)) == ["What can you help me with?"]
+
+
+# --------------------------------------------------------------------------- #
+# Widget-create trigger
+# --------------------------------------------------------------------------- #
+
+
+class TestWidgetCreateTrigger:
+    @pytest.mark.asyncio
+    async def test_create_on_site_pocket_stays_unbound(self, client, recording_bus) -> None:
+        """CR-12: a widget on a site's pocket is a bar, not a concierge. No agent
+        is provisioned and no AgentCreated is emitted."""
+        from pocketpaw_ee.cloud._core.realtime.events import AgentCreated
+
+        c, _store = client
+        await _site()
+
+        res = await c.post("/paw-bar/widgets", json=_create_payload())
+        assert res.status_code == 201
+        assert res.json()["agent_id"] == ""
+        assert not [e for e in recording_bus.events if isinstance(e, AgentCreated)]
+
+    @pytest.mark.asyncio
+    async def test_ensure_site_agent_names_and_owns_the_dedicated_agent(self, client) -> None:
+        """What the owner's explicit create provisions for a legacy concierge."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        _c, store = client
+        site = await _site()
+        widget = await store.create_widget(_widget())
+
+        agent_id = await ap.ensure_site_agent(site, widget)
+        assert agent_id
+        agent = await agents_service.get(agent_id)
+        assert agent.name == "Brew & Co Concierge"
+        assert agent.slug == f"concierge-{site.id}"
+        assert agent.workspace_id == _WS
+        assert agent.owner == _OWNER
+        assert agent.config.soul_archetype == "The Site Concierge"
+        assert "Brew & Co" in agent.config.soul_persona
+        # Idempotent: a second call adopts the same agent.
+        again = await store.get_widget(widget.id, workspace_id=_WS)
+        assert await ap.ensure_site_agent(site, again) == agent_id
+
+    @pytest.mark.asyncio
+    async def test_manual_agent_id_is_respected_not_replaced(self, client) -> None:
+        c, _store = client
+        await _site()
+        res = await c.post("/paw-bar/widgets", json=_create_payload(agent_id="agent-manual"))
+        assert res.status_code == 201
+        assert res.json()["agent_id"] == "agent-manual"
+
+    @pytest.mark.asyncio
+    async def test_create_without_site_stays_unbound(self, client) -> None:
+        # No Site inserted for this pocket → provisioning is skipped silently.
+        c, _store = client
+        res = await c.post("/paw-bar/widgets", json=_create_payload(pocket_id="pocket-orphan"))
+        assert res.status_code == 201
+        assert res.json()["agent_id"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# Concierge-enable trigger
+# --------------------------------------------------------------------------- #
+
+
+class TestConciergeEnableTrigger:
+    """CR-12: turning the switch on is not creating a concierge."""
+
+    @pytest.mark.asyncio
+    async def test_enabling_leaves_an_unbound_widget_unbound(self, client) -> None:
+        c, store = client
+        site = await _site(concierge_enabled=False)
+        widget = await store.create_widget(_widget(agent_id=""))
+
+        res = await c.patch(
+            f"/paw-bar/admin/site/{site.id}/settings",
+            json={"concierge_enabled": True},
+        )
+        assert res.status_code == 200
+
+        bound = await store.get_widget(widget.id, workspace_id=_WS)
+        assert bound is not None and bound.agent_id == "", "enabling must not provision"
+
+    @pytest.mark.asyncio
+    async def test_enabling_leaves_manual_bind_untouched(self, client) -> None:
+        c, store = client
+        site = await _site(concierge_enabled=False)
+        widget = await store.create_widget(_widget(agent_id="agent-manual"))
+
+        res = await c.patch(
+            f"/paw-bar/admin/site/{site.id}/settings",
+            json={"concierge_enabled": True},
+        )
+        assert res.status_code == 200
+        bound = await store.get_widget(widget.id, workspace_id=_WS)
+        assert bound is not None and bound.agent_id == "agent-manual"
+
+    @pytest.mark.asyncio
+    async def test_re_patch_enabled_on_already_enabled_site_stays_unbound(self, client) -> None:
+        """The old E2 one-click hook re-PATCHed concierge_enabled=true to provision.
+        That hook is gone: the dashboard creates a concierge through its own
+        endpoint, and a re-PATCH writes the switch and nothing else."""
+        c, store = client
+        site = await _site(concierge_enabled=True)  # already on
+        widget = await store.create_widget(_widget(agent_id=""))
+
+        res = await c.patch(
+            f"/paw-bar/admin/site/{site.id}/settings",
+            json={"concierge_enabled": True},
+        )
+        assert res.status_code == 200
+        bound = await store.get_widget(widget.id, workspace_id=_WS)
+        assert bound is not None and bound.agent_id == ""
+
+    @pytest.mark.asyncio
+    async def test_re_patch_enabled_on_bound_site_is_noop(self, client) -> None:
+        """A re-PATCH of concierge_enabled=true on an already-BOUND site leaves the
+        agent untouched (idempotent, unbound-only)."""
+        c, store = client
+        site = await _site(concierge_enabled=True)
+        widget = await store.create_widget(_widget(agent_id="agent-manual"))
+
+        res = await c.patch(
+            f"/paw-bar/admin/site/{site.id}/settings",
+            json={"concierge_enabled": True},
+        )
+        assert res.status_code == 200
+        bound = await store.get_widget(widget.id, workspace_id=_WS)
+        assert bound is not None and bound.agent_id == "agent-manual"
+
+
+# --------------------------------------------------------------------------- #
+# Regression — unbound chat still 409s (no fallback-to-universal)
+# --------------------------------------------------------------------------- #
+
+
+class TestUnboundChatStill409:
+    @pytest.mark.asyncio
+    async def test_unbound_widget_chat_is_409(self, client) -> None:
+        c, store = client
+        await _site()  # enabled, key resolves
+        widget = await store.create_widget(_widget(agent_id=""))
+        res = await c.post(
+            "/paw-bar/chat",
+            json={
+                "widget_id": widget.id,
+                "signed_key": _VALID_KEY,
+                "customer_ref": _CUST,
+                "message": "What time do you open?",
+            },
+            headers={"Origin": _ORIGIN},
+        )
+        assert res.status_code == 409
+        assert "no concierge agent" in res.text
+
+
+# --------------------------------------------------------------------------- #
+# ASG-1 identity seeding + starters ride the frame config (owner AND public)
+# --------------------------------------------------------------------------- #
+
+
+def _starters_config(starters: list[str]):
+    from pocketpaw_ee.cloud.models.agent import AgentConfig
+
+    return AgentConfig(conversation_starters=starters)
+
+
+class TestIdentityAndFrameStarters:
+    @pytest.mark.asyncio
+    async def test_provisioning_seeds_the_identity_fields(self, client) -> None:
+        """welcome_message + conversation_starters exist on the Agent model, so the
+        provisioned agent is seeded with the site greeting and the starters derived
+        from the widget spec (catalog + gated-action labels)."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        _c, store = client
+        site = await _site(concierge_greeting="Welcome to Brew & Co!")
+        widget = await store.create_widget(
+            _widget(spec=_spec(with_catalog=True, with_actions=True))
+        )
+        agent_id = await ap.ensure_site_agent(site, widget)
+        agent = await agents_service.get(agent_id)
+        assert agent.config.welcome_message == "Welcome to Brew & Co!"
+        expected = ap.derive_conversation_starters(
+            _widget(spec=_spec(with_catalog=True, with_actions=True))
+        )
+        assert "What do you sell?" in expected
+        assert list(agent.config.conversation_starters) == expected
+
+    def test_frame_config_carries_starters_capped_four(self) -> None:
+        from pocketpaw_ee.paw_bar.router import _pawbar_frame_config
+
+        cfg = _pawbar_frame_config(
+            site_key="k",
+            widget_id="w",
+            api_base="",
+            parent_origin="",
+            greeting="",
+            starters=["a", "b", "c", "d", "e"],
+        )
+        assert cfg["starters"] == ["a", "b", "c", "d"]
+
+    def test_frame_config_starters_default_empty(self) -> None:
+        from pocketpaw_ee.paw_bar.router import _pawbar_frame_config
+
+        cfg = _pawbar_frame_config(
+            site_key="k", widget_id="w", api_base="", parent_origin="", greeting=""
+        )
+        assert cfg["starters"] == []
+
+    @pytest.mark.asyncio
+    async def test_public_frame_includes_starters_key(self, client) -> None:
+        c, _store = client
+        await _site()
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
+        assert res.status_code == 200
+        assert "starters" in res.text
+
+    # The public frame is pre-auth: the key is world-visible and ``w`` is whatever
+    # the caller types. Starters are read only for a widget bound to the key's own
+    # site, and only from an agent in the key's own tenant.
+
+    @pytest.mark.asyncio
+    async def test_public_frame_carries_the_bound_agents_starters(self, client) -> None:
+        """THE REPORTED BUG: the owner preview showed starters, the visitor's
+        frame hard-coded []."""
+        c, store = client
+        await _site()
+        agent = await _agent_doc(config=_starters_config(["Hours?", "Menu?"]))
+        widget = await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": widget.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": ["Hours?", "Menu?"]' in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_refuses_another_tenants_widget(self, client) -> None:
+        """A ``w`` from another workspace + pocket must not leak its agent's
+        starters through this site's key."""
+        c, store = client
+        await _site()
+        agent = await _agent_doc(workspace="ws-2", config=_starters_config(["Secret?"]))
+        foreign = await store.create_widget(
+            _widget(workspace_id="ws-2", pocket_id="pocket-2", agent_id=str(agent.id))
+        )
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": foreign.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Secret?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_refuses_a_sibling_pocket_widget(self, client) -> None:
+        """Same workspace, different pocket: a key for pocket A never reads the
+        agent behind pocket B's bar."""
+        c, store = client
+        await _site()
+        agent = await _agent_doc(config=_starters_config(["Sibling?"]))
+        sibling = await store.create_widget(_widget(pocket_id="pocket-2", agent_id=str(agent.id)))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": sibling.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Sibling?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_refuses_an_agent_in_another_tenant(self, client) -> None:
+        """A legacy widget (empty workspace) on this pocket passes the widget
+        binding, the same way it passes the chat gate, so the agent itself must
+        belong to the key's tenant."""
+        c, store = client
+        await _site()
+        agent = await _agent_doc(workspace="ws-2", config=_starters_config(["Elsewhere?"]))
+        legacy = await store.create_widget(_widget(workspace_id="", agent_id=str(agent.id)))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": legacy.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Elsewhere?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_unbound_or_unknown_widget_is_empty(self, client) -> None:
+        c, store = client
+        await _site()
+        unbound = await store.create_widget(_widget(agent_id=""))
+        for w in (unbound.id, "pb_does_not_exist", ""):
+            res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": w})
+            assert res.status_code == 200, (w, res.text)
+            assert '"starters": []' in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_escapes_a_hostile_starter(self, client) -> None:
+        """Starters are owner-editable text inlined into a <script>: a ``</script>``
+        in one must not close the tag and inject markup."""
+        c, store = client
+        await _site()
+        hostile = "</script><img src=x onerror=alert(1)>"
+        agent = await _agent_doc(config=_starters_config([hostile]))
+        widget = await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": widget.id})
+        assert res.status_code == 200, res.text
+        assert hostile not in res.text
+        assert "<img src=x" not in res.text
+        assert "\\u003c/script>\\u003cimg src=x onerror=alert(1)>" in res.text
+
+    @pytest.mark.asyncio
+    async def test_public_frame_starters_lookup_is_time_boxed(self, client, monkeypatch) -> None:
+        """Starters are cosmetic: a slow agents read must not hold up the page
+        view. Past the budget the frame renders with []."""
+        import asyncio
+
+        from pocketpaw_ee.paw_bar import router as router_mod
+
+        async def _slow(agent_id: str, *, workspace_id: str) -> list[str]:
+            await asyncio.sleep(2)
+            return ["Too late?"]
+
+        monkeypatch.setattr(router_mod, "_FRAME_STARTERS_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(router_mod, "_bound_agent_starters", _slow)
+        c, store = client
+        await _site()
+        widget = await store.create_widget(_widget(agent_id="agent-slow"))
+        res = await c.get("/paw-bar/frame", params={"key": _VALID_KEY, "w": widget.id})
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Too late?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_owner_preview_refuses_an_agent_in_another_tenant(self, client) -> None:
+        """The preview's widget is workspace-scoped, but the agent it names is
+        checked too: a cross-tenant agent id gives []."""
+        c, store = client
+        site = await _site()
+        agent = await _agent_doc(workspace="ws-2", config=_starters_config(["Theirs?"]))
+        await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+        assert res.status_code == 200, res.text
+        assert '"starters": []' in res.text
+        assert "Theirs?" not in res.text
+
+    @pytest.mark.asyncio
+    async def test_owner_preview_frame_carries_the_bound_agents_starters(self, client) -> None:
+        """The preview path shares ``_bound_agent_starters`` and its tenant check."""
+        c, store = client
+        site = await _site()
+        agent = await _agent_doc(config=_starters_config(["Preview?"]))
+        await store.create_widget(_widget(agent_id=str(agent.id)))
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+        assert res.status_code == 200, res.text
+        assert '"starters": ["Preview?"]' in res.text
+
+
+# --------------------------------------------------------------------------- #
+# Paw Bar inbox D5 — the "visible to site visitors" signal
+# --------------------------------------------------------------------------- #
+
+
+@pytest_asyncio.fixture
+async def bar_store(tmp_path, mongo_db):
+    """A tmp paw-bar store patched in at the source (no HTTP app), plus Beanie for
+    the Agent docs ``is_visible_to_site_visitors`` resolves the workspace from."""
+    from unittest.mock import patch
+
+    store = PawBarStore(tmp_path / "visibility.db")
+    with patch("pocketpaw_ee.api.get_paw_bar_store", return_value=store):
+        yield store
+
+
+async def _agent_doc(**ov: Any):
+    from pocketpaw_ee.cloud.models.agent import Agent
+
+    d: dict[str, Any] = dict(
+        workspace=_WS, name="Brew & Co Concierge", slug="concierge-site-1", owner=_OWNER
+    )
+    d.update(ov)
+    agent = Agent(**d)
+    await agent.insert()
+    return agent
+
+
+class TestSiteVisitorVisibility:
+    """D5 consequence 1: a concierge run reads its own ``agent:<id>`` scope, so the
+    agent's Knowledge surface must SAY that anything on it is publishable. The
+    machine-readable half of that badge is ``visible_to_site_visitors`` on
+    ``GET /agents/{id}/knowledge``, derived from the real widget→agent binding."""
+
+    @pytest.mark.asyncio
+    async def test_widget_for_agent_finds_the_bound_widget(self, bar_store) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        widget = await bar_store.create_widget(_widget(agent_id="agent-bound"))
+        assert (await ap.widget_for_agent("agent-bound", _WS)).id == widget.id
+
+    @pytest.mark.asyncio
+    async def test_widget_for_agent_ignores_an_unbound_or_sibling_widget(self, bar_store) -> None:
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        await bar_store.create_widget(_widget(agent_id=""))
+        await bar_store.create_widget(_widget(pocket_id="pocket-2", agent_id="agent-other"))
+        assert await ap.widget_for_agent("agent-bound", _WS) is None
+
+    @pytest.mark.asyncio
+    async def test_widget_for_agent_is_workspace_scoped(self, bar_store) -> None:
+        """Another tenant's bar never answers for this workspace's agent."""
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        await bar_store.create_widget(_widget(agent_id="agent-bound", workspace_id="ws-other"))
+        assert await ap.widget_for_agent("agent-bound", _WS) is None
+        assert await ap.widget_for_agent("agent-bound", "ws-other") is not None
+
+    @pytest.mark.asyncio
+    async def test_widget_for_agent_refuses_an_unscoped_lookup(self, bar_store) -> None:
+        """An empty agent id or workspace returns None instead of scanning — an
+        unscoped list would hand back a sibling tenant's bar."""
+        from pocketpaw_ee.paw_bar import agent_provisioning as ap
+
+        await bar_store.create_widget(_widget(agent_id="agent-bound"))
+        assert await ap.widget_for_agent("", _WS) is None
+        assert await ap.widget_for_agent("agent-bound", "") is None
+
+    @pytest.mark.asyncio
+    async def test_site_bound_agent_is_flagged_visible(self, bar_store) -> None:
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        agent = await _agent_doc()
+        await bar_store.create_widget(_widget(agent_id=str(agent.id)))
+        assert await agents_service.is_visible_to_site_visitors(str(agent.id)) is True
+
+    @pytest.mark.asyncio
+    async def test_internal_agent_is_not_flagged_visible(self, bar_store) -> None:
+        """An ordinary workspace agent fronts no bar — no badge, no false alarm."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        internal = await _agent_doc(slug="hr-assistant", name="HR Assistant")
+        await bar_store.create_widget(_widget(agent_id="someone-else"))
+        assert await agents_service.is_visible_to_site_visitors(str(internal.id)) is False
+
+    @pytest.mark.asyncio
+    async def test_visibility_of_an_unknown_agent_is_false(self, bar_store) -> None:
+        """A missing / malformed agent id resolves no workspace, so there is
+        nothing to scan and nothing to claim."""
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        assert await agents_service.is_visible_to_site_visitors("") is False
+        assert await agents_service.is_visible_to_site_visitors("not-an-object-id") is False
+
+    @pytest.mark.asyncio
+    async def test_visibility_is_failure_soft(self, bar_store) -> None:
+        """The flag labels a surface, it does not guard one — an unreadable store
+        yields False rather than 500-ing the owner's Knowledge tab."""
+        from unittest.mock import patch
+
+        from pocketpaw_ee.cloud.agents import service as agents_service
+
+        agent = await _agent_doc()
+        await bar_store.create_widget(_widget(agent_id=str(agent.id)))
+        with patch(
+            "pocketpaw_ee.paw_bar.agent_provisioning.widget_for_agent",
+            side_effect=RuntimeError("store is gone"),
+        ):
+            assert await agents_service.is_visible_to_site_visitors(str(agent.id)) is False
+
+    @pytest.mark.asyncio
+    async def test_knowledge_read_carries_the_flag(self, bar_store) -> None:
+        """The wire shape the frontend badge reads: ``GET /agents/{id}/knowledge``
+        returns ``visible_to_site_visitors`` beside ``items``."""
+        from unittest.mock import AsyncMock, patch
+
+        from pocketpaw_ee.cloud._core.errors import NotFound
+        from pocketpaw_ee.cloud.agents.router import list_knowledge
+
+        agent = await _agent_doc()
+        await bar_store.create_widget(_widget(agent_id=str(agent.id)))
+        internal = await _agent_doc(slug="hr-assistant", name="HR Assistant")
+
+        # The route is called directly, so pass the viewer FastAPI would inject:
+        # the agents' owner in their workspace. The ensure_can_read gate runs for real.
+        viewer = {"workspace_id": _WS, "user_id": _OWNER}
+        with patch(
+            "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.list_articles",
+            new=AsyncMock(return_value=[{"id": "a1", "title": "Hours"}]),
+        ):
+            public = await list_knowledge(str(agent.id), **viewer)
+            private = await list_knowledge(str(internal.id), **viewer)
+            # Same private agent, someone else's eyes: the gate still refuses.
+            with pytest.raises(NotFound):
+                await list_knowledge(str(internal.id), workspace_id="ws-2", user_id="user:eve")
+
+        assert public["visible_to_site_visitors"] is True
+        assert public["items"] == [{"id": "a1", "title": "Hours"}]
+        assert private["visible_to_site_visitors"] is False

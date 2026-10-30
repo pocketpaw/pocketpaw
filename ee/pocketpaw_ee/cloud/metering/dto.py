@@ -18,18 +18,22 @@ from pydantic import BaseModel, Field
 class BillResult(BaseModel):
     """The outcome of billing one run's compute cost.
 
-    ``credits_charged`` is the integer credits debited (0 when the cost rounded
-    to nothing or usage was empty — the run is still marked billed).
+    ``credits_charged`` is the WHOLE credits debited, truncated for display, so a
+    run costing 3.125 credits reports 3. ``micro_charged`` is the exact figure
+    (1_000_000 == 1 credit) and is what the wallet actually moved — read that one
+    to reconcile against the ledger. A cheap run can charge real money and still
+    show ``credits_charged == 0``; only ``debited`` says whether money moved.
     ``balance_after`` is the workspace wallet balance once the debit landed (may
     be negative: a completed run is always billed, so an overage is recorded as a
-    legitimate negative). ``debited`` is False when ``credits_charged == 0`` and
-    no ledger movement was written.
+    legitimate negative). ``debited`` is False only when the run was genuinely free
+    and no ledger movement was written.
     """
 
     run_id: str
     workspace_id: str
     cost_usd: float
     credits_charged: int
+    micro_charged: int = 0
     balance_after: int
     debited: bool
     cost_source: str = Field(

@@ -37,6 +37,9 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 pytest.importorskip("mongomock_motor")
 
+# Mandates here bind tmp repos outside the default allowlist roots.
+pytestmark = pytest.mark.usefixtures("any_repo_root")
+
 from pocketpaw_ee.cloud.mandates import patrols as patrols_mod  # noqa: E402
 from pocketpaw_ee.cloud.mandates import scheduler as scheduler_mod  # noqa: E402
 from pocketpaw_ee.cloud.mandates import service as mandate_service  # noqa: E402
@@ -104,8 +107,9 @@ async def test_list_cadence_due_recent_shift_not_due(tmp_path, mongo_db):
     now = datetime(2026, 6, 13, tzinfo=UTC)
     # A shift two days ago — inside the weekly window, so NOT due.
     shift = ShiftDoc(workspace=WS, mandate_id=weekly, no=1, state="done")
-    shift.createdAt = now - timedelta(days=2)
     await shift.insert()
+    # Backdate AFTER insert: the insert hook stamps createdAt with the wall clock.
+    await shift.set({ShiftDoc.createdAt: now - timedelta(days=2)})
 
     due_ids = {row["mandate_id"] for row in await mandate_service.list_cadence_due(now)}
     assert weekly not in due_ids, "a weekly mandate shifted 2 days ago is not yet due"
@@ -125,8 +129,9 @@ async def test_list_cadence_due_exact_7_day_boundary_is_due(tmp_path, mongo_db):
     now = datetime(2026, 6, 13, tzinfo=UTC)
 
     shift = ShiftDoc(workspace=WS, mandate_id=weekly, no=1, state="done")
-    shift.createdAt = now - timedelta(days=7)  # exactly the interval ago
     await shift.insert()
+    # Backdate AFTER insert: the insert hook stamps createdAt with the wall clock.
+    await shift.set({ShiftDoc.createdAt: now - timedelta(days=7)})  # exactly the interval ago
 
     due_ids = {row["mandate_id"] for row in await mandate_service.list_cadence_due(now)}
     assert weekly in due_ids, "a shift exactly 7 days ago is DUE (exclusive boundary)"

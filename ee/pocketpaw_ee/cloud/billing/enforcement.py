@@ -1,0 +1,225 @@
+# ee/pocketpaw_ee/cloud/billing/enforcement.py — one function answering "do the
+# PER-SITE billing seams enforce right now".
+#
+# Updated 2026-10-02 (feat/partners-sell, PH-2): the concierge quota counts over
+# the site's PAID PERIOD when the tier's period is longer than a month (the
+# partner ``staff_year`` rung: 1,200 a year, counted from ``renewal_date`` minus
+# 12 months). Monthly tiers still count from the 1st of the month, unchanged.
+# Updated 2026-10-01 (feat/partners-foundation, PH-1): the answer is now also
+# PER WORKSPACE. ``sites_enforced(partner)`` is True when the site's workspace
+# holds an ACTIVE Paw Partners profile, even with both global flags off; async
+# seams call ``sites_enforced_for(workspace_id)``, which loads that profile only
+# when the global flags are off. Non-partner workspaces behave exactly as before.
+# Updated 2026-10-02: ``load_partner`` skips the read when the flags already
+# enforce, and ``partner=`` lets a caller that already holds the profile pass it
+# (``...`` = not loaded yet), so one request never reads the Workspace twice.
+#
+# Created 2026-08-21 (feat/sites-billing-flag, PW-2). Until now every sites seam
+# read ``billing_enforced`` directly, which is the workspace-wide switch: turning
+# it on to start charging for custom domains also starts 402ing chat runs, seat
+# invites, pocket creates, connector enables and uploads. Those are unrelated
+# decisions on unrelated timelines, and needing them to be the same one is why the
+# sites paywall could not be switched on at all.
+#
+# ``sites_billing_enforced`` is the second switch. The condition is the OR of the
+# two, never a replacement: a deployment already setting the global flag keeps
+# behaving exactly as ``configuration-reference.mdx`` documents it, so this change
+# is additive for every existing tenant.
+#
+# It lives in ONE function rather than being written at each seam because there
+# are five of them, and a compound condition copied five times is a condition that
+# will eventually read differently in one place. ``billing`` rather than ``sites``
+# is the home so ``cloud.auth.site_keys`` can reach it without importing the sites
+# package.
+#
+# NOT covered, deliberately: the badge stamper
+# (``sites.service._stamp_free_badge``) reads NEITHER flag today and still reads
+# neither. It badges a free site regardless of billing posture, which
+# ``auth.site_keys.concierge_available`` already documents as a known inconsistency
+# in the per-site family. Wiring it to this function would strip the attribution
+# badge from every OSS / self-host site the moment this shipped, which is a
+# product decision, not a refactor. Named here so the omission is visibly a choice.
+
+# Updated 2026-08-26 (feat/concierge-conversation-quota): added
+# ``concierge_conversation_quota_exceeded`` — the "200 conversations a month"
+# allowance on the ``staff`` tier stops being a catalog claim and starts being a
+# gate. It lives beside ``sites_enforced`` because it is the same family (a
+# per-site billing seam) and because it needs that function; the module comment
+# above already explains why ``billing`` rather than ``sites`` is the home.
+#
+# It is ASYNC and touches a store, which nothing else in the per-site entitlement
+# path does. That is why it is not in ``entitlements.service``: the resolver there
+# is deliberately pure so every branch runs without a database, and a quota is a
+# question about history, not about a plan.
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+
+from dateutil.relativedelta import relativedelta
+
+
+def sites_enforced(partner: Any | None = None) -> bool:
+    """Are the per-site billing seams live?
+
+    True when EITHER the workspace-wide ``billing_enforced`` or the sites-only
+    ``sites_billing_enforced`` is set. Both default False, so OSS / self-host
+    sees no paywall and every seam returns before it reads a database.
+
+    ``getattr`` with a default rather than plain attribute access: settings are
+    routinely stubbed in tests with a namespace carrying only the fields under
+    test, and a seam that raises AttributeError because a stub predates a new flag
+    fails for a reason that has nothing to do with billing. Absent reads as off,
+    which is also the correct fail-open direction for a paywall.
+    """
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    return bool(
+        getattr(settings, "billing_enforced", False)
+        or getattr(settings, "sites_billing_enforced", False)
+        or _partner_active(partner)
+    )
+
+
+def _partner_active(partner: Any | None) -> bool:
+    """An ``active`` Paw Partners profile (PH-1). ``applied`` / ``suspended`` are not."""
+    return getattr(partner, "status", None) == "active"
+
+
+async def load_partner(workspace_id: str | None) -> Any | None:
+    """The workspace partner profile the billing gates need, or None.
+
+    Skips the read entirely when the global flags already enforce — the profile
+    cannot change the answer then.
+    """
+    if sites_enforced():
+        return None
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    return await partners_service.partner_profile_for_workspace(workspace_id)
+
+
+async def sites_enforced_for(workspace_id: str | None, *, partner: Any = ...) -> bool:
+    """``sites_enforced`` for one workspace, loading its partner profile.
+
+    Global flags first, so a deployment with them on never reads anything. With
+    them off (OSS, self-host, prod today) this is one ``_id`` lookup on the
+    workspace — a positive per-workspace check, never a cached marker.
+    """
+    if sites_enforced():
+        return True
+    if partner is ...:
+        partner = await load_partner(workspace_id)
+    return _partner_active(partner)
+
+
+def _month_start() -> datetime:
+    """Midnight on the 1st of the current month, on the clock the store writes.
+
+    NAIVE LOCAL, deliberately, and it must stay that way. ``created_at`` on a
+    conversation row is written with ``datetime.now().isoformat()`` — no timezone,
+    local clock — and the count compares ISO strings. A UTC or aware boundary
+    renders with an offset suffix that sorts after every stored value, so the
+    count would come back 0 and the quota would never fire. Same clock, same shape.
+    """
+    now = datetime.now()
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _period_start(site: Any, months: int) -> datetime | None:
+    """Start of the site's current paid period, on the store's naive-local clock.
+
+    ``renewal_date - months``; None when the site has no renewal date (it is not
+    paying, and the entitlement gate upstream already refuses it).
+    """
+    renewal = getattr(site, "renewal_date", None)
+    if renewal is None:
+        return None
+    if renewal.tzinfo is None:
+        renewal = renewal.replace(tzinfo=UTC)
+    return (renewal - relativedelta(months=months)).astimezone().replace(tzinfo=None)
+
+
+async def concierge_conversation_quota_exceeded(
+    site: Any,
+    *,
+    widget_id: str,
+    workspace_id: str,
+    store: Any | None = None,
+    partner: Any = ...,
+) -> bool:
+    """Would STARTING another concierge conversation exceed this site's month?
+
+    Asked only when a visitor's turn would begin a NEW conversation. A thread
+    already in progress is never cut off part-way through: it was counted on the
+    turn that started it, and refusing its next message would strand a visitor
+    mid-sentence for a number they cannot see.
+
+    Returns False (allow) in four cases, each for its own reason:
+
+      * Billing is not enforced. OSS and self-host have no paywall, and this
+        returns before it reads anything.
+      * The site's tier is unresolvable, or is an org flat. The entitlement gate
+        upstream has already decided whether a concierge is served at all; this
+        function's job is only the ceiling.
+      * The tier's allowance is 0. That is NOT "no conversations" — 0 means the
+        tier sells no allowance, and reading it as a ceiling would refuse every
+        conversation on a tier that is meant to be metered from the first one.
+        The retired ``agency`` flat was the tier designed that way, at its pooled
+        rate, and it could not reach this line even then — it was an ORG flat, and
+        the lookup above refused it. It is gone from the catalog entirely since
+        2026-09-06, so today NO shipping tier reaches this branch. It stays because
+        it is what keeps the next metered per-site rung from being silently capped
+        at zero the day someone prices one.
+      * The store read fails. A bookkeeping error must not silence a paying
+        customer's concierge, so the failure direction is to serve.
+
+    Fail-OPEN on error is the opposite of the entitlement gate's posture, and
+    deliberately so: that gate answers "has this been paid for", where the safe
+    error is refuse. This one answers "has a paid allowance been used up", where
+    the safe error is allow — the alternative charges a customer for a tier and
+    then withholds it because a count did not load.
+    """
+    if not await sites_enforced_for(workspace_id, partner=partner):
+        return False
+
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    tier = site_plans.site_scoped_tier(getattr(site, "plan_tier", None))
+    if tier is None:
+        return False
+    allowance = tier.conversation_allowance
+    if allowance <= 0:
+        return False
+
+    if store is None:
+        from pocketpaw_ee.api import get_paw_bar_store
+
+        store = get_paw_bar_store()
+    try:
+        # A yearly rung's allowance is per YEAR: count from its period start.
+        since = (_period_start(site, tier.period_months) if tier.period_months > 1 else None) or (
+            _month_start()
+        )
+        used = await store.count_conversations_started_since(widget_id, since, workspace_id)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "billing.concierge_quota: could not count conversations for widget %s — "
+            "serving the concierge rather than refusing on a bookkeeping error",
+            widget_id,
+            exc_info=True,
+        )
+        return False
+    return used >= allowance
+
+
+__all__ = [
+    "concierge_conversation_quota_exceeded",
+    "load_partner",
+    "sites_enforced",
+    "sites_enforced_for",
+]

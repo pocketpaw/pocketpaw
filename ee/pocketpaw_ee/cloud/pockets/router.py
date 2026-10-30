@@ -198,6 +198,7 @@ invocation has the same blast radius as a write binding.
 
 from __future__ import annotations
 
+import logging
 import secrets as _secrets
 from typing import Any
 from uuid import uuid4
@@ -220,6 +221,7 @@ from pocketpaw_ee.cloud.pockets.dto import (
     BulkDispatchResponse,
     CreatePocketRequest,
     DispatchBulkRequest,
+    DuplicatePocketRequest,
     GrantPocketConnectorRequest,
     HomePocketResponse,
     MergeSpecRequest,
@@ -256,6 +258,8 @@ from pocketpaw_ee.cloud.shared.deps import (
     require_pocket_edit,
     require_pocket_owner,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/pockets", tags=["Pockets"], dependencies=[Depends(require_license)])
 
@@ -435,6 +439,19 @@ async def get_home_pocket(
     return HomePocketResponse(pocket_id=pocket["_id"], pocket=pocket, created=created)
 
 
+@router.get("/builtin-widgets")
+async def get_builtin_widgets() -> list[dict]:
+    """Return every enabled built-in widget definition.
+
+    The frontend's AddWidgetPicker "Built-in" section fetches this list
+    to populate its rail. Declared ahead of ``GET /{pocket_id}`` so the
+    static ``/builtin-widgets`` segment wins the route match. No auth
+    required — these are system-level definitions visible to every
+    authenticated user (the frontend's auth layer gates the call).
+    """
+    return await pockets_service.list_builtin_widgets()
+
+
 @router.get("/{pocket_id}")
 async def get_pocket(
     pocket_id: str,
@@ -466,7 +483,26 @@ async def get_pocket(
         user_id = str(user.id)
     else:
         raise CloudError(401, "auth.required", "Authentication required.")
-    return await pockets_service.get(pocket_id, user_id)
+    # ``get_for_wire`` and not ``get``: this is the one route that hands a
+    # pocket's full wire dict straight to a client, so it is where SF-2's source
+    # gate has to bite. ``get`` is the pipeline's reader and never redacts — see
+    # its docstring for why gating it would stop sites being built rather than
+    # hide them. A new endpoint that returns a pocket belongs on this one too.
+    return await pockets_service.get_for_wire(pocket_id, user_id)
+
+
+@router.post("/{pocket_id}/duplicate")
+async def duplicate_pocket(
+    pocket_id: str,
+    body: DuplicatePocketRequest | None = None,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Copy a site pocket into a new one the caller owns. Returns the new pocket's
+    wire dict, the same shape ``POST /pockets`` returns."""
+    return await pockets_service.duplicate_pocket(
+        workspace_id, user_id, pocket_id, body or DuplicatePocketRequest()
+    )
 
 
 @router.patch("/{pocket_id}", dependencies=[Depends(require_pocket_edit)])
@@ -549,6 +585,31 @@ def _loopback_bypass_active(
 
     Any missing factor → bypass denied; the caller falls through to
     the standard cookie/bearer auth dependency.
+
+    AND IT IS REFUSED OUTRIGHT IN MULTI-TENANT CLOUD.
+
+    The loopback half of this contract provides nothing behind a reverse
+    proxy. The docstring on ``_is_localhost`` says so itself: with nginx or
+    Caddy on the same box, ``request.client.host`` is ``127.0.0.1`` for every
+    external client, so factor 1 passes for the whole internet. That leaves
+    the process token as the entire gate — and the remaining factors are the
+    workspace id and the user id, both read from attacker-supplied headers.
+
+    So a leaked internal token is any-tenant, any-user impersonation across
+    pocket reads, spec merges and both reconcile routes. The token is minted
+    per process and never rotated within it, and the code that describes it
+    calls the arrangement "interim, dev-grade".
+
+    ``is_multi_tenant_cloud()`` is the signal, not an env flag anybody has to
+    remember to set: it is exactly "there is a cloud DB, so more than one
+    tenant lives here". A local desktop install, where this bypass is how the
+    agent talks to its own backend, has no cloud DB and is unaffected.
+
+    ``POCKETPAW_INTERNAL_BYPASS_ENABLED=1`` re-enables it in cloud for a
+    deployment that genuinely needs it, and says so in the log every time it
+    fires. Silence is safe; leniency is deliberate.
+
+    Gated by tests/cloud/test_pocket_loopback_bypass.py.
     """
     if not _is_localhost(request):
         return False
@@ -558,6 +619,46 @@ def _loopback_bypass_active(
         return False
     if not workspace_header or not user_header:
         return False
+    if not _bypass_allowed_here():
+        return False
+    return True
+
+
+def _bypass_allowed_here() -> bool:
+    """Whether the internal bypass may fire in THIS deployment at all.
+
+    Off in multi-tenant cloud unless explicitly re-enabled, because the
+    workspace and user it trusts both come from request headers — see
+    ``_loopback_bypass_active``.
+    """
+    import os
+
+    if os.environ.get("POCKETPAW_INTERNAL_BYPASS_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        logger.warning(
+            "POCKETPAW_INTERNAL_BYPASS_ENABLED is set — honouring the pocket "
+            "internal bypass, which takes its workspace and user from request "
+            "headers. Unset this unless a component genuinely needs it."
+        )
+        return True
+
+    try:
+        from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
+
+        if is_multi_tenant_cloud():
+            return False
+    except Exception:  # noqa: BLE001 — an unreadable signal must not open the gate
+        logger.warning(
+            "guards: could not determine whether this is multi-tenant cloud — "
+            "refusing the pocket internal bypass",
+            exc_info=True,
+        )
+        return False
+
     return True
 
 
@@ -1575,14 +1676,13 @@ async def update_widget(
     return await pockets_service.update_widget(pocket_id, widget_id, user_id, body)
 
 
-@router.delete("/{pocket_id}/widgets/{widget_id}", status_code=204)
+@router.delete("/{pocket_id}/widgets/{widget_id}")
 async def remove_widget(
     pocket_id: str,
     widget_id: str,
     user_id: str = Depends(current_user_id),
-) -> Response:
-    await pockets_service.remove_widget(pocket_id, widget_id, user_id)
-    return Response(status_code=204)
+) -> dict:
+    return await pockets_service.remove_widget(pocket_id, widget_id, user_id)
 
 
 @router.post("/{pocket_id}/widgets/reorder")

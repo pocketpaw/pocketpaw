@@ -7,6 +7,24 @@ Extracted from dashboard.py — contains:
 - ``shutdown_event()`` — tears down all services
 
 Changes:
+- 2026-09-04 (fix/unblock-event-loop, backend-perf H1): every broadcast helper
+  here was its own copy of "iterate ``active_connections``, ``await
+  ws.send_json`` with no timeout". Six copies, none bounded. A client that
+  stopped reading held the loop on TCP back-pressure with no deadline, and the
+  dashboard is one uvicorn process, so that await stalled every other request.
+  All six now go through ``_fanout``, which sends concurrently and gives each
+  socket its own 5s deadline. The cloud package had already learned this the
+  hard way — see ``SEND_TIMEOUT_SECONDS`` in ``ee/.../chat/ws.py`` — but the
+  OSS dashboard path never got the fix.
+- 2026-08-01: ``startup_event`` installs the asyncio accept-noise filter
+  (``pocketpaw.asyncio_noise``) as its first act, so the Windows proactor
+  stops logging a full traceback every time a client aborts a connection
+  mid-accept. Covers both server modes — ``dashboard.py`` and
+  ``api/serve.py`` share this lifespan. (fix/asyncio-accept-noise)
+- 2026-07-12: removed the ``bundled_kb`` (ripple-recipes) boot-time mirror.
+  The hand-authored ripple pattern recipes biased the agent toward fixed
+  layouts; design breadth now comes from live design references, not a
+  shipped scope. (chore/remove-bundled-kb-ripple-recipes)
 - 2026-07-11 (feat/external-alerting-c2c3): ``startup_event`` now autostarts the
   ``AutomationEvaluator`` (background threshold/data-change rule loop) when
   ``settings.automation_evaluator_autostart`` is true (the default) — the OSS
@@ -15,13 +33,12 @@ Changes:
 - 2026-05-22: ``startup_event`` also mirrors the built-in pocket
   templates into ``~/.pocketpaw/templates/`` via the
   ``bundled_templates`` installer — same best-effort, catch-and-log
-  pattern as the skills / kb installers, gated on
+  pattern as the skills installer, gated on
   ``auto_install_bundled_templates`` (feat/bundled-templates, 2a).
-- 2026-05-21: ``startup_event`` mirrors bundled SKILL.md files and
-  pre-compiled kb-go scopes into the user's home dir at boot via the
-  ``bundled_skills`` / ``bundled_kb`` installers. Best-effort, gated on
-  the ``auto_install_bundled_*`` settings; reuses the already-loaded
-  ``settings`` object.
+- 2026-05-21: ``startup_event`` mirrors bundled SKILL.md files into the
+  user's home dir at boot via the ``bundled_skills`` installer.
+  Best-effort, gated on ``auto_install_bundled_skills``; reuses the
+  already-loaded ``settings`` object.
 """
 
 import asyncio
@@ -29,6 +46,7 @@ import logging
 from datetime import UTC
 
 import pocketpaw.dashboard_state as _state
+from pocketpaw.asyncio_noise import install_accept_noise_filter
 from pocketpaw.bus import get_message_bus
 from pocketpaw.config import Settings
 from pocketpaw.daemon import get_daemon
@@ -51,6 +69,57 @@ logger = logging.getLogger(__name__)
 # Broadcast helpers
 # ---------------------------------------------------------------------------
 
+# A single send must not be able to hold the dashboard's event loop open
+# indefinitely. A client that stops reading (backgrounded tab, sleeping laptop,
+# a NAT that dropped the flow without a FIN) leaves ``send_json`` waiting on
+# TCP back-pressure with no deadline of its own, and the dashboard runs one
+# uvicorn process: that await blocks every other request on the box.
+#
+# 5.0s matches ``SEND_TIMEOUT_SECONDS`` in the cloud package's ws.py, which
+# carries the reasoning in full — far above any healthy RTT, short enough that
+# a stalled fan-out is noticed.
+WS_SEND_TIMEOUT_SECONDS = 5.0
+
+# Cap on sends in flight per broadcast. The dashboard is single-tenant and
+# rarely has more than a handful of tabs open, so this is a guard rail rather
+# than a throttle.
+WS_FANOUT_CONCURRENCY = 32
+
+
+async def _fanout(message: dict) -> None:
+    """Deliver ``message`` to every dashboard socket, concurrently and bounded.
+
+    Every broadcast helper in this module used to be its own ``for`` loop with
+    one unbounded ``await ws.send_json(...)`` per socket, so delivery cost the
+    SUM of the connected clients' latencies and a single wedged client stalled
+    the rest indefinitely. Sends now run together, each with its own deadline.
+
+    A socket that raises OR times out is dropped from ``active_connections``.
+    Dropping on timeout is the part that matters: without it a wedged client
+    would be re-attempted on every subsequent broadcast, so adding the timeout
+    alone would have made the stall recur forever instead of once.
+    """
+    targets = list(active_connections)
+    if not targets:
+        return
+
+    sem = asyncio.Semaphore(WS_FANOUT_CONCURRENCY)
+
+    async def _send(ws):
+        async with sem:
+            try:
+                await asyncio.wait_for(ws.send_json(message), timeout=WS_SEND_TIMEOUT_SECONDS)
+            except Exception:
+                # Includes TimeoutError. CancelledError is a BaseException on
+                # 3.8+, so a cancelled broadcast still propagates rather than
+                # being mistaken for a dead socket.
+                return ws
+        return None
+
+    for ws in await asyncio.gather(*(_send(w) for w in targets)):
+        if ws is not None and ws in active_connections:
+            active_connections.remove(ws)
+
 
 async def broadcast_reminder(reminder: dict):
     """Broadcast a reminder notification to all connected clients."""
@@ -59,11 +128,7 @@ async def broadcast_reminder(reminder: dict):
 
     # Legacy broadcast (backup)
     message = {"type": "reminder", "reminder": reminder}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            pass
+    await _fanout(message)
 
     # Persist reminder as an assistant message in every active WebSocket session
     # so it survives session switches and page reloads.
@@ -104,12 +169,7 @@ async def broadcast_reminder(reminder: dict):
 async def broadcast_intention(intention_id: str, chunk: dict):
     """Broadcast intention execution results to all connected clients."""
     message = {"type": "intention_event", "intention_id": intention_id, **chunk}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            if ws in active_connections:
-                active_connections.remove(ws)
+    await _fanout(message)
 
     # Push message-type intention chunks to notification channels
     if chunk.get("type") == "message":
@@ -124,23 +184,13 @@ async def broadcast_intention(intention_id: str, chunk: dict):
 async def _broadcast_audit_entry(entry: dict):
     """Broadcast a new audit log entry to all connected WebSocket clients."""
     message = {"type": "system_event", "event_type": "audit_entry", "data": entry}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            if ws in active_connections:
-                active_connections.remove(ws)
+    await _fanout(message)
 
 
 async def _broadcast_health_update(summary: dict):
     """Broadcast health status update to all connected WebSocket clients."""
     message = {"type": "health_update", "data": summary}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            if ws in active_connections:
-                active_connections.remove(ws)
+    await _fanout(message)
 
 
 async def push_open_path(path: str, action: str = "navigate"):
@@ -155,11 +205,7 @@ async def push_open_path(path: str, action: str = "navigate"):
         ``"view"`` to open a file in the viewer.
     """
     message = {"type": "open_path", "path": path, "action": action}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            pass
+    await _fanout(message)
 
 
 # ---------------------------------------------------------------------------
@@ -179,15 +225,21 @@ async def startup_event(
         Callable for starting a channel adapter. Injected from dashboard.py
         to avoid circular import with dashboard_channels.
     """
+    # Silence the Windows proactor's aborted-accept tracebacks before any
+    # socket work starts. Real errors still reach the default handler.
+    install_accept_noise_filter()
+
     # Start Message Bus Integration
     bus = get_message_bus()
     await ws_adapter.start(bus)
 
-    # Load .env for enterprise config (license key, MongoDB URI, admin creds)
+    # Load .env for enterprise config (license key, MongoDB URI, admin creds). The
+    # working directory's file only, the one Settings reads: a bare load_dotenv()
+    # walks up and would import a parent project's .env.
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(".env")
     except ImportError:
         pass
 
@@ -244,43 +296,18 @@ async def startup_event(
             skipped = sum(1 for r in results if r.status == "skipped")
             failed = [r for r in results if r.status == "failed"]
             logger.info(
-                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed",
+                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed "
+                "— skills: %s",
                 installed,
                 updated,
                 skipped,
                 len(failed),
+                ", ".join(sorted(r.name for r in results)) or "(none)",
             )
             for r in failed:
                 logger.warning("Skill %s failed to install: %s", r.name, r.error)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Bundled-skills install failed (non-fatal): %s", exc)
-
-    # Mirror PocketPaw's pre-compiled kb-go scopes into
-    # ``~/.knowledge-base/`` so the existing ``_get_kb_context``
-    # injection can retrieve recipes at pocket-creation time.
-    # Best-effort — a failure here just means the agent loses the
-    # recipe-retrieval boost; the MCP tool + skill flow still works.
-    # Opt-out: ``POCKETPAW_AUTO_INSTALL_BUNDLED_KB_SCOPES=false``.
-    if settings.auto_install_bundled_kb_scopes:
-        try:
-            from pocketpaw.bundled_kb import install_bundled_kb_scopes
-
-            kb_results = install_bundled_kb_scopes()
-            installed = sum(1 for r in kb_results if r.status == "installed")
-            updated = sum(1 for r in kb_results if r.status == "updated")
-            skipped = sum(1 for r in kb_results if r.status == "skipped")
-            failed = [r for r in kb_results if r.status == "failed"]
-            logger.info(
-                "Bundled kb-go scopes sync: %d installed / %d updated / %d skipped / %d failed",
-                installed,
-                updated,
-                skipped,
-                len(failed),
-            )
-            for r in failed:
-                logger.warning("KB scope %s failed to install: %s", r.name, r.error)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Bundled kb-go scopes install failed (non-fatal): %s", exc)
 
     # Mirror PocketPaw's built-in pocket templates into
     # ``~/.pocketpaw/templates/`` so the create specialist can
@@ -478,11 +505,7 @@ async def startup_event(
 
         async def _mcp_ws_broadcast(message: dict) -> None:
             """Broadcast an MCP message to all connected WebSocket clients."""
-            for ws in active_connections[:]:
-                try:
-                    await ws.send_json(message)
-                except Exception:
-                    pass
+            await _fanout(message)
 
         set_ws_broadcast(_mcp_ws_broadcast)
 
@@ -666,6 +689,35 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
     except Exception as exc:
         logger.debug("Cloud run drain skipped: %s", exc)
 
+    # Flush the batched request-log queue. Telemetry writes are batched behind
+    # a queue now, so on any restart the queued tail is simply lost unless
+    # something drains it — and a restart is exactly when someone is reading
+    # /audit. Same guarded-import shape and same reason as the run drain above:
+    # this is the only shutdown hook that fires.
+    try:
+        from pocketpaw_ee.cloud._core.request_log import shutdown_request_log
+
+        await _bounded("request_log_flush", shutdown_request_log(), timeout=8.0)
+    except Exception as exc:
+        logger.debug("Request-log flush skipped: %s", exc)
+
+    # Run the enterprise lifecycle shutdown hooks. The mirror of the startup
+    # loop above, which existed on its own for months: ``on_shutdown`` was
+    # declared in the protocol (src/pocketpaw/extensions.py), implemented by
+    # CloudLifecycleHook, and called by nothing. Everything that hook started --
+    # the meeting scheduler, the pocket interval refresh, the temporal sweeps,
+    # the run sweeper -- outlived the process it belonged to.
+    #
+    # Placed after the run drain and the request-log flush so cloud teardown
+    # happens before the channel adapters and the daemon go down under it.
+    try:
+        from pocketpaw._registry import providers as _ext_providers
+
+        for _hook in _ext_providers("pocketpaw.lifecycle"):
+            await _bounded("lifecycle_shutdown", _hook.on_shutdown(), timeout=10.0)
+    except Exception as exc:
+        logger.debug("Lifecycle shutdown hooks skipped: %s", exc)
+
     # Stop all channel adapters
     if _stop_channel_adapter_fn:
         for channel in list(_channel_adapters):
@@ -691,3 +743,10 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
         await _bounded("mcp_servers", get_mcp_manager().stop_all(), timeout=8.0)
     except Exception as e:
         logger.warning("Error stopping MCP servers: %s", e)
+
+    # Deliver the last paw-lens check-ins (the final ``ok`` of a job that just
+    # finished). Last, so the schedulers and the ee hooks above have stopped.
+    # Bounded at 1 s; ``flush`` never raises.
+    from pocketpaw.lens_checkins import flush as flush_lens_checkins
+
+    await flush_lens_checkins(timeout=1.0)

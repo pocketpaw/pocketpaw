@@ -1,80 +1,38 @@
-# ee/pocketpaw_ee/cloud/mandates/executor.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 4 — plan gate + executor).
+# ee/pocketpaw_ee/cloud/mandates/executor.py — apply-on-approve for the PLAN GATE.
 #
-# Updated: 2026-06-13 (feat/belt-headless-exec) — ``resolve_dispatcher`` now
-#   honours ``POCKETPAW_MANDATE_DISPATCHER=headless``: the ``HeadlessTaskDispatcher``
-#   (``cloud/belt/headless.py``) files the SAME queued ``code_change`` run as the
-#   station dispatcher, then PRODUCES the diff programmatically via the headless
-#   develop runner and attaches it, so the run becomes a real PENDING change
-#   awaiting the per-diff Instinct gate — no human in the diff-producing loop
-#   (the approval gate is preserved). It degrades to the plain ``station``
-#   dispatcher when no production develop loop is wired, so the older HONESTY
-#   note below still describes the DEFAULT (``station``) path; ``headless`` is the
-#   additive autonomous path. The ``station`` and ``bus`` dispatchers are
-#   untouched.
+# ``service.trigger_shift`` proposes the foreman's PlanProposal through Instinct
+# as a ``belt_plan`` Action (blob under ``Action.parameters._belt_plan``). After a
+# human approves it, the ee instinct router fires ``execute_approved_plan``, which:
 #
-# Updated: 2026-06-11 (feat/belt-autopilot — REAL task dispatcher) — added the
-#   ``StationTaskDispatcher`` and ``resolve_dispatcher()`` so an approved plan
-#   task starts a REAL Belt station run instead of a bus-only echo. The
-#   dispatcher selection is env-driven (``POCKETPAW_MANDATE_DISPATCHER=
-#   station|bus``; default ``station`` when the belt plumbing imports cleanly,
-#   else a clean fall-back to ``bus``).
+#   1. Reads the blob; a missing/schema-mismatched blob fails loud.
+#   2. RE-validates (defense in depth): the mandate still exists, is ACTIVE, and
+#      the charter budget is UNCHANGED since the plan was proposed.
+#   3. Dispatches each task through a ``TaskDispatcher`` (``resolve_dispatcher``,
+#      env ``POCKETPAW_MANDATE_DISPATCHER``):
+#        * ``station`` (default) — ``StationTaskDispatcher`` files a QUEUED
+#          ``code_change`` Action (``station_pending=True``, no diff, based on
+#          the repo's checked-out branch: ``belt.service.default_base``)
+#          carrying the task text, its ``title`` (the commit subject when it
+#          lands) and ``expected_outcome``, its ``recipe`` (if any), the crew
+#          ``worker``
+#          seat (``{agent_id, name, setup, seated_by}``; task N goes to live dev seat
+#          ``(N-1) % devs``, see ``mandates.service.pick_dev``) and the mandate
+#          provenance, and fires ``belt_run_updated``. A human drives ``/belt``
+#          to a diff.
+#        * ``headless`` — ``belt/headless.HeadlessTaskDispatcher`` files the same
+#          queued run, then a production ``DevelopFn`` (the develop station)
+#          produces and attaches the diff; the run stays PENDING the per-diff
+#          gate. Falls back to ``station`` when no develop loop is wired.
+#        * ``bus`` — announce-only ``BusTaskDispatcher``.
+#   4. Marks the shift ``executing`` → ``done`` via the mandates service (the sole
+#      Beanie importer), appends the summary to the mandate's soul (best-effort),
+#      and closes the Decision-Graph chain EXACTLY ONCE: every failure path
+#      returns right after its single ``_fail``; success emits once at the end.
 #
-#   HONESTY (the dispatcher-reality verdict): a genuinely HEADLESS belt station
-#   run is NOT reachable with the existing machinery. The belt "develop station"
-#   is an INTERACTIVE chat-agent loop — the ``/belt`` surface preamble
-#   (``cloud/surface/handlers/belt.py``) drives a Claude chat session that
-#   ORIENTs, DEVELOPs, and produces a unified diff, which the
-#   ``mcp__pocketpaw_belt__belt_propose_change`` tool then files as a
-#   ``code_change`` Instinct Action. There is NO programmatic "task → diff"
-#   runner to call from here; the diff is the OUTPUT of an LLM chat session.
-#   So ``StationTaskDispatcher`` does the CLOSEST REAL thing: it files a real
-#   ``code_change`` Instinct Action (the SAME row type the console Runs tab reads
-#   and the belt gate executes) carrying the task text, in a QUEUED state
-#   (``station_pending=True``, no diff yet), and fires the real
-#   ``belt_run_updated`` event so the run shows up live in the console. A human
-#   opens the ``/belt`` station for that queued run (one click) to drive it to a
-#   diff, which rides the existing gate as normal. This is a genuine run record,
-#   not a bus echo — the tests assert the persisted ``code_change`` Action and
-#   its ``station_pending`` queued state, not a bus message. If a later PR lands
-#   a real headless station runner, swap its call into ``StationTaskDispatcher``
-#   behind this same ``TaskDispatcher`` protocol with no caller change.
-#
-# The apply-on-approve half of the MANDATE plan gate. ``service.trigger_shift``
-# proposes the foreman's PlanProposal THROUGH Instinct as a ``belt_plan``
-# Action (blob under ``Action.parameters._belt_plan``); after a human approves
-# it in The Tray, the ee instinct router fires ``execute_approved_plan`` here —
-# EXACTLY mirroring how ``ee.cloud.belt.executor.execute_approved_change`` is
-# fired for a ``_code_change`` Action. This function:
-#
-#   1. Reads the ``_belt_plan`` blob; a missing/schema-mismatched blob fails loud.
-#   2. RE-validates at approve time (defense in depth): the mandate still
-#      exists, is still ACTIVE, and the charter budget is UNCHANGED since the
-#      plan was proposed (a tightened budget refuses a now-over-budget plan).
-#   3. Dispatches each approved task as a normal Belt run via the injectable
-#      ``TaskDispatcher``. The default ``BusTaskDispatcher`` routes through the
-#      EXISTING belt service (``emit_belt_run_updated``) — the genuine external
-#      boundary here is the develop-station agent session, exactly as ``gh pr
-#      create`` was for the code-change executor, so tests inject a recorder.
-#      >>> DEMO-BAR CONCESSION: dispatch announces the run on the belt bus and
-#      records the task; wiring an autonomous develop-station runner is the
-#      autopilot PR's job. <<<
-#   4. Marks the shift ``executing`` → ``done`` (via the mandates service — the
-#      sole Beanie importer), appends the shift summary to the mandate's soul
-#      (best-effort), and closes the Decision-Graph chain with EXACTLY ONE
-#      ``decision.completed`` (the documented chain-doubling trap): every
-#      failure path returns right after its single ``_fail`` emit; the success
-#      path emits once at the end.
-#
-# Vocabulary pin (review M1): the chain's SUCCESS terminal is
-# ``action_outcome="dispatched"`` — everywhere. The strings "executed" /
-# ``mark_executed`` / ``ActionStatus.EXECUTED`` that appear nearby are the
-# Instinct STORE's status vocabulary for the Action row, not the chain
-# outcome; do not conflate the two.
-#
-# Reject path: the instinct router owns the chain close on reject (mirroring
-# code_change); it calls ``mark_plan_rejected`` here best-effort so the shift
-# record reflects the rejection.
+# Vocabulary: the chain's SUCCESS terminal is ``action_outcome="dispatched"``.
+# "executed" / ``mark_executed`` are the Instinct STORE's Action-row status, not
+# the chain outcome. Reject path: the instinct router owns the chain close and
+# calls ``mark_plan_rejected`` here best-effort to record the rejection.
 
 from __future__ import annotations
 
@@ -201,6 +159,7 @@ class StationTaskDispatcher:
         why = str(task.get("why") or "")
         expected = str(task.get("expected_outcome") or "")
         repo = await _repo_for_mandate(workspace_id, mandate_id)
+        worker = await _crew_seat(workspace_id, mandate_id, index)
 
         # The QUEUED-run blob: the SAME ``_code_change`` shape the console reads,
         # but with ``station_pending=True`` and NO diff. ``task`` carries the
@@ -212,10 +171,17 @@ class StationTaskDispatcher:
             # A station-queued run carries the task text instead of a diff.
             "station_pending": True,
             "repo": repo or "",
-            "base_branch": "",
+            # The station's default base, resolved now so every reader of the
+            # queued run (its blueprint above all) has it before the develop.
+            "base_branch": await belt_service.default_base(repo) if repo else "",
             "diff": "",
             "task": f"{title}\n\n{why}".strip(),
             "summary": expected or title,
+            # The short task title is the commit subject / PR title; the
+            # develop station overwrites ``summary`` with its report, so the
+            # expected outcome keeps its own key for a re-develop.
+            "title": title,
+            "expected_outcome": expected,
             "workspace_id": workspace_id,
             "requested_by": str(task.get("requested_by") or ""),
             # Provenance — tie the queued run back to the mandate shift + plan.
@@ -223,6 +189,14 @@ class StationTaskDispatcher:
             "shift_no": shift_no,
             "plan_action_id": plan_action_id,
             "task_index": index,
+            # A charter recipe name (foreman-validated) — the develop station
+            # runs that command instead of an LLM develop. "" = develop work.
+            "recipe": str(task.get("recipe") or ""),
+            # The crew seat this task runs on ({agent_id, name, setup,
+            # seated_by}); the headless runner reads the agent's model +
+            # instructions at develop time, as seated_by. {} = no crew: the
+            # factory env decides.
+            "worker": worker or {},
         }
 
         trigger = ActionTrigger(
@@ -279,6 +253,19 @@ async def _repo_for_mandate(workspace_id: str, mandate_id: str) -> str | None:
         return await mandate_service.repo_for_mandate(workspace_id, mandate_id)
     except Exception:  # noqa: BLE001 — a repo read must never break dispatch
         logger.debug("mandate: repo lookup for station run failed (non-fatal)", exc_info=True)
+        return None
+
+
+async def _crew_seat(workspace_id: str, mandate_id: str, index: int) -> dict[str, Any] | None:
+    """Best-effort read of the dev seat for task ``index`` (mandates service,
+    the sole Beanie importer). A read failure degrades to ``None`` (factory env
+    defaults); it never breaks the dispatch."""
+    try:
+        from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+        return await mandate_service.crew_seat_for_task(workspace_id, mandate_id, index)
+    except Exception:  # noqa: BLE001 — a crew read must never break dispatch
+        logger.warning("mandate: crew seat lookup failed (non-fatal)", exc_info=True)
         return None
 
 
@@ -491,6 +478,16 @@ async def execute_approved_plan(
         )
 
     try:
+        # Unpaid early-access workspace: the shift's runs spend off the credit
+        # ledger, so the plan is refused here, the one chokepoint every approve
+        # path (tray, bulk, Mission Control) reaches.
+        from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+        denied = await early_access_denial(workspace_id)
+        if denied is not None:
+            await _fail(denied.message, error_class=denied.code)
+            return
+
         if blob.get("schema") != BELT_PLAN_SCHEMA:
             await _fail(
                 "belt_plan schema mismatch — the plan blob is from an incompatible "

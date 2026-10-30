@@ -1,0 +1,175 @@
+[
+  {
+    "label": "the intents table is dropped, so chip prompts lose their widget",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    phrases |= {\" \".join(_words(i)) for i in INTENTS.get(name, {}).get(\"intents\", ())}",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_chip_prompt_gets_its_widget_with_props"
+    ]
+  },
+  {
+    "label": "the intents table is built from the overlay alone, so the manifest's keywords and hints are lost",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "INTENTS = intents_table(RIPPLE_PROFILE.manifest[\"intents\"], OVERLAY)",
+    "replace": "INTENTS = intents_table([], OVERLAY)",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_widget_out_of_the_overlay_still_matches_through_the_manifest"
+    ]
+  },
+  {
+    "label": "the overlay's extra keywords are dropped in the merge",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "        entry[\"intents\"] = asks + [k for k in extra.get(\"intents\", ()) if k not in asks]\n",
+    "replace": "        entry[\"intents\"] = asks\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_widget_out_of_the_overlay_still_matches_through_the_manifest"
+    ]
+  },
+  {
+    "label": "history is not scored, so a follow-up loses its widget",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "        score = 2 * _score(name, now, now_words) + _score(name, past, past_words)",
+    "replace": "        score = 2 * _score(name, now, now_words)",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_follow_up_keeps_the_widget_from_the_last_turns"
+    ]
+  },
+  {
+    "label": "widgets an earlier card used are not kept",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    earlier = earlier_widgets(history)\n",
+    "replace": "    earlier = []\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_widget_an_earlier_card_used_stays_picked"
+    ]
+  },
+  {
+    "label": "the top-K cap is dropped, so the per-turn section is unbounded",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "if name not in earlier][:TOP_K]",
+    "replace": "if name not in earlier]",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_picks_are_capped_and_never_echo_the_visitor"
+    ]
+  },
+  {
+    "label": "the per-turn section goes ahead of the fixed core, breaking the stable prefix",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            lines += [f\"   {widget_relevance.full_line(name, message, history)}\" for name in picked]",
+    "replace": "            lines[1:1] = [f\"   {widget_relevance.full_line(name, message, history)}\" for name in picked]",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_prompt_is_byte_stable_and_the_core_comes_first"
+    ]
+  },
+  {
+    "label": "the picked widgets never reach the paragraph",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        picked = widget_relevance.pick_widgets(message, history)\n",
+    "replace": "        picked = []\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_chip_prompt_gets_its_widget_with_props",
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_the_prompt_carries_the_map_hint"
+    ]
+  },
+  {
+    "label": "a widget's steering hint never reaches its line",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    return f\"{line} {hint}\" if hint else line",
+    "replace": "    return line",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_steering_hints_reach_the_section",
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_core_widgets_carry_their_steering_hints_on_every_turn"
+    ]
+  },
+  {
+    "label": "a curated line is ignored",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    if entry.get(\"line\"):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_the_steering_hints_reach_the_section"
+    ]
+  },
+  {
+    "label": "the picked-slot match is loosened, so a plain booking request loses its card",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "d like to book .+ at \\d\")",
+    "replace": "d like to book\")",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_booking_request_gets_no_picked_slot_note"
+    ]
+  },
+  {
+    "label": "a picked-slot turn keeps the full cards paragraph, so the model can write a booking card again",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if picked_slot(message, profile):\n        return _PICKED_SLOT_NOTE\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_picked_slot_turn_gets_a_text_only_instruction_and_no_card_grammar"
+    ]
+  },
+  {
+    "label": "FenceFilter ignores drop_cards, so a card on a picked-slot turn still renders",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if tag == _CARD_LANG and self._drop_cards:\n            return \"\"\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_picked_slot_turn_drops_a_card_and_keeps_the_text"
+    ]
+  },
+  {
+    "label": "the turn's FenceFilter is built without drop_cards, so the backstop never runs",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                drop_cards=picked_slot(message, profile),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_ripple_profile.py::test_a_picked_slot_turn_is_text_only_end_to_end"
+    ]
+  },
+  {
+    "label": "a named figure no longer ranks ahead of iso-scene",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    if \"figure\" in top and \"iso-scene\" in top and named_figures(message, history):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_figure_subject_gets_its_figure_first_with_its_anchors_alone"
+    ]
+  },
+  {
+    "label": "every figure is listed with its sliders and anchors, so the line grows with the catalog",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "        return _hinted(name, _figure_line(named_figures(message, history)))\n",
+    "replace": "        return _hinted(name, _figure_line(list(RIPPLE_FIGURES)))\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_figure_subject_gets_its_figure_first_with_its_anchors_alone"
+    ]
+  },
+  {
+    "label": "a figure an earlier card used loses its anchors on a later turn",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "            if fid in RIPPLE_FIGURES and fid not in seen:\n",
+    "replace": "            if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_figure_an_earlier_card_used_stays_in_full"
+    ]
+  },
+  {
+    "label": "the full-figure cap is dropped, so a message naming every figure lists them all",
+    "file": "ee/pocketpaw_ee/paw_bar/widget_relevance.py",
+    "find": "    return (seen + [fid for _, _, fid in sorted(scored)])[:MAX_FULL_FIGURES]\n",
+    "replace": "    return seen + [fid for _, _, fid in sorted(scored)]\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_core_plus_the_worst_case_section_stays_under_the_cap"
+    ]
+  },
+  {
+    "label": "the craft-backed authoring rules lose the manifest's rule text",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return f\"   - {CRAFT_RULES[rule_id]} {detail}\"\n",
+    "replace": "    return f\"   - {detail}\"\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_widget_relevance.py::test_a_rule_that_repeats_a_craft_rule_leads_with_the_manifest_text"
+    ]
+  }
+]

@@ -137,14 +137,23 @@ async def search_sessions(q: str = Query(""), limit: int = Query(20, ge=1, le=20
 
 
 @router.get("/sessions/{session_id}/history")
-async def get_session_history(session_id: str, limit: int = Query(50, ge=1, le=500)):
-    """Get session message history."""
+async def get_session_history(
+    session_id: str,
+    limit: int = Query(50, ge=1, le=500),
+    before: str | None = Query(None),
+):
+    """Get session message history.
+
+    Returns ``{"messages": [...], "has_more": bool}`` — messages newest-window
+    first, ASCENDING. Pass ``before`` (the oldest loaded message's
+    ``{createdAt}|{id}`` cursor) to page backward into older history.
+    """
     from pocketpaw.memory import get_memory_manager
 
     if not session_id:
-        return []
+        return {"messages": [], "has_more": False}
     manager = get_memory_manager()
-    return await manager.get_session_history(session_id, limit=limit)
+    return await manager.get_session_history_page(session_id, limit=limit, before=before)
 
 
 @router.get("/sessions/{session_id}/export")

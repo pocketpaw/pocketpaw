@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -66,7 +67,7 @@ def _build_app(*, workspace_id: str | None = "w1", monkeypatch=None) -> FastAPI:
     if monkeypatch is not None:
         from pocketpaw_ee.cloud._core import deps as core_deps
 
-        monkeypatch.setattr(core_deps, "check_workspace_action", lambda *a, **k: None)
+        monkeypatch.setattr(core_deps, "check_workspace_action", AsyncMock(return_value=None))
 
     return app
 

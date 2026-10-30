@@ -1,28 +1,33 @@
-# ee/pocketpaw_ee/cloud/mandates/domain.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
+# ee/pocketpaw_ee/cloud/mandates/domain.py — MANDATE persistence + value objects.
 #
-# Updated: 2026-06-11 (feat/belt-autopilot) — added the ``Autopilot`` embedded
-# value object + the ``autopilot`` field on ``MandateDoc``. Autopilot runs
-# Foresight-seeded simulated users against the mandate's surface on a background
-# cycle, emitting structured feedback sightings the next shift's foreman cites.
-# The persisted state is ``{on: bool, users: int}``; the background asyncio task
-# itself is process-local (the ``autopilot`` module's registry), never persisted.
-#
-# The MANDATE primitive's persistence + value objects. A MANDATE is a standing
-# JOB the Belt holds over time (an FDE retainer): it senses its surface via
-# PATROLS, plans a FEW tasks per SHIFT via a FOREMAN (LLM judgment), routes the
+# A MANDATE is a standing JOB the Belt holds over time: it senses its surface via
+# PATROLS, plans each SHIFT's tasks via a FOREMAN (LLM judgment), routes the
 # plan through a PLAN GATE (Instinct ``belt_plan`` proposal), and dispatches
 # approved tasks as normal Belt runs.
 #
-# This module holds BOTH the Beanie documents (MandateDoc / ShiftDoc /
-# SightingDoc) AND the frozen domain/charter value objects. Per the 4-file
-# entity rule, ONLY ``mandates/service.py`` imports the Beanie doc classes; the
-# router/dto layers see only the frozen domain objects the service maps to.
+# The CHARTER is the standing brief: goal, KPIs, says_no + boundaries (hard
+# constraints), budget, cadence (``daily`` / ``weekly`` / ``continuous`` /
+# ``manual``), and the factory's deterministic hooks — ``checks`` (commands that
+# must pass before a headless develop run's diff is attached) and ``recipes``
+# (named commands a plan task can run instead of an LLM develop). Checks and
+# recipes are argv strings split with ``shlex`` and never run through a shell;
+# only ``belt.manage`` (admin) can write a charter. ``model`` (fable / opus /
+# sonnet, unset = the CLI default) is the Claude model the line's cloud sessions
+# start on.
 #
-# The docs live here (not in cloud/models/) so the entity is self-contained;
-# they are registered into ``init_beanie`` via a lazy import in
-# ``cloud/models/__init__.get_all_documents`` (same out-of-models pattern the
-# calendar docs use). Every doc carries the ``workspace`` tenancy key, indexed.
+# This module holds BOTH the Beanie documents (MandateDoc / ShiftDoc /
+# SightingDoc) AND the frozen value objects. Per the 4-file entity rule, ONLY
+# ``mandates/service.py`` imports the Beanie doc classes. The docs are registered
+# into ``init_beanie`` via a lazy import in ``cloud/models/__init__``. Every doc
+# carries the ``workspace`` tenancy key, indexed. ``Autopilot`` is persisted
+# ``{on, users}``; its background task is process-local (``autopilot`` module).
+# ``MandateDoc.upstream`` is the ``upstream`` patrol's config: pinned GitHub
+# dependencies (``{repo, pin_file}``) whose new commits the patrol reports.
+# ``MandateDoc.crew`` is the roster: cloud Agents on the mandate, each with a
+# role (``dev`` / ``reviewer`` / ``foreman`` / ``tester``), a concurrency and an optional
+# Claude setup (``owner`` / ``strict``; unset = the factory env). A crew member
+# IS an Agent; the roster holds only the link plus the seat, never a copy of the
+# agent's model or instructions.
 
 from __future__ import annotations
 
@@ -40,9 +45,18 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 # ---------------------------------------------------------------------------
 
 KpiDirection = Literal["up", "down"]
-Cadence = Literal["weekly", "manual"]
+Cadence = Literal["daily", "weekly", "continuous", "manual"]
+CrewRole = Literal["dev", "reviewer", "foreman", "tester"]
+CrewSetup = Literal["owner", "strict"]
 MandateStatus = Literal["active", "paused"]
 ShiftState = Literal["planning", "in_gate", "executing", "done", "stood_down"]
+# What a shift plans: ``task`` (the foreman's judgment) or ``feature-lead`` (one
+# lead run per line of free feature issues, planned without the LLM: ``lead_planner``).
+RunKind = Literal["task", "feature-lead"]
+# The run kind's recipe on each planned task; the cloud station's ``LEAD_RECIPE``.
+LEAD_RUN_KIND = "feature-lead"
+# The Claude model a line's cloud sessions start on (``claude --model <alias>``).
+CharterModel = Literal["fable", "opus", "sonnet"]
 
 
 # ---------------------------------------------------------------------------
@@ -65,15 +79,20 @@ class Kpi(BaseModel):
 
 
 class Budget(BaseModel):
-    """Per-shift + per-week budget caps on a mandate charter.
+    """Per-shift, in-flight + per-week budget caps on a mandate charter.
 
-    ``max_tasks_per_shift`` is the hard cap the foreman MUST respect and the
-    plan-gate executor RE-validates at approval time. ``gate_minutes_per_week``
-    is the human-review time budget the mandate is allowed to consume (advisory
-    at demo bar).
+    ``max_tasks_per_shift`` is the hard cap on one plan: machine validation
+    refuses more and the plan-gate executor RE-validates it at approval time.
+    ``max_in_flight`` caps the line's tasks in flight at once (runs, plus tasks
+    of plans waiting at the plan gate); a shift's budget is the headroom under
+    it (``service._headroom``). ``None`` (every charter that
+    predates the field) reads as ``max_tasks_per_shift``.
+    ``gate_minutes_per_week`` is the human-review time budget the mandate is
+    allowed to consume (advisory at demo bar).
     """
 
     max_tasks_per_shift: int = 3
+    max_in_flight: int | None = None
     gate_minutes_per_week: int = 15
 
 
@@ -83,8 +102,33 @@ class Charter(BaseModel):
     ``goal`` is the one-line job. ``kpis`` are the tracked outcomes.
     ``says_no`` + ``boundaries`` are hard constraints the foreman must honor
     (a boundary OVERRIDES a KPI opportunity). ``budget`` caps the per-shift
-    task count + weekly gate minutes. ``cadence`` is ``"weekly"`` or
-    ``"manual"`` (demo bar triggers shifts manually).
+    task count + weekly gate minutes. ``cadence`` is ``"daily"``, ``"weekly"``,
+    ``"continuous"`` (a shift fires while the line has headroom under its
+    in-flight cap and unworked open sightings remain; ``service.list_cadence_due``
+    has the rules) or
+    ``"manual"`` (the scheduler never fires a manual mandate).
+
+    ``checks`` are commands that must pass before a headless develop run's diff
+    is attached (e.g. ``uv run pytest -q``). ``recipes`` maps a name to a
+    deterministic command a plan task can run instead of an LLM develop (e.g.
+    ``{"bump-photo": "node scripts/bump-craft-engine.mjs photo"}``). Both are
+    argv strings split with ``shlex`` — never run through a shell.
+
+    ``issue_labels`` scopes the ``issues`` patrol on a GitHub-bound repo: an
+    open issue is sighted when it carries one of these labels (e.g.
+    ``["line:flare"]``). Empty = the GitHub patrol takes nothing.
+
+    ``run_kind`` ``"feature-lead"`` marks a lead mandate: each shift plans one
+    ``feature-lead`` run per line of free feature issues (``lead_planner``), skipping the
+    foreman, and the plan is approved as ``system:lead-planner``. ``"task"``
+    (the default) is the foreman and the plan gate.
+
+    ``beta_only`` (lead mandates) leaves ``p3`` issues out of the plan: p3 is
+    out of the beta. Off by default.
+
+    ``model`` is the Claude model every cloud session of the line starts on
+    (``claude --model <model> --cloud``: leads, workers, fixers, reviewers,
+    testers, relaunches). ``None`` launches on the CLI's own default.
     """
 
     goal: str
@@ -93,12 +137,50 @@ class Charter(BaseModel):
     boundaries: list[str] = Field(default_factory=list)
     budget: Budget = Field(default_factory=Budget)
     cadence: Cadence = "weekly"
+    checks: list[str] = Field(default_factory=list)
+    recipes: dict[str, str] = Field(default_factory=dict)
+    issue_labels: list[str] = Field(default_factory=list)
+    run_kind: RunKind = "task"
+    model: CharterModel | None = None
+    beta_only: bool = False
 
 
 class Surface(BaseModel):
     """What a mandate senses + acts on. v1 binds one repo (``repo_id``)."""
 
     repo_id: str
+
+
+class UpstreamPin(BaseModel):
+    """One pinned GitHub dependency the ``upstream`` patrol watches.
+
+    ``repo`` is ``owner/name``; ``pin_file`` is a TOML file (e.g. a
+    ``Cargo.toml``) relative to the mandate's bound repo whose
+    ``git = "https://github.com/<repo>"`` dependency carries the pinned ``rev``."""
+
+    repo: str
+    pin_file: str
+
+
+class CrewMember(BaseModel):
+    """One seat on a mandate's crew: a cloud Agent and how it works here.
+
+    ``agent_id`` is the Agent (its model, instructions and soul live there).
+    ``role`` is the seat; only ``dev`` seats take plan tasks (round-robin, see
+    ``mandates.service.pick_dev``), and the first live ``tester`` seat runs the
+    cloud station's tester on a landed run. ``concurrency`` is how many develops the
+    worker may run at once (recorded; the factory still runs one at a time).
+    ``setup`` picks the develop station's Claude setup for this worker's runs;
+    ``None`` keeps the factory's ``POCKETPAW_FACTORY_CLAUDE_SETUP``.
+    ``seated_by`` is the admin who seated this agent (server-set; a later roster
+    save by anyone keeps it): every develop re-reads the agent AS that user, so
+    an agent they can no longer read is a gone seat."""
+
+    agent_id: str
+    role: CrewRole = "dev"
+    concurrency: int = 1
+    setup: CrewSetup | None = None
+    seated_by: str = ""
 
 
 class Autopilot(BaseModel):
@@ -142,6 +224,13 @@ class MandateDoc(TimestampedDocument):
     # Autopilot — Foresight-seeded simulated users feeding the feedback patrol.
     # Persisted so a restart re-derives the running task; default off.
     autopilot: Autopilot = Field(default_factory=Autopilot)
+    # The ``upstream`` patrol's watch list; empty on mandates that predate it.
+    upstream: list[UpstreamPin] = Field(default_factory=list)
+    # The crew roster; empty = the factory's env defaults run every task.
+    crew: list[CrewMember] = Field(default_factory=list)
+    # ``shift_lock`` ({token, expires_at}) is deliberately NOT a field: only
+    # ``service._claim_shift`` / ``_release_shift`` write it, raw, because
+    # ``save()`` ``$set``s every model field and would clear a live lock.
 
     class Settings:
         name = "mandates"
@@ -176,7 +265,9 @@ class SightingDoc(TimestampedDocument):
     ``patrol`` is the producing patrol name (``"deps"`` / ``"feedback"``).
     ``severity`` is 1-5 (5 = most urgent). ``summary`` is the one-line headline;
     ``evidence`` carries patrol-specific detail (package name, CVE id, feedback
-    source). Sightings are the foreman's input signal between shifts.
+    source). A sighting stays OPEN, in the foreman's backlog, until a task that
+    cites it lands; the shift that first sees that landed run records it on
+    ``resolved_by_run`` / ``resolved_at``.
     """
 
     workspace: Indexed(str)  # type: ignore[valid-type]
@@ -186,6 +277,8 @@ class SightingDoc(TimestampedDocument):
     summary: str
     evidence: dict = Field(default_factory=dict)
     ts: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    resolved_by_run: str | None = None
+    resolved_at: datetime | None = None
 
     class Settings:
         name = "mandate_sightings"
@@ -245,6 +338,10 @@ __all__ = [
     "Budget",
     "Cadence",
     "Charter",
+    "CharterModel",
+    "CrewMember",
+    "CrewRole",
+    "CrewSetup",
     "Kpi",
     "KpiDirection",
     "MandateDoc",
@@ -256,4 +353,5 @@ __all__ = [
     "SightingDoc",
     "SightingView",
     "Surface",
+    "UpstreamPin",
 ]

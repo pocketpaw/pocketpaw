@@ -1,0 +1,10 @@
+{
+  "case_id": "on-kb-hours",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved answer. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "3a28983e23f5f7d9",
+  "raw_model_output": "We open at 7:30am on Sundays and close at 6pm."
+}

@@ -176,26 +176,28 @@ class PocketSpecialistCreateInput(BaseModel):
     )
     hints: PocketSpecialistHints | None = Field(default=None)
 
+
 class PocketSpecialistHints(BaseModel):
     """Caller-supplied overrides for fields the user named explicitly."""
+
     name: str | None = None
     description: str | None = None
-    color: str | None = None              # hex #RRGGBB
-    icon: str | None = None               # lucide-react icon name
-    target_pocket_id: str | None = None   # forces update path; skips
-                                          # list-decide branch
+    color: str | None = None  # hex #RRGGBB
+    icon: str | None = None  # lucide-react icon name
+    target_pocket_id: str | None = None  # forces update path; skips
+    # list-decide branch
 ```
 
 ### Output
 
 ```python
 class PocketSpecialistCreateOutput(BaseModel):
-    ok: bool                              # only false on infra failure
+    ok: bool  # only false on infra failure
     action: Literal["created", "extended"]
-    pocket: PocketSummary                 # id, name, description, type, icon, color
-    warnings: list[str]                   # validator warnings on the persisted spec
+    pocket: PocketSummary  # id, name, description, type, icon, color
+    warnings: list[str]  # validator warnings on the persisted spec
     duration_ms: int
-    backend_used: str                     # which backend ran the specialist
+    backend_used: str  # which backend ran the specialist
 ```
 
 `ok=False` is reserved for infrastructure failures (Mongo down, backend
@@ -266,8 +268,7 @@ async def run_specialist(
         backend_name,
         settings_override={
             f"{backend_name}_model": (
-                settings.pocket_specialist_model
-                or getattr(settings, f"{backend_name}_model")
+                settings.pocket_specialist_model or getattr(settings, f"{backend_name}_model")
             ),
         },
     )
@@ -363,8 +364,7 @@ pocket_specialist_model: str = Field(
 pocket_specialist_max_validation_retries: int = Field(
     default=3,
     description=(
-        "Max draft → validate → revise iterations before persisting "
-        "with remaining warnings."
+        "Max draft → validate → revise iterations before persisting with remaining warnings."
     ),
 )
 pocket_specialist_mode: Literal["subagent", "agent"] = Field(

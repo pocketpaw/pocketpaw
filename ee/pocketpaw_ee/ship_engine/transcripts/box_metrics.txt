@@ -1,0 +1,10 @@
+# Recorded from a healthy 2-vCPU Hetzner cx22 box running one app.
+# Command: awk '{print $1}' /proc/loadavg; nproc; free -m | awk '/^Mem:/{...}'; df -Pk / | awk 'NR==2{print $5}'
+# Four lines: load1, cores, memory used %, root filesystem used %.
+EXIT: 0
+--- stdout ---
+0.42
+2
+37.5
+23%
+--- stderr ---

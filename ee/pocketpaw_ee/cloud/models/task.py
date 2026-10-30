@@ -145,6 +145,8 @@ class Task(TimestampedDocument):
             [("workspace_id", 1), ("assignee_id", 1), ("status", 1)],
             [("workspace_id", 1), ("cycle_id", 1)],
             [("workspace_id", 1), ("status", 1), ("createdAt", -1)],
+            # Unfiltered ``GET /tasks``: workspace only, newest first.
+            [("workspace_id", 1), ("createdAt", -1)],
         ]
 
 

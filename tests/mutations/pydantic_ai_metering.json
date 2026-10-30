@@ -1,0 +1,142 @@
+[
+  {
+    "label": "the usage event goes silent again on a turn with no cache activity",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        output = int(getattr(usage, \"output_tokens\", 0) or 0)\n\n        from pocketpaw.llm.caching import report_savings",
+    "replace": "        output = int(getattr(usage, \"output_tokens\", 0) or 0)\n        if not read and not write:\n            return None\n\n        from pocketpaw.llm.caching import report_savings",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_a_run_with_no_cache_activity_is_still_metered"
+    ]
+  },
+  {
+    "label": "the cost is computed from the uncached remainder — cached tokens subtracted twice",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                input_tokens=total,\n                output_tokens=output,\n                cache_read_tokens=read,",
+    "replace": "                input_tokens=max(0, total - read - write),\n                output_tokens=output,\n                cache_read_tokens=read,",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_usage_event_carries_what_the_meter_actually_reads",
+      "tests/test_pydantic_ai_backend.py::test_the_meter_prices_a_pydantic_ai_run_end_to_end"
+    ]
+  },
+  {
+    "label": "the cache write is dropped from the price — a write bills as ordinary input again",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                cache_read_tokens=read,\n                cache_write_tokens=write,",
+    "replace": "                cache_read_tokens=read,\n                cache_write_tokens=0,",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_usage_event_carries_what_the_meter_actually_reads"
+    ]
+  },
+  {
+    "label": "the model is taken from configuration instead of the response that answered",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "        model_name = getattr(response, \"model_name\", None)",
+    "replace": "        model_name = None",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_usage_event_carries_what_the_meter_actually_reads",
+      "tests/test_pydantic_ai_backend.py::test_the_meter_prices_a_pydantic_ai_run_end_to_end"
+    ]
+  },
+  {
+    "label": "total_cost_usd is dropped from the payload — the meter falls through to zero",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                \"total_cost_usd\": cost,\n                \"model\": model_name,",
+    "replace": "                \"model\": model_name,",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_usage_event_carries_what_the_meter_actually_reads",
+      "tests/test_pydantic_ai_backend.py::test_the_meter_prices_a_pydantic_ai_run_end_to_end"
+    ]
+  },
+  {
+    "label": "output tokens are dropped — the half of a conversation that costs the most",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                \"output_tokens\": output,\n                \"cached_input_tokens\": read,",
+    "replace": "                \"cached_input_tokens\": read,",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_usage_event_carries_what_the_meter_actually_reads",
+      "tests/test_pydantic_ai_backend.py::test_a_run_with_no_cache_activity_is_still_metered"
+    ]
+  },
+  {
+    "label": "cached_input_tokens is dropped — a cache hit is billed at the full input rate",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                \"cached_input_tokens\": read,\n                \"cache_read_tokens\": savings.cache_read_tokens,",
+    "replace": "                \"cache_read_tokens\": savings.cache_read_tokens,",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_the_usage_event_carries_what_the_meter_actually_reads"
+    ]
+  },
+  {
+    "label": "an unpriced model raises instead of billing zero — one bad model stalls the sweep",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            if priced is not None:\n                cost = float(priced)\n            else:",
+    "replace": "            cost = float(priced)\n            if False:",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_an_unpriced_model_degrades_instead_of_raising"
+    ]
+  },
+  {
+    "label": "the uncached-remainder subtraction inverts — the cache A/B's hit rate inflates",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "                \"input_tokens\": max(0, total - read - write),\n                \"output_tokens\": output,",
+    "replace": "                \"input_tokens\": total,\n                \"output_tokens\": output,",
+    "tests": [
+      "tests/test_pydantic_ai_backend.py::test_usage_event_reports_uncached_remainder"
+    ]
+  },
+  {
+    "label": "an id the price library does not carry leaves the table — it silently bills zero",
+    "file": "src/pocketpaw/usage_tracker.py",
+    "find": "    \"claude-haiku-4-20250506\": {\"input\": 0.80, \"output\": 4.0, \"cached_input\": 0.08},",
+    "replace": "",
+    "tests": [
+      "tests/test_usage_tracker.py::TestTheTableIsTheLastRungAndStillCarriesItsOwn::test_the_ids_the_library_does_not_carry_fall_through_to_the_table"
+    ]
+  },
+  {
+    "label": "the table lookup goes back to first-hit-in-insertion-order — a dated mini id bills at its bigger sibling's rate",
+    "file": "src/pocketpaw/usage_tracker.py",
+    "find": "            if (model.startswith(key) or key.startswith(model)) and (\n                best is None or len(key) > len(best)\n            ):\n                best = key",
+    "replace": "            if model.startswith(key) or key.startswith(model):\n                best = key\n                break",
+    "tests": [
+      "tests/test_usage_tracker.py::TestTheTableIsTheLastRungAndStillCarriesItsOwn::test_a_dated_mini_id_does_not_match_its_bigger_sibling"
+    ]
+  },
+  {
+    "label": "the cache-hit rate is charged as full input — the 69% discount disappears",
+    "file": "src/pocketpaw/usage_tracker.py",
+    "find": "        + cached_input_tokens * pricing.get(\"cached_input\", pricing[\"input\"])",
+    "replace": "        + cached_input_tokens * pricing[\"input\"]",
+    "tests": [
+      "tests/test_usage_tracker.py::TestTheModelsWeActuallyRunArePriceable::test_a_cache_hit_is_cheaper_than_a_cold_read"
+    ]
+  },
+  {
+    "label": "the run is priced at sweep time instead of at the moment it ran — a backlog reprices at today's rates",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "    cost = resolve_cost(run_doc.usage, at=run_moment(run_doc))",
+    "replace": "    cost = resolve_cost(run_doc.usage, at=None)",
+    "tests": [
+      "tests/cloud/metering/test_compute_meter.py::test_a_backlogged_run_bills_at_the_rate_it_actually_ran_at"
+    ]
+  },
+  {
+    "label": "the meter reads the uncached remainder as the whole prompt — every cached turn undercounts",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        return raw_input + read + write, read, write",
+    "replace": "        return raw_input, read, write",
+    "tests": [
+      "tests/cloud/metering/test_compute_meter.py::test_a_cached_anthropic_payload_is_read_as_an_inclusive_prompt"
+    ]
+  },
+  {
+    "label": "an unpriced run collapses back into 'none' — a bill we failed to send looks like nothing to bill",
+    "file": "ee/pocketpaw_ee/cloud/metering/service.py",
+    "find": "        return ComputeCost(cost_usd=0.0, source=\"unpriced\", model=model)",
+    "replace": "        return ComputeCost(cost_usd=0.0, source=\"none\", model=model)",
+    "tests": [
+      "tests/cloud/metering/test_compute_meter.py::test_an_unpriced_model_is_its_own_source_and_not_silence",
+      "tests/cloud/metering/test_compute_meter.py::test_the_sweep_names_the_models_it_could_not_price"
+    ]
+  }
+]

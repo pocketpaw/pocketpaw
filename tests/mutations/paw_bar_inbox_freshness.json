@@ -1,0 +1,96 @@
+[
+  {
+    "label": "the freshness merge is removed — the list row freezes at the last RUN again (the original bug)",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "            if line_at is not None and (run_at is None or line_at > run_at):\n                last_message_at = line.created_at\n                preview = (line.content or \"\")[:_CONVERSATION_PREVIEW_CHARS]\n                run_at = line_at",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_owner_reply_becomes_the_row_preview",
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_muted_visitor_line_becomes_the_row_preview",
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_rows_sort_by_the_latest_line_not_the_latest_run"
+    ]
+  },
+  {
+    "label": "the out-of-band read returns nothing — the merge has no lines to merge",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    if widget is None or not refs:\n        return {}, {}\n    try:\n        lines = await _store().list_recent_owner_messages(",
+    "replace": "    if True:\n        return {}, {}\n    try:\n        lines = await _store().list_recent_owner_messages(",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_owner_reply_becomes_the_row_preview",
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_muted_visitor_line_becomes_the_row_preview"
+    ]
+  },
+  {
+    "label": "the merged re-sort is dropped — a human-held conversation sinks below a quiet one",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    merged.sort(key=lambda m: (m[0] is not None, m[0] or _EPOCH), reverse=True)",
+    "replace": "    pass",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_rows_sort_by_the_latest_line_not_the_latest_run"
+    ]
+  },
+  {
+    "label": "the newest-first sort inverts — the oldest conversation leads the inbox",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    merged.sort(key=lambda m: (m[0] is not None, m[0] or _EPOCH), reverse=True)",
+    "replace": "    merged.sort(key=lambda m: (m[0] is not None, m[0] or _EPOCH))",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_rows_sort_by_the_latest_line_not_the_latest_run"
+    ]
+  },
+  {
+    "label": "the store's role filter widens to SYSTEM — a resume notice becomes the inbox preview",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "            wanted = [OwnerMessageRole.OWNER.value, OwnerMessageRole.VISITOR.value]",
+    "replace": "            wanted = [r.value for r in OwnerMessageRole]",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_system_lines_never_become_the_row_preview"
+    ]
+  },
+  {
+    "label": "the batched read ignores the visitor filter — another visitor's line can preview this row",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "        placeholders = \", \".join(\"?\" for _ in customer_refs)\n        conditions += f\" AND customer_ref IN ({placeholders})\"\n        params.extend(customer_refs)\n        role_placeholders",
+    "replace": "        role_placeholders",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_a_busy_widget_does_not_starve_the_page_of_its_own_lines"
+    ]
+  },
+  {
+    "label": "an owner line stops carrying who typed it — the thread says \"someone replied\" again",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        author_name=getattr(identity, \"name\", \"\") or \"\",\n        author_avatar=getattr(identity, \"avatar\", \"\") or \"\",",
+    "replace": "        author_name=\"\",\n        author_avatar=\"\",",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_transcript_owner_line_names_the_human_who_typed_it",
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_reply_echo_carries_the_author_identity"
+    ]
+  },
+  {
+    "label": "the reply echo goes out unattributed — the operator's own sentence reads as anonymous until the next poll",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "        message=_owner_transcript_message(message, await _resolve_message_authors([message])),",
+    "replace": "        message=_owner_transcript_message(message),",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_reply_echo_carries_the_author_identity"
+    ]
+  },
+  {
+    "label": "attribution stops being owner-only — a visitor's muted line is stamped with an operator",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    identity = (authors or {}).get(author_id) if role == \"owner\" else None",
+    "replace": "    identity = (authors or {}).get(author_id)",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_only_owner_lines_are_attributed"
+    ]
+  },
+  {
+    "label": "the public visitor poll starts carrying the operator's identity — a staff name and photo to every stranger",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "class VisitorMessage(BaseModel):\n    \"\"\"One owner/system line as the VISITOR's widget sees it.",
+    "replace": "class VisitorMessage(BaseModel):\n    author_name: str = \"\"\n\n    \"\"\"One owner/system line as the VISITOR's widget sees it.",
+    "tests": [
+      "tests/cloud/test_paw_bar_inbox_freshness.py::test_visitor_poll_never_carries_the_operator_identity"
+    ]
+  }
+]

@@ -51,9 +51,7 @@ The primary notification persistence model, extending `TimestampedDocument` (whi
 ```python
 class Settings:
     name = "notifications"  # MongoDB collection name
-    indexes = [
-        [('recipient', 1), ('read', 1), ('created_at', -1)]
-    ]
+    indexes = [[("recipient", 1), ("read", 1), ("created_at", -1)]]
 ```
 The composite index optimizes the common query pattern: *"Get unread notifications for user X, sorted by recency."* This is the inbox query performed on every app load. The index enables efficient filtering by recipient and read status, then sorts by creation time descending (newest first).
 
@@ -191,20 +189,23 @@ The indexed `recipient` field enables efficient access control checks ("does use
 
 **Get inbox (unread notifications for a user):**
 ```python
-await Notification.find(
-    Notification.workspace == workspace_id,
-    Notification.recipient == user_id,
-    Notification.read == False,
-    Notification.expires_at == None | (Notification.expires_at > datetime.now())
-).sort([("created_at", -1)]).to_list()
+await (
+    Notification.find(
+        Notification.workspace == workspace_id,
+        Notification.recipient == user_id,
+        Notification.read == False,
+        Notification.expires_at == None | (Notification.expires_at > datetime.now()),
+    )
+    .sort([("created_at", -1)])
+    .to_list()
+)
 ```
 
 **Mark notifications as read:**
 ```python
-await Notification.find(
-    Notification.recipient == user_id,
-    Notification.read == False
-).update({"$set": {"read": True}})
+await Notification.find(Notification.recipient == user_id, Notification.read == False).update(
+    {"$set": {"read": True}}
+)
 ```
 
 **Get all notifications (including read) for user:**

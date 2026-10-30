@@ -152,6 +152,30 @@ class TestLangchainReactAgentFactory:
         assert a1 is a2
         assert mock_factory.call_count == 1
 
+    def test_a_changed_system_prompt_rebuilds_the_graph(self):
+        """A new session must not be served the previous session's prompt.
+
+        ``prompt=`` is compiled into the graph and ``AgentPool`` keeps ONE
+        instance per agent across every session, so a cache key that ignores
+        the prompt hands session B the graph built for session A — which is how
+        a brand-new chat opened already knowing the site built in the last one.
+        This key was the model name alone.
+        """
+        from pocketpaw.agents.langchain_react import LangchainReactBackend
+
+        backend = LangchainReactBackend(Settings(deep_agents_model="anthropic:claude-sonnet-4-6"))
+        backend._custom_tools = []
+
+        with patch(
+            "langgraph.prebuilt.create_react_agent",
+            side_effect=lambda **kw: MagicMock(name=f"graph:{kw.get('prompt')}"),
+        ) as mock_factory:
+            backend._get_or_create_agent(MagicMock(), "SITE: Acme Dental", mcp_tools=[])
+            backend._get_or_create_agent(MagicMock(), "CHAT: fresh session", mcp_tools=[])
+
+        assert mock_factory.call_count == 2, "prompt change did not rebuild the graph"
+        assert mock_factory.call_args_list[-1].kwargs["prompt"] == "CHAT: fresh session"
+
 
 class TestLangchainReactStatus:
     async def test_status_reports_correct_backend_name(self):

@@ -1,5 +1,22 @@
 """Auth domain — FastAPI router.
 
+POST /auth/guest mints an anonymous BYOK guest (rate-limited per IP, key
+validated before anything is created, answers with the same cookie login
+response /auth/login uses); POST /auth/guest/upgrade attaches email+password to
+the SAME guest user id, after the register password policy (a rejection answers
+with register's 400 ``REGISTER_INVALID_PASSWORD`` shape). Both, and the
+MFA-gated login overrides, are registered BEFORE the fastapi-users
+sub-routers, because route order is the override.
+
+``password_signup_open`` (settings) gates the two password sign-up doors,
+/auth/register and /auth/guest/upgrade: while False both answer 403
+``auth.password_signup_closed`` and social sign-in is the only way in. Login
+for existing password accounts is untouched.
+
+Password checks in this module (MFA disable, backup-code regenerate) go
+through ``auth.password_hashing`` so argon2 never runs on the event loop, and
+are rate-limited per user (``mfa_password_limiter``, 429).
+
 Profile endpoints use ``Depends(request_context)`` and call into
 ``ee.cloud.auth.service`` module functions directly. The fastapi-users
 sub-routers (login/logout/register) and the avatar file-serving / upload
@@ -17,14 +34,23 @@ from beanie import PydanticObjectId
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
+from fastapi_users.exceptions import InvalidPasswordException
 from fastapi_users.router.common import ErrorCode
 from pydantic import BaseModel
 from starlette.responses import FileResponse
 
-from pocketpaw.security.rate_limiter import mfa_challenge_limiter
+from pocketpaw.config import get_settings  # type: ignore[import-untyped]
+from pocketpaw.security.rate_limiter import (
+    guest_mint_limiter,
+    mfa_challenge_limiter,
+    mfa_password_limiter,
+)
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.audit import service as audit_service
+from pocketpaw_ee.cloud.auth import guest as guest_service
 from pocketpaw_ee.cloud.auth import mfa as mfa_service
+from pocketpaw_ee.cloud.auth import password_hashing
 from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.auth import sessions as sessions_service
 from pocketpaw_ee.cloud.auth._login_helpers import mint_and_record as _mint_and_record
@@ -294,6 +320,92 @@ async def revoke_other_sessions(
 
 
 # ---------------------------------------------------------------------------
+# Guest accounts (BYOK-first onboarding, 2026-09-01, feat/byok-guest-backend).
+# Registered BEFORE the fastapi-users sub-routers below, same as the MFA login
+# overrides at the top of this file. /auth/guest mints an anonymous account
+# from a validated provider key and answers with the SAME cookie login
+# response /auth/login answers with; /auth/guest/upgrade attaches real
+# credentials to the SAME user id (the stock /auth/register cannot — it
+# always creates a new user).
+# ---------------------------------------------------------------------------
+
+
+class _GuestMintRequest(BaseModel):
+    api_key: str
+    provider: str = "anthropic"
+    # Only meaningful for provider "openai_compatible". The URL is checked
+    # against the strict SSRF guard inside ``mint_guest``'s validation call,
+    # not here, so that one guard covers both the guest route and /byok/key.
+    base_url: str | None = None
+    model: str | None = None
+
+
+class _GuestUpgradeRequest(BaseModel):
+    email: str
+    password: str
+
+
+@router.post("/auth/guest", name="auth:guest.mint")
+async def guest_mint(
+    body: _GuestMintRequest,
+    request: Request,
+):
+    """Try-before-signup: validate the key, mint guest user + workspace.
+
+    Rate-limited per IP as literally the first step — the key validation
+    inside ``mint_guest`` is a provider round trip on our egress, and an
+    unthrottled mint route doubles as a key-checking oracle.
+    """
+    if not guest_mint_limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="guest_mint_rate_limited")
+    user = await guest_service.mint_guest(
+        body.api_key,
+        provider=body.provider,
+        base_url=body.base_url,
+        model=body.model,
+    )
+    response = await _mint_and_record(cookie_backend, user, request)
+    return response
+
+
+def _require_password_signup_open() -> None:
+    """Refuse a new password account while the launch switch has it closed."""
+    if not get_settings().password_signup_open:
+        raise Forbidden(
+            "auth.password_signup_closed",
+            "Sign-up with email and password is closed during early access. "
+            "Continue with Google instead.",
+        )
+
+
+@router.post(
+    "/auth/guest/upgrade",
+    name="auth:guest.upgrade",
+    dependencies=[Depends(_require_password_signup_open)],
+)
+async def guest_upgrade(
+    body: _GuestUpgradeRequest,
+    user: Any = Depends(current_active_user),
+) -> dict:
+    """Attach email+password to the authenticated guest — same user id,
+    workspace/sessions/pages/key all stay. The existing session keeps working;
+    the client should re-fetch /auth/me."""
+    try:
+        upgraded = await guest_service.upgrade_guest(user, email=body.email, password=body.password)
+    except InvalidPasswordException as exc:
+        # Register's exact shape, so the client's password-field mapping works.
+        raise HTTPException(
+            status_code=400,
+            detail={"code": ErrorCode.REGISTER_INVALID_PASSWORD, "reason": exc.reason},
+        ) from exc
+    return {
+        "id": str(upgraded.id),
+        "email": upgraded.email,
+        "is_guest": upgraded.is_guest,
+    }
+
+
+# ---------------------------------------------------------------------------
 # fastapi-users sub-routers (logout/register). The login + logout routes
 # are overridden above; register still comes from upstream.
 # ---------------------------------------------------------------------------
@@ -309,6 +421,7 @@ router.include_router(
 router.include_router(
     fastapi_users.get_register_router(UserRead, UserCreate),
     prefix="/auth",
+    dependencies=[Depends(_require_password_signup_open)],
 )
 router.include_router(
     fastapi_users.get_reset_password_router(),
@@ -321,9 +434,11 @@ router.include_router(
 
 router.include_router(api_keys_router)
 
+from pocketpaw_ee.cloud.auth.social import router as social_router  # noqa: E402
 from pocketpaw_ee.cloud.auth.sso import router as sso_router  # noqa: E402
 
 router.include_router(sso_router)
+router.include_router(social_router)
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +549,12 @@ async def mfa_disable(
 ) -> dict:
     if not user.mfa_enabled:
         raise HTTPException(status_code=400, detail="mfa_not_enabled")
+    if not mfa_password_limiter.allow(str(user.id)):
+        raise HTTPException(status_code=429, detail="mfa_too_many_attempts")
 
-    verified, _ = manager.password_helper.verify_and_update(body.password, user.hashed_password)
+    verified, _ = await password_hashing.verify_and_update(
+        body.password, user.hashed_password, manager.password_helper
+    )
     if not verified:
         raise HTTPException(status_code=400, detail="mfa_invalid_password")
     if not mfa_service.verify_totp(user.mfa_totp_secret or "", body.code):
@@ -460,8 +579,12 @@ async def mfa_regenerate_backup_codes(
 ) -> dict:
     if not user.mfa_enabled:
         raise HTTPException(status_code=400, detail="mfa_not_enabled")
+    if not mfa_password_limiter.allow(str(user.id)):
+        raise HTTPException(status_code=429, detail="mfa_too_many_attempts")
 
-    verified, _ = manager.password_helper.verify_and_update(body.password, user.hashed_password)
+    verified, _ = await password_hashing.verify_and_update(
+        body.password, user.hashed_password, manager.password_helper
+    )
     if not verified:
         raise HTTPException(status_code=400, detail="mfa_invalid_password")
     if not mfa_service.verify_totp(user.mfa_totp_secret or "", body.code):

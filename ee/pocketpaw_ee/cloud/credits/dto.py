@@ -29,13 +29,31 @@ class BalanceResponse(BaseModel):
 
 
 class LedgerEntryResponse(BaseModel):
-    """One movement on the wire — mirrors ``domain.LedgerEntry``."""
+    """One movement on the wire — mirrors ``domain.LedgerEntry``.
+
+    ``amount_delta`` and ``balance_after`` are WHOLE credits, kept for existing
+    clients, and they are not sufficient to render a row on their own. A proxy call
+    costing $0.0015 is 375_000 micro-credits, which truncates to 0 whole credits —
+    so a real charge arrives here as ``amount_delta: 0``, and a UI deriving the sign
+    from it (``>= 0`` reads as a credit) shows a DEBIT as ``+$0.00``. Observed on
+    the live billing page 2026-09-04, a column of ``+$0.00`` rows beside a falling
+    balance.
+
+    ``amount_delta_micro`` and ``balance_after_micro`` are the exact figures, in
+    millionths of a credit. Take the SIGN and the AMOUNT from those. They are the
+    stored values, so no rounding decision is made anywhere between the wallet and
+    the screen.
+    """
 
     id: str
     workspace_id: str
     kind: str
     amount_delta: int
     balance_after: int
+    # Exact, signed, in micro-credits (1_000_000 == 1 credit == $0.01). Render from
+    # these; the whole-credit pair above cannot express a sub-cent movement.
+    amount_delta_micro: int = 0
+    balance_after_micro: int = 0
     member_id: str | None = None
     cause: str | None = None
     ref: dict[str, Any] = Field(default_factory=dict)
@@ -62,6 +80,8 @@ def ledger_entry_to_dto(entry: LedgerEntry) -> LedgerEntryResponse:
         kind=entry.kind,
         amount_delta=entry.amount_delta,
         balance_after=entry.balance_after,
+        amount_delta_micro=entry.amount_delta_micro,
+        balance_after_micro=entry.balance_after_micro,
         member_id=entry.member_id,
         cause=entry.cause,
         ref=dict(entry.ref),

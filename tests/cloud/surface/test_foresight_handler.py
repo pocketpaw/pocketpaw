@@ -41,7 +41,7 @@ async def test_preamble_includes_directive_surface_guidance(
     monkeypatch.setattr(foresight_handler, "_render_workspace_ambient", _async_return(""))
     monkeypatch.setattr(foresight_handler, "_render_skill_hint", lambda: "")
 
-    out = await foresight_handler.build_preamble("ws_a", "user_a", SurfaceMeta())
+    out = (await foresight_handler.build_preamble("ws_a", "user_a", SurfaceMeta())).text
     assert "<surface-guidance>" in out
     assert "PREFER Foresight affordances" in out
     assert "DO NOT offer pocket creation" in out
@@ -62,7 +62,7 @@ async def test_surface_tag_emits_with_panel(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(foresight_handler, "_render_skill_hint", lambda: "")
 
     meta = SurfaceMeta(panel="live")
-    out = await foresight_handler.build_preamble("ws_a", "user_a", meta)
+    out = (await foresight_handler.build_preamble("ws_a", "user_a", meta)).text
     assert '<surface kind="foresight" route="/foresight" panel="live" />' in out
 
 
@@ -78,7 +78,7 @@ async def test_surface_tag_drops_unknown_panel(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(foresight_handler, "_render_skill_hint", lambda: "")
 
     meta = SurfaceMeta(panel="lvie")
-    out = await foresight_handler.build_preamble("ws_a", "user_a", meta)
+    out = (await foresight_handler.build_preamble("ws_a", "user_a", meta)).text
     assert '<surface kind="foresight" route="/foresight" />' in out
     assert "panel=" not in out
 
@@ -103,7 +103,7 @@ async def test_active_run_block_uses_run_id(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(foresight_handler, "_render_skill_hint", lambda: "")
 
     meta = SurfaceMeta(run_id="run:abc", panel="results")
-    out = await foresight_handler.build_preamble("ws_a", "user_a", meta)
+    out = (await foresight_handler.build_preamble("ws_a", "user_a", meta)).text
     assert captured == {"run_id": "run:abc", "workspace_id": "ws_a"}
     assert '<active-run id="run:abc"' in out
 
@@ -124,7 +124,7 @@ async def test_active_scenario_block_uses_scenario_id(
     monkeypatch.setattr(foresight_handler, "_render_skill_hint", lambda: "")
 
     meta = SurfaceMeta(scenario_id="cs_xyz", panel="editor")
-    out = await foresight_handler.build_preamble("ws_a", "user_a", meta)
+    out = (await foresight_handler.build_preamble("ws_a", "user_a", meta)).text
     assert captured == {"scenario_id": "cs_xyz"}
     assert '<active-scenario id="cs_xyz"' in out
 
@@ -207,7 +207,7 @@ async def test_handler_degrades_when_every_subrender_raises(
     # We expect this to propagate (build_preamble doesn't catch sub-renderer
     # exceptions; the service.py wrapper does — verified by the next test).
     with pytest.raises(RuntimeError):
-        await foresight_handler.build_preamble("ws_a", "user_a", meta)
+        (await foresight_handler.build_preamble("ws_a", "user_a", meta)).text
 
 
 async def test_service_wrapper_absorbs_handler_exception(

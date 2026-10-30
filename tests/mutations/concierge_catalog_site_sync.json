@@ -1,0 +1,157 @@
+[
+  {
+    "label": "OWNER WRITES STAMP THE SITE \u2014 an owner edit stays site-owned, so the next sync overwrites what the owner typed",
+    "file": "src/pocketpaw/paw_bar/catalog_store.py",
+    "find": "    now: str,\n    origin: str = ORIGIN_OWNER,\n",
+    "replace": "    now: str,\n    origin: str = ORIGIN_SITE,\n",
+    "tests": [
+      "tests/test_paw_bar_catalog_store.py::test_an_owner_edit_makes_a_site_item_the_owners_for_good",
+      "tests/cloud/test_paw_bar_catalog_routes.py::test_an_owner_put_or_bulk_write_takes_a_site_item_over"
+    ]
+  },
+  {
+    "label": "the sync stops telling owner rows apart, so an owner-made product counts as the site's",
+    "file": "src/pocketpaw/paw_bar/catalog_store.py",
+    "find": "        elif current[0] != ORIGIN_SITE:\n",
+    "replace": "        elif False:\n",
+    "tests": [
+      "tests/test_paw_bar_catalog_store.py::test_an_owner_edit_makes_a_site_item_the_owners_for_good"
+    ]
+  },
+  {
+    "label": "TOMBSTONES IGNORED \u2014 a product the owner deleted comes back on the next sync",
+    "file": "src/pocketpaw/paw_bar/catalog_store.py",
+    "find": "        if item.id in tombstones:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/test_paw_bar_catalog_store.py::test_a_deleted_site_item_does_not_come_back",
+      "tests/cloud/test_paw_bar_catalog_routes.py::test_an_owner_delete_keeps_a_site_item_from_coming_back"
+    ]
+  },
+  {
+    "label": "a delete writes no tombstone, so the deleted id is free for the sync to re-add",
+    "file": "src/pocketpaw/paw_bar/catalog_store.py",
+    "find": "                    [now, widget_id, *wanted],\n",
+    "replace": "                    [now, widget_id, *[\"\"] * len(wanted)],\n",
+    "tests": [
+      "tests/test_paw_bar_catalog_store.py::test_a_deleted_site_item_does_not_come_back"
+    ]
+  },
+  {
+    "label": "A PARTIAL IMPORT MARKS PRODUCTS SOLD OUT \u2014 one failed page and half the catalog reads unavailable",
+    "file": "src/pocketpaw/paw_bar/catalog_store.py",
+    "find": "    if complete:\n        listed = {item.id for item, _ in cleaned}\n",
+    "replace": "    if True:\n        listed = {item.id for item, _ in cleaned}\n",
+    "tests": [
+      "tests/test_paw_bar_catalog_store.py::test_a_partial_import_marks_nothing_sold_out"
+    ]
+  },
+  {
+    "label": "a missing site product is left in stock, so the concierge offers what the site stopped selling",
+    "file": "src/pocketpaw/paw_bar/catalog_store.py",
+    "find": "            \"UPDATE paw_bar_catalog_items SET in_stock = 0, updated_at = ?\"\n",
+    "replace": "            \"UPDATE paw_bar_catalog_items SET in_stock = in_stock, updated_at = ?\"\n",
+    "tests": [
+      "tests/test_paw_bar_catalog_store.py::test_a_product_gone_from_a_complete_import_is_sold_out_never_deleted"
+    ]
+  },
+  {
+    "label": "THE CAP IS IGNORED by the site sync \u2014 a large store grows a widget past pawbar_catalog_max_items",
+    "file": "src/pocketpaw/paw_bar/catalog_store.py",
+    "find": "            if room <= 0:\n",
+    "replace": "            if False:\n",
+    "tests": [
+      "tests/test_paw_bar_catalog_store.py::test_a_site_sync_stops_at_the_cap_in_the_importers_order"
+    ]
+  },
+  {
+    "label": "an unedited site row is never refreshed, so a price change on the site never reaches the cards",
+    "file": "src/pocketpaw/paw_bar/catalog_store.py",
+    "find": "    await db.executemany(_SITE_UPDATE_SQL, updates)\n",
+    "replace": "    await db.executemany(_SITE_UPDATE_SQL, updates[:0])\n",
+    "tests": [
+      "tests/test_paw_bar_catalog_store.py::test_a_resync_updates_a_site_item_the_owner_never_touched"
+    ]
+  },
+  {
+    "label": "a deployed DB keeps no origin column default, so pre-existing rows are not the owner's",
+    "file": "src/pocketpaw/paw_bar/store.py",
+    "find": "\"ALTER TABLE paw_bar_catalog_items ADD COLUMN origin TEXT NOT NULL DEFAULT 'owner'\"",
+    "replace": "\"ALTER TABLE paw_bar_catalog_items ADD COLUMN origin TEXT NOT NULL DEFAULT 'site'\"",
+    "tests": [
+      "tests/test_paw_bar_catalog_store.py::test_a_db_from_before_the_origin_column_reads_every_row_as_the_owners"
+    ]
+  },
+  {
+    "label": "a partial import counts as complete, so a timeout marks unread products sold out",
+    "file": "ee/pocketpaw_ee/paw_bar/catalog_sync.py",
+    "find": "        preview.status == \"ok\"\n",
+    "replace": "        preview.status in (\"ok\", \"partial\")\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_catalog_sync.py::test_only_a_complete_import_marks_missing_products_sold_out"
+    ]
+  },
+  {
+    "label": "an import cut at the cap counts as complete, so every product past the cap reads sold out",
+    "file": "ee/pocketpaw_ee/paw_bar/catalog_sync.py",
+    "find": "        and preview.total_found <= len(preview.items)\n",
+    "replace": "        and True\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_catalog_sync.py::test_only_a_complete_import_marks_missing_products_sold_out"
+    ]
+  },
+  {
+    "label": "CURRENCY-LESS PRICES WRITTEN \u2014 a product whose units are unknown is stored as USD",
+    "file": "ee/pocketpaw_ee/paw_bar/catalog_sync.py",
+    "find": "        items = [item for item in preview.items if item.currency]\n",
+    "replace": "        items = list(preview.items)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_catalog_sync.py::test_a_product_with_no_currency_is_left_for_the_owner"
+    ]
+  },
+  {
+    "label": "a site with no widget is still imported, so a site without a concierge is fetched for nothing",
+    "file": "ee/pocketpaw_ee/paw_bar/catalog_sync.py",
+    "find": "    widget = await _widget_for(site)\n    if widget is None:\n        return None\n",
+    "replace": "    widget = await _widget_for(site)\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_catalog_sync.py::test_a_site_without_a_widget_is_not_imported"
+    ]
+  },
+  {
+    "label": "two schedules for one site run two imports at once",
+    "file": "ee/pocketpaw_ee/paw_bar/catalog_sync.py",
+    "find": "    if key in _IN_FLIGHT:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_catalog_sync.py::test_the_detached_sync_runs_once_per_site_at_a_time"
+    ]
+  },
+  {
+    "label": "THE HOSTED LANE NEVER SCHEDULES THE CATALOG \u2014 a published store's products stay text only",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "        report.error = \"pocket_unavailable\"\n        await _record_sync(site, report, previous=previous)\n        return report\n    _schedule_catalog_sync(site)\n",
+    "replace": "        report.error = \"pocket_unavailable\"\n        await _record_sync(site, report, previous=previous)\n        return report\n",
+    "tests": [
+      "tests/cloud/test_site_kb_ingest.py::test_a_hosted_sync_schedules_the_catalog_sync"
+    ]
+  },
+  {
+    "label": "THE CONNECTED LANE NEVER SCHEDULES THE CATALOG \u2014 a connected store's products stay text only",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "    _schedule_first_foreign_screenshot(site)\n    _schedule_catalog_sync(site)\n",
+    "replace": "    _schedule_first_foreign_screenshot(site)\n",
+    "tests": [
+      "tests/cloud/test_site_foreign_grounding.py::test_a_crawl_that_reached_the_origin_schedules_the_catalog_sync"
+    ]
+  },
+  {
+    "label": "the public spec leaks a row's bookkeeping (origin, source, position) to every visitor",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "item.model_dump(include=_PUBLIC_CATALOG_FIELDS)",
+    "replace": "item.model_dump()",
+    "tests": [
+      "tests/cloud/test_paw_bar_catalog_routes.py::test_the_frozen_public_spec_is_filled_from_the_store"
+    ]
+  }
+]

@@ -53,11 +53,15 @@
 #       permission filtering inside the service; workspace.view is the MEMBER read
 #       gate that mirrors that membership requirement fail-closed. Service passes
 #       user_id so the service applies the same permission filter the route does.
-#     * billing_usage_read(start?, end?) — READ usage/spend. Gate ``workspace.view``
-#       (MEMBER) — the REST GET /billing/usage route is membership-only (any role
-#       may read its own workspace's usage; it does NOT gate on billing.manage), so
-#       we match it and do NOT over-gate to OWNER. Service:
-#       billing.usage.get_workspace_usage (start/end → start_date/end_date).
+#     * billing_usage_read(start?, end?) — READ usage/spend. Gate ``billing.view``
+#       (ADMIN) — EXACTLY what the REST GET /billing/usage route gates on. This
+#       said ``workspace.view`` (MEMBER) until 2026-09-02, and the reason given was
+#       that the REST route was membership-only. That was true, and it was the bug:
+#       the billing router carried no action gate at all, so "mirroring" it meant
+#       inheriting a hole. Now that the route gates at ``billing.view``, so does
+#       this — the mirror is the point, and it has to move in the same direction.
+#       Still NOT ``billing.manage`` (OWNER): reading the bill is not managing it.
+#       Service: billing.usage.get_workspace_usage (start/end → start_date/end_date).
 #     * audit_read(limit?) — READ recent audit rows. Gate ``audit.read`` (ADMIN —
 #       EXACTLY what the REST GET /{id}/audit route gates on). Service:
 #       audit.service.list_events_response (limit → AuditQueryRequest.limit).
@@ -122,6 +126,38 @@
 #       ``seats`` field). With no safe, honest execution path, wiring it would mean
 #       either a silent seat DB write (bypassing billing) or a fabricated flow —
 #       both refused. Skipped; escalated as NEEDS_CONTEXT.
+#
+# Updated: 2026-09-02 (fix/billing-router-authorization) — billing_usage_read now
+#   gates at ``billing.view`` (ADMIN), not ``workspace.view`` (MEMBER). The gate
+#   did not change independently: the REST GET /billing/usage route moved to
+#   ``billing.view`` in the same change (it had been running on ``require_license``
+#   alone, as had every other route on that router), and this tool's contract has
+#   always been to MIRROR that route. Leaving it at MEMBER would have left a member
+#   who is refused the usage read over HTTP able to ask the agent for the same
+#   numbers — a documented bypass of a gate added in the same commit. The other
+#   four READ tools are unchanged and stay on ``_READ_ACTION`` / ``workspace.view``.
+#
+# Updated: 2026-09-11 (fix/billing-usage-chart-micro) — billing_usage_read now
+#   reports a MICRO-CREDIT figure beside every whole-credit one. The wallet stores
+#   micro-credits and a chat run costs about 375_000 of them, so the whole-credit
+#   fields are 0 for a day of ordinary light usage; an agent answering "what did we
+#   spend?" from those alone told the customer "nothing" while the wallet drained.
+#   Same defect the REST usage chart had, one hop further out — the tool renders the
+#   same ``billing.usage`` response, so it inherited the rounding and now inherits
+#   the fix. Additive: the whole-credit keys keep their names and meaning.
+#
+#   The unit guidance lives in the ``@tool`` DESCRIPTION, not in the handler's
+#   Python docstring. ``__doc__`` is never transmitted — the SDK serializes
+#   ``SdkMcpTool.description`` (the second positional arg to ``@tool``) and nothing
+#   else, so an instruction written in the docstring reaches the model as silence.
+#   Shipping the micro fields WITHOUT that description would have been worse than
+#   the zero it replaced: handed ``{"total_credits": 0, "total_credits_micro":
+#   750000}`` with no unit defined, the obvious wrong answer is "$750,000" against
+#   a real charge of $0.0075, and a customer can at least tell that 0 is wrong.
+#   The same edit corrects a PRE-EXISTING lie in that description and in the tool
+#   list above: both said any MEMBER may read usage, which stopped being true on
+#   2026-09-02 when the gate moved to ``billing.view`` (ADMIN). It was promising
+#   the model a read the gate then denied.
 """Agent-side MCP surface for workspace administration.
 
 Tools registered:
@@ -145,8 +181,9 @@ Tools registered:
     ``workspace.view`` (MEMBER); the service applies the caller's connector
     permissions.
   - ``billing_usage_read(start, end)`` — READ daily usage/spend over an optional
-    date window. Gated at ``workspace.view`` (MEMBER — matching the
-    membership-only REST usage route).
+    date window. Gated at ``billing.view`` (ADMIN — the same action the REST GET
+    /billing/usage route gates on, so the two cannot drift apart). Spend is
+    reported in BOTH micro-credits (exact) and whole credits (truncated).
   - ``audit_read(limit)`` — READ recent audit-log rows. Gated at ``audit.read``
     (ADMIN — same as the REST audit route).
 
@@ -215,13 +252,17 @@ ADMIN_TOOL_IDS = (
 
 # The RBAC action keys these tools gate on (canonical entries in
 # ``guards.actions.ACTIONS``). ``workspace.view`` = MEMBER (read the roster /
-# settings / connectors / usage), ``workspace.member.role_change`` = ADMIN
+# settings / connectors), ``workspace.member.role_change`` = ADMIN
 # (change a member's role), ``invite.create`` = ADMIN (read/manage invites —
-# the REST invites route's action), ``audit.read`` = ADMIN (read the audit log).
+# the REST invites route's action), ``audit.read`` = ADMIN (read the audit log),
+# ``billing.view`` = ADMIN (read the workspace's spend — its own key rather than
+# the shared read action, because the REST GET /billing/usage route gates on
+# exactly this one and the two must not drift apart again).
 _READ_ACTION = "workspace.view"
 _ROLE_CHANGE_ACTION = "workspace.member.role_change"
 _INVITE_ACTION = "invite.create"
 _AUDIT_ACTION = "audit.read"
+_BILLING_READ_ACTION = "billing.view"
 # WA-5 ADMIN WRITE actions (all ADMIN in guards.actions.ACTIONS). The tool RBAC-
 # gates on these; the executor whitelists + re-checks the SAME keys.
 _MEMBER_REMOVE_ACTION = "workspace.member.remove"
@@ -361,7 +402,7 @@ async def _gate_read(tool: str, action: str, deny_message: str) -> tuple[str, st
         return _error_response("could not resolve the calling user for the RBAC check.")
 
     try:
-        check_workspace_action(user, workspace_id, action)
+        await check_workspace_action(user, workspace_id, action)
     except Forbidden as exc:
         logger.info(
             "%s denied: user=%s workspace=%s code=%s",
@@ -482,7 +523,7 @@ async def _members_list_handler(args: dict) -> dict:  # noqa: ARG001 — no args
     # as a structured deny envelope (never raised out of the tool). The gate
     # already audits the denial via guards/audit.log_denial.
     try:
-        check_workspace_action(user, workspace_id, _READ_ACTION)
+        await check_workspace_action(user, workspace_id, _READ_ACTION)
     except Forbidden as exc:
         logger.info(
             "members_list denied: user=%s workspace=%s code=%s",
@@ -566,7 +607,7 @@ async def _member_update_role_handler(args: dict) -> dict:
     # deny is enforced BEFORE any proposal/mutation path — a member never
     # reaches the write.
     try:
-        check_workspace_action(user, workspace_id, _ROLE_CHANGE_ACTION)
+        await check_workspace_action(user, workspace_id, _ROLE_CHANGE_ACTION)
     except Forbidden as exc:
         logger.info(
             "member_update_role denied: actor=%s workspace=%s target=%s code=%s",
@@ -776,10 +817,23 @@ async def _connectors_list_handler(args: dict) -> dict:  # noqa: ARG001 — no a
 
 async def _billing_usage_read_handler(args: dict) -> dict:
     """READ the workspace's daily usage/spend over an optional date window. Gated
-    at ``workspace.view`` (MEMBER — the REST GET /billing/usage route is
-    membership-only; it does NOT gate on billing.manage, so we match it and do NOT
-    over-gate to OWNER). EXECUTES directly on a gate pass. ``start`` / ``end`` are
-    optional ``YYYY-MM-DD`` strings (default: the trailing 30 days)."""
+    at ``billing.view`` (ADMIN — EXACTLY what the REST GET /billing/usage route
+    gates on; the two are deliberately the same key so they cannot drift). NOT
+    ``billing.manage`` (OWNER): reading the bill is not managing it. EXECUTES
+    directly on a gate pass. ``start`` / ``end`` are optional ``YYYY-MM-DD``
+    strings (default: the trailing 30 days).
+
+    Every credit figure is reported twice: ``*_credits`` truncated to whole credits
+    for a human-readable answer, and ``*_credits_micro`` exact (1_000_000 micro ==
+    1 credit == $0.01). A typical run is 375_000 micro, so a light day's
+    whole-credit figures are all 0 and only the micro ones carry the spend.
+
+    THIS DOCSTRING IS FOR READERS OF THIS FILE, NOT FOR THE MODEL. ``__doc__`` is
+    never transmitted — the SDK sends ``SdkMcpTool.description``, the second
+    positional arg to ``@tool``. The unit guidance the model actually needs lives
+    there (``build_admin_server``, the ``billing_usage_read`` tool) and is pinned
+    by ``test_billing_usage_read_description_defines_the_micro_unit``. Change both
+    together or the model silently keeps the old instruction."""
     start = args.get("start")
     end = args.get("end")
     if start is not None and not isinstance(start, str):
@@ -789,7 +843,7 @@ async def _billing_usage_read_handler(args: dict) -> dict:
 
     gate = await _gate_read(
         "billing_usage_read",
-        _READ_ACTION,
+        _BILLING_READ_ACTION,
         "You don't have permission to view this workspace's usage",
     )
     if isinstance(gate, dict):
@@ -806,6 +860,10 @@ async def _billing_usage_read_handler(args: dict) -> dict:
         logger.warning("billing_usage_read failed", exc_info=True)
         return _error_response(f"billing_usage_read failed: {exc}")
 
+    # Carry the MICRO figures alongside the whole-credit ones. A chat run costs
+    # about 375_000 micro-credits, so ``credits`` is 0 for a day of ordinary light
+    # usage — an agent answering "what did we spend?" off the whole-credit fields
+    # alone would tell the customer "nothing" while their wallet drained.
     return _success_response(
         {
             "ok": True,
@@ -814,13 +872,16 @@ async def _billing_usage_read_handler(args: dict) -> dict:
             "end_date": usage.end_date,
             "models": usage.models,
             "total_credits": usage.total_credits,
+            "total_credits_micro": usage.total_credits_micro,
             "buckets": [
                 {
                     "date": b.date,
                     "total_credits": b.total_credits,
+                    "total_credits_micro": b.total_credits_micro,
                     "by_model": {
                         model: {
                             "credits": stats.credits,
+                            "credits_micro": stats.credits_micro,
                             "requests": stats.requests,
                             "tokens": stats.tokens,
                         }
@@ -1481,11 +1542,20 @@ def build_admin_server() -> tuple[str, Any] | None:
     @tool(
         "billing_usage_read",
         (
-            "Read the CURRENT workspace's usage and spend (daily credits and "
+            "Read the CURRENT workspace's usage and spend (daily spend and "
             "request counts, broken down by model) over an optional date window. "
             "Call this when the user asks how much they've spent or used. Optional "
             "args: `start` and `end` (YYYY-MM-DD); omit both for the last 30 days. "
-            "Any workspace member may read their workspace's usage. If you don't "
+            "UNITS — every spend figure is returned twice and the two are not "
+            "interchangeable. The `credits_micro` / `total_credits_micro` fields "
+            "are EXACT, in micro-credits: 1000000 micro = 1 credit = $0.01, so "
+            "750000 micro = 0.75 credits = $0.0075. The plain `credits` / "
+            "`total_credits` fields are those same amounts truncated to whole "
+            "credits, and one ordinary run costs about 375000 micro, so they read "
+            "0 on a light day. Answer from the micro fields and convert them; "
+            "never repeat a micro number as a credit or dollar figure, and never "
+            "report 'nothing spent' from a 0 in a plain credits field. "
+            "Reading usage requires the ADMIN role. If you don't "
             "have permission, the result says so (denied) — relay that."
         ),
         {

@@ -1,0 +1,38 @@
+# Site briefs for the /sites capacity baseline. Created 2026-07-29.
+#
+# One brief per line, cycled by chat_loadtest.py --prompt-file. Lines starting
+# with '#' and blank lines are ignored.
+#
+# PROVENANCE, because it changes how much the numbers are worth: these are
+# hand-authored to span the shapes a /sites request takes, NOT sampled from
+# production traffic. They vary along the three axes that move cost — how much
+# the brief specifies (a one-liner makes the agent invent more), whether it
+# names sections or content, and whether it asks for interaction beyond static
+# copy. If real briefs become available, replace this file; the agent's token
+# spend and turn length depend on brief shape, so a fixture that misses the
+# real distribution will bias every latency number measured with it.
+#
+# Keep the count near 20. Fewer and prompt-cache behaviour looks better than it
+# is, because the same few prefixes repeat.
+
+Build a landing page for a dentist in Austin
+Make me a site for my bakery
+I need a one-page site for a freelance photographer, with a gallery and a contact form
+Portfolio site for a UX designer. Work samples, an about section, and a way to reach me.
+Landing page for a B2B SaaS that does invoice reconciliation. Hero, three feature blocks, pricing, FAQ.
+Create a site for a yoga studio in Lisbon with a class schedule and instructor bios
+Simple coming-soon page with an email signup for a hardware startup
+A restaurant site: menu, hours, location map, and a reservations link
+Build a personal blog homepage with a list of recent posts and an about page
+Marketing site for a mobile app. App store badges, screenshots, and a short feature tour.
+Make a site for my dog grooming business, friendly and warm, with a price list
+Conference landing page with a speaker grid, agenda, and a register button
+Nonprofit site for an animal shelter — mission, how to donate, and adoptable pets
+Documentation-style site for an open source CLI tool with install steps and examples
+Build a real estate agent's site with property listings and a lead capture form
+Law firm site: practice areas, attorney profiles, and a consultation request form
+A wedding photographer's site with a portfolio, packages, and testimonials
+Landing page for an online course about data engineering, with a syllabus and pricing tiers
+Local plumber site that ranks for emergency callouts, with service areas and a phone CTA
+Product page for a physical product — a mechanical keyboard — with specs, photos, and a buy button
+Build a site for a small accounting practice offering bookkeeping and tax prep to freelancers

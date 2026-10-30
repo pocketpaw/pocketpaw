@@ -1,0 +1,105 @@
+[
+  {
+    "label": "IMG-1: the image blocks are never appended, so the turn reaches the model as text only — the original bug, restored one layer down",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    content: list[dict] = [{\"type\": \"text\", \"text\": message}]\n    for img in images:\n        content.append(",
+    "replace": "    content: list[dict] = [{\"type\": \"text\", \"text\": message}]\n    for img in []:\n        content.append(",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-2: the loop assigns instead of appending, so only the last of several attachments survives and a five-image turn shows the model one",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    for img in images:\n        content.append(\n            {\n                \"type\": \"image\",",
+    "replace": "    for img in images:\n        content[1:] = [\n            {\n                \"type\": \"image\",",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-3: raw bytes go on the wire instead of base64, which the SDK cannot serialize — and the failure surfaces deep inside the SDK, not here",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                    \"data\": base64.b64encode(img.data).decode(\"ascii\"),",
+    "replace": "                    \"data\": img.data,",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-4: every attachment is declared png regardless of what it is, so a jpeg is decoded as a png and the model is shown nothing",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                    \"media_type\": img.media_type,",
+    "replace": "                    \"media_type\": \"application/octet-stream\",",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-5: the payload is handed over bare instead of as an async iterable, which is the only form streaming input accepts — and streaming is the only mode that carries images",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "async def stream_one_message(payload: dict):",
+    "replace": "async def stream_one_message(payload: dict):\n    return\n    yield payload\n\n\nasync def _unused_stream_one_message(payload: dict):",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-6: pydantic-ai is handed a list prompt even with nothing attached, changing the prompt type of every text turn the product already sends",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    if not images:\n        return message\n    from pydantic_ai import BinaryContent",
+    "replace": "    if False:\n        return message\n    from pydantic_ai import BinaryContent",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-7: the pydantic-ai images are dropped from the prompt list, so the model gets the question without the picture it is about",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in images)",
+    "replace": "    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in [])",
+    "tests": ["tests/agents/test_image_attachments_reach_the_model.py"]
+  },
+  {
+    "label": "IMG-8: the signature gate goes away and only truthiness is left, so the first user to attach a photo on any of the seven narrow backends ends their turn in TypeError: run() got an unexpected keyword argument 'image_attachments'",
+    "file": "src/pocketpaw/agents/pool.py",
+    "find": "            if image_attachments and _accepts_image_attachments_kwarg(run_backend.run):\n                run_kwargs[\"image_attachments\"] = tuple(image_attachments)",
+    "replace": "            if image_attachments:\n                run_kwargs[\"image_attachments\"] = tuple(image_attachments)",
+    "tests": [
+      "tests/test_agent_pool_image_attachments.py"
+    ]
+  },
+  {
+    "label": "IMG-9: AVIF leaves the transcode set, so a Chrome 'Copy image' upload falls through to the extraction path and the model describes the container's ispe box instead of the picture (the 2026-09-15 live report)",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    {\"image/avif\", \"image/heic\", \"image/heif\", \"image/tiff\", \"image/bmp\"}",
+    "replace": "    {\"image/heic\", \"image/heif\", \"image/tiff\", \"image/bmp\"}",
+    "tests": [
+      "tests/cloud/chat/test_attachment_image_transcode.py"
+    ]
+  },
+  {
+    "label": "IMG-10: the fitter returns an oversized image unchanged instead of shrinking it, so a 4K PNG screenshot goes to the provider past its 5MB per-image limit and the turn fails with nothing useful to show the user",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        edge = _MODEL_IMAGE_MAX_EDGE\n        for _ in range(6):",
+    "replace": "        return raw, mime\n        edge = _MODEL_IMAGE_MAX_EDGE\n        for _ in range(6):",
+    "tests": [
+      "tests/cloud/chat/test_attachment_image_size_limits.py"
+    ]
+  },
+  {
+    "label": "IMG-11: the early-exit forgets the dimension check, so an image that is small in bytes but enormous in pixels is sent at full size and billed at full size",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "                if max(probe.size) <= _MODEL_IMAGE_MAX_EDGE:\n                    return raw, mime",
+    "replace": "                if probe is not None:\n                    return raw, mime",
+    "tests": [
+      "tests/cloud/chat/test_attachment_image_size_limits.py"
+    ]
+  },
+  {
+    "label": "IMG-12: a shrunk JPEG comes back declared as PNG, so the bytes and the media_type disagree and the provider decodes a JPEG as a PNG",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        out_mime = \"image/jpeg\" if keep_jpeg else \"image/png\"",
+    "replace": "        out_mime = \"image/png\"",
+    "tests": [
+      "tests/cloud/chat/test_attachment_image_size_limits.py"
+    ]
+  },
+  {
+    "label": "IMG-13: the legacy persistent send goes back to a bare string, so in a default deployment (POCKETPAW_SESSION_SUPERVISOR off, no leased client) every attached image is dropped and the model sees the filename without the pixels (the 2026-09-15 live report)",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                    await _persistent_client.query(\n                        stream_one_message(\n                            build_streaming_user_message(turn_text, image_attachments)\n                        )\n                        if image_attachments\n                        else turn_text\n                    )",
+    "replace": "                    await _persistent_client.query(turn_text)",
+    "tests": [
+      "tests/test_claude_sdk_persistent_client_images.py"
+    ]
+  }
+]

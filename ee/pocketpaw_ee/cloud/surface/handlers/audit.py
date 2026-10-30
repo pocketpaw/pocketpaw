@@ -4,21 +4,32 @@
 # target, actor, timestamp) so the agent can quote them when the user
 # asks "what happened today?". Tenancy enforced by
 # ``audit_service.agent_list_audit``.
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` keyed on a digest of what was rendered. An append-only log
+# read as a LIST: no revision to point at, and the rendered rows already carry
+# each entry's timestamp, so the digest moves the moment a new entry lands and
+# holds still while nothing happens. The unavailable branch reads nothing and
+# gets its own exact key.
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
-from pocketpaw_ee.cloud.surface.handlers._helpers import truncate_preamble
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import (
+    content_key,
+    meta_key,
+    truncate_preamble,
+)
 
 logger = logging.getLogger(__name__)
 
 LIST_LIMIT = 10
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the audit surface preamble."""
     try:
         from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
@@ -34,8 +45,12 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         resp = await audit_service.agent_list_audit(ctx, {"limit": LIST_LIMIT})
     except Exception:
         logger.debug("audit_handler: list failed", exc_info=True)
-        return (
-            '<surface kind="audit" route="/audit" /><audit-snapshot>(unavailable)</audit-snapshot>'
+        return SurfacePreamble(
+            text=(
+                '<surface kind="audit" route="/audit" />'
+                "<audit-snapshot>(unavailable)</audit-snapshot>"
+            ),
+            cache_key=meta_key("audit", "unavailable"),
         )
 
     entries = list(getattr(resp, "entries", []) or [])
@@ -51,7 +66,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
             for e in entries[:LIST_LIMIT]
         ]
         parts.append("<audit-list>\n" + "\n".join(rows) + "\n</audit-list>")
-    return truncate_preamble("\n".join(parts))
+    text = truncate_preamble("\n".join(parts))
+    return SurfacePreamble(text=text, cache_key=content_key("audit", text))
 
 
 __all__ = ["build_preamble"]

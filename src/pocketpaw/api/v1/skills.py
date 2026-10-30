@@ -69,8 +69,6 @@ async def remove_skill(request: Request):
     import shutil
     from pathlib import Path
 
-    from pocketpaw.skills import get_skill_loader
-
     data = await request.json()
     name = data.get("name", "").strip()
     if not name:
@@ -83,8 +81,9 @@ async def remove_skill(request: Request):
         skill_dir = base / name
         if skill_dir.is_dir() and (skill_dir / "SKILL.md").exists():
             shutil.rmtree(skill_dir)
-            loader = get_skill_loader()
-            loader.reload()
+            from pocketpaw.cache_invalidation import reload_skills
+
+            reload_skills()
             return StatusResponse()
 
     raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")

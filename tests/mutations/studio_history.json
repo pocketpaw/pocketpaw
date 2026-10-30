@@ -1,0 +1,65 @@
+[
+  {
+    "label": "cap the gallery again (silently hides the older half)",
+    "file": "ee/pocketpaw_ee/cloud/studio/service.py",
+    "find": "    limit: int | None = None,\n    source: str | None = None,",
+    "replace": "    limit: int | None = DEFAULT_GENERATION_LIMIT,\n    source: str | None = None,",
+    "tests": [
+      "tests/cloud/studio/test_store.py::test_the_gallery_is_not_silently_capped"
+    ]
+  },
+  {
+    "label": "drop unique=True from the dedupe index",
+    "file": "ee/pocketpaw_ee/cloud/models/studio_generation.py",
+    "find": "                unique=True,",
+    "replace": "                sparse=False,",
+    "tests": [
+      "tests/cloud/studio/test_store.py::test_the_dedupe_key_is_declared_unique"
+    ]
+  },
+  {
+    "label": "let a history write failure 500 a paid generation",
+    "file": "ee/pocketpaw_ee/cloud/studio/service.py",
+    "find": "    except Exception:  # noqa: BLE001 \u2014 a history miss must not cost a paid asset",
+    "replace": "    except _NeverRaised:  # noqa: BLE001",
+    "tests": [
+      "tests/cloud/studio/test_store.py::test_a_history_failure_does_not_fail_the_caller"
+    ]
+  },
+  {
+    "label": "never import the legacy history at boot",
+    "file": "ee/pocketpaw_ee/cloud/studio/migrate_generations_jsonl.py",
+    "find": "    if _suppress_boot_import:\n        return",
+    "replace": "    if True:\n        return",
+    "tests": [
+      "tests/cloud/studio/test_migrate_generations_jsonl.py::test_boot_import_runs_without_being_asked"
+    ]
+  },
+  {
+    "label": "let a migration hiccup block the boot",
+    "file": "ee/pocketpaw_ee/cloud/studio/migrate_generations_jsonl.py",
+    "find": "    except Exception:  # noqa: BLE001 \u2014 a migration hiccup must never block boot",
+    "replace": "    except _NeverRaised:  # noqa: BLE001",
+    "tests": [
+      "tests/cloud/studio/test_migrate_generations_jsonl.py::test_boot_import_never_blocks_a_boot"
+    ]
+  },
+  {
+    "label": "ignore the CLI suppression flag (makes --dry-run a lie)",
+    "file": "ee/pocketpaw_ee/cloud/studio/migrate_generations_jsonl.py",
+    "find": "    if _suppress_boot_import:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/studio/test_migrate_generations_jsonl.py::test_the_cli_suppresses_the_boot_import"
+    ]
+  },
+  {
+    "label": "hydrate whole documents in tracked_generation_filenames",
+    "file": "ee/pocketpaw_ee/cloud/studio/service.py",
+    "find": "        {\"assets.url\": 1, \"_id\": 0},\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/studio/test_store.py::test_tracked_filenames_asks_for_a_projection"
+    ]
+  }
+]

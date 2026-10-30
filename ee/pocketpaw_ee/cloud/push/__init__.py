@@ -8,7 +8,8 @@
 # router.py (thin HTTP boundary). Two extra modules carry the #1393 wiring:
 # dispatch.py (``notify`` — the WS/Web-Push transport fork that never
 # double-notifies a user with both the desktop app and a browser tab open)
-# and listeners.py (the v1 product events — agent.stream_end /
-# instinct.approval.created / meeting.started — subscribed to the realtime
-# bus and routed through ``notify``). Neither writes Beanie directly, so the
+# and listeners.py (``notification.new`` — every persisted notification —
+# plus ``agent.stream_end``, the one product event with no notification row,
+# subscribed to the realtime bus and routed through ``notify``). Neither
+# writes Beanie directly, so the
 # "Push — Beanie writes only from service.py" contract still holds.

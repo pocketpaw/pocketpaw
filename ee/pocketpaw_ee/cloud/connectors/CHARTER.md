@@ -137,11 +137,11 @@ to multi-tenant per-workspace `gcloud` configs on a shared host.
 
 ```python
 class Connector(Protocol):
-    name: str                            # "gmail"
-    display_name: str                    # "Gmail"
-    auth: AuthSpec                       # bearer | oauth2 | api_key | none
-    actions: list[ActionSchema]          # search, read, send, list, …
-    widgets: list[WidgetRecipe]          # NEW — default home widgets
+    name: str  # "gmail"
+    display_name: str  # "Gmail"
+    auth: AuthSpec  # bearer | oauth2 | api_key | none
+    actions: list[ActionSchema]  # search, read, send, list, …
+    widgets: list[WidgetRecipe]  # NEW — default home widgets
 
     async def connect(self, scope: ConnectorScope, config: dict) -> ConnectionResult: ...
     async def disconnect(self, scope: ConnectorScope) -> bool: ...
@@ -156,9 +156,9 @@ is allowed to execute:
 
 ```python
 class ExecutionMode(StrEnum):
-    CLOUD = "cloud"        # runs in the FastAPI process (REST APIs, in-process logic)
-    LOCAL = "local"        # runs in the user's pocketpaw runtime (CLI tools)
-    SANDBOX = "sandbox"    # ephemeral container per call (deferred — see Out of scope)
+    CLOUD = "cloud"  # runs in the FastAPI process (REST APIs, in-process logic)
+    LOCAL = "local"  # runs in the user's pocketpaw runtime (CLI tools)
+    SANDBOX = "sandbox"  # ephemeral container per call (deferred — see Out of scope)
 
 
 class ActionSchema:
@@ -167,8 +167,8 @@ class ActionSchema:
     method: str
     params: list[ParamSpec]
     trust_level: TrustLevel
-    execution_mode: ExecutionMode = ExecutionMode.CLOUD   # NEW
-    requires_binary: str | None = None                    # NEW — "gcloud", "firebase", "gh", …
+    execution_mode: ExecutionMode = ExecutionMode.CLOUD  # NEW
+    requires_binary: str | None = None  # NEW — "gcloud", "firebase", "gh", …
 ```
 
 Notes on the change from today's protocol:
@@ -243,6 +243,7 @@ of one of the four layers.
 def connector_tools_for(c: Connector) -> list[BaseTool]:
     return [_action_to_tool(c, action) for action in c.actions]
 
+
 def all_builtin_tools(registry: ConnectorRegistry) -> list[BaseTool]:
     return [t for c in registry.list() for t in connector_tools_for(c)]
 ```
@@ -275,7 +276,9 @@ your pockets" + generative paths.
 
 ```python
 # ee/cloud/automations/runtime.py
-async def connector_step(c: Connector, action: str, params: dict, scope: ConnectorScope) -> StepResult: ...
+async def connector_step(
+    c: Connector, action: str, params: dict, scope: ConnectorScope
+) -> StepResult: ...
 ```
 
 ### 6.2 — CLI connectors and the local-agent bus

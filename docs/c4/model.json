@@ -29,8 +29,10 @@
               {"id": "cloud-chat-surface", "name": "Cloud Chat + Surface engine", "description": "Cloud agent orchestration: resolves the chat surface (home/pockets/sites/code/studio/belt), injects per-surface preambles, and assembles scope/pocket/participant context. ee/cloud/chat (agent_service) + ee/cloud/surface.", "technology": "Python, claude_agent_sdk", "kb_article": ""},
               {"id": "pockets", "name": "Pockets + rippleSpec", "description": "Pocket workspace containers (agents+data+tools+KB+rules). The rippleSpec merge endpoint; data sources (read GETs) and write actions gated through Instinct. ee/cloud/pockets.", "technology": "Python", "kb_article": ""},
               {"id": "sites", "name": "Paw Sites", "description": "Publish pockets as edge sites. Two engines x two modes: {ripple,svelte} x {static,dynamic}; dynamic = per-tenant Cloudflare D1. ee/pocketpaw_ee/sites + the paw-sites generator.", "technology": "Python, Bun, SvelteKit", "kb_article": ""},
+              {"id": "integrations", "name": "Sites integrations", "description": "One-click integrations for Paw Sites: encrypted workspace connection vault with a leased token-refresh path, provider registry (built-in / connect / embed), hosted OAuth connect + callback, site bindings, the public site gateway (POST /sites/{id}/x/{provider}/{action}), provider webhook ingress and site orders. ee/pocketpaw_ee/integrations.", "technology": "Python, FastAPI", "kb_article": ""},
               {"id": "foresight", "name": "Foresight", "description": "Scenario simulation / rehearsal: soul-seeded personas run per-tick cognition loops with calibration and backtest gating. ee/pocketpaw_ee/foresight.", "technology": "Python", "kb_article": ""},
-              {"id": "enterprise-ops", "name": "Enterprise Ops", "description": "Fleet install, Calendar (external sync + conflict detection), Guards (RBAC/ABAC), Audit (placeholder), and the Paw Bar customer decision loop. ee/pocketpaw_ee/{fleet,calendar,guards,audit,paw_bar}.", "technology": "Python", "kb_article": ""}
+              {"id": "enterprise-ops", "name": "Enterprise Ops", "description": "Fleet install, Calendar (external sync + conflict detection), Guards (RBAC/ABAC), Audit (placeholder), and the Paw Bar customer decision loop. ee/pocketpaw_ee/{fleet,calendar,guards,audit,paw_bar}.", "technology": "Python", "kb_article": ""},
+              {"id": "belt-blueprint", "name": "Belt blueprint reader", "description": "One repo's app blueprint graph (features, components, journeys, gaps) each app's planned C4 view with a status per component, and the suite feature map joined to those statuses, derived from git on the bound clone plus GitHub issues, PRs and lead branches, cached 60 s per workspace and repo. GET /belt/blueprints, /belt/blueprints/c4 and /belt/blueprints/suite-map. ee/pocketpaw_ee/cloud/belt/app_blueprint*.py.", "technology": "Python, git, gh", "kb_article": ""}
             ]
           },
           {"id": "mongo", "name": "MongoDB", "description": "Primary cloud datastore: pockets, sessions, messages, agents, sites, Instinct approvals, connectors.", "technology": "MongoDB (Beanie ODM)", "tags": ["database"], "kb_article": "", "components": []},
@@ -41,8 +43,9 @@
       },
       {"id": "soul-protocol", "name": "Soul Protocol", "description": "External: portable identity + 5-tier memory (.soul). PocketPaw runtime, Fabric, and Instinct write to the soul journal (Decision Graph).", "tags": ["external"], "containers": []},
       {"id": "ripple", "name": "Ripple", "description": "External: Svelte 5 generative-UI runtime that renders rippleSpec into live UI. Pockets and the static/ripple site track compile through it.", "tags": ["external"], "containers": []},
-      {"id": "cloudflare", "name": "Cloudflare Workers + D1", "description": "External: edge deploy target for Paw Sites; per-tenant D1 backs dynamic sites.", "tags": ["external"], "containers": []},
-      {"id": "kb-go", "name": "kb-go", "description": "External: on-box knowledge-base compiler. Discovery uses its keyless convo-ingest path to compile unstructured exhaust without any off-box call.", "tags": ["external"], "containers": []}
+      {"id": "cloudflare", "name": "Cloudflare Workers + D1", "description": "External: edge deploy target for Paw Sites; per-tenant D1 backs dynamic sites; Email Service (REST) sends owner lead/handoff email.", "tags": ["external"], "containers": []},
+      {"id": "kb-go", "name": "kb-go", "description": "External: on-box knowledge-base compiler. Discovery uses its keyless convo-ingest path to compile unstructured exhaust without any off-box call.", "tags": ["external"], "containers": []},
+      {"id": "paw-lens", "name": "paw-lens", "description": "External: on-box agent/automation health service (Go). Receives OTLP traces from pocketpaw's Logfire exporter and serves a token-guarded read API that the cloud lens proxy forwards.", "tags": ["external"], "containers": []}
     ],
     "relationships": [
       {"source": "connectors", "target": "fabric", "description": "ingests typed records", "technology": "", "style": "sync"},
@@ -50,6 +53,7 @@
       {"source": "discovery", "target": "instinct", "description": "proposes governed rules", "technology": "", "style": "async"},
       {"source": "discovery", "target": "kb-go", "description": "on-box compile (keyless)", "technology": "subprocess", "style": "sync"},
       {"source": "pockets", "target": "instinct", "description": "gates write actions", "technology": "", "style": "sync"},
+      {"source": "belt-blueprint", "target": "instinct", "description": "reads the workspace's lead runs", "technology": "", "style": "sync"},
       {"source": "pockets", "target": "ripple", "description": "renders rippleSpec", "technology": "", "style": "sync"},
       {"source": "cloud-chat-surface", "target": "pockets", "description": "creates / edits pockets", "technology": "", "style": "sync"},
       {"source": "cloud-chat-surface", "target": "fabric", "description": "queries the ontology", "technology": "", "style": "sync"},
@@ -59,10 +63,17 @@
       {"source": "sites", "target": "pockets", "description": "publishes from a pocket spec", "technology": "", "style": "sync"},
       {"source": "sites", "target": "ripple", "description": "compiles the ripple track", "technology": "", "style": "sync"},
       {"source": "sites", "target": "cloudflare", "description": "deploys worker + D1", "technology": "", "style": "sync"},
+      {"source": "sites", "target": "cloudflare", "description": "owner lead email via the notification outbox", "technology": "Email Service REST", "style": "async"},
+      {"source": "sites", "target": "integrations", "description": "published pages and Workers call the gateway", "technology": "HTTPS", "style": "sync"},
+      {"source": "integrations", "target": "mongo", "description": "persists encrypted connections, bindings, orders", "technology": "", "style": "sync"},
+      {"source": "integrations", "target": "redis", "description": "single-use OAuth state", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "integrations", "description": "agent asks the owner to connect a provider", "technology": "SSE card", "style": "async"},
       {"source": "runtime", "target": "soul-protocol", "description": "loads / saves memory", "technology": "", "style": "sync"},
       {"source": "fabric", "target": "soul-protocol", "description": "writes the object journal", "technology": "", "style": "async"},
       {"source": "instinct", "target": "soul-protocol", "description": "emits Decision-Graph events", "technology": "", "style": "async"},
-      {"source": "pockets", "target": "mongo", "description": "persists pocket + spec", "technology": "", "style": "sync"}
+      {"source": "pockets", "target": "mongo", "description": "persists pocket + spec", "technology": "", "style": "sync"},
+      {"source": "runtime", "target": "paw-lens", "description": "agent traces", "technology": "OTLP/HTTP", "style": "async"},
+      {"source": "pocketpaw-app", "target": "paw-lens", "description": "read API proxy", "technology": "HTTP + X-Lens-Token", "style": "sync"}
     ]
   }
 }

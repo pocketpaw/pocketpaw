@@ -1,4 +1,9 @@
 # workspace_aggregator.py — Workspace-level KB aggregator for Cluster C / PR 1.
+# Updated: 2026-08-04 — Living-wiki API. AggregatedArticle rows now carry the
+# wiki metadata the /knowledge frontend renders: summary, word_count,
+# compiled_with, version, categories, concepts, compiled_at. All additive with
+# safe defaults, so pre-existing consumers of the row shape are unchanged;
+# updated_at falls back to compiled_at when the kb row has no timestamp.
 # Created: 2026-04-19 — Powers GET /api/v1/knowledge/articles by merging the
 # workspace-scoped KB (`workspace:{id}`) with every per-agent KB
 # (`agent:{agent_id}`) that lives inside the same workspace. Scope checks are
@@ -21,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -29,7 +34,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AggregatedArticle:
-    """One row in the workspace KB browser."""
+    """One row in the workspace KB browser.
+
+    The wiki-metadata fields (``summary`` onwards) default to empty values so
+    rows built from sources that lack them (orphan raw docs, older kb
+    binaries) still construct cleanly.
+    """
 
     id: str
     title: str
@@ -37,6 +47,13 @@ class AggregatedArticle:
     scope: str  # "workspace:{id}" or "agent:{agent_id}"
     agent_id: str | None
     updated_at: str | None
+    summary: str = ""
+    word_count: int = 0
+    compiled_with: str | None = None
+    version: int | None = None
+    categories: list[str] = field(default_factory=list)
+    concepts: list[str] = field(default_factory=list)
+    compiled_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +63,13 @@ class AggregatedArticle:
             "scope": self.scope,
             "agent_id": self.agent_id,
             "updated_at": self.updated_at,
+            "summary": self.summary,
+            "word_count": self.word_count,
+            "compiled_with": self.compiled_with,
+            "version": self.version,
+            "categories": self.categories,
+            "concepts": self.concepts,
+            "compiled_at": self.compiled_at,
         }
 
 
@@ -62,7 +86,10 @@ def _row_to_article(row: Any, *, scope: str, agent_id: str | None) -> Aggregated
         return None
     title = row.get("title") or row.get("name") or row.get("source") or f"article:{article_id}"
     source = row.get("source") or row.get("origin") or ""
-    updated_at = row.get("updated_at") or row.get("updatedAt") or row.get("modified")
+    compiled_at = row.get("compiled_at")
+    updated_at = row.get("updated_at") or row.get("updatedAt") or row.get("modified") or compiled_at
+    word_count = row.get("word_count")
+    version = row.get("version")
     return AggregatedArticle(
         id=str(article_id),
         title=str(title),
@@ -70,6 +97,13 @@ def _row_to_article(row: Any, *, scope: str, agent_id: str | None) -> Aggregated
         scope=scope,
         agent_id=agent_id,
         updated_at=str(updated_at) if updated_at else None,
+        summary=str(row.get("summary") or ""),
+        word_count=int(word_count) if isinstance(word_count, int | float) else 0,
+        compiled_with=str(row["compiled_with"]) if row.get("compiled_with") else None,
+        version=int(version) if isinstance(version, int) else None,
+        categories=[str(c) for c in row.get("categories") or [] if str(c).strip()],
+        concepts=[str(c) for c in row.get("concepts") or [] if str(c).strip()],
+        compiled_at=str(compiled_at) if compiled_at else None,
     )
 
 

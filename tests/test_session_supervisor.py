@@ -651,3 +651,54 @@ async def test_reaped_lease_then_cold_pruned_without_second_disconnect() -> None
     assert spy.disconnect_count == 1  # NOT torn down a second time
     assert ("ws-a", "sess-1") not in sup._runtimes
     assert ("ws-a", "sess-busy") in sup._runtimes  # busy survives
+
+
+# --- Singleton reads its quotas from settings -----------------------------
+#
+# Added 2026-09-01 (feat/scale-concurrency-knobs). The two warm quotas were
+# hardcoded constructor defaults and ``get_session_supervisor()`` passed no
+# arguments, so the only way to change them on a busy deploy was to edit this
+# module. These pin that the env knob actually reaches the ONE instance the app
+# runs on — asserting the config field exists proves nothing about that.
+
+
+def test_get_session_supervisor_reads_warm_quotas_from_settings(monkeypatch):
+    from pocketpaw.agents import session_supervisor as mod
+
+    monkeypatch.setenv("POCKETPAW_SESSION_WARM_MAX_PER_TENANT", "3")
+    monkeypatch.setenv("POCKETPAW_SESSION_WARM_MAX_GLOBAL", "17")
+    monkeypatch.setattr(mod, "_supervisor", None)
+
+    sup = mod.get_session_supervisor()
+    try:
+        assert sup._max_warm_per_tenant == 3
+        assert sup._max_warm_global == 17
+    finally:
+        mod._supervisor = None
+
+
+def test_get_session_supervisor_defaults_match_the_constructor(monkeypatch):
+    """Shipping the knob must not move any existing deploy: with no env set, the
+    singleton has to land on the same 8 / 64 the constructor has always used."""
+    from pocketpaw.agents import session_supervisor as mod
+
+    monkeypatch.delenv("POCKETPAW_SESSION_WARM_MAX_PER_TENANT", raising=False)
+    monkeypatch.delenv("POCKETPAW_SESSION_WARM_MAX_GLOBAL", raising=False)
+    monkeypatch.setattr(mod, "_supervisor", None)
+
+    sup = mod.get_session_supervisor()
+    try:
+        bare = SessionSupervisor()
+        assert sup._max_warm_per_tenant == bare._max_warm_per_tenant == 8
+        assert sup._max_warm_global == bare._max_warm_global == 64
+    finally:
+        mod._supervisor = None
+
+
+def test_direct_construction_ignores_settings(monkeypatch):
+    """The engine stays config-free: an explicit constructor argument must win
+    over the environment, which is what keeps every fake-driven test above
+    independent of ambient config."""
+    monkeypatch.setenv("POCKETPAW_SESSION_WARM_MAX_PER_TENANT", "99")
+    sup = SessionSupervisor(max_warm_per_tenant=2)
+    assert sup._max_warm_per_tenant == 2

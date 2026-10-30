@@ -1,0 +1,10 @@
+{
+  "case_id": "guided-escalation-email",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model. well-behaved email route for a visitor who asked who to contact. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "611664873626fb4d",
+  "raw_model_output": "You can write to hello@brewco.test about a wholesale order and the team will help."
+}

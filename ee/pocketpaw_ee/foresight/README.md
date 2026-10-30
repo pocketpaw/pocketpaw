@@ -71,7 +71,9 @@ config = ScenarioConfig(
     n_ticks=3,
     personas=[
         PersonaSpec(name="tenant-a", role="tenant", ocean=OceanDrift(agreeableness=0.5)),
-        PersonaSpec(name="approver-prakash", role="approver", ocean=OceanDrift(conscientiousness=1.2)),
+        PersonaSpec(
+            name="approver-prakash", role="approver", ocean=OceanDrift(conscientiousness=1.2)
+        ),
     ],
 )
 result = asyncio.run(run_scenario(config))
@@ -83,9 +85,7 @@ print(result.as_wire_dict())
 ```python
 from pocketpaw_ee.foresight import run_scenario, ScenarioConfig
 
-config = ScenarioConfig.from_yaml(
-    "ee/pocketpaw_ee/foresight/scenarios/decision_forecast.yaml"
-)
+config = ScenarioConfig.from_yaml("ee/pocketpaw_ee/foresight/scenarios/decision_forecast.yaml")
 result = asyncio.run(run_scenario(config))
 ```
 

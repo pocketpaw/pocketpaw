@@ -21,6 +21,11 @@
 # non-role entry, proving OSS never leaks admin capabilities; and
 # ``build_role_aware_provider`` returns None for a non-``ws:`` scope so the
 # fail-closed default stays in place.
+# Updated: 2026-08-17 (feat/ast-3-atlas-flag-aware, AST-3) — the "available on
+# connectors only" card invariant now exempts the two rollout-flagged primitives
+# (``FLAGGED_PRIMITIVE_IDS``), which legitimately carry ``available`` + ``mode``
+# from the deployment flags; the flag behaviour itself is pinned in
+# test_overlay_flags.py.
 
 import json
 
@@ -33,6 +38,7 @@ from pocketpaw.agents.sdk_mcp_atlas import (
 from pocketpaw.atlas.model import AtlasEntry, AtlasModel
 from pocketpaw.atlas.overlay import (
     DEFAULT_SCOPE_KEY,
+    FLAGGED_PRIMITIVE_IDS,
     ROLE_LEVELS,
     AtlasOverlay,
     DefaultEntitlementProvider,
@@ -417,7 +423,7 @@ class TestMcpHandlersWithProvider:
         for card in cards:
             if card["kind"] == "connector":
                 assert card["available"] is (card["id"] == "connector:stripe")
-            else:
+            elif card["id"] not in FLAGGED_PRIMITIVE_IDS:  # AST-3: flag-aware
                 assert "available" not in card
 
     @pytest.mark.asyncio

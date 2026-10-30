@@ -1,4 +1,18 @@
 # service.py — EEUploadService: workspace-scoped upload pipeline on top of OSS.
+# Module-level helpers for other entities: ``get_records_scoped`` (metadata only)
+#   and ``read_bytes_scoped`` (server-internal byte read pinned to a workspace,
+#   size-capped, NO per-user ACL; callers must authorise upstream).
+# Updated: 2026-09-27 — fix/chat-attachment-name-backfill. Added module-level
+#   ``get_records_scoped(file_ids, workspace)``, a metadata-only batch lookup
+#   (no blob I/O) other entities call instead of reaching into the store, so
+#   session history can fill names on legacy nameless chat attachments.
+# Updated: 2026-08-29 — T0 "Persist the extracted text". ``delete`` now also
+#   removes the file's DERIVED extraction blob (``uploads.extracted_text``),
+#   which T0 introduced beside the uploaded bytes. Without this, every deleted
+#   file would leave its extracted text at rest forever. It runs after the
+#   tombstone and the primary blob delete, is keyed on ``file_id`` alone (so it
+#   needs no row read and works post-tombstone), and swallows its own failures
+#   — a derived orphan is a cleanup-job problem, never a failed delete.
 # Updated: 2026-06-26 — ART-4 security follow-up. ``presigned_get`` now forwards
 #   a Content-Disposition to the storage adapter: ``attachment; filename="…"``
 #   for any mime NOT in ``INLINE_MIMES`` (mirroring the streaming download
@@ -24,10 +38,14 @@
 #   The KB listener picks up the new key and routes the article into
 #   ``pocket:{id}`` instead of ``workspace:{wid}``. Storage layout is
 #   unchanged — partitioning is metadata-only (Captain Option A).
+#
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """EEUploadService — workspace-scoped upload pipeline on top of the OSS service."""
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,8 +67,9 @@ from pocketpaw.uploads.service import (
 from pocketpaw.uploads.service import (
     generate_thumbnail as _oss_generate_thumbnail,
 )
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import FileDeleted, FileReady
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import FileDeleted, FileReady
+from pocketpaw_ee.cloud.uploads.extracted_text import delete_extracted_text
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
 
@@ -202,6 +221,40 @@ class EEUploadService:
     ) -> BulkUploadResult:
         # Delegate validation + adapter writes; metadata is discarded inside OSS
         result = await self._oss.upload_many(files, owner_id, chat_id)
+        # feat/billing-storage-caps: block a batch that would push the workspace
+        # over its plan's S3 cap. We check the ACTUAL written sizes (from the
+        # OSS result — not a pre-write guess) and roll back the just-written
+        # blobs so an over-cap batch is a no-op: no Mongo row, no FileReady.
+        # GATED on ``billing_enforced`` (a no-op for OSS / self-host), and never
+        # retroactive — existing blobs are untouched.
+        from pocketpaw_ee.cloud.storage import service as storage_service
+
+        incoming = sum(rec.size for rec in result.uploaded)
+        if incoming:
+            exceeded, _used, limit = await storage_service.storage_cap_exceeded(workspace, incoming)
+            if exceeded:
+                for rec in result.uploaded:
+                    with contextlib.suppress(Exception):
+                        await self._adapter.delete(rec.storage_key)
+                from pocketpaw_ee.cloud._core.errors import StorageLimitError
+
+                raise StorageLimitError(limit)
+        # feat/abuse-budgets: the plan cap above only runs when billing is
+        # enforced, which is off by default — so on an unbilled deployment it
+        # is not a bound at all. This one always runs. Same rollback, and it
+        # sits AFTER the plan cap so a billed workspace still gets the 402 that
+        # names a real upgrade path rather than a 429 that says "wait".
+        if result.uploaded:
+            from pocketpaw_ee.cloud.uploads import upload_budget
+
+            allowed, over = await upload_budget.try_spend(workspace, len(result.uploaded), incoming)
+            if not allowed:
+                for rec in result.uploaded:
+                    with contextlib.suppress(Exception):
+                        await self._adapter.delete(rec.storage_key)
+                from pocketpaw_ee.cloud._core.errors import DailyUploadLimitError
+
+                raise DailyUploadLimitError(over)
         # Persist each successful record in Mongo with workspace + pocket scoping.
         for rec in result.uploaded:
             await self._meta.save_scoped(
@@ -312,6 +365,13 @@ class EEUploadService:
         # future cleanup job) rather than silently surviving visibility.
         await self._meta.soft_delete_scoped(file_id, workspace=workspace)
         await self._adapter.delete(rec.storage_key)
+        # T0: the upload's DERIVED extraction blob goes with it. Keyed
+        # deterministically on file_id, so no row read is needed — which also
+        # means it works after the tombstone above. Best-effort by contract:
+        # ``delete_extracted_text`` swallows its own failures, because a
+        # leftover derived blob is a cleanup-job problem and never a reason to
+        # fail a delete the user asked for.
+        await delete_extracted_text(file_id, adapter=self._adapter)
         # Emit FileDeleted on every delete so subscribers can prune cached
         # state (KB index, search caches). Chat-scoped rows include group_id
         # for the timeline broadcast; workspace-only rows skip it.
@@ -327,6 +387,38 @@ class EEUploadService:
 # ---------------------------------------------------------------------------
 # Programmatic write helper (pocketpaw#1118 P1)
 # ---------------------------------------------------------------------------
+
+
+async def get_records_scoped(file_ids: list[str], workspace: str) -> dict[str, FileRecord]:
+    """Metadata for a batch of uploads in one workspace, keyed by file_id.
+
+    One query, no storage access. Ids that are unknown, soft-deleted or owned
+    by another workspace are absent from the result.
+    """
+    return await MongoFileStore().get_many_scoped(file_ids, workspace)
+
+
+async def read_bytes_scoped(file_id: str, workspace: str, *, max_bytes: int) -> bytes | None:
+    """A live upload's bytes, read server-side, or ``None``.
+
+    For server-internal copies of a file the platform itself wrote (a site's
+    screenshot copied onto a template), so there is no requester and no
+    ``_assert_can_read``: the caller must already have authorised the read of
+    whatever pointed it at ``file_id``. Workspace-pinned like ``get_scoped``, so
+    an id from another workspace, an unknown id or a deleted row is ``None``.
+    ``None`` too past ``max_bytes``: the read stops there rather than buffer a
+    file the caller would refuse.
+    """
+    rec = await MongoFileStore().get_scoped(file_id, workspace=workspace)
+    if rec is None:
+        return None
+    adapter = build_adapter(Path.home() / ".pocketpaw" / "uploads")
+    buf = bytearray()
+    async for chunk in adapter.open(rec.storage_key):
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            return None
+    return bytes(buf)
 
 
 _PLANNER_EXTENSION_BY_MIME = {
@@ -392,6 +484,19 @@ async def write_text_file(
         yield payload
 
     obj = await adapter.put(storage_key, _body(), content_type)
+
+    # feat/billing-storage-caps: the programmatic writer honours the workspace's
+    # S3 cap the same way the HTTP upload path does. ``assert_storage_available``
+    # raises ``StorageLimitError`` (402) BEFORE the Mongo row lands; on the raise
+    # we also remove the just-written blob so an over-cap write leaves no orphan.
+    from pocketpaw_ee.cloud.storage import service as storage_service
+
+    try:
+        await storage_service.assert_storage_available(workspace_id, obj.size)
+    except Exception:
+        with contextlib.suppress(Exception):
+            await adapter.delete(storage_key)
+        raise
 
     rec = FileRecord(
         id=uuid4().hex,

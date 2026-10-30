@@ -1,5 +1,29 @@
 """User and OAuth account models (fastapi-users + Beanie).
 
+Updated: 2026-09-01 (feat/byok-guest-backend) — added ``is_guest`` +
+``guest_limits`` for BYOK-first onboarding. A guest is a server-minted
+anonymous account (synthetic email, random password) with hard server-side
+limits; signup later ATTACHES real credentials to the SAME user id and flips
+``is_guest`` off. ``guest_limits`` is nullable: ``None`` on every non-guest
+row (no limits), populated at guest mint. The turn/session caps are enforced
+by ``ee.cloud.auth.guest_budget`` (fail-closed), not here.
+
+Updated: 2026-09-04 — added the ``workspaces.workspace`` index. Until now the
+only index on this collection was the unique ``email`` one that
+``BeanieBaseUser`` contributes, so every membership lookup was a COLLSCAN.
+That predicate is not cold: ``list_member_ids`` backs ``AudienceResolver``,
+which resolves the recipients of every workspace-scoped realtime event behind
+a 2-second cache — so steady chat traffic scans the whole collection roughly
+every 2 seconds per active workspace, on the single event loop. Multikey on
+the ``workspaces`` array, which also serves the ``$elemMatch`` in
+``list_admin_ids`` and the ``$in`` in ``list_peer_ids``.
+
+Updated: 2026-08-01 (AM-6) — added ``OAuthAccount.linked_at`` so the
+connected-accounts panel can say WHEN an identity was attached. Nullable with
+no default rather than ``default_factory=now``: rows written before this field
+existed have no honest timestamp, and stamping them with "now" on first read
+would invent one. They read back as ``None`` and the UI omits the date.
+
 Updated: 2026-05-21 — added ``home_pocket_id`` so the home page can be
 backed by a per-user "home pocket". Optional (default None) — the auth
 service resolves-or-provisions it lazily; existing users read back as
@@ -13,12 +37,29 @@ from datetime import UTC, datetime
 from beanie import Document
 from fastapi_users_db_beanie import BaseOAuthAccount, BeanieBaseUser
 from pydantic import BaseModel, Field
+from pymongo import IndexModel
 
 
 class OAuthAccount(BaseOAuthAccount):
-    """OAuth account linked to a User (Google, GitHub, etc.)."""
+    """OAuth account linked to a User (Google, GitHub, etc.).
 
-    pass
+    ``linked_at`` is ours, not fastapi-users'. See the module docstring for why
+    it is nullable instead of defaulting to now.
+    """
+
+    linked_at: datetime | None = None
+
+
+class GuestLimits(BaseModel):
+    """Hard server-side caps for a guest account (BYOK-first onboarding).
+
+    Stored on the user (not env-config) so an individual guest's caps can be
+    raised without a deploy, and so the caps travel with the row the budget
+    reads. Defaults are the captain's launch numbers.
+    """
+
+    sessions: int = 2
+    turns_per_day: int = 40
 
 
 class WorkspaceMembership(BaseModel):
@@ -41,6 +82,12 @@ class User(BeanieBaseUser, Document):  # type: ignore[misc]
     last_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
     oauth_accounts: list[OAuthAccount] = Field(default_factory=list)
 
+    # BYOK-first onboarding (2026-09-01): server-minted anonymous guest.
+    # ``is_guest`` gates the fail-closed turn/session budget and the upload
+    # block; the upgrade route flips it False and clears nothing else.
+    is_guest: bool = False
+    guest_limits: GuestLimits | None = None
+
     # MFA / TOTP state (Wave 3 Task 3). pending_setup + enabled form a
     # tri-state: (False, False) never set up; (True, False) secret minted
     # but not yet verified; (*, True) active. Backup codes stored as
@@ -51,6 +98,44 @@ class User(BeanieBaseUser, Document):  # type: ignore[misc]
     mfa_verified_at: datetime | None = None
     mfa_pending_setup: bool = False
 
+    # Platform authority axis (2026-09-14) — see ee.guards.platform. ORTHOGONAL
+    # to ``workspaces[].role``: that says what the user may do inside one
+    # tenant, this says whether they may act across all of them. A workspace
+    # OWNER gets nothing here by being one.
+    #
+    # ``None`` on every existing row and on every new signup, which is the only
+    # safe default — platform access is granted deliberately, by the CLI in
+    # ee/pocketpaw_ee/cloud/platform/cli.py, and never by a signup path.
+    #
+    # Stored as a plain string rather than the enum so that an unrecognised
+    # value written by a newer node degrades to "no access"
+    # (``check_platform_action`` denies anything it cannot parse) instead of
+    # raising on load and taking out every read of that user. Same reasoning as
+    # ``workspaces[].role``, which is also a bare str.
+    platform_role: str | None = None
+
+    # Early access grant (credits.service.grant_early_access). The workspace is
+    # claimed once, atomically, and only ever one the user OWNS; the grant then
+    # lands there under the per-user ledger key. ``granted_at`` is stamped after
+    # the ledger grant and is only a fast path: the ledger key is the guarantee.
+    early_access_workspace_id: str | None = None
+    early_access_granted_at: datetime | None = None
+    # First "notify me when plans open" click (early_access.service.notify_plans).
+    # Set once and never moved, so a repeat click keeps the original time.
+    notify_plans_at: datetime | None = None
+
     class Settings:
         name = "users"
         email_collation = None
+        indexes = [
+            # Multikey over the ``workspaces`` array. Serves the three
+            # membership predicates in workspace/service.py:
+            #   list_member_ids  {"workspaces.workspace": wid}
+            #   list_admin_ids   {"workspaces": {"$elemMatch": {...}}}
+            #   list_peer_ids    {"workspaces.workspace": {"$in": [...]}}
+            # ``$elemMatch`` on (workspace, role) uses this too: Mongo narrows
+            # on the indexed leading field and filters ``role`` from the
+            # candidate docs, which is the whole win here — the scan goes from
+            # the collection to one workspace's members.
+            IndexModel([("workspaces.workspace", 1)], name="workspaces_workspace_1"),
+        ]

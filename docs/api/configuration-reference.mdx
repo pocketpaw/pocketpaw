@@ -9,6 +9,40 @@ tags: ["api", "configuration"]
 
 {/*
   docs/api/configuration-reference.mdx
+  Updated 2026-10-02 (feat/partners-tiers, PH-15) — added the
+  POCKETPAW_PARTNER_TIER_SWEEP_ENABLED kill switch (monthly partner tier review).
+  Updated 2026-10-02 (feat/partners-inr-topup, PH-4) — Billing & Credits: added
+  `dodo_credit_product_id_inr` + `fx_inr_per_usd` and an "INR top-ups" note
+  (settlement-first conversion with a 0.5x-2x sanity band, bulk bonus tiers,
+  pro-rata reversals, Rs.100 minimum; INR routes on Dodo's product id, and
+  metadata never sets an amount).
+  Updated 2026-10-02 (feat/partners-whatsapp-leads, PH-6) — added "Paw Partners —
+  lead WhatsApp" with the four POCKETPAW_MSG91_PLATFORM_* settings: the platform
+  MSG91 account that sends a partner-sold site's new leads to the opted-in shop
+  owner.
+  Updated 2026-09-02 (docs/sites-analytics, SA-7) — EXTENDED the SA-2/SA-3 section
+  below rather than adding a second one, with the one operator fact the variables
+  alone do not carry: the READ needs an Account Analytics Read token scope that the
+  deploy paths do not use, so a publish-only token deploys counters and then 403s
+  every read — a failure that looks like broken analytics rather than like a missing
+  permission. Deliberately adds nothing about which engines count. The SA-3 entry below
+  already answers that, and this branch merges AFTER it.
+  Updated 2026-09-02 (feat/sites-analytics-shim, SA-3) — the "Paw Sites — visitor
+  analytics" section now says which engines count and what the off shape is on each
+  branch. SA-2's kill-switch row said the off shape has "no main", which was true
+  while only assets-only sites counted; a ripple or dynamic svelte site has a main
+  either way, because that main is SvelteKit's own worker.
+  Updated 2026-09-02 (feat/sites-analytics-gate, SA-2) — added the "Paw Sites —
+  visitor analytics" section with PAW_SITES_ANALYTICS_DISABLED (the operator kill
+  switch SA-2 introduces) and PAW_SITES_ANALYTICS_DATASET (which SA-1 shipped
+  undocumented). They are the first entries in this file with NO settings field:
+  the Paw Sites deploy path reads its configuration from the environment directly,
+  so the lead sentence above no longer claims every variable carries the
+  POCKETPAW_ prefix.
+  Updated 2026-08-03 (feat/prompt-bulk-retrieval, PA-8a) — added the "Prompt
+  Assembly" section with prompt_pocket_summary_only, the default-off switch that
+  moves bulk pocket widget detail out of the system prompt and onto the
+  get_pocket tool-result path.
   Updated 2026-07-11 (feat/fst-8-harness, FST-8) — added the "Fabric" section
   with fabric_source_truth_mode (the off/shadow/enforce rollout switch) and
   its divergence-report enforce gate.
@@ -16,7 +50,7 @@ tags: ["api", "configuration"]
 
 # Configuration Reference
 
-Complete reference of all configuration settings. All environment variables use the `POCKETPAW_` prefix.
+Complete reference of all configuration settings. Environment variables backed by a settings field use the `POCKETPAW_` prefix. The Paw Sites deploy knobs at the end are the exception — they are read straight from the process environment and carry no settings field.
 
 ## Core Settings
 
@@ -27,6 +61,8 @@ Complete reference of all configuration settings. All environment variables use 
 | `agent_backend` | `POCKETPAW_AGENT_BACKEND` | enum | `claude_agent_sdk` | Agent backend (`claude_agent_sdk`, `openai_agents`, `google_adk`, `codex_cli`, `opencode`, `copilot_sdk`) |
 | `claude_sdk_model` | `POCKETPAW_CLAUDE_SDK_MODEL` | string | `""` (auto) | Model override for Claude SDK (empty = let Claude Code decide) |
 | `claude_sdk_max_turns` | `POCKETPAW_CLAUDE_SDK_MAX_TURNS` | integer | `25` | Max tool-use turns per query in Claude SDK |
+| `sites_app_build_max_turns` | `POCKETPAW_SITES_APP_BUILD_MAX_TURNS` | integer | `0` | Tool-use turn cap for a `/sites` project turn whose `PLAN.md` still has unticked milestones, so an approved app plan is built through every milestone in one turn. `0` means no cap for that turn; `N > 0` caps it at N, raising `claude_sdk_max_turns` / `pydantic_ai_max_turns` but never lowering them. Every other chat keeps its backend cap, a platform-funded free run keeps `free_run_max_turns`, and Stop still ends any run. |
+| `claude_sdk_tool_search` | `POCKETPAW_CLAUDE_SDK_TOOL_SEARCH` | string | `""` | Passed to the Claude Code CLI as `ENABLE_TOOL_SEARCH` (`true`, `false`, `auto`, `auto:N`; a JSON `true`/`false` in config.json or the settings API counts as the string; anything else is ignored with a warning). Empty keeps the CLI default, which turns MCP tool search off behind any `ANTHROPIC_BASE_URL` other than `api.anthropic.com`, so gateway providers send every MCP schema upfront (about 105k vs 19k input tokens per fresh request with 37 MCP servers). Requests fail if the gateway can't forward `tool_reference` blocks; test it with `scripts/check_gateway_tool_search.py`. Skipped with a warning on the `ollama` and `gemini` providers, which never reach a Claude model. A non-empty `ENABLE_TOOL_SEARCH` in the process env wins. See [Claude Agent SDK](/backends/claude-sdk#mcp-tool-search-behind-a-gateway) |
 | `smart_routing_enabled` | `POCKETPAW_SMART_ROUTING_ENABLED` | boolean | `false` | Smart model routing (disabled by default — conflicts with Claude Code) |
 | `model_tier_simple` | `POCKETPAW_MODEL_TIER_SIMPLE` | string | `claude-haiku-4-5-20251001` | Model for simple tasks (when smart routing is on) |
 | `model_tier_moderate` | `POCKETPAW_MODEL_TIER_MODERATE` | string | `claude-sonnet-4-5-20250929` | Model for moderate tasks (when smart routing is on) |
@@ -66,9 +102,36 @@ Cloud / subscription (PEE) only. The credit ledger and these knobs are inert on 
 
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
-| `billing_enforced` | `POCKETPAW_BILLING_ENFORCED` | bool | `false` | Run-start hard-block. When `true`, starting a chat run is rejected with HTTP 402 if the workspace balance is `<= 0` (`credits.insufficient`) **or** its month-to-date spend has hit the monthly credit ceiling (`credits.quota_exceeded`), at both the chat HTTP path and the worker/executor, before any model call. In-flight runs are never killed. **Subscription / PEE deployments must set this to `1`** — left at the default, a Free workspace runs past its cap into a negative balance (see the [cloud GA runbook](/runbooks/cloud-ga-two-tenant-smoke), step 3c). Per-plan ceilings come from the catalog (`billing/plans.py` `_CEILING`; `enterprise` is uncapped), not from this flag. |
+| `billing_enforced` | `POCKETPAW_BILLING_ENFORCED` | bool | `false` | Run-start hard-block. When `true`, starting a chat run is rejected with HTTP 402 if the workspace balance is `<= 0` (`credits.insufficient`) **or** its month-to-date spend has hit the monthly credit ceiling (`credits.quota_exceeded`), at both the chat HTTP path and the worker/executor, before any model call. In-flight runs are never killed. **Subscription / PEE deployments must set this to `1`** — left at the default, a Free workspace runs past its cap into a negative balance (see the [cloud GA runbook](/runbooks/cloud-ga-two-tenant-smoke), step 3c). Per-plan ceilings come from the catalog (`billing/plans.py` `_CEILING`; `enterprise` is uncapped), not from this flag. Also turns the Paw Sites seams on, which since 2026-08-21 have their own switch as well (`sites_billing_enforced`); the sites seams read either flag, so nothing changes for a deployment already setting this one. |
+| `sites_billing_enforced` | `POCKETPAW_SITES_BILLING_ENFORCED` | bool | `false` | Per-SITE billing enforcement, independent of `billing_enforced`. When `true`, the Paw Sites seams enforce: the custom-domain capability gate, the custom-domain count cap (how many sites in a workspace may carry one, and how many hostnames a free site may carry) and the visitor concierge entitlement. Set **either** this or `billing_enforced` and those seams are live. It exists because the two decisions are unrelated — charging for custom domains should not also start rejecting chat runs with 402. Explicitly outside its scope and still governed by `billing_enforced` alone: chat-run credit blocks, the seat cap, the pocket cap, the connector cap, the daily call budget and the storage cap. With both off the seams do no extra database read, so OSS / self-host is unaffected. |
+| `credits_enforced` | `POCKETPAW_CREDITS_ENFORCED` | bool | `false` | The chat credit gate on its own. When `true`, starting an agent run is refused with HTTP 402 `credits.insufficient` (wallet at or below 0) or `credits.quota_exceeded` (monthly ceiling reached), at the chat HTTP route and in the worker, before any model call. The gate reads `billing_enforced` OR this flag. Unlike `billing_enforced` it turns on nothing else: the seat, pocket, connector, upload, storage, call and sites gates stay off. Used for the early-access launch. The platform settings route shows it read-only and refuses writes (`platform.settings.env_only_field`); set it in the environment. |
+| `payments_open` | `POCKETPAW_PAYMENTS_OPEN` | bool | `false` | Whether customers can pay (plans, top-ups). While `false`, a workspace on the `free` plan with no applied `top_up` or `subscription_grant` in its ledger counts as platform-funded early access, and the early-access limits apply to it. While `false` every checkout returns 403 `payments.closed` and the Dodo webhook grants no credits and changes no plan; webhook grants also need `dodo_environment=live_mode`. Flip it together with live payment provider credentials. The platform settings route shows it read-only and refuses writes (`platform.settings.env_only_field`); set it in the environment. |
+| `free_run_max_turns` | `POCKETPAW_FREE_RUN_MAX_TURNS` | int | `20` | Model requests one platform-funded free run may make (an unpaid early-access workspace while `credits_enforced` or `billing_enforced` is on), in place of `pydantic_ai_max_turns` when lower. Such a run is also forced onto `pydantic_ai`, gets a token limit its wallet pays for, and is the workspace's only active chat run (429 `credits.run_in_progress` otherwise). |
+| `free_model_allowlist` | `POCKETPAW_FREE_MODEL_ALLOWLIST` | list[str] (JSON) | `["claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-sonnet-4-6"]` | Models a platform-funded turn on an unpaid early-access workspace may use while `credits_enforced` or `billing_enforced` is on. Matched ignoring case and one known provider prefix. The model must also be priced by metering, and `pydantic_ai_model` must be on the list or every free turn is refused. Anything else is refused with 400 `model.not_allowed`. Paid workspaces and BYOK turns are not limited. |
+| `early_access_grant_credits` | `POCKETPAW_EARLY_ACCESS_GRANT_CREDITS` | int | `1000` | Early access credits each verified user gets once, into the oldest workspace they own (never one they were invited to). Granted on owned-workspace create and on the guest social upgrade. Keep it at or below the free plan's monthly ceiling. `0` turns the grant off. Grants are permanent, so a change affects new users only. |
+| `password_signup_open` | `POCKETPAW_PASSWORD_SIGNUP_OPEN` | bool | `true` | Whether new accounts may be created with an email and password. When `false`, `POST /auth/register` and `POST /auth/guest/upgrade` answer 403 `auth.password_signup_closed` and social sign-in is the only way in. Existing password accounts still log in. The early-access launch sets it to `false`. |
 | `billing_markup` | `POCKETPAW_BILLING_MARKUP` | float | `2.5` | Flat markup applied to a run's real compute cost before it is billed to the wallet. Metered charge = `round(cost_usd * billing_markup / credit_usd)`. |
+| _(removed)_ | `POCKETPAW_DODO_SITE_PRODUCTS` | — | — | **Deleted 2026-09-05.** Mapped a per-site plan tier to a Dodo recurring product id. Paw Sites left the gateway: a paid site is charged to the **workspace credit balance**, so nothing reads this and the setting no longer exists. Setting the env var is inert. `dodo_plan_products` is untouched — workspace plans still bill through Dodo. |
+| _(removed)_ | `POCKETPAW_DODO_SITE_ADDONS` | — | — | **Deleted 2026-09-05.** Mapped a per-site plan tier to a Dodo add-on id, billing a paid site as a line on the workspace subscription. Removed with the rest of that rail; see the [site plans on credits runbook](/runbooks/2026-09-05-site-plans-on-credits). |
+| _(no setting)_ | `POCKETPAW_SITE_RENEWALS_ENABLED` | bool | `true` (unset) | Kill switch for the credits site-plan **renewal** sweep, which runs on the five-minute heartbeat and debits the next month for every wallet-paid site whose `renewal_date` has passed. This sweep is what makes a monthly site plan recur at all now that a paid site has no gateway subscription — without it a customer pays once and keeps every paid capability for good — so it defaults **on** and is off only when this is set to `0`/`false`/`no`/`off`. Read per sweep rather than at boot, so an operator can stop the charging on a running process. A site whose wallet cannot cover the renewal is marked `cancelled` and drops to the free floor; **the site itself is never taken down**. |
+| _(no setting)_ | `POCKETPAW_PARTNER_TIER_SWEEP_ENABLED` | bool | `true` (unset) | Kill switch for the monthly Paw Partners tier review (`partners.service.sweep_partner_tiers`, on the five-minute heartbeat). It lowers a partner's volume tier when its active sold sites no longer earn it and re-grants any missing milestone reward, once per partner per UTC month. Off only when set to `0`/`false`/`no`/`off`; read per sweep. Off, tiers still go up after sales and client payments but never come down. |
 | `credit_usd` | `POCKETPAW_CREDIT_USD` | float | `0.01` | USD value of one credit (1 credit == $0.01). Divides the marked-up compute cost to yield integer credits. |
+| `billing_dunning_grace_days` | `POCKETPAW_BILLING_DUNNING_GRACE_DAYS` | int | `7` | Days a workspace keeps its paid plan after a renewal payment fails. A verified `subscription.on_hold` webhook stamps the deadline onto the subscription and leaves entitlements alone; a sweep on the five-minute heartbeat reverts `Workspace.plan` to `free` once it passes, and a successful retry (`subscription.renewed` / `.active`) clears it. `subscription.expired` / `.failed` are terminal at the gateway and suspend immediately regardless of this value. Owners and admins get an in-app notification (bell and push) when the payment fails, with the grace deadline, and again when the plan actually drops to `free`. Credits are never clawed back on any dunning path — only an actual `refund.succeeded` or `dispute.lost` reverses credits. Set it longer than the gateway's own retry schedule: cutting a customer off while Dodo is still recovering the charge is worse than a few extra days of service. `0` suspends on the first failed charge. |
+| `dodo_credit_product_id_inr` | `POCKETPAW_DODO_CREDIT_PRODUCT_ID_INR` | string | -- | Dodo product id of the **INR-priced** pay-what-you-want credits product. `POST /billing/topup` with `"currency": "INR"` puts it in the cart with the amount in **paise** (a pay-what-you-want amount is in the product's own currency, so the USD credits product cannot carry a rupee figure) and pins `billing_currency=INR`. Unset refuses INR top-ups with `billing.product_unconfigured`. |
+| `fx_inr_per_usd` | `POCKETPAW_FX_INR_PER_USD` | float | `89` | Rupees per US dollar. Used **only** when a verified INR `payment.succeeded` carries no USD `settlement_amount`: credits = `floor(paise / rate)`. When Dodo does report a USD settlement, that figure is granted instead (1 credit per settled cent). |
+
+### INR top-ups (Paw Partners)
+
+Indian partners prepay the wallet in rupees. The verified webhook decides what to grant from **Dodo's own `product_cart`** (the product actually bought) and the money actually paid. Checkout metadata never gates or sizes a grant: a Dodo static payment link accepts `metadata_*` query parameters, so a buyer can write any metadata they like, and the webhook signature only proves Dodo sent the body. (`topup_currency` is still stamped on the checkout metadata, as an informational tag.)
+
+- **INR credits product (`dodo_credit_product_id_inr`, the only line in the cart), charged in INR** → converted from the money paid (below) and eligible for the bulk bonus.
+- **Any other USD charge** → `total_amount` cents, exactly as before.
+- **Anything else** (a USD-product checkout Dodo priced in rupees, a mixed or missing cart, a foreign charge) → acknowledged, recorded on the `Payment` row with `credits_granted = 0`, and granted nothing. The log names the event id and currency, never the amount.
+
+- **Conversion.** Dodo's own USD `settlement_amount` wins when present and sits within 0.5x–2x of the `fx_inr_per_usd` estimate; outside that band it is treated as a unit or field mismatch and the FX rate grants instead (a warning names the event id). The `Payment` row keeps the settlement figure, which source won (`conversion`) and the rate the base credits were granted at — the last two copied off the base ledger entry, so a redelivery after a rate change cannot rewrite them. The reversal cap (`credits_granted`) is likewise read from the applied ledger lines, never recomputed.
+- **Bulk bonus.** A separate ledger line with `cause = "bulk_bonus"`, keyed on `<event_id>:bulk_bonus`, so it is exactly-once on its own: **+10%** of the base credits from ₹25,000, **+20%** from ₹1,00,000 (floored, measured on the gross amount paid). A bonus is not `top_up`, so it does not count as purchased revenue and does not raise the monthly ceiling.
+- **Reversals.** `refund.succeeded` / `dispute.lost` against an INR top-up reverse `floor(granted × refunded / paid)`, where `granted` is base + bonus: a full refund takes exactly base + bonus, a partial refund takes its share of both, and the running total can never pass what was granted. For USD `granted == paid`, so this is the same cent-for-credit reversal as before.
+- **Limits.** One INR top-up is ₹100 to ₹10,00,000 (10,000 to 100,000,000 paise); the USD cap stays 1,000,000 credits ($10,000).
 
 ## Tool Policy
 
@@ -77,6 +140,14 @@ Cloud / subscription (PEE) only. The credit ledger and these knobs are inert on 
 | `tool_profile` | `POCKETPAW_TOOL_PROFILE` | enum | `full` | Tool profile (`minimal`, `coding`, `full`) |
 | `tools_allow` | `POCKETPAW_TOOLS_ALLOW` | string[] | `[]` | Allowed tools (comma-separated list) |
 | `tools_deny` | `POCKETPAW_TOOLS_DENY` | string[] | `[]` | Denied tools (comma-separated list) |
+
+## Prompt Assembly
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `prompt_pocket_summary_only` | `POCKETPAW_PROMPT_POCKET_SUMMARY_ONLY` | boolean | `false` | Keep bulk pocket widget detail out of the system prompt. `false` (default) is the block shipped today: `<current-pocket>` carries a JSON dump of the widget summary the client posted. `true` renders the cheap half only — pocket id, name, widget count and a snapshot stamp — plus the same standing order to call `mcp__pocketpaw_pocket__get_pocket`, so detail arrives as a tool result and costs nothing until it is asked for. On a 300-widget pocket the block drops from ~41,000 chars to ~1,700. |
+
+Independent of the flag, the `<current-pocket>` widget summary is bounded to 2,000 serialised characters (whole widgets only, with a `widgets_summary_truncated: showing N of M` line when anything is cut) and the pocket name to 200. Before that bound, a large pocket could render the block past the whole prompt budget, and the budget's answer was to drop the block whole — taking the pocket id and the `get_pocket` instruction with it, on exactly the pockets too large to answer without a fetch.
 
 ## Telegram
 
@@ -109,8 +180,39 @@ Cloud / subscription (PEE) only. The credit ledger and these knobs are inert on 
 | `whatsapp_access_token` | `POCKETPAW_WHATSAPP_ACCESS_TOKEN` | string | — | Business API token |
 | `whatsapp_phone_number_id` | `POCKETPAW_WHATSAPP_PHONE_NUMBER_ID` | string | — | Phone number ID |
 | `whatsapp_verify_token` | `POCKETPAW_WHATSAPP_VERIFY_TOKEN` | string | — | Webhook verify token |
+| `whatsapp_app_secret` | `POCKETPAW_WHATSAPP_APP_SECRET` | string | — | Meta app secret. Business mode rejects inbound webhooks (403) without a matching `X-Hub-Signature-256`, and rejects all of them while unset |
 | `whatsapp_allowed_phone_numbers` | `POCKETPAW_WHATSAPP_ALLOWED_PHONE_NUMBERS` | string[] | `[]` | Allowed numbers (comma-separated) |
 | `whatsapp_neonize_db` | `POCKETPAW_WHATSAPP_NEONIZE_DB` | string | `~/.pocketpaw/neonize.db` | Neonize DB path |
+
+## Paw Partners — lead WhatsApp
+
+The platform's own MSG91 account. A new lead on a site a partner sold goes to the
+shop owner's WhatsApp when the owner opted in. This is separate from the
+per-workspace `msg91` connector that /growth uses. Nothing is sent until the first
+three are set. Delivery details: "Partner leads on WhatsApp" in `docs/api-reference.md`.
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `msg91_platform_authkey` | `POCKETPAW_MSG91_PLATFORM_AUTHKEY` | string | — | MSG91 authkey. Secret, stored encrypted, never logged |
+| `msg91_platform_integrated_number` | `POCKETPAW_MSG91_PLATFORM_INTEGRATED_NUMBER` | string | — | WhatsApp sender number on the account |
+| `msg91_platform_lead_template` | `POCKETPAW_MSG91_PLATFORM_LEAD_TEMPLATE` | string | — | Approved new-lead template name (one body variable) |
+| `msg91_platform_language` | `POCKETPAW_MSG91_PLATFORM_LANGUAGE` | string | `en` | Template language code |
+
+## AI visibility checks
+
+The platform's own provider accounts used to ask AI search engines whether they
+name a business (`ee/pocketpaw_ee/cloud/ai_visibility`). An engine with no key is
+skipped. All keys are secrets, stored encrypted and never logged.
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `ai_visibility_openai_api_key` | `POCKETPAW_AI_VISIBILITY_OPENAI_API_KEY` | string | — | OpenAI Responses API with web search |
+| `ai_visibility_perplexity_api_key` | `POCKETPAW_AI_VISIBILITY_PERPLEXITY_API_KEY` | string | — | Perplexity Agent API |
+| `ai_visibility_anthropic_api_key` | `POCKETPAW_AI_VISIBILITY_ANTHROPIC_API_KEY` | string | — | Claude web search, and the judge fallback |
+| `ai_visibility_cf_account_id` | `POCKETPAW_AI_VISIBILITY_CF_ACCOUNT_ID` | string | — | Cloudflare account for Workers AI (Clef-flash judge) |
+| `ai_visibility_cf_api_token` | `POCKETPAW_AI_VISIBILITY_CF_API_TOKEN` | string | — | Cloudflare API token with Workers AI access |
+| `turnstile_secret` | `POCKETPAW_TURNSTILE_SECRET` | string | — | Cloudflare Turnstile secret for the free AI check; unset skips verification (dev only) |
+| `ai_check_daily_usd` | `POCKETPAW_AI_CHECK_DAILY_USD` | float | `5.0` | Daily engine-spend cap for anonymous free AI checks; past it the check answers 503 |
 
 ## Signal
 
@@ -165,6 +267,13 @@ Cloud / subscription (PEE) only. The credit ledger and these knobs are inert on 
 | `google_api_key` | `POCKETPAW_GOOGLE_API_KEY` | string | — | Google AI API key |
 | `image_model` | `POCKETPAW_IMAGE_MODEL` | string | `gemini-2.0-flash` | Model |
 
+## Design Research (Refero)
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `refero_api_token` | `POCKETPAW_REFERO_API_TOKEN` | string | — | Refero API token. Enables the design-research tools that ground generated UI in real shipped design systems: `refero_design_styles` / `refero_design_screens` (BaseTools, for the pydantic_ai and other non-SDK backends) and the `pocketpaw_refero` in-process MCP server exposing `search_styles` / `get_style` / `search_screens` / `view_reference` (for the claude_agent_sdk backend, which cannot see a BaseTool; `view_reference` returns a screen's screenshot or a style preview as images). Requires a paid Refero plan. **Unset degrades to empty results everywhere** — a site build proceeds without design research rather than failing, exactly like an unconfigured stock-photo provider. Granted to `/sites` on every mode; other restrictive surfaces see it only if they name the ids. **Licensing:** a per-seat Refero plan is licensed to one user and forbids sharing access, so a token serving a multi-tenant deploy needs Refero's usage-based integration agreement, not a Pro seat. |
+| `refero_endpoint` | `POCKETPAW_REFERO_ENDPOINT` | string | `""` | Override the Refero MCP endpoint. Empty uses the documented default (`https://api.refero.design/mcp`). For pointing at a proxy or staging host without a code change; no reason to set it otherwise. |
+
 ## Voice & STT
 
 | Setting | Env Variable | Type | Default | Description |
@@ -210,6 +319,54 @@ The pocket specialist does NOT receive Composio — its tool surface stays narro
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
 | `mcp_client_metadata_url` | `POCKETPAW_MCP_CLIENT_METADATA_URL` | string | — | CIMD URL for MCP OAuth (for servers without dynamic client registration) |
+| `sites_mcp_servers` | `POCKETPAW_SITES_MCP_SERVERS` | string | `""` | Comma-separated names of EXTERNAL MCP servers (from `~/.pocketpaw/mcp_servers.json`) that the **/sites** surface may call — e.g. `refero` for live design research. Empty grants none, so an install that has not opted in is unaffected. `/sites` runs a hard allow-list of fully-qualified `mcp__<server>__<tool>` ids, but an external server's tool names are unknown until the client connects, so it is allow-listed wholesale with a bare `mcp__<server>` token; naming a server here puts that token in the /sites allow set. This scopes the grant to **that surface alone** — unlike `ALWAYS_ALLOWED_MCP_SERVERS`, which hands a server to every surface. A name matching no configured server is inert, not an error. Read once at startup. |
+
+| `inspo_mcp_url` | `POCKETPAW_INSPO_MCP_URL` | string | `""` | Override the endpoint the bundled design-research tools call — the `pocketpaw_inspo` server and the `inspo_*` BaseTools. Empty uses the hosted archive at `https://inspomcp.dev/api/mcp`. Exists because the hosted service rate-limits **per IP** and a multi-tenant deploy presents one egress IP for all its tenants, so a busy install can exhaust the limit for everyone at once; the upstream is MIT with a documented self-host path. Read per call, so it takes effect without a restart. |
+
+### Design research on /sites
+
+**Nothing to configure.** `pocketpaw_inspo` is a bundled in-process MCP server,
+like `pocketpaw_stock` and `pocketpaw_icons` — it ships with the deploy and the
+/sites create preamble names its tools unconditionally.
+
+It wraps an archive of ~2,300 captured pages across ~830 real shipped sites,
+each carrying a DESIGN.md extracted from the live DOM (role-tagged palette, type
+ramp, spacing scale, macrostructure), and exposes three tools:
+`research_page_design` (a brief in, a macrostructure and real exemplars out),
+`get_reference_design_system` (one exemplar's DESIGN.md) and
+`view_reference_screenshot` (one exemplar's captured screenshot, hero, full page
+or phone width, returned as images). Screenshots are fetched only from the
+archive's blob host.
+
+The same archive reaches the pydantic_ai and other non-SDK backends through two
+BaseTools, `inspo_research_page_design` and `inspo_reference_design_system`,
+which cannot see an in-process MCP server. Both surfaces share one code path
+(`pocketpaw.tools.builtin.inspo`), so `inspo_mcp_url` applies to both.
+
+The preamble names tools by their SDK ids (`mcp__pocketpaw_inspo__…`). The
+pydantic_ai backend bridges the same in-process servers as `<server>_<tool>`,
+so it rewrites those ids in the prompt to its own names
+(`pocketpaw_inspo_research_page_design`) before the turn runs. One preamble
+serves every backend.
+
+The /sites **create** preamble uses them in `PHASE 1b`, before the look is
+chosen: a few searches (per section where the shape is the open question), then
+the 3-5 strongest references OPENED as screenshots, then one direction locked.
+The locked reference sets the palette (each colour kept in its role), type
+character and composition; the embedded design system fills the gaps. The
+rotation rule still binds, so two similar briefs do not resolve to the same page,
+and anything the user supplied outranks every reference. After the draft
+verifies, the agent looks at it with `preview_site` at desktop and phone width
+before calling it ready.
+
+<Note>
+This was briefly shipped as an **external** server behind
+`POCKETPAW_SITES_MCP_SERVERS` (pocketpaw#2204). That took two switches — install
+the server, then grant it — both defaulting off and neither implying the other,
+so a deploy of the code alone changed nothing and said nothing about why. The
+server is bundled now and that setting is no longer involved in design research.
+It remains available for granting *other* external servers to `/sites`.
+</Note>
 
 ## Memory (Mem0)
 
@@ -227,3 +384,65 @@ The pocket specialist does NOT receive Composio — its tool surface stays narro
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
 | `fabric_source_truth_mode` | `POCKETPAW_FABRIC_SOURCE_TRUTH_MODE` | enum | `off` | Rollout mode for Fabric source truth (`off`, `shadow`, `enforce`). `off` = pure last-writer-wins, no statements. `shadow` = provenance statements + divergence log lines recorded alongside the LWW cache. `enforce` = the trust-ladder resolver's winner owns the cache. Gate the flip to `enforce` with `python -m pocketpaw.fabric.divergence_report` — see [Fabric Source Truth](/concepts/architecture#fabric-source-truth). |
+
+## Paw Sites — AI visibility
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| — | `POCKETPAW_SITES_AI_READY` | boolean | unset (on) | Every workers.dev publish writes `robots.txt`, `sitemap.xml`, `llms.txt`, markdown page copies with `Link` headers, LocalBusiness JSON-LD and an IndexNow key file into the site, then pings IndexNow. `0`, `false`, `off` or `no` turns it off for the next publish of every site. Absolute URLs need a host, so a first publish with no live custom domain also needs `PAW_CF_WORKERS_SUBDOMAIN`; without it the files are skipped for that publish. See "Sites — AI visibility" in `docs/api-reference.md`. |
+
+## Paw Sites — visitor analytics
+
+A published Paw Site on a paid per-site tier carries a small generated Cloudflare
+Worker that records one Analytics Engine row per pageview. These two variables are
+the deploy-side knobs for it.
+
+**Every engine counts, in one of two shapes.** A site whose build emits no server
+entry (`html`, `react`, a static `svelte` landing site) gets a counter that serves the
+page through the `ASSETS` binding. A site whose build emits one (`ripple`, a dynamic
+`svelte` site) gets a shim that imports SvelteKit's own worker, counts, and returns
+its response unchanged — so `main` points at the shim rather than at
+`_worker.js`, and `nodejs_compat`, the `ASSETS` binding and any D1 binding are
+carried through untouched.
+
+**Counting costs invocations on both, and on the server-worker branch it costs more
+than it used to.** Cloudflare bills a Worker invocation and serves a static asset for
+free. A counting config carries `run_worker_first` rules that route page-shaped paths
+to the Worker and leave stylesheets, scripts, fonts and images on the free path. On a
+`ripple` site those rules also route its **prerendered** pages through the Worker,
+which the asset router had been serving for nothing. That is what makes the counting
+possible at all — without the rules the shim is never invoked for a prerendered page
+— and it is a real per-pageview cost that arrives with the paid tier.
+
+Both are read **straight from the process environment** and have no `POCKETPAW_`
+settings field, so the Setting column below is empty. That is deliberate: the Paw
+Sites deploy path reads its Cloudflare configuration (`PAW_CF_*`) from the
+environment directly rather than through the settings object, and these ride the
+same seam. The rest of the `PAW_SITES_*` and `PAW_CF_*` deploy variables are not
+catalogued here yet.
+
+Both take effect **at the next publish**. Neither one rewrites a site that is
+already deployed: the config and the counter are written into the project at publish
+time, so a site keeps whatever it was last published with until it is published
+again.
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| — | `PAW_SITES_ANALYTICS_DISABLED` | boolean | unset (off) | **Operator kill switch.** Truthy (`1`, `true`, `yes`, `on`; case-insensitive) makes the next publish of **every** site emit the pre-analytics config shape: no Analytics Engine binding, no `run_worker_first` rules, and no generated counter file. On an assets-only site that means no `main` at all; on a `ripple` or dynamic `svelte` site `main` goes back to naming SvelteKit's own `_worker.js` directly, which is the config that shipped before analytics existed. Paid sites included — it overrides the plan entitlement, it does not consult it. It exists for one failure: if the Cloudflare account is on the **Workers Free plan**, a `main` in the request path starts consuming a 100,000 request/day ceiling that is **account-wide**, and breaching that stops Cloudflare serving the Workers behind it rather than degrading analytics. Every published site goes dark together, so the mitigation has to be faster than a code change and a release. Already-deployed sites keep counting until they are republished, so pulling this switch during an incident means republishing the affected sites. Any other value, including `0` and `false`, leaves analytics on. |
+| — | `PAW_SITES_ANALYTICS_DATASET` | string | `paw_site_pageviews` | The Cloudflare Analytics Engine dataset the counter writes into. One dataset for all sites, partitioned by site id in `indexes[0]` — Analytics Engine is queried by index, and a dataset per site would need provisioning per site for no gain. Override it so a dev or staging publish cannot pollute the production dataset. An empty or whitespace-only value falls back to the default rather than emitting an empty dataset name, which wrangler accepts and Cloudflare does not. Changing it does not migrate existing rows: sites published against the old dataset keep writing there until they are republished, and Analytics Engine retains data for three months. |
+
+### The token scope the read needs
+
+Serving a site's numbers back through `GET /sites/{site_id}/analytics` queries the
+Analytics Engine SQL API, and that call needs an **Account Analytics Read**
+permission on `PAW_CF_API_TOKEN`. It is a different scope from the Workers and SSL
+permissions the deploy paths use, so a token minted for publishing alone will deploy
+counters happily and then fail every read.
+
+A token without it answers `403`, which surfaces as `sites.cloudflare_error` with
+Cloudflare's own message attached. Sites that count perfectly well while the
+dashboard cannot read them is the exact shape this failure takes, so check the scope
+before looking anywhere else.
+
+The cost model and the rest of the engineering detail are in the
+[visitor analytics design note](https://github.com/pocketpaw/pocketpaw/blob/dev/docs/design/2026-09-02-sites-visitor-analytics.md).

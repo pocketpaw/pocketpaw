@@ -1,0 +1,38 @@
+[
+ {
+  "label": "resolver: flip pocket-vs-room precedence to room-first",
+  "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+  "find": "        return f\"/pockets/{pocket_id}/chat\" if pocket_id else f\"/chat/{nav_target}\"",
+  "replace": "        return f\"/chat/{nav_target}\" if room_id else f\"/pockets/{pocket_id}/chat\"",
+  "tests": [
+   "tests/cloud/push/test_deeplink_contract.py"
+  ]
+ },
+ {
+  "label": "resolver: delete the lead arm (falls to the /chat default)",
+  "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+  "find": "    if source_type == \"lead\":",
+  "replace": "    if source_type == \"lead_disabled_by_mutation\":",
+  "tests": [
+   "tests/cloud/push/test_deeplink_contract.py"
+  ]
+ },
+ {
+  "label": "resolver: delete the alert arm (falls to the /chat default)",
+  "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+  "find": "    if source_type == \"alert\":",
+  "replace": "    if source_type == \"alert_disabled_by_mutation\":",
+  "tests": [
+   "tests/cloud/push/test_deeplink_contract.py"
+  ]
+ },
+ {
+  "label": "resolver: paw_bar loses its agent binding (always the bare list)",
+  "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+  "find": "        return f\"/agents/{agent_id}?tab=conversations\" if agent_id else \"/agents\"",
+  "replace": "        return \"/agents\"",
+  "tests": [
+   "tests/cloud/push/test_deeplink_contract.py"
+  ]
+ }
+]

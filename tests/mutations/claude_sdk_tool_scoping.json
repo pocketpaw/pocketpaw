@@ -1,0 +1,193 @@
+[
+  {
+    "label": "the gate waves every call through — every surface restriction is a no-op again",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            if _tool_gate_allows(name, allowed, grants=grants, deny=deny, deny_below=deny_below):\n                return {}",
+    "replace": "            if True:\n                return {}",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_denied_mcp_tool_is_refused_at_call_time"
+    ]
+  },
+  {
+    "label": "the gate is never registered — allowed_tools is back to auto-approve only",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                self._HookMatcher(matcher=None, hooks=[gate]),\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_denied_mcp_tool_is_refused_at_call_time"
+    ]
+  },
+  {
+    "label": "the gate never checks the deny set — a denied id under a bare server grant runs",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "    if name in deny or name.startswith(deny_below):\n        return False\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_denied_id_under_a_bare_server_grant_is_refused"
+    ]
+  },
+  {
+    "label": "the warm-client key ignores the deny set — a reused client runs a newly denied tool",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            f\"{sorted(getattr(options, 'disallowed_tools', None) or [])}:\"\n",
+    "replace": "",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_deny_the_allowlist_cannot_show_still_changes_the_warm_client_key"
+    ]
+  },
+  {
+    "label": "the gate fails open on malformed input",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            logger.exception(\"Tool gate failed; denying the call\")",
+    "replace": "            return {}",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_the_gate_denies_malformed_input_instead_of_raising"
+    ]
+  },
+  {
+    "label": "a full tool id admits every name below it",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if entry in external or (_mcp_server_of(entry) and entry.count(\"__\") == 1)",
+    "replace": "        if _mcp_server_of(entry)",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_the_gate_rule"
+    ]
+  },
+  {
+    "label": "a bare server entry admits every server whose name starts the same",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        f\"{entry}__\"\n        for entry in sorted(set(entries))",
+    "replace": "        entry\n        for entry in sorted(set(entries))",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_bare_server_entry_admits_that_server_and_no_other"
+    ]
+  },
+  {
+    "label": "only a bare entry with no __ grants a server — a configured server named acme__crm is unreachable",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        if entry in external or (_mcp_server_of(entry) and entry.count(\"__\") == 1)",
+    "replace": "        if _mcp_server_of(entry) and entry.count(\"__\") == 1",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_server_name_with_a_double_underscore_grants_that_server_only"
+    ]
+  },
+  {
+    "label": "a raw external server name is never respelled — the /sites grant strips the server it names",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            return f\"mcp__{_cli_server_name(rest)}\"",
+    "replace": "            return token",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_mode_grant_naming_an_external_server_by_its_raw_name_keeps_it"
+    ]
+  },
+  {
+    "label": "the pinned built-ins ignore policy and deny — a denied Bash is offered again",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            builtins = [t for t in allowed_tools if not t.startswith(\"mcp__\")]",
+    "replace": "            builtins = list(all_sdk_tools)",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_denied_builtin_is_unpinned_disallowed_and_refused"
+    ]
+  },
+  {
+    "label": "the infra tools are not pinned — tool search goes off and WaitForMcpServers is refused",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            options_kwargs[\"tools\"] = list(dict.fromkeys([*builtins, *_INFRA_TOOLS]))",
+    "replace": "            options_kwargs[\"tools\"] = builtins",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_a_turn_pins_its_builtins_plus_the_infra_tools"
+    ]
+  },
+  {
+    "label": "the deny set never reaches disallowed_tools",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            options_kwargs[\"disallowed_tools\"] = sorted(deny_mcp_tool_ids)",
+    "replace": "            pass",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_disallowed_tools_carries_the_whole_deny_set"
+    ]
+  },
+  {
+    "label": "claude.ai connectors load into every agent on a subscription login",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        sdk_env[\"ENABLE_CLAUDEAI_MCP_SERVERS\"] = \"false\"",
+    "replace": "        pass",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_claude_ai_connectors_are_off_on_a_default_turn"
+    ]
+  },
+  {
+    "label": "a per-run extra env switches claude.ai connectors back on",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        sdk_env[\"ENABLE_CLAUDEAI_MCP_SERVERS\"] = \"false\"",
+    "replace": "        sdk_env.setdefault(\"ENABLE_CLAUDEAI_MCP_SERVERS\", \"false\")",
+    "tests": [
+      "tests/test_claude_sdk_tool_scoping.py::test_nothing_switches_claude_ai_connectors_back_on"
+    ]
+  },
+  {
+    "label": "a scoped turn starts every ambient server again",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        live = _servers_of(allowed_tools, external_grants) if scoped else None",
+    "replace": "        live = None",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_an_exclusive_turn_starts_only_the_server_its_tool_lives_on",
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_mode_turn_keeps_its_servers_the_grant_and_the_always_allowed"
+    ]
+  },
+  {
+    "label": "an external server is cut at its first __ (acme__crm becomes acme) and never starts",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "        servers.add(owner[len(\"mcp__\") :] if owner else _mcp_server_of(entry))",
+    "replace": "        servers.add(_mcp_server_of(entry))",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_scoped_turn_starts_external_servers_whose_names_hold_a_double_underscore",
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_tool_declared_under_a_double_underscore_server_starts_that_server"
+    ]
+  },
+  {
+    "label": "an out-of-scope provider is still built (composio fetches on a /code turn)",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                if only is not None and not {_mcp_server_of(t) for t in provider.tool_ids()} & only:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_an_exclusive_turn_starts_only_the_server_its_tool_lives_on"
+    ]
+  },
+  {
+    "label": "a provider whose tool_ids() raises is skipped silently on a scoped turn",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "                if only is not None and not {_mcp_server_of(t) for t in provider.tool_ids()} & only:",
+    "replace": "                try:\n                    owns = {_mcp_server_of(t) for t in provider.tool_ids()}\n                except Exception:  # noqa: BLE001\n                    owns = set()\n                if only is not None and not owns & only:",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_provider_whose_tool_ids_raise_is_logged_on_a_scoped_turn"
+    ]
+  },
+  {
+    "label": "an external server is matched by its raw config name, not the CLI spelling",
+    "file": "src/pocketpaw/agents/claude_sdk.py",
+    "find": "            servers = {n: c for n, c in servers.items() if _cli_server_name(n) in only}",
+    "replace": "            servers = {n: c for n, c in servers.items() if n in only}",
+    "tests": [
+      "tests/test_claude_sdk_scoped_mcp_registration.py::test_a_bare_external_entry_starts_the_server_under_its_config_name"
+    ]
+  },
+  {
+    "label": "the skill path loses its skill's built-ins to the pocket lock",
+    "file": "ee/pocketpaw_ee/agent/pocket_specialist/runtime.py",
+    "find": "            run_kwargs[\"allow_sdk_tools\"] = frozenset({\"Bash\", \"Read\", \"Write\", \"Edit\", \"Grep\"})",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/agent/test_pocket_specialist/test_edit.py::TestSkillPathDeclaresItsTools"
+    ]
+  },
+  {
+    "label": "a backend without allow_sdk_tools is handed it anyway (deep_agents raises)",
+    "file": "ee/pocketpaw_ee/agent/pocket_specialist/runtime.py",
+    "find": "        if \"allow_sdk_tools\" in inspect.signature(backend.run).parameters:",
+    "replace": "        if True:",
+    "tests": [
+      "tests/ee/agent/test_pocket_specialist/test_edit.py::TestSkillPathDeclaresItsTools"
+    ]
+  }
+]

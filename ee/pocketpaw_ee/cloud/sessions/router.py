@@ -1,6 +1,23 @@
-"""Sessions domain — FastAPI router."""
+"""Sessions domain — FastAPI router.
+
+Updated 2026-09-27 (feat/bulk-grants-conversations): added
+``POST /sessions/by-agents`` so the chat sidebar can resolve every agent DM
+room in one request instead of one ``GET /sessions?agent_id=`` per agent. It
+answers ``{"sessions": {agent_id: [session, ...]}}`` with every requested id as
+a key, from one query (``sessions_service.list_by_agents``). Registered above
+the ``/{session_id}`` routes like the other literal paths.
+
+Updated 2026-08-01: the three ``runtime`` / ``touch`` routes below now resolve
+identity through the same dependencies as every other route in this router, and
+their reads and writes are scoped to that identity. They were the last routes
+here relying on an in-handler decision instead. The invariants are pinned in
+``tests/cloud/sessions/test_runtime_route_auth.py``; the standing per-route
+audit lives in ``tests/cloud/auth/test_route_auth_audit.py``.
+"""
 
 from __future__ import annotations
+
+import asyncio
 
 from fastapi import APIRouter, Depends, Query
 from starlette.responses import Response
@@ -10,6 +27,7 @@ from pocketpaw_ee.cloud.sessions import service as sessions_service
 from pocketpaw_ee.cloud.sessions.dto import (
     CreateSessionRequest,
     SessionPage,
+    SessionsByAgentsRequest,
     Surface,
     UpdateSessionRequest,
     session_to_wire_dict,
@@ -40,12 +58,15 @@ async def create_session(
 
 @router.get("", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
 async def list_sessions(
+    response: Response,
     agent_id: str | None = None,
     surface: Surface | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=sessions_service.LIST_LIMIT, ge=1, le=500),
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> list[dict]:
-    """List the user's sessions.
+    """List the user's ``limit`` most recent sessions, as a bare list.
 
     Query params:
     - ``agent_id`` filters to DM sessions for that agent (used by the
@@ -53,13 +74,47 @@ async def list_sessions(
     - ``surface`` filters to sessions stamped with the given originating
       surface (``chat`` / ``files`` / ``pocket_creation``). Omitted →
       every row, including legacy ``surface=None`` rows.
+    - ``limit`` caps the rows (default ``LIST_LIMIT``). Without ``agent_id``,
+      a further page exists when the ``X-Next-Cursor`` response header is set;
+      pass it back as ``cursor``. The body stays a list for old clients.
     """
     ctx = sessions_service.legacy_ctx(user_id, workspace_id)
     if agent_id:
-        items = await sessions_service.list_by_agent(ctx, workspace_id, agent_id)
+        items = await sessions_service.list_by_agent(ctx, workspace_id, agent_id, limit=limit)
     else:
-        items = await sessions_service.list_for_owner(ctx, workspace_id, surface=surface)
+        items, next_cursor = await sessions_service.list_for_owner_page(
+            ctx, workspace_id, surface=surface, cursor=cursor, limit=limit
+        )
+        if next_cursor:
+            response.headers["X-Next-Cursor"] = next_cursor
     return [session_to_wire_dict(s) for s in items]
+
+
+@router.post(
+    "/by-agents",
+    dependencies=[Depends(require_action_any_workspace("session.read_own"))],
+)
+async def list_sessions_by_agents(
+    body: SessionsByAgentsRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """The caller's DM sessions for many agents, keyed by agent id.
+
+    Same order as ``GET /sessions?agent_id=`` per agent, the newest
+    ``AGENT_SESSIONS_LIMIT`` each. Every requested agent id is a key; an agent
+    with no sessions maps to ``[]``.
+    """
+    ctx = sessions_service.legacy_ctx(user_id, workspace_id)
+    grouped = await sessions_service.list_by_agents(
+        ctx, workspace_id, list(dict.fromkeys(body.agent_ids))
+    )
+    return {
+        "sessions": {
+            agent_id: [session_to_wire_dict(s) for s in items]
+            for agent_id, items in grouped.items()
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -135,12 +190,23 @@ async def list_pocket_creation_sessions(
     return await _mode_page("pocket_creation", cursor, limit, workspace_id, user_id)
 
 
-@router.get("/runtime")
-async def list_runtime_sessions(limit: int = 50) -> dict:
-    """List sessions from the active memory store's session index.
+@router.get("/runtime", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
+async def list_runtime_sessions(
+    limit: int = Query(default=50, ge=1, le=500),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """List the CALLER's sessions from the active memory store's index.
 
     Dispatches on the store: MongoMemoryStore exposes an async variant,
     FileMemoryStore a sync one. Stores without either return empty.
+
+    Guard and scope both added 2026-08-01, and both are load-bearing:
+    authenticating the caller without also scoping the store query would still
+    answer with rows that are not theirs. The guard mirrors the sibling listing
+    routes above so every listing in this router answers "the caller's own
+    sessions" the same way, and the store query carries the matching workspace
+    and owner filter.
     """
     from pocketpaw.memory import get_memory_manager
 
@@ -148,9 +214,20 @@ async def list_runtime_sessions(limit: int = 50) -> dict:
     store = manager._store
 
     if hasattr(store, "_load_session_index_async"):
-        index = await store._load_session_index_async()
+        # Mongo reads only the newest ``limit`` rows; ``total`` is a count.
+        index, total = await asyncio.gather(
+            store._load_session_index_async(
+                workspace_id=workspace_id, owner_id=user_id, limit=limit
+            ),
+            store._count_session_index_async(workspace_id=workspace_id, owner_id=user_id),
+        )
     elif hasattr(store, "_load_session_index"):
+        # The file store is single-tenant by construction — it is the OSS /
+        # dedicated-install backend, and a cloud deployment cannot reach this
+        # branch (``verify_cloud_memory_backend`` refuses to boot on anything
+        # but MongoMemoryStore). So there is no tenant to scope to here.
         index = store._load_session_index()
+        total = len(index)
     else:
         return {"sessions": [], "total": 0}
 
@@ -162,12 +239,23 @@ async def list_runtime_sessions(limit: int = 50) -> dict:
 
     sessions = [{"id": safe_key, **meta} for safe_key, meta in entries]
 
-    return {"sessions": sessions, "total": len(index)}
+    return {"sessions": sessions, "total": total}
 
 
 @router.post("/runtime/create")
-async def create_runtime_session() -> dict:
-    """Create a new runtime session (no MongoDB — just a session key)."""
+async def create_runtime_session(
+    user_id: str = Depends(current_user_id),  # noqa: ARG001 — identity gate, not input
+) -> dict:
+    """Create a new runtime session (no MongoDB — just a session key).
+
+    The dependency is unused by the body on purpose: this handler mints a
+    random key and touches nothing, so there is nothing here to scope. It
+    requires a session anyway, because "needs no session but is currently
+    harmless" stops holding the moment somebody makes this handler persist
+    something, and that change would not look like a security change to
+    whoever writes it. Only ``current_user_id`` — no workspace is needed to
+    generate a string.
+    """
     import uuid
 
     safe_key = f"websocket_{uuid.uuid4().hex[:12]}"
@@ -211,19 +299,36 @@ async def delete_session(
 @router.get("/{session_id}/history")
 async def get_session_history(
     session_id: str,
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
+    before: str | None = None,
     user_id: str = Depends(current_user_id),
 ) -> dict:
-    """Return session history from the unified Mongo messages store."""
+    """Return session history from the unified Mongo messages store.
+
+    ``before`` is a ``{createdAt}|{_id}`` keyset cursor — pass the oldest
+    loaded message's cursor to fetch the previous (older) page. The response
+    carries ``has_more`` so the client can stop once history is exhausted.
+    """
     from pocketpaw_ee.cloud.shared.errors import NotFound
 
     try:
-        return await sessions_service.get_history(session_id, user_id, limit=limit)
+        return await sessions_service.get_history(session_id, user_id, limit=limit, before=before)
     except NotFound:
-        return {"messages": []}
+        return {"messages": [], "active_run": None, "has_more": False}
 
 
 @router.post("/{session_id}/touch", status_code=204)
-async def touch_session(session_id: str) -> Response:
-    await sessions_service.touch(session_id)
+async def touch_session(
+    session_id: str,
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Bump a session's activity — the caller's own sessions only.
+
+    Both the dependency and the ``user_id`` argument are new (2026-08-01).
+    Ownership is the requirement here, not merely a session: this writes
+    ``lastActivity`` / ``messageCount`` and emits a ``SessionUpdated`` onto the
+    OWNER's realtime feed, so a caller who cannot read the session must not be
+    able to move it either.
+    """
+    await sessions_service.touch(session_id, user_id)
     return Response(status_code=204)

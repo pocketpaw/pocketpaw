@@ -1,5 +1,62 @@
 """EE /uploads router — workspace-scoped upload endpoints.
 
+2026-09-27 (feat/bulk-grants-conversations): added ``POST /uploads/grants``,
+the batch form of ``GET /uploads/{file_id}/grant``. The chat sidebar used to
+fire one grant request per attachment and thumbnail; now it sends one list of
+``{id, w, h, q, f}`` items (1..200, same bounds as the GET) and gets back
+``{"grants": [...]}`` in request order, one entry per item. Both routes mint
+through ``_mint_grant``, so a batch item is byte-for-byte what the single GET
+returns; the old ``grant()`` body moved there unchanged. Identical items are
+minted once, at most ``_GRANT_CONCURRENCY`` at a time. A missing or foreign
+file is ``{"error": "not_found"}`` for that item only, never a failed batch.
+The route sits above every ``/{file_id}`` route so no future ``POST
+/{file_id}`` can swallow the literal ``/grants`` segment.
+
+2026-09-14 (feat/uploads-multipart-endpoints): the five resumable-upload routes
+from ``docs/design/drafts/2026-09-14-multipart-upload-contract.md`` — init, the
+relay part PUT, complete, status/resume, and abort. They live on THIS router,
+under the same ``/uploads`` prefix, because they carry the same four gates as
+``POST ""`` — guest refusal, ``uploads.write``, pocket ABAC, folder-chain
+auto-create — and putting them anywhere else would mean maintaining a second
+copy of those gates that drifts from this one.
+
+Every one of them raises ``CloudError`` subclasses, never ``HTTPException``,
+per the ee/cloud error convention; their neighbours here predate the rule and
+``make_book_agent`` is the precedent. The tenant boundary is the same shape too:
+an upload session is read with a workspace filter on every path, and a session
+belonging to another workspace is a 404 — never a 403, which would confirm the
+id exists.
+
+They are registered BEFORE the ``/{file_id}`` routes below. Path shapes do not
+currently collide (``/multipart/...`` always carries a literal second segment),
+but FastAPI resolves first-match-wins and a future single-segment file route
+would silently swallow ``POST /uploads/multipart``.
+
+Updated 2026-09-01 (feat/byok-guest-backend): POST "" (the upload route)
+refuses guest accounts with 403 {"code": "guest_upload_forbidden"} before any
+other processing — uploads are the signup hook for BYOK guests.
+
+2026-08-28 (FC-1 "File comprehension"): ``PATCH /uploads/{file_id}`` accepts
+``summary`` (str) so a person can correct or write what a file IS, and the
+response echoes it. This is the half of FC-1 that makes "never overwrite a
+human's edit" mean something — the ingest-time comprehension pass refuses to
+touch a row whose ``summary`` is already non-empty, so without a way for a
+human to SET one, that rule would only ever protect a previous machine
+summary. An explicit ``""`` erases it (and thereby re-opens the file to a
+future comprehension pass); omitting the field leaves it untouched.
+
+2026-08-29 (BA-3 "Make an agent of this book"): added
+``POST /uploads/{file_id}/agent`` — press once, get a dedicated co-reader
+agent that has read this file. All the provisioning logic lives in
+``uploads.book_agent``; the route is the tenant boundary and nothing else.
+PATH NOTE: the feature is pressed from the /files library, but the endpoint
+lives under this router's ``/uploads`` prefix because that is where the
+native ``file_id``, the tenant deps and the write ACL already are — the
+/files surface addresses the same row as ``uploads:<file_id>``. Unlike its
+neighbours here (which predate the rule), this route raises ``CloudError``
+subclasses, never ``HTTPException``, per the ee/cloud error convention;
+``_core.http.cloud_error_handler`` renders them.
+
 2026-07-03 (FL-11b "hide-from-AI purge"): ``PATCH /uploads/{file_id}`` now
 retroactively purges a file's KB content when ``hide_from_ai`` flips false→true
 AND the row tracks a kb-go article (``kb_article_id`` + ``kb_scope`` recorded on
@@ -47,7 +104,9 @@ into it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
@@ -60,15 +119,18 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
 )
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from pocketpaw.uploads.config import INLINE_MIMES, UploadSettings
 from pocketpaw.uploads.errors import NotFound
 from pocketpaw.uploads.factory import build_adapter
+from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import (
     current_user_id,
@@ -78,6 +140,7 @@ from pocketpaw_ee.cloud.shared.deps import (
 from pocketpaw_ee.cloud.shared.time import iso_utc
 from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+from pocketpaw_ee.cloud.uploads.multipart_service import EEMultipartService
 from pocketpaw_ee.cloud.uploads.paths import normalize_path, parent_of
 from pocketpaw_ee.cloud.uploads.service import EEUploadService
 
@@ -89,6 +152,11 @@ _CFG = UploadSettings(local_root=_ROOT)
 _ADAPTER = build_adapter(_ROOT)
 _META = MongoFileStore()
 _FOLDERS = FolderStore()
+
+# FC-1: the longest summary PATCH will accept. A library subtitle, not a
+# document — the machine-written ones land well under this, and the ceiling
+# exists so a hand-crafted request cannot put a novel into every listing row.
+_MAX_SUMMARY_CHARS = 1000
 
 
 async def _is_chat_member(chat_id: str, user_id: str, _workspace: str) -> bool:
@@ -121,6 +189,12 @@ _SVC = EEUploadService(
     is_chat_member=_is_chat_member,
     is_workspace_admin=_is_workspace_admin,
 )
+
+# Resumable uploads. Built from the same adapter / store / config triple as
+# ``_SVC`` so a deployment cannot end up with simple and multipart uploads
+# pointed at different buckets, and so a test substituting storage substitutes
+# it for both at once.
+_MPU = EEMultipartService(adapter=_ADAPTER, meta=_META, cfg=_CFG)
 
 router = APIRouter(
     prefix="/uploads",
@@ -284,6 +358,219 @@ async def delete_folder(
 
 
 # ---------------------------------------------------------------------------
+# Multipart / resumable upload routes
+#
+# Registered before the ``/{file_id}`` routes — see the module docstring.
+# ---------------------------------------------------------------------------
+
+
+async def _refuse_guest(user_id: str) -> None:
+    """Guests cannot upload, by any route.
+
+    Lifted out of ``POST ""`` verbatim rather than reimplemented: the refusal
+    is a frozen frontend contract (a top-level ``{"code":
+    "guest_upload_forbidden"}``) and the whole point is that it fires BEFORE
+    any other processing, so every upload entry point has to make the same call
+    at the same moment. One helper, five call sites, one behaviour.
+    """
+    from pocketpaw_ee.cloud.auth import guest_budget
+
+    if await guest_budget.load_guest(user_id) is not None:
+        from pocketpaw_ee.cloud._core.errors import GuestUploadForbidden
+
+        raise GuestUploadForbidden()
+
+
+async def _assert_pocket_edit(pocket_id: str | None, user_id: str) -> None:
+    """Pocket ABAC, same gate and same code as ``POST ""``.
+
+    Checked at complete as well as at init, not only at init: a session lives
+    for seven days, and someone removed from a pocket in the meantime must not
+    be able to land a file in it with a request they prepared while they still
+    had access.
+    """
+    if not pocket_id:
+        return
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        allowed = await pockets_service.has_edit_access(pocket_id=pocket_id, user_id=user_id)
+    except Exception:
+        allowed = False
+    if not allowed:
+        raise Forbidden("files.pocket_forbidden")
+
+
+@router.post(
+    "/multipart",
+    status_code=201,
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def multipart_init(
+    body: dict = Body(...),
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Open a resumable upload session.
+
+    Returns the mode the configured storage adapter can actually do — the
+    client does not choose — the part geometry, and the first batch of signed
+    part URLs when there are any. Everything that can refuse this upload
+    refuses it here, before a byte of it exists on our side.
+    """
+    from pocketpaw_ee.cloud._core.errors import BadRequest
+
+    await _refuse_guest(user_id)
+
+    try:
+        folder_path = normalize_path(body.get("path"))
+    except ValueError as e:
+        raise BadRequest("multipart.invalid", str(e)) from e
+
+    pocket_id = body.get("pocket_id")
+    await _assert_pocket_edit(pocket_id, user_id)
+
+    if folder_path != "/":
+        try:
+            await _FOLDERS.ensure_chain(workspace=workspace, owner=user_id, path=folder_path)
+        except ValueError as e:
+            raise BadRequest("multipart.invalid", str(e)) from e
+
+    return await _MPU.init(
+        workspace=workspace,
+        owner_id=user_id,
+        filename=body.get("filename"),
+        size=body.get("size"),
+        mime=body.get("mime"),
+        chat_id=body.get("chat_id"),
+        pocket_id=pocket_id,
+        folder_path=folder_path,
+    )
+
+
+@router.put(
+    "/multipart/{upload_id}/parts/{part_number}",
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def multipart_put_part(
+    upload_id: str,
+    part_number: int,
+    request: Request,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Relay one part through the API. Raw binary body, one part.
+
+    Only used when the storage adapter cannot presign (local disk); a session
+    in ``presigned`` mode refuses here and points the client at its URLs.
+
+    The declared length is checked against this session's part size BEFORE the
+    body is read. ``BodySizeLimitMiddleware`` already bounds this route at one
+    part plus slack, but that ceiling is derived from the largest part size the
+    configuration can produce, not from THIS session's — so it stops the absurd
+    while this stops the merely wrong.
+    """
+    await _refuse_guest(user_id)
+    return await _MPU.put_part(
+        upload_id=upload_id,
+        workspace=workspace,
+        part_number=part_number,
+        declared_length=_declared_length(request),
+        read_body=request.body,
+    )
+
+
+def _declared_length(request: Request) -> int | None:
+    """``Content-Length``, or ``None`` when absent or unparseable.
+
+    Same reading as ``security/body_limit.py``: an unparseable value is treated
+    as absent rather than as a rejection, because the measured length is
+    checked after the read regardless and the server rejects malformed framing
+    on its own terms.
+    """
+    raw = request.headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+@router.post(
+    "/multipart/{upload_id}/complete",
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def multipart_complete(
+    upload_id: str,
+    body: dict = Body(...),
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Assemble the parts and land the file.
+
+    The only place a multipart upload becomes a ``FileUpload`` row and fires
+    ``FileReady``. Returns exactly the shape ``POST /uploads`` puts in
+    ``uploaded[]`` so the frontend normalisers work on both unchanged.
+
+    ``parts`` in the body is OPTIONAL and advisory. The manifest is read from
+    storage itself, because a client that reloaded mid-upload has no etags for
+    what its previous session sent — see ``EEMultipartService._resolve_parts``.
+    When a client does supply etags they are checked against storage, and a
+    disagreement is a 409 rather than an object assembled from bytes nobody
+    chose.
+    """
+    await _refuse_guest(user_id)
+
+    async def _pocket_guard(pocket_id: str | None) -> None:
+        await _assert_pocket_edit(pocket_id, user_id)
+
+    return await _MPU.complete(
+        upload_id=upload_id,
+        workspace=workspace,
+        parts=body.get("parts"),
+        pocket_guard=_pocket_guard,
+    )
+
+
+@router.get("/multipart/{upload_id}")
+async def multipart_status(
+    upload_id: str,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """What a client that reloaded mid-upload needs to carry on.
+
+    Reports which parts storage already holds and re-mints URLs for the ones it
+    does not, so a resume costs the missing parts rather than the whole file.
+    """
+    await _refuse_guest(user_id)
+    return await _MPU.status(upload_id=upload_id, workspace=workspace)
+
+
+@router.delete(
+    "/multipart/{upload_id}",
+    status_code=204,
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def multipart_abort(
+    upload_id: str,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Cancel the upload, drop its parts, and give back the daily-budget claim.
+
+    Idempotent: aborting an already-aborted session succeeds. A COMPLETED
+    session is a 404 — those bytes are a real file now, and
+    ``DELETE /uploads/{file_id}`` is how that one is removed.
+    """
+    await _refuse_guest(user_id)
+    await _MPU.abort(upload_id=upload_id, workspace=workspace)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
 # File routes
 # ---------------------------------------------------------------------------
 
@@ -300,6 +587,13 @@ async def upload(
     workspace: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict:
+    # Guests cannot upload (BYOK-first onboarding, 2026-09-01): the upload
+    # affordance is the signup hook. Raised BEFORE any validation/side effect.
+    # The check moved into ``_refuse_guest`` on 2026-09-14 when multipart added
+    # four more upload entry points — six copies of a security gate is six
+    # chances for one of them to drift, and the copy that drifts is an upload
+    # route with no account behind it.
+    await _refuse_guest(user_id)
     try:
         folder_path = normalize_path(path)
     except ValueError as e:
@@ -340,6 +634,89 @@ async def upload(
     }
 
 
+# ---------------------------------------------------------------------------
+# Grants — short-lived download URLs, single and batch
+# ---------------------------------------------------------------------------
+
+#: How many grants one batch mints at once. Each is a scoped metadata read plus
+#: (on S3) a presign, so this bounds the Mongo fan-out of one request.
+_GRANT_CONCURRENCY = 16
+
+
+async def _mint_grant(
+    file_id: str, user_id: str, workspace: str, *, w: int, h: int, q: int, f: str
+) -> dict:
+    """Mint the ``{url, expires_at}`` pair for one file. Raises ``NotFound``.
+
+    Shared by ``GET /{file_id}/grant`` and ``POST /grants`` so a batch item is
+    exactly what the single route would have answered. Workspace scope and the
+    per-file read ACL are enforced by ``EEUploadService.presigned_get``.
+
+    When ``w`` or ``h`` is set the URL points at a resized thumbnail served by
+    ``GET /uploads/{id}`` (generated on first request, server-cached after).
+    Full-size downloads get the S3 presigned URL when the adapter has one;
+    thumbnails always get the cookie-authed server URL.
+    """
+    has_thumb = w > 0 or h > 0
+    _rec, presigned = await _SVC.presigned_get(file_id, user_id, workspace, DEFAULT_TTL_SECONDS)
+    expires_at = int(time.time()) + DEFAULT_TTL_SECONDS
+
+    if has_thumb or presigned is None:
+        thumb_qs = f"w={w}&h={h}&q={q}&f={f}" if has_thumb else ""
+        base = f"/api/v1/uploads/{file_id}"
+        sep = "?" if thumb_qs else ""
+        return {"url": f"{base}{sep}{thumb_qs}", "expires_at": expires_at}
+
+    return {"url": presigned, "expires_at": expires_at}
+
+
+class GrantItem(BaseModel):
+    """One file to grant. Same fields and bounds as ``GET /{file_id}/grant``."""
+
+    id: str
+    w: int = Field(default=0, ge=0, le=2048)
+    h: int = Field(default=0, ge=0, le=2048)
+    q: int = Field(default=80, ge=1, le=100)
+    f: str = "webp"
+
+
+class GrantBatchRequest(BaseModel):
+    items: list[GrantItem] = Field(min_length=1, max_length=200)
+
+
+@router.post("/grants")
+async def grant_batch(
+    body: GrantBatchRequest,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Mint grants for many files in one request.
+
+    Answers ``{"grants": [...]}`` in the same order and length as
+    ``body.items``. Each entry echoes ``id, w, h, q, f`` and carries either
+    ``url`` + ``expires_at`` or ``error: "not_found"``; a file the caller cannot
+    see fails only its own entry. Identical items are minted once.
+    """
+    keys = [(i.id, i.w, i.h, i.q, i.f) for i in body.items]
+    unique = list(dict.fromkeys(keys))
+    sem = asyncio.Semaphore(_GRANT_CONCURRENCY)
+
+    async def _one(key: tuple[str, int, int, int, str]) -> dict:
+        file_id, w, h, q, f = key
+        async with sem:
+            try:
+                return await _mint_grant(file_id, user_id, workspace, w=w, h=h, q=q, f=f)
+            except NotFound:
+                return {"error": "not_found"}
+
+    minted = dict(zip(unique, await asyncio.gather(*(_one(k) for k in unique)), strict=True))
+    return {
+        "grants": [
+            {"id": k[0], "w": k[1], "h": k[2], "q": k[3], "f": k[4], **minted[k]} for k in keys
+        ]
+    }
+
+
 @router.patch("/{file_id}")
 async def patch_upload(
     file_id: str,
@@ -365,6 +742,7 @@ async def patch_upload(
     new_tags = body.get("tags")
     new_collections = body.get("collections")
     new_hide = body.get("hide_from_ai")
+    new_summary = body.get("summary")
 
     if new_filename is not None:
         if not isinstance(new_filename, str) or not new_filename.strip():
@@ -395,6 +773,20 @@ async def patch_upload(
         ):
             raise HTTPException(status_code=400, detail="collections must be a list of strings")
         doc.collections = new_collections
+
+    # FC-1: a human writing (or correcting, or erasing) what the file IS.
+    # Capped at _MAX_SUMMARY_CHARS — this is a library subtitle, not a place
+    # to paste a document, and an unbounded string here would be echoed into
+    # every /files listing row.
+    if new_summary is not None:
+        if not isinstance(new_summary, str):
+            raise HTTPException(status_code=400, detail="summary must be a string")
+        if len(new_summary) > _MAX_SUMMARY_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"summary must be at most {_MAX_SUMMARY_CHARS} characters",
+            )
+        doc.summary = new_summary
 
     # FL-11b: detect a false→true hide transition so we can retroactively
     # purge the file's KB article after the row is saved. Capture the pre-edit
@@ -452,6 +844,57 @@ async def patch_upload(
         "tags": list(doc.tags or []),
         "collections": list(doc.collections or []),
         "hide_from_ai": bool(doc.hide_from_ai),
+        "summary": doc.summary,
+    }
+
+
+@router.post(
+    "/{file_id}/agent",
+    dependencies=[Depends(require_action_any_workspace("uploads.write"))],
+)
+async def make_book_agent(
+    file_id: str,
+    workspace: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Make (or return) the dedicated co-reader agent for this file.
+
+    Idempotent — pressing twice returns the same agent with ``created:
+    false``. ``indexed`` reports whether the book's text is actually in the
+    agent's knowledge scope: ``false`` means the agent exists but the ingest
+    failed, and the caller should say so rather than presenting a co-reader
+    that has read nothing (pressing again retries the ingest against that
+    same agent).
+
+    Gated as a WRITE: it mutates the file row's ``agent_id`` bind, so it takes
+    the same ``uploads.write`` membership check as upload, plus the
+    owner-or-workspace-admin ACL the PATCH route uses. Everything below that
+    — tenancy, idempotency, failure policy — lives in ``book_agent``.
+    """
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud._core.errors import NotFound as CloudNotFound
+    from pocketpaw_ee.cloud.uploads.book_agent import ensure_book_agent
+
+    doc = await _META.get_doc_scoped(file_id, workspace=workspace)
+    if doc is None:
+        raise CloudNotFound("file", file_id)
+
+    # Write-side ACL — owner OR workspace admin, matching PATCH /uploads/{id}.
+    # Chat membership does NOT grant it: making an agent of someone's book is
+    # a write on their library row, not a read of a shared attachment.
+    if doc.owner != user_id:
+        try:
+            is_admin = await _is_workspace_admin(user_id, workspace)
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            raise Forbidden("files.forbidden")
+
+    result = await ensure_book_agent(file_id, workspace, user_id)
+    return {
+        "agent_id": result.agent_id,
+        "created": result.created,
+        "indexed": result.indexed,
     }
 
 
@@ -469,10 +912,6 @@ async def download_url(
     enforced by ``EEUploadService.presigned_get``; the alias does not
     relax any check.
     """
-    import time
-
-    from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
-
     try:
         rec, presigned = await _SVC.presigned_get(file_id, user_id, workspace, DEFAULT_TTL_SECONDS)
     except NotFound as e:
@@ -498,38 +937,12 @@ async def grant(
 ) -> dict:
     """Mint a short-lived download URL for ``file_id``.
 
-    When ``w`` or ``h`` is provided, returns a URL to a resized thumbnail
-    served through the ``GET /uploads/{id}`` endpoint. Thumbnail generation
-    is deferred to the first request (server-cached after that).
-
-    For full-size downloads, returns the S3 presigned URL when available.
-    For thumbnails, always returns a cookie-authed server URL.
+    The body lives in ``_mint_grant``, which ``POST /grants`` shares.
     """
-    import time
-
-    from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS
-
-    has_thumb = w > 0 or h > 0
     try:
-        _rec, presigned = await _SVC.presigned_get(file_id, user_id, workspace, DEFAULT_TTL_SECONDS)
+        return await _mint_grant(file_id, user_id, workspace, w=w, h=h, q=q, f=f)
     except NotFound as e:
         raise HTTPException(status_code=404, detail="not found") from e
-
-    has_presigned = presigned is not None
-
-    if has_thumb or not has_presigned:
-        thumb_qs = f"w={w}&h={h}&q={q}&f={f}" if has_thumb else ""
-        base = f"/api/v1/uploads/{file_id}"
-        sep = "?" if thumb_qs else ""
-        return {
-            "url": f"{base}{sep}{thumb_qs}",
-            "expires_at": int(time.time()) + DEFAULT_TTL_SECONDS,
-        }
-
-    return {
-        "url": presigned,
-        "expires_at": int(time.time()) + DEFAULT_TTL_SECONDS,
-    }
 
 
 @router.get("/{file_id}")

@@ -157,6 +157,7 @@ class BulkInviteRequest(BaseModel):
     role: str = "member"
     group_id: str | None = None
 
+
 class BulkInviteResponse(BaseModel):
     created: list[InviteResponse]
     skipped: list[dict]  # [{email, reason}]
@@ -220,10 +221,10 @@ async def bulk_create_invites(ctx, workspace_id, body) -> dict:
 class AuditEvent(Document):
     workspace: Indexed(str)
     actor_id: Indexed(str)
-    action: Indexed(str)   # "workspace.member_added", "workspace.invite_revoked", etc.
-    target_type: str        # "user", "invite", "workspace", "group"
+    action: Indexed(str)  # "workspace.member_added", "workspace.invite_revoked", etc.
+    target_type: str  # "user", "invite", "workspace", "group"
     target_id: str | None
-    metadata: dict          # role transitions, old/new values, etc.
+    metadata: dict  # role transitions, old/new values, etc.
     ip: str | None
     user_agent: str | None
     at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -234,8 +235,9 @@ TTL index on `at` (e.g. 365 days) so the collection stays bounded.
 **Step 2: Service.**
 
 ```python
-async def record(workspace_id, actor_id, action, *, target_type, target_id=None, metadata=None, ctx=None):
-    ...
+async def record(
+    workspace_id, actor_id, action, *, target_type, target_id=None, metadata=None, ctx=None
+): ...
 ```
 
 `ctx` carries IP / UA from request middleware (add a tiny `RequestContext.ip` if it doesn't already).

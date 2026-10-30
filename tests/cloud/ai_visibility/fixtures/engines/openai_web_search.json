@@ -1,0 +1,40 @@
+{
+  "id": "resp_68f1c0a2",
+  "object": "response",
+  "status": "completed",
+  "model": "gpt-6-luna",
+  "output": [
+    {
+      "type": "web_search_call",
+      "id": "ws_68f1c0a3",
+      "status": "completed",
+      "action": {
+        "type": "search",
+        "query": "best pizza in Austin TX",
+        "sources": [
+          {"type": "url", "url": "https://www.yelp.com/biz/home-slice-pizza-austin"},
+          {"type": "url", "url": "https://www.joespizzaatx.com/menu"},
+          {"type": "url", "url": "https://www.reddit.com/r/Austin/comments/abc123/best_pizza/"},
+          {"type": "url", "url": "https://www.tripadvisor.com/Restaurants-g30196-c31-Austin_Texas.html"}
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "msg_68f1c0a4",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Some of the most recommended pizza spots in Austin are Home Slice Pizza on South Congress, known for New York style slices, and Joe's Pizza near Zilker, which locals praise for its thin crust. Via 313 is a favourite for Detroit style.",
+          "annotations": [
+            {"type": "url_citation", "start_index": 51, "end_index": 67, "url": "https://www.yelp.com/biz/home-slice-pizza-austin?utm_source=openai", "title": "Home Slice Pizza - Yelp"},
+            {"type": "url_citation", "start_index": 120, "end_index": 132, "url": "https://www.joespizzaatx.com/menu?utm_source=openai", "title": "Menu - Joe's Pizza"}
+          ]
+        }
+      ]
+    }
+  ],
+  "usage": {"input_tokens": 2100, "output_tokens": 180, "total_tokens": 2280}
+}

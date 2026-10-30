@@ -7,7 +7,7 @@
 #   * mark_merged flips an accepted candidate to status="merged" and emits
 #     artifact.version.merged; it does NOT move the published pointer (publish
 #     already did) and is scope-checked.
-#   * discard flips a rejected candidate to status="reverted" and leaves the
+#   * discard flips a rejected candidate to status="discarded" and leaves the
 #     PUBLISHED pointer untouched (a rejection never moves what is live).
 #   * Both raise on a scope/workspace mismatch (the defensive service check).
 #   * A svelte set_svelte_source_file edit records a draft ArtifactVersion
@@ -64,7 +64,7 @@ async def test_mark_merged_flips_candidate_and_keeps_published(
 async def test_discard_reverts_candidate_and_leaves_published_untouched(
     beanie_test_db, versions_journal
 ) -> None:
-    """discard flips the candidate to reverted; the published pointer on main is
+    """discard flips the candidate to discarded; the published pointer on main is
     untouched (rejection must never move what is live)."""
     pub = await versions.write_draft(
         scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": "live"}
@@ -79,7 +79,7 @@ async def test_discard_reverts_candidate_and_leaves_published_untouched(
     discarded = await versions.discard(
         scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(cand.id)
     )
-    assert discarded.status == "reverted"
+    assert discarded.status == "discarded"
 
     # The published pointer is still the original live version — untouched.
     live = await versions.get_published(scope_type="pocket", scope_id=POCKET)
@@ -140,7 +140,7 @@ async def test_discard_all_drafts_clears_every_draft_in_one_pass(
 ) -> None:
     """P2a (A): after N edits a pocket has N draft rows above the published
     pointer (write_draft inserts a fresh draft each time). ONE discard_all_drafts
-    must flip EVERY draft above published to 'reverted' so get_draft() is None and
+    must flip EVERY draft above published to 'discarded' so get_draft() is None and
     has_unpublished_changes becomes false on the FIRST discard — not after N clicks.
 
     Reproduce-first: pre-fix discard_all_drafts does not exist (AttributeError).
@@ -204,7 +204,7 @@ async def test_discard_all_drafts_clears_every_draft_in_one_pass(
 
 async def test_discard_all_drafts_is_tenant_scoped(beanie_test_db) -> None:
     """discard_all_drafts must only touch THIS workspace's drafts — a same-id draft
-    under another workspace is never reverted."""
+    under another workspace is never touched."""
     scope = "pocket-discard-tenant"
     await versions.write_draft(
         scope_type="pocket", scope_id=scope, workspace_id=WS, content={"mine": 1}
@@ -226,7 +226,7 @@ async def test_discard_all_drafts_is_tenant_scoped(beanie_test_db) -> None:
 
 async def test_write_draft_supersedes_prior_draft_head(beanie_test_db) -> None:
     """P2a (B): three sequential write_drafts must leave EXACTLY ONE live draft —
-    each new write supersedes the prior draft head (flips it to 'reverted') so the
+    each new write supersedes the prior draft head (flips it to 'superseded') so the
     draft pile never accumulates again.
 
     Reproduce-first: pre-fix write_draft always inserts a new status='draft' row,
@@ -259,12 +259,14 @@ async def test_write_draft_supersedes_prior_draft_head(beanie_test_db) -> None:
     assert draft is not None
     assert draft.id == v3.id
     assert draft.version_no == 3
-    # The superseded heads are still on the log as reverted (history is append-only).
+    # The superseded heads are still on the log (history is append-only), and they
+    # say SUPERSEDED — an edit replaced them, which is not a revert and not a
+    # discard. Conflating the three is what made the owner-facing timeline lie.
     superseded = await ArtifactVersion.find(
         ArtifactVersion.scope_type == "pocket",
         ArtifactVersion.scope_id == scope,
         ArtifactVersion.branch == "main",
-        ArtifactVersion.status == "reverted",
+        ArtifactVersion.status == "superseded",
     ).to_list()
     assert {r.id for r in superseded} == {v1.id, v2.id}
 

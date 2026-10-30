@@ -113,13 +113,13 @@ class InviteContextDTO(BaseModel):
 
 class CreateInviteRequest(BaseModel):
     email: str
-    role: str = Field(default="member", pattern="^(admin|member)$")
+    role: str = Field(default="member", pattern="^(admin|editor|member)$")
     group_id: str | None = None
     context: InviteContextDTO | None = None
 
 
 class UpdateMemberRoleRequest(BaseModel):
-    role: str = Field(pattern="^(owner|admin|member)$")
+    role: str = Field(pattern="^(owner|admin|editor|member)$")
 
 
 class SetApprovalLevelRequest(BaseModel):
@@ -172,7 +172,7 @@ class BulkInviteRequest(BaseModel):
     """
 
     emails: list[EmailStr] = Field(min_length=1, max_length=100)
-    role: str = Field(default="member", pattern="^(admin|member)$")
+    role: str = Field(default="member", pattern="^(admin|editor|member)$")
     group_id: str | None = None
 
 
@@ -388,6 +388,40 @@ class SetMemberConnectorPermissionsRequest(BaseModel):
     """
 
     connectors: list[str] = Field(default_factory=list)
+
+
+# ── Action Permissions (per-member granular overrides) ──
+
+# Action keys that an admin/editor can grant as individual overrides on top of
+# a member's base role. Mirrors the EDITOR-tier entries in guards/actions.py.
+# Overrides are additive — they grant the permission regardless of base role.
+OVERRIDABLE_ACTIONS: set[str] = {
+    "channel.create",
+    "agent.edit",
+    "agent.delete",
+    "workspace.member.permissions",
+}
+
+
+class ActionPermissionsOut(BaseModel):
+    """GET /workspaces/{id}/action-permissions response.
+
+    Returns a dict of user_id → list of action keys that have been explicitly
+    granted to that user as overrides beyond their base role.
+    """
+
+    permissions: dict[str, list[str]]
+
+
+class SetMemberActionPermissionsRequest(BaseModel):
+    """PUT /workspaces/{id}/action-permissions/{user_id} request.
+
+    ``actions`` is the set of action keys to grant as overrides. Only keys
+    in ``OVERRIDABLE_ACTIONS`` are accepted — others are silently dropped.
+    An empty list clears all overrides (back to role defaults).
+    """
+
+    actions: list[str] = Field(default_factory=list)
 
 
 class InvitePreviewResponse(BaseModel):

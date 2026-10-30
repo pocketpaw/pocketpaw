@@ -13,10 +13,12 @@
 #     pocket's rippleSpec dict, OR a svelte source map ``{path: contents}``),
 #     not a diff. Content is small, so full snapshots keep the model dead
 #     simple and make diff/revert (BP-4) a pure function of two rows.
-#   * STATE MACHINE. ``status`` ∈ {draft, published, merged, reverted}. A
-#     write creates a ``draft``; ``publish()`` flips a row to ``published``;
-#     ``merged`` / ``reverted`` are reserved for BP-3 (merge gate) / BP-4
-#     (revert) and are NOT produced in BP-1.
+#   * STATE MACHINE. ``status`` ∈ {draft, published, merged, superseded,
+#     discarded, reverted}. A write creates a ``draft``; ``publish()`` flips a
+#     row to ``published``; ``merged`` is the merge gate's accept path (BP-3).
+#     ``superseded`` and ``discarded`` are the two ways a draft stops being the
+#     working draft, and they are deliberately DIFFERENT words — see below.
+#     ``reverted`` is LEGACY: nothing writes it any more.
 #   * POINTERS ARE DERIVED, NOT STORED. There is deliberately no separate
 #     ``ArtifactRef`` doc holding draft_version_id / published_version_id.
 #     The "current draft" and "published" pointers are derived from this
@@ -32,8 +34,26 @@
 #     ``get_published`` there.
 #
 # TODO(BP-3): the merge gate sets status="merged" on an accepted candidate.
-# TODO(BP-4): revert reads two snapshots from here + a Journal projection
-#             builds the history view; reverted rows get status="reverted".
+#
+# Updated: 2026-08-21 (feat/version-history-truthful-lifecycle) — the state
+# machine gained ``superseded`` and ``discarded``, and ``reverted`` retired to
+# legacy. ``reverted`` had become the answer to three different questions:
+# write_draft wrote it when a later edit replaced the draft head, and discard /
+# discard_all_drafts wrote it when the owner threw a draft away. revert() never
+# wrote it at all — a revert moves FORWARD, writing a new draft — so the one
+# reading the word would take at face value was the one meaning it never had.
+# The timeline renders status verbatim, so a site edited six times showed five
+# rows claiming a rollback nobody performed.
+#
+# The split is by intent, because the timeline is read by the site's owner:
+#   * ``superseded`` — a later edit replaced this draft. Nothing was decided;
+#     this is just what typing twice looks like. Reads as ordinary history.
+#   * ``discarded``  — the owner (or the merge gate's reject path) threw this
+#     draft away. That WAS a decision, and the history should keep it.
+# ``reverted`` stays in the Literal so rows written before this change still
+# validate. They are not rewritten — ``service.resolve_legacy_statuses`` splits
+# them on the read path instead, from lineage already in the rows: a row some
+# later row descends from was superseded, anything else was discarded.
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -45,10 +65,20 @@ from pydantic import Field
 
 __all__ = ["ArtifactVersion", "ArtifactVersionStatus"]
 
-# The version state machine. BP-1 only produces ``draft`` (write_draft /
-# branch) and ``published`` (publish). ``merged`` and ``reverted`` are
-# reserved seams for BP-3 / BP-4 — declared now so the model is stable.
-ArtifactVersionStatus = Literal["draft", "published", "merged", "reverted"]
+# The version state machine. ``draft`` (write_draft / branch) and ``published``
+# (publish) are the pointers; ``merged`` is BP-3's accept path. ``superseded``
+# and ``discarded`` are the two exits from being the working draft, split by
+# whether a human decided it. ``reverted`` is LEGACY — kept so rows written
+# before 2026-08-21 still validate, never written by this module now. See the
+# module header for why the one word became three meanings.
+ArtifactVersionStatus = Literal[
+    "draft",
+    "published",
+    "merged",
+    "superseded",
+    "discarded",
+    "reverted",
+]
 
 
 class ArtifactVersion(Document):

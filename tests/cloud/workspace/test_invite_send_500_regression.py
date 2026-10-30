@@ -62,7 +62,10 @@ def _ctx(user_id: str) -> RequestContext:
 async def _seed_workspace(owner: _UserDoc, *, slug: str) -> str:
     from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 
-    ws_doc = _WorkspaceDoc(name="W", slug=slug, owner=str(owner.id))
+    # Paid plan (pro, 10 seats): since feat/billing-rbac-member-caps a Free
+    # workspace (max_seats=0) can't invite anyone, which would short-circuit the
+    # invite flow these tests exercise before the insert/route logic under test.
+    ws_doc = _WorkspaceDoc(name="W", slug=slug, owner=str(owner.id), plan="pro")
     await ws_doc.insert()
     ws_id = str(ws_doc.id)
     await workspace_service._add_member(ws_id, str(owner.id), role="owner", set_active=True)

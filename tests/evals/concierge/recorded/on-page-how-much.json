@@ -1,0 +1,10 @@
+{
+  "case_id": "on-page-how-much",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved answer from the indexed page. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "a0703eea345db450",
+  "raw_model_output": "The house beans on this page are $18.50 for a 1kg bag, roasted every Tuesday."
+}
