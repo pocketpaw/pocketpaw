@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.activity.buffer import ActivityEvent, get_buffer
+from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.mission_control import service as mc_service
 from pocketpaw_ee.cloud.mission_control.router import router as mc_router
@@ -49,9 +50,26 @@ def _patch_store_and_pockets(monkeypatch, store: InstinctStore):
     yield
 
 
-def _build_app(workspace_id: str = "w1") -> FastAPI:
+class _FakeMembership:
+    def __init__(self, workspace: str, role: str) -> None:
+        self.workspace = workspace
+        self.role = role
+
+
+class _FakeUser:
+    """Duck-typed User for the ``instinct.approve`` role gate."""
+
+    def __init__(self, workspace_id: str, role: str) -> None:
+        self.id = "u1"
+        self.active_workspace = workspace_id
+        self.is_active = True
+        self.workspaces = [_FakeMembership(workspace_id, role)]
+
+
+def _build_app(workspace_id: str = "w1", role: str = "admin") -> FastAPI:
     """Build a minimal app with the MC router mounted and the request_context
-    dep overridden so we don't need a real JWT chain."""
+    dep overridden so we don't need a real JWT chain. ``role`` is the caller's
+    workspace role, which the Nudge approve/reject gate checks."""
     app = FastAPI()
     add_error_handler(app)
     app.include_router(mc_router, prefix="/api/v1")
@@ -67,6 +85,7 @@ def _build_app(workspace_id: str = "w1") -> FastAPI:
 
     app.dependency_overrides[require_license] = lambda: None
     app.dependency_overrides[request_context] = _fake_ctx
+    app.dependency_overrides[current_active_user] = lambda: _FakeUser(workspace_id, role)
     return app
 
 
@@ -170,6 +189,92 @@ class TestBulkRejectEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert body["rejected"][0]["rejected_reason"] == "no budget"
+
+
+class TestBulkNudgeDecisionRoleGate:
+    """Approving or rejecting a Nudge is ``instinct.approve`` (ADMIN), the same
+    gate as ``/instinct/actions/{id}/approve``. A MEMBER must not get around it
+    through the Mission Control bulk routes. Tasks stay MEMBER-level: the Tasks
+    service does its own creator/assignee check."""
+
+    @pytest.fixture(autouse=True)
+    def _no_override_lookup(self, monkeypatch):
+        # Per-member grants live in Mongo; none exist here.
+        monkeypatch.setattr(
+            "pocketpaw_ee.guards.deps._has_action_override", AsyncMock(return_value=False)
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("prefix", ["", "nudge:"])
+    async def test_member_cannot_bulk_approve_nudge(
+        self, store: InstinctStore, prefix: str
+    ) -> None:
+        a = await store.propose("p1", "A", "", "", _trigger())
+        with TestClient(_build_app(role="member")) as client:
+            resp = client.post(
+                "/api/v1/mission-control/items/bulk-approve",
+                json={"ids": [f"{prefix}{a.id}"]},
+            )
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "workspace.insufficient_role"
+        assert (await store.get_action(a.id)).status.value == "pending"
+
+    @pytest.mark.asyncio
+    async def test_member_cannot_sneak_nudge_into_task_batch(self, store: InstinctStore) -> None:
+        a = await store.propose("p1", "A", "", "", _trigger())
+        with TestClient(_build_app(role="member")) as client:
+            resp = client.post(
+                "/api/v1/mission-control/items/bulk-approve",
+                json={"ids": ["task:t1", a.id]},
+            )
+        assert resp.status_code == 403
+        assert (await store.get_action(a.id)).status.value == "pending"
+
+    @pytest.mark.asyncio
+    async def test_member_cannot_bulk_reject_nudge(self, store: InstinctStore) -> None:
+        a = await store.propose("p1", "A", "", "", _trigger())
+        with TestClient(_build_app(role="member")) as client:
+            resp = client.post(
+                "/api/v1/mission-control/items/bulk-reject",
+                json={"ids": [a.id], "reason": "nope"},
+            )
+        assert resp.status_code == 403
+        assert (await store.get_action(a.id)).status.value == "pending"
+
+    @pytest.mark.asyncio
+    async def test_admin_can_bulk_approve_nudge(self, store: InstinctStore) -> None:
+        a = await store.propose("p1", "A", "", "", _trigger())
+        with TestClient(_build_app(role="admin")) as client:
+            resp = client.post(
+                "/api/v1/mission-control/items/bulk-approve",
+                json={"ids": [a.id]},
+            )
+        assert resp.status_code == 200
+        assert [it["id"] for it in resp.json()["approved"]] == [a.id]
+
+    @pytest.mark.asyncio
+    async def test_member_can_still_bulk_complete_tasks(self, monkeypatch) -> None:
+        complete = AsyncMock(side_effect=RuntimeError("no mongo here"))
+        monkeypatch.setattr("pocketpaw_ee.cloud.tasks.service.agent_complete_task", complete)
+        with TestClient(_build_app(role="member")) as client:
+            resp = client.post(
+                "/api/v1/mission-control/items/bulk-approve",
+                json={"ids": ["task:t1"]},
+            )
+        assert resp.status_code == 200
+        complete.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_member_can_still_bulk_block_tasks(self, monkeypatch) -> None:
+        block = AsyncMock(side_effect=RuntimeError("no mongo here"))
+        monkeypatch.setattr("pocketpaw_ee.cloud.tasks.service.agent_block_task", block)
+        with TestClient(_build_app(role="member")) as client:
+            resp = client.post(
+                "/api/v1/mission-control/items/bulk-reject",
+                json={"ids": ["task:t1"], "reason": "blocked"},
+            )
+        assert resp.status_code == 200
+        block.assert_awaited_once()
 
 
 class TestBulkRoutingStubs:
