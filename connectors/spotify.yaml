@@ -1,0 +1,36 @@
+# Spotify connector — REST over OAuth bearer.
+# Created: 2026-05-03 — Phase 1 PR-7.
+
+name: spotify
+display_name: Spotify
+type: communication
+icon: music
+
+auth:
+  method: oauth2
+  credentials:
+    - name: SPOTIFY_OAUTH_TOKEN
+      description: OAuth access token with appropriate scopes
+      required: true
+
+actions:
+  - name: spotify_search
+    description: Search Spotify for tracks, albums, or artists.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: spotify_now_playing
+    description: Show what's currently playing.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: spotify_playback
+    description: Control playback (play / pause / next / previous / volume).
+    method: POST
+    trust_level: confirm
+    execution_mode: cloud
+  - name: spotify_playlist
+    description: List or modify your playlists.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud

@@ -1,0 +1,83 @@
+[
+  {
+    "label": "the consumer goes back to a fully serial dispatch",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "        await asyncio.gather(*(_run_lane(redis, entries) for entries in lanes.values()))",
+    "replace": "        for _entries in lanes.values():\n            await _run_lane(redis, _entries)",
+    "tests": [
+      "tests/cloud/test_xproc_lane_dispatch.py::TestLaneConcurrency::test_separate_lanes_run_concurrently"
+    ]
+  },
+  {
+    "label": "the batch is gathered flat, scrambling one reply's chunks",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "                lanes.setdefault(_ordering_lane(envelope), []).append((entry_id, envelope))",
+    "replace": "                lanes.setdefault((\"flat\", entry_id), []).append((entry_id, envelope))",
+    "tests": [
+      "tests/cloud/test_xproc_lane_dispatch.py::TestLaneConcurrency::test_one_lane_stays_in_order"
+    ]
+  },
+  {
+    "label": "ws envelopes stop keying on scope, so one conversation splits across lanes",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "    if kind == \"ws\":\n        return (\"ws\", str(envelope.get(\"scope_id\", \"\")))",
+    "replace": "    if kind == \"ws\":\n        return (\"ws\", str(envelope.get(\"type\", \"\")))",
+    "tests": [
+      "tests/cloud/test_xproc_lane_dispatch.py::TestOrderingLane::test_ws_envelopes_key_on_scope"
+    ]
+  },
+  {
+    "label": "an unscoped bus envelope falls back to something unique instead of its type",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "        return (\"bus-type\", str(envelope.get(\"type\", \"\")))",
+    "replace": "        return (\"bus-type\", str(id(envelope)))",
+    "tests": [
+      "tests/cloud/test_xproc_lane_dispatch.py::TestOrderingLane::test_two_envelopes_of_the_same_unscoped_type_share_a_lane"
+    ]
+  },
+  {
+    "label": "a failed dispatch is no longer acked, so the entry is redelivered forever",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "        finally:\n            # Always ack",
+    "replace": "        else:\n            # Always ack",
+    "tests": [
+      "tests/cloud/test_xproc_lane_dispatch.py::TestAcking::test_a_failing_dispatch_is_still_acked"
+    ]
+  },
+  {
+    "label": "an unparseable envelope is never acked, so it is redelivered forever",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "                    lanes.setdefault((\"bad\", entry_id), []).append((entry_id, None))\n                    continue",
+    "replace": "                    continue",
+    "tests": [
+      "tests/cloud/test_xproc_lane_dispatch.py::TestAcking::test_an_unparseable_envelope_is_acked_and_isolated"
+    ]
+  },
+  {
+    "label": "a non-dict data payload raises instead of falling back",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "        if isinstance(data, dict):\n            for field in _BUS_SCOPE_FIELDS:",
+    "replace": "        if True:\n            for field in _BUS_SCOPE_FIELDS:",
+    "tests": [
+      "tests/cloud/test_xproc_lane_dispatch.py::TestOrderingLane::test_a_non_dict_data_does_not_raise"
+    ]
+  },
+  {
+    "label": "the opencode client goes back to an unbounded connect timeout",
+    "file": "src/pocketpaw/agents/opencode.py",
+    "find": "    _TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)",
+    "replace": "    _TIMEOUT = None",
+    "tests": [
+      "tests/test_opencode_timeouts.py::test_connect_is_bounded"
+    ]
+  },
+  {
+    "label": "the opencode client bounds READ, truncating long generations",
+    "file": "src/pocketpaw/agents/opencode.py",
+    "find": "    _TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)",
+    "replace": "    _TIMEOUT = httpx.Timeout(10.0)",
+    "tests": [
+      "tests/test_opencode_timeouts.py::test_read_stays_unbounded"
+    ]
+  }
+]

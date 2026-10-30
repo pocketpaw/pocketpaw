@@ -36,7 +36,7 @@ class TestRedditClientFormatPost:
     """Test RedditClient._format_post helper."""
 
     def test_format_post(self):
-        from pocketpaw.integrations.reddit import RedditClient
+        from pocketpaw.clients.reddit import RedditClient
 
         post = {
             "title": "Test Post",
@@ -55,7 +55,7 @@ class TestRedditClientFormatPost:
         assert "reddit.com" in result["url"]
 
     def test_format_post_deleted(self):
-        from pocketpaw.integrations.reddit import RedditClient
+        from pocketpaw.clients.reddit import RedditClient
 
         post = {}
         result = RedditClient._format_post(post)
@@ -80,12 +80,12 @@ async def test_reddit_search_success():
     ]
 
     with patch(
-        "pocketpaw.integrations.reddit.RedditClient.search",
+        "pocketpaw.clients.reddit.RedditClient.search",
         new_callable=AsyncMock,
         return_value=mock_posts,
     ):
         # Also skip rate limiting
-        with patch("pocketpaw.integrations.reddit._rate_limit", new_callable=AsyncMock):
+        with patch("pocketpaw.clients.reddit._rate_limit", new_callable=AsyncMock):
             result = await tool.execute(query="python frameworks", subreddit="python")
 
     assert "Best Python Frameworks" in result
@@ -98,11 +98,11 @@ async def test_reddit_search_no_results():
     tool = RedditSearchTool()
 
     with patch(
-        "pocketpaw.integrations.reddit.RedditClient.search",
+        "pocketpaw.clients.reddit.RedditClient.search",
         new_callable=AsyncMock,
         return_value=[],
     ):
-        with patch("pocketpaw.integrations.reddit._rate_limit", new_callable=AsyncMock):
+        with patch("pocketpaw.clients.reddit._rate_limit", new_callable=AsyncMock):
             result = await tool.execute(query="xyznonexistent123")
 
     assert "No posts found" in result
@@ -127,11 +127,11 @@ async def test_reddit_read_success():
     }
 
     with patch(
-        "pocketpaw.integrations.reddit.RedditClient.get_post",
+        "pocketpaw.clients.reddit.RedditClient.get_post",
         new_callable=AsyncMock,
         return_value=mock_post,
     ):
-        with patch("pocketpaw.integrations.reddit._rate_limit", new_callable=AsyncMock):
+        with patch("pocketpaw.clients.reddit._rate_limit", new_callable=AsyncMock):
             result = await tool.execute(url="https://reddit.com/r/test/comments/abc/")
 
     assert "My Post" in result
@@ -156,11 +156,11 @@ async def test_reddit_trending_success():
     ]
 
     with patch(
-        "pocketpaw.integrations.reddit.RedditClient.get_subreddit_top",
+        "pocketpaw.clients.reddit.RedditClient.get_subreddit_top",
         new_callable=AsyncMock,
         return_value=mock_posts,
     ):
-        with patch("pocketpaw.integrations.reddit._rate_limit", new_callable=AsyncMock):
+        with patch("pocketpaw.clients.reddit._rate_limit", new_callable=AsyncMock):
             result = await tool.execute(subreddit="all", time_filter="day")
 
     assert "Trending Post 1" in result
@@ -173,11 +173,11 @@ async def test_reddit_trending_empty():
     tool = RedditTrendingTool()
 
     with patch(
-        "pocketpaw.integrations.reddit.RedditClient.get_subreddit_top",
+        "pocketpaw.clients.reddit.RedditClient.get_subreddit_top",
         new_callable=AsyncMock,
         return_value=[],
     ):
-        with patch("pocketpaw.integrations.reddit._rate_limit", new_callable=AsyncMock):
+        with patch("pocketpaw.clients.reddit._rate_limit", new_callable=AsyncMock):
             result = await tool.execute(subreddit="deadsubreddit")
 
     assert "No trending posts" in result
@@ -191,11 +191,11 @@ async def test_reddit_read_error():
     mock_post = {"error": "Unexpected response format"}
 
     with patch(
-        "pocketpaw.integrations.reddit.RedditClient.get_post",
+        "pocketpaw.clients.reddit.RedditClient.get_post",
         new_callable=AsyncMock,
         return_value=mock_post,
     ):
-        with patch("pocketpaw.integrations.reddit._rate_limit", new_callable=AsyncMock):
+        with patch("pocketpaw.clients.reddit._rate_limit", new_callable=AsyncMock):
             result = await tool.execute(url="https://reddit.com/bad")
 
     assert result.startswith("Error:")

@@ -1,0 +1,138 @@
+[
+  {
+    "label": "the device class is written first instead of last (Analytics Engine columns are positional, so every row already stored is silently re-labelled and there is no update to fix them with)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "        (request.cf && request.cf.country) || \"\",\n        visitor,\n        deviceClass(ua),",
+    "replace": "        deviceClass(ua),\n        (request.cf && request.cf.country) || \"\",\n        visitor,",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py",
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the user-agent itself lands in the row (the privacy ceiling is gone and a row can single a visitor out, which is the claim the whole feature rests on)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "        deviceClass(ua),",
+    "replace": "        ua,",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "an unrecognised user-agent is reported as desktop (the fallback inflates the one number a site owner is most likely to act on, and unknown becomes unreachable)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  if (DESKTOP_RE.test(ua)) return \"desktop\";\n  return \"unknown\";",
+    "replace": "  return \"desktop\";",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "mobile is tested before tablet (an iPad announces Mobile and an Android tablet is an Android without it, so every tablet is filed as a phone or a desktop)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  if (TABLET_RE.test(ua)) return \"tablet\";\n  if (MOBILE_RE.test(ua)) return \"mobile\";",
+    "replace": "  if (MOBILE_RE.test(ua)) return \"mobile\";\n  if (TABLET_RE.test(ua)) return \"tablet\";",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the server-worker branch writes the assets-only entry (a dynamic site's server rendering is replaced by a raw asset serve, and main names a file that is not there)",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "        analytics_worker.SHIM_FILENAME if emits_worker else analytics_worker.ENTRY_FILENAME,",
+    "replace": "        analytics_worker.ENTRY_FILENAME,",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the counting server-worker config drops run_worker_first (the asset router serves every prerendered page itself, so the shim is never invoked and counts almost nothing while looking completely deployed)",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "            \"main\": analytics_worker.SHIM_FILENAME,\n            \"compatibility_date\": \"2024-09-23\",\n            \"compatibility_flags\": [\"nodejs_compat\"],\n            \"workers_dev\": True,\n            \"assets\": {\n                \"binding\": \"ASSETS\",\n                \"directory\": output_rel,\n                \"run_worker_first\": analytics_worker.run_worker_first_rules(\n                    Path(project_dir, output_rel)\n                ),\n            },",
+    "replace": "            \"main\": analytics_worker.SHIM_FILENAME,\n            \"compatibility_date\": \"2024-09-23\",\n            \"compatibility_flags\": [\"nodejs_compat\"],\n            \"workers_dev\": True,\n            \"assets\": {\"binding\": \"ASSETS\", \"directory\": output_rel},",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the counting server-worker config drops nodejs_compat (the SvelteKit worker cannot start, so counting takes the whole site down with it)",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "            \"main\": analytics_worker.SHIM_FILENAME,\n            \"compatibility_date\": \"2024-09-23\",\n            \"compatibility_flags\": [\"nodejs_compat\"],\n",
+    "replace": "            \"main\": analytics_worker.SHIM_FILENAME,\n            \"compatibility_date\": \"2024-09-23\",\n",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "a counting dynamic site loses its D1 binding (it goes on rendering and every query fails, while the pageview numbers look perfect)",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "    if d1_database_id:\n        config[\"d1_databases\"] = [",
+    "replace": "    if d1_database_id and not count_pageviews:\n        config[\"d1_databases\"] = [",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the shim rebuilds the response instead of returning it (a dropped set-cookie is a lost session and a dropped content-type is a page rendered as text, both of which look like a working deploy)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "    const response = await worker.fetch(request, env, ctx);",
+    "replace": "    const upstream = await worker.fetch(request, env, ctx);\n    const response = new Response(await upstream.text(), {{ status: upstream.status }});",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the shim swallows the site's own failure (a broken dynamic site serves a blank response nobody can trace back to the site's code)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "    const response = await worker.fetch(request, env, ctx);\n    try {{",
+    "replace": "    let response;\n    try {{\n      response = await worker.fetch(request, env, ctx);\n    }} catch (err) {{ response = new Response(\"\", {{ status: 200 }}); }}\n    try {{",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the shim stops forwarding the adapter's other handlers (a scheduled or queue handler silently stops firing, with nothing logged)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  ...worker,\n  async fetch(request, env, ctx) {{",
+    "replace": "  async fetch(request, env, ctx) {{",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the shim counts every response, not just a delivered page (the asset router's fallback carries every 404 scan here, so path-scanning bots become pageviews)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "      if (response && (response.status === 200 || response.status === 304)) {{",
+    "replace": "      if (true) {{",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the shim stops being excluded from the served tree (it carries the per-publish hash salt, so the visitor hash stops being irreversible)",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "    analytics_worker.SHIM_FILENAME,\n)",
+    "replace": ")",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "only this publish's own counter is considered stale (the OTHER branch's leftover survives a change of build shape and its salt is uploaded as an ordinary asset)",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "    for stale_path in (\n        Path(project_dir, analytics_worker.ENTRY_FILENAME),\n        Path(project_dir, analytics_worker.SHIM_FILENAME),\n    ):",
+    "replace": "    for stale_path in (counter_path,):",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the local server serves the shim (the salt that makes the visitor hash irreversible is handed out over loopback, deploy scaffold and all)",
+    "file": "ee/pocketpaw_ee/sites/local_server.py",
+    "find": "    analytics_worker.SHIM_FILENAME,\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  }
+]

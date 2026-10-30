@@ -1,0 +1,467 @@
+# service.py — the audit log's business logic, over two sinks.
+#
+# * ``agent_list_audit``: a read-only, workspace-scoped wrapper over the SQLite
+#   ``pocketpaw.audit.store`` (agent / pocket / skill decisions). # no-event.
+# * The Mongo ``AuditEvent`` collection, of which this module is the sole writer:
+#   ``record`` (fire-and-forget, never raises), ``list_events`` (cursor-paginated),
+#   ``list_target_events`` (one target's history, e.g. a Sites Data row),
+#   ``count_target_events`` (events on one target and those under it since a moment, e.g.
+#   a site's data changes since a restore point), ``find_target_event`` (the event
+#   on one target whose metadata matches, e.g. the restore that minted a bookmark),
+#   ``stream_export_csv``, ``actor_names``.
+# * ``purge_workspace_audit``: the retention seam, age- and tenant-scoped, called by
+#   ``workspace.service``; it purges both sinks (interim, until there is one sink).
+from __future__ import annotations
+
+import json
+import logging
+import re
+from datetime import datetime
+from typing import Any
+
+from beanie import PydanticObjectId
+
+from pocketpaw.audit.store import AuditStore, get_audit_store  # type: ignore[import-untyped]
+from pocketpaw_ee.cloud._core.context import RequestContext
+from pocketpaw_ee.cloud._core.errors import CloudError, Internal, ValidationError
+from pocketpaw_ee.cloud.audit.domain import AuditEventDomain, AuditPage
+from pocketpaw_ee.cloud.audit.dto import (
+    AuditEntryDTO,
+    AuditEventOut,
+    AuditListResponse,
+    AuditPageResponse,
+    AuditQueryRequest,
+    ListAuditRequest,
+)
+from pocketpaw_ee.cloud.models.audit_event import AuditEvent as _AuditEventDoc
+
+logger = logging.getLogger(__name__)
+
+
+async def _name_by_id(workspace_id: str) -> dict[str, str]:
+    """``{user id: full name}`` for the workspace's members; empty on a read error."""
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    try:
+        users = await _UserDoc.find({"workspaces.workspace": workspace_id}).to_list()
+    except Exception:
+        logger.warning(
+            "audit: failed to resolve actor names for workspace %s",
+            workspace_id,
+            exc_info=True,
+        )
+        return {}
+    return {str(u.id): u.full_name for u in users if u.full_name}
+
+
+async def actor_names(workspace_id: str, actor_ids: list[str]) -> dict[str, str]:
+    """Display names of ``actor_ids`` that are members of the workspace."""
+    if not actor_ids:
+        return {}
+    name_by_id = await _name_by_id(workspace_id)
+    return {a: name_by_id[a] for a in actor_ids if a in name_by_id}
+
+
+async def _resolve_actor_names(
+    items: list[dict[str, Any]],
+    workspace_id: str,
+    key: str = "actor",
+) -> list[dict[str, Any]]:
+    """Resolve user IDs in audit entries to names via workspace membership.
+
+    For ``key="actor"`` (activity endpoint): resolves ``user:<id>`` and
+    bare ObjectIds to ``user:<name>``.  ``agent:`` / ``system`` left as-is.
+
+    For ``key="actorId"`` (audit endpoint): resolves bare ObjectIds to names.
+    """
+    name_by_id = await _name_by_id(workspace_id)
+    if not name_by_id:
+        return items
+
+    for item in items:
+        actor = item.get(key, "")
+        if not isinstance(actor, str) or not actor:
+            continue
+
+        if key == "actor":
+            if actor.startswith("agent:") or actor == "system":
+                continue
+            user_id = actor[5:] if actor.startswith("user:") else actor
+            if user_id in name_by_id:
+                item[key] = f"user:{name_by_id[user_id]}"
+        elif key == "actorId":
+            if actor in name_by_id:
+                item[key] = name_by_id[actor]
+    return items
+
+
+async def agent_list_audit(
+    ctx: RequestContext,
+    body: ListAuditRequest | dict | None = None,
+    *,
+    store: AuditStore | None = None,  # DI seam for tests
+) -> AuditListResponse:
+    body = ListAuditRequest.model_validate(body or {})
+    if not ctx.workspace_id:
+        return AuditListResponse(entries=[], total=0)
+    store = store or get_audit_store()
+    try:
+        entries = await store.search_entries(
+            workspace_id=ctx.workspace_id,
+            pocket_id=body.pocket_id,
+            category=body.category,
+            actor=body.actor,
+            q=body.q,
+            limit=body.limit,
+        )
+    except CloudError:
+        raise
+    except Exception as exc:
+        logger.error("audit.list failed", exc_info=True)
+        raise Internal("audit.list_failed", "audit query failed") from exc
+    dtos = [AuditEntryDTO.model_validate(e, from_attributes=True) for e in entries]
+
+    if dtos and ctx.workspace_id:
+        dicts = [dto.model_dump() for dto in dtos]
+        dicts = await _resolve_actor_names(dicts, ctx.workspace_id, key="actor")
+        dtos = [AuditEntryDTO.model_validate(d) for d in dicts]
+
+    return AuditListResponse(entries=dtos, total=len(dtos))
+
+
+# ---------------------------------------------------------------------------
+# Workspace-mutation audit log (Wave 2 Task 10).
+#
+# ``record`` is called from workspace/service.py on every mutating op. It is
+# fire-and-forget: a write failure is logged and swallowed so an audit
+# outage cannot block a legitimate mutation. ``list_events`` is the read
+# path behind GET /workspaces/{id}/audit, paginated by a composite
+# ``(at, _id)`` cursor for stable ordering.
+#
+# IP + user-agent are stubbed to None for now; threading them through
+# RequestContext is deferred to Wave 3.
+# ---------------------------------------------------------------------------
+
+
+def _doc_to_domain(doc: _AuditEventDoc) -> AuditEventDomain:
+    return AuditEventDomain(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        actor_id=doc.actor_id,
+        action=doc.action,
+        target_type=doc.target_type,
+        target_id=doc.target_id,
+        metadata=dict(doc.metadata or {}),
+        ip=doc.ip,
+        user_agent=doc.user_agent,
+        at=doc.at,
+    )
+
+
+def _domain_to_wire(d: AuditEventDomain) -> AuditEventOut:
+    return AuditEventOut(
+        id=d.id,
+        workspaceId=d.workspace_id,
+        actorId=d.actor_id,
+        action=d.action,
+        targetType=d.target_type,
+        targetId=d.target_id,
+        metadata=d.metadata,
+        ip=d.ip,
+        userAgent=d.user_agent,
+        at=d.at.isoformat(),
+    )
+
+
+def _encode_cursor(at: datetime, oid: PydanticObjectId) -> str:
+    return f"{at.isoformat()}|{oid!s}"
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, PydanticObjectId]:
+    try:
+        at_iso, oid_str = cursor.split("|", 1)
+        return datetime.fromisoformat(at_iso), PydanticObjectId(oid_str)
+    except (ValueError, TypeError) as exc:
+        raise ValidationError("audit.bad_cursor", "Invalid pagination cursor") from exc
+
+
+def _parse_iso(value: str, field_name: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValidationError("audit.bad_timestamp", f"Invalid ISO-8601 in {field_name!r}") from exc
+
+
+async def record(
+    workspace_id: str,
+    actor_id: str,
+    action: str,
+    *,
+    target_type: str,
+    target_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    ip: str | None = None,
+    user_agent: str | None = None,
+) -> None:
+    """Persist one workspace audit event.
+
+    Never raises — an audit-write failure is logged so the mutating
+    operation that triggered it can complete. # no-event: audit rows ARE
+    the event sink; emitting a realtime event here would be self-referential.
+    """
+    try:
+        doc = _AuditEventDoc(
+            workspace=workspace_id,
+            actor_id=actor_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            metadata=dict(metadata or {}),
+            ip=ip,
+            user_agent=user_agent,
+        )
+        await doc.insert()
+    except Exception:
+        logger.warning("audit.record failed for %s/%s", workspace_id, action, exc_info=True)
+        return
+
+    # Fire-and-forget SIEM delivery — never blocks the audit write.
+    from pocketpaw_ee.cloud.audit import webhooks as _webhooks
+
+    _webhooks.schedule_delivery(doc)
+
+
+async def purge_workspace_audit(
+    workspace_id: str,
+    older_than: datetime,
+    *,
+    store: AuditStore | None = None,  # DI seam for tests
+) -> int:
+    """Delete audit rows older than ``older_than`` for ONE workspace.
+
+    The retention-enforcement seam (compliance-starter). Tenant-scoped by
+    ``workspace`` and age-scoped by ``at < older_than`` in a single Mongo
+    delete — a recent row, or another tenant's row of any age, is never
+    touched. Lives here because ``audit.service`` is the sole writer of the
+    ``AuditEvent`` collection (import-linter contract); the retention
+    orchestrator (``workspace.service.enforce_retention``) calls this rather
+    than reaching into the collection itself.
+
+    Interim: audit lives in two sinks — Mongo ``AuditEvent`` and the SQLite
+    ``AuditStore`` that ``agent_list_audit`` reads — so both are purged with
+    the same tenant + age scope. Returns the total deleted across both.
+    # no-event: retention bookkeeping
+    """
+    result = await _AuditEventDoc.find(
+        {"workspace": workspace_id, "at": {"$lt": older_than}}
+    ).delete()
+    # motor/beanie DeleteResult exposes ``deleted_count``; guard for the
+    # mongomock shim which may return None on an empty match.
+    mongo_deleted = int(getattr(result, "deleted_count", 0) or 0)
+    store = store or get_audit_store()
+    return mongo_deleted + await store.purge_entries(workspace_id, older_than)
+
+
+async def list_events(workspace_id: str, query: AuditQueryRequest | dict) -> AuditPage:
+    """Cursor-paginated audit-event list, newest first."""
+    body = AuditQueryRequest.model_validate(query or {})
+
+    # Why uniform $and: piling fields into a flat dict works today but
+    # future patches that add another ``at`` clause (e.g. a tail-window
+    # filter alongside the cursor) would silently clobber the earlier
+    # one. ``$and`` of leaf clauses composes safely.
+    clauses: list[dict[str, Any]] = [{"workspace": workspace_id}]
+    if body.action:
+        clauses.append({"action": body.action})
+    if body.actor:
+        clauses.append({"actor_id": body.actor})
+
+    time_filter: dict[str, datetime] = {}
+    if body.since:
+        time_filter["$gte"] = _parse_iso(body.since, "since")
+    if body.until:
+        time_filter["$lte"] = _parse_iso(body.until, "until")
+    if time_filter:
+        clauses.append({"at": time_filter})
+
+    if body.cursor:
+        c_at, c_oid = _decode_cursor(body.cursor)
+        clauses.append(
+            {
+                "$or": [
+                    {"at": {"$lt": c_at}},
+                    {"at": c_at, "_id": {"$lt": c_oid}},
+                ],
+            }
+        )
+
+    mongo_filter: dict[str, Any] = clauses[0] if len(clauses) == 1 else {"$and": clauses}
+
+    # Per reference_mongomock_quirks: no .aggregate() — straight find+sort
+    # with a composite sort key for stable ordering across pages.
+    docs = (
+        await _AuditEventDoc.find(mongo_filter)
+        .sort([("at", -1), ("_id", -1)])
+        .limit(body.limit + 1)
+        .to_list()
+    )
+
+    has_more = len(docs) > body.limit
+    rows = docs[: body.limit]
+    next_cursor = _encode_cursor(rows[-1].at, rows[-1].id) if has_more and rows else None
+    return AuditPage(items=[_doc_to_domain(d) for d in rows], next_cursor=next_cursor)
+
+
+async def list_target_events(
+    workspace_id: str, *, target_type: str, target_id: str, limit: int = 50
+) -> list[AuditEventDomain]:
+    """The workspace's events about one target, newest first (a row's history in the
+    Sites Data dashboard reads this)."""
+    docs = (
+        await _AuditEventDoc.find(
+            {"workspace": workspace_id, "target_type": target_type, "target_id": target_id}
+        )
+        .sort([("at", -1), ("_id", -1)])
+        .limit(max(1, min(limit, 200)))
+        .to_list()
+    )
+    return [_doc_to_domain(d) for d in docs]
+
+
+async def count_target_events(
+    workspace_id: str,
+    *,
+    target_type: str,
+    target_root: str,
+    since: datetime,
+    action_prefix: str = "",
+) -> int:
+    """How many of the workspace's events on ``target_type`` targets that are
+    ``target_root`` or under it (``<root>:…``), with an action starting with
+    ``action_prefix``, happened at or after ``since``. Both match literally."""
+    query: dict[str, Any] = {
+        "workspace": workspace_id,
+        "target_type": target_type,
+        "target_id": {"$regex": "^" + re.escape(target_root) + "(:|$)"},
+        "at": {"$gte": since},
+    }
+    if action_prefix:
+        query["action"] = {"$regex": "^" + re.escape(action_prefix)}
+    return await _AuditEventDoc.find(query).count()
+
+
+async def find_target_event(
+    workspace_id: str,
+    *,
+    target_type: str,
+    actions: list[str],
+    metadata: dict[str, Any],
+    target_id: str | None = None,
+    target_root: str | None = None,
+) -> AuditEventDomain | None:
+    """The newest of the workspace's events on exactly ``target_id`` (or on
+    ``target_root`` and the targets under it, ``<root>:…``), with one of
+    ``actions``, whose metadata holds every ``metadata`` key with that exact value."""
+    if (target_id is None) == (target_root is None):
+        raise ValueError("find_target_event takes exactly one of target_id / target_root")
+    target: Any = target_id
+    if target_root is not None:
+        target = {"$regex": "^" + re.escape(target_root) + "(:|$)"}
+    query: dict[str, Any] = {
+        "workspace": workspace_id,
+        "target_type": target_type,
+        "target_id": target,
+        "action": {"$in": list(actions)},
+    }
+    for key, value in metadata.items():
+        query[f"metadata.{key}"] = value
+    docs = await _AuditEventDoc.find(query).sort([("at", -1), ("_id", -1)]).limit(1).to_list()
+    return _doc_to_domain(docs[0]) if docs else None
+
+
+async def stream_export_csv(
+    workspace_id: str,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+):
+    """Async generator yielding CSV rows (header + one row per event).
+
+    Iterates the motor cursor with ``async for`` so memory stays flat
+    regardless of result count — ``.to_list()`` would buffer the entire
+    workspace's audit history before any row reached the client.
+    """
+    import csv
+    import io
+
+    mongo_filter: dict[str, Any] = {"workspace": workspace_id}
+    time_filter: dict[str, datetime] = {}
+    if since:
+        time_filter["$gte"] = _parse_iso(since, "since")
+    if until:
+        time_filter["$lte"] = _parse_iso(until, "until")
+    if time_filter:
+        mongo_filter["at"] = time_filter
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    def _flush() -> str:
+        out = buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+        return out
+
+    writer.writerow(
+        ["at", "actor_id", "action", "target_type", "target_id", "ip", "user_agent", "metadata"]
+    )
+    yield _flush()
+
+    cursor = _AuditEventDoc.find(mongo_filter).sort([("at", -1), ("_id", -1)])
+    async for d in cursor:
+        writer.writerow(
+            [
+                d.at.isoformat(),
+                d.actor_id,
+                d.action,
+                d.target_type,
+                d.target_id or "",
+                d.ip or "",
+                d.user_agent or "",
+                json.dumps(d.metadata or {}, default=str),
+            ]
+        )
+        yield _flush()
+
+
+async def list_events_response(
+    workspace_id: str,
+    query: AuditQueryRequest | dict,
+) -> AuditPageResponse:
+    """Service-level helper that wraps ``list_events`` in the wire shape.
+
+    Kept inline (cloud Rule 8: mapping helpers live next to the service)
+    so the router stays a thin adapter.
+    """
+    page = await list_events(workspace_id, query)
+    items: list[AuditEventOut] = [_domain_to_wire(d) for d in page.items]
+
+    if items:
+        dicts = [item.model_dump() for item in items]
+        dicts = await _resolve_actor_names(dicts, workspace_id, key="actorId")
+        items = [AuditEventOut.model_validate(d) for d in dicts]
+
+    return AuditPageResponse(
+        items=items,
+        nextCursor=page.next_cursor,
+    )
+
+
+__all__ = [
+    "agent_list_audit",
+    "list_events",
+    "list_events_response",
+    "purge_workspace_audit",
+    "record",
+    "stream_export_csv",
+]

@@ -197,11 +197,14 @@ from ee.cloud.shared.events import event_bus
 from notification_service import create_notification
 from group_service import add_user_to_group
 
+
 async def on_invite_accepted(data: dict[str, Any]) -> None:
     await create_notification(data["user_id"], "Your invite was accepted!")
 
+
 async def on_invite_accepted_group(data: dict[str, Any]) -> None:
     await add_user_to_group(data["user_id"], data["group_id"])
+
 
 event_bus.subscribe("invite.accepted", on_invite_accepted)
 event_bus.subscribe("invite.accepted", on_invite_accepted_group)
@@ -211,17 +214,21 @@ event_bus.subscribe("invite.accepted", on_invite_accepted_group)
 ```python
 from ee.cloud.shared.events import event_bus
 
+
 async def accept_invite(invite_id: str):
     invite = await Invite.get(invite_id)
     invite.status = "accepted"
     await invite.save()
-    
+
     # Trigger side effects
-    await event_bus.emit("invite.accepted", {
-        "invite_id": invite_id,
-        "user_id": invite.user_id,
-        "group_id": invite.group_id,
-    })
+    await event_bus.emit(
+        "invite.accepted",
+        {
+            "invite_id": invite_id,
+            "user_id": invite.user_id,
+            "group_id": invite.group_id,
+        },
+    )
 ```
 
 ---

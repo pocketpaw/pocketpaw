@@ -6,6 +6,9 @@ display_name: GitLab
 type: developer
 icon: git-merge
 
+senses:
+  - paw.code.v1
+
 auth:
   method: bearer
   credentials:

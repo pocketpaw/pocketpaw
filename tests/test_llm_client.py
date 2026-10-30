@@ -1,4 +1,12 @@
-"""Tests for the centralized LLMClient abstraction."""
+"""Tests for the centralized LLMClient abstraction.
+
+MCG-2: added TestToSdkEnv.test_to_sdk_env_litellm and
+TestResolveLLMClient.test_resolve_litellm_routes_sdk_env_to_proxy — assert that
+selecting the ``litellm`` provider produces a subprocess env whose
+``ANTHROPIC_BASE_URL`` points at the configured ``litellm_api_base`` and whose
+``ANTHROPIC_API_KEY`` carries ``litellm_api_key``. This is the seam that routes
+the spawned ``claude`` CLI's model calls through the LiteLLM proxy.
+"""
 
 import dataclasses
 from unittest.mock import patch
@@ -94,6 +102,28 @@ class TestResolveLLMClient:
         assert llm.openai_compatible_base_url == "https://openrouter.ai/api/v1"
         assert llm.api_key == "sk-or-v1-test"
         assert llm.model == "meta-llama/llama-4-maverick"
+
+    def test_resolve_litellm_routes_sdk_env_to_proxy(self):
+        """MCG-2 GATE seam: selecting the litellm provider routes the Claude SDK
+        subprocess env at the configured proxy base + carries the proxy key.
+
+        End-to-end path: Settings → resolve_llm_client(force_provider="litellm")
+        → to_sdk_env(). This is what points the spawned ``claude`` CLI's model
+        calls at the LiteLLM proxy instead of api.anthropic.com.
+        """
+        settings = Settings(
+            litellm_api_base="https://litellm.example.com",
+            litellm_api_key="sk-proxy-123",
+            litellm_model="claude-3-haiku",
+        )
+        llm = resolve_llm_client(settings, force_provider="litellm")
+        assert llm.is_litellm
+        assert llm.api_key == "sk-proxy-123"
+
+        env = llm.to_sdk_env()
+        # Trailing slash is stripped by LiteLLMAdapter.resolve_config.
+        assert env["ANTHROPIC_BASE_URL"] == "https://litellm.example.com"
+        assert env["ANTHROPIC_API_KEY"] == "sk-proxy-123"
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +274,26 @@ class TestToSdkEnv:
         env = llm.to_sdk_env()
         assert env["ANTHROPIC_API_KEY"] == "my-key"
         assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+    def test_to_sdk_env_litellm(self):
+        """MCG-2 GATE seam: the litellm provider points the Claude SDK subprocess
+        at the proxy base and forwards the proxy key as ANTHROPIC_API_KEY.
+
+        The litellm base URL travels via ``openai_compatible_base_url`` on the
+        LLMClient (how resolve_llm_client stores adapter base_urls) and must
+        emerge as ANTHROPIC_BASE_URL so the spawned ``claude`` CLI calls the
+        proxy. Both the base URL AND the key must be present.
+        """
+        llm = LLMClient(
+            provider="litellm",
+            model="claude-3-haiku",
+            api_key="sk-proxy-key",
+            ollama_host="http://localhost:11434",
+            openai_compatible_base_url="https://litellm.example.com",
+        )
+        env = llm.to_sdk_env()
+        assert env["ANTHROPIC_BASE_URL"] == "https://litellm.example.com"
+        assert env["ANTHROPIC_API_KEY"] == "sk-proxy-key"
 
 
 # ---------------------------------------------------------------------------

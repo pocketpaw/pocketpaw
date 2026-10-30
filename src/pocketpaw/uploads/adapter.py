@@ -1,0 +1,241 @@
+"""StorageAdapter protocol — the swap point for local, S3, etc.
+
+Updated 2026-09-14 (feat/uploads-multipart-endpoints): added ``list_parts``,
+making it seven. It exists because the caller cannot get a trustworthy manifest
+from anywhere else: on the presigned path the part PUTs go browser→bucket and
+are never observed here, so after a client reload nobody on either side knows
+the etags. Storage does. Same raising default as its siblings.
+
+Updated 2026-09-14 (feat/uploads-multipart-adapter): added the six-method
+multipart surface — ``create_multipart``, ``sign_part``, ``put_part``,
+``complete_multipart``, ``abort_multipart``, ``supports_presigned_parts``. Every
+other write path here is one call carrying the whole object, which is what
+breaks on a 2 GB file: ``put`` buffers the entire body before a byte is stored,
+so the failure lands after the transfer and a dropped connection costs all of it.
+
+Two shapes behind one surface. An adapter that can presign part URLs says so and
+the bytes go browser→bucket, never through us; one that cannot (local disk)
+relays them through ``put_part``. ``supports_presigned_parts`` is what callers
+branch on, which is why it defaults instead of raising.
+
+Updated 2026-08-31 (feat/sites-public-asset-uploads): added ``public_url``. Every
+other read path here is *time-limited* (``presigned_get``) or *auth-gated* (the
+caller streams via ``open`` behind its own permission check). Neither can back an
+``<img src>`` on a site we publish to the open internet: a presign expires while
+the site is still live, and an auth-gated URL 401s for the anonymous visitor the
+site exists to serve. ``public_url`` is the third kind — a durable, credential-free
+address — and it is ``None`` on every adapter that cannot honestly mint one, so a
+caller must handle absence rather than receive a URL that later dies.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class StoredObject:
+    """Return value of ``StorageAdapter.put``."""
+
+    key: str
+    size: int
+    mime: str
+
+
+@dataclass
+class StorageItem:
+    """One entry in a directory listing returned by ``browse``."""
+
+    name: str
+    is_dir: bool
+    size: int = 0
+    modified: int = 0  # unix ms; 0 when the backend does not report it
+
+
+class StorageAdapter(Protocol):
+    """Abstract byte storage. Knows nothing about metadata, auth, or mime logic.
+
+    Implementations must be safe to call from asyncio contexts.
+    """
+
+    async def put(self, key: str, stream: AsyncIterator[bytes], mime: str) -> StoredObject:
+        """Persist ``stream`` at ``key``. Returns the canonical ``StoredObject``."""
+
+    def open(self, key: str) -> AsyncIterator[bytes]:  # pragma: no cover
+        """Yield the stored bytes in chunks. Raises ``NotFound`` if missing.
+
+        Note: not ``async def`` — implementations are async generator
+        functions (``async def`` + ``yield``), which Python types as
+        ``AsyncIterator[bytes]`` when called (no ``await`` on the call).
+        """
+
+    async def delete(self, key: str) -> None:
+        """Remove ``key`` if present. Idempotent."""
+
+    async def exists(self, key: str) -> bool:
+        """Return whether ``key`` is currently stored."""
+
+    def local_path(self, key: str) -> Path | None:
+        """Return an absolute local path to the blob, or ``None`` if unsupported.
+
+        Lets the agent loop pass local files to built-in tools (e.g. Read)
+        without streaming through HTTP. Remote adapters (S3, GCS) return
+        ``None`` — the caller should fall back to streaming via ``open``.
+        """
+
+    async def presigned_get(
+        self,
+        key: str,
+        ttl_seconds: int,
+        response_content_disposition: str | None = None,
+    ) -> str | None:
+        """Return a time-limited public URL for reading ``key``.
+
+        Adapters that natively support presigning (S3, GCS) return an
+        absolute URL the browser can fetch without an Authorization header.
+        Adapters that don't (local disk) return ``None``; the caller should
+        fall back to its own signing scheme.
+
+        ``response_content_disposition`` (when set) is forwarded so the served
+        response carries that ``Content-Disposition`` — callers pass
+        ``attachment; filename="…"`` to force a download for content that must
+        not render inline on the storage origin (e.g. delivered HTML/SVG). The
+        local adapter ignores it (it never presigns); ``None`` preserves the
+        adapter/object default disposition.
+        """
+
+    def public_url(self, key: str) -> str | None:
+        """Return a durable, credential-free URL for ``key``, or ``None``.
+
+        Distinct from :meth:`presigned_get` in the two ways that matter for
+        published content: it never expires, and it carries no signature, so it
+        can be baked into HTML that outlives this process. Only an adapter
+        pointed at a bucket whose objects are actually world-readable may return
+        a URL here — returning one for a private bucket produces a link that
+        renders as a broken image for every visitor.
+
+        The default is ``None`` (local disk, and the private S3 adapter). Callers
+        must treat ``None`` as "this deployment cannot host public assets" and
+        fail loudly rather than substituting an auth-gated link.
+        """
+        return None
+
+    async def list_prefix(self, prefix: str) -> list[str]:
+        """List every key that starts with ``prefix`` (non-recursive, one level).
+
+        Returns the unique "sub-directory" names (the next path segment after
+        ``prefix``). S3 adapters return the CommonPrefixes from a
+        delimiter'd ``list_objects_v2``. Local adapters return the child
+        file/directory names.
+
+        Adapters that don't support prefix listing return ``[]``.
+        """
+
+    async def browse(self, prefix: str) -> list[StorageItem]:
+        """List one directory level. Returns both files and sub-folders.
+
+        Each item carries its name, whether it is a directory, and the file
+        size in bytes (zero for directories). The default (no-op)
+        implementation returns empty — adapters override to provide actual
+        listing.
+        """
+        return []
+
+    async def rename_key(self, old_key: str, new_key: str) -> None:
+        """Rename (move) a key from ``old_key`` to ``new_key``.
+
+        The default raises ``NotImplementedError``. Adapters that support
+        rename must implement this so the cloud project file endpoints can
+        rename files and directories.
+        """
+        raise NotImplementedError("rename_key not supported by this adapter")
+
+    # --- Multipart / resumable uploads -------------------------------------
+    #
+    # Five of the six raise by default rather than degrade to a single-shot
+    # ``put``: a half-implemented adapter should fail at the first call, not
+    # land a 5 GB upload as an empty object.
+
+    def supports_presigned_parts(self) -> bool:
+        """Whether this adapter can presign a single part URL.
+
+        Defaults ``False`` rather than raising, unlike its five siblings —
+        every caller asks this *before* it knows the rest exists, and the relay
+        path is a true answer for any adapter.
+        """
+        return False
+
+    async def create_multipart(self, key: str, mime: str) -> str:
+        """Open a multipart upload for ``key``. Returns the provider's upload id.
+
+        The caller stores that id and hands it back on every later call.
+        ``mime`` is recorded here because that is when S3 wants it — a
+        ``ContentType`` at complete time is ignored and the object is served
+        as ``application/octet-stream`` forever.
+        """
+        raise NotImplementedError("create_multipart not supported by this adapter")
+
+    async def sign_part(self, key: str, upload_id: str, part_number: int, ttl: int) -> str | None:
+        """Presigned URL for PUTting one part. ``None`` when unsupported.
+
+        Same ``None`` contract as :meth:`presigned_get` — check
+        :meth:`supports_presigned_parts` rather than reading it as an error.
+        ``ttl`` is seconds, and must outlive the slowest connection using it.
+        """
+        raise NotImplementedError("sign_part not supported by this adapter")
+
+    async def list_parts(self, key: str, upload_id: str) -> list[tuple[int, str]]:
+        """Every part storage currently holds for this upload, ``(number, etag)``.
+
+        Sorted by part number, and the AUTHORITATIVE answer to "what has
+        actually arrived" — which is a different question from "what does the
+        client think it sent". Those diverge in the case resumable uploads
+        exist for: a client that reloads mid-upload has no etags for the parts
+        its previous session wrote, and on the presigned path nobody on this
+        side ever saw them either, because those PUTs went browser→bucket. A
+        caller that can only complete from a client-supplied list therefore
+        cannot complete a resumed upload at all.
+
+        Callers should complete from this, and treat any list the client sends
+        as an assertion to check against it rather than as the source of truth.
+        """
+        raise NotImplementedError("list_parts not supported by this adapter")
+
+    async def put_part(self, key: str, upload_id: str, part_number: int, body: bytes) -> str:
+        """Store one part (the relay path). Returns its etag.
+
+        ``body`` is bytes, not a stream: the caller has already bounded it at
+        ``part_size``. Part numbers are 1-based and may arrive out of order.
+        The etag is opaque — round-trip it back at complete time.
+        """
+        raise NotImplementedError("put_part not supported by this adapter")
+
+    async def complete_multipart(
+        self, key: str, upload_id: str, parts: list[tuple[int, str]]
+    ) -> StoredObject:
+        """Assemble the parts into the object at ``key``.
+
+        ``parts`` is ``(part_number, etag)`` in any order — implementations
+        sort, since a caller collecting from parallel workers has no reason to
+        have kept the ordering. The returned ``size``/``mime`` are what storage
+        reports, so they are what belongs on the caller's metadata row.
+
+        May raise ``ObjectNotDescribed`` — a ``StorageFailure`` subclass meaning
+        the object assembled successfully and only the read-back of its size and
+        type failed. That is a recoverable outcome: the bytes are stored, and a
+        caller holding its own record of them should keep the upload rather than
+        report a completed transfer as failed. Any other ``StorageFailure``
+        means nothing landed.
+        """
+        raise NotImplementedError("complete_multipart not supported by this adapter")
+
+    async def abort_multipart(self, key: str, upload_id: str) -> None:
+        """Discard an in-progress upload and its parts.
+
+        Idempotent like :meth:`delete` — this runs on cancel and cleanup paths
+        where raising on "already gone" turns recovery into a second failure.
+        """
+        raise NotImplementedError("abort_multipart not supported by this adapter")

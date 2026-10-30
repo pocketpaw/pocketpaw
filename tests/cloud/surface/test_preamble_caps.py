@@ -1,0 +1,169 @@
+"""The two caps that jointly bound the pocket preamble stay consistent (PA-9).
+
+Created 2026-08-03 (PA-9, feat/prompt-budget-measurement).
+
+``PREAMBLE_MAX_CHARS`` and ``WIDGET_PREVIEW_LIMIT`` are set independently, in
+different units, and bound the same text. PA-9 measured that they do not
+currently collide — a full 300-widget preamble renders at 609 chars against a
+1500-char cap — but nothing asserted it, so the property held by luck.
+
+It matters because ``truncate_preamble`` cuts the TAIL. In
+``handlers/pocket.py`` the widget rows are emitted BEFORE the node and backend
+summaries, so a widget limit raised past the char cap does not truncate the
+widget list that caused the overflow; it silently deletes ``<pocket-nodes>`` and
+``<pocket-backend>`` instead. The agent would lose the pocket's wiring state and
+nothing in the preamble would say so.
+
+These are pure-function tests over the two helpers — no DB, no fixtures.
+"""
+
+from __future__ import annotations
+
+from bson import ObjectId
+from pocketpaw_ee.cloud.surface.handlers._helpers import (
+    PREAMBLE_MAX_CHARS,
+    WIDGET_PREVIEW_LIMIT,
+    format_widget_line,
+    truncate_preamble,
+)
+
+from pocketpaw.prompt.entity import ID_TAIL_CHARS, MISSING_ID
+
+
+def test_the_fixture_measures_a_production_shaped_row() -> None:
+    """A cap test is worth exactly what its fixture is worth.
+
+    THIS TEST EXISTS BECAUSE THE MUTATION HARNESS FOUND ITS ABSENCE. Deleting
+    ``self.id`` from ``_Widget`` leaves every cap assertion below GREEN — rows
+    without an id are shorter, so a cap measured on them passes more easily. The
+    suite would happily report headroom that production does not have, which is
+    the precise failure this file exists to prevent. ``scripts/mutate.py``
+    flagged it as the one escaping mutation of twenty-one; everything else in
+    the plan was caught.
+
+    So the fixture's realism is now itself asserted: the widget must carry an
+    id, and the rendered row must actually show it.
+
+    THE MUTATION THAT BREAKS THIS: delete ``self.id = str(ObjectId())`` from
+    ``_Widget``. Run: the row rendered ``id=?`` and both assertions failed.
+    (Applied 2026-08-03, via scripts/mutate.py.)
+    """
+    widget = _Widget(0)
+    row = format_widget_line(widget)
+
+    assert f"id={MISSING_ID}" not in row, (
+        "the fixture widget has no id, so every cap measured below is short by "
+        "~23 chars a row against production"
+    )
+    assert widget.id[-ID_TAIL_CHARS:] in row, f"the row does not carry the fixture's id: {row}"
+
+
+class _Widget:
+    """A widget with realistic field lengths.
+
+    ``format_widget_line`` reads ``id`` / ``name`` / ``type`` / ``spec`` off a
+    duck-typed object. Every field must be plausible or the measurement flatters
+    itself: a ``(unnamed)`` fallback renders ~7 chars shorter per line, and —
+    added 2026-08-03 (feat/prompt-entity-ids) — a MISSING ``id`` renders the
+    1-char ``?`` marker where production carries a 24-char ObjectId.
+
+    That second one nearly shipped. When the row started carrying the widget id,
+    this fixture had no ``id`` attribute, so the cap test went on passing while
+    measuring rows 23 chars shorter than the ones the agent actually sees. A cap
+    test that under-measures is worse than none: it reports headroom that is not
+    there. The id is a real ObjectId here for exactly that reason.
+    """
+
+    def __init__(self, i: int) -> None:
+        self.id = str(ObjectId())
+        self.name = f"Revenue by region {i}"
+        self.type = "spec"
+        self.spec = {"kind": "chart"}
+
+
+def _render_preamble(widget_count: int) -> str:
+    """Rebuild the widest preamble ``handlers/pocket.py`` can emit.
+
+    Mirrors that handler's assembly order — surface tag, current-pocket tag,
+    widget rows, then the node and backend summaries that sit in the truncation
+    firing line.
+    """
+    widgets = [_Widget(i) for i in range(widget_count)]
+    parts = [
+        '<surface kind="pocket" route="/pockets/pk-123" />',
+        f'<current-pocket id="pk-123" name="Launch Tracker" widgets="{widget_count}" />',
+    ]
+    rows = [format_widget_line(w) for w in widgets[:WIDGET_PREVIEW_LIMIT]]
+    if widget_count > WIDGET_PREVIEW_LIMIT:
+        rows.append(f"... (+{widget_count - WIDGET_PREVIEW_LIMIT} more)")
+    parts.append(
+        f'<pocket-widgets count="{widget_count}">\n' + "\n".join(rows) + "\n</pocket-widgets>"
+    )
+    # The two blocks that get deleted first when the preamble overflows.
+    parts.append("<pocket-nodes>3 nodes: fetch, transform, render</pocket-nodes>")
+    parts.append("<pocket-backend>backend: connected (postgres)</pocket-backend>")
+    return "\n".join(parts)
+
+
+def test_widget_preview_limit_fits_inside_the_preamble_char_cap():
+    """A full widget preview must not push the preamble over its own cap.
+
+    MUTATION: set ``WIDGET_PREVIEW_LIMIT = 60`` in
+    ``ee/pocketpaw_ee/cloud/surface/handlers/_helpers.py``. 60 lines at ~55
+    chars is ~3,300 chars against a 1,500 cap, ``truncate_preamble`` fires, and
+    both assertions below fail.
+
+    The margin is thinner than PA-9 measured. Since the row began carrying the
+    widget id (2026-08-03) a line averages 55.2 chars rather than 36.2 and this
+    preamble renders at 979 of 1500, so ~21 widgets fit rather than ~36. 12 is
+    still safe. The full table of how that moved — and why the id is rendered as
+    an 8-char tail rather than whole — is in ``_helpers.py`` beside
+    ``WIDGET_PREVIEW_LIMIT``.
+    """
+    raw = _render_preamble(300)
+
+    assert len(raw) <= PREAMBLE_MAX_CHARS, (
+        f"{WIDGET_PREVIEW_LIMIT} widgets render a {len(raw)}-char preamble, over "
+        f"the {PREAMBLE_MAX_CHARS}-char cap — truncation would eat the node and "
+        "backend summaries, not the widget list that overflowed it."
+    )
+    assert truncate_preamble(raw) == raw
+
+
+def test_truncation_would_eat_the_wiring_summaries_not_the_widgets():
+    """Why the cap above is load-bearing rather than cosmetic.
+
+    Pins the failure MODE: ``truncate_preamble`` drops trailing lines, so an
+    over-long preamble loses the blocks that come last. If a future refactor
+    made truncation cut the widget rows instead, the test above would be
+    guarding a risk that no longer exists and should be revisited.
+
+    MUTATION: change ``truncate_preamble`` to keep the LAST lines rather than
+    the first (iterate ``reversed(lines)``). Verified 2026-08-03: the head
+    assertion is the one that fires — the surface tag is dropped — and the
+    backend summary survives, so the last assertion would fail too.
+    """
+    raw = _render_preamble(300)
+    # Force overflow independent of the real cap, so this test documents the
+    # helper's behaviour rather than today's cap values.
+    cut = truncate_preamble(raw, limit=300)
+
+    assert cut != raw
+    assert cut.endswith("... (truncated)")
+    assert "<surface kind=" in cut, "truncation must keep the head"
+    assert "<pocket-backend>" not in cut, "truncation drops the tail — that is the risk"
+
+
+def test_a_small_pocket_is_never_truncated():
+    """The common case stays whole.
+
+    Most pockets hold fewer widgets than the preview limit, and that preamble
+    must survive intact — it is the agent's only view of the surface.
+
+    MUTATION: set ``PREAMBLE_MAX_CHARS = 200`` in ``_helpers.py``; the 5-widget
+    preamble (~400 chars) is then cut and both assertions fail.
+    """
+    raw = _render_preamble(5)
+
+    assert truncate_preamble(raw) == raw
+    assert "<pocket-backend>" in raw

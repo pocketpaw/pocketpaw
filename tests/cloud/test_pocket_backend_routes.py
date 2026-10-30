@@ -1,0 +1,969 @@
+# tests/cloud/test_pocket_backend_routes.py — RFC 04 alpha.
+# Created: 2026-05-21 — Integration coverage for the pocket-backend routes
+# added to the pockets router:
+#
+#   PUT    /pockets/{id}/backend
+#   GET    /pockets/{id}/backend
+#   DELETE /pockets/{id}/backend
+#   POST   /pockets/{id}/sources/run
+#
+# The service functions and the source executor are monkeypatched so the
+# tests pin the route wiring (request body parsing, status codes, response
+# shape) without a Mongo connection or real outbound HTTP. Auth + license
+# guards are overridden — same pattern as test_pocket_layout_routes.py.
+#
+# Updated: 2026-05-21 (PR #1177 security pass) — added coverage for the
+# DELETE route, the edit-access guard on GET, and the user_id thread-through
+# on the source-run route.
+#
+# Updated: 2026-05-22 (RFC 05 M2a) — the executor-creds tuple gained a
+# trailing `allowed_writes` element and the backend response carries the
+# write allowlist; existing assertions updated. Added coverage for the two
+# new write-action routes:
+#   POST /pockets/{id}/actions/run        — run a declared write action
+#   PUT  /pockets/{id}/backend/write-policy — set the write allowlist
+#
+# Updated: 2026-06-13 — reconciled the stale `test_run_sources_400_when_no_backend`
+# with the `fix/pocket-sources-run-400` contract (router docstring, 2026-06-08).
+# `POST /sources/run` no longer 400s when no backend is bound: it returns 200
+# with empty `ran`/`errors` when nothing is selected, or a per-source
+# `pocket_backend.not_configured` error (200) when a runnable source IS
+# authored. The single stale test is replaced by two that pin both arms; the
+# selection + error shape run for real (`selected_source_keys` is not mocked).
+# Updated: 2026-06-15 (feat/invoke-tool-v1) — the backend response now carries
+# `allowed_tools`; the configure assertion updated. Added coverage for the new
+# owner-only route:
+#   PUT /pockets/{id}/backend/tool-policy — set the tool allowlist
+# (owner sets the grants; empty list valid; empty tool name 422'd; non-owner
+# 403 before the service runs).
+
+from __future__ import annotations
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.pockets import service as pockets_service
+from pocketpaw_ee.cloud.pockets.router import router
+from pocketpaw_ee.cloud.shared.deps import (
+    current_user_id,
+    current_workspace_id,
+    require_pocket_action_run,
+    require_pocket_edit,
+    require_pocket_owner,
+)
+
+FAKE_USER = "user-alice"
+FAKE_WORKSPACE = "ws-alpha"
+
+
+@pytest.fixture
+def app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+
+    a = FastAPI()
+    add_error_handler(a)
+    a.include_router(router)
+
+    a.dependency_overrides[require_license] = lambda: None
+    a.dependency_overrides[require_pocket_edit] = lambda: None
+    a.dependency_overrides[require_pocket_owner] = lambda: None
+    a.dependency_overrides[require_pocket_action_run] = lambda: None
+    a.dependency_overrides[current_user_id] = lambda: FAKE_USER
+    a.dependency_overrides[current_workspace_id] = lambda: FAKE_WORKSPACE
+    return a
+
+
+@pytest.fixture
+def client(app: FastAPI) -> TestClient:
+    return TestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# PUT /pockets/{id}/backend
+# ---------------------------------------------------------------------------
+
+
+def test_put_backend_configures(monkeypatch, client):
+    captured = {}
+
+    async def _set(
+        workspace_id,
+        user_id,
+        pocket_id,
+        base_url,
+        auth_type,
+        auth_token,
+        auth_header,
+        *,
+        backend_type="http",
+        connector_name=None,
+    ):
+        captured.update(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            base_url=base_url,
+            auth_type=auth_type,
+            auth_token=auth_token,
+            backend_type=backend_type,
+            connector_name=connector_name,
+        )
+        return {
+            "backend_type": backend_type,
+            "connector_name": connector_name,
+            "base_url": base_url,
+            "auth_type": auth_type,
+            "configured": True,
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_backend", _set)
+
+    res = client.put(
+        "/pockets/pocket-1/backend",
+        json={
+            "base_url": "https://api.example.com",
+            "auth_type": "bearer",
+            "auth_token": "secret",
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body == {
+        # connector-as-backend: the response now carries backend_type +
+        # connector_name. The faked service omits them, so the response model
+        # fills the http defaults.
+        "backend_type": "http",
+        "connector_name": None,
+        "base_url": "https://api.example.com",
+        "auth_type": "bearer",
+        "configured": True,
+        # RFC 05 M2a: the response now carries the write allowlist —
+        # empty by default (fail-closed).
+        "allowed_writes": [],
+        # feat/invoke-tool-v1: the response carries the tool allowlist —
+        # empty by default (fail-closed).
+        "allowed_tools": [],
+        # RFC 05 M2b.1: the response carries the gated-write approval
+        # route — None by default (the pocket owner approves).
+        "approval_route": None,
+    }
+    # The route forwarded the right identity + body to the service.
+    assert captured["workspace_id"] == FAKE_WORKSPACE
+    assert captured["pocket_id"] == "pocket-1"
+    assert captured["auth_token"] == "secret"
+
+
+def test_put_backend_rejects_bad_auth_type(client):
+    res = client.put(
+        "/pockets/pocket-1/backend",
+        json={"base_url": "https://api.example.com", "auth_type": "oauth2"},
+    )
+    assert res.status_code == 422  # Literal validation
+
+
+# ---------------------------------------------------------------------------
+# GET /pockets/{id}/backend
+# ---------------------------------------------------------------------------
+
+
+def test_get_backend_returns_summary(monkeypatch, client):
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "name": "P"}
+
+    async def _get_backend(workspace_id, pocket_id):
+        return {"base_url": "https://api.example.com", "auth_type": "none", "configured": True}
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend", _get_backend)
+
+    res = client.get("/pockets/pocket-1/backend")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["configured"] is True
+    assert "token" not in body
+
+
+def test_get_backend_404_when_unconfigured(monkeypatch, client):
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id}
+
+    async def _get_backend(workspace_id, pocket_id):
+        return None
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend", _get_backend)
+
+    res = client.get("/pockets/pocket-1/backend")
+    assert res.status_code == 404
+
+
+def test_get_backend_forbidden_for_non_editor(monkeypatch):
+    """SHOULD-FIX-1 — a viewer (no edit access) gets 403, not the binding."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+
+    a = FastAPI()
+    add_error_handler(a)
+    a.include_router(router)
+    a.dependency_overrides[require_license] = lambda: None
+    a.dependency_overrides[require_pocket_owner] = lambda: None
+    a.dependency_overrides[current_user_id] = lambda: FAKE_USER
+    a.dependency_overrides[current_workspace_id] = lambda: FAKE_WORKSPACE
+
+    def _deny_edit():
+        raise Forbidden("pocket.forbidden", "edit access required")
+
+    a.dependency_overrides[require_pocket_edit] = _deny_edit
+
+    res = TestClient(a).get("/pockets/pocket-1/backend")
+    assert res.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# DELETE /pockets/{id}/backend
+# ---------------------------------------------------------------------------
+
+
+def test_delete_backend_revokes(monkeypatch, client):
+    captured = {}
+
+    async def _remove(workspace_id, user_id, pocket_id):
+        captured.update(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+
+    monkeypatch.setattr(pockets_service, "remove_pocket_backend", _remove)
+
+    res = client.delete("/pockets/pocket-1/backend")
+    assert res.status_code == 204, res.text
+    assert res.content == b""
+    assert captured == {
+        "workspace_id": FAKE_WORKSPACE,
+        "user_id": FAKE_USER,
+        "pocket_id": "pocket-1",
+    }
+
+
+def test_delete_backend_idempotent_when_unconfigured(monkeypatch, client):
+    """remove_pocket_backend is a no-op on a pocket with no credential —
+    the route still returns 204."""
+
+    async def _remove(workspace_id, user_id, pocket_id):
+        return None  # service no-ops when there is no row
+
+    monkeypatch.setattr(pockets_service, "remove_pocket_backend", _remove)
+
+    res = client.delete("/pockets/pocket-with-no-backend/backend")
+    assert res.status_code == 204
+
+
+# ---------------------------------------------------------------------------
+# POST /pockets/{id}/sources/run
+# ---------------------------------------------------------------------------
+
+
+def test_run_sources_happy_path(monkeypatch, client):
+    spec = {"sources": {"prs": {"method": "GET", "path": "/pulls", "bind": "state.prs"}}}
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        # connector-as-backend: 8-tuple — trailing elements are the write
+        # allowlist, approval route (None = owner approves), backend_type,
+        # connector_name.
+        return ("https://api.example.com", "bearer", None, "tok", [], None, "http", None)
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import source_executor
+
+    captured = {}
+
+    async def _run_sources(**kwargs):
+        captured.update(kwargs)
+        return {"ran": [{"source": "prs", "bind": "prs", "value": [1, 2]}], "errors": []}
+
+    monkeypatch.setattr(source_executor, "run_sources", _run_sources)
+
+    res = client.post("/pockets/pocket-1/sources/run", json={"trigger": "manual"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ran"][0]["bind"] == "prs"
+    assert body["errors"] == []
+    # The route passed the spec + creds + trigger + identity through.
+    assert captured["ripple_spec"] == spec
+    assert captured["base_url"] == "https://api.example.com"
+    assert captured["token"] == "tok"
+    assert captured["trigger"] == "manual"
+    assert captured["user_id"] == FAKE_USER
+
+
+def test_run_sources_noop_when_no_backend_and_nothing_selected(monkeypatch, client):
+    """A blank/starter pocket — no backend, no sources — is a clean no-op.
+
+    The frontend runs declared sources on every ``pocket_open``, so this
+    path is hit on every open of an unconfigured pocket. It returns 200
+    with empty ``ran``/``errors`` — NOT the old 400, which surfaced in the
+    browser as a noisy ``pocket_open sources run failed: HttpError: Bad
+    Request``. See ``fix/pocket-sources-run-400`` (router docstring,
+    2026-06-08) for the contract.
+    """
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": {}}
+
+    async def _no_creds(workspace_id, pocket_id):
+        return None
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
+
+    res = client.post("/pockets/pocket-1/sources/run", json={})
+    assert res.status_code == 200, res.text
+    assert res.json() == {"ran": [], "errors": []}
+
+
+def test_run_sources_per_source_error_when_no_backend_but_source_authored(monkeypatch, client):
+    """A runnable source authored on a pocket with no backend bound is a
+    real misconfiguration — reported as a per-source
+    ``pocket_backend.not_configured`` error with HTTP 200, never a hard 400.
+
+    This mirrors the soft/non-fatal "no backend" handling every other
+    source-run call site uses (agent pocket_router, temporal_dispatcher,
+    bulk_dispatch). ``source_executor.selected_source_keys`` is deliberately
+    NOT monkeypatched, so the real selection logic + error shape are pinned.
+    """
+    spec = {"sources": {"prs": {"method": "GET", "path": "/pulls", "bind": "state.prs"}}}
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _no_creds(workspace_id, pocket_id):
+        return None
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
+
+    # An empty body (no trigger, no source) selects every declared source —
+    # here, the single authored ``prs`` source.
+    res = client.post("/pockets/pocket-1/sources/run", json={})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ran"] == []
+    assert body["errors"] == [
+        {
+            "source": "prs",
+            "error": "This pocket has no backend configured",
+            "code": "pocket_backend.not_configured",
+        }
+    ]
+
+
+# ---------------------------------------------------------------------------
+# PUT /pockets/{id}/backend/write-policy — RFC 05 M2a
+# ---------------------------------------------------------------------------
+
+
+def test_put_write_policy_sets_allowlist(monkeypatch, client):
+    captured = {}
+
+    async def _set_policy(workspace_id, user_id, pocket_id, allowed_writes):
+        captured.update(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            allowed_writes=allowed_writes,
+        )
+        return {
+            "base_url": "https://api.example.com",
+            "auth_type": "bearer",
+            "configured": True,
+            "allowed_writes": allowed_writes,
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_write_policy", _set_policy)
+
+    res = client.put(
+        "/pockets/pocket-1/backend/write-policy",
+        json={"allowed_writes": [{"method": "POST", "path_pattern": "/leases/*/renew"}]},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["allowed_writes"] == [{"method": "POST", "path_pattern": "/leases/*/renew"}]
+    # The route forwarded the right identity + rules to the service.
+    assert captured["pocket_id"] == "pocket-1"
+    assert captured["allowed_writes"] == [{"method": "POST", "path_pattern": "/leases/*/renew"}]
+
+
+def test_put_write_policy_rejects_bad_method(client):
+    """`method` is a write-verb Literal — GET is rejected at parse time."""
+    res = client.put(
+        "/pockets/pocket-1/backend/write-policy",
+        json={"allowed_writes": [{"method": "GET", "path_pattern": "/x"}]},
+    )
+    assert res.status_code == 422
+
+
+def test_put_write_policy_empty_list_is_valid(monkeypatch, client):
+    """An empty allowlist revokes every write — a valid request."""
+
+    async def _set_policy(workspace_id, user_id, pocket_id, allowed_writes):
+        return {
+            "base_url": "https://api.example.com",
+            "auth_type": "none",
+            "configured": True,
+            "allowed_writes": [],
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_write_policy", _set_policy)
+    res = client.put("/pockets/pocket-1/backend/write-policy", json={"allowed_writes": []})
+    assert res.status_code == 200, res.text
+    assert res.json()["allowed_writes"] == []
+
+
+# ---------------------------------------------------------------------------
+# PUT /pockets/{id}/backend/tool-policy — feat/invoke-tool-v1
+# ---------------------------------------------------------------------------
+
+
+def test_put_tool_policy_sets_allowlist(monkeypatch, client):
+    """An owner sets the tool allowlist; the route forwards the grants to the
+    service and echoes them back. `require_pocket_owner` is overridden to allow
+    (owner)."""
+    captured = {}
+
+    async def _set_policy(workspace_id, user_id, pocket_id, allowed_tools):
+        captured.update(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            allowed_tools=allowed_tools,
+        )
+        return {
+            "base_url": "",
+            "auth_type": "none",
+            "configured": True,
+            "allowed_tools": allowed_tools,
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_tool_policy", _set_policy)
+
+    res = client.put(
+        "/pockets/pocket-1/backend/tool-policy",
+        json={"allowed_tools": [{"tool": "connector:github:list_issues"}, {"tool": "web_fetch"}]},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["allowed_tools"] == [
+        {"tool": "connector:github:list_issues"},
+        {"tool": "web_fetch"},
+    ]
+    # The route forwarded the right identity + grants to the service.
+    assert captured["workspace_id"] == FAKE_WORKSPACE
+    assert captured["user_id"] == FAKE_USER
+    assert captured["pocket_id"] == "pocket-1"
+    assert captured["allowed_tools"] == [
+        {"tool": "connector:github:list_issues"},
+        {"tool": "web_fetch"},
+    ]
+
+
+def test_put_tool_policy_empty_list_is_valid(monkeypatch, client):
+    """An empty allowlist revokes every tool — a valid request (fail-closed)."""
+
+    async def _set_policy(workspace_id, user_id, pocket_id, allowed_tools):
+        return {
+            "base_url": "",
+            "auth_type": "none",
+            "configured": True,
+            "allowed_tools": [],
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_tool_policy", _set_policy)
+    res = client.put("/pockets/pocket-1/backend/tool-policy", json={"allowed_tools": []})
+    assert res.status_code == 200, res.text
+    assert res.json()["allowed_tools"] == []
+
+
+def test_put_tool_policy_rejects_empty_tool_name(client):
+    """`tool` has `min_length=1` — an empty grant is a 422 at parse time, before
+    the service is touched."""
+    res = client.put(
+        "/pockets/pocket-1/backend/tool-policy",
+        json={"allowed_tools": [{"tool": ""}]},
+    )
+    assert res.status_code == 422
+
+
+def test_put_tool_policy_forbidden_for_non_owner(monkeypatch):
+    """The tool-policy route is owner-only — `require_pocket_owner` denies a
+    non-owner with 403 before the service is reached."""
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+
+    a = FastAPI()
+    add_error_handler(a)
+    a.include_router(router)
+    a.dependency_overrides[require_license] = lambda: None
+    a.dependency_overrides[current_user_id] = lambda: FAKE_USER
+    a.dependency_overrides[current_workspace_id] = lambda: FAKE_WORKSPACE
+
+    def _deny():
+        raise Forbidden("pocket.owner_required", "owner access required")
+
+    a.dependency_overrides[require_pocket_owner] = _deny
+
+    # If the guard ever let a non-owner through, the service would be hit — make
+    # that a loud failure rather than a silent pass.
+    async def _should_not_run(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("set_pocket_tool_policy must not run for a non-owner")
+
+    monkeypatch.setattr(pockets_service, "set_pocket_tool_policy", _should_not_run)
+
+    res = TestClient(a).put(
+        "/pockets/pocket-1/backend/tool-policy",
+        json={"allowed_tools": [{"tool": "web_fetch"}]},
+    )
+    assert res.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# POST /pockets/{id}/actions/run — RFC 05 M2a
+# ---------------------------------------------------------------------------
+
+
+def test_run_action_happy_path(monkeypatch, client):
+    """The route reads `method` server-side from the persisted action,
+    threads the resolved path/params + creds + allowlist to the executor,
+    and returns its result."""
+    spec = {
+        "actions": {
+            "mark_renewed": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leases/{item.id}/renew",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        # RFC 05 M2b.1: 6-tuple — write allowlist + approval route.
+        return (
+            "https://api.example.com",
+            "bearer",
+            None,
+            "tok",
+            [{"method": "POST", "path_pattern": "/leases/*/renew"}],
+            None,
+        )
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    captured = {}
+
+    async def _run_action(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "action": kwargs["action"],
+            "status": 200,
+            "response": {"renewed": True},
+            "on_success": [],
+            "on_error": [],
+        }
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "mark_renewed", "path": "/leases/42/renew", "params": {"rent": 2000}},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["response"] == {"renewed": True}
+    # The executor saw the raw action (the server picks the verb), the
+    # resolved path/params, the creds, and the allowlist.
+    assert captured["raw_action"]["method"] == "POST"
+    assert captured["path"] == "/leases/42/renew"
+    assert captured["params"] == {"rent": 2000}
+    assert captured["allowed_writes"] == [{"method": "POST", "path_pattern": "/leases/*/renew"}]
+    assert captured["user_id"] == FAKE_USER
+    # The route threads `workspace_id` so the executor can tenant-tag its
+    # audit-log entries.
+    assert captured["workspace_id"]
+
+
+def test_run_action_resolves_path_from_binding_when_client_omits_it(monkeypatch, client):
+    """A `call_binding` handler fires with `{action, params}` and NO `path`
+    — the read-time normalizer rewrites inline write `api` handlers to
+    `call_binding` without a `path`, so the client cannot supply one. The
+    route must resolve the path from the persisted binding (which already
+    carries it, to know the HTTP method) instead of rejecting the request.
+
+    Regression for the live Nerve-demo 422: every relative-URL api button
+    POSTed `{action, params}` to `/actions/run` and hit `RunActionRequest`'s
+    required `path`, failing validation before the route ever ran.
+    """
+    spec = {
+        "actions": {
+            "score_next_20": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leads/score-next",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        return (
+            "https://api.example.com",
+            "bearer",
+            None,
+            "tok",
+            [{"method": "POST", "path_pattern": "/leads/score-next"}],
+            None,
+        )
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    captured = {}
+
+    async def _run_action(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "action": kwargs["action"],
+            "status": 200,
+            "response": {"scored": 20},
+            "on_success": [],
+            "on_error": [],
+        }
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+
+    # No `path` in the body — exactly what the normalized `call_binding`
+    # handler produces.
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "score_next_20", "params": {"batch": 20}},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["response"] == {"scored": 20}
+    # The route fell back to the binding's persisted path.
+    assert captured["path"] == "/leads/score-next"
+    assert captured["params"] == {"batch": 20}
+
+
+def test_run_action_client_path_wins_over_binding_path(monkeypatch, client):
+    """When the client DOES send a resolved path (e.g. a row-scoped binding
+    whose stored path holds an unresolved `{item.id}` template), the
+    client's value is used — the binding path is only a fallback."""
+    spec = {
+        "actions": {
+            "mark_renewed": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leases/{item.id}/renew",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        return (
+            "https://api.example.com",
+            "bearer",
+            None,
+            "tok",
+            [{"method": "POST", "path_pattern": "/leases/*/renew"}],
+            None,
+        )
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    captured = {}
+
+    async def _run_action(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "action": kwargs["action"], "status": 200, "response": {}}
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "mark_renewed", "path": "/leases/42/renew"},
+    )
+    assert res.status_code == 200, res.text
+    # The client's resolved path, not the binding's templated one.
+    assert captured["path"] == "/leases/42/renew"
+
+
+def test_run_action_404_when_action_not_declared(monkeypatch, client):
+    """An action name not in the persisted spec returns an `ok:false`
+    body with code `action_not_found` — no executor call."""
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": {"actions": {}}}
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "ghost", "path": "/x"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is False
+    assert body["code"] == "action_not_found"
+
+
+def test_run_action_400_when_no_backend(monkeypatch, client):
+    spec = {"actions": {"a": {"kind": "write_binding", "method": "POST", "path": "/x"}}}
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _no_creds(workspace_id, pocket_id):
+        return None
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
+
+    res = client.post("/pockets/pocket-1/actions/run", json={"action": "a", "path": "/x"})
+    assert res.status_code == 400, res.text
+
+
+def test_run_action_forbidden_for_non_invited(monkeypatch):
+    """The action-run gate is owner OR explicit shared_with ONLY — a
+    workspace-visible pocket does not grant access. The guard denies."""
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+
+    a = FastAPI()
+    add_error_handler(a)
+    a.include_router(router)
+    a.dependency_overrides[require_license] = lambda: None
+    a.dependency_overrides[require_pocket_edit] = lambda: None
+    a.dependency_overrides[require_pocket_owner] = lambda: None
+    a.dependency_overrides[current_user_id] = lambda: FAKE_USER
+    a.dependency_overrides[current_workspace_id] = lambda: FAKE_WORKSPACE
+
+    def _deny():
+        raise Forbidden("pocket.access_denied", "write-action access required")
+
+    a.dependency_overrides[require_pocket_action_run] = _deny
+
+    res = TestClient(a).post("/pockets/pocket-1/actions/run", json={"action": "a", "path": "/x"})
+    assert res.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# RFC 05 M2b.1 — instinct-pending routing on POST /actions/run
+# ---------------------------------------------------------------------------
+
+
+def _instinct_spec() -> dict:
+    return {
+        "actions": {
+            "mark_renewed": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leases/{item.id}/renew",
+                "requires_instinct": True,
+                "outcome": "renewal_completed",
+            }
+        }
+    }
+
+
+def test_run_action_instinct_pending_routes_to_bridge(monkeypatch, client):
+    """A `requires_instinct` write: the executor returns the
+    `instinct_pending` sentinel, the route calls
+    `instinct_bridge.propose_pocket_write`, and the response carries
+    `code:"instinct_pending"` + `proposed_action_id`."""
+
+    async def _get_pocket(pocket_id, user_id):
+        return {
+            "_id": pocket_id,
+            "workspace": FAKE_WORKSPACE,
+            "owner": FAKE_USER,
+            "rippleSpec": _instinct_spec(),
+        }
+
+    async def _get_creds(workspace_id, pocket_id):
+        return ("https://api.example.com", "bearer", None, "tok", [], None)
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor, instinct_bridge
+
+    park_blob = {
+        "action": "mark_renewed",
+        "method": "POST",
+        "path": "/leases/42/renew",
+        "params": {},
+        "idempotency_key": None,
+        "outcome": "renewal_completed",
+    }
+
+    async def _run_action(**kwargs):
+        # The executor parked the write — no HTTP call.
+        return {
+            "ok": True,
+            "code": "instinct_pending",
+            "action": kwargs["action"],
+            "_park": park_blob,
+            "on_success": [],
+            "on_error": [],
+        }
+
+    proposed = {}
+
+    async def _propose(**kwargs):
+        proposed.update(kwargs)
+        return "act_pending_123"
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+    monkeypatch.setattr(instinct_bridge, "propose_pocket_write", _propose)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "mark_renewed", "path": "/leases/42/renew"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["code"] == "instinct_pending"
+    assert body["proposed_action_id"] == "act_pending_123"
+    # The route handed the parked write to the bridge.
+    assert proposed["parked_write"] == park_blob
+    assert proposed["requested_by"] == FAKE_USER
+
+
+def test_run_action_direct_write_emits_outcome(monkeypatch, client):
+    """A fired (non-gated) write whose binding declares an `outcome`
+    emits a `pocket.outcome` event via the outcomes service."""
+    spec = {
+        "actions": {
+            "mark_renewed": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leases/{item.id}/renew",
+                "outcome": "renewal_completed",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "workspace": FAKE_WORKSPACE, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        return ("https://api.example.com", "bearer", None, "tok", [], None)
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.outcomes import service as outcomes_service
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    async def _run_action(**kwargs):
+        return {
+            "ok": True,
+            "action": kwargs["action"],
+            "status": 200,
+            "response": {},
+            "outcome": "renewal_completed",
+            "on_success": [],
+            "on_error": [],
+        }
+
+    emitted = {}
+
+    async def _emit_outcome(**kwargs):
+        emitted.update(kwargs)
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+    monkeypatch.setattr(outcomes_service, "emit_pocket_outcome", _emit_outcome)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "mark_renewed", "path": "/leases/42/renew"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["ok"] is True
+    # The route emitted the outcome with via_instinct=False.
+    assert emitted["outcome"] == "renewal_completed"
+    assert emitted["via_instinct"] is False
+    assert emitted["actor"] == FAKE_USER
+
+
+# ---------------------------------------------------------------------------
+# PUT /pockets/{id}/backend/approval-route — RFC 05 M2b.1
+# ---------------------------------------------------------------------------
+
+
+def test_put_approval_route_sets_named_approver(monkeypatch, client):
+    captured = {}
+
+    async def _set_route(workspace_id, user_id, pocket_id, route):
+        captured.update(route=route, pocket_id=pocket_id)
+        return {
+            "base_url": "https://api.example.com",
+            "auth_type": "bearer",
+            "configured": True,
+            "allowed_writes": [],
+            "approval_route": route,
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_approval_route", _set_route)
+    res = client.put(
+        "/pockets/pocket-1/backend/approval-route",
+        json={"route": {"mode": "user", "user_id": "approver-7"}},
+    )
+    assert res.status_code == 200, res.text
+    assert captured["route"] == {"mode": "user", "user_id": "approver-7"}
+    assert res.json()["approval_route"] == {"mode": "user", "user_id": "approver-7"}
+
+
+def test_put_approval_route_empty_body_clears_route(monkeypatch, client):
+    """An omitted body clears the route — service receives route=None."""
+    captured = {}
+
+    async def _set_route(workspace_id, user_id, pocket_id, route):
+        captured["route"] = route
+        return {
+            "base_url": "https://api.example.com",
+            "auth_type": "none",
+            "configured": True,
+            "allowed_writes": [],
+            "approval_route": None,
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_approval_route", _set_route)
+    res = client.put("/pockets/pocket-1/backend/approval-route", json={})
+    assert res.status_code == 200, res.text
+    assert captured["route"] is None

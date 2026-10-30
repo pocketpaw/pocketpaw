@@ -1,0 +1,259 @@
+---
+title: "OSS-EE Split: Two Wheels, One Repo, Enforced Boundary"
+description: "PocketPaw ships as pocketpaw (MIT) + pocketpaw-ee (FSL-1.1) — two installable wheels in one repo. An import-linter contract enforces the boundary; an entry-point Protocol registry plugs the enterprise layer in at runtime. Edition-aware Docker build, per-package CI."
+section: Core Concepts
+ogType: article
+keywords: ["oss ee split", "open core", "pocketpaw-ee", "import-linter", "edition", "entry-points"]
+tags: ["architecture", "packaging", "open-core"]
+---
+
+# OSS-EE Split: Two Wheels, One Repo, Enforced Boundary
+
+PocketPaw ships as **two installable wheels** built from one repo: `pocketpaw` (MIT — single-tenant agent runtime, channels, tools, local memory) and `pocketpaw-ee` (FSL-1.1 — multi-tenant cloud, auth, billing, audit, fleet, decisions, calendar, pocket specialist). The OSS core never statically imports the enterprise package; an `import-linter` contract enforces it at CI time. The enterprise layer plugs in at runtime via Python entry-points and a small registry of `typing.Protocol` extension points.
+
+This page is the canonical reference for the split. For why we did it (open-core line, GitLab/Sentry/PostHog precedent), see the design doc.
+
+<Callout type="info">
+**Status (2026-05-25):** IMPLEMENTED (Phases 1-4).
+
+**Implementation PRs:** #1152 (Phase 1 — rename), #1153 (Phase 2 — subpackage moves), #1157 (Phase 4 — pyproject split), plus follow-ups #1141 / #1148 / #1154.
+
+**Plan docs:**
+- [docs/plans/2026-05-16-oss-ee-split-design.md](https://github.com/pocketpaw/pocketpaw/blob/main/docs/plans/2026-05-16-oss-ee-split-design.md) — overall design
+- Phase 1 rename — `docs/plans/2026-05-18-oss-ee-split-phase-1-rename.md`
+- Phase 2 subpackage moves — `docs/plans/2026-05-18-oss-ee-split-phase-2-subpackage-moves.md`
+- Phase 3 extension points — `docs/plans/2026-05-18-oss-ee-split-phase-3-extension-points.md`
+- Phase 3b agents — `docs/plans/2026-05-20-oss-ee-split-phase-3b-agents.md`
+- Phase 4 pyproject split — `docs/plans/2026-05-18-oss-ee-split-phase-4-pyproject-split.md`
+- Phase 5 publish — `docs/plans/2026-05-18-oss-ee-split-phase-5-publish.md`
+
+**What's live:** `pocketpaw` + `pocketpaw-ee` as two separate Python packages with separate `pyproject.toml` files (`/pyproject.toml` for OSS, `ee/pyproject.toml` for EE); import-linter contract enforces `pocketpaw → pocketpaw_ee` is forbidden statically; eleven extension-point Protocol groups (`pocketpaw.event_bus`, `pocketpaw.embeddings`, `pocketpaw.memory_backends`, `pocketpaw.capabilities`, `pocketpaw.auth`, `pocketpaw.routes`, `pocketpaw.lifecycle`, `pocketpaw.storage_backends`, `pocketpaw.models`, `pocketpaw.pockets`, `pocketpaw.mcp_servers`, `pocketpaw.stores`); edition-aware Dockerfile via `POCKETPAW_EDITION` build arg; CI splits tests per package.
+
+**What's planned:** tighten contracts as ee modules grow (each new entity adds itself to the import-linter contract on touch).
+</Callout>
+
+## Why Two Wheels
+
+`pocketpaw` is a self-hosted single-tenant agent — channels, tools, local memory, browser, security stack, OSS routes, dashboard. `pocketpaw-ee` is the multi-tenant cloud layer — auth, workspaces, team chat, billing, file storage, audit, fleet, pocket specialist, calendar primitive, decision graph, Composio.
+
+The line is **commercial**: single-tenant runtime is free; multi-tenant cloud is paid (the GitLab / Sentry / PostHog pattern). Repo visibility stays the same — `ee/` lives in the public repo under FSL.
+
+Before the split, the OSS core imported from `ee/` in seven places, `ee/` shipped in every wheel, and `pip install pocketpaw` (hypothetically) put FSL-licensed code on disk. The split decoupled distribution, license, and dependency graph from each other.
+
+## Repo Layout
+
+```
+backend/
+├── LICENSE                      # MIT — applies to src/pocketpaw
+├── pyproject.toml               # Defines package: pocketpaw
+├── src/
+│   └── pocketpaw/
+│       ├── extensions.py        # Protocol definitions for plugin points
+│       ├── _registry.py         # entry-point discovery
+│       ├── agents/              # 6 backends
+│       ├── bus/                 # event bus + channel adapters
+│       ├── tools/               # OSS tool registry
+│       ├── memory/              # file store + mem0
+│       ├── bundled_skills/      # auto-installed AgentSkills (incl. pocket-create / -edit)
+│       ├── bundled_templates/   # auto-installed pocket templates
+│       ├── bundled_kb/          # auto-installed knowledge-base scopes
+│       └── ...
+├── ee/
+│   ├── LICENSE                  # FSL-1.1 (Apache-2.0 future-licensed)
+│   ├── pyproject.toml           # Defines package: pocketpaw-ee
+│   └── pocketpaw_ee/
+│       ├── cloud/               # multi-tenant cloud (auth, chat, pockets, billing, ...)
+│       ├── calendar/            # native calendar primitive (#1132)
+│       ├── agent/
+│       │   ├── pocket_specialist/   # specialist + skill bridge
+│       │   ├── pocket_router/       # execution-router classifier
+│       │   └── mcp_servers/         # in-process MCP servers (tasks, planner, ...)
+│       ├── audit/               # compliance audit log
+│       ├── fleet/               # multi-agent swarms
+│       ├── instinct/            # decision pipeline
+│       ├── fabric/              # knowledge graph
+│       ├── guards/              # policy/guards
+│       └── extensions.py        # entry-point implementations
+└── tests/
+    ├── cloud/                   # EE-only — needs `uv sync --dev --group ee`
+    ├── ee/                      # EE-only
+    └── ...                      # OSS — runs on plain `uv sync --dev`
+```
+
+`pocketpaw` (the OSS wheel) ships only `src/pocketpaw/`. `pocketpaw-ee` (the EE wheel) ships only `ee/pocketpaw_ee/` and depends on `pocketpaw~=0.4.x` (a compatible-release pin within the same minor series).
+
+## The Import-Linter Contract
+
+Root `pyproject.toml`:
+
+```toml
+[tool.importlinter]
+root_packages = ["pocketpaw_ee", "pocketpaw"]
+
+[[tool.importlinter.contracts]]
+name = "OSS core may not import from EE"
+type = "forbidden"
+source_modules    = ["pocketpaw"]
+forbidden_modules = ["pocketpaw_ee"]
+ignore_imports = [
+    "pocketpaw.tools.cli -> pocketpaw_ee.cloud",
+    "pocketpaw.tools.cli -> pocketpaw_ee.cloud.shared.db",
+    "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.service",
+    "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.agent_context",
+    "pocketpaw.tools.cli -> pocketpaw_ee.agent.pocket_specialist.cli_tool",
+    "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
+]
+```
+
+The contract is checked in CI (`uv run lint-imports`). The `ignore_imports` allowlist captures the handful of runtime-only imports the CLI shells out into — each one is wrapped in `try/except ImportError` so an OSS-only install degrades cleanly. New EE additions never go through here; they go through entry-points.
+
+## Runtime Plugging — Entry-Points + Protocols
+
+`src/pocketpaw/extensions.py` defines narrow `typing.Protocol` contracts. `src/pocketpaw/_registry.py` discovers implementations via `importlib.metadata.entry_points`. The enterprise wheel declares them in `ee/pyproject.toml`:
+
+```toml
+[project.entry-points."pocketpaw.event_bus"]
+cloud = "pocketpaw_ee.extensions:CloudEventBusProvider"
+
+[project.entry-points."pocketpaw.embeddings"]
+cloud = "pocketpaw_ee.extensions:CloudEmbeddingProvider"
+
+[project.entry-points."pocketpaw.memory_backends"]
+mongodb = "pocketpaw_ee.extensions:MongoMemoryBackendProvider"
+
+[project.entry-points."pocketpaw.capabilities"]
+cloud = "pocketpaw_ee.extensions:CloudCapabilityProvider"
+
+[project.entry-points."pocketpaw.auth"]
+cloud = "pocketpaw_ee.extensions:CloudAuthProvider"
+
+[project.entry-points."pocketpaw.routes"]
+cloud = "pocketpaw_ee.extensions:CloudRouteProvider"
+
+[project.entry-points."pocketpaw.lifecycle"]
+cloud = "pocketpaw_ee.extensions:CloudLifecycleHook"
+
+[project.entry-points."pocketpaw.storage_backends"]
+cloud = "pocketpaw_ee.extensions:CloudStorageBackend"
+
+[project.entry-points."pocketpaw.models"]
+cloud = "pocketpaw_ee.extensions:CloudModelProvider"
+
+[project.entry-points."pocketpaw.pockets"]
+cloud = "pocketpaw_ee.extensions:CloudPocketWriter"
+
+[project.entry-points."pocketpaw.mcp_servers"]
+tasks       = "pocketpaw_ee.extensions:CloudTasksMcpProvider"
+planner     = "pocketpaw_ee.extensions:CloudPlannerMcpProvider"
+pocket      = "pocketpaw_ee.extensions:CloudPocketMcpProvider"
+decisions   = "pocketpaw_ee.extensions:CloudDecisionsMcpProvider"
+pocket_specialist = "pocketpaw_ee.extensions:CloudPocketSpecialistMcpProvider"
+```
+
+Each entry-point points at a zero-arg callable (usually the class itself) that the registry instantiates once and caches. Without `pocketpaw-ee` installed, `entry_points` returns the empty set and the OSS core degrades to defaults.
+
+The Protocol contracts:
+
+| Group | Protocol | What EE supplies |
+|---|---|---|
+| `pocketpaw.event_bus` | `EventBusProvider` | Distributed (Redis-backed) bus |
+| `pocketpaw.embeddings` | `EmbeddingProvider` | Cloud embedder for the KB |
+| `pocketpaw.memory_backends` | `MemoryBackendProvider` | `mongodb` backend |
+| `pocketpaw.capabilities` | `CapabilityProvider` | Reports cloud features as available |
+| `pocketpaw.auth` | `AuthProvider` | Multi-tenant FastAPI auth deps |
+| `pocketpaw.routes` | `RouteProvider` | All `/api/v1/cloud/*` + workspace + chat routes |
+| `pocketpaw.lifecycle` | `LifecycleHook` | `mount_cloud()` on startup, drain on shutdown |
+| `pocketpaw.storage_backends` | `StorageBackend` | S3 / GCS file storage |
+| `pocketpaw.models` | `ModelProvider` | Beanie document classes |
+| `pocketpaw.pockets` | `PocketWriter` | Cloud pocket-writer |
+| `pocketpaw.mcp_servers` | (string-id list) | In-process MCP servers (tasks, planner, pocket, decisions, pocket_specialist) |
+| `pocketpaw.stores` | `StoreProvider` | Singleton factory overrides (instinct, fabric) |
+
+## Developing With Both Packages Locally
+
+```bash
+# OSS-only — fast, no MongoDB / Redis / FSL code installed
+uv sync --dev
+
+# Full dev environment — adds the editable `pocketpaw-ee` package
+uv sync --dev --group ee
+```
+
+The `ee` extra is declared in the root `pyproject.toml`:
+
+```toml
+[tool.uv.sources]
+pocketpaw-ee = { path = "ee", editable = true }
+
+[project.optional-dependencies]
+ee = ["pocketpaw-ee"]
+```
+
+Editable install means changes to `ee/pocketpaw_ee/` show up immediately without a re-sync.
+
+## Test Splits
+
+```bash
+# OSS-core scope — passes on plain `uv sync --dev`
+uv run pytest --ignore=tests/e2e --ignore=tests/cloud --ignore=tests/ee
+
+# Full suite — needs `uv sync --dev --group ee`
+uv run pytest --ignore=tests/e2e
+
+# EE-only smoke
+uv run pytest tests/ee tests/cloud
+```
+
+CI splits accordingly. The "Test (OSS-only)" job runs on a `uv sync --dev` install and asserts the OSS surface stays self-contained.
+
+## Edition-Aware Docker Build
+
+The root `Dockerfile` accepts a `POCKETPAW_EDITION` build arg:
+
+```dockerfile
+ARG POCKETPAW_EDITION=oss
+
+# ...
+
+COPY ee/ ee/
+RUN if [ "$POCKETPAW_EDITION" = "enterprise" ]; then \
+        pip install --no-cache-dir ./ee ; \
+    fi
+```
+
+Two builds, one Dockerfile:
+
+```bash
+# OSS image — `ee/` lands only in the throwaway builder stage; runtime image stays EE-free
+docker build .
+
+# Enterprise image
+docker build --build-arg POCKETPAW_EDITION=enterprise .
+```
+
+The runtime stage copies only the venv from the builder, so the OSS image is genuinely EE-free on disk.
+
+## Why Touch-Time Migration
+
+The split shipped over four phases (rename → subpackage moves → extension points → pyproject split) plus follow-ups. The four-phase rollout was deliberate: each phase was independently reviewable, independently revertable, and shippable in days rather than weeks.
+
+The same touch-time principle applies going forward. When a contributor adds a new entity to `ee/pocketpaw_ee/cloud/`, they:
+
+1. Land the entity in the 4-file shape (`domain.py`, `dto.py`, `service.py`, `router.py`).
+2. Add the entity's router to the appropriate entry-point provider (`CloudRouteProvider` in `ee/pocketpaw_ee/extensions.py`).
+3. Add `<Entity>Document` to the failing list in the import-linter contract; add the new modules to the source-modules list.
+4. Ship the entity + the contract update in the same PR.
+
+The boundary stays sound because every new addition has to think about it.
+
+## Versioning
+
+`pocketpaw-ee` tracks `pocketpaw` within the same minor series via a `~=` compatible-release pin (`pocketpaw~=0.4.16` in `ee/pyproject.toml`). Patches flow automatically; a minor bump on core (0.5+) requires an explicit floor bump on EE. This catches the case where EE depends on a feature added in a newer core patch but the core wheel hasn't been bumped yet.
+
+## Related
+
+- [Architecture](/concepts/architecture) — overall PocketPaw architecture (the OSS surface).
+- [Calendar](/concepts/calendar) — example EE entity using the 4-file shape.
+- [Decision Graph](/concepts/decision-graph) — example EE entity using entry-points to expose MCP tools.
+- [Composio](/integrations/composio) — example EE entity using lazy imports for an optional SDK.
+- [Self-Hosting](/deployment/self-hosting) — building and deploying the edition-aware Docker image.

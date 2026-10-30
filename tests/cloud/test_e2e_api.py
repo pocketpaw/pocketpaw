@@ -71,12 +71,11 @@ async def beanie_db():
     Uses a unique database name per test run to avoid collisions.
     Drops the database after tests complete.
     """
+    # Reset license cache so env vars take effect
+    import pocketpaw_ee.cloud.license as lic_mod
     from beanie import init_beanie
     from motor.motor_asyncio import AsyncIOMotorClient
-
-    # Reset license cache so env vars take effect
-    import ee.cloud.license as lic_mod
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     lic_mod._cached_license = None
     lic_mod._license_error = None
@@ -95,8 +94,8 @@ async def beanie_db():
 async def app(license_env, beanie_db) -> FastAPI:
     """Build a FastAPI app with cloud routes mounted, agent pool mocked."""
     # Reset license module cache before mounting
-    import ee.cloud.license as lic_mod
-    from ee.cloud import mount_cloud
+    import pocketpaw_ee.cloud.license as lic_mod
+    from pocketpaw_ee.cloud import mount_cloud
 
     lic_mod._cached_license = None
 
@@ -170,7 +169,11 @@ async def _register_and_login(http: AsyncClient, email: str | None = None) -> di
 
 
 async def _make_workspace(http: AsyncClient, headers: dict, slug: str | None = None) -> dict:
-    """Create a workspace and return the workspace dict."""
+    """Create a workspace on a PAID plan and return the workspace dict.
+
+    Since feat/billing-rbac-member-caps a Free workspace (max_seats=0) can't
+    invite anyone; the invite e2e tests need seats, so each created workspace is
+    upgraded to Paw Pro (10 seats) in the DB before it's handed back."""
     slug = slug or f"ws-{uuid.uuid4().hex[:8]}"
     r = await http.post(
         "/api/v1/workspaces",
@@ -181,7 +184,15 @@ async def _make_workspace(http: AsyncClient, headers: dict, slug: str | None = N
         headers=headers,
     )
     assert r.status_code == 200, f"Create workspace failed: {r.text}"
-    return r.json()
+    ws = r.json()
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+
+    doc = await _WorkspaceDoc.get(ws["_id"])
+    if doc is not None:
+        doc.plan = "pro"
+        await doc.save()
+    return ws
 
 
 # ===========================================================================
@@ -443,7 +454,7 @@ class TestWorkspaceFlow:
         """Workspace routes require a valid license."""
         auth = await _register_and_login(http)
         with patch.dict(os.environ, {"POCKETPAW_LICENSE_KEY": ""}):
-            import ee.cloud.license as lic_mod
+            import pocketpaw_ee.cloud.license as lic_mod
 
             lic_mod._cached_license = None
             lic_mod._license_error = None
@@ -1086,7 +1097,10 @@ class TestSessionsFlow:
         r1 = await http.post("/api/v1/sessions", json={"title": "Touch Me"}, headers=ctx["headers"])
         session_uuid = r1.json()["sessionId"]
 
-        r2 = await http.post(f"/api/v1/sessions/{session_uuid}/touch")
+        # Headers added 2026-08-01, when this route joined the rest of the
+        # router in requiring a session and session ownership. Guard coverage
+        # lives in tests/cloud/sessions/test_runtime_route_auth.py.
+        r2 = await http.post(f"/api/v1/sessions/{session_uuid}/touch", headers=ctx["headers"])
         assert r2.status_code == 204
 
     async def test_create_session_linked_to_pocket(self, http: AsyncClient):

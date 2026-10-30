@@ -1,0 +1,767 @@
+# ee/pocketpaw_ee/cloud/billing/providers/dodo.py — the Dodo Payments
+# implementation of ``IPaymentsProvider`` (BC-2, the Gateway primitive).
+#
+# Two responsibilities, both adapting the real SDK to the framework-free
+# ``domain`` shapes:
+#
+#   * ``create_one_time`` — builds an async ``DodoPayments`` client from settings
+#     and calls ``payments.create(...)`` with ``payment_link=True`` to get a
+#     HOSTED checkout url back, ``metadata={"workspace_id": ...}`` so the webhook
+#     can route the grant, and a pay-what-you-want cart line on the configured
+#     credit product whose ``amount`` == the purchased credits (1 credit == $0.01
+#     == 1 cent == the currency's lowest denomination, so amount_credits maps
+#     1:1 onto Dodo's cents — NO division).
+#
+#   * ``verify_and_parse_webhook`` — verifies the Standard-Webhooks signature
+#     with ``standardwebhooks.Webhook(...).verify(payload, headers)`` (raises on a
+#     bad/missing signature, malformed headers, or a stale timestamp) BEFORE the
+#     body is trusted, then normalizes the verified event into a ``GatewayEvent``.
+#     ``event_id`` is the Standard-Webhooks ``webhook-id`` header (the idempotency
+#     key); ``workspace_id`` is pulled from the payment's ``metadata``.
+#
+# SDK-API NOTES (discovered by reading the installed packages, NOT the brief):
+#   * ``standardwebhooks.Webhook`` takes ``whsecret=`` (it strips a ``whsec_``
+#     prefix and base64-decodes), NOT ``base64_secret=`` as the brief stated.
+#   * Dodo's ``payments.create`` / ``checkout_sessions.create`` do NOT accept a
+#     raw amount — they require a ``product_cart`` of pre-existing Dodo product
+#     ids plus ``billing`` (country) and ``customer`` (email). A one-time top-up
+#     for an arbitrary credit amount is therefore modeled as a pay-what-you-want
+#     line on a configured credits product (``dodo_credit_product_id``), with the
+#     amount carried on the cart item.
+#   * The ``billing`` country defaults to ``US`` but is configurable via
+#     ``dodo_billing_country`` (POCKETPAW_DODO_BILLING_COUNTRY) — set ``IN`` with
+#     INR products to surface UPI; the buyer can still change it on the hosted page.
+#   * The hosted url comes back as ``response.payment_link`` (only populated when
+#     ``payment_link=True``); ``response.payment_id`` is the gateway ref.
+#   * The webhook body is ``{business_id, data: Payment, timestamp, type}``; the
+#     buyer's metadata lives at ``data.metadata`` and the money amount at
+#     ``data.total_amount`` (lowest denomination) with ``data.currency``.
+#
+# SUBSCRIPTIONS (BC-7), again adapting the real SDK:
+#
+#   * ``create_subscription`` — opens a CHECKOUT SESSION via
+#     ``client.checkout_sessions.create(...)``: a recurring ``product_cart`` line
+#     ([{product_id, quantity:1}]) creates the SUBSCRIPTION at payment time,
+#     ``return_url`` / ``cancel_url`` send the buyer back to the app afterward,
+#     ``customer`` carries the email, ``billing_address.country`` keeps the
+#     configurable billing country (IN+INR → UPI), and ``metadata={"workspace_id",
+#     "plan_key"}`` lets the renewal webhook route the grant. The response is a
+#     SESSION: the hosted url is ``response.checkout_url`` and ``response.session_id``
+#     is carried on ``SubscriptionCheckout.subscription_id`` (the real gateway
+#     subscription id is created at payment and arrives on the subscription.active
+#     webhook body, NOT from this create call).
+#
+#     WHY checkout sessions (the fix): the prior ``subscriptions.create(
+#     payment_link=True)`` call accepted NO return_url, so after paying on Dodo the
+#     buyer was stranded — the app never got them back. Checkout Sessions is the
+#     Dodo API that supports return_url + cancel_url.
+#
+#   * ``cancel_subscription`` — calls ``client.subscriptions.update(<id>,
+#     status="cancelled")`` (the SDK has no ``.cancel`` — cancellation is a status
+#     PATCH). The entitlement revert is driven by the resulting webhook, not here.
+#
+#   * ``verify_and_parse_webhook`` ALSO recognizes the subscription event family.
+#     The real Dodo event names (verified against the SDK's WebhookEventType
+#     literal in ``types/webhook_event_type.py``) are ``subscription.active``,
+#     ``subscription.renewed``, ``subscription.cancelled`` (among others). The
+#     event body is ``{business_id, data: Subscription, timestamp, type}``; the
+#     buyer's metadata lives at ``data.metadata`` (carrying ``workspace_id`` +
+#     ``plan_key``), the recurring product at ``data.product_id`` (the reverse-map
+#     fallback for the tier), and the subscription id at ``data.subscription_id``.
+#
+# INR TOP-UPS (PH-4, feat/partners-inr-topup): ``create_one_time(currency="INR")``
+#   puts the amount (PAISE) on a SEPARATE INR-priced credits product
+#   (``dodo_credit_product_id_inr``) — a pay-what-you-want ``amount`` is in the
+#   PRODUCT's currency, so the USD product cannot carry an exact rupee figure —
+#   and pins ``billing_currency="INR"`` so Dodo refuses (a legible 4xx via
+#   ``_gateway_failure``) rather than silently converting. The webhook parse also
+#   lifts ``data.settlement_amount`` / ``data.settlement_currency`` onto the
+#   ``GatewayEvent`` so the service can grant an INR charge from Dodo's own USD
+#   settlement figure, and lifts ``data.product_cart`` product ids onto
+#   ``GatewayEvent.product_ids`` — Dodo's own record of what was bought, which is
+#   what the INR path routes on. ``topup_currency`` is stamped on checkout
+#   metadata as an informational tag only: a static payment link lets a buyer set
+#   ``metadata_*`` params, so metadata never gates or sizes a grant.
+#
+# SECURITY: the signature is verified before the payload is parsed. The webhook
+# secret and the API key are NEVER logged.
+#
+# Created 2026-06-24 (integration/billing-credits, BC-2): new module.
+# Updated 2026-09-02 (fix/site-plan-change-gateway-conflict): every SDK call is
+#   now translated into a ``CloudError`` on failure. Nothing was, so the SDK's own
+#   exception escaped the provider, escaped the service, and reached the client as
+#   a 500 with a traceback. Changing a site's plan while the previous change was
+#   still awaiting payment is the case that surfaced it: Dodo answers ``409
+#   PENDING_PLAN_CHANGE_EXISTS``, which is a legible thing to tell a buyer, and
+#   ``POST /api/v1/sites/publish`` returned "Internal Server Error" instead. The
+#   mapping keeps the gateway's own message on the 4xx paths and refuses to
+#   dress an unclassifiable failure up as the caller's mistake.
+# Updated 2026-06-24 (security): warn (don't silently swallow) when a
+#   payment.succeeded event carries a non-int / missing ``total_amount`` — the
+#   safe-coerce-to-0 behavior is unchanged, but ops now get a log to triage.
+# Updated 2026-06-24 (BC-7): implemented the subscription surface
+#   (``create_subscription`` + ``cancel_subscription``) over
+#   ``client.subscriptions.*``, and extended ``verify_and_parse_webhook`` to
+#   return a ``SubscriptionEvent`` for a verified ``subscription.*`` delivery
+#   (plan_key from metadata, with a product_id reverse-map fallback off the
+#   configured plan->product mapping).
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 review): ``create_one_time``
+# takes ``pin_currency`` — a partner client pay link pins its charge currency
+# (``billing_currency``) so the payment matches the link exactly. Top-ups unchanged.
+#
+# Updated 2026-06-24 (BC-9): ``verify_and_parse_webhook`` now also reads
+#   ``data.metadata.site_id`` onto the ``SubscriptionEvent`` — the discriminator
+#   that tells a PER-SITE annual sub (each published site has its own plan) from a
+#   WORKSPACE-plan sub. A per-site subscribe stamps ``site_id`` on the metadata;
+#   the service routes a delivery with one to the site, without one to the
+#   workspace path. No new SDK call — site subs reuse ``create_subscription``.
+# Updated 2026-06-28 (fix/billing-checkout-sessions): ``create_subscription`` now
+#   opens a Dodo CHECKOUT SESSION (``checkout_sessions.create``) instead of
+#   ``subscriptions.create(payment_link=True)``. The old call accepted no
+#   return_url, stranding the buyer after payment; the session carries return_url +
+#   cancel_url (threaded in from the caller's Origin) so the buyer is returned to
+#   the app. The recurring product rides as a ``product_cart`` line and the
+#   subscription is created at payment; the response ``session_id`` is carried on
+#   ``SubscriptionCheckout.subscription_id``. The webhook grant is untouched (it
+#   reads the subscription_id + metadata off the event body, not this response).
+#
+# Updated 2026-08-26 (feat/site-plans-as-addons): ``change_plan`` now forwards an
+#   ``addons`` cart to ``subscriptions.change_plan``, ALWAYS — including when it is
+#   empty. The SDK omits an unset parameter, and an omitted add-on list is not
+#   "leave the cart alone" at this gateway, it is "empty the cart". Forwarding
+#   unconditionally means the destructive case only happens when a caller asked
+#   for it.
+#
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning, M1):
+#   ``verify_and_parse_webhook`` now recognizes a THIRD family — ``refund.*`` and
+#   ``dispute.*`` normalize to a ``ReversalEvent``. They cannot ride
+#   ``GatewayEvent``: a ``Refund`` puts its money on ``data.amount`` (optional
+#   int) while a ``Dispute`` puts it on ``data.amount`` as a STRING, neither has
+#   ``total_amount``, and a ``Dispute`` carries no ``metadata`` at all — so
+#   ``data.payment_id`` is the only field that can route a clawback back to a
+#   workspace. ``_reversal_amount`` reads both shapes and returns 0 for anything
+#   it cannot parse, which the service treats as "reverse the whole grant"
+#   rather than as a partial figure nobody stated.
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from pocketpaw_ee.cloud._core.errors import (
+    BadRequest,
+    CloudError,
+    ConflictError,
+    Internal,
+    RateLimited,
+    ValidationError,
+    with_cause,
+)
+from pocketpaw_ee.cloud.billing.domain import (
+    GatewayEvent,
+    OneTimeCheckout,
+    ReversalEvent,
+    SubscriptionCheckout,
+    SubscriptionEvent,
+)
+
+logger = logging.getLogger(__name__)
+
+# The verified subscription event families this provider normalizes. Other
+# subscription.* deliveries (on_hold / paused / failed / expired / plan_changed /
+# updated) are still parsed into a SubscriptionEvent — the service decides which
+# ones act — but these three are the ones BC-7's grant/revert logic keys on.
+_SUBSCRIPTION_EVENT_PREFIX = "subscription."
+
+# The verified REVERSAL families this provider normalizes (M1). EVERY
+# ``refund.*`` / ``dispute.*`` delivery becomes a ``ReversalEvent`` — the
+# SERVICE decides which of them move money (``refund.succeeded`` and
+# ``dispute.lost``; the other five dispute deliveries are lifecycle), exactly
+# as it already does for the subscription family.
+_REVERSAL_EVENT_PREFIXES = ("refund.", "dispute.")
+
+# Default billing country for the hosted checkout. Dodo requires a country on
+# the billing address; the buyer can change it on the hosted page. "US" is a
+# neutral default — the real value is confirmed by the customer at checkout.
+_DEFAULT_BILLING_COUNTRY = "US"
+# A new-customer line needs an email. Dodo collects the real one on the hosted
+# page; this placeholder only satisfies the create call when the caller has no
+# email on file. The buyer's actual email lands on the resulting Payment.
+_PLACEHOLDER_EMAIL = "billing@pocketpaw.local"
+
+
+def _customer_param(email: str | None) -> dict[str, str]:
+    """Build Dodo's ``CustomerRequest`` (new-customer variant).
+
+    Dodo's ``customer`` is an untagged enum: ``{customer_id}`` (attach existing) OR
+    ``{email, name}`` (new customer). Sending ``{email}`` alone fails the server-side
+    variant match with a 422 (``did not match any variant of untagged enum
+    CustomerRequest``) — a NAME is required too. Derive a display name from the email
+    local-part when the caller has none; Dodo collects the real details on the hosted
+    page either way.
+    """
+    e = email or _PLACEHOLDER_EMAIL
+    return {"email": e, "name": e.split("@", 1)[0] or "Customer"}
+
+
+def _reversal_amount(raw: Any, *, event_type: str, event_id: str) -> int:
+    """The reversed money in the currency's lowest denomination, or 0.
+
+    Dodo states this field in two DIFFERENT SHAPES and both reach here:
+    ``Refund.amount`` is an OPTIONAL int, while ``Dispute.amount`` is a required
+    STRING ("represented as a string to accommodate precision"). A string of
+    digits is that same lowest-denomination integer, so it is parsed; anything
+    else — a decimal string, a float, None — yields 0.
+
+    0 means "the gateway named no usable amount", which the service reads as a
+    FULL reversal capped at what the payment actually granted. That is the right
+    reading for the only two events that move money here (a completed refund and
+    a lost chargeback both take the whole charge unless they say otherwise), and
+    it keeps a money field we could not parse from being turned into a partial
+    figure nobody stated.
+    """
+    if isinstance(raw, bool):
+        value = None
+    elif isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        value = int(raw.strip())
+    else:
+        value = None
+    if value is None:
+        if raw is not None:
+            # Nothing to leak — it is not a number we could read.
+            logger.warning(
+                "billing.webhook: %s carried an unreadable amount (type=%s, event_id=%s) — "
+                "treating it as unstated; the reversal falls back to the full recorded grant",
+                event_type,
+                type(raw).__name__,
+                event_id,
+            )
+        return 0
+    return max(value, 0)
+
+
+def _cart_product_ids(cart: Any) -> tuple[str, ...]:
+    """Product ids from a verified payment's ``product_cart``, strictly.
+
+    Anything malformed — not a list, a non-dict line, a non-string id — yields
+    an empty tuple rather than an exception, so a strange body is a no-grant
+    ack, never a 500 that Dodo retries forever.
+    """
+    if not isinstance(cart, list):
+        return ()
+    ids: list[str] = []
+    for line in cart:
+        pid = line.get("product_id") if isinstance(line, dict) else None
+        if not isinstance(pid, str) or not pid:
+            return ()
+        ids.append(pid)
+    return tuple(ids)
+
+
+class DodoProvider:
+    """Dodo Payments gateway adapter. Implements ``IPaymentsProvider``."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None,
+        environment: str,
+        webhook_secret: str | None,
+        credit_product_id: str | None,
+        plan_products: dict[str, str] | None = None,
+        billing_country: str = _DEFAULT_BILLING_COUNTRY,
+        credit_product_id_inr: str | None = None,
+    ) -> None:
+        # Stored, not validated here — a deployment may construct the provider
+        # with billing disabled. Each call validates the inputs IT needs, so a
+        # misconfiguration fails loudly at the point of use with a clear code.
+        self._api_key = api_key
+        self._environment = environment or "test_mode"
+        self._webhook_secret = webhook_secret
+        self._credit_product_id = credit_product_id
+        # The INR-priced credits product (PH-4). Separate because a
+        # pay-what-you-want amount is denominated in the product's own currency.
+        self._credit_product_id_inr = credit_product_id_inr
+        # plan_key -> recurring product_id (BC-7). Used only for the REVERSE map
+        # at webhook-parse time (product_id -> plan_key) when a subscription
+        # delivery's metadata lacks plan_key; the forward direction (picking a
+        # product for a tier) is the service's job, passed in to create_subscription.
+        self._plan_products = dict(plan_products or {})
+        # ISO-3166 alpha-2 country prefilled on the hosted checkout's billing
+        # address — drives which payment methods Dodo surfaces (e.g. IN -> UPI).
+        self._billing_country = billing_country or _DEFAULT_BILLING_COUNTRY
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> DodoProvider:
+        """Build a provider from a ``pocketpaw.config.Settings`` instance."""
+        plan_products = getattr(settings, "dodo_plan_products", None)
+        return cls(
+            api_key=getattr(settings, "dodo_payments_api_key", None),
+            environment=getattr(settings, "dodo_environment", "test_mode"),
+            webhook_secret=getattr(settings, "dodo_webhook_secret", None),
+            credit_product_id=getattr(settings, "dodo_credit_product_id", None),
+            plan_products=plan_products if isinstance(plan_products, dict) else None,
+            billing_country=getattr(settings, "dodo_billing_country", _DEFAULT_BILLING_COUNTRY),
+            credit_product_id_inr=getattr(settings, "dodo_credit_product_id_inr", None),
+        )
+
+    def _plan_key_for_product(self, product_id: str) -> str:
+        """Reverse-resolve a tier key from a recurring product id, or ''.
+
+        The plan->product config is the forward map; this inverts it so a
+        subscription webhook whose metadata is missing ``plan_key`` can still be
+        routed by the product id Dodo always sends on ``data.product_id``.
+        """
+        if not product_id:
+            return ""
+        for key, pid in self._plan_products.items():
+            if pid == product_id:
+                return str(key)
+        return ""
+
+    # ------------------------------------------------------------------ #
+    # Checkout
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _gateway_failure(exc: Exception, *, operation: str) -> CloudError:
+        """Turn a Dodo SDK status error into the error contract this layer owes.
+
+        Every call in this class used to let the SDK's own exception escape. That
+        exception is not a ``CloudError``, so nothing mapped it, and a perfectly
+        legible gateway refusal reached the client as a 500 with a stack trace —
+        including the one that prompted this: changing a site's plan while the
+        previous change was still awaiting payment answered ``409
+        PENDING_PLAN_CHANGE_EXISTS``, and the publish endpoint returned "Internal
+        Server Error" for a condition the buyer could have acted on.
+
+        The gateway's own ``code`` decides the mapping wherever it is specific
+        enough to be worth naming, and the status decides the rest. Anything we
+        cannot classify becomes a 500 deliberately: an unrecognised gateway
+        failure is our problem to look at, not something to dress up as the
+        caller's mistake.
+        """
+        status = int(getattr(exc, "status_code", 0) or 0)
+        body = getattr(exc, "body", None)
+        gateway_code = ""
+        gateway_message = ""
+        if isinstance(body, dict):
+            gateway_code = str(body.get("code") or "")
+            gateway_message = str(body.get("message") or "")
+
+        if gateway_code == "PENDING_PLAN_CHANGE_EXISTS":
+            # The actionable one. A previous change_plan charged a proration that
+            # has not settled, and the gateway refuses to queue a second change
+            # behind it. Waiting genuinely fixes it, so say so rather than
+            # inviting a retry that will fail the same way.
+            return ConflictError(
+                "billing.plan_change_pending",
+                "This subscription already has a plan change waiting on payment. "
+                "The change will apply once that payment settles; try again after it does.",
+            )
+
+        # The gateway's message is passed through on the 4xx paths. It is written
+        # for the account holder, and replacing it with our own wording would drop
+        # the only specific thing we know about the refusal.
+        detail = gateway_message or f"the payment gateway refused the {operation}"
+        if status == 409:
+            return ConflictError("billing.gateway_conflict", detail)
+        if status == 429:
+            return RateLimited("billing.gateway_rate_limited", detail)
+        if status in (400, 404, 422):
+            return ValidationError("billing.gateway_rejected", detail)
+        if status in (401, 403):
+            # OUR credential is wrong, not the caller's request. A 403 here would
+            # tell the buyer they lack permission for something they are entitled
+            # to, and send whoever reads it to the wrong system.
+            return Internal(
+                "billing.gateway_unauthorized",
+                "Billing is misconfigured and the payment gateway rejected our credentials.",
+            )
+        return Internal(
+            "billing.gateway_unavailable", f"The payment gateway failed the {operation}."
+        )
+
+    def _client(self):  # pragma: no cover - thin SDK wiring, mocked in tests
+        """Construct the async DodoPayments client from settings.
+
+        Imported lazily so importing this module (e.g. at app mount) never pulls
+        the SDK, and so tests can patch ``billing.providers.dodo.AsyncDodoPayments``.
+        """
+        if not self._api_key:
+            raise ValidationError(
+                "billing.gateway_unconfigured",
+                "Dodo Payments API key is not configured (POCKETPAW_DODO_PAYMENTS_API_KEY).",
+            )
+        return AsyncDodoPayments(bearer_token=self._api_key, environment=self._environment)
+
+    async def create_one_time(
+        self,
+        *,
+        amount_credits: int,
+        workspace_id: str,
+        customer_email: str | None,
+        metadata: dict,
+        currency: str = "USD",
+        pin_currency: bool = False,
+    ) -> OneTimeCheckout:
+        if (
+            not isinstance(amount_credits, int)
+            or isinstance(amount_credits, bool)
+            or amount_credits <= 0
+        ):
+            raise ValidationError(
+                "billing.invalid_amount", "amount_credits must be a positive integer"
+            )
+        if not workspace_id:
+            raise ValidationError("billing.invalid_workspace", "workspace_id is required")
+        currency = (currency or "USD").upper()
+        env_name = "POCKETPAW_DODO_CREDIT_PRODUCT_ID"
+        if currency == "INR":
+            product_id, env_name = self._credit_product_id_inr, f"{env_name}_INR"
+        elif currency == "USD":
+            product_id = self._credit_product_id
+        else:
+            raise ValidationError("billing.invalid_currency", "currency must be USD or INR")
+        if not product_id:
+            raise ValidationError(
+                "billing.product_unconfigured",
+                f"Dodo credit product id is not configured ({env_name}).",
+            )
+
+        # The cart amount is in the product currency's lowest denomination: for
+        # USD 1 credit == 1 cent so amount_credits maps 1:1 (no division); for
+        # INR the caller already passed paise.
+        cart_amount_cents = amount_credits
+
+        # workspace_id MUST ride on metadata so the webhook can route the grant.
+        # The provider stamps it authoritatively, overriding any caller value.
+        meta = {k: str(v) for k, v in dict(metadata or {}).items()}
+        meta["workspace_id"] = str(workspace_id)
+        # Informational tag only. It NEVER gates or sizes a grant: a static
+        # payment link accepts ``metadata_*`` query params, so a buyer can write
+        # any value here. The webhook routes on Dodo's ``product_cart`` instead.
+        meta["topup_currency"] = currency
+
+        # INR only: pin the charge currency so Dodo refuses rather than converting.
+        # The USD path sends nothing here, exactly as before — pinning it would
+        # switch off Dodo's adaptive local-currency display for existing buyers.
+        # ``pin_currency`` (PH-13 partner pay links) pins USD too: the payment must
+        # be charged in exactly the currency and amount the link was made for.
+        extra = {"billing_currency": currency} if currency == "INR" or pin_currency else {}
+
+        client = self._client()
+        try:
+            response = await client.payments.create(
+                billing={"country": self._billing_country},
+                customer=_customer_param(customer_email),
+                product_cart=[
+                    {
+                        "product_id": product_id,
+                        "quantity": 1,
+                        "amount": cart_amount_cents,
+                    }
+                ],
+                payment_link=True,
+                metadata=meta,
+                **extra,
+            )
+        except CloudError:
+            raise
+        except Exception as exc:
+            raise with_cause(self._gateway_failure(exc, operation="payment"), exc) from exc
+
+        checkout_url = getattr(response, "payment_link", None)
+        gateway_ref = getattr(response, "payment_id", "") or ""
+        if not checkout_url:
+            # payment_link is only populated when payment_link=True succeeds.
+            raise ValidationError(
+                "billing.no_checkout_url",
+                "Dodo did not return a hosted payment link for the top-up.",
+            )
+        return OneTimeCheckout(checkout_url=str(checkout_url), gateway_ref=str(gateway_ref))
+
+    # ------------------------------------------------------------------ #
+    # Subscriptions (BC-7)
+    # ------------------------------------------------------------------ #
+
+    async def create_subscription(
+        self,
+        *,
+        plan_key: str,
+        product_id: str,
+        workspace_id: str,
+        customer_email: str | None,
+        metadata: dict,
+        return_url: str | None = None,
+        cancel_url: str | None = None,
+    ) -> SubscriptionCheckout:
+        if not plan_key:
+            raise ValidationError("billing.invalid_plan", "plan_key is required")
+        if not workspace_id:
+            raise ValidationError("billing.invalid_workspace", "workspace_id is required")
+        if not product_id:
+            raise ValidationError(
+                "billing.plan_product_unconfigured",
+                f"No Dodo recurring product id is configured for plan '{plan_key}' "
+                "(POCKETPAW_DODO_PLAN_PRODUCTS).",
+            )
+
+        # workspace_id AND plan_key MUST ride on metadata so the renewal webhook
+        # can route the grant to the right wallet at the right tier. The provider
+        # stamps both authoritatively, overriding any caller value.
+        meta = {k: str(v) for k, v in dict(metadata or {}).items()}
+        meta["workspace_id"] = str(workspace_id)
+        meta["plan_key"] = str(plan_key)
+
+        # CHECKOUT SESSIONS (the fix): ``subscriptions.create(payment_link=True)``
+        # accepts NO return_url, so the buyer was stranded after paying on Dodo.
+        # The Checkout Sessions API DOES carry return_url + cancel_url. A recurring
+        # product passed as a ``product_cart`` line creates the SUBSCRIPTION at
+        # payment time; the response is a SESSION (checkout_url + session_id), and
+        # the real subscription_id arrives later on the verified subscription.active
+        # webhook body — NOT from this create call.
+        #
+        # ``billing_address.country`` (was ``billing={"country": ...}`` on the old
+        # subscriptions API) preserves the configurable billing country so IN+INR
+        # products still surface UPI; the buyer can change it on the hosted page.
+        create_kwargs: dict[str, Any] = {
+            "product_cart": [{"product_id": product_id, "quantity": 1}],
+            "customer": _customer_param(customer_email),
+            "billing_address": {"country": self._billing_country},
+            "metadata": meta,
+        }
+        # Only attach return_url/cancel_url when the caller supplied a base — Dodo
+        # treats a missing return_url as "no redirect"; sending an empty string is
+        # worse than omitting it. The sites publish path passes neither.
+        if return_url:
+            create_kwargs["return_url"] = return_url
+        if cancel_url:
+            create_kwargs["cancel_url"] = cancel_url
+
+        client = self._client()
+        try:
+            response = await client.checkout_sessions.create(**create_kwargs)
+        except CloudError:
+            raise
+        except Exception as exc:
+            raise with_cause(self._gateway_failure(exc, operation="checkout"), exc) from exc
+
+        checkout_url = getattr(response, "checkout_url", None)
+        # The session id is repurposed onto SubscriptionCheckout.subscription_id —
+        # the create response has no subscription yet (it's created at payment). The
+        # authoritative gateway subscription_id comes in on the webhook body.
+        session_id = getattr(response, "session_id", "") or ""
+        if not checkout_url:
+            # checkout_url is None only when payment_method_id was passed (we never
+            # do) or the create failed — treat a missing url as a hard error.
+            raise ValidationError(
+                "billing.no_checkout_url",
+                "Dodo did not return a checkout session url for the subscription.",
+            )
+        return SubscriptionCheckout(checkout_url=str(checkout_url), subscription_id=str(session_id))
+
+    async def cancel_subscription(self, subscription_id: str) -> None:
+        if not subscription_id:
+            raise ValidationError("billing.invalid_subscription", "subscription_id is required")
+        # The SDK has no ``.cancel`` — cancellation is a status PATCH via
+        # ``subscriptions.update(<id>, status="cancelled")``. Dodo emits the
+        # ``subscription.cancelled`` webhook that drives the entitlement revert.
+        client = self._client()
+        try:
+            await client.subscriptions.update(subscription_id, status="cancelled")
+        except CloudError:
+            raise
+        except Exception as exc:
+            raise with_cause(self._gateway_failure(exc, operation="cancellation"), exc) from exc
+
+    async def change_plan(
+        self,
+        *,
+        subscription_id: str,
+        product_id: str,
+        plan_key: str,
+        addons: list[dict],
+    ) -> None:
+        if not subscription_id:
+            raise ValidationError("billing.invalid_subscription", "subscription_id is required")
+        if not product_id:
+            raise ValidationError(
+                "billing.plan_product_unconfigured",
+                f"No Dodo product is configured for plan '{plan_key}'.",
+            )
+        client = self._client()
+        # ``quantity`` is REQUIRED by the SDK even for a plain one-seat plan.
+        #
+        # ``difference_immediately`` charges (or credits) only the delta between
+        # the two plans for the remainder of the current term, which is the whole
+        # reason to use this over cancel-then-create: the buyer keeps the time they
+        # already paid for. ``prevent_change`` means a declined card leaves the
+        # subscription on its CURRENT plan rather than moving it and then failing —
+        # the caller's persisted tier and the gateway's stay in agreement.
+        #
+        # ``addons`` is forwarded ALWAYS, including when empty. The SDK omits an
+        # unset parameter, and an omitted add-on list is not "leave the cart
+        # alone" at this gateway — it is "empty the cart". Passing the caller's
+        # list through unconditionally means the destructive case only happens
+        # when a caller actually asked for it.
+        try:
+            await client.subscriptions.change_plan(
+                subscription_id,
+                product_id=product_id,
+                quantity=1,
+                proration_billing_mode="difference_immediately",
+                on_payment_failure="prevent_change",
+                addons=list(addons),
+            )
+        except CloudError:
+            raise
+        except Exception as exc:
+            raise with_cause(self._gateway_failure(exc, operation="plan change"), exc) from exc
+
+    # ------------------------------------------------------------------ #
+    # Webhook
+    # ------------------------------------------------------------------ #
+
+    def verify_and_parse_webhook(
+        self,
+        *,
+        payload: bytes,
+        headers: dict[str, str],
+    ) -> GatewayEvent | SubscriptionEvent | ReversalEvent:
+        if not self._webhook_secret:
+            raise ValidationError(
+                "billing.webhook_unconfigured",
+                "Dodo webhook secret is not configured (POCKETPAW_DODO_WEBHOOK_SECRET).",
+            )
+
+        # SECURITY: verify the signature against the RAW bytes BEFORE the body is
+        # parsed or trusted. ``Webhook`` takes ``whsecret`` (strips a ``whsec_``
+        # prefix, base64-decodes); ``.verify`` returns the parsed JSON and RAISES
+        # ``WebhookVerificationError`` on a bad/missing signature, malformed
+        # headers, or a timestamp outside the 5-minute tolerance.
+        wh = Webhook(self._webhook_secret)
+        try:
+            verified = wh.verify(payload, headers)
+        except WebhookVerificationError as exc:
+            # Do NOT include the secret or signature in the message. A bad/missing
+            # signature is a 400 (untrusted request), not a 422 (field rule).
+            raise BadRequest(
+                "billing.webhook_invalid_signature",
+                "Dodo webhook signature did not verify.",
+            ) from exc
+
+        # The Standard-Webhooks delivery id is the idempotency key. It lives in
+        # the ``webhook-id`` header (verify already required it to be present).
+        lower = {k.lower(): v for k, v in headers.items()}
+        event_id = lower.get("webhook-id", "")
+        if not event_id:  # pragma: no cover - verify() already enforces this
+            raise BadRequest(
+                "billing.webhook_missing_id", "Dodo webhook is missing the webhook-id header."
+            )
+
+        if not isinstance(verified, dict):
+            # verify() returns json.loads(...) — normally a dict; be defensive.
+            try:
+                verified = json.loads(payload or b"{}")
+            except ValueError as exc:
+                raise BadRequest(
+                    "billing.webhook_malformed", "Dodo webhook body was not valid JSON."
+                ) from exc
+
+        event_type = str(verified.get("type") or "")
+        data = verified.get("data") if isinstance(verified.get("data"), dict) else {}
+
+        meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+        workspace_id = str(meta.get("workspace_id") or "")
+
+        # SUBSCRIPTION family (BC-7) — a ``subscription.*`` delivery normalizes to
+        # a ``SubscriptionEvent``, NOT a GatewayEvent. The tier comes from the
+        # metadata's ``plan_key`` (stamped at subscribe time); if it's missing,
+        # fall back to reverse-mapping the recurring ``data.product_id`` through
+        # the configured plan->product mapping. No money amount on the wire here —
+        # the grant uses the catalog's allotment, not an event amount.
+        if event_type.startswith(_SUBSCRIPTION_EVENT_PREFIX):
+            product_id = str(data.get("product_id") or "")
+            plan_key = str(meta.get("plan_key") or "") or self._plan_key_for_product(product_id)
+            subscription_id = str(data.get("subscription_id") or "")
+            # BC-9: a per-site annual sub stamps ``site_id`` on its metadata; a
+            # workspace-plan sub does not. This is the discriminator the service
+            # routes on — a delivery WITH a site_id updates the SITE, one WITHOUT
+            # it follows the BC-7 workspace path. Pull it straight off metadata.
+            site_id = str(meta.get("site_id") or "")
+            return SubscriptionEvent(
+                event_id=event_id,
+                type=event_type,
+                workspace_id=workspace_id,
+                plan_key=plan_key,
+                product_id=product_id,
+                subscription_id=subscription_id,
+                site_id=site_id,
+                raw=verified,
+            )
+
+        # REVERSAL family (M1) — a ``refund.*`` / ``dispute.*`` delivery
+        # normalizes to a ``ReversalEvent``, NOT a GatewayEvent. Every field
+        # that matters differs: the money is on ``data.amount`` rather than
+        # ``total_amount``, and a ``Dispute`` carries no metadata at all, so
+        # ``data.payment_id`` is the only route back to a workspace. Parsed for
+        # the WHOLE family; the service picks which ones move money.
+        if event_type.startswith(_REVERSAL_EVENT_PREFIXES):
+            return ReversalEvent(
+                event_id=event_id,
+                type=event_type,
+                payment_id=str(data.get("payment_id") or ""),
+                amount_credits=_reversal_amount(
+                    data.get("amount"), event_type=event_type, event_id=event_id
+                ),
+                currency=str(data.get("currency") or ""),
+                workspace_id=workspace_id,
+                is_partial=bool(data.get("is_partial")),
+                raw=verified,
+            )
+
+        # ``total_amount`` is the lowest denomination (cents for USD). 1 credit ==
+        # 1 cent, so cents map 1:1 back onto credits.
+        raw_amount = data.get("total_amount")
+        if isinstance(raw_amount, int):
+            amount_credits = int(raw_amount)
+        else:
+            # Safe-coerce to 0 (the service's amount<=0 guard then no-ops the
+            # grant), but warn so ops can triage a malformed/missing amount on
+            # a success event. No money value to leak here — it isn't a number.
+            amount_credits = 0
+            if event_type == "payment.succeeded":
+                logger.warning(
+                    "billing.webhook: payment.succeeded had non-int total_amount "
+                    "(type=%s, event_id=%s) — coercing to 0, grant will no-op",
+                    type(raw_amount).__name__,
+                    event_id,
+                )
+        currency = str(data.get("currency") or "")
+
+        return GatewayEvent(
+            event_id=event_id,
+            type=event_type,
+            amount_credits=amount_credits,
+            workspace_id=workspace_id,
+            currency=currency,
+            raw=verified,
+            settlement_amount=(
+                int(data["settlement_amount"])
+                if isinstance(data.get("settlement_amount"), int)
+                and not isinstance(data.get("settlement_amount"), bool)
+                else 0
+            ),
+            settlement_currency=str(data.get("settlement_currency") or ""),
+            product_ids=_cart_product_ids(data.get("product_cart")),
+        )
+
+
+# Lazy SDK imports — pulled at module import time so they CAN be monkeypatched on
+# this module in tests, but the actual network client is only built inside
+# ``_client()``. ``standardwebhooks`` is pure-Python (no network), safe to import.
+from dodopayments import AsyncDodoPayments  # noqa: E402
+from standardwebhooks import Webhook, WebhookVerificationError  # noqa: E402

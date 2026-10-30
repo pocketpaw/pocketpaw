@@ -1,0 +1,121 @@
+[
+  {
+    "label": "run_worker_first matches everything (every stylesheet, script, font and image is billed as a pageview — roughly 20x the cost)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "_BASE_ROUTE_RULES: tuple[str, ...] = (\"/\", \"/*.html\", \"/*.htm\", \"/*/\")",
+    "replace": "_BASE_ROUTE_RULES: tuple[str, ...] = (\"/*\",)",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "one rule reaches into an asset directory (nested stylesheets, scripts and images are billed, which a flat-fixture test cannot see)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "_BASE_ROUTE_RULES: tuple[str, ...] = (\"/\", \"/*.html\", \"/*.htm\", \"/*/\")",
+    "replace": "_BASE_ROUTE_RULES = (\"/\", \"/*.html\", \"/*.htm\", \"/*/\", \"/assets/*\")",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the hash salt becomes the site id (an attacker holding a row can brute-force the visitor's IP, so the row is personal data)",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "        secret = secrets.token_hex(16)",
+    "replace": "        secret = site_id",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py",
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  },
+  {
+    "label": "the clean-URL enumeration is dropped (every extensionless page URL goes uncounted)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "    rules = list(_BASE_ROUTE_RULES)\n    seen = set(rules)\n    if not out_dir.is_dir():\n        return rules\n",
+    "replace": "    return list(_BASE_ROUTE_RULES)\n    rules = list(_BASE_ROUTE_RULES)\n    seen = set(rules)\n",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the generated entry stops being excluded from the served tree (the per-publish hash salt is downloadable, so the visitor hash stops being irreversible)",
+    "file": "ee/pocketpaw_ee/sites/workers_deploy.py",
+    "find": "\n    analytics_worker.ENTRY_FILENAME,\n",
+    "replace": "\n",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the counter stops being failure-soft (a throwing writeDataPoint surfaces as a rejected waitUntil the visitor paid for)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  }} catch (err) {{\n    // Swallowed on purpose. See the failure-soft note in analytics_worker.py.\n  }}",
+    "replace": "  }} catch (err) {{\n    throw err;\n  }}",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the bot filter never fires (crawler traffic is stored and billed, and lands in the pageview numbers)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  if (!ua) return true;\n  return BOT_RE.test(ua);",
+    "replace": "  return false;",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the salt stops rotating daily (the visitor hash becomes a permanent cross-day identifier — the property the no-cookie claim rests on)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  return new Date(nowMs).toISOString().slice(0, 10);",
+    "replace": "  return \"static\";",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "every response is counted, not just a delivered page (404 path-scanning bots become pageviews)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "      if (response.status === 200 || response.status === 304) {{",
+    "replace": "      if (true) {{",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "a same-site referrer is reported as a referrer (the site's own pages bury its real acquisition sources)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "    return host && host !== selfHost ? host : \"\";",
+    "replace": "    return host;",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the visit id drops the visitor (every visitor browsing in the same hour shares one id, so the visit count becomes an hour count and still reads as a plausible number)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  return sha256Hex16(`${{secret}}|${{hour}}|${{visitor}}`);",
+    "replace": "  return sha256Hex16(`${{secret}}|${{hour}}`);",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the visit id stops rotating hourly (a visit becomes a whole UTC day, so pages-per-visit collapses and a returning visitor is never a second visit)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "  return new Date(nowMs).toISOString().slice(0, 13);",
+    "replace": "  return \"static\";",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py"
+    ]
+  },
+  {
+    "label": "the visit id is written first instead of last (Analytics Engine columns are positional, so every row already stored is silently re-labelled and there is no update to fix them with)",
+    "file": "ee/pocketpaw_ee/sites/analytics_worker.py",
+    "find": "        visitor,\n        deviceClass(ua),\n        visit,",
+    "replace": "        visit,\n        visitor,\n        deviceClass(ua),",
+    "tests": [
+      "tests/ee/sites/test_sites_analytics_counter.py",
+      "tests/ee/sites/test_sites_analytics_shim.py"
+    ]
+  }
+]

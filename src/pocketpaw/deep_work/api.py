@@ -1,5 +1,11 @@
 # Deep Work API endpoints.
 # Created: 2026-02-12
+# Updated: 2026-05-21 (feat/deep-work-intake) — issue #1161: added the
+#   interactive intake endpoints. POST /intake/clarify returns the
+#   clarification questions for a vague goal (empty list = well-formed,
+#   no intake needed). POST /start-with-intake submits the goal plus the
+#   collected answers — the goal is enriched before planning. The plain
+#   POST /start one-shot path is unchanged.
 # Updated: 2026-02-26 — Deep Work v2: Added cancel and retry endpoints.
 #   POST /projects/{id}/cancel — cancel project, stop all tasks
 #   POST /projects/{id}/tasks/{tid}/retry — manual retry of a failed task
@@ -8,7 +14,9 @@
 #
 # FastAPI router for Deep Work orchestration:
 #   POST /parse-goal                          — analyze goal (domain, complexity)
-#   POST /start                               — submit project (natural language)
+#   POST /intake/clarify                      — get clarification questions for a goal
+#   POST /start                               — submit project (one-shot)
+#   POST /start-with-intake                   — submit project + clarification answers
 #   GET  /projects/{id}/plan                  — get plan with execution_levels
 #   POST /projects/{id}/approve               — approve plan, start execution
 #   POST /projects/{id}/pause                 — pause execution
@@ -58,6 +66,43 @@ class StartDeepWorkRequest(BaseModel):
     )
 
 
+class ClarifyGoalRequest(BaseModel):
+    """Request body for the intake clarification step (issue #1161)."""
+
+    description: str = Field(
+        ..., min_length=10, max_length=5000, description="Natural language goal description"
+    )
+
+
+class IntakeAnswer(BaseModel):
+    """One clarification question and the user's answer to it."""
+
+    question: str = Field(..., description="The clarification question that was asked")
+    answer: str = Field(default="", description="The user's answer (blank = skipped)")
+
+
+class StartWithIntakeRequest(BaseModel):
+    """Request body for starting a project through the intake mode.
+
+    The dashboard first calls ``/intake/clarify`` to get the questions,
+    collects answers in a chat turn, then submits them here. An empty
+    ``answers`` list means the goal was well-formed and intake was a
+    no-op — this behaves identically to ``/start``.
+    """
+
+    description: str = Field(
+        ..., min_length=10, max_length=5000, description="Natural language project description"
+    )
+    answers: list[IntakeAnswer] = Field(
+        default_factory=list,
+        description="Clarification answers collected from the intake conversation",
+    )
+    research_depth: str = Field(
+        default="auto",
+        description="Research thoroughness: 'auto', 'none', 'quick', 'standard', or 'deep'",
+    )
+
+
 def _enrich_project_dict(project_dict: dict) -> dict:
     """Add folder_path and file_count to a project dict for frontend output panel."""
     from pathlib import Path
@@ -97,9 +142,39 @@ async def parse_goal(request: ParseGoalRequest) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/intake/clarify")
+async def clarify_goal(request: ClarifyGoalRequest) -> dict[str, Any]:
+    """Return the clarification questions for a goal (issue #1161).
+
+    This is the first step of the interactive intake mode. The frontend
+    calls it, shows each question in a chat turn, collects answers, then
+    posts them to ``/start-with-intake``.
+
+    An empty ``clarifications`` list means the goal is already well-formed
+    — the frontend should skip straight to ``/start`` (or call
+    ``/start-with-intake`` with no answers, which is equivalent).
+    """
+    from pocketpaw.deep_work.goal_parser import GoalParser
+
+    try:
+        parser = GoalParser()
+        analysis = await parser.parse(request.description)
+        return {
+            "success": True,
+            "clarifications": analysis.clarifications_needed,
+            "needs_clarification": analysis.needs_clarification,
+            "goal_analysis": analysis.to_dict(),
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        logger.exception(f"Goal clarification failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/start")
 async def start_deep_work(request: StartDeepWorkRequest) -> dict[str, Any]:
-    """Submit a new project for Deep Work planning.
+    """Submit a new project for Deep Work planning (one-shot path).
 
     Returns the project immediately in PLANNING status and runs the
     planner in the background. Frontend tracks progress via WebSocket
@@ -132,6 +207,68 @@ async def start_deep_work(request: StartDeepWorkRequest) -> dict[str, Any]:
             )
         except Exception as e:
             logger.exception(f"Background planning failed for {project.id}: {e}")
+
+    asyncio.create_task(_plan_in_background())
+
+    return {"success": True, "project": project.to_dict()}
+
+
+@router.post("/start-with-intake")
+async def start_deep_work_with_intake(request: StartWithIntakeRequest) -> dict[str, Any]:
+    """Submit a project through the interactive intake mode (issue #1161).
+
+    The frontend has already run the clarification conversation (via
+    ``/intake/clarify``) and collected answers. This endpoint folds those
+    answers into the goal, then plans against the *enriched* goal.
+
+    Returns the project immediately in PLANNING status; planning (and the
+    final re-parse of the enriched goal) runs in the background, tracked
+    via the same WebSocket events as ``/start``.
+
+    With an empty ``answers`` list this is equivalent to ``/start`` — the
+    goal is used as-is.
+    """
+    from pocketpaw.deep_work import get_deep_work_session
+    from pocketpaw.deep_work.goal_parser import QAPair, _fold_transcript
+    from pocketpaw.deep_work.models import ProjectStatus
+    from pocketpaw.mission_control.manager import get_mission_control_manager
+
+    manager = get_mission_control_manager()
+
+    # Fold the collected answers into the goal up-front. This is pure
+    # string work (no LLM call), so the project description we persist and
+    # return is already the enriched one. Blank answers are dropped.
+    transcript = [
+        QAPair(question=a.question, answer=a.answer)
+        for a in request.answers
+        if a.answer and a.answer.strip()
+    ]
+    enriched_goal = _fold_transcript(request.description, transcript)
+
+    project = await manager.create_project(
+        title=enriched_goal[:80],
+        description=enriched_goal,
+        creator_id="human",
+    )
+    project.status = ProjectStatus.PLANNING
+    project.metadata["intake"] = {
+        "original_input": request.description,
+        "enriched_goal": enriched_goal,
+        "transcript": [qa.to_dict() for qa in transcript],
+        "clarified": len(transcript) > 0,
+    }
+    await manager.update_project(project)
+
+    async def _plan_in_background():
+        session = get_deep_work_session()
+        try:
+            await session.plan_existing_project(
+                project.id,
+                enriched_goal,
+                research_depth=request.research_depth,
+            )
+        except Exception as e:
+            logger.exception(f"Background intake planning failed for {project.id}: {e}")
 
     asyncio.create_task(_plan_in_background())
 

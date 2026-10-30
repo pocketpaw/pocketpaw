@@ -1,0 +1,86 @@
+[
+  {
+    "label": "the file store slices the HEAD, returning the oldest messages",
+    "file": "src/pocketpaw/memory/file_store.py",
+    "find": "            if limit is not None:\n                data = data[-limit:]",
+    "replace": "            if limit is not None:\n                data = data[:limit]",
+    "tests": ["tests/test_session_history_bounds.py::TestFileStoreBounds::test_returns_the_newest_not_the_oldest"]
+  },
+  {
+    "label": "the file store drops the bound entirely",
+    "file": "src/pocketpaw/memory/file_store.py",
+    "find": "            if limit is not None:\n                data = data[-limit:]",
+    "replace": "            if False:\n                data = data[-limit:]",
+    "tests": ["tests/test_session_history_bounds.py::TestFileStoreBounds::test_is_bounded_by_default"]
+  },
+  {
+    "label": "get_session defaults to unbounded again",
+    "file": "src/pocketpaw/memory/protocol.py",
+    "find": "DEFAULT_SESSION_HISTORY_LIMIT = 500",
+    "replace": "DEFAULT_SESSION_HISTORY_LIMIT = None",
+    "tests": ["tests/test_session_history_bounds.py::TestFileStoreBounds::test_is_bounded_by_default"]
+  },
+  {
+    "label": "the backward paginator is given the default bound, hiding older history",
+    "file": "src/pocketpaw/memory/manager.py",
+    "find": "        entries = await self._store.get_session(session_key, limit=None)\n        try:\n            if before:",
+    "replace": "        entries = await self._store.get_session(session_key)\n        try:\n            if before:",
+    "tests": ["tests/test_session_history_bounds.py::TestManagerCallers::test_paging_backward_still_reaches_the_oldest_message"]
+  },
+  {
+    "label": "compaction silently summarizes only the newest window",
+    "file": "src/pocketpaw/memory/manager.py",
+    "find": "        entries = await self._store.get_session(session_key, limit=None)\n        if not entries:\n            return []",
+    "replace": "        entries = await self._store.get_session(session_key)\n        if not entries:\n            return []",
+    "tests": ["tests/test_session_history_bounds.py::TestManagerCallers::test_compaction_still_sees_the_whole_session"]
+  },
+  {
+    "label": "the display path goes back to an unbounded read",
+    "file": "src/pocketpaw/memory/manager.py",
+    "find": "        entries = await self._store.get_session(session_key)\n        history: list[dict[str, Any]] = []",
+    "replace": "        entries = await self._store.get_session(session_key, limit=None)\n        history: list[dict[str, Any]] = []",
+    "tests": ["tests/test_session_history_bounds.py::TestManagerCallers::test_the_display_path_takes_the_default_bound"]
+  },
+  {
+    "label": "chat_runs loses the status index, restoring the collection scan",
+    "file": "ee/pocketpaw_ee/cloud/models/chat_run.py",
+    "find": "            IndexModel([(\"status\", 1), (\"createdAt\", -1)]),",
+    "replace": "",
+    "tests": ["tests/cloud/test_growing_query_bounds.py::TestChatRunIndexes::test_an_index_leads_on_status"]
+  },
+  {
+    "label": "messages loses the context_type + createdAt index, restoring the in-memory sort",
+    "file": "ee/pocketpaw_ee/cloud/models/message.py",
+    "find": "            [(\"context_type\", 1), (\"createdAt\", -1)],",
+    "replace": "",
+    "tests": ["tests/cloud/test_growing_query_bounds.py::TestMessageIndexes::test_context_type_plus_created_at_exists"]
+  },
+  {
+    "label": "find_active_run_scopes stops projecting and hydrates whole documents",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/service.py",
+    "find": "        {\"workspace\": 1, \"context_type\": 1, \"scope_id\": 1},",
+    "replace": "        None,",
+    "tests": ["tests/cloud/test_growing_query_bounds.py::TestActiveRunScopesProjection::test_only_the_three_needed_fields_are_requested"]
+  },
+  {
+    "label": "the projection grows to include the run's full answer text",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/service.py",
+    "find": "        {\"workspace\": 1, \"context_type\": 1, \"scope_id\": 1},",
+    "replace": "        {\"workspace\": 1, \"context_type\": 1, \"scope_id\": 1, \"partial_text\": 1},",
+    "tests": ["tests/cloud/test_growing_query_bounds.py::TestActiveRunScopesProjection::test_only_the_three_needed_fields_are_requested"]
+  },
+  {
+    "label": "a legacy row missing a field crashes the jail GC guard",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/service.py",
+    "find": "        (row.get(\"workspace\", \"\"), row.get(\"context_type\", \"\"), row.get(\"scope_id\", \"\"))",
+    "replace": "        (row[\"workspace\"], row[\"context_type\"], row[\"scope_id\"])",
+    "tests": ["tests/cloud/test_growing_query_bounds.py::TestActiveRunScopesProjection::test_a_row_missing_a_field_does_not_raise"]
+  },
+  {
+    "label": "the active-status filter widens, so the GC protects the wrong jails",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/service.py",
+    "find": "        {\"status\": {\"$in\": list(ACTIVE_RUN_STATUSES)}},\n        {\"workspace\": 1, \"context_type\": 1, \"scope_id\": 1},",
+    "replace": "        {\"status\": {\"$in\": [\"queued\"]}},\n        {\"workspace\": 1, \"context_type\": 1, \"scope_id\": 1},",
+    "tests": ["tests/cloud/test_growing_query_bounds.py::TestActiveRunScopesProjection::test_the_active_status_filter_is_unchanged"]
+  }
+]

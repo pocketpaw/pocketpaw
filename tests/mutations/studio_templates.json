@@ -1,0 +1,69 @@
+[
+  {
+    "label": "publish: keep input-image params in the recipe",
+    "file": "ee/pocketpaw_ee/cloud/studio_templates/service.py",
+    "find": "            \"params\": _strip_input_images(params),\n",
+    "replace": "            \"params\": params,\n",
+    "tests": [
+      "tests/cloud/studio_templates/test_studio_templates.py::test_publish_snapshots_the_asset_and_strips_input_images",
+      "tests/cloud/discover/test_discover_studio.py::test_use_returns_the_recipe_and_creates_nothing"
+    ]
+  },
+  {
+    "label": "publish: never flag input images",
+    "file": "ee/pocketpaw_ee/cloud/studio_templates/service.py",
+    "find": "        uses_input_images=(gen.params.inputImageCount or 0) > 0,\n",
+    "replace": "        uses_input_images=False,\n",
+    "tests": [
+      "tests/cloud/studio_templates/test_studio_templates.py::test_publish_snapshots_the_asset_and_strips_input_images",
+      "tests/cloud/studio_templates/test_studio_templates.py::test_use_returns_the_recipe_and_writes_nothing_to_studio"
+    ]
+  },
+  {
+    "label": "publish: accept an unfinished generation",
+    "file": "ee/pocketpaw_ee/cloud/studio_templates/service.py",
+    "find": "    if gen.status != \"succeeded\":\n",
+    "replace": "    if gen.status == \"never\":\n",
+    "tests": [
+      "tests/cloud/studio_templates/test_studio_templates.py::test_publish_refuses_other_workspace_unknown_asset_and_unfinished"
+    ]
+  },
+  {
+    "label": "owned: drop the owner filter",
+    "file": "ee/pocketpaw_ee/cloud/studio_templates/service.py",
+    "find": "        StudioTemplate.owner == user_id,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/studio_templates/test_studio_templates.py::test_patch_and_delete_are_owner_only",
+      "tests/cloud/discover/test_discover_studio.py::test_private_patch_and_delete_take_it_down"
+    ]
+  },
+  {
+    "label": "strip: only drop keys starting with input",
+    "file": "ee/pocketpaw_ee/cloud/studio_templates/service.py",
+    "find": "        return low.startswith(\"ref\") or any(m in low for m in _INPUT_MARKERS)\n",
+    "replace": "        return low.startswith(\"input\")\n",
+    "tests": [
+      "tests/cloud/studio_templates/test_studio_templates.py::test_strip_input_images_drops_every_input_ref_or_upload_key"
+    ]
+  },
+  {
+    "label": "discover row: relative preview URL",
+    "file": "ee/pocketpaw_ee/cloud/studio_templates/service_admin.py",
+    "find": "        \"preview_image_url\": _absolute(preview),\n",
+    "replace": "        \"preview_image_url\": preview,\n",
+    "tests": [
+      "tests/cloud/studio_templates/test_studio_templates.py::test_public_lists_with_absolute_urls_private_and_delete_unlist",
+      "tests/cloud/discover/test_discover_studio.py::test_public_template_is_on_the_anonymous_index_with_absolute_urls"
+    ]
+  },
+  {
+    "label": "use: serve a hidden template's recipe",
+    "file": "ee/pocketpaw_ee/cloud/studio_templates/service_admin.py",
+    "find": "    if doc is None or doc.visibility != \"public\" or doc.hidden:\n",
+    "replace": "    if doc is None or doc.visibility != \"public\":\n",
+    "tests": [
+      "tests/cloud/studio_templates/test_studio_templates.py::test_use_of_a_hidden_template_is_not_found"
+    ]
+  }
+]

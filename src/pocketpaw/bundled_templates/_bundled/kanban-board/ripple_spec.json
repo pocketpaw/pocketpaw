@@ -1,0 +1,83 @@
+{
+  "_placeholder_note": "Built-in pocket template (kanban-board). Card titles and lane names below carry [bracketed] placeholders — the create specialist renames lanes to the user's workflow and rewrites cards to their domain. Keep the kanban bind + columnKey wiring intact so drag-to-move persists; keep the add-card composer.",
+  "state": {
+    "draft": "",
+    "draft_lane": "backlog",
+    "next_id": 7,
+    "lane_options": [
+      { "value": "backlog", "label": "Backlog" },
+      { "value": "in_progress", "label": "In progress" },
+      { "value": "review", "label": "Review" },
+      { "value": "done", "label": "Done" }
+    ],
+    "cards": [
+      { "id": "c1", "title": "[Spec the new export format]", "status": "backlog", "assignee": "[Priya]" },
+      { "id": "c2", "title": "[Wire up the search endpoint]", "status": "in_progress", "assignee": "[Marco]" },
+      { "id": "c3", "title": "[Fix the timezone bug in reminders]", "status": "in_progress", "assignee": "[Dana]" },
+      { "id": "c4", "title": "[Review the billing migration PR]", "status": "review", "assignee": "[Sam]" },
+      { "id": "c5", "title": "[Ship the dark-mode toggle]", "status": "done", "assignee": "[Priya]" },
+      { "id": "c6", "title": "[Write the release notes]", "status": "backlog", "assignee": "[Marco]" }
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "16px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "[Team Board]",
+          "subtitle": "[Drag a card to move it across the workflow]"
+        }
+      },
+      {
+        "type": "flex",
+        "props": { "direction": "row", "gap": "8px", "align": "end" },
+        "children": [
+          {
+            "type": "input",
+            "bind": "draft",
+            "props": { "label": "New card", "placeholder": "[What's the work?]" }
+          },
+          {
+            "type": "select",
+            "bind": "draft_lane",
+            "props": { "label": "Lane", "options": "{state.lane_options}" }
+          },
+          {
+            "type": "button",
+            "props": { "label": "Add card", "variant": "primary" },
+            "on_click": [
+              { "action": "validate", "condition": "{state.draft.length > 0}", "message": "Type a card title first" },
+              {
+                "action": "push",
+                "target": "cards",
+                "value": {
+                  "id": "c-{state.next_id}",
+                  "title": "{state.draft}",
+                  "status": "{state.draft_lane}",
+                  "assignee": ""
+                }
+              },
+              { "action": "set", "target": "next_id", "value": "{state.next_id + 1}" },
+              { "action": "set", "target": "draft", "value": "" }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "kanban",
+        "bind": "cards",
+        "props": {
+          "columns": [
+            { "id": "backlog", "title": "Backlog" },
+            { "id": "in_progress", "title": "In progress" },
+            { "id": "review", "title": "Review" },
+            { "id": "done", "title": "Done" }
+          ],
+          "columnKey": "status"
+        }
+      }
+    ]
+  }
+}

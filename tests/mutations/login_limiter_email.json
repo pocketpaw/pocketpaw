@@ -1,0 +1,30 @@
+[
+  {
+    "label": "read JSON bodies as a form (the old collapse to login:{ip}:)",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "            if \"json\" in request.headers.get(\"content-type\", \"\").lower():",
+    "replace": "            if False:",
+    "tests": [
+      "tests/test_login_limiter_email.py::test_json_registers_with_distinct_emails_do_not_share_a_bucket",
+      "tests/test_login_limiter_email.py::test_json_registers_with_the_same_email_are_limited"
+    ]
+  },
+  {
+    "label": "drop the email from the limiter key",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "        key = f\"login:{client_ip}:{email}\"",
+    "replace": "        key = f\"login:{client_ip}:\"",
+    "tests": [
+      "tests/test_login_limiter_email.py::test_json_registers_with_distinct_emails_do_not_share_a_bucket"
+    ]
+  },
+  {
+    "label": "never read the form (username ignored on login)",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "                fields = await request.form()",
+    "replace": "                fields = {}",
+    "tests": [
+      "tests/test_login_limiter_email.py::test_form_login_with_the_same_username_is_limited"
+    ]
+  }
+]

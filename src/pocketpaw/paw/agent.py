@@ -51,13 +51,13 @@ async def get_paw_agent(project_root: Path | None = None) -> PawAgent:
 
     from soul_protocol import Soul
 
-    from pocketpaw.paw.soul_bridge import SoulBootstrapProvider, SoulBridge
     from pocketpaw.paw.tools import (
         SoulEditCoreTool,
         SoulRecallTool,
         SoulRememberTool,
         SoulStatusTool,
     )
+    from pocketpaw.soul import SoulBootstrapProvider, SoulBridge
     from pocketpaw.tools.registry import ToolRegistry
 
     config = PawConfig.load(project_root)

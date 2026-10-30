@@ -1,0 +1,1399 @@
+"""Sessions service — CRUD + history + activity tracking.
+
+Sole owner of writes to the ``Session`` Beanie document. Module-level
+``async def`` API, no class wrapper, no Protocol-based repository.
+
+Invariants a reader must not break:
+
+- Reads: a pocket's conversations are readable by the owner and by anyone who
+  passes the pocket read rule AND belongs to its workspace
+  (``_fetch_readable_session``, ``can_read_session``). Group-context rows stay
+  with their owner. Writes (update, delete, touch, sending a turn) stay
+  owner-only through ``_fetch_owned``.
+- ``create`` enforces the guest session cap on its new-row branch only, via
+  ``auth.guest_gates``; ``count_owned`` counts without touching another
+  entity's document.
+- ``auto_create_pocket_session`` stamps the workspace's default ``pocketpaw``
+  agent (and the pocket id when known) so OSS-path sessions list in that DM room.
+- History wire dicts (``_message_to_dict``) carry ``runStatus`` on a cut-off
+  reply, ``steps`` / ``stepsOmitted`` for a reply's thinking and tool calls, and
+  ``askUser`` (``MessageAskUser.to_wire``) for an ``ask_user`` question, each
+  only when set, so plain rows keep their old payload.
+- ``get_history`` fills display fields on legacy nameless upload attachments at
+  read time with ONE workspace-scoped lookup; stored documents are never
+  rewritten and a lookup failure leaves the page unchanged.
+- ``list_by_agents`` is one ``In(agent, ids)`` query grouped in Python; every
+  requested id is a key in the result.
+
+Public API: ``create``, ``list_for_owner`` / ``list_for_owner_page``,
+``list_by_agent`` / ``list_by_agents``, ``list_for_pocket``, ``list_for_user`` /
+``count_for_user``, ``get``, ``update``, ``delete`` (soft), ``link_pocket``,
+``get_history`` (on Beanie: spans three context types), ``touch`` (hot path),
+``legacy_ctx``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+import re
+import uuid
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+from beanie import PydanticObjectId
+from beanie.operators import In, Or
+from bson.errors import InvalidId
+
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    SessionCreated,
+    SessionDeleted,
+    SessionUpdated,
+)
+from pocketpaw_ee.cloud.models.session import Session as _SessionDoc
+from pocketpaw_ee.cloud.sessions.dto import (
+    CreateSessionRequest,
+    UpdateSessionRequest,
+)
+from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound
+from pocketpaw_ee.cloud.shared.events import event_bus
+from pocketpaw_ee.cloud.shared.time import iso_utc
+
+if TYPE_CHECKING:
+    from pocketpaw_ee.cloud.sessions.domain import Session as DomainSession
+
+logger = logging.getLogger(__name__)
+
+
+async def _aggregate(model: Any, pipeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run a raw aggregation. Motor's ``aggregate()`` returns a coroutine and
+    mongomock-motor's a plain cursor, hence the ``isawaitable`` check (the
+    repo's cross-driver idiom; Beanie's ``Document.aggregate`` breaks under the
+    test harness)."""
+    cursor = model.get_pymongo_collection().aggregate(pipeline)
+    if inspect.isawaitable(cursor):
+        cursor = await cursor
+    return [row async for row in cursor]
+
+
+# ---------------------------------------------------------------------------
+# Private mapping helpers
+# ---------------------------------------------------------------------------
+
+
+def _to_domain(doc: _SessionDoc) -> DomainSession:
+    from pocketpaw_ee.cloud.sessions.domain import Session
+
+    return Session(
+        id=str(doc.id),
+        sessionId=doc.sessionId,
+        context_type=doc.context_type or "session",
+        workspace=doc.workspace,
+        owner=doc.owner,
+        title=doc.title,
+        pocket=doc.pocket,
+        group=doc.group,
+        agent=doc.agent,
+        message_count=doc.messageCount,
+        last_activity=doc.lastActivity,
+        created_at=getattr(doc, "createdAt", datetime.now(UTC)),  # type: ignore[arg-type]
+        deleted_at=doc.deleted_at,
+        surface=getattr(doc, "surface", None),
+    )
+
+
+async def count_owned(user_id: str) -> int:
+    """How many session rows a user owns, across every workspace and surface.
+
+    # global-read: the guest session cap (auth/guest_budget) is a property of
+    # the USER, not one workspace — a guest's caps must not multiply by
+    # workspace. Only the guest budget calls this.
+    """
+    return await _SessionDoc.find(_SessionDoc.owner == user_id).count()
+
+
+def legacy_ctx(user_id: str, workspace_id: str | None = None) -> RequestContext:
+    """Build a RequestContext for routers that haven't migrated to
+    ``Depends(request_context)`` yet. Synthesizes request_id and scope."""
+    return RequestContext(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        request_id="legacy",
+        scope=ScopeKind.NONE,
+        started_at=datetime.now(UTC),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public API — CRUD
+# ---------------------------------------------------------------------------
+
+
+async def _refuse_foreign_scope_ids(workspace_id: str, body: CreateSessionRequest) -> None:
+    """Reject a create whose ``group_id`` / ``pocket_id`` belongs elsewhere.
+
+    ``create`` stamped ``group=body.group_id`` and ``pocket=body.pocket_id``
+    straight from the request with no validation. The row's own ``workspace``
+    was the caller's, so it looked correctly tenanted — but ``get_history``
+    builds its Message filter from those fields
+    (``{"context_type": "group", "group": session.group}``, no workspace term),
+    so an attacker-chosen group id returned another tenant's whole transcript
+    from a session they legitimately own. Two calls, no bypass.
+
+    Validated here at the write rather than at the read, because the read is
+    reached by several paths and the write is one. ``Message.workspace_id``
+    exists but is ``None`` on every group message written through REST or
+    WebSocket, so filtering the read would return nothing and look correct.
+
+    Deliberately narrow: only an id that resolves to a real row in ANOTHER
+    workspace is refused. A malformed id and a dangling one both pass through,
+    because neither names a row and therefore neither can disclose anything —
+    ``get_history`` filtering on them matches nothing. Rejecting them would be
+    a behaviour change with no security value, and several internal callers
+    pass synthetic scope ids.
+
+    NotFound rather than Forbidden — a scope in another workspace should not
+    confirm that it exists.
+    """
+    from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+    for kind, raw_id, model in (
+        ("group", body.group_id, _GroupDoc),
+        ("pocket", body.pocket_id, _PocketDoc),
+    ):
+        if not raw_id:
+            continue
+        try:
+            oid = PydanticObjectId(raw_id)
+        except (InvalidId, ValueError, TypeError):
+            # Not an ObjectId, so it names no row and can leak nothing. Left
+            # alone rather than rejected: several internal callers and tests
+            # pass synthetic scope ids, and raising here would be a behaviour
+            # change with no security value — plus an uncaught InvalidId is a
+            # 500, not a refusal.
+            continue
+        row = await model.get(oid)
+        if row is None:
+            # A dangling id. ``get_history`` filtering on it matches nothing,
+            # so there is nothing to disclose and nothing to refuse.
+            continue
+        if row.workspace != workspace_id:
+            logger.warning(
+                "Refused a session naming a %s outside the caller's workspace (caller=%s, %s=%s)",
+                kind,
+                workspace_id,
+                kind,
+                raw_id,
+            )
+            raise NotFound(kind, raw_id)
+
+
+async def create(
+    ctx: RequestContext,
+    workspace_id: str,
+    body: CreateSessionRequest,
+) -> DomainSession:
+    """Create a session, or update-and-return the existing one when
+    ``body.session_id`` matches an existing row."""
+    sid = body.session_id or f"websocket_{uuid.uuid4().hex[:12]}"
+
+    await _refuse_foreign_scope_ids(workspace_id, body)
+
+    if body.session_id:
+        existing_doc = await _SessionDoc.find_one(_SessionDoc.sessionId == body.session_id)
+        if existing_doc is not None:
+            # The upsert branch looked the row up by ``sessionId`` alone and
+            # compared neither workspace nor owner before patching it, saving
+            # it, emitting SessionUpdated addressed to ``existing_doc.owner``,
+            # and returning the row — which discloses the victim's workspace,
+            # owner, pocket, group and agent. ``link_pocket`` does exactly this
+            # check 375 lines below; this branch never got it.
+            #
+            # NotFound rather than Forbidden, so a session id in another
+            # workspace is indistinguishable from one that does not exist.
+            if existing_doc.workspace != workspace_id:
+                logger.warning(
+                    "Refused a session upsert onto another workspace's row (caller=%s, session=%s)",
+                    workspace_id,
+                    body.session_id,
+                )
+                raise NotFound("session", body.session_id)
+            patched: dict = {}
+            if body.pocket_id and body.pocket_id != existing_doc.pocket:
+                existing_doc.pocket = body.pocket_id
+                # Linking a pocket to a session-typed session promotes its
+                # context_type so the model validator (which forbids
+                # session-typed rows from carrying a pocket) is satisfied.
+                if existing_doc.context_type == "session":
+                    existing_doc.context_type = "pocket"
+                patched["pocket_id"] = body.pocket_id
+            if body.title and body.title != "New Chat" and body.title != existing_doc.title:
+                existing_doc.title = body.title
+                patched["title"] = body.title
+            # Stamp ``surface`` only when missing — it tags the *origin* of
+            # the session so a re-link from a different surface shouldn't
+            # rewrite history.
+            if body.surface and getattr(existing_doc, "surface", None) is None:
+                existing_doc.surface = body.surface
+                patched["surface"] = body.surface
+            if patched:
+                await existing_doc.save()
+                await emit(
+                    SessionUpdated(
+                        data={
+                            "session_id": str(existing_doc.id),
+                            "user_id": existing_doc.owner,
+                            **patched,
+                        }
+                    )
+                )
+            return _to_domain(existing_doc)
+
+    if body.group_id:
+        ctype = "group"
+    elif body.pocket_id:
+        ctype = "pocket"
+    else:
+        ctype = "session"
+
+    # Guest session cap (BYOK-first onboarding): only the NEW-ROW branch —
+    # the upsert path above returns an EXISTING session and mints nothing.
+    # No-op for non-guest users; raises GuestLimitError("sessions") (402,
+    # the frozen signup-prompt contract) at the cap. Lazy import: auth and
+    # sessions must stay independently importable.
+    from pocketpaw_ee.cloud.auth.guest_gates import assert_guest_can_create_session
+
+    await assert_guest_can_create_session(ctx.user_id)
+
+    doc = _SessionDoc(
+        sessionId=sid,
+        context_type=ctype,
+        workspace=workspace_id,
+        owner=ctx.user_id,
+        title=body.title,
+        pocket=body.pocket_id,
+        group=body.group_id,
+        agent=body.agent_id,
+        surface=body.surface,
+    )
+    await doc.insert()
+    session = _to_domain(doc)
+
+    await event_bus.emit(
+        "session.created",
+        {
+            "session_id": session.id,
+            "session_uuid": session.sessionId,
+            "workspace_id": workspace_id,
+            "owner_id": ctx.user_id,
+            "pocket_id": body.pocket_id,
+        },
+    )
+
+    created_data: dict = {
+        "session_id": session.id,
+        "user_id": ctx.user_id,
+        "agent_id": body.agent_id,
+        "workspace_id": workspace_id,
+    }
+    if body.pocket_id:
+        created_data["pocket_id"] = body.pocket_id
+    await emit(SessionCreated(data=created_data))
+
+    return session
+
+
+def _surface_filters(surface: str | None) -> list[Any]:
+    """Build the surface predicate for a session listing.
+
+    Legacy-null-as-chat rule: rows stamped ``surface=None`` predate the
+    surface split and belong to the main /chat sidebar *only*. So a
+    ``"chat"`` request matches ``surface IN ("chat", None)`` — Mongo's
+    ``$in: [..., null]`` matches both explicit nulls and missing fields.
+    Every other surface (``"files"`` / ``"pocket_creation"`` / ``"foresight"``)
+    matches its tag *exactly*, so legacy nulls never bleed into those rails.
+    ``surface=None`` (the unfiltered default) keeps returning every row.
+    """
+    if surface == "chat":
+        return [In(_SessionDoc.surface, ["chat", None])]
+    if surface is not None:
+        return [_SessionDoc.surface == surface]
+    return []
+
+
+# Default row cap for the flat session listings (``GET /sessions``, the agent
+# and pocket lists). Newest first, so the cap drops only the oldest threads.
+LIST_LIMIT = 200
+# Rows per agent in ``POST /sessions/by-agents``.
+AGENT_SESSIONS_LIMIT = 100
+
+
+async def list_for_owner(
+    ctx: RequestContext,
+    workspace_id: str,
+    *,
+    surface: str | None = None,
+    limit: int = LIST_LIMIT,
+) -> list[DomainSession]:
+    """The caller's ``limit`` most recent sessions in ``workspace_id``.
+
+    ``surface`` (when provided) restricts the listing per
+    :func:`_surface_filters` — a ``"chat"`` request also includes legacy
+    ``surface=None`` rows; other surfaces match exactly. ``None`` lists every
+    surface. The first page of :func:`list_for_owner_page`; use that for more.
+    """
+    rows, _ = await list_for_owner_page(ctx, workspace_id, surface=surface, limit=limit)
+    return rows
+
+
+def _encode_session_cursor(last_activity: datetime, oid: str) -> str:
+    """Opaque keyset cursor — composite ``{lastActivity_iso}|{oid}``.
+
+    Mirrors the audit-event cursor (``audit/service.py``). Keyed on
+    ``(lastActivity, _id)`` so pages stay stable even as sessions reorder by
+    activity between fetches.
+    """
+    return f"{last_activity.isoformat()}|{oid}"
+
+
+def _decode_session_cursor(cursor: str) -> tuple[datetime, PydanticObjectId]:
+    try:
+        at_iso, oid_str = cursor.split("|", 1)
+        return datetime.fromisoformat(at_iso), PydanticObjectId(oid_str)
+    except (ValueError, TypeError) as exc:
+        raise NotFound("session.bad_cursor", "Invalid pagination cursor") from exc
+
+
+def _surface_mongo_clause(surface: str | None) -> dict[str, Any] | None:
+    """Raw-mongo equivalent of :func:`_surface_filters` for the keyset query.
+
+    ``chat`` → ``surface IN ("chat", null)`` (``$in: [null]`` also matches
+    missing fields, i.e. legacy rows). Other surfaces match exactly. ``None``
+    → no surface clause.
+    """
+    if surface == "chat":
+        return {"surface": {"$in": ["chat", None]}}
+    if surface is not None:
+        return {"surface": surface}
+    return None
+
+
+async def list_for_owner_page(
+    ctx: RequestContext,
+    workspace_id: str,
+    *,
+    surface: str | None = None,
+    cursor: str | None = None,
+    limit: int = 50,
+) -> tuple[list[DomainSession], str | None]:
+    """Keyset-paginated session listing for one surface, newest first.
+
+    Returns ``(rows, next_cursor)`` where ``next_cursor`` is ``None`` on the
+    last page. Surface scoping follows the legacy-null-as-chat rule
+    (:func:`_surface_mongo_clause`). Backs the per-mode endpoints
+    (``GET /sessions/{chat,files,foresight,pocket-creation}``) so each mode's
+    rail paginates independently of the others.
+    """
+    clauses: list[dict[str, Any]] = [
+        {"workspace": workspace_id},
+        {"owner": ctx.user_id},
+        {"deleted_at": None},
+    ]
+    surface_clause = _surface_mongo_clause(surface)
+    if surface_clause is not None:
+        clauses.append(surface_clause)
+    if cursor:
+        c_at, c_oid = _decode_session_cursor(cursor)
+        clauses.append(
+            {
+                "$or": [
+                    {"lastActivity": {"$lt": c_at}},
+                    {"lastActivity": c_at, "_id": {"$lt": c_oid}},
+                ],
+            }
+        )
+
+    mongo_filter: dict[str, Any] = clauses[0] if len(clauses) == 1 else {"$and": clauses}
+    docs = (
+        await _SessionDoc.find(mongo_filter)
+        .sort([("lastActivity", -1), ("_id", -1)])  # type: ignore[arg-type, list-item]
+        .limit(limit + 1)
+        .to_list()
+    )
+
+    has_more = len(docs) > limit
+    rows = [_to_domain(d) for d in docs[:limit]]
+    next_cursor = (
+        _encode_session_cursor(rows[-1].last_activity, rows[-1].id) if has_more and rows else None
+    )
+    return rows, next_cursor
+
+
+async def list_by_agent(
+    ctx: RequestContext, workspace_id: str, agent_id: str, *, limit: int = LIST_LIMIT
+) -> list[DomainSession]:
+    """The caller's ``limit`` most recent sessions with ``agent_id``."""
+    docs = (
+        await _SessionDoc.find(
+            _SessionDoc.workspace == workspace_id,
+            _SessionDoc.owner == ctx.user_id,
+            _SessionDoc.agent == agent_id,
+            _SessionDoc.deleted_at == None,  # noqa: E711
+        )
+        .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]
+        .limit(limit)
+        .to_list()
+    )
+    return [_to_domain(d) for d in docs]
+
+
+async def list_by_agents(
+    ctx: RequestContext,
+    workspace_id: str,
+    agent_ids: list[str],
+    *,
+    per_agent: int = AGENT_SESSIONS_LIMIT,
+) -> dict[str, list[DomainSession]]:
+    """``list_by_agent`` for many agents at once, capped at ``per_agent`` each.
+
+    Returns a dict with every requested agent id as a key (an empty list when
+    the caller has no sessions with that agent). Each list keeps the
+    ``-lastActivity`` order. Two queries: an aggregation picks each agent's
+    newest ``per_agent`` ids (only ids are grouped, so the group stage stays
+    small), then one ``$in`` read loads those rows.
+    """
+    grouped: dict[str, list[DomainSession]] = {aid: [] for aid in agent_ids}
+    if not grouped:
+        return grouped
+    picked = await _aggregate(
+        _SessionDoc,
+        [
+            {
+                "$match": {
+                    "workspace": workspace_id,
+                    "owner": ctx.user_id,
+                    "agent": {"$in": list(grouped)},
+                    "deleted_at": None,
+                }
+            },
+            {"$sort": {"lastActivity": -1, "_id": -1}},
+            {"$group": {"_id": "$agent", "ids": {"$push": "$_id"}}},
+            {"$project": {"ids": {"$slice": ["$ids", per_agent]}}},
+        ],
+    )
+    ids = [oid for row in picked for oid in row["ids"]]
+    if not ids:
+        return grouped
+    docs = (
+        await _SessionDoc.find(In(_SessionDoc.id, ids))
+        .sort([("lastActivity", -1), ("_id", -1)])  # type: ignore[list-item]
+        .to_list()
+    )
+    for doc in docs:
+        bucket = grouped.get(doc.agent or "")
+        if bucket is not None:
+            bucket.append(_to_domain(doc))
+    return grouped
+
+
+async def _is_workspace_member(workspace_id: str, user_id: str) -> bool:
+    """Is ``user_id`` a member of ``workspace_id`` (any role)?
+
+    Delegates to the workspace service's membership lookup (the one the API-key
+    routes use too), so there is a single answer to "who is in this workspace".
+    """
+    from pocketpaw_ee.cloud.workspace.service import _get_member_role
+
+    return await _get_member_role(workspace_id, user_id) is not None
+
+
+async def _pocket_access(pocket_id: str, user_id: str) -> tuple[str | None, bool]:
+    """``(pocket's workspace, may user_id read the pocket's threads)``.
+
+    Reading needs both the pocket read rule (``pockets_service.can_read``:
+    owner, team, ``shared_with`` or a non-private visibility) and membership of
+    the POCKET's workspace. Visibility alone is not tenant-scoped, so the
+    membership check is what keeps a workspace-visible pocket's threads inside
+    its workspace. The workspace is ``None`` when the pocket does not exist.
+    The two pocket reads run concurrently; each loads the pocket once
+    (pockets/service.py has no single call returning both).
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    workspace_id, readable = await asyncio.gather(
+        pockets_service.get_pocket_workspace(pocket_id),
+        pockets_service.can_read(pocket_id, user_id),
+    )
+    if not workspace_id or not readable:
+        return workspace_id, False
+    return workspace_id, await _is_workspace_member(workspace_id, user_id)
+
+
+async def _readable_pocket_workspace(pocket_id: str, user_id: str) -> str | None:
+    """The pocket's workspace when ``user_id`` may read the pocket's threads
+    (see :func:`_pocket_access`), else ``None``."""
+    workspace_id, readable = await _pocket_access(pocket_id, user_id)
+    return workspace_id if readable else None
+
+
+async def list_for_pocket(
+    ctx: RequestContext, pocket_id: str, *, limit: int = LIST_LIMIT
+) -> list[DomainSession]:
+    """The ``limit`` most recent threads attached to ``pocket_id``.
+
+    A caller who may read the pocket and belongs to its workspace sees every
+    owner's threads, scoped to the pocket's workspace, so a teammate opening a
+    shared site sees the conversations that built it. Each row still carries
+    ``owner`` so the client can tell whose thread it is. Anyone else gets only
+    their own threads, also pinned to the pocket's workspace when the pocket
+    exists (a session can only be linked to a pocket in its own workspace, see
+    ``_refuse_foreign_scope_ids`` and ``link_pocket``).
+    """
+    filters: list[Any] = [
+        _SessionDoc.pocket == pocket_id,
+        _SessionDoc.deleted_at == None,  # noqa: E711
+    ]
+    workspace_id, readable = await _pocket_access(pocket_id, ctx.user_id)
+    if workspace_id is not None:
+        filters.append(_SessionDoc.workspace == workspace_id)
+    if readable:
+        # Someone else's group-context row would list a thread whose history
+        # ``_fetch_readable_session`` refuses (it is gated by group
+        # membership), so only the caller's own group rows are listed.
+        filters.append(Or(_SessionDoc.owner == ctx.user_id, _SessionDoc.context_type != "group"))
+    else:
+        filters.append(_SessionDoc.owner == ctx.user_id)
+    docs = (
+        await _SessionDoc.find(*filters)
+        .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]
+        .limit(limit)
+        .to_list()
+    )
+    return [_to_domain(d) for d in docs]
+
+
+async def list_for_user(
+    workspace_id: str,
+    user_id: str,
+    limit: int | None = None,
+    *,
+    surface: str | None = None,
+) -> list[dict]:
+    """Sessions in ``workspace_id`` owned by ``user_id``, newest first.
+
+    Wire-dict shape so callers outside the cloud entity (e.g. surface
+    preamble handlers) don't need to import the domain object. Field
+    names mirror :class:`DomainSession`. ``limit`` (when provided) caps
+    the returned slice; ``None`` returns the full set. ``surface`` (when
+    provided) scopes the listing per :func:`_surface_filters` — a
+    ``"chat"`` request also includes legacy ``surface=None`` rows; other
+    surfaces match exactly. Both the workspace and owner filters are
+    applied per the cloud entity tenancy rule — no global reads.
+    """
+    query = (
+        _SessionDoc.find(
+            _SessionDoc.workspace == workspace_id,
+            _SessionDoc.owner == user_id,
+            _SessionDoc.deleted_at == None,  # noqa: E711
+            *_surface_filters(surface),
+        ).sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    docs = await query.to_list()
+    return [_to_wire_dict(d) for d in docs]
+
+
+async def count_for_user(
+    workspace_id: str,
+    user_id: str,
+    *,
+    surface: str | None = None,
+) -> int:
+    """How many rows :func:`list_for_user` would return with no ``limit`` —
+    same four filters, counted server-side."""
+    return await _SessionDoc.find(
+        _SessionDoc.workspace == workspace_id,
+        _SessionDoc.owner == user_id,
+        _SessionDoc.deleted_at == None,  # noqa: E711
+        *_surface_filters(surface),
+    ).count()
+
+
+def _to_wire_dict(doc: _SessionDoc) -> dict:
+    """Project a ``Session`` doc to a wire dict for cross-entity callers.
+
+    Mirrors :func:`_to_domain` field names so the two shapes stay in
+    lockstep — wire callers (surface handlers, downstream readers) get
+    the same fields a domain consumer would. Scoped helper, intentionally
+    local to ``list_for_user`` until a broader migration introduces a
+    ``Session`` Response DTO.
+    """
+    return {
+        "id": str(doc.id),
+        "sessionId": doc.sessionId,
+        "context_type": doc.context_type or "session",
+        "workspace": doc.workspace,
+        "owner": doc.owner,
+        "title": doc.title,
+        "pocket": doc.pocket,
+        "group": doc.group,
+        "agent": doc.agent,
+        "message_count": doc.messageCount,
+        "last_activity": doc.lastActivity,
+        "created_at": getattr(doc, "createdAt", None),
+        "deleted_at": doc.deleted_at,
+        "surface": getattr(doc, "surface", None),
+    }
+
+
+async def _fetch_live(session_id: str) -> _SessionDoc:
+    """Internal: fetch a non-deleted session by ObjectId or sessionId, or
+    raise NotFound. No access check; callers add one."""
+    doc: _SessionDoc | None = None
+    try:
+        doc = await _SessionDoc.get(PydanticObjectId(session_id))
+    except Exception:
+        doc = None
+    if doc is None:
+        doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id)
+    if doc is None or doc.deleted_at:
+        raise NotFound("session", session_id)
+    return doc
+
+
+async def _fetch_owned(session_id: str, user_id: str) -> _SessionDoc:
+    """Internal: fetch by ObjectId or sessionId; check owner; raise
+    NotFound / Forbidden as needed. The WRITE gate: ``update``, ``delete``
+    and ``touch`` use it. Reads go through ``_fetch_readable_session``."""
+    doc = await _fetch_live(session_id)
+    if doc.owner != user_id:
+        raise Forbidden("session.not_owner", "Not the session owner")
+    return doc
+
+
+async def _fetch_readable_session(session_id: str, user_id: str) -> _SessionDoc:
+    """Internal: the READ gate for ``get`` and ``get_history``.
+
+    Admits the owner, exactly like ``_fetch_owned``. Also admits a non-owner
+    when the session is attached to a pocket, the caller may read that pocket
+    and belongs to its workspace, and the pocket's workspace is the session's
+    own. That last check stops a session row stamped with another workspace's
+    pocket from borrowing that pocket's audience. Everything else raises the
+    same Forbidden as ``_fetch_owned``.
+    """
+    doc = await _fetch_live(session_id)
+    if doc.owner == user_id:
+        return doc
+    # A group-context row reads the whole group's transcript, which is gated by
+    # group membership, not by the pocket. Those stay with their owner.
+    if doc.pocket and doc.context_type != "group":
+        workspace_id = await _readable_pocket_workspace(doc.pocket, user_id)
+        if workspace_id is not None and workspace_id == doc.workspace:
+            return doc
+    raise Forbidden("session.not_owner", "Not the session owner")
+
+
+async def can_read_session(session_id: str, user_id: str) -> bool:
+    """Boolean form of ``_fetch_readable_session``: may ``user_id`` read this
+    thread? Same rule, not a copy of it. A missing, deleted or unreadable
+    session is ``False``."""
+    try:
+        await _fetch_readable_session(session_id, user_id)
+    except (Forbidden, NotFound):
+        return False
+    return True
+
+
+async def get(ctx: RequestContext, session_id: str) -> DomainSession:
+    """One session, for its owner or a reader of the session's pocket."""
+    doc = await _fetch_readable_session(session_id, ctx.user_id)
+    return _to_domain(doc)
+
+
+async def update(
+    ctx: RequestContext,
+    session_id: str,
+    body: UpdateSessionRequest,
+) -> DomainSession:
+    doc = await _fetch_owned(session_id, ctx.user_id)
+    patched = body.model_dump(exclude_unset=True)
+    if not patched:
+        return _to_domain(doc)
+    if body.title is not None:
+        doc.title = body.title
+    if body.pocket_id is not None:
+        doc.pocket = body.pocket_id
+        if doc.context_type == "session":
+            doc.context_type = "pocket"
+    await doc.save()
+    await emit(
+        SessionUpdated(
+            data={
+                "session_id": str(doc.id),
+                "user_id": ctx.user_id,
+                **patched,
+            }
+        )
+    )
+    return _to_domain(doc)
+
+
+async def delete(ctx: RequestContext, session_id: str) -> None:
+    doc = await _fetch_owned(session_id, ctx.user_id)
+    doc.deleted_at = datetime.now(UTC)
+    await doc.save()
+    await emit(
+        SessionDeleted(
+            data={
+                "session_id": str(doc.id),
+                "user_id": ctx.user_id,
+            }
+        )
+    )
+
+
+async def link_pocket(workspace_id: str, session_id_str: str, pocket_id: str) -> None:
+    """Link a session (looked up by its sessionId string) to a pocket.
+
+    Used by ``pockets/service.create_pocket`` when called with
+    ``body.session_id``. No-op if the session doesn't exist or is in a
+    different workspace.
+    """
+    doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id_str)
+    if doc is None or doc.workspace != workspace_id:
+        return
+    doc.pocket = pocket_id
+    # Promote the session's context_type so the model validator (which
+    # forbids session-typed rows from carrying a pocket) is satisfied.
+    if doc.context_type == "session":
+        doc.context_type = "pocket"
+    await doc.save()
+
+
+# ---------------------------------------------------------------------------
+# History + activity — kept on Beanie (cross-cutting, hot path)
+# ---------------------------------------------------------------------------
+
+
+async def _active_run_for_session(session: _SessionDoc) -> dict | None:
+    """Newest non-terminal ``ChatRunDoc`` for this session, or ``None``.
+
+    The desktop client POSTs every session-routed chat to
+    ``/cloud/chat/session/{_id}/agent`` — including pocket and dm sessions —
+    so every run for a session is written as ``(session, str(session.id))``
+    regardless of ``session.context_type``. Query that scope first; fall
+    back to the context-type-derived scope so curl / future clients that hit
+    ``/cloud/chat/pocket/{id}/agent`` directly still resolve.
+    """
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+
+    candidates: list[tuple[str, str]] = [("session", str(session.id))]
+    if session.context_type == "group" and session.group:
+        candidates.append(("group", session.group))
+    elif session.context_type == "pocket" and session.pocket:
+        candidates.append(("pocket", session.pocket))
+
+    for ctype, scope_id in candidates:
+        active = await run_service.find_active_run_for_scope(
+            workspace_id=session.workspace,
+            context_type=ctype,
+            scope_id=scope_id,
+        )
+        if active is not None:
+            return {"run_id": active.run_id, "status": active.status}
+    return None
+
+
+def _encode_history_cursor(created_at: datetime, oid: str) -> str:
+    """Opaque keyset cursor for history paging — ``{createdAt}|{_id}``.
+
+    Same ``{field}|{oid}`` shape as the session-list cursor
+    (:func:`_encode_session_cursor`) so the frontend can page a transcript
+    backward by handing back the oldest message's ``createdAt`` + ``_id``.
+    """
+    return f"{created_at.isoformat()}|{oid}"
+
+
+def _decode_history_cursor(cursor: str) -> tuple[datetime, PydanticObjectId]:
+    """Inverse of :func:`_encode_history_cursor`."""
+    try:
+        at_iso, oid_str = cursor.split("|", 1)
+        return datetime.fromisoformat(at_iso), PydanticObjectId(oid_str)
+    except (ValueError, TypeError) as exc:
+        raise NotFound("session.bad_cursor", "Invalid history cursor") from exc
+
+
+def _message_to_dict(m: Any, role: str) -> dict[str, Any]:
+    """Serialize a Message row the way the client expects (display path)."""
+    out = {
+        "_id": str(m.id),
+        "role": role,
+        "content": m.content,
+        "sender": m.sender,
+        "senderType": m.sender_type,
+        "createdAt": iso_utc(m.createdAt),
+        "attachments": [a.model_dump() for a in (m.attachments or [])],
+    }
+    run_status = getattr(m, "run_status", None)
+    if run_status:
+        out["runStatus"] = run_status
+    # Imported here like the other chat imports in this module: sessions must
+    # not pull the chat package in at import time.
+    from pocketpaw_ee.cloud.chat.runs.steps import steps_wire_fields
+
+    out.update(steps_wire_fields(getattr(m, "steps", None), getattr(m, "steps_omitted", 0) or 0))
+    ask = getattr(m, "ask_user", None)
+    if ask is not None:
+        out["askUser"] = ask.to_wire()
+    return out
+
+
+# Attachment types that are plain file chips and may be backfilled. Anything
+# else (artifact, ripple, pocket, widget, …) carries its own display contract.
+_BACKFILL_TYPES = frozenset({"", "file", "image", "audio"})
+
+
+def _needs_backfill(att: dict[str, Any]) -> str | None:
+    """Return the upload file_id when ``att`` is a nameless upload chip."""
+    from pocketpaw.uploads.resolver import parse_upload_url
+
+    if att.get("name") or (att.get("type") or "") not in _BACKFILL_TYPES:
+        return None
+    return parse_upload_url(att.get("url") or "")
+
+
+async def _backfill_attachment_display(
+    messages: list[dict[str, Any]], workspace: str | None
+) -> None:
+    """Fill name / meta / type on nameless upload attachments, in place.
+
+    Operates on the serialized wire dicts only, never on stored documents.
+    One batched lookup for every upload id on the page, scoped to
+    ``workspace`` so another tenant's filenames can't leak. Never raises.
+    """
+    if not workspace:
+        return
+    try:
+        wanted = {
+            fid
+            for m in messages
+            for a in m.get("attachments") or []
+            if (fid := _needs_backfill(a)) is not None
+        }
+        if not wanted:
+            return
+        from pocketpaw_ee.cloud.uploads import service as uploads_service
+
+        records = await uploads_service.get_records_scoped(list(wanted), workspace)
+        for m in messages:
+            for att in m.get("attachments") or []:
+                fid = _needs_backfill(att)
+                rec = records.get(fid) if fid else None
+                if rec is None:
+                    continue
+                att["name"] = rec.filename
+                meta = dict(att.get("meta") or {})
+                meta.setdefault("mime", rec.mime)
+                meta.setdefault("size", rec.size)
+                meta.setdefault("id", rec.id)
+                att["meta"] = meta
+                if (att.get("type") or "file") == "file":
+                    mime = rec.mime or ""
+                    if mime.startswith("image/"):
+                        att["type"] = "image"
+                    elif mime.startswith("audio/"):
+                        att["type"] = "audio"
+                    else:
+                        att["type"] = "file"
+    except Exception:
+        logger.debug("history attachment backfill failed (workspace=%s)", workspace, exc_info=True)
+
+
+def _wire_role(m: Any, *, group: bool) -> str:
+    """Display role for a wire message.
+
+    Session / pocket rows carry ``role`` directly (``m.role or "user"``);
+    group rows derive it from ``sender_type`` (agents render as
+    ``assistant``).
+    """
+    if group:
+        return "assistant" if m.sender_type == "agent" else "user"
+    return m.role or "user"
+
+
+async def get_history(
+    session_id: str,
+    user_id: str,
+    limit: int = 100,
+    before: str | None = None,
+) -> dict:
+    """Return session chat history from the unified Mongo messages store.
+
+    Spans three context types (session/group/pocket). Response includes
+    ``active_run`` for frontend auto-resume of an in-flight agent reply.
+
+    Pagination: pages NEWEST-first under the hood (so a transcript opens on
+    the latest messages), then returns ``messages`` ASCENDING for display.
+    ``before`` is a ``{createdAt}|{_id}`` keyset cursor — hand back the
+    OLDEST message's cursor to fetch the previous (older) page. ``has_more``
+    tells the client whether any older pages remain, so scroll-up history
+    loading knows when to stop.
+
+    Readable by the owner and by anyone who may read the session's pocket and
+    belongs to its workspace (see ``_fetch_readable_session``).
+    """
+    from pocketpaw_ee.cloud.models.message import Message
+
+    session = await _fetch_readable_session(session_id, user_id)
+
+    if session.context_type == "session":
+        # Prefix-match on session_key so reads stay aligned with whatever
+        # ``target_agent_id`` the SSE writer used at write time. The writer
+        # builds ``cloud:session:{session.id}:{target_agent_id}`` per stream;
+        # ``Session.agent`` is backfilled best-effort and may lag (or stay
+        # None when the backfill save fails). Matching the literal stored
+        # ``session.agent`` would miss those rows entirely — symptom: user
+        # sees their optimistic message with no agent reply.
+        prefix = f"cloud:session:{session.id}:"
+        clauses: list[dict[str, Any]] = [
+            {"context_type": "session"},
+            {"session_key": {"$regex": f"^{re.escape(prefix)}"}},
+        ]
+    elif session.context_type == "group" and session.group:
+        clauses = [
+            {"context_type": "group"},
+            {"group": session.group},
+            {"deleted": False},
+        ]
+    else:
+        # Pocket context — three writer paths land here with different
+        # session_key shapes; preserved verbatim from the legacy implementation.
+        pocket_candidate_keys = [session.sessionId]
+        if session.pocket and session.agent:
+            pocket_candidate_keys.append(f"cloud:pocket:{session.pocket}:{session.agent}")
+        or_clauses: list[dict[str, Any]] = [
+            {"context_type": "pocket", "session_key": {"$in": pocket_candidate_keys}}
+        ]
+        if session.agent:
+            or_clauses.append(
+                {
+                    "context_type": "session",
+                    "session_key": f"cloud:session:{session.id}:{session.agent}",
+                }
+            )
+        clauses = [{"$or": or_clauses}]
+
+    # Keyset cursor: strictly older than the given (createdAt, _id).
+    if before:
+        before_ts, before_oid = _decode_history_cursor(before)
+        clauses.append(
+            {
+                "$or": [
+                    {"createdAt": {"$lt": before_ts}},
+                    {"createdAt": before_ts, "_id": {"$lt": before_oid}},
+                ]
+            }
+        )
+
+    mongo_filter: dict[str, Any] = clauses[0] if len(clauses) == 1 else {"$and": clauses}
+    # The active-run lookup and the page read are independent, so they overlap.
+    active_run, docs = await asyncio.gather(
+        _active_run_for_session(session),
+        Message.find(mongo_filter)
+        .sort([("createdAt", -1), ("_id", -1)])  # type: ignore[list-item]
+        .limit(limit + 1)
+        .to_list(),
+    )
+    is_group = session.context_type == "group" and bool(session.group)
+    has_more = len(docs) > limit
+    page = list(reversed(docs[:limit]))  # newest-first fetch → oldest→newest display
+    messages = [_message_to_dict(m, _wire_role(m, group=is_group)) for m in page]
+    await _backfill_attachment_display(messages, session.workspace)
+    return {
+        "messages": messages,
+        "active_run": active_run,
+        "has_more": has_more,
+    }
+
+
+async def ensure_for_agent_scope(
+    *,
+    kind: str,
+    scope_id: str,
+    workspace_id: str,
+    user_id: str,
+    target_agent_id: str | None,
+) -> str | None:
+    """Find-or-create the ``Session`` row that the sidebar uses to surface a
+    ``(scope, agent)`` agent-chat pair. Returns its ``sessionId`` or ``None``.
+
+    Only applies to pocket and agent-DM scopes; plain group chats don't
+    show Session rows in the sidebar (the group itself is the entry).
+    For ``session`` scope we look up by ``_id`` and backfill ``Session.agent``
+    when the session was created without one (e.g. ``createPocketSession``).
+    """
+    if kind == "pocket":
+        existing = (
+            await _SessionDoc.find(
+                _SessionDoc.pocket == scope_id,
+                _SessionDoc.agent == target_agent_id,
+                _SessionDoc.owner == user_id,
+                _SessionDoc.deleted_at == None,  # noqa: E711
+            )
+            .sort(-_SessionDoc.lastActivity)
+            .limit(1)
+            .to_list()
+        )
+        if existing:
+            return existing[0].sessionId
+        doc = _SessionDoc(
+            sessionId=f"websocket_{uuid.uuid4().hex[:12]}",
+            context_type="pocket",
+            workspace=workspace_id,
+            owner=user_id,
+            title="New Chat",
+            pocket=scope_id,
+            agent=target_agent_id,
+        )
+        await doc.insert()
+        return doc.sessionId
+
+    if kind == "dm":
+        # Agent-DM: one Session per (agent, user). Plain human DMs have no
+        # agent and surface as rooms, not sessions — skip those.
+        if not target_agent_id:
+            return None
+        existing = (
+            await _SessionDoc.find(
+                _SessionDoc.agent == target_agent_id,
+                _SessionDoc.owner == user_id,
+                _SessionDoc.deleted_at == None,  # noqa: E711
+            )
+            .sort(-_SessionDoc.lastActivity)
+            .limit(1)
+            .to_list()
+        )
+        if existing:
+            return existing[0].sessionId
+        doc = _SessionDoc(
+            sessionId=f"websocket_{uuid.uuid4().hex[:12]}",
+            context_type="group",
+            workspace=workspace_id,
+            owner=user_id,
+            title="New Chat",
+            group=scope_id,
+            agent=target_agent_id,
+        )
+        await doc.insert()
+        return doc.sessionId
+
+    if kind == "session":
+        try:
+            doc = await _SessionDoc.get(PydanticObjectId(scope_id))
+        except Exception:
+            return None
+        if doc is None:
+            return None
+        # Backfill Session.agent when the session was created without one.
+        # The read-side history query no longer keys on ``Session.agent``
+        # (it prefix-matches ``cloud:session:{sid}:`` so any writer-supplied
+        # agent id matches), but persisting the field still keeps the
+        # sidebar's per-agent grouping correct. Log at warning so a recurring
+        # save failure shows up in dashboard logs — historically this failure
+        # mode caused the "user message with no agent reply" symptom and went
+        # undetected for too long.
+        if not getattr(doc, "agent", None) and target_agent_id:
+            doc.agent = target_agent_id
+            try:
+                await doc.save()
+            except Exception:
+                logger.warning(
+                    "Session.agent backfill failed for %s — read path uses "
+                    "prefix-match so history still resolves, but downstream "
+                    "consumers grouping by agent may misroute",
+                    doc.sessionId,
+                    exc_info=True,
+                )
+        return doc.sessionId
+
+    return None
+
+
+async def auto_create_pocket_session(
+    session_key: str, *, workspace_id: str | None = None, pocket_id: str | None = None
+) -> _SessionDoc | None:
+    """Create a pocket ``Session`` doc for ``session_key`` when none exists.
+
+    Picks the first user in the target workspace (or any workspace user
+    if ``workspace_id`` is not provided) so the session has an owner.
+    Returns ``None`` if no suitable user exists. Used by the cloud
+    memory store so its adapter doesn't have to import ``Session`` /
+    ``User`` directly.
+
+    Stamps the workspace's default ``pocketpaw`` agent (and ``pocket_id``
+    when supplied) so OSS-path home/widget chats land in the PocketPaw DM
+    room, which lists by ``Session.agent``. Both degrade to ``None`` when
+    resolution fails — a missing agent must never block a chat save.
+    """
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    query: dict
+    if workspace_id:
+        query = {"workspaces.workspace": workspace_id}
+    else:
+        query = {"workspaces": {"$ne": []}}
+    users = await _UserDoc.find(query).limit(1).to_list()
+    if not users:
+        logger.warning("auto_create_pocket_session: no user with a workspace")
+        return None
+
+    user = users[0]
+    if workspace_id is None:
+        workspace_id = user.workspaces[0].workspace if user.workspaces else None
+    if not workspace_id:
+        return None
+
+    # Resolve the workspace's default ``pocketpaw`` agent so the session
+    # surfaces in the PocketPaw DM room. Lazy import: ``chat.agent_service``
+    # imports from this module, so a top-level import would cycle (same
+    # reason ``User`` is imported function-locally above).
+    agent_id: str | None = None
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import _get_default_workspace_agent_id
+
+        agent_id = await _get_default_workspace_agent_id(workspace_id)
+    except Exception:
+        logger.warning(
+            "auto_create_pocket_session: default agent lookup failed for ws=%s",
+            workspace_id,
+            exc_info=True,
+        )
+
+    doc = _SessionDoc(
+        sessionId=session_key,
+        context_type="pocket",
+        workspace=workspace_id,
+        owner=str(user.id),
+        title="Chat",
+        agent=agent_id,
+        pocket=pocket_id,
+    )
+    await doc.insert()
+    logger.info(
+        "auto-created pocket session: sessionId=%s owner=%s agent=%s pocket=%s",
+        session_key,
+        user.id,
+        agent_id,
+        pocket_id,
+    )
+    return doc
+
+
+async def find_by_session_id(session_id: str) -> _SessionDoc | None:
+    """Return the ``Session`` Beanie doc keyed by ``sessionId`` (the safe
+    string form, not the Mongo ObjectId), or ``None`` if missing.
+
+    Used by the cloud memory store for its session-resolution path so it
+    doesn't import ``Session`` directly.
+    """
+    return await _SessionDoc.find_one(_SessionDoc.sessionId == session_id)
+
+
+async def touch_doc(doc: _SessionDoc) -> None:
+    """Increment ``messageCount`` and refresh ``lastActivity`` on an
+    already-loaded ``Session`` doc. Failures log but don't raise.
+
+    Variant of :func:`touch` for callers that already have the doc in
+    hand (the cloud memory store's write path) — saves a refetch.
+    """
+    try:
+        doc.lastActivity = datetime.now(UTC)
+        doc.messageCount = (doc.messageCount or 0) + 1
+        await doc.save()
+    except Exception:
+        logger.warning("failed to touch Session %s", doc.sessionId, exc_info=True)
+
+
+async def attach_pocket_to_session_doc(
+    session_mongo_id: str, user_id: str, pocket_id: str
+) -> str | None:
+    """Link an existing session (by Beanie ``_id``) to a freshly-created
+    pocket. The session's ``pocket`` and ``context_type`` are updated and
+    persisted. Returns the session's ``_id`` (as str) on success, ``None``
+    if the session is missing, owned by someone else, or the save failed.
+
+    Used by the in-process MCP ``create_pocket`` tool so the chat that
+    built the pocket shows up in that pocket's session list — without
+    this the conversation gets orphaned at the workspace level.
+    """
+    try:
+        doc = await _SessionDoc.get(PydanticObjectId(session_mongo_id))
+    except Exception:
+        logger.warning(
+            "attach_pocket_to_session_doc: invalid session id %s",
+            session_mongo_id,
+            exc_info=True,
+        )
+        return None
+    if doc is None or doc.owner != user_id:
+        return None
+    doc.pocket = pocket_id
+    doc.context_type = "pocket"
+    try:
+        await doc.save()
+    except Exception:
+        logger.warning(
+            "attach_pocket_to_session_doc: save failed for %s",
+            session_mongo_id,
+            exc_info=True,
+        )
+        return None
+    return str(doc.id)
+
+
+async def set_title_if_default(session_id: str, title: str) -> bool:
+    """Persist ``title`` only when the current title is still a system
+    default (``"New Chat"`` / ``"Chat"`` / empty). Used by the cloud
+    title listener so user-edited titles aren't clobbered when a delayed
+    backend titler fires for the same session.
+
+    Returns ``True`` if the title was written, ``False`` if the session
+    is missing, already has a user-edited title, or the save failed.
+    """
+    try:
+        doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id)
+    except Exception:
+        logger.warning("session lookup failed for %s", session_id, exc_info=True)
+        return False
+    if doc is None:
+        return False
+    if doc.title and doc.title not in ("New Chat", "Chat"):
+        return False
+
+    doc.title = title
+    try:
+        await doc.save()
+    except Exception:
+        logger.warning("session title save failed for %s", session_id, exc_info=True)
+        return False
+
+    try:
+        await emit(
+            SessionUpdated(
+                data={
+                    "session_id": str(doc.id),
+                    "user_id": doc.owner,
+                    "title": title,
+                }
+            )
+        )
+    except Exception:
+        logger.warning("session title emit failed for %s", session_id, exc_info=True)
+    return True
+
+
+async def set_title(session_id: str, title: str) -> bool:
+    """Write ``title`` to ``Session.title`` and broadcast ``SessionUpdated``.
+
+    Returns ``True`` on a successful write. Best-effort — Mongo lookup or
+    save failures log and return ``False`` so the caller can continue
+    with the SSE-only path.
+    """
+    try:
+        doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id)
+    except Exception:
+        logger.warning("session lookup failed for %s", session_id, exc_info=True)
+        return False
+    if doc is None:
+        return False
+
+    doc.title = title
+    try:
+        await doc.save()
+    except Exception:
+        logger.warning("session title save failed for %s", session_id, exc_info=True)
+        return False
+
+    try:
+        await emit(
+            SessionUpdated(
+                data={
+                    "session_id": str(doc.id),
+                    "user_id": doc.owner,
+                    "title": title,
+                }
+            )
+        )
+    except Exception:
+        logger.debug("SessionUpdated emit failed for %s", session_id, exc_info=True)
+    return True
+
+
+async def touch(session_id: str, user_id: str) -> None:
+    """Update lastActivity and increment messageCount, for the OWNER only.
+
+    ``user_id`` is required rather than optional (2026-08-01), so that an
+    unscoped write cannot be reintroduced simply by leaving the argument out.
+    The ownership check matters as much as the identity: this writes to the
+    document and emits a ``SessionUpdated`` naming its owner onto that owner's
+    realtime feed, neither of which belongs to a caller who cannot read it.
+
+    Callers that already hold the doc use ``touch_doc``, which is the path the
+    memory store's write hook takes — it has established ownership by having
+    loaded the doc through an owned lookup, so it is unaffected.
+    """
+    doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id)
+    if not doc and session_id.startswith("websocket_"):
+        doc = await _SessionDoc.find_one(_SessionDoc.sessionId == session_id[10:])
+    if not doc:
+        return
+    if doc.owner != user_id:
+        # Deliberately the same shape as ``_fetch_owned``. Note the asymmetry
+        # with the missing-session case above, which returns quietly: a caller
+        # probing ids learns "exists and is not yours" here. That is already
+        # true of every other per-session route (GET / PATCH / DELETE all raise
+        # Forbidden on a live session they don't own), so staying silent here
+        # would not close an oracle, only make this one route inconsistent.
+        raise Forbidden("session.not_owner", "Not the session owner")
+    doc.lastActivity = datetime.now(UTC)
+    doc.messageCount += 1
+    await doc.save()
+
+    await emit(
+        SessionUpdated(
+            data={
+                "session_id": str(doc.id),
+                "user_id": doc.owner,
+                "last_message_at": iso_utc(doc.lastActivity),
+            }
+        )
+    )
+
+
+__all__ = [
+    "attach_pocket_to_session_doc",
+    "auto_create_pocket_session",
+    "create",
+    "delete",
+    "ensure_for_agent_scope",
+    "find_by_session_id",
+    "get",
+    "get_history",
+    "legacy_ctx",
+    "link_pocket",
+    "list_by_agent",
+    "list_by_agents",
+    "list_for_owner",
+    "list_for_pocket",
+    "list_for_user",
+    "set_title",
+    "set_title_if_default",
+    "touch",
+    "touch_doc",
+    "update",
+]

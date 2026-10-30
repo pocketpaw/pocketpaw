@@ -3,6 +3,10 @@
 # Created: 2026-02-06
 # Tests: CredentialStore, config save/load separation, plaintext migration,
 #         file permissions, and log secret scrubbing.
+# Updated 2026-06-24: expected SECRET_FIELDS now includes the Dodo billing
+#         secrets (dodo_payments_api_key, dodo_webhook_secret).
+# Updated 2026-10-02 (PH-6): ... and msg91_platform_authkey (partner lead WhatsApp).
+# Updated 2026-10-03 (AV-3): ... and the four ai_visibility_* provider secrets.
 
 import json
 import logging
@@ -379,10 +383,18 @@ class TestPlaintextMigration:
     """Tests for the one-time migration from plaintext config.json to encrypted store."""
 
     @pytest.fixture
-    def env(self, tmp_path):
-        """Set up a temp config dir with NO migration flag (simulates upgrade)."""
+    def env(self, tmp_path, monkeypatch):
+        """Set up a temp config dir with NO migration flag (simulates upgrade).
+
+        Strips POCKETPAW_LLM_PROVIDER (set by CI to "ollama") so the test's
+        ``llm_provider == "anthropic"`` assertion in
+        ``test_loaded_settings_have_migrated_values`` measures what the
+        migrated config.json says, not what the CI workflow exports.
+        """
         import pocketpaw.config as cfg
         import pocketpaw.credentials as creds
+
+        monkeypatch.delenv("POCKETPAW_LLM_PROVIDER", raising=False)
 
         test_store = CredentialStore(config_dir=tmp_path)
 
@@ -514,6 +526,7 @@ class TestSecretFieldsList:
             "slack_app_token",
             "whatsapp_access_token",
             "whatsapp_verify_token",
+            "whatsapp_app_secret",
             "tavily_api_key",
             "brave_search_api_key",
             "parallel_api_key",
@@ -532,8 +545,29 @@ class TestSecretFieldsList:
             "litellm_api_key",
             "claude_code_oauth_token",
             "status_api_key",
+            "dodo_payments_api_key",
+            "dodo_webhook_secret",
+            "shield_api_token",
+            "lens_api_token",
+            "cf_email_api_token",
+            "msg91_platform_authkey",
+            "ai_visibility_openai_api_key",
+            "ai_visibility_perplexity_api_key",
+            "ai_visibility_anthropic_api_key",
+            "ai_visibility_cf_api_token",
+            "turnstile_secret",
+            "public_web_key",
         }
         assert SECRET_FIELDS == expected
+
+    def test_shield_api_token_is_secret(self):
+        """The shield control-API bearer token must be a SECRET_FIELD so it is
+        stored encrypted and never returned over REST (regression: it was added
+        to config as a plain field, which would have leaked it via
+        Settings.save() -> config.json and GET /api/v1/settings)."""
+        assert "shield_api_token" in SECRET_FIELDS
+        # The socket PATH is not a secret and must stay excluded.
+        assert "shield_api_socket" not in SECRET_FIELDS
 
     def test_non_secrets_excluded(self):
         """Common non-secret fields must NOT be in SECRET_FIELDS."""

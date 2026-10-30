@@ -61,7 +61,7 @@ class RedditSearchTool(BaseTool):
         limit: int = 10,
     ) -> str:
         try:
-            from pocketpaw.integrations.reddit import RedditClient
+            from pocketpaw.clients.reddit import RedditClient
 
             client = RedditClient()
             posts = await client.search(query, subreddit=subreddit, sort=sort, limit=limit)
@@ -115,7 +115,7 @@ class RedditReadTool(BaseTool):
 
     async def execute(self, url: str) -> str:
         try:
-            from pocketpaw.integrations.reddit import RedditClient
+            from pocketpaw.clients.reddit import RedditClient
 
             client = RedditClient()
             post = await client.get_post(url)
@@ -194,7 +194,7 @@ class RedditTrendingTool(BaseTool):
         limit: int = 10,
     ) -> str:
         try:
-            from pocketpaw.integrations.reddit import RedditClient
+            from pocketpaw.clients.reddit import RedditClient
 
             client = RedditClient()
             posts = await client.get_subreddit_top(

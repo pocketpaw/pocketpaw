@@ -1,0 +1,104 @@
+[
+  {
+    "label": "contact form: the assembler's field names drift from the mapping again (the original bug)",
+    "file": "src/pocketpaw/sites_capture/contact_form.py",
+    "find": "        name=\"full_name\",\n        label=\"Your name\",",
+    "replace": "        name=\"contact_full_name\",\n        label=\"Your name\",",
+    "tests": [
+      "tests/ee/sites/test_contact_form_contract.py"
+    ]
+  },
+  {
+    "label": "contact form: the generated form stops deriving its POST names from the schema",
+    "file": "ee/pocketpaw_ee/sites/landing_assembler.py",
+    "find": "            \"name\": spec.name,",
+    "replace": "            \"name\": spec.name.replace(\"full_name\", \"name\"),",
+    "tests": [
+      "tests/ee/sites/test_contact_form_contract.py"
+    ]
+  },
+  {
+    "label": "contact form: the seeded mapping goes back to being restated by hand",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "_DEFAULT_EVENT_MAPPING: dict[str, Any] = default_event_mapping()",
+    "replace": "_DEFAULT_EVENT_MAPPING: dict[str, Any] = {\n    _DEFAULT_FORM_TYPE: {\n        \"creates\": \"Lead\",\n        \"fields\": {\"full_name\": \"{{ payload.full_name }}\"},\n    }\n}",
+    "tests": [
+      "tests/ee/sites/test_contact_form_contract.py"
+    ]
+  },
+  {
+    "label": "contact form: alias normalization is dropped, so the deployed fleet goes dark",
+    "file": "ee/pocketpaw_ee/cloud/leads/service.py",
+    "find": "        payload = contact_form.normalize(payload)",
+    "replace": "        payload = dict(payload)",
+    "tests": [
+      "tests/ee/sites/test_contact_form_contract.py",
+      "tests/cloud/leads/test_service.py"
+    ]
+  },
+  {
+    "label": "contact form: an empty canonical key shadows the alias that has the value",
+    "file": "src/pocketpaw/sites_capture/contact_form.py",
+    "find": "        if str(out.get(canonical) or \"\").strip():\n            continue  # the canonical spelling already carries a real value",
+    "replace": "        if canonical in out:\n            continue",
+    "tests": [
+      "tests/sites_capture/test_contact_form.py"
+    ]
+  },
+  {
+    "label": "contact form: normalization starts dropping unrecognized keys (disables the honeypot)",
+    "file": "src/pocketpaw/sites_capture/contact_form.py",
+    "find": "    out = dict(payload)",
+    "replace": "    out: dict[str, object] = {}",
+    "tests": [
+      "tests/sites_capture/test_contact_form.py"
+    ]
+  },
+  {
+    "label": "contact form: validation stops rejecting a submission nobody can reply to",
+    "file": "src/pocketpaw/sites_capture/contact_form.py",
+    "find": "    if not reachable:\n        return \"no_reply_channel\"",
+    "replace": "    if False:\n        return \"no_reply_channel\"",
+    "tests": [
+      "tests/sites_capture/test_contact_form.py",
+      "tests/cloud/leads/test_service.py"
+    ]
+  },
+  {
+    "label": "contact form: the per-field length cap is removed",
+    "file": "src/pocketpaw/sites_capture/contact_form.py",
+    "find": "        if len(str(payload.get(spec.name) or \"\")) > spec.max_length:\n            return \"too_long\"",
+    "replace": "        if False:\n            return \"too_long\"",
+    "tests": [
+      "tests/sites_capture/test_contact_form.py"
+    ]
+  },
+  {
+    "label": "contact form: an unrecognized imported form is silently dropped instead of captured",
+    "file": "src/pocketpaw/sites_capture/contact_form.py",
+    "find": "    if not recognized(payload):\n        return None",
+    "replace": "    if not recognized(payload):\n        return \"no_reply_channel\"",
+    "tests": [
+      "tests/sites_capture/test_contact_form.py",
+      "tests/cloud/leads/test_service.py"
+    ]
+  },
+  {
+    "label": "contact form: a typo'd email with a good phone starts being rejected",
+    "file": "src/pocketpaw/sites_capture/contact_form.py",
+    "find": "    reachable = looks_like_email(payload.get(EMAIL)) or looks_like_phone(payload.get(PHONE))",
+    "replace": "    reachable = looks_like_email(payload.get(EMAIL))",
+    "tests": [
+      "tests/sites_capture/test_contact_form.py"
+    ]
+  },
+  {
+    "label": "contact form: validation leaks onto form types that never declared this schema",
+    "file": "ee/pocketpaw_ee/cloud/leads/service.py",
+    "find": "    if form_type == contact_form.CONTACT_FORM_TYPE:",
+    "replace": "    if True:",
+    "tests": [
+      "tests/cloud/leads/test_service.py"
+    ]
+  }
+]

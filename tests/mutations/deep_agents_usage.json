@@ -1,0 +1,119 @@
+[
+  {
+    "label": "the invoice goes back behind the cache gate — a cold turn bills nothing at all",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "            _usage_emitted = True\n            yield _build_usage_event(cache_usage, _answering_model)\n\n            yield AgentEvent(type=\"done\", content=\"\")",
+    "replace": "            if cache_usage[\"cache_read_input_tokens\"] or cache_usage[\"cache_creation_input_tokens\"]:\n                _usage_emitted = True\n                yield _build_usage_event(cache_usage, _answering_model)\n\n            yield AgentEvent(type=\"done\", content=\"\")",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestTheStreamAlwaysBills::test_a_cold_turn_still_emits_the_usage_event",
+      "tests/test_deep_agents_anthropic_cache.py::TestTheStreamAlwaysBills::test_configuration_is_the_fallback_when_no_chunk_names_a_model",
+      "tests/test_deep_agents_anthropic_cache.py::TestTheStreamAlwaysBills::test_a_soft_stop_keeps_the_turns_that_finished"
+    ]
+  },
+  {
+    "label": "the model is dropped from the payload — the meter cannot price a run it cannot name",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "            \"total_cost_usd\": cost,\n            \"model\": model,\n",
+    "replace": "            \"total_cost_usd\": cost,\n            \"model\": None,\n",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestTheUsageEventIsTheInvoice::test_the_payload_carries_what_the_meter_actually_reads",
+      "tests/test_deep_agents_anthropic_cache.py::TestTheMeterPricesADeepAgentsRun::test_the_meter_bills_a_real_amount"
+    ]
+  },
+  {
+    "label": "the model is read off configuration instead of the response that answered",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "                    _accumulate_cache_usage(msg_chunk, cache_usage)\n                    _answering_model = _model_name_from_chunk(msg_chunk) or _answering_model",
+    "replace": "                    _accumulate_cache_usage(msg_chunk, cache_usage)",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestTheStreamAlwaysBills::test_the_model_comes_off_the_response_not_configuration",
+      "tests/test_deep_agents_anthropic_cache.py::TestTheMeterPricesADeepAgentsRun::test_the_meter_bills_a_real_amount"
+    ]
+  },
+  {
+    "label": "output tokens are dropped from the fold — the half of a turn that costs the most",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "    acc[\"inclusive_input_tokens\"] += total_input\n    acc[\"output_tokens\"] += output",
+    "replace": "    acc[\"inclusive_input_tokens\"] += total_input",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestAccumulateCacheUsage::test_output_tokens_survive_the_fold",
+      "tests/test_deep_agents_anthropic_cache.py::TestAccumulateCacheUsage::test_folds_cache_read_and_creation",
+      "tests/test_deep_agents_anthropic_cache.py::TestTheUsageEventIsTheInvoice::test_the_payload_carries_what_the_meter_actually_reads"
+    ]
+  },
+  {
+    "label": "the inclusive input total is not kept — pricing has only the remainder to work from",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "    acc[\"input_tokens\"] += max(0, total_input - read - write)\n    acc[\"inclusive_input_tokens\"] += total_input",
+    "replace": "    acc[\"input_tokens\"] += max(0, total_input - read - write)\n    acc[\"inclusive_input_tokens\"] += max(0, total_input - read - write)",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestAccumulateCacheUsage::test_the_inclusive_total_is_kept_beside_the_remainder",
+      "tests/test_deep_agents_anthropic_cache.py::TestTheUsageEventIsTheInvoice::test_the_price_is_taken_on_the_inclusive_total_not_the_remainder"
+    ]
+  },
+  {
+    "label": "the run is priced off the uncached remainder — the cache is subtracted a second time",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "            input_tokens=inclusive,\n            output_tokens=output,",
+    "replace": "            input_tokens=acc.get(\"input_tokens\", 0),\n            output_tokens=output,",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestTheUsageEventIsTheInvoice::test_the_price_is_taken_on_the_inclusive_total_not_the_remainder"
+    ]
+  },
+  {
+    "label": "the payload reports the inclusive total as input_tokens — the meter counts the cache twice",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "            \"input_tokens\": acc.get(\"input_tokens\", 0),\n            \"output_tokens\": output,",
+    "replace": "            \"input_tokens\": acc.get(\"inclusive_input_tokens\", 0),\n            \"output_tokens\": output,",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestTheUsageEventIsTheInvoice::test_the_payload_carries_what_the_meter_actually_reads",
+      "tests/test_deep_agents_anthropic_cache.py::TestTheMeterPricesADeepAgentsRun::test_the_meter_reconstitutes_the_inclusive_prompt"
+    ]
+  },
+  {
+    "label": "a cache write filed under its TTL key is invisible again — the hit rate lies",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "_CACHE_WRITE_KEYS = (\n    \"cache_creation\",\n    \"ephemeral_5m_input_tokens\",\n    \"ephemeral_1h_input_tokens\",\n)",
+    "replace": "_CACHE_WRITE_KEYS = (\"cache_creation\",)",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestAccumulateCacheUsage::test_a_write_filed_under_a_ttl_key_is_not_lost",
+      "tests/test_deep_agents_anthropic_cache.py::TestTheUsageEventIsTheInvoice::test_the_payload_carries_what_the_meter_actually_reads"
+    ]
+  },
+  {
+    "label": "cached_input_tokens drops the write — the run's total token count comes up short",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "            \"cached_input_tokens\": read + write,",
+    "replace": "            \"cached_input_tokens\": read,",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestTheUsageEventIsTheInvoice::test_the_payload_carries_what_the_meter_actually_reads"
+    ]
+  },
+  {
+    "label": "a mid-stream failure discards the turns that already completed and were billed to us",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "            if not _usage_emitted:\n                _usage_emitted = True\n                yield _build_usage_event(cache_usage, _answering_model)\n            logger.error(\"Deep Agents streaming error: %s\", e, exc_info=True)",
+    "replace": "            logger.error(\"Deep Agents streaming error: %s\", e, exc_info=True)",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestTheStreamAlwaysBills::test_usage_survives_a_mid_stream_failure"
+    ]
+  },
+  {
+    "label": "a hard cancel discards the usage — CancelledError is not an Exception and slips past",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "            if not _usage_emitted:\n                _usage_emitted = True\n                yield _build_usage_event(cache_usage, _answering_model)\n            raise",
+    "replace": "            raise",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestTheStreamAlwaysBills::test_usage_survives_a_hard_cancel"
+    ]
+  },
+  {
+    "label": "the invoice moves into finally — every consumer that closes the stream early now crashes",
+    "file": "src/pocketpaw/agents/deep_agents.py",
+    "find": "        except GeneratorExit:",
+    "replace": "        except GeneratorExit:\n            if not _usage_emitted:\n                _usage_emitted = True\n                yield _build_usage_event(cache_usage, _answering_model)",
+    "tests": [
+      "tests/test_deep_agents_anthropic_cache.py::TestTheStreamAlwaysBills::test_closing_the_stream_early_does_not_break_aclose"
+    ]
+  }
+]

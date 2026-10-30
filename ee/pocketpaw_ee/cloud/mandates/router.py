@@ -1,0 +1,234 @@
+# ee/pocketpaw_ee/cloud/mandates/router.py — the MANDATE routes.
+#
+# FastAPI router for the standing Belt JOB, under the ``/belt/mandates`` prefix.
+# Routes are THIN: read identity (workspace + user) from the cloud deps,
+# delegate to ``mandates.service``, return its wire dict. RBAC mirrors the belt
+# console — ``belt.read`` (MEMBER) on reads, ``belt.manage`` (ADMIN) on
+# mutations (create, shift trigger, feedback intake, plan resolve, autopilot,
+# crew, the charter patch).
+# Errors propagate as ``CloudError``; the router never raises HTTPException.
+#
+# Envelopes (UI contract): create, autopilot, crew and the charter patch return
+# ``{"mandate"}``, shift and plan/resolve return ``{"shift"}``; GET detail stays
+# bare. The feedback
+# route takes the general ``{text, severity?, source}`` and the teaching
+# ``{kind, reason, shift_no?, task_title?}`` shapes (the service discriminates
+# on ``kind``). ``plan/resolve`` maps the console's per-task verdicts onto the
+# real Instinct approve-with-edits / reject paths through
+# ``service.resolve_plan``, the same function the auto plan gate calls.
+#
+# Static paths (``/digest``) are declared before ``/{mandate_id}`` so they are
+# never captured as a mandate id.
+
+"""FastAPI router for Belt mandates (standing jobs)."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends
+
+from pocketpaw_ee.cloud._core.deps import (
+    current_user_id,
+    current_workspace_id,
+    require_action_any_workspace,
+    require_paid_or_early_access_allowed,
+)
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.mandates import service as mandate_service
+from pocketpaw_ee.cloud.mandates.dto import (
+    CreateMandateRequest,
+)
+
+# Mandates dispatch Belt work off the credit ledger: refused for an unpaid
+# early-access workspace (403 ``early_access.not_available``), approve included.
+router = APIRouter(
+    prefix="/belt/mandates",
+    tags=["Belt Mandates"],
+    dependencies=[Depends(require_license), Depends(require_paid_or_early_access_allowed)],
+)
+
+
+@router.post("")
+async def create_mandate(
+    body: CreateMandateRequest,
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Create a standing mandate (admin-gated). Returns ``{"mandate": <detail>}``
+    (UI contract envelope; the GET detail route stays unwrapped)."""
+    return await mandate_service.create_mandate(workspace_id, user_id, body.model_dump())
+
+
+@router.get("")
+async def list_mandates(
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """List the workspace's mandates with a per-mandate health summary."""
+    return await mandate_service.list_mandates(workspace_id, user_id)
+
+
+@router.get("/digest")
+async def get_digest(
+    since: str | None = None,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """The workspace's mandate digest since ``since`` (ISO-8601, default 24 hours
+    ago): per mandate the new sightings, shifts, runs and the gates waiting on a
+    human, plus workspace ``totals``."""
+    return await mandate_service.digest(workspace_id, user_id, {"since": since})
+
+
+@router.get("/{mandate_id}")
+async def get_mandate(
+    mandate_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Return one mandate's detail (charter, recent shifts, sightings-by-patrol).
+    A mandate in another workspace is a 404."""
+    return await mandate_service.get_mandate(workspace_id, user_id, mandate_id)
+
+
+@router.post("/{mandate_id}/feedback")
+async def file_feedback(
+    mandate_id: str,
+    body: dict[str, Any],
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Intake patrol — file human feedback as a Sighting on the mandate.
+
+    Two body shapes (UI contract), discriminated on the presence of ``kind``;
+    the SERVICE validates the raw dict against the matching schema at entry
+    (the validate-at-entry rule holds — discrimination just happens first):
+
+    * GENERAL  — ``{text, severity?, source}`` → the sighting wire dict
+      (autopilot and integrations keep using this).
+    * TEACHING — ``{kind: reject|edit|plan, reason, shift_no?, task_title?}``
+      → ``{"ok": true}`` (the gate UI's teaching channel)."""
+    return await mandate_service.file_feedback(workspace_id, user_id, mandate_id, body)
+
+
+@router.get("/{mandate_id}/sightings")
+async def list_sightings(
+    mandate_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """List a mandate's sightings, newest-first."""
+    return await mandate_service.list_sightings(workspace_id, user_id, mandate_id)
+
+
+@router.post("/{mandate_id}/shift")
+async def trigger_shift(
+    mandate_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Run a SHIFT — the foreman plans a few tasks; the plan routes through the
+    Instinct plan gate. Demo-bar manual trigger (admin-gated). Returns
+    ``{"shift": {...}}`` (UI contract envelope)."""
+    return await mandate_service.trigger_shift(workspace_id, user_id, mandate_id)
+
+
+@router.post("/{mandate_id}/plan/resolve")
+async def resolve_plan(
+    mandate_id: str,
+    body: dict[str, Any],
+    user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """The console's authoritative gate action (UI contract): per-task verdicts
+    for an in_gate shift plan → ``{"shift": {...}}``.
+
+    The verdicts are MAPPED ONTO THE REAL INSTINCT PATH — the single chain
+    authority — so the decision chain still closes exactly once in the same
+    code the Tray uses:
+
+    * any approved/edited subset → ``approve_action`` WITH EDITS (the blob's
+      task list filtered + retitled; Corrections recorded; the plan executor
+      dispatches the kept tasks as belt runs).
+    * all tasks rejected → ``reject_action`` (router closes the chain; the
+      shift records the rejection).
+
+    Rejected tasks are recorded as teaching sightings (reason + task title) so
+    the foreman's next digest learns. Decision ``index`` is 0-based into the
+    plan's tasks array, and every task must carry exactly one decision."""
+    return await mandate_service.resolve_plan(
+        workspace_id, user_id, mandate_id, body, approver=user
+    )
+
+
+@router.post("/{mandate_id}/autopilot")
+async def set_autopilot(
+    mandate_id: str,
+    body: dict[str, Any],
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Start or stop AUTOPILOT — Foresight-seeded simulated users that exercise
+    the mandate's surface and feed the feedback patrol (admin-gated).
+
+    Body: ``{action: "start"|"stop", users?: int (default 3, max 10)}``. START
+    persists ``autopilot={on, users}``, runs ONE cycle immediately (so the
+    response already reflects its sightings), and spawns the background cycle.
+    STOP cancels the background task and persists the off state. Returns
+    ``{"mandate": <detail>}`` (UI contract envelope)."""
+    return await mandate_service.set_autopilot(workspace_id, user_id, mandate_id, body)
+
+
+@router.put("/{mandate_id}/crew")
+async def set_crew(
+    mandate_id: str,
+    body: dict[str, Any],
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Replace the mandate's CREW roster (admin-gated): the cloud Agents that
+    work its plan tasks. Body: ``{crew: [{agent_id, role: dev|reviewer|foreman|tester,
+    concurrency, setup?: owner|strict}]}``; every agent must be readable by the
+    caller in this workspace (422 otherwise). Returns ``{"mandate": <detail>}``."""
+    return await mandate_service.set_crew(workspace_id, user_id, mandate_id, body)
+
+
+@router.patch("/{mandate_id}/charter")
+async def update_charter(
+    mandate_id: str,
+    body: dict[str, Any],
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Change the line's Claude ``model`` (``fable`` / ``opus`` / ``sonnet``,
+    ``null`` = the CLI default) and its ``budget.max_in_flight`` /
+    ``budget.max_tasks_per_shift`` caps (admin-gated). Only the fields sent
+    change; any other field is a 422. Returns ``{"mandate": <detail>}``."""
+    return await mandate_service.update_charter(workspace_id, user_id, mandate_id, body)
+
+
+@router.get("/{mandate_id}/pawprints")
+async def get_pawprints(
+    mandate_id: str,
+    _user: Any = Depends(require_action_any_workspace("belt.read")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Return the mandate's past-tense event feed (shift n: proposed / approved /
+    rejected / executed / stood_down, with evidence refs)."""
+    return await mandate_service.get_pawprints(workspace_id, user_id, mandate_id)
+
+
+__all__ = ["router"]

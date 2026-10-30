@@ -1,0 +1,1281 @@
+# events.py — the realtime Event base class, its registry, and the shared
+# event vocabulary for the cloud bus.
+#
+# Each ``Event`` subclass pins an ``EVENT_TYPE`` literal that routes both the
+# WebSocket fan-out (see ``audience.py``) and in-process bus subscribers.
+# ``Event.__init_subclass__`` registers every subclass in ``EVENT_REGISTRY`` so
+# ``rebuild_event`` can turn a cross-process JSON envelope back into its class.
+#
+# Invariant: one class per ``EVENT_TYPE`` across the codebase. A second class
+# with the same type silently replaces the first in the registry, depending on
+# import order. A domain that owns its own vocabulary declares it in its own
+# module (``meetings/events.py``, ``mandates/events.py``) and NOT here too;
+# ``tests/cloud/realtime/test_event_registry.py`` fails on any duplicate.
+# Such a module must also be listed in ``_DOMAIN_EVENT_MODULES`` so a process
+# that never imported it can still rebuild its events.
+#
+# Where a group has a payload contract, the comment above it documents it.
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import ClassVar
+
+EVENT_REGISTRY: dict[str, type[Event]] = {}
+
+# Domain modules that declare their own Event subclasses. A process that never
+# imported one (an arq worker) loads them on the first registry miss, so
+# ``rebuild_event`` still finds the owning class. Imported lazily: each of
+# these imports this module.
+_DOMAIN_EVENT_MODULES = (
+    "pocketpaw_ee.cloud.meetings.events",
+    "pocketpaw_ee.cloud.mandates.events",
+)
+_domain_events_loaded = False
+
+
+def _load_domain_events() -> None:
+    global _domain_events_loaded
+    if _domain_events_loaded:
+        return
+    _domain_events_loaded = True
+    import importlib
+
+    for name in _DOMAIN_EVENT_MODULES:
+        importlib.import_module(name)
+
+
+@dataclass
+class Event:
+    type: str = ""
+    data: dict = field(default_factory=dict)
+    ts: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        cls_type = getattr(type(self), "EVENT_TYPE", "")
+        if cls_type:
+            self.type = cls_type
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        # Register subclasses by their EVENT_TYPE discriminator so a
+        # cross-process consumer can reconstruct the original class from a
+        # JSON envelope. Subclasses without EVENT_TYPE (intermediate bases)
+        # are skipped.
+        evt_type = getattr(cls, "EVENT_TYPE", "")
+        if evt_type:
+            EVENT_REGISTRY[evt_type] = cls
+
+
+def rebuild_event(payload: dict) -> Event:
+    """Reconstruct an ``Event`` (or matching subclass) from a JSON envelope.
+
+    Unknown ``type`` values fall back to the base ``Event`` so a newer worker
+    shipping a fresh event type doesn't crash an older web consumer. Missing
+    ``ts`` defaults to now.
+    """
+    evt_type = str(payload.get("type") or "")
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        raise TypeError(f"event payload `data` must be a dict, got {type(data).__name__}")
+    ts_raw = payload.get("ts")
+    if ts_raw is None:
+        ts = datetime.now(UTC)
+    else:
+        ts = datetime.fromisoformat(str(ts_raw))
+    if evt_type not in EVENT_REGISTRY:
+        _load_domain_events()
+    cls = EVENT_REGISTRY.get(evt_type, Event)
+    inst = cls(data=data, ts=ts)
+    # Subclasses overwrite `type` in __post_init__; the base Event needs the
+    # explicit value so listeners that match on the string still work.
+    if cls is Event:
+        inst.type = evt_type
+    return inst
+
+
+# Workspace
+@dataclass
+class WorkspaceUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace.updated"
+
+
+@dataclass
+class WorkspaceDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace.deleted"
+
+
+@dataclass
+class WorkspaceMemberAdded(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace.member_added"
+
+
+@dataclass
+class WorkspaceMemberRemoved(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace.member_removed"
+
+
+@dataclass
+class WorkspaceMemberRole(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace.member_role"
+
+
+@dataclass
+class WorkspaceInviteCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace.invite.created"
+
+
+@dataclass
+class WorkspaceInviteAccepted(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace.invite.accepted"
+
+
+@dataclass
+class WorkspaceInviteRevoked(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace.invite.revoked"
+
+
+# Groups
+@dataclass
+class GroupCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "group.created"
+
+
+@dataclass
+class GroupUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "group.updated"
+
+
+@dataclass
+class GroupDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "group.deleted"
+
+
+@dataclass
+class GroupMemberAdded(Event):
+    EVENT_TYPE: ClassVar[str] = "group.member_added"
+
+
+@dataclass
+class GroupJoined(Event):
+    """Full group payload delivered only to a newly-added user.
+
+    Lets the recipient's sidebar insert the room without a manual refresh.
+    Existing members don't need this (they already have the room); they
+    receive ``GroupMemberAdded`` instead.
+    """
+
+    EVENT_TYPE: ClassVar[str] = "group.joined"
+
+
+@dataclass
+class GroupMemberRemoved(Event):
+    EVENT_TYPE: ClassVar[str] = "group.member_removed"
+
+
+@dataclass
+class GroupMemberRole(Event):
+    EVENT_TYPE: ClassVar[str] = "group.member_role"
+
+
+@dataclass
+class GroupAgentAdded(Event):
+    EVENT_TYPE: ClassVar[str] = "group.agent_added"
+
+
+@dataclass
+class GroupAgentRemoved(Event):
+    EVENT_TYPE: ClassVar[str] = "group.agent_removed"
+
+
+@dataclass
+class GroupAgentUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "group.agent_updated"
+
+
+@dataclass
+class GroupPinned(Event):
+    EVENT_TYPE: ClassVar[str] = "group.pinned"
+
+
+@dataclass
+class GroupUnpinned(Event):
+    EVENT_TYPE: ClassVar[str] = "group.unpinned"
+
+
+@dataclass
+class GroupUnreadDelta(Event):
+    EVENT_TYPE: ClassVar[str] = "group.unread_delta"
+
+
+# Messages
+@dataclass
+class MessageNew(Event):
+    EVENT_TYPE: ClassVar[str] = "message.new"
+
+
+@dataclass
+class MessageSent(Event):
+    EVENT_TYPE: ClassVar[str] = "message.sent"
+
+
+@dataclass
+class ThreadCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "thread.created"
+
+
+@dataclass
+class ThreadReply(Event):
+    EVENT_TYPE: ClassVar[str] = "thread.reply"
+
+
+@dataclass
+class ThreadClosed(Event):
+    EVENT_TYPE: ClassVar[str] = "thread.closed"
+
+
+@dataclass
+class MessageEdited(Event):
+    EVENT_TYPE: ClassVar[str] = "message.edited"
+
+
+@dataclass
+class MessageDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "message.deleted"
+
+
+@dataclass
+class MessageReactionAdded(Event):
+    EVENT_TYPE: ClassVar[str] = "message.reaction.added"
+
+
+@dataclass
+class MessageReactionRemoved(Event):
+    EVENT_TYPE: ClassVar[str] = "message.reaction.removed"
+
+
+@dataclass
+class MessageReaction(Event):
+    EVENT_TYPE: ClassVar[str] = "message.reaction"
+
+
+@dataclass
+class MessageRead(Event):
+    EVENT_TYPE: ClassVar[str] = "message.read"
+
+
+@dataclass
+class MessageUiStateUpdated(Event):
+    """Emitted when a message's inline-Ripple UI state is patched.
+
+    Carries ``message_id``, ``spec_id``, ``state``, plus the routing keys
+    needed by the audience resolver (``group_id`` for group messages,
+    ``user_id`` for session/pocket messages).
+    """
+
+    EVENT_TYPE: ClassVar[str] = "message.ui_state.updated"
+
+
+@dataclass
+class UnreadUpdate(Event):
+    EVENT_TYPE: ClassVar[str] = "unread.update"
+
+
+# Presence
+@dataclass
+class PresenceOnline(Event):
+    EVENT_TYPE: ClassVar[str] = "presence.online"
+
+
+@dataclass
+class PresenceOffline(Event):
+    EVENT_TYPE: ClassVar[str] = "presence.offline"
+
+
+@dataclass
+class TypingStart(Event):
+    EVENT_TYPE: ClassVar[str] = "typing.start"
+
+
+@dataclass
+class TypingStop(Event):
+    EVENT_TYPE: ClassVar[str] = "typing.stop"
+
+
+# Files
+@dataclass
+class FileReady(Event):
+    EVENT_TYPE: ClassVar[str] = "file.ready"
+
+
+@dataclass
+class FileDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "file.deleted"
+
+
+# Sessions
+@dataclass
+class SessionCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "session.created"
+
+
+@dataclass
+class SessionUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "session.updated"
+
+
+@dataclass
+class SessionDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "session.deleted"
+
+
+# Agent
+@dataclass
+class AgentThinking(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.thinking"
+
+
+@dataclass
+class AgentToolStart(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.tool_start"
+
+
+@dataclass
+class AgentToolResult(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.tool_result"
+
+
+@dataclass
+class AgentError(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.error"
+
+
+@dataclass
+class AgentStreamStart(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.stream_start"
+
+
+@dataclass
+class AgentStreamChunk(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.stream_chunk"
+
+
+@dataclass
+class AgentStreamEnd(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.stream_end"
+
+
+@dataclass
+class AgentToolUse(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.tool_use"
+
+
+@dataclass
+class AgentPlanUpdated(Event):
+    # HTN-5: the agent's ordered plan, normalized out of whichever plan tool the
+    # backend exposes (``write_plan`` today; ``write_todos`` / ``TodoWrite`` in
+    # HTN-6). Payload: ``{group_id, agent_id, agent_name, run_id, seq,
+    # items: [{id, content, status}], progress: {completed, total}}`` with
+    # status in ``pending|in_progress|completed|cancelled``.
+    #
+    # WHOLE-LIST REPLACEMENT: every emit carries the complete ordered plan, so
+    # a receiver replaces its state and never merges — inherited from
+    # ``write_plan``, which overwrites its own state on each call. ``seq`` is a
+    # per-run monotonic counter so a reordered delivery cannot let a stale plan
+    # overwrite a fresh one.
+    EVENT_TYPE: ClassVar[str] = "agent.plan_updated"
+
+
+# Agents (entity CRUD — distinct from agent.* runtime stream events above)
+@dataclass
+class AgentCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.created"
+
+
+@dataclass
+class AgentUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.updated"
+
+
+@dataclass
+class AgentDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.deleted"
+
+
+@dataclass
+class AgentDisabled(Event):
+    # Soft-disable (AW-4): the agent is revoked everywhere at once — the run
+    # pool refuses to resolve it on any path until re-enabled. Mirrors
+    # AgentDeleted's payload shape so audit/analytics listeners can key off it.
+    EVENT_TYPE: ClassVar[str] = "agent.disabled"
+
+
+@dataclass
+class AgentEnabled(Event):
+    # Re-enable (AW-4): clears the soft-disable flag; the pool resolves the
+    # agent again on the next get() (the disable already invalidated the cache).
+    EVENT_TYPE: ClassVar[str] = "agent.enabled"
+
+
+@dataclass
+class AgentScopeUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.scope_updated"
+
+
+# Pockets
+@dataclass
+class PocketCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.created"
+
+
+@dataclass
+class PocketUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.updated"
+
+
+@dataclass
+class PocketDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.deleted"
+
+
+# Pocket outcomes — RFC 05 M2b.2. Emitted AFTER a write action's
+# `run_action` returns `ok:true` AND the binding declared a non-null
+# `outcome`. A write completing is an *output*; a named `outcome` is the
+# business event the operator cares about ("renewal_completed"). The
+# outcomes ledger subscriber appends each event to a workspace-scoped
+# JSONL file so `GET /outcomes` can count them.
+#
+# Payload (`data`):
+#   outcome             — the binding's `outcome` name (str)
+#   pocket_id           — the pocket the write ran on
+#   workspace_id        — tenancy
+#   action              — the action name from `rippleSpec.actions`
+#   actor               — the user who triggered (direct) or approved
+#                          (gated) the write
+#   via_instinct        — True when the write was routed through Instinct
+#   instinct_action_id  — the Instinct Action id, or None for a direct write
+#   occurred_at         — ISO-8601 UTC timestamp
+#   outcome_value       — reserved for Layer 4 billing; always None here
+#   outcome_unit        — reserved for Layer 4 billing; always None here
+@dataclass
+class PocketOutcomeEvent(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.outcome"
+
+
+# Workspace jobs — pp#1459 (feat/workspace-jobs). A pocket job is a named,
+# server-side async callable run in the ARQ worker under the synthetic
+# `system:workspace_job` identity. `WorkspaceJobQueued` is emitted at dispatch
+# (the action route's kind=="job" branch); `WorkspaceJobUpdated` is emitted on
+# a terminal transition (done / failed) by the worker. Both ride the same
+# xproc bridge as `PocketUpdated` — worker-side emits route through
+# `publish_bus_envelope` to the web bus.
+#
+# Payload (`data`) for both:
+#   job_id, workspace_id, pocket_id, action, job_name
+#   status — present on WorkspaceJobUpdated only (done | failed)
+@dataclass
+class WorkspaceJobQueued(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace_job.queued"
+
+
+@dataclass
+class WorkspaceJobUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace_job.updated"
+
+
+# Credit ledger (BC-1, the Ledger primitive). Emitted by
+# ``credits.service`` after EVERY successful grant / debit on a workspace's
+# credit wallet (EE cloud rule 9 — emit on every write). A no-op idempotent
+# replay does NOT re-emit (the movement was already applied + emitted on the
+# first call). Listeners (billing dashboard, low-balance alerts, usage meter)
+# key off this single event per movement.
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id      — tenancy.
+#   kind              — genesis | grant | spend | transfer.
+#   amount_delta      — signed WHOLE credits this movement applied (+grant /
+#                       -spend), truncated for display.
+#   balance_after     — the wallet balance in whole credits once it landed.
+#   amount_delta_micro / balance_after_micro — the same two exactly, in
+#                       micro-credits (1_000_000 == 1 credit). A metered spend is
+#                       routinely a fraction of a credit, so the whole-credit pair
+#                       above can both read 0 on a real charge; anything doing
+#                       arithmetic must use these.
+#   cause             — business reason (top_up | compute_spend | promo | ...).
+#   idempotency_key   — the caller's exactly-once key for this movement.
+@dataclass
+class CreditMovement(Event):
+    EVENT_TYPE: ClassVar[str] = "credits.movement"
+
+
+# Billing — top-up payment captured (BC-2, the Gateway primitive). Emitted by
+# ``billing.service`` after a VERIFIED ``payment.succeeded`` webhook drove a
+# credit grant. data: {workspace_id, gateway, gateway_ref, event_id,
+# amount_credits, currency}. Fires once per delivery (a replayed webhook is a
+# no-op grant, so it does NOT re-emit).
+@dataclass
+class BillingTopupCaptured(Event):
+    EVENT_TYPE: ClassVar[str] = "billing.topup.captured"
+
+
+# Billing — subscription renewal grant (BC-7, the Subscription primitive).
+# Emitted by ``billing.service`` after a VERIFIED ``subscription.active`` /
+# ``subscription.renewed`` webhook drove a credit grant of the tier's monthly
+# allotment. The grant is ADDITIVE (unused credits roll over), keyed on the
+# per-renewal webhook event id. data: {workspace_id, gateway, event_id,
+# plan_key, subscription_id, amount_credits, balance_after}. Fires once per
+# delivery (a replayed renewal is a no-op grant, so it does NOT re-emit).
+@dataclass
+class BillingSubscriptionGranted(Event):
+    EVENT_TYPE: ClassVar[str] = "billing.subscription.granted"
+
+
+# Sites — a pocket was published as a live Paw Site on a per-site annual plan
+# (BC-9, the per-site plan layer). Emitted by ``sites.service.publish_pocket``
+# after the Site doc is inserted/upserted with its ``plan_tier`` stamped. Fires
+# once per publish. data: {workspace_id, site_id, pocket_id, owner, plan_tier}.
+# Listeners (billing dashboard, site-plan analytics, BC-10 Cloudflare
+# provisioner) key off this to react to a new published site at a tier.
+@dataclass
+class SitePublished(Event):
+    EVENT_TYPE: ClassVar[str] = "site.published"
+
+
+# Sites — a DRAFT site was created (fix/sites-draft-realtime). Emitted by
+# ``sites.service.create_draft_site`` after the Site doc is inserted, on the FRESH
+# mint only (the mint is idempotent — a repeat create, or one against an
+# already-live doc, returns the existing doc and emits nothing). data:
+# {workspace_id, site_id, pocket_id, owner, deployed} — ``deployed`` is always
+# False here, and rides along so a listener can tell a draft from a publish
+# without a second read.
+#
+# WHY A SECOND SITE EVENT. ``site.published`` used to be the only one, so the
+# /sites gallery had no way to hear that a draft had appeared: draft-first create
+# (pocketpaw#1744) mints the Site doc long before any publish, and the only other
+# signal is the ``pocket_created`` SSE, which is per-RUN and therefore reaches
+# just the one tab that started the create. Every other open gallery — a second
+# tab, a teammate, the /chat surface, a zip/url import — showed the new draft only
+# after a manual Refresh. This is the draft half of the pair, routed to the same
+# workspace audience for the same reason.
+@dataclass
+class SiteCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "site.created"
+
+
+# Sites: per-site secrets (``sites.site_secrets``). NAMES ONLY, never a value.
+# ``site.secret_requested``: an agent (or user) asked the owner for a secret; the
+# builder shows the secure input card. ``site.secret_updated``: a secret was set or
+# deleted (``status`` is "set" or "deleted"). data: {workspace_id, pocket_id, name,
+# status, description, requested_by, owner, user_id}. Routed to the pocket owner and
+# the acting user only (see audience.py), not the whole workspace.
+@dataclass
+class SiteSecretRequested(Event):
+    EVENT_TYPE: ClassVar[str] = "site.secret_requested"
+
+
+@dataclass
+class SiteSecretUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "site.secret_updated"
+
+
+# Sites integrations (``pocketpaw_ee.integrations``). A site's binding to a provider
+# changed: linked, unlinked, connected, reconnected, or its grant went stale.
+# data: {workspace_id, pocket_id, provider, status, owner, user_id}. ``status`` is
+# the SiteIntegrationView status, or "unlinked". Never a token. Routed like the
+# secret events: the pocket owner and the acting user.
+@dataclass
+class SiteIntegrationChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "site.integration_changed"
+
+
+# Tasks (Mission Control work-item primitive)
+@dataclass
+class TaskProposed(Event):
+    EVENT_TYPE: ClassVar[str] = "task.proposed"
+
+
+@dataclass
+class TaskUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "task.updated"
+
+
+@dataclass
+class TaskClaimed(Event):
+    EVENT_TYPE: ClassVar[str] = "task.claimed"
+
+
+@dataclass
+class TaskResolved(Event):
+    EVENT_TYPE: ClassVar[str] = "task.resolved"
+
+
+@dataclass
+class TaskBlocked(Event):
+    EVENT_TYPE: ClassVar[str] = "task.blocked"
+
+
+# Notifications
+@dataclass
+class NotificationNew(Event):
+    EVENT_TYPE: ClassVar[str] = "notification.new"
+
+
+@dataclass
+class NotificationRead(Event):
+    EVENT_TYPE: ClassVar[str] = "notification.read"
+
+
+@dataclass
+class NotificationCleared(Event):
+    EVENT_TYPE: ClassVar[str] = "notification.cleared"
+
+
+@dataclass
+class NotificationDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "notification.deleted"
+
+
+# Cycles — Mission Control time-boxed work windows.
+# The daily-snapshot job (``ee.cloud.cycles.snapshot_job``) emits
+# ``CycleSnapshotted`` after appending a new point to a cycle's daily
+# series; the frontend's burnup chart subscribes and patches the active
+# cycle without a full refetch.
+@dataclass
+class CycleCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "cycle.created"
+
+
+@dataclass
+class CycleUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "cycle.updated"
+
+
+@dataclass
+class CycleClosed(Event):
+    EVENT_TYPE: ClassVar[str] = "cycle.closed"
+
+
+@dataclass
+class CycleSnapshotted(Event):
+    EVENT_TYPE: ClassVar[str] = "cycle.snapshotted"
+
+
+# Projects — Linear-style scoping primitive for Mission Control.
+# Pocket, Task, and Cycle entities carry an optional ``project_id``
+# pointer; mutating a project doesn't cascade-delete its children, it
+# just soft-unassigns them. Listeners (search index, dashboards) use
+# these events to refresh project-grouped views.
+@dataclass
+class ProjectCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "project.created"
+
+
+@dataclass
+class ProjectUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "project.updated"
+
+
+@dataclass
+class ProjectArchived(Event):
+    EVENT_TYPE: ClassVar[str] = "project.archived"
+
+
+@dataclass
+class ProjectDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "project.deleted"
+
+
+# Planner — fires after ``ee.cloud.planner.service.agent_plan_project``
+# finishes materializing the OSS PlannerResult into cloud primitives
+# (PRD file, plan.json, goal.md, tasks, agent-gap list). Listeners use
+# it to refresh the Mission Control Plan tab without polling.
+@dataclass
+class PlanGenerated(Event):
+    EVENT_TYPE: ClassVar[str] = "plan.generated"
+
+
+# Planner — fires after ``ee.cloud.planner.service.agent_resolve_gap``
+# reassigns the human-fallback tasks for a previously-missing agent spec
+# to a newly-created cloud Agent. Listeners refresh the Plan tab's
+# agent-gap card (removing the resolved spec) and the Mission Control
+# feed (rows whose assignee changed).
+@dataclass
+class PlanGapResolved(Event):
+    EVENT_TYPE: ClassVar[str] = "plan.gap_resolved"
+
+
+# Calls — LiveKit group call lifecycle
+@dataclass
+class CallStarted(Event):
+    EVENT_TYPE: ClassVar[str] = "call.started"
+
+
+@dataclass
+class CallEnded(Event):
+    EVENT_TYPE: ClassVar[str] = "call.ended"
+
+
+@dataclass
+class CallParticipantJoined(Event):
+    EVENT_TYPE: ClassVar[str] = "call.participant_joined"
+
+
+@dataclass
+class CallParticipantLeft(Event):
+    EVENT_TYPE: ClassVar[str] = "call.participant_left"
+
+
+# Ask Paw: the in-call assistant's state for one question (listening, thinking,
+# speaking, idle, error). Emitted by ``livekit/assistant.py`` and the Ask Paw
+# routes; payload {group_id, state, ask_id, asked_by, asked_by_name, question,
+# answer, error}.
+@dataclass
+class CallAssistantState(Event):
+    EVENT_TYPE: ClassVar[str] = "call.assistant_state"
+
+
+# Meetings — the realtime ``meeting.updated`` the meetings service emits.
+# Every other ``meeting.*`` event is owned by ``meetings/events.py``.
+@dataclass
+class MeetingUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "meeting.updated"
+
+
+# Foresight — RFC 08 scenario runs. ``ForesightRunCreated`` fires when a
+# scenario run document is first inserted (status="queued"); the engine
+# then ticks the run (in PR 7 it stays synchronous, in v1.0 it fans to a
+# background task) and fires either ``ForesightRunCompleted`` once the
+# run lands a wire-dict ``result`` or ``ForesightRunFailed`` if the
+# engine raises. Listeners use these to refresh the UI rail's Live +
+# Results panels (RFC §11.3 / §11.4) and, in v1.0, to seed the
+# calibration loop's prediction buffer (RFC §9.1).
+@dataclass
+class ForesightRunCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.run.created"
+
+
+@dataclass
+class ForesightRunCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.run.completed"
+
+
+@dataclass
+class ForesightRunFailed(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.run.failed"
+
+
+# Foresight backtests — RFC 08 §10 + §13.1 gate 7. A backtest is the
+# retroactive variant of a scenario run: it scores projected outcomes
+# against known actual outcomes pulled from the customer's historical
+# data and produces an accuracy summary that gates forward sims.
+# ``ForesightBacktestCreated`` fires when the backtest doc is inserted
+# (status="queued"); ``ForesightBacktestCompleted`` fires once the
+# aggregator's gate decision lands; ``ForesightBacktestFailed`` fires
+# when the engine raises. Listeners use these to refresh the UI's
+# Onboarding + Aggregate panels (RFC §10 + §11.4) and, when the
+# gate flips from closed to open, fire the
+# ``ForesightOnboardingUnlocked`` companion event so the chat agent's
+# onboarding skill can move the customer to the Scenarios panel.
+@dataclass
+class ForesightBacktestCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.backtest.created"
+
+
+@dataclass
+class ForesightBacktestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.backtest.completed"
+
+
+@dataclass
+class ForesightBacktestFailed(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.backtest.failed"
+
+
+@dataclass
+class ForesightOnboardingUnlocked(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.onboarding.unlocked"
+
+
+# Foresight per-workspace configuration — RFC 08 v1.0 PR 10. Fires when
+# an admin tightens the workspace's onboarding gate threshold via the
+# PUT /foresight/workspace/threshold endpoint, or resets it back to the
+# global default. Listeners can refresh the Aggregate / Onboarding panels
+# in the UI without polling the GET endpoint.
+@dataclass
+class ForesightThresholdUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.threshold.updated"
+
+
+# Foresight insights-synthesizer config — RFC 08 v1.0 (LLM insights PR).
+# Fires when an admin flips the workspace's synthesizer choice between
+# "pattern" (the v0.5 deterministic synthesizer) and "llm" (the v1.0
+# LLM-driven synthesizer with a hard fallback). Listeners can clear
+# any per-workspace LLM insight cache and refresh the Insights panel
+# without polling.
+@dataclass
+class ForesightInsightsConfigUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.insights_config.updated"
+
+
+# Foresight per-anchor projection fanout — RFC 08 §7.7 + PR 5. Fires
+# once per (anchor × tick) bucket as the engine ticks the run forward;
+# the UI's Live panel consumes these to render the projection timeline
+# without polling the GET /runs/{id}/projected-decisions endpoint.
+# v1.0's calibration loop will subscribe so each projection lands in
+# the prediction buffer (RFC §9.1) as it is minted, not at the end of
+# the run.
+@dataclass
+class ForesightProjectedDecisionEmitted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.projected_decision.emitted"
+
+
+# Foresight → Instinct approval loop — RFC 08 §8. Fires when a
+# ProjectedDecision opts into the Instinct queue (via the scenario's
+# ``route_to_instinct=true`` flag) and the cloud-side fan-out creates
+# one Instinct ``Action`` row. The proposal is EVIDENCE — the Instinct
+# policy that already gates the underlying real decision still owns
+# the predicate; approving the proposal acknowledges the forecast but
+# does NOT trigger any executing side-effect. Listeners use this event
+# to refresh the Tray feed without polling.
+@dataclass
+class ForesightInstinctProposalCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.instinct_proposal.created"
+
+
+# Foresight workspace-scoped custom scenarios — RFC 08 v1.0 wave 3.
+# Fires when an operator saves, edits, or deletes a custom scenario
+# YAML via the ``/api/v1/foresight/scenarios/custom`` surface. The
+# Scenarios panel uses these to refresh its list without polling; the
+# audit log subscribes for create/update/delete records.
+@dataclass
+class ForesightCustomScenarioCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.custom_scenario.created"
+
+
+@dataclass
+class ForesightCustomScenarioUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.custom_scenario.updated"
+
+
+@dataclass
+class ForesightCustomScenarioDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.custom_scenario.deleted"
+
+
+# Composio — per-user OAuth integrations (Gmail, Slack, GitHub, …)
+# verified via per-toolkit identity probes. ``ComposioConnectionVerified``
+# fires when a probe succeeds and the stored identity matches (or first
+# time storing). ``ComposioConnectionMismatch`` fires when a fresh probe
+# returns a different external identity than the stored one — surfaces
+# to the chat as a "confirm this is what you intended" prompt rather
+# than silently overwriting.
+@dataclass
+class ComposioConnectionVerified(Event):
+    EVENT_TYPE: ClassVar[str] = "composio.connection.verified"
+
+
+@dataclass
+class ComposioConnectionMismatch(Event):
+    EVENT_TYPE: ClassVar[str] = "composio.connection.mismatch"
+
+
+# Connectors — per-workspace adapter state (enable / disable / config / sync).
+# Distinct from ``ComposioConnectionVerified`` above: those events describe a
+# per-user OAuth identity probe; these describe workspace-scoped adapter rows
+# in the WorkspaceConnector collection. Audience fans out to every member of
+# ``workspace_id`` so the connectors UI updates live in every open tab.
+@dataclass
+class ConnectorEnabled(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.enabled"
+
+
+@dataclass
+class ConnectorDisabled(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.disabled"
+
+
+@dataclass
+class ConnectorConfigUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.config_updated"
+
+
+@dataclass
+class ConnectorSyncRecorded(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.sync_recorded"
+
+
+# Member ingest — VIP Onboarding Phase B. Fired when the per-user ingest
+# worker finishes a member's Gmail/Calendar → private-KB sync (backfill or
+# incremental). data: workspace_id, member_id, scope, mode, status, documents.
+@dataclass
+class MemberIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.completed"
+
+
+# member_ingest.purged — fan-out when a member's Phase B per-user data is
+# deleted (member disconnected their accounts, or was offboarded from the
+# workspace). data: workspace_id, member_id, scope, status, and the per-store
+# delete counts (kb_cleared, tokens_deleted, connectors_deleted,
+# ingest_state_deleted). Downstream consumers (soul memory, the member's home
+# surface, search index) react by dropping anything keyed on that scope.
+@dataclass
+class MemberDataPurged(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.purged"
+
+
+# Fabric ingest — generic Firestore→Fabric mirror worker. Fired when the
+# per-source ingest worker finishes mirroring one Firestore collection into
+# Fabric objects (backfill or incremental). data: workspace_id, source_id,
+# object_type_id, mode, status, objects_ingested, cursor.
+@dataclass
+class FabricIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "fabric_ingest.completed"
+
+
+# Calls — call.notes_posted. The lifecycle events (call.started / call.ended)
+# are defined above with the rest of the LiveKit group-call types; this is the
+# post-call notes fan-out, audience = the group's members.
+@dataclass
+class CallNotesPosted(Event):
+    EVENT_TYPE: ClassVar[str] = "call.notes_posted"
+
+
+# Activity
+@dataclass
+class ActivityLogged(Event):
+    EVENT_TYPE: ClassVar[str] = "activity.logged"
+
+
+# Instinct approval queue (RFC 03 v2 / Wave 3a). Fires on every
+# ``instinct_approvals.service`` state-mutating call. Created on the
+# initial gate-result persistence; approved / rejected on operator
+# decision. ``data`` carries the approval id + workspace + pocket
+# context so a downstream WS fan-out can target the right operator
+# inbox without re-reading the doc.
+@dataclass
+class InstinctApprovalCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.created"
+
+
+@dataclass
+class InstinctApprovalApproved(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.approved"
+
+
+@dataclass
+class InstinctApprovalRejected(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.rejected"
+
+
+# Layered/learning Instinct gate (2026-06-18 design / T3). Emitted by
+# ``instinct_approvals.service.auto_approve`` when the AUTO lane decides a
+# write WITHOUT a human — a row is created already-decided
+# (status="auto_approved"). Distinct from ``InstinctApprovalApproved``,
+# which fires only on a human's approve action; this one always carries
+# ``actor="system:triager"`` so the UI renders it with a robot icon and the
+# human-pending tray (which filters on status="pending") never shows it.
+# ``data`` carries the approval id + workspace/pocket context plus
+# ``trust_score``, ``triager_reasoning`` and ``lane`` for the audit trail.
+@dataclass
+class InstinctApprovalAutoApproved(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.auto_approved"
+
+
+# Bulk action dispatch (RFC 03 v2 / Wave 3b). Emitted by
+# ``pockets.service.dispatch_bulk_action`` after a fan-out call resolves —
+# one event per dispatch, regardless of how many rows were processed.
+# ``data`` carries: ``workspace_id``, ``pocket_id``, ``action_name``,
+# ``total_rows``, ``executed`` (count of EXECUTE / NOTIFY_AND_EXECUTE
+# rows fired), ``blocked`` (count of BLOCK rows), ``approval_needed``
+# (count of rows that escalated into the batch approval), and an
+# optional ``batch_approval_id`` (str | None) — set when ``approval_needed``
+# is non-zero.
+@dataclass
+class BulkActionDispatched(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.bulk_action.dispatched"
+
+
+# Discovered governed rules (SZD slice-2 / S2-R1). Emitted by
+# ``rules.service`` on every state-mutating call — ``created`` when an approved
+# rule lands, ``archived`` when one is retired/superseded. ``data`` carries the
+# rule id + workspace + owner so a downstream WS fan-out can refresh the
+# workspace's rule list without re-reading the doc.
+@dataclass
+class RuleCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.rule.created"
+
+
+@dataclass
+class RuleArchived(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.rule.archived"
+
+
+# Site templates (``site_templates.service``). Payload is the template's meta as
+# the recipient sees it, plus ``workspace_id`` and ``user_id`` (the one recipient:
+# the owner, or for ``used`` the caller); ``SiteTemplateUsed`` adds the new
+# ``pocket_id``. ``updated`` covers a metadata edit and a report-triggered hide.
+# Never the snapshot: it carries the site's source.
+@dataclass
+class SiteTemplateSaved(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.saved"
+
+
+@dataclass
+class SiteTemplateDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.deleted"
+
+
+@dataclass
+class SiteTemplateUsed(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.used"
+
+
+@dataclass
+class SiteTemplateUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "site_template.updated"
+
+
+# Studio templates (``studio_templates.service``). Payload is the template's wire
+# shape for its owner plus ``workspace_id`` and ``user_id`` (the one recipient).
+# ``updated`` covers a metadata edit and a Discover hide / unhide.
+@dataclass
+class StudioTemplateSaved(Event):
+    EVENT_TYPE: ClassVar[str] = "studio_template.saved"
+
+
+@dataclass
+class StudioTemplateUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "studio_template.updated"
+
+
+@dataclass
+class StudioTemplateDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "studio_template.deleted"
+
+
+# Discover index (``discover.service`` / ``service_admin``). Payload carries
+# ``listing_id``, ``source`` and ``source_id``; ``used`` adds ``workspace_id`` and
+# ``user_id`` (the caller), ``reported`` the reporter, ``moderated`` the new
+# ``featured`` / ``hidden``. No audience: listings are public, so none of these
+# fan out to sockets; they exist for in-process listeners and the audit trail.
+@dataclass
+class DiscoverListingUpserted(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.upserted"
+
+
+@dataclass
+class DiscoverListingRemoved(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.removed"
+
+
+@dataclass
+class DiscoverListingUsed(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.used"
+
+
+@dataclass
+class DiscoverListingReported(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.reported"
+
+
+@dataclass
+class DiscoverListingModerated(Event):
+    EVENT_TYPE: ClassVar[str] = "discover.listing.moderated"
+
+
+# Outcome event emission (RFC 03 v2 / Wave 3c). Fires AFTER a write
+# action's ``run_action`` returns ``ok:true`` on the HTTP 2xx success
+# path AND the action's ``outcomes_emitted[]`` declares one or more
+# names. One event per declared name (bulk emits per row). Feeds the
+# downstream Outcomes meter (out of scope for Wave 3c — bus emit is
+# the seam).
+#
+# Payload (``data``):
+#   event_name             — the declared outcome name (str), one of
+#                            ``actions[].outcomes_emitted``.
+#   workspace_id           — tenancy.
+#   pocket_id              — the pocket the action ran on.
+#   action_name            — the action that fired.
+#   row_id                 — the stable row identifier (empty when the
+#                            action does not bind to a row, e.g. a
+#                            page-level action).
+#   row_context_snapshot   — the row dict at emit time. Captures
+#                            payload state for downstream audit.
+#   emitted_at             — ISO-8601 UTC timestamp.
+#   template_name          — pocket template name (provenance for the
+#                            outcomes catalog).
+#   template_version       — pocket template version.
+#
+# Distinct from ``PocketOutcomeEvent`` (M2b.2): the M2b.2 event is
+# binding-driven (single ``binding.outcome`` field), this event is
+# template-driven (per-action ``outcomes_emitted[]`` list — multiple
+# emits per action allowed). Both coexist.
+@dataclass
+class OutcomeEmitted(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.outcome_emitted"
+
+
+# Temporal sweep completion event (RFC 03 v2 Wave 3d).
+# Fired by ``temporal_sweeps.service.upsert_state`` once per (workspace,
+# pocket) sweep, with the sweep's tally: edges_fired (how many rising-
+# edge transitions dispatched), blocked (how many Instinct blocked),
+# escalated (how many escalated to approval), errors (per-row eval
+# failures), and the wall-clock duration. Downstream listeners (audit,
+# dashboards) key off this single event instead of N per-row events,
+# the same way ``BulkActionDispatched`` is one event per dispatch.
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id        — tenancy.
+#   pocket_id           — pocket whose temporal triggers were swept.
+#   edges_fired         — count of rising edges that dispatched.
+#   blocked             — count of edges whose Instinct gate returned
+#                         BLOCK (action_executor never called).
+#   escalated           — count of edges whose Instinct gate returned
+#                         ESCALATE_APPROVAL (one InstinctApproval row
+#                         persisted per row).
+#   errors              — count of per-row CEL eval failures.
+#   sweep_duration_ms   — wall-clock ms the sweep ran for. Forensic /
+#                         dashboard signal; long sweeps deserve a look.
+@dataclass
+class TemporalSweepCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.temporal_sweep_completed"
+
+
+# Belt & Pulley station run lifecycle (feat/belt-console-backend, SC-2).
+# Fired on every Belt code-change run state transition so the /belt console
+# refreshes a run's status / stage / PR link WITHOUT polling. The transitions
+# happen ASYNCHRONOUSLY relative to the chat turn — propose lands during the
+# turn, but approve (in the Tray) and the executed / failed terminals fire long
+# after the turn's per-session SSE drain is gone — so this MUST ride the
+# workspace realtime bus (the same path Tray / Mission Control events take) to
+# reach the page. Workspace-scoped: the audience resolver fans it out to every
+# workspace member (the /belt console is a per-workspace view).
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id  — tenancy (drives the workspace fan-out).
+#   action_id     — the Instinct code-change Action id (the run id).
+#   status        — queued | running | proposed | approved | rejected | landed
+#                   | failed.
+#   stage         — station (queued) | orient | develop | check | fix | review
+#                   (running) | gate | done.
+#   pr_url        — the opened PR url (only on the landed terminal); omitted
+#                   otherwise so the wire stays minimal.
+@dataclass
+class BeltRunUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "belt_run_updated"
+
+
+# Web Cursor sandbox registry (WC-1, feat/websandbox-registry). Emitted by
+# ``websandbox.service`` on every state-mutating call per cloud rule 9 (emit on
+# every write). ``WebSandboxRegistered`` fires when a sandbox row is created /
+# re-registered for a (workspace, user, repo); ``WebSandboxStatusChanged`` fires
+# on a lifecycle transition (pending -> opening -> ready -> stopped -> reaped) or
+# when the Daytona ``sandbox_id`` is bound. ``data`` carries the row id +
+# workspace/user/repo + status so a downstream WS fan-out can refresh the IDE
+# shell without re-reading the doc.
+@dataclass
+class WebSandboxRegistered(Event):
+    EVENT_TYPE: ClassVar[str] = "websandbox.registered"
+
+
+@dataclass
+class WebSandboxStatusChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "websandbox.status_changed"
+
+
+# Code Mode durable-project registry (CM-2a, feat/code-mode). The DURABLE half of
+# Code Mode's two-lifecycle model: a CodeProject outlives any single ephemeral
+# Daytona sandbox. ``CodeProjectCreated`` fires when a project is first registered
+# for a (workspace, user, provider, repo); ``CodeProjectOpened`` fires when a
+# project is opened and bound to a live sandbox (reused or freshly provisioned).
+# ``data`` carries the project id + workspace/user/repo + the bound sandbox row id
+# so a downstream fan-out can refresh the projects grid without re-reading the doc.
+@dataclass
+class CodeProjectCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.created"
+
+
+@dataclass
+class CodeProjectOpened(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.opened"
+
+
+# ``CodeProjectRenamed`` fires when a project's display name changes; ``data``
+# carries the project id + workspace/user + the new name. ``CodeProjectDeleted``
+# fires when a project is removed (and its bound sandbox torn down); ``data``
+# carries the project id + workspace/user so a projects-grid fan-out can drop the
+# card without a re-read.
+@dataclass
+class CodeProjectRenamed(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.renamed"
+
+
+@dataclass
+class CodeProjectDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "codeproject.deleted"
+
+
+# Code Mode GitHub connect (CM-3, feat/code-mode). Fires when a user's GitHub App
+# installation is first bound to a (workspace, user) — the durable "this user can
+# open private repos" signal a connected-state UI reacts to. ``data`` carries the
+# connection id + workspace/user/provider + installation id.
+@dataclass
+class CodeConnectionCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "codeconnection.created"
+
+
+# /ship managed deploys (SHIP-3, feat/ship-3-cloud-entity). Emitted by
+# ``ship.service`` and the arq deploy job on every state-mutating call per cloud
+# rule 9 (emit on every write). ``ShipBoxCreated`` fires when a provision is
+# accepted; ``ShipAppCreated`` when an app is registered on a box;
+# ``ShipAppUpdated`` when an app's domains / database link / status change;
+# ``ShipDeployQueued`` at enqueue and ``ShipDeployStatusChanged`` on each
+# ``queued -> building -> releasing -> live`` (or ``failed``) transition — the
+# worker-side emits ride the xproc bridge to the web bus, the same path
+# ``WorkspaceJobUpdated`` uses. ``ShipDestroyProposed`` fires when a DELETE parks
+# a teardown for human approval; NOTHING is destroyed by it.
+# ``data`` carries ids + workspace + status only — never SSH key material, env
+# values, or database connection strings.
+@dataclass
+class ShipBoxCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.box.created"
+
+
+@dataclass
+class ShipAppCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.app.created"
+
+
+@dataclass
+class ShipAppUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.app.updated"
+
+
+@dataclass
+class ShipDeployQueued(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.deploy.queued"
+
+
+@dataclass
+class ShipDeployStatusChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.deploy.status_changed"
+
+
+@dataclass
+class ShipDestroyProposed(Event):
+    EVENT_TYPE: ClassVar[str] = "ship.destroy.proposed"
+
+
+# Paw Partners public profile. ``updated`` carries ``workspace_id``, ``slug`` and
+# ``public`` after a partner edits its directory profile; ``applied`` carries the
+# ``application_id`` and ``country`` of a new partner application (never the
+# applicant's contact details). No audience: in-process listeners and the audit
+# trail only.
+@dataclass
+class PartnerProfileUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.profile.updated"
+
+
+@dataclass
+class PartnerApplied(Event):
+    EVENT_TYPE: ClassVar[str] = "partner.applied"

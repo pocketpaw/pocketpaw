@@ -1,0 +1,5 @@
+{
+  "name": "pocketpaw-bundled",
+  "version": "0.1.0",
+  "description": "PocketPaw's bundled chat-agent skills (pocket/site creation, editing, planning, foresight). Loaded into the claude_agent_sdk backend via the SDK plugins= option so they survive setting_sources=[] persona isolation."
+}

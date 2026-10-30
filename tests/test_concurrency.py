@@ -1,14 +1,27 @@
-"""Tests for concurrency controls: session locks, global semaphore, async clients."""
+"""Tests for concurrency controls: session locks, global semaphore, async clients.
+
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the stub builders
+return an ``AssembledPrompt`` from ``assemble_system_prompt`` and the fake routers
+declare ``system_prompt_digest``, because ``AgentLoop`` now carries the assembled
+prompt's stable digest through the router to the backend. Nothing about what
+these tests prove changed; only the shape of the two things they fake.
+"""
 
 import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from pocketpaw.bus import Channel, InboundMessage
+from pocketpaw.prompt import AssembledPrompt
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _assembled(text: str = "system") -> AssembledPrompt:
+    """What ``AgentContextBuilder.assemble_system_prompt`` hands the loop back."""
+    return AssembledPrompt(text=text, stable_digest="0123456789abcdef")
 
 
 def _make_inbound(chat_id: str, content: str = "hi") -> InboundMessage:
@@ -25,7 +38,15 @@ def _make_slow_router(delay: float = 0.1):
     """Return a mock router whose run() sleeps for *delay* seconds."""
     router = MagicMock()
 
-    async def mock_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def mock_run(
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
+    ):
         await asyncio.sleep(delay)
         yield {"type": "message", "content": "ok", "metadata": {}}
         yield {"type": "done", "content": ""}
@@ -40,6 +61,7 @@ def _make_slow_router(delay: float = 0.1):
 # ---------------------------------------------------------------------------
 
 
+@patch("pocketpaw.agents.loop.Settings.load")
 @patch("pocketpaw.agents.loop.get_injection_scanner")
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
@@ -51,6 +73,7 @@ async def test_session_lock_serialises_same_session(
     mock_get_mem,
     mock_get_bus,
     mock_get_scanner,
+    mock_settings_load,
 ):
     """Two messages with the same session_key must not overlap."""
     settings = MagicMock()
@@ -63,7 +86,9 @@ async def test_session_lock_serialises_same_session(
     settings.compaction_summary_chars = 150
     settings.compaction_llm_summarize = False
     settings.max_concurrent_conversations = 5
+    settings.agent_backend = "claude_agent_sdk"
     mock_get_settings.return_value = settings
+    mock_settings_load.return_value = settings
 
     bus = MagicMock()
     bus.publish_outbound = AsyncMock()
@@ -77,7 +102,7 @@ async def test_session_lock_serialises_same_session(
     mock_get_mem.return_value = mem
 
     ctx = MagicMock()
-    ctx.build_system_prompt = AsyncMock(return_value="system")
+    ctx.assemble_system_prompt = AsyncMock(return_value=_assembled("system"))
     mock_ctx_cls.return_value = ctx
 
     scanner = MagicMock()
@@ -90,7 +115,15 @@ async def test_session_lock_serialises_same_session(
     order = []
     delay = 0.05
 
-    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def slow_run(
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
+    ):
         order.append(f"start:{message}")
         await asyncio.sleep(delay)
         order.append(f"end:{message}")
@@ -99,6 +132,8 @@ async def test_session_lock_serialises_same_session(
 
     router = MagicMock()
     router.run = slow_run
+    router._active_backend_name = "claude_agent_sdk"
+    router.stop = AsyncMock()
     loop._router = router
 
     msg1 = _make_inbound("user1", "first")
@@ -120,6 +155,7 @@ async def test_session_lock_serialises_same_session(
 # ---------------------------------------------------------------------------
 
 
+@patch("pocketpaw.agents.loop.Settings.load")
 @patch("pocketpaw.agents.loop.get_injection_scanner")
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
@@ -131,6 +167,7 @@ async def test_cross_session_runs_in_parallel(
     mock_get_mem,
     mock_get_bus,
     mock_get_scanner,
+    mock_settings_load,
 ):
     """Messages for different sessions should overlap in time."""
     settings = MagicMock()
@@ -143,7 +180,9 @@ async def test_cross_session_runs_in_parallel(
     settings.compaction_summary_chars = 150
     settings.compaction_llm_summarize = False
     settings.max_concurrent_conversations = 5
+    settings.agent_backend = "claude_agent_sdk"
     mock_get_settings.return_value = settings
+    mock_settings_load.return_value = settings
 
     bus = MagicMock()
     bus.publish_outbound = AsyncMock()
@@ -157,7 +196,7 @@ async def test_cross_session_runs_in_parallel(
     mock_get_mem.return_value = mem
 
     ctx = MagicMock()
-    ctx.build_system_prompt = AsyncMock(return_value="system")
+    ctx.assemble_system_prompt = AsyncMock(return_value=_assembled("system"))
     mock_ctx_cls.return_value = ctx
 
     scanner = MagicMock()
@@ -169,7 +208,15 @@ async def test_cross_session_runs_in_parallel(
 
     order = []
 
-    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def slow_run(
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
+    ):
         order.append(f"start:{message}")
         await asyncio.sleep(0.05)
         order.append(f"end:{message}")
@@ -178,6 +225,8 @@ async def test_cross_session_runs_in_parallel(
 
     router = MagicMock()
     router.run = slow_run
+    router._active_backend_name = "claude_agent_sdk"
+    router.stop = AsyncMock()
     loop._router = router
 
     # Different session keys → should run in parallel
@@ -203,6 +252,7 @@ async def test_cross_session_runs_in_parallel(
 # ---------------------------------------------------------------------------
 
 
+@patch("pocketpaw.agents.loop.Settings.load")
 @patch("pocketpaw.agents.loop.get_injection_scanner")
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
@@ -214,6 +264,7 @@ async def test_global_semaphore_caps_concurrency(
     mock_get_mem,
     mock_get_bus,
     mock_get_scanner,
+    mock_settings_load,
 ):
     """With max_concurrent_conversations=1, even cross-session must serialise."""
     settings = MagicMock()
@@ -226,7 +277,9 @@ async def test_global_semaphore_caps_concurrency(
     settings.compaction_summary_chars = 150
     settings.compaction_llm_summarize = False
     settings.max_concurrent_conversations = 1  # Force serial
+    settings.agent_backend = "claude_agent_sdk"
     mock_get_settings.return_value = settings
+    mock_settings_load.return_value = settings
 
     bus = MagicMock()
     bus.publish_outbound = AsyncMock()
@@ -240,7 +293,7 @@ async def test_global_semaphore_caps_concurrency(
     mock_get_mem.return_value = mem
 
     ctx = MagicMock()
-    ctx.build_system_prompt = AsyncMock(return_value="system")
+    ctx.assemble_system_prompt = AsyncMock(return_value=_assembled("system"))
     mock_ctx_cls.return_value = ctx
 
     scanner = MagicMock()
@@ -252,7 +305,15 @@ async def test_global_semaphore_caps_concurrency(
 
     order = []
 
-    async def slow_run(message, *, system_prompt=None, history=None, session_key=None):
+    async def slow_run(
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
+    ):
         order.append(f"start:{message}")
         await asyncio.sleep(0.05)
         order.append(f"end:{message}")
@@ -261,6 +322,8 @@ async def test_global_semaphore_caps_concurrency(
 
     router = MagicMock()
     router.run = slow_run
+    router._active_backend_name = "claude_agent_sdk"
+    router.stop = AsyncMock()
     loop._router = router
 
     msg_a = _make_inbound("userA", "alpha")

@@ -1,0 +1,120 @@
+---
+title: "Pocket Sources"
+description: "Pocket sources are read-only declared bindings to live external data — HTTP, connector, or internal projection — refreshed on interval, webhook, or manual trigger, with refresh-cost ceilings and a catalog allowlist."
+section: Core Concepts
+ogType: article
+keywords: ["pocket sources", "rippleSpec sources", "live data binding", "webhook refresh", "interval refresh"]
+tags: ["pockets", "ripple", "rfc-04"]
+---
+
+# Pocket Sources
+
+A pocket source is a **read-only, declared binding to live external data** that surfaces into a pocket's UI through the ripple state tree. Sources are how a dashboard pocket gets refreshed PR counts, how a tracker pocket shows current calendar events, how a status pocket polls a deploy. They are the read half of pocket data; [write actions](/concepts/pocket-write-actions) are the write half.
+
+<Callout type="info">
+**Status (2026-05-25):** IMPLEMENTED through M3.
+
+**Implementation PRs:** #1177 (alpha), #1187 (catalog-as-allowlist + embed escape hatch), #1188 (interval + webhook refresh + cost controls)
+
+**Workspace RFC:** [docs/rfc/04-pocket-interactivity-and-data-sync-rfc.md](https://github.com/qbtrix/paw-workspace/blob/main/docs/rfc/04-pocket-interactivity-and-data-sync-rfc.md)
+
+**What's live:** read-only live data sources; interval and webhook refresh; per-pocket refresh-cost ceilings; catalog-as-allowlist source-type gate.
+
+**What's planned:** M4 multi-source joins; M5 provenance graph back to Fabric.
+</Callout>
+
+## What a Source Is
+
+A source is one entry on `rippleSpec.sources` keyed by a flat name:
+
+```json
+{
+  "sources": {
+    "prs": {
+      "type": "http_get",
+      "method": "GET",
+      "path": "/repos/octocat/hello/pulls?state=open",
+      "refresh": ["interval:60s", "manual"]
+    }
+  }
+}
+```
+
+The binding is read-only — only `GET` ever leaves the server. The pocket's single configured backend supplies the `base_url`, auth, and credentials; the source supplies the path and refresh policy. Hydrated results land on `state.prs` for widgets to bind against.
+
+The pure-helper sibling of `state_ops.py` (which mutates `rippleSpec.state`) and `spec_ops.py` (which mutates `rippleSpec.ui`) is `sources_ops.py` — it owns the third top-level rippleSpec key.
+
+## Declaring a Source
+
+A source binding sits inside `rippleSpec.sources` and is referenced from widgets via the ripple state tree:
+
+```json
+{
+  "sources": {
+    "prs": {
+      "type": "http_get",
+      "method": "GET",
+      "path": "/repos/owner/repo/pulls",
+      "refresh": ["interval:60s", "manual"]
+    }
+  },
+  "state": { "prs": [] },
+  "ui": {
+    "type": "table",
+    "props": { "rows": "@state.prs" },
+    "events": {
+      "mount": [{ "verb": "run_source", "source": "prs" }]
+    }
+  }
+}
+```
+
+Three things make this work end-to-end:
+
+1. The binding is **declared on the spec** — the agent that authors the pocket writes it; a viewer cannot edit it.
+2. The widget reads from `@state.prs` — when the source hydrates, the state slice updates and ripple re-renders the bound widgets.
+3. The `run_source` ripple verb is queued on `mount` so the table loads its first batch when the pocket opens.
+
+## Refresh Modes
+
+A source may declare any combination of three refresh modes via its `refresh` array:
+
+| Mode | Trigger | How it fires |
+|------|---------|-------------|
+| `interval:<duration>` | Server-driven, periodic | The pocket's `refresh_scheduler` ticks once per interval and re-runs the source. Costs come out of the auto-refresh budget. |
+| `webhook` | Upstream-driven, push | An upstream backend calls `POST /api/v1/pockets/{id}/sources/{source}/refresh` with the per-pocket secret in `X-Pocket-Webhook-Secret`. |
+| `manual` | UI-driven, on-demand | A widget event handler queues the `run_source` verb. Calls `POST /api/v1/pockets/{id}/sources/run`. |
+
+A source whose refresh list omits `webhook` cannot be triggered via the webhook endpoint even with a valid secret — the named source must opt in.
+
+## Cost Controls
+
+PR #1188 added per-pocket refresh-cost ceilings to prevent a runaway poll loop or a webhook flood from running up unbounded backend cost. The budget is enforced separately from the manual rate limit:
+
+- **Auto-refresh budget** — interval and webhook refreshes share one per-pocket counter. Over-budget hits are **skipped** (HTTP 200 with `{"skipped": "rate_limited"}`), not queued. The pocket simply does not refresh again until the window resets.
+- **Manual rate limit** — the explicit `POST /sources/run` from the UI has its own per-`(pocket, user)` counter so a viewer mashing the refresh button cannot blow the auto-refresh budget for everyone.
+- **Per-request guards** — every source call inherits the read executor's SSRF / DNS-rebinding / 512 KB response-size / tight-timeout guards from `_http_guard.py`. Redirects are not followed; the response is parsed inline.
+
+## Catalog as Allowlist
+
+PR #1187 promoted the source-type registry from documentation to runtime gate: **only catalog-registered source types may be used**. A spec referencing an unknown `type` is rejected at ingest with a clear warning. This prevents an agent from inventing a new transport (e.g. `type: "grpc"`) that has not been hardened, and it gives the human owner a single review surface (the catalog) for what their pockets can call.
+
+There is one **embed escape hatch**: a `type: "embed"` source surfaces a trusted iframe URL. The escape hatch is review-gated like a write allowlist entry — the workspace owner accepts the iframe domain; an agent cannot embed a fresh origin without that acceptance.
+
+## How Sources Surface in the UI
+
+A hydrated source flows through three layers to the user:
+
+1. **Executor** — `source_executor.run_sources` makes the HTTP call, parses the response, and writes the result onto the pocket's state slice (e.g. `state.prs = [...]`).
+2. **Ripple** — the state mutation propagates to every widget that bound against the slice via `@state.<key>` references. Ripple handles the diff + re-render.
+3. **Reconciler** — the frontend reconciler (the same one that handles `pocket_mutation` SSE events) merges the new slice into the live model, preserving any optimistic UI state the user had in flight.
+
+The run-sources route is deliberately NOT gated on edit access — any pocket reader may run already-authored sources. That is the core shared-live-pocket UX: a viewer opens a shared dashboard and the on-mount `run_source` verbs refresh it. The viewer cannot change the backend or the source paths (both are edit-only), so the SSRF hardening plus the immutable edit-authored source list bound the risk to "fetch the same GET bindings the editors already approved."
+
+## Open Work
+
+- **M4 — Multi-source joins.** Today each source hydrates its own state slice independently. M4 will let a widget bind against a join across two sources (e.g. PRs joined with reviewer profiles) so the agent does not have to author a server-side aggregator for every cross-source view.
+- **M5 — Provenance graph.** Each source result will be tagged with its origin (which connector, which Fabric snapshot version) so the Decision Graph can trace a projected decision back through the source data that fed it. The graph is the natural extension of the outcome events write actions already emit.
+- **Source connectors beyond raw HTTP.** The catalog is the right surface to add `connector:gmail` / `connector:calendar` / `connector:slack` typed sources that wrap the connector framework so the agent does not author raw paths against external APIs.
+
+For the full design rationale, see [RFC 04 — Pocket Interactivity and Data Sync](https://github.com/qbtrix/paw-workspace/blob/main/docs/rfc/04-pocket-interactivity-and-data-sync-rfc.md).

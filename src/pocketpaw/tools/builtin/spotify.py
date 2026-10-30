@@ -48,7 +48,7 @@ class SpotifySearchTool(BaseTool):
 
     async def execute(self, query: str, type: str = "track", limit: int = 5) -> str:
         try:
-            from pocketpaw.integrations.spotify import SpotifyClient
+            from pocketpaw.clients.spotify import SpotifyClient
 
             client = SpotifyClient()
             results = await client.search(query, search_type=type, limit=limit)
@@ -107,7 +107,7 @@ class SpotifyNowPlayingTool(BaseTool):
 
     async def execute(self) -> str:
         try:
-            from pocketpaw.integrations.spotify import SpotifyClient
+            from pocketpaw.clients.spotify import SpotifyClient
 
             client = SpotifyClient()
             result = await client.now_playing()
@@ -187,7 +187,7 @@ class SpotifyPlaybackTool(BaseTool):
             )
 
         try:
-            from pocketpaw.integrations.spotify import SpotifyClient
+            from pocketpaw.clients.spotify import SpotifyClient
 
             client = SpotifyClient()
             kwargs: dict[str, Any] = {}
@@ -251,7 +251,7 @@ class SpotifyPlaylistTool(BaseTool):
         track_uri: str | None = None,
     ) -> str:
         try:
-            from pocketpaw.integrations.spotify import SpotifyClient
+            from pocketpaw.clients.spotify import SpotifyClient
 
             client = SpotifyClient()
 

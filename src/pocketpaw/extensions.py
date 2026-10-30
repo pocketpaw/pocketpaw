@@ -1,0 +1,287 @@
+"""Extension-point Protocols for pluggable PocketPaw functionality.
+
+Core (`pocketpaw`) defines narrow `typing.Protocol` contracts here. Concrete
+implementations live in `pocketpaw_ee` (and potentially third-party packages)
+and are discovered at runtime via `importlib.metadata.entry_points` — see
+`pocketpaw._registry`. Core code must never `import pocketpaw_ee` directly;
+the OSS-EE split (open-core) depends on that boundary, and an `import-linter`
+contract enforces it.
+
+Each Protocol documents the entry-point group that carries its implementations.
+An entry-point points at a zero-arg callable (usually the class itself) that
+the registry instantiates once and caches.
+
+Updated: 2026-10-03 (dashboard ws ticket) — ``AuthProvider`` gained
+``redeem_dashboard_ws_ticket`` so the dashboard socket can redeem a first-frame
+ws_ticket through the registry instead of importing EE.
+
+Updated: 2026-06-12 (connector-store-unification CS-3) — added
+``ConnectorStateStoreProvider`` (group ``pocketpaw.connector_state_stores``)
+so EE can back the ConnectorRegistry's durable state with the cloud DB
+instead of the file store.
+
+Updated: 2026-06-26 (ISO-1 — workspace-keyed store factory) — activated the
+previously-dormant ``StoreProvider`` seam: ``pocketpaw.stores.get_fabric_store``
+now consults it, and ``get_store`` gained a ``workspace_id`` keyword so a future
+EE provider can return a per-workspace / cloud-backed Fabric store. The EE
+registration is a later task; core only consults the seam here.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class EventBusProvider(Protocol):
+    """Entry-point group: ``pocketpaw.event_bus``
+
+    Supplies the process-wide async event bus. When no provider is
+    registered, core falls back to a local in-process bus.
+    """
+
+    def get_event_bus(self) -> Any: ...
+
+
+@runtime_checkable
+class EmbeddingProvider(Protocol):
+    """Entry-point group: ``pocketpaw.embeddings``
+
+    Builds a text/image embedder for knowledge-base retrieval.
+    """
+
+    def build_embedder(self, settings: Any) -> Any: ...
+
+
+@runtime_checkable
+class MemoryBackendProvider(Protocol):
+    """Entry-point group: ``pocketpaw.memory_backends``
+
+    Supplies an alternative `MemoryStoreProtocol` implementation keyed by
+    ``name`` (e.g. ``"mongodb"``). Core ships ``file`` and ``mem0``.
+    """
+
+    name: str
+
+    def build(self, settings: Any) -> Any: ...
+
+
+@runtime_checkable
+class CapabilityProvider(Protocol):
+    """Entry-point group: ``pocketpaw.capabilities``
+
+    Reports which optional capabilities an install has. Core's
+    ``features.py`` merges every provider's map into the capability registry.
+    """
+
+    def capabilities(self) -> dict[str, bool]: ...
+
+
+@runtime_checkable
+class AuthProvider(Protocol):
+    """Entry-point group: ``pocketpaw.auth``
+
+    Supplies FastAPI auth dependencies for routes that behave differently
+    under multi-tenant cloud auth vs the single-tenant dashboard.
+    """
+
+    def current_optional_user(self) -> Any: ...
+
+    async def redeem_dashboard_ws_ticket(self, ticket: str) -> bool:
+        """Consume a first-frame ws_ticket for the dashboard socket.
+
+        True only when the ticket is valid, unused, and belongs to an active
+        superuser. Core treats a provider without this method as "no ticket
+        support" and fails closed.
+        """
+        ...
+
+
+@runtime_checkable
+class StoreProvider(Protocol):
+    """Entry-point group: ``pocketpaw.stores``
+
+    Overrides the default store factories (instinct, fabric, …). Core ships
+    local SQLite-backed defaults; EE swaps in cloud-backed ones.
+
+    Activated by ISO-1 (2026-06-26): ``pocketpaw.stores.get_fabric_store``
+    consults this seam before building its own store, so EE can later register a
+    workspace-keyed / cloud-backed Fabric store without core importing EE. The
+    EE registration itself is a LATER task — core merely consults the seam now.
+
+    ``get_store`` takes the logical store *name* (``"fabric"``, ``"instinct"``,
+    …) and the resolved ``workspace_id`` (``None`` for the single-tenant /
+    unscoped path). A provider returns the store it wants core to use, or
+    ``None`` to decline that name (core then builds its local default).
+    Implementations should accept ``workspace_id`` as a keyword so the core
+    factory can pass it; the factory tolerates a legacy no-``workspace_id``
+    signature for back-compat.
+    """
+
+    def get_store(self, name: str, *, workspace_id: str | None = None) -> Any: ...
+
+
+@runtime_checkable
+class RouteProvider(Protocol):
+    """Entry-point group: ``pocketpaw.routes``
+
+    Mounts additional sub-applications / routers onto the dashboard app
+    (the multi-tenant cloud API).
+    """
+
+    def mount(self, app: Any) -> None:
+        """Mount sub-applications / routers onto *app*. Called early, before
+        the core v1 routers, so EE routes take priority."""
+        ...
+
+
+@runtime_checkable
+class LifecycleHook(Protocol):
+    """Entry-point group: ``pocketpaw.lifecycle``
+
+    Startup/shutdown hooks run by the dashboard lifecycle. Used for things
+    like initializing the cloud database or registering event listeners.
+
+    Hooks take no arguments — the dashboard lifecycle (``startup_event`` in
+    ``dashboard_lifecycle.py``) has no FastAPI ``app`` reference to thread
+    through, and the cloud hook resolves what it needs from the environment.
+    """
+
+    async def on_startup(self) -> None: ...
+
+    async def on_shutdown(self) -> None: ...
+
+
+@runtime_checkable
+class StorageBackend(Protocol):
+    """Entry-point group: ``pocketpaw.storage_backends``
+
+    Supplies a file-storage adapter + metadata store for upload resolution.
+    """
+
+    name: str
+
+    def adapter(self) -> Any: ...
+
+    def meta(self) -> Any: ...
+
+
+@runtime_checkable
+class ModelProvider(Protocol):
+    """Entry-point group: ``pocketpaw.models``
+
+    Exposes Beanie document classes (cloud entities: Agent, Session, User,
+    Workspace, …) so core code can look them up by name without importing
+    `pocketpaw_ee`. Returns ``None`` for unknown names.
+    """
+
+    def get_model(self, name: str) -> type | None: ...
+
+
+@runtime_checkable
+class McpServerProvider(Protocol):
+    """Entry-point group: ``pocketpaw.mcp_servers``
+
+    Builds in-process MCP servers exposed to agent backends. Each provider
+    returns ``(name, config_entry)`` or ``None`` when its feature is
+    unavailable in the current context.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None: ...
+
+    def tool_ids(self) -> list[str]:
+        """Tool ids this server exposes (for allowlist matching)."""
+        ...
+
+
+@runtime_checkable
+class AgentExtension(Protocol):
+    """Entry-point group: ``pocketpaw.agent_extensions``
+
+    Extends the core agent runtime with EE-only capabilities: extra
+    function-tools for tool-list backends (deep_agents, openai_agents, …)
+    and environment variables carrying cloud identity for subprocess (CLI)
+    backends. An OSS install registers no provider and the runtime runs
+    with only its built-in tools and a bare subprocess environment.
+    """
+
+    def agent_tools(self, backend: str) -> list[Any]:
+        """Extra tool instances to expose to *backend*, or ``[]``."""
+        ...
+
+    def subprocess_env(self) -> dict[str, str]:
+        """Environment variables to inject into agent subprocesses —
+        cloud workspace/user/session identity. ``{}`` when no cloud
+        context is active (the common OSS / out-of-stream case)."""
+        ...
+
+    def agent_cwd(self) -> str | None:
+        """Per-run working directory for the agent, or ``None`` to use
+        ``settings.file_jail_path``. The cloud product returns a
+        per-workspace/session jail so a tenant's file operations never
+        co-mingle in the shared home dir, and RAISES when a cloud run has
+        no resolvable workspace (fail-closed — never silently land in
+        ``~``). An OSS install registers no provider, so the core keeps
+        its ``file_jail_path`` default. Optional: a provider predating
+        this method simply isn't consulted (the core uses ``getattr``)."""
+        ...
+
+
+@runtime_checkable
+class PocketWriter(Protocol):
+    """Entry-point group: ``pocketpaw.pockets``
+
+    Persists a pocket created by an agent. The cloud product writes a
+    Pocket document and links it to the chat Session in MongoDB; an OSS
+    install registers no provider, so agent-emitted pocket specs fan out
+    as SSE events only and are never persisted.
+    """
+
+    async def create_pocket_and_session(
+        self,
+        spec: dict,
+        session_key: str,
+        user_id: str | None,
+        workspace_id: str | None,
+    ) -> str | None:
+        """Create the pocket + linked session. Returns the new pocket id,
+        or ``None`` on failure."""
+        ...
+
+
+@runtime_checkable
+class ConnectorStateStoreProvider(Protocol):
+    """Entry-point group: ``pocketpaw.connector_state_stores``
+
+    Supplies the durable ``ConnectorStateStore`` that backs
+    ``ConnectorRegistry`` when no explicit store is passed. Core ships the
+    file-backed default (``~/.pocketpaw/connectors/state/``); the cloud
+    product swaps in a store backed by the ``WorkspaceConnector`` document
+    so connector config rehydrates from the tenant database after a
+    process restart.
+
+    The returned store satisfies
+    ``pocketpaw.connectors.state_store.ConnectorStateStore``. Its
+    ``get``/``set``/``delete`` methods may be async (return awaitables) —
+    the registry awaits awaitable results; ``list`` must stay sync (it is
+    called from the registry's sync ``status()``).
+    """
+
+    def get_state_store(self) -> Any: ...
+
+
+@runtime_checkable
+class ComposioToolProvider(Protocol):
+    """Entry-point group: ``pocketpaw.composio_tools``
+
+    Fetches Composio integration tools for an agent backend. Composio
+    wires 200+ pre-built OAuth integrations (Gmail, Slack, GitHub,
+    Calendar, Drive, …); the cloud product fetches them per-stream and
+    returns them in the tool format native to *backend*. An OSS install
+    registers no provider, so agents run with only their built-in tools.
+    """
+
+    def build_tools(self, backend: str, settings: Any) -> list[Any]:
+        """Composio tool instances for *backend*, or ``[]`` when Composio
+        is not configured / not applicable."""
+        ...

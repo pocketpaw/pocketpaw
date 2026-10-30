@@ -16,6 +16,7 @@ import importlib
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import uuid
@@ -23,9 +24,17 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from pocketpaw._compat import require_extra
-from pocketpaw.memory.protocol import MemoryEntry, MemoryType
+from pocketpaw.memory.protocol import (
+    DEFAULT_SESSION_HISTORY_LIMIT,
+    MemoryEntry,
+    MemoryType,
+)
 
 logger = logging.getLogger(__name__)
+
+# Set once we've warned about a backend mismatch so the hot path doesn't spam
+# the log. See ``FileMemoryStore.save`` for the rationale.
+_warned_backend_mismatch = False
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -1722,6 +1731,19 @@ class FileMemoryStore:
 
     async def save(self, entry: MemoryEntry) -> str:
         """Save a memory entry."""
+        # Defense-in-depth: if mongodb is the configured backend yet a write is
+        # landing here, a stale FileMemoryStore reference survived the cloud
+        # in-place store swap and chat is about to hit local disk. Warn once
+        # (never raise — OSS core must stay functional and must not import EE).
+        global _warned_backend_mismatch
+        if not _warned_backend_mismatch and os.environ.get("POCKETPAW_MEMORY_BACKEND") == "mongodb":
+            _warned_backend_mismatch = True
+            logger.warning(
+                "FileMemoryStore.save called while POCKETPAW_MEMORY_BACKEND=mongodb "
+                "— a memory write is going to local disk instead of Mongo. A cached "
+                "FileMemoryStore reference likely survived the backend swap."
+            )
+
         if entry.type == MemoryType.SESSION:
             # Session entries use random UUIDs (no collision issue)
             if not entry.id:
@@ -2415,8 +2437,18 @@ class FileMemoryStore:
                 break
         return results
 
-    async def get_session(self, session_key: str) -> list[MemoryEntry]:
-        """Get session history."""
+    async def get_session(
+        self, session_key: str, limit: int | None = DEFAULT_SESSION_HISTORY_LIMIT
+    ) -> list[MemoryEntry]:
+        """Get session history, oldest first, bounded by default.
+
+        The file store reads the whole session file either way — there is no
+        cheaper way to get the tail of a JSON array — so the bound here saves
+        the DESERIALIZATION and the retained MemoryEntry objects, not the read.
+        That is still the bulk of the cost on a long session, and it keeps the
+        adapter's contract identical to the Mongo one, which is what callers
+        depend on.
+        """
         session_file = self._get_session_file(session_key)
 
         if not session_file.exists():
@@ -2436,6 +2468,11 @@ class FileMemoryStore:
 
             raw = await asyncio.to_thread(safe_read)
             data = json.loads(raw)
+            # The file is stored oldest-first, so the newest `limit` is the
+            # TAIL. Slicing the head would return the oldest — the shape of the
+            # bug #2075 fixed in the chat history window.
+            if limit is not None:
+                data = data[-limit:]
             return [
                 MemoryEntry(
                     id=item["id"],

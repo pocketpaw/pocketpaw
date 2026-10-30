@@ -1,0 +1,92 @@
+{
+  "_placeholder_note": "Built-in pocket template (activity-feed). Event titles, dates, and details below carry [bracketed] placeholders — the create specialist rewrites them to the user's real history and domain. Keep the timeline bound to state.events; keep the add-entry composer so the feed is usable on first load. If the feed is a who-did-what stream rather than dated milestones, the specialist may swap `timeline` for `audit-log`.",
+  "state": {
+    "draft_title": "",
+    "draft_detail": "",
+    "draft_date": "",
+    "draft_type": "default",
+    "next_id": 6,
+    "type_options": [
+      { "value": "default", "label": "Update" },
+      { "value": "success", "label": "Shipped" },
+      { "value": "warning", "label": "At risk" },
+      { "value": "info", "label": "Note" }
+    ],
+    "events": [
+      { "id": "a1", "date": "2026-05-20", "title": "[Closed the Acme renewal]", "detail": "[Signed the 2-year contract — kickoff next week.]", "type": "success" },
+      { "id": "a2", "date": "2026-05-18", "title": "[Shipped the search rebuild]", "detail": "[New endpoint live; latency down ~40%.]", "type": "success" },
+      { "id": "a3", "date": "2026-05-15", "title": "[Onboarding flow flagged at risk]", "detail": "[Drop-off on step 3 — investigating this week.]", "type": "warning" },
+      { "id": "a4", "date": "2026-05-12", "title": "[Quarterly planning kicked off]", "detail": "[Roadmap draft circulated for feedback.]", "type": "default" },
+      { "id": "a5", "date": "2026-05-08", "title": "[New analytics dashboard in beta]", "detail": "[Rolled out to the design partners.]", "type": "info" }
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "16px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "[Activity]",
+          "subtitle": "[What happened, newest first]"
+        }
+      },
+      {
+        "type": "flex",
+        "props": { "direction": "row", "gap": "8px", "align": "end" },
+        "children": [
+          {
+            "type": "input",
+            "bind": "draft_title",
+            "props": { "label": "Headline", "placeholder": "[What happened?]" }
+          },
+          {
+            "type": "input",
+            "bind": "draft_detail",
+            "props": { "label": "Detail", "placeholder": "[One line of context]" }
+          },
+          {
+            "type": "date-picker",
+            "bind": "draft_date",
+            "props": { "label": "Date" }
+          },
+          {
+            "type": "select",
+            "bind": "draft_type",
+            "props": { "label": "Type", "options": "{state.type_options}" }
+          },
+          {
+            "type": "button",
+            "props": { "label": "Add entry", "variant": "primary" },
+            "on_click": [
+              { "action": "validate", "condition": "{state.draft_title.length > 0}", "message": "Type a headline first" },
+              { "action": "validate", "condition": "{state.draft_date.length > 0}", "message": "Pick a date first" },
+              {
+                "action": "push",
+                "target": "events",
+                "value": {
+                  "id": "a-{state.next_id}",
+                  "date": "{state.draft_date}",
+                  "title": "{state.draft_title}",
+                  "detail": "{state.draft_detail}",
+                  "type": "{state.draft_type}"
+                }
+              },
+              { "action": "set", "target": "next_id", "value": "{state.next_id + 1}" },
+              { "action": "set", "target": "draft_title", "value": "" },
+              { "action": "set", "target": "draft_detail", "value": "" },
+              { "action": "set", "target": "draft_date", "value": "" }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "timeline",
+        "props": {
+          "events": "{state.events.sortBy('date', 'desc')}",
+          "density": "compact"
+        }
+      }
+    ]
+  }
+}

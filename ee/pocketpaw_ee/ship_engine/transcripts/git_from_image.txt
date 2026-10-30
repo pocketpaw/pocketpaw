@@ -1,0 +1,18 @@
+# transcript: `dokku git:from-image demo <image>` — successful image deploy.
+EXIT: 0
+--- stdout ---
+-----> Cleaning up...
+-----> Updating git repository with specified build context
+-----> Releasing demo...
+-----> Checking for predeploy task
+       No predeploy task found, skipping
+-----> Running post-deploy
+-----> Creating new app virtual host file...
+-----> Configuring demo.paw.example...(using built-in template)
+-----> Creating http nginx.conf
+       Reloading nginx
+-----> Renaming containers
+       Renaming container demo.web.1.upcoming-1234 (8a5e3b2c1d) to demo.web.1
+=====> Application deployed:
+       http://demo.paw.example
+--- stderr ---

@@ -1,0 +1,90 @@
+# Tests — runs the pytest suite on every PR targeting dev/main or an
+# RFC integration branch (pattern: feat/*-integration), and on pushes to
+# the same branches.
+# Created: 2026-05-07 — Added pytest job to PR Quality Gate so broken tests
+# can no longer slip through CI on PRs targeting ee. Closes #1065.
+# Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
+# sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
+# Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
+# Updated: 2026-06-26 — Added the `pytest-flag-mode` job (FU-4): re-runs the
+# isolation subset WITH POCKETPAW_REQUIRE_WORKSPACE_SCOPE=1 so cloud fail-closed
+# (per-workspace physical isolation) regressions are caught (the full suite runs
+# WITHOUT the flag, over in ci.yml). Required.
+# Updated: 2026-06-27 — Removed the duplicate `pytest` job: it re-ran the full
+# suite already covered by ci.yml's `test` matrix (which includes 3.12). This
+# file is now the flag-mode lane only.
+name: Tests
+
+on:
+  pull_request:
+    branches: [dev, main, 'feat/*-integration']
+  push:
+    branches: [dev, main, 'feat/*-integration']
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest-flag-mode:
+    # FU-4 — the cloud paw-OS deployment runs EVERY store path with
+    # POCKETPAW_REQUIRE_WORKSPACE_SCOPE=1 (fail-closed per-workspace physical
+    # isolation). The `pytest` job above runs WITHOUT the flag, so a store call
+    # that regresses to the legacy shared file (or that raises under the flag
+    # after an action is already approved) still passes there. This job re-runs
+    # the ISOLATION subset WITH the flag exported so flag-mode regressions are
+    # caught. Required, and green today (the C1 fix passes under the flag).
+    #
+    # Explicit subset — NOT the whole suite — because many non-isolation tests
+    # legitimately run unscoped (single-tenant OSS back-compat) and would
+    # fail-closed under the flag. Two known flag-broken paths are deliberately
+    # EXCLUDED until their fixes land (see
+    # docs/design/drafts/2026-06-26-cloud-iso-flag-mode-followups.md):
+    #   FU-2 — the abandon-sweeper scans all tenants from one store
+    #          (tests/cloud/test_action_sweeper.py is multi-tenant under the flag)
+    #   FU-3 — paw_bar's colon-qualified owner is not a path-safe workspace id
+    #          (tests/cloud/test_paw_bar_decision_loop.py)
+    # Add each to the list below once it's fixed; then this lane covers the whole
+    # cloud surface and the class stops slipping past CI.
+    name: pytest (flag mode)
+    runs-on: ubuntu-latest
+    # A hung pytest exit (an unclosed aiosqlite worker thread) fails fast
+    # instead of holding the runner for the 6 h default.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set Python version
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --dev --all-extras --group ee
+
+      - name: Run isolation subset under POCKETPAW_REQUIRE_WORKSPACE_SCOPE=1
+        run: |
+          uv run pytest \
+            tests/cloud/test_executor_workspace_iso.py \
+            tests/cloud/test_instinct_empty_workspace_failclosed.py \
+            tests/cloud/test_ga_two_tenant_pentest.py \
+            tests/cloud/test_agent_ledger_endpoint.py \
+            tests/cloud/test_paw_bar_decision_loop_tenancy.py \
+            tests/cloud/people/test_person_read_model.py \
+            tests/ee/test_action_sweeper.py \
+            tests/test_instinct_workspace_isolation.py \
+            tests/test_fabric_workspace_isolation.py \
+            tests/test_store_isolation_lint.py \
+            tests/test_workspace_ctxvar_bridge.py \
+            tests/test_workspace_store_migration.py \
+            tests/test_audit_lock_survives_eviction.py \
+            tests/test_agent_ledger.py \
+            tests/test_herdr_runtime.py \
+            --ignore=tests/e2e \
+            -q --tb=short
+        env:
+          POCKETPAW_REQUIRE_WORKSPACE_SCOPE: "1"
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

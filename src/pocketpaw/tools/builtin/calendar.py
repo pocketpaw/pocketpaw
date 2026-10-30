@@ -49,7 +49,7 @@ class CalendarListTool(BaseTool):
         }
 
     async def execute(self, days_ahead: int = 1, max_results: int = 10) -> str:
-        from pocketpaw.integrations.gcalendar import CalendarClient
+        from pocketpaw.clients.gcalendar import CalendarClient
 
         try:
             client = CalendarClient()
@@ -138,7 +138,7 @@ class CalendarCreateTool(BaseTool):
         location: str = "",
         attendees: list[str] | None = None,
     ) -> str:
-        from pocketpaw.integrations.gcalendar import CalendarClient
+        from pocketpaw.clients.gcalendar import CalendarClient
 
         try:
             client = CalendarClient()
@@ -185,7 +185,7 @@ class CalendarPrepTool(BaseTool):
         }
 
     async def execute(self) -> str:
-        from pocketpaw.integrations.gcalendar import CalendarClient
+        from pocketpaw.clients.gcalendar import CalendarClient
 
         try:
             client = CalendarClient()

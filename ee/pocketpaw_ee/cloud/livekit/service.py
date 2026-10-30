@@ -1,0 +1,1675 @@
+"""LiveKit service — room management, token generation, call lifecycle.
+
+Uses the ``livekit-api`` Python SDK to talk to LiveKit Cloud.
+Requires ``LIVEKIT_URL``, ``LIVEKIT_API_KEY``, ``LIVEKIT_API_SECRET``
+environment variables. ``create_room`` starts the meeting-notes bot only when
+``_meeting_notes_allowed``: an unpaid early-access workspace's call runs without
+it, since its STT and summary spend never reaches the credit ledger. The bot's
+token may publish microphone audio only (no camera, screen or data), which is
+how Ask Paw answers are voiced into the call.
+
+Change log:
+- Fix duplicate call-bot spawn race: ``create_room()`` now guards the agent
+  spawn with a per-group ``asyncio.Lock`` (``_spawn_locks`` / ``_spawn_lock_for``)
+  so two concurrent joins for the same group can't both pass the
+  check→spawn→insert window and start two "call-bot" subprocesses. The deploy
+  runs a single worker, so this in-process lock fully covers it; true
+  cross-replica dedupe is out of scope here (see the LiveKit Agents migration
+  design doc).
+- Added daily CALL-TIME budget enforcement (feat/billing-rbac-member-caps):
+  ``create_room()`` resolves the workspace's plan (entitlements) and enforces
+  ``max_call_seconds_per_day`` (Free = 0 → no calls, Go = 1800 = 30 min, Pro =
+  7200 = 2 hrs, Pro Max = 28800 = 8 hrs, Enterprise = None). A NEW room is
+  blocked with ``CallLimitError`` when the budget is exhausted; a join to an
+  already-running room is not (that call already owns its budget). Each new
+  call records its remaining budget as a ``Meeting.call_budget_deadline`` and a
+  watchdog task (``_force_end_at_budget``) force-ends it at the deadline, so a
+  single over-budget call is cut off rather than merely blocking later starts.
+- ``get_room_info()["active"]`` now means a participant other than the call-bot
+  is in the room (fix/livekit-call-security, 2026-09-30). It was hard-coded True
+  for any existing room, which left invite accept's "call ended" branch dead.
+- ``create_room(..., record_meeting=False)`` (same branch): a scheduled meeting
+  starting through ``meetings/providers/livekit`` now passes its workspace, so
+  the daily budget gate and the watchdog apply, without inserting a duplicate
+  "Instant call" row. The result carries ``call_budget_deadline``.
+- ``require_call_group()`` (same branch): the shared, audited check that a
+  group exists, is in the caller's workspace and has the caller as a member.
+  Used by the LiveKit routes and by scheduling a LiveKit meeting.
+- ``end_room()`` closes EVERY in_progress LiveKit meeting row for the room, not
+  just the first (feat/meetings-instant, 2026-10-01): a scheduled start landing
+  on a running instant call left two rows, and ending the call half-closed
+  them. ``_daily_call_usage`` merges overlapping spans per room so those two
+  rows count one call's time once.
+- ``_reap_agent_process`` (feat/meetings-ics, 2026-10-01): when the call-bot
+  exits on its own because everyone left, a hidden meeting room's meeting goes
+  back to ``scheduled`` (``meetings.service.release_meeting_room``) instead of
+  staying "live" forever. ``end_room`` still marks it ended.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import sys
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from livekit.api import AccessToken, LiveKitAPI, VideoGrants
+from livekit.protocol.room import (
+    CreateRoomRequest,
+    DeleteRoomRequest,
+    ListParticipantsRequest,
+    ListRoomsRequest,
+)
+
+from pocketpaw_ee.cloud._core.errors import CallLimitError, Forbidden
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    CallEnded,
+    CallNotesPosted,
+    CallStarted,
+    MessageNew,
+)
+from pocketpaw_ee.cloud.models.meeting import Meeting as MeetingDoc
+from pocketpaw_ee.cloud.models.meeting import MeetingTranscript
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Active meeting agents registry
+# ---------------------------------------------------------------------------
+
+from pocketpaw_ee.cloud.livekit.types import MeetingAgentProtocol  # noqa: E402
+
+_active_agents: dict[str, MeetingAgentProtocol] = {}
+
+# Per-group spawn locks. create_room() holds the lock for a group across the
+# check→spawn→insert sequence so two concurrent joins for the SAME group can't
+# both pass the "_active_agents" check and start duplicate call-bot
+# subprocesses. Intentionally never popped: an asyncio.Lock is tiny and the key
+# set is bounded by the groups that ever start a call, so leaving entries costs
+# nothing and avoids the re-mint race a concurrent pop-vs-_spawn_lock_for (e.g.
+# a reap/end_room popping a lock another create_room is mid-flight holding)
+# would cause — which would reopen the very double-spawn this guards against.
+_spawn_locks: dict[str, asyncio.Lock] = {}
+
+
+def _spawn_lock_for(group_id: str) -> asyncio.Lock:
+    """Get-or-create the per-group spawn lock.
+
+    Safe without its own lock: on a single-threaded event loop there is no
+    ``await`` between the ``get`` and the ``set``, so two coroutines can't
+    interleave here and mint two different locks for the same group.
+    """
+    lock = _spawn_locks.get(group_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _spawn_locks[group_id] = lock
+    return lock
+
+
+# Collected meeting-notes payloads from agent subprocesses.
+# Populated by _collect_agent_notes (background reader on stdout pipe)
+# and consumed by _reap_agent_process (which posts them to the group
+# chat using the parent process's Beanie connection).
+_agent_notes_payloads: dict[str, dict[str, Any]] = {}
+
+# ---------------------------------------------------------------------------
+# Active recordings registry  (group_id → egress_id)
+# ---------------------------------------------------------------------------
+
+_active_recordings: dict[str, str] = {}
+
+
+def _get_agent(group_id: str) -> MeetingAgentProtocol | None:
+    """Get the active meeting agent for a group, if any."""
+    return _active_agents.get(group_id)
+
+
+# ---------------------------------------------------------------------------
+# Configuration — read from environment
+# ---------------------------------------------------------------------------
+
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "")
+LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
+LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
+
+# System agent used for bot posting
+CALL_BOT_USER_ID = "__livekit_call_bot__"
+
+
+def _ensure_configured() -> None:
+    """Raise if LiveKit credentials are missing."""
+    if not LIVEKIT_URL or not LIVEKIT_API_KEY or not LIVEKIT_API_SECRET:
+        raise RuntimeError(
+            "LiveKit is not configured. Set LIVEKIT_URL, LIVEKIT_API_KEY, "
+            "and LIVEKIT_API_SECRET environment variables."
+        )
+
+
+def room_name_for_group(group_id: str) -> str:
+    """Build a deterministic LiveKit room name for a group."""
+    return f"group-call-{group_id}"
+
+
+async def require_call_group(group_id: str | None, user_id: str, workspace_id: str) -> None:
+    """Refuse unless ``group_id`` is a group in ``workspace_id`` that ``user_id`` is in.
+
+    The one access check for every group-scoped call operation (token, room,
+    recording, scheduling a LiveKit meeting). A single 403 covers "no such
+    group", "another workspace" and "not a member", so the response doesn't
+    reveal which groups exist, and every refusal is written to the audit log.
+    """
+    from pocketpaw_ee.cloud.chat.group_service import _get_group_domain_or_none
+    from pocketpaw_ee.guards.audit import log_denial
+
+    group = await _get_group_domain_or_none(group_id) if group_id else None
+    if group is None or group.workspace_id != workspace_id or user_id not in group.members:
+        log_denial(
+            actor=user_id,
+            action="group.view",
+            code="livekit.room_forbidden",
+            resource_id=group_id or "",
+            workspace_id=workspace_id,
+        )
+        raise Forbidden("livekit.room_forbidden", "You don't have access to this call.")
+
+
+# ---------------------------------------------------------------------------
+# Subprocess agent management (avoids running WebRTC/Deepgram in the
+# server event loop).
+# ---------------------------------------------------------------------------
+
+
+class _SubprocessAgentRef:
+    """Thin wrapper that implements ``MeetingAgentProtocol`` via a subprocess.
+
+    The real ``CallMeetingAgent`` runs in a child process managed by
+    ``asyncio.create_subprocess_exec``.  ``start()`` is a no-op (the
+    process starts on construction); ``stop()`` sends SIGTERM.
+    """
+
+    def __init__(
+        self,
+        group_id: str,
+        room_name: str,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        self.group_id = group_id
+        self.room_name = room_name
+        self._process = process
+
+    async def start(self) -> None:
+        """Already started by ``_spawn_agent_process``."""
+        pass
+
+    async def stop(self) -> None:
+        """Send SIGTERM and wait up to 30 s for graceful exit."""
+        if self._process.returncode is not None:
+            return  # already terminated
+        try:
+            self._process.terminate()
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=30)
+            except TimeoutError:
+                logger.warning(
+                    "Agent subprocess for room %s did not exit in 30s, killing",
+                    self.room_name,
+                )
+                self._process.kill()
+                await self._process.wait()
+        except ProcessLookupError:
+            pass  # already dead
+        logger.info(
+            "Agent subprocess for room %s exited (code %s)",
+            self.room_name,
+            self._process.returncode,
+        )
+
+
+async def _spawn_agent_process(
+    group_id: str,
+    room_name: str,
+    bot_token: str,
+) -> asyncio.subprocess.Process:
+    """Launch ``CallMeetingAgent`` as a managed subprocess.
+
+    Uses ``sys.executable -m ee.cloud.livekit.agent`` so the child
+    inherits the same Python environment and dependencies.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "pocketpaw_ee.cloud.livekit.agent",
+        "--group",
+        group_id,
+        "--room",
+        room_name,
+        "--token",
+        bot_token,
+        "--url",
+        LIVEKIT_URL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    # Forward stderr to the parent logger so agent logs are visible in
+    # the server output.  The background task reads the pipe so the
+    # subprocess never blocks on a full buffer.
+    asyncio.create_task(_forward_agent_stderr(proc, room_name))
+
+    # Bump the stdout StreamReader limit from the default 64 KiB to 256 KiB.
+    # The agent writes a JSON payload to stdout at call end which can exceed
+    # 64 KiB for long meetings (the transcript alone can be ~50 KiB after
+    # truncation). Without this, readline() raises LimitOverrunError
+    # ("Separator is found, but chunk is longer than limit") and the meeting
+    # notes payload is silently dropped.
+    try:
+        proc.stdout._limit = 256 * 1024  # 256 KiB
+    except AttributeError:
+        pass  # graceful if internal API changes
+
+    # Collect meeting notes from stdout.
+    # The agent writes a JSON payload to stdout when the call ends.
+    # We read it here in the parent process so we can post it to the
+    # group chat using the parent's Beanie connection (the subprocess
+    # is isolated and doesn't have MongoDB initialized).
+    asyncio.create_task(_collect_agent_notes(proc, group_id, room_name))
+
+    logger.info(
+        "Spawned agent subprocess (PID %d) for room %s",
+        proc.pid,
+        room_name,
+    )
+    return proc
+
+
+async def _forward_agent_stderr(
+    proc: asyncio.subprocess.Process,
+    room_name: str,
+) -> None:
+    """Forward an agent subprocess's stderr to the parent logger."""
+    label = f"agent[{room_name}]"
+    while True:
+        line = await proc.stderr.readline()
+        if not line:
+            break
+        text = line.decode("utf-8", errors="replace").rstrip("\n")
+        if text:
+            logger.log(logging.WARNING, "[%s] %s", label, text)
+
+
+async def _collect_agent_notes(
+    proc: asyncio.subprocess.Process,
+    group_id: str,
+    room_name: str,
+) -> None:
+    """Read the agent's stdout and capture the meeting notes JSON payload.
+
+    The agent writes a single JSON line to stdout in ``_finalize_notes()``
+    with ``type: "meeting_notes"``.  We read it here and store it in
+    ``_agent_notes_payloads`` so that ``_reap_agent_process`` can post it
+    to the group chat using the parent process's Beanie connection.
+
+    Runs as a background ``asyncio.Task``.  The pipe is unbuffered enough
+    that the agent's ``print(..., flush=True)`` won't block.
+    """
+    import json
+
+    try:
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+                if isinstance(payload, dict) and payload.get("type") == "meeting_notes":
+                    _agent_notes_payloads[group_id] = payload
+                    logger.info(
+                        "Collected meeting notes payload from agent for room %s",
+                        room_name,
+                    )
+            except json.JSONDecodeError:
+                pass  # ignore non-JSON output (shouldn't happen)
+    except asyncio.exceptions.LimitOverrunError as exc:
+        # Should not happen since both the bump to 256 KiB and the agent-side
+        # truncation (40 KiB transcript cap) keep the line under the limit.
+        logger.error(
+            "LimitOverrunError reading agent stdout for room %s — line exceeds "
+            "%d-byte limit. Meeting notes payload lost: %s",
+            room_name,
+            getattr(proc.stdout, "_limit", 65536),
+            exc,
+        )
+    except Exception as exc:
+        logger.warning("Error reading agent stdout for %s: %s", room_name, exc)
+
+
+async def _reap_agent_process(
+    group_id: str,
+    proc: asyncio.subprocess.Process,
+    workspace_id: str = "",
+) -> None:
+    """Wait for an agent subprocess to finish, then clean up the registry.
+
+    Runs in a background ``asyncio.Task``.  When the agent detects the
+    room is empty and exits on its own, this removes it from
+    ``_active_agents`` so the registry doesn't leak.
+
+    If the agent exited on its own (natural end — room empty), emit
+    ``CallEnded`` so all connected clients refresh their message list
+    and see the meeting notes.  When ``end_room()`` kills the agent
+    manually it already pops the agent from ``_active_agents``, so
+    ``pop`` returns ``None`` and we skip the duplicate emit.
+    """
+    was_registered = False
+    try:
+        await proc.wait()
+    except asyncio.CancelledError:
+        # Server is shutting down — kill the child and let it go.
+        if proc.returncode is None:
+            proc.kill()
+        raise
+    finally:
+        was_registered = _active_agents.pop(group_id, None) is not None
+        logger.info(
+            "Reaped agent subprocess for group %s (exit code %s)",
+            group_id,
+            proc.returncode,
+        )
+
+    # ── Post meeting notes (parent process handles the DB write) ──
+    # The agent subprocess outputs a JSON payload to stdout with the
+    # meeting notes data.  We read it via _collect_agent_notes and
+    # post it here where Beanie/MongoDB is already initialized.
+    # Yield control first so _collect_agent_notes can drain the pipe.
+    await asyncio.sleep(0)
+    payload = _agent_notes_payloads.pop(group_id, None)
+    if payload is not None:
+        try:
+            await post_meeting_notes_to_group(
+                group_id=group_id,
+                transcript=payload.get("transcript", ""),
+                summary=payload.get("summary", "Call ended."),
+                action_items=payload.get("action_items", []),
+                participants=payload.get("participants", []),
+                participant_map=payload.get("participant_map", None),
+                duration_seconds=payload.get("duration_seconds", 0),
+                workspace_id=workspace_id,
+            )
+            logger.info("Posted meeting notes for group %s from agent payload", group_id)
+        except Exception:
+            logger.exception(
+                "Failed to post meeting notes for group %s from agent payload",
+                group_id,
+            )
+
+    # Emit CallEnded for natural end — notes are now in the DB,
+    # so tell all connected clients to refresh and display them.
+    if was_registered:
+        try:
+            from pocketpaw_ee.cloud._core.realtime.emit import emit as realtime_emit
+            from pocketpaw_ee.cloud._core.realtime.events import CallEnded as _CallEnded
+
+            await realtime_emit(
+                _CallEnded(
+                    data={
+                        "group_id": group_id,
+                        "room_name": room_name_for_group(group_id),
+                    }
+                )
+            )
+            logger.info("Emitted CallEnded for natural room end (group %s)", group_id)
+        except Exception:
+            logger.debug("Could not emit CallEnded for natural room end (shutdown?)")
+
+        # A meeting room everyone left goes back to "scheduled" (its link starts a
+        # new call); end_room is what marks a meeting ended.
+        if workspace_id:
+            try:
+                from pocketpaw_ee.cloud.meetings import service as meetings_service
+
+                await meetings_service.release_meeting_room(workspace_id, group_id)
+            except Exception:
+                logger.exception("Could not release meeting room %s after natural end", group_id)
+
+
+# ---------------------------------------------------------------------------
+# S3 configuration for LiveKit recording output
+# ---------------------------------------------------------------------------
+
+
+def _get_s3_config() -> dict[str, str] | None:
+    """Read S3 config from environment for LiveKit Egress output.
+
+    Returns a dict with keys used by ``livekit.protocol.egress.S3Upload``
+    or ``None`` if S3 is not configured (falls back to temp local storage).
+    """
+    bucket = os.environ.get("S3_PRIVATE_BUCKET") or os.environ.get("S3_BUCKET")
+    if not bucket:
+        logger.warning("S3 not configured — recordings will use LiveKit's built-in storage")
+        return None
+    return {
+        "bucket": bucket,
+        "region": os.environ.get("S3_REGION", ""),
+        "endpoint": os.environ.get("S3_ENDPOINT", ""),
+        "access_key": os.environ.get("S3_ACCESS_KEY_ID", ""),
+        "secret": os.environ.get("S3_SECRET_ACCESS_KEY", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Recording management
+# ---------------------------------------------------------------------------
+
+RECORDING_DIR = "recordings"
+
+
+def _recording_output_path(group_id: str) -> str:
+    """Build a deterministic S3 key for a recording."""
+    from datetime import UTC, datetime
+
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    return f"{RECORDING_DIR}/{group_id}/{timestamp}_{room_name_for_group(group_id)}.mp4"
+
+
+async def start_room_recording(group_id: str) -> dict[str, Any]:
+    """Start a composite room recording via LiveKit Egress, outputting to S3.
+
+    Returns the egress metadata including the egress ID and output path.
+
+    Raises ``RuntimeError`` if a recording is already active for this group.
+    """
+    _ensure_configured()
+
+    if group_id in _active_recordings:
+        raise RuntimeError(f"Recording already active for group {group_id}")
+
+    room_name = room_name_for_group(group_id)
+
+    from livekit.api import LiveKitAPI
+    from livekit.protocol.egress import (
+        EncodedFileOutput,
+        EncodedFileType,
+        EncodingOptionsPreset,
+        RoomCompositeEgressRequest,
+        S3Upload,
+    )
+
+    output_path = _recording_output_path(group_id)
+    s3_cfg = _get_s3_config()
+
+    file_output = EncodedFileOutput(
+        file_type=EncodedFileType.MP4,
+        filepath=output_path,
+        disable_manifest=False,
+    )
+
+    # Configure S3 upload destination
+    if s3_cfg:
+        file_output.s3.CopyFrom(
+            S3Upload(
+                bucket=s3_cfg["bucket"],
+                region=s3_cfg["region"],
+                endpoint=s3_cfg["endpoint"],
+                access_key=s3_cfg["access_key"],
+                secret=s3_cfg["secret"],
+            )
+        )
+    # If no S3 config, LiveKit uses its built-in storage (if configured)
+    # or the recording will fail — log a warning.
+
+    req = RoomCompositeEgressRequest(
+        room_name=room_name,
+        preset=EncodingOptionsPreset.H264_720P_30,
+        audio_only=False,
+        file_outputs=[file_output],
+    )
+
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+        try:
+            info = await lk.egress.start_room_composite_egress(req)
+            egress_id = info.egress_id
+            _active_recordings[group_id] = egress_id
+            logger.info(
+                "Started recording for room %s (egress_id=%s, output=%s)",
+                room_name,
+                egress_id,
+                output_path,
+            )
+            return {
+                "egress_id": egress_id,
+                "room_name": room_name,
+                "group_id": group_id,
+                "output_path": output_path,
+                "status": info.status,
+                "started_at": info.started_at,
+            }
+        except Exception as exc:
+            logger.error("Failed to start recording for room %s: %s", room_name, exc)
+            raise
+
+
+async def stop_room_recording(group_id: str) -> dict[str, Any]:
+    """Stop an active room recording.
+
+    Returns the final egress info including the S3 output path so the
+    caller can create a file record in the uploads system.
+
+    Raises ``RuntimeError`` if no recording is active for this group.
+    """
+    _ensure_configured()
+
+    egress_id = _active_recordings.pop(group_id, None)
+    if not egress_id:
+        raise RuntimeError(f"No active recording for group {group_id}")
+
+    from livekit.api import LiveKitAPI
+    from livekit.protocol.egress import StopEgressRequest
+
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+        try:
+            stop_req = StopEgressRequest(egress_id=egress_id)
+            info = await lk.egress.stop_egress(stop_req)
+            logger.info(
+                "Stopped recording for group %s (egress_id=%s, status=%s)",
+                group_id,
+                egress_id,
+                info.status,
+            )
+
+            # Collect output file info
+            output_files = []
+            for f in info.file_results or []:
+                output_files.append(
+                    {
+                        "filename": f.filename,
+                        "size": f.size,
+                        "duration": f.duration,
+                    }
+                )
+
+            return {
+                "egress_id": egress_id,
+                "room_name": info.room_name or room_name_for_group(group_id),
+                "group_id": group_id,
+                "status": info.status,
+                "output_files": output_files,
+                "ended_at": info.ended_at,
+            }
+        except Exception as exc:
+            logger.error("Failed to stop recording for group %s: %s", group_id, exc)
+            raise
+
+
+async def get_recording_info(group_id: str) -> dict[str, Any] | None:
+    """Get the current status of a recording for a group.
+
+    Returns ``None`` if no recording was ever started.
+    """
+    egress_id = _active_recordings.get(group_id)
+    if not egress_id:
+        return None
+
+    _ensure_configured()
+
+    from livekit.api import LiveKitAPI
+    from livekit.protocol.egress import ListEgressRequest
+
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+        try:
+            list_req = ListEgressRequest(room_name=room_name_for_group(group_id))
+            resp = await lk.egress.list_egress(list_req)
+            for item in resp.items or []:
+                if item.egress_id == egress_id:
+                    return {
+                        "egress_id": item.egress_id,
+                        "room_name": item.room_name,
+                        "group_id": group_id,
+                        "status": item.status,
+                        "started_at": item.started_at,
+                        "ended_at": item.ended_at,
+                    }
+            return {
+                "egress_id": egress_id,
+                "group_id": group_id,
+                "status": "unknown",
+            }
+        except Exception as exc:
+            logger.warning("Failed to get recording info for group %s: %s", group_id, exc)
+            return {
+                "egress_id": egress_id,
+                "group_id": group_id,
+                "status": "unknown",
+            }
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Daily call-time budget (feat/billing-rbac-member-caps)
+# ---------------------------------------------------------------------------
+
+
+def _start_of_today_utc() -> datetime:
+    """Midnight UTC of the current calendar day (the budget window boundary)."""
+    return datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Coerce a DB round-tripped datetime to tz-aware UTC.
+
+    mongomock (and some drivers) return naive datetimes even when stored aware;
+    production Mongo round-trips aware. Normalize so comparisons never mix
+    offset-aware and offset-naive values.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+async def _daily_call_usage(workspace_id: str) -> int:
+    """Total SECONDS of LiveKit calls used today by a workspace.
+
+    Sums the overlap between each of the workspace's LiveKit ``Meeting`` rows
+    and today (UTC). An ended meeting contributes ``actual_end - actual_start``;
+    one still in progress contributes ``now - actual_start`` so a running call
+    counts toward the daily budget immediately. A call started BEFORE today that
+    ends today is counted for its today-overlap; a call started before today
+    that is still running (no ``actual_end``) is not counted — an accepted edge
+    (the daily window is UTC, and such cross-midnight in-flight calls are rare).
+    """
+    start = _start_of_today_utc()
+    end = start + timedelta(days=1)
+    docs = await MeetingDoc.find(
+        {
+            "workspace": workspace_id,
+            "source": "livekit",
+            "$or": [
+                {"actual_start": {"$gte": start}},
+                {"actual_end": {"$gte": start}},
+            ],
+        }
+    ).to_list()
+    now = datetime.now(UTC)
+    # Clip each row's span to today's window, grouped by room: two rows for one
+    # room (a scheduled start on a running call) overlap, and one call's time
+    # must count once. A row with no room name stands alone.
+    spans: dict[str, list[tuple[datetime, datetime]]] = {}
+    for doc in docs:
+        s = max(_as_utc(doc.actual_start or now), start)
+        e = min(_as_utc(doc.actual_end or now), end)
+        if e > s:
+            spans.setdefault(doc.provider_meeting_id or str(doc.id), []).append((s, e))
+    total = 0
+    for room_spans in spans.values():
+        cur_s, cur_e = None, None
+        for s, e in sorted(room_spans):
+            if cur_e is None or s > cur_e:
+                if cur_e is not None:
+                    total += int((cur_e - cur_s).total_seconds())
+                cur_s, cur_e = s, e
+            else:
+                cur_e = max(cur_e, e)
+        total += int((cur_e - cur_s).total_seconds())
+    return total
+
+
+async def _call_budget_remaining(workspace_id: str) -> tuple[int | None, int]:
+    """Resolve the workspace's today call budget as ``(cap_seconds, remaining)``.
+
+    ``cap`` is the plan's ``max_call_seconds_per_day``: None = uncapped
+    (Enterprise), 0 = Free (no calls at all). ``remaining`` is
+    ``cap - today_used`` and may be negative once the budget is spent (a None
+    cap yields ``remaining = 0`` — meaningless, callers check the cap). Raises
+    nothing itself; ``create_room`` decides how to enforce.
+    """
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    cap = ent.max_call_seconds_per_day
+    if cap is None:
+        return None, 0
+    if cap == 0:
+        # Free — no calls at all; today's usage is irrelevant (the gate blocks
+        # at entry, so skip the DB usage query entirely).
+        return 0, 0
+    used = await _daily_call_usage(workspace_id)
+    return cap, cap - used
+
+
+async def _force_end_at_budget(group_id: str, workspace_id: str, deadline: datetime) -> None:
+    """Force-end a call once its daily budget is exhausted.
+
+    Scheduled at call-start with ``deadline = now + remaining budget``. Sleeps
+    until the deadline, then ends the room ONLY if its Meeting is still
+    ``in_progress`` (a user who hung up early means ``end_room`` already ran and
+    the meeting is ``ended`` — this becomes a no-op). In-memory like the
+    meeting-agent reaper: a deploy restart loses the task, and LiveKit's
+    ``empty_timeout`` (5 min) reaps an orphaned room anyway.
+    """
+    delay = max(0.0, (deadline - datetime.now(UTC)).total_seconds())
+    if delay > 0:
+        await asyncio.sleep(delay)
+    try:
+        room_name = room_name_for_group(group_id)
+        meeting = await MeetingDoc.find_one(
+            MeetingDoc.workspace == workspace_id,
+            MeetingDoc.provider_meeting_id == room_name,
+            MeetingDoc.status == "in_progress",
+        )
+        if meeting is None:
+            logger.info("Budget force-end skipped: call %s already ended", room_name)
+            return
+        logger.info("Daily call budget exhausted — force-ending call %s", room_name)
+        await end_room(group_id, workspace_id, reason="budget_exhausted")
+    except Exception as exc:
+        logger.warning("Failed to force-end call %s at budget deadline: %s", group_id, exc)
+
+
+async def _meeting_notes_allowed(workspace_id: str) -> bool:
+    """False for an unpaid early-access workspace: the notes bot spends on STT
+    and an LLM summary outside the credit ledger, so the call runs without it.
+    A failed check also answers False; a call with no notes is the safe miss.
+    """
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+    try:
+        return await early_access_denial(workspace_id) is None
+    except Exception:
+        logger.warning(
+            "livekit: early-access check failed for workspace=%s; no meeting notes",
+            workspace_id,
+            exc_info=True,
+        )
+        return False
+
+
+async def create_room(
+    group_id: str,
+    workspace_id: str = "",
+    user_id: str = "",
+    *,
+    record_meeting: bool = True,
+) -> dict[str, Any]:
+    """Create a LiveKit room for a group call.
+
+    Returns room metadata including the room name and the admin token.
+    The room is named ``group-call-{group_id}`` for deterministic lookup.
+    Automatically starts the meeting notes agent for this room.
+
+    The returned dict includes an ``is_new`` boolean indicating whether
+    the room was just created or already existed. When a new room is
+    created, a ``Meeting`` document is also persisted so the call
+    appears in the scheduled meetings sidebar as "Live".
+
+    Daily CALL-TIME budget (ABAC/RBAC member-cap seam): the workspace's plan
+    caps LiveKit minutes per day (Free = 0 → no calls). Free is blocked at
+    entry; a paid tier with an exhausted budget is blocked from creating a NEW
+    room (joining an already-running room is allowed — that call already owns
+    its budget). Each new call gets a ``call_budget_deadline`` and a watchdog
+    that force-ends it at the deadline so a single over-budget call is cut off.
+
+    ``record_meeting=False`` is for a caller that already owns the call's
+    ``Meeting`` row (a scheduled meeting starting): the budget gate and the
+    watchdog still apply, but no "Instant call" row is inserted and no
+    ``meeting.started`` is emitted. The caller stores the returned
+    ``call_budget_deadline`` and sets ``provider_meeting_id`` to the room name
+    on its own row so ``end_room`` and the watchdog find it.
+    """
+    _ensure_configured()
+
+    room_name = room_name_for_group(group_id)
+
+    # Daily call-time budget: Free (cap 0) has NO calling at all, so block
+    # before touching LiveKit. Paid tiers are enforced only when creating a NEW
+    # room below (a join to an already-running call is not blocked).
+    budget: tuple[int | None, int] | None = None
+    if workspace_id:
+        budget = await _call_budget_remaining(workspace_id)
+        if budget[0] == 0:
+            raise CallLimitError(0)
+
+    is_new = False
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+        # Check if the room already exists FIRST (LiveKit's CreateRoom may be
+        # idempotent — succeeding without error for existing rooms — so we
+        # cannot rely on catching "already exists" errors).
+        list_req = ListRoomsRequest(names=[room_name])
+        list_resp = await lk.room.list_rooms(list_req)
+        room_exists = len(list_resp.rooms) > 0
+
+        if not room_exists:
+            # A paid tier only blocks a NEW call once today's budget is spent;
+            # joining an existing room is always allowed. A None cap (Enterprise
+            # / no plan context) is uncapped — no gate.
+            if budget is not None and budget[0] is not None:
+                cap, remaining = budget
+                if remaining <= 0:
+                    raise CallLimitError(cap)
+            req = CreateRoomRequest(
+                name=room_name,
+                empty_timeout=5 * 60,
+                max_participants=50,
+                max_playout_delay=750,
+            )
+            await lk.room.create_room(req)
+            logger.info("Created LiveKit room %s for group %s", room_name, group_id)
+            is_new = True
+        else:
+            logger.info("LiveKit room %s already exists for group %s", room_name, group_id)
+
+    # The new call may run until its remaining daily budget is spent — the
+    # watchdog force-ends it there. Uncapped (Enterprise / no plan context)
+    # calls, and joins to a running room, get no deadline.
+    now = datetime.now(UTC)
+    budget_deadline = None
+    if is_new and budget is not None:
+        cap, remaining = budget
+        if cap is not None and remaining > 0:
+            budget_deadline = now + timedelta(seconds=remaining)
+
+    if budget_deadline is not None and not record_meeting:
+        asyncio.create_task(_force_end_at_budget(group_id, workspace_id, budget_deadline))
+
+    # Persist a Meeting document when a new room is created so the
+    # call shows up in the scheduled meetings sidebar as "Live".
+    if is_new and workspace_id and record_meeting:
+        try:
+            meeting = MeetingDoc(
+                workspace=workspace_id,
+                source="livekit",
+                provider=None,
+                provider_meeting_id=room_name,
+                title="Instant call",
+                join_url="",
+                scheduled_start=now,
+                scheduled_end=None,
+                actual_start=now,
+                status="in_progress",
+                call_budget_deadline=budget_deadline,
+                participants=[],
+                recording_file_ids=[],
+                raw_provider_payload={"group_id": group_id},
+                created_by_user_id=user_id or None,
+            )
+            await meeting.insert()
+            logger.info("Created Meeting doc for instant call in group %s", group_id)
+
+            if budget_deadline is not None:
+                asyncio.create_task(_force_end_at_budget(group_id, workspace_id, budget_deadline))
+                logger.info(
+                    "Scheduled budget force-end for group %s at %s",
+                    group_id,
+                    budget_deadline.isoformat(),
+                )
+
+            # Emit meeting.started so other clients pick it up
+            from pocketpaw_ee.cloud.meetings.events import MeetingStarted
+
+            await emit(
+                MeetingStarted(
+                    data={
+                        "workspace_id": workspace_id,
+                        "meeting_id": str(meeting.id),
+                        "source": "livekit",
+                        "group_id": group_id,
+                    }
+                )
+            )
+            logger.info("Emitted meeting.started for instant call in group %s", group_id)
+        except Exception as exc:
+            logger.warning("Failed to create Meeting doc for instant call: %s", exc)
+
+    # The call bot subscribes for transcription and publishes one microphone
+    # track for Ask Paw's spoken answers; no camera, screen share or data.
+    # Use a 24h TTL so the bot never expires mid-call.
+    bot_token = await _generate_token(
+        room_name,
+        "call-bot",
+        can_publish=True,
+        can_subscribe=True,
+        is_admin=False,
+        ttl_seconds=86400,
+        publish_sources=["microphone"],
+        can_publish_data=False,
+    )
+
+    # Start the meeting notes agent as a managed subprocess so it does not
+    # block the server event loop with WebRTC / Deepgram STT processing.
+    #
+    # The check -> spawn -> insert below would race without the lock: the
+    # ``await _spawn_agent_process`` yields the event loop between the
+    # membership check and the insert, so two concurrent joins (two
+    # POST /livekit/rooms for the same group) could each pass the check and
+    # spawn a second "call-bot" that fights the first over the shared identity.
+    # The per-group asyncio.Lock makes check -> spawn -> insert atomic. The
+    # deploy runs a single worker so this fully dedupes it; cross-replica dedupe
+    # (only if the API is ever run multi-replica) is the LiveKit Agents
+    # migration's job, not a best-effort participant poll here.
+    notes_on = await _meeting_notes_allowed(workspace_id)
+    async with _spawn_lock_for(group_id):
+        if notes_on and group_id not in _active_agents:
+            proc = await _spawn_agent_process(
+                group_id=group_id,
+                room_name=room_name,
+                bot_token=bot_token,
+            )
+            agent_ref = _SubprocessAgentRef(
+                group_id=group_id,
+                room_name=room_name,
+                process=proc,
+            )
+            _active_agents[group_id] = agent_ref
+
+            # Background task: wait for the subprocess to finish, then clean
+            # up the registry so we don't leak agent references.
+            asyncio.create_task(_reap_agent_process(group_id, proc, workspace_id))
+
+            logger.info(
+                "Started meeting agent subprocess for group %s (room %s)", group_id, room_name
+            )
+
+    await emit(CallStarted(data={"group_id": group_id, "room_name": room_name}))
+
+    return {
+        "room_name": room_name,
+        "group_id": group_id,
+        "url": LIVEKIT_URL,
+        "bot_token": bot_token,
+        "created_at": datetime.now(UTC).isoformat(),
+        "is_new": is_new,
+        "call_budget_deadline": budget_deadline,
+    }
+
+
+async def generate_participant_token(
+    room_name: str,
+    identity: str,
+    *,
+    name: str | None = None,
+    can_publish: bool = True,
+    can_subscribe: bool = True,
+    ttl_seconds: int = 3600,
+) -> str:
+    """Generate a LiveKit access token for a participant.
+
+    Args:
+        room_name: The LiveKit room name.
+        identity: Participant identity (usually user ID).
+        name: Display name to show to other participants. Falls back to identity.
+        can_publish: Whether the participant can publish audio/video.
+        can_subscribe: Whether the participant can subscribe to others.
+        ttl_seconds: Token time-to-live.
+
+    Returns:
+        A JWT token string for connecting to LiveKit.
+    """
+    _ensure_configured()
+    return await _generate_token(
+        room_name,
+        identity,
+        name=name,
+        can_publish=can_publish,
+        can_subscribe=can_subscribe,
+        ttl_seconds=ttl_seconds,
+    )
+
+
+async def end_room(group_id: str, workspace_id: str = "", reason: str = "") -> dict[str, Any]:
+    """End an active call by deleting the LiveKit room.
+
+    When the room is deleted, all participants are disconnected and the
+    call bot's cleanup logic (posting meeting notes) is triggered.
+    Also transitions the associated Meeting document to ``ended`` so
+    the call shows as "Over" in the scheduled meetings sidebar.
+
+    ``reason`` is a machine-readable end reason carried on the ``call.ended``
+    event (e.g. ``budget_exhausted`` when the daily call-time budget watchdog
+    force-ends the room) so the UI can show plan-specific messaging. Omitted
+    (empty) for ordinary, user-initiated end-calls.
+    """
+    _ensure_configured()
+
+    room_name = room_name_for_group(group_id)
+
+    # Stop the meeting agent first (generates and posts notes)
+    agent = _active_agents.pop(group_id, None)
+    if agent is not None:
+        try:
+            await agent.stop()
+            logger.info("Stopped meeting agent for group %s", group_id)
+        except Exception as exc:
+            logger.warning("Error stopping meeting agent for group %s: %s", group_id, exc)
+
+    # ── Post meeting notes synchronously ──
+    # The agent wrote a JSON payload to stdout before exiting.
+    # _collect_agent_notes stored it in _agent_notes_payloads.
+    # We post it here (in the parent's Beanie context) so that notes
+    # are in the DB BEFORE the room is deleted and CallEnded is
+    # emitted by the router layer.
+    # Yield control first so _collect_agent_notes can drain the pipe.
+    await asyncio.sleep(0)
+    payload = _agent_notes_payloads.pop(group_id, None)
+    if payload is not None:
+        try:
+            await post_meeting_notes_to_group(
+                group_id=group_id,
+                transcript=payload.get("transcript", ""),
+                summary=payload.get("summary", "Call ended."),
+                action_items=payload.get("action_items", []),
+                participants=payload.get("participants", []),
+                participant_map=payload.get("participant_map", None),
+                duration_seconds=payload.get("duration_seconds", 0),
+                workspace_id=workspace_id,
+            )
+            logger.info("Posted meeting notes for group %s (end_room)", group_id)
+        except Exception as exc:
+            logger.warning("Failed to post meeting notes for group %s: %s", group_id, exc)
+
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+        try:
+            req = DeleteRoomRequest(room=room_name)
+            await lk.room.delete_room(req)
+            logger.info("Deleted LiveKit room %s for group %s", room_name, group_id)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "not found" in msg or "does not exist" in msg:
+                logger.warning("LiveKit room %s not found (already deleted)", room_name)
+            else:
+                logger.error("Failed to delete LiveKit room: %s", exc)
+                raise
+
+    ended_data: dict[str, Any] = {"group_id": group_id, "room_name": room_name}
+    if reason:
+        ended_data["reason"] = reason
+    await emit(CallEnded(data=ended_data))
+
+    # Transition the call's Meeting rows to ended so the call shows as "Over".
+    # All of them: a scheduled start on a running call leaves two in_progress
+    # rows for one room, and closing only one strands the other as "Live".
+    if workspace_id:
+        try:
+            now = datetime.now(UTC)
+            meetings = await MeetingDoc.find(
+                MeetingDoc.workspace == workspace_id,
+                MeetingDoc.provider_meeting_id == room_name,
+                MeetingDoc.source == "livekit",
+                MeetingDoc.status == "in_progress",
+            ).to_list()
+            for meeting in meetings:
+                meeting.status = "ended"
+                meeting.actual_end = now
+                await meeting.save()
+                logger.info("Marked Meeting %s as ended for group %s", meeting.id, group_id)
+        except Exception as exc:
+            logger.warning("Failed to end Meeting for group %s: %s", group_id, exc)
+
+    return {
+        "room_name": room_name,
+        "group_id": group_id,
+        "ended_at": datetime.now(UTC).isoformat(),
+    }
+
+
+async def get_room_info(group_id: str) -> dict[str, Any] | None:
+    """Get the current state of a LiveKit room.
+
+    Returns None if the room doesn't exist (no active call). ``active`` is
+    True only while a participant other than the call-bot is in the room.
+    """
+    _ensure_configured()
+
+    room_name = room_name_for_group(group_id)
+
+    async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+        try:
+            list_req = ListRoomsRequest(names=[room_name])
+            list_resp = await lk.room.list_rooms(list_req)
+            if not list_resp.rooms:
+                return None
+
+            parts_req = ListParticipantsRequest(room=room_name)
+            parts_resp = await lk.room.list_participants(parts_req)
+            participants = parts_resp.participants
+
+            return {
+                "room_name": room_name,
+                "group_id": group_id,
+                "participant_count": len(participants),
+                "participants": [
+                    {
+                        "identity": p.identity,
+                        "name": p.name or p.identity,
+                        "joined_at": _format_joined_at(p.joined_at),
+                        "kind": str(p.kind),
+                    }
+                    for p in participants
+                ],
+                # A room holding only the call-bot (or nobody) is not a live
+                # call. It used to report True whenever the room existed.
+                "active": any(p.identity != "call-bot" for p in participants),
+            }
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "not found" in msg or "does not exist" in msg:
+                return None
+            logger.error("Failed to get room info: %s", exc)
+            raise
+
+
+# ---------------------------------------------------------------------------
+# Meeting notes — called by the agent after call ends
+# ---------------------------------------------------------------------------
+
+
+async def post_meeting_notes_to_group(
+    group_id: str,
+    transcript: str,
+    summary: str,
+    action_items: list[str],
+    participants: list[str],
+    duration_seconds: int,
+    workspace_id: str = "",
+    participant_map: list[dict[str, str]] | None = None,
+) -> None:
+    """Post meeting notes to a group after a call ends.
+
+    Creates a system message directly (bypassing membership check since the
+    call-bot is not a group member) and emits a real-time event so all
+    group members see it. Also stores the transcript as a file and creates
+    a MeetingTranscript record so the meeting detail in /meetings can
+    display the transcript.
+    """
+    # Resolve participant identities to display names using participant_map
+    # (which maps identity → name as sent by the agent).
+    name_map: dict[str, str] = {}
+    if participant_map:
+        for p in participant_map:
+            pid = p.get("identity", "")
+            pname = p.get("name", "") or pid
+            if pid:
+                name_map[pid] = pname
+    participant_names = [name_map.get(p, p) for p in participants]
+
+    lines = [
+        "📋 **Meeting Notes**",
+        "",
+        f"**Duration:** {_format_duration(duration_seconds)}",
+        f"**Participants:** {', '.join(participant_names) if participant_names else 'N/A'}",
+        "",
+    ]
+
+    # If the summary is rich markdown (has its own headings), use it directly.
+    # Otherwise, wrap it in a "**Summary:**" label.
+    if summary.strip().startswith("## "):
+        lines.append(summary)
+    else:
+        lines.append("**Summary:**")
+        lines.append(summary)
+
+    if action_items:
+        lines.append("")
+        lines.append("**Action Items:**")
+        for i, item in enumerate(action_items, 1):
+            lines.append(f"{i}. {item}")
+
+    if transcript:
+        lines.append("")
+        lines.append("**Transcript:**")
+        # Truncate transcript to stay within message limits
+        max_transcript_len = 4000
+        transcript_preview = transcript[:max_transcript_len]
+        if len(transcript) > max_transcript_len:
+            transcript_preview += "\n\n*(transcript truncated)*"
+        lines.append(f"```\n{transcript_preview}\n```")
+
+    content = "\n".join(lines)
+
+    try:
+        # Use direct message creation to bypass membership check
+
+        from pocketpaw_ee.cloud.chat import group_service
+        from pocketpaw_ee.cloud.chat.message_service import _create_group_message_doc
+        from pocketpaw_ee.cloud.shared.events import event_bus
+
+        domain_msg = await _create_group_message_doc(
+            group_id=group_id,
+            sender=CALL_BOT_USER_ID,
+            sender_type="user",
+            sender_name="Meeting Notes",
+            content=content,
+        )
+        # The message's writer owns the group stats (nothing on the bus does).
+        # A stats failure must not lose the notes, so it is logged, not raised.
+        try:
+            await group_service.bump_message_stats(
+                group_id, last_message_at=domain_msg.created_at or datetime.now(UTC)
+            )
+        except Exception:
+            logger.warning("meeting notes: group stats bump failed for %s", group_id)
+        # Emit on the internal event bus (agent routing)
+        await event_bus.emit(
+            "message.sent",
+            {
+                "group_id": group_id,
+                "message_id": domain_msg.id,
+                "sender_id": CALL_BOT_USER_ID,
+                "sender_type": "user",
+                "content": content,
+                "mentions": [],
+            },
+        )
+        await emit(
+            CallNotesPosted(
+                data={
+                    "group_id": group_id,
+                    "message_id": domain_msg.id,
+                    "duration_seconds": duration_seconds,
+                    "participant_count": len(participants),
+                }
+            )
+        )
+        await emit(
+            MessageNew(
+                data={
+                    "group": group_id,
+                    "group_id": group_id,
+                    "sender": CALL_BOT_USER_ID,
+                    "senderName": "Meeting Notes",
+                    "senderType": "user",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "message_id": domain_msg.id,
+                    "_id": domain_msg.id,
+                    "content": content,
+                    "mentions": [],
+                }
+            )
+        )
+        logger.info("Posted meeting notes to group %s (message %s)", group_id, domain_msg.id)
+    except Exception as exc:
+        logger.error("Failed to post meeting notes to group %s: %s", group_id, exc)
+        raise
+
+    # Store transcript as a file and create MeetingTranscript doc.
+    if workspace_id and transcript:
+        try:
+            from pocketpaw_ee.cloud.meetings.events import MeetingTranscriptReady
+            from pocketpaw_ee.cloud.uploads.service import write_text_file
+
+            room_name = room_name_for_group(group_id)
+            meeting = await MeetingDoc.find_one(
+                MeetingDoc.workspace == workspace_id,
+                MeetingDoc.provider_meeting_id == room_name,
+                MeetingDoc.source == "livekit",
+            )
+            if meeting is None:
+                return
+
+            safe_title = (meeting.title or "call").replace("/", "-")[:80]
+            file_rec = await write_text_file(
+                workspace_id=workspace_id,
+                owner_id=meeting.created_by_user_id or "system",
+                folder_path="/transcripts",
+                filename=f"{safe_title}-transcript.vtt",
+                content=transcript,
+                mime="text/vtt",
+            )
+
+            import re as _re
+
+            cue_count = transcript.count("\n--> ") + transcript.count(" --> ")
+            # For plain-text transcripts (no VTT cues), fall back to line count
+            entry_count = max(cue_count, 1) if transcript.strip() else 0
+            speaker_count = len({m.group(1) for m in _re.finditer(r"<v\s+([^>]+)>", transcript)})
+
+            transcript_doc = MeetingTranscript(
+                workspace=workspace_id,
+                meeting_id=str(meeting.id),
+                provider_transcript_id=room_name,
+                file_id=file_rec.id,
+                entry_count=entry_count,
+                speaker_count=speaker_count,
+                language=None,
+                fetched_at=datetime.now(UTC),
+                indexed_in_kb=False,
+                kb_indexed_version=1,
+            )
+            await transcript_doc.insert()
+
+            await emit(
+                MeetingTranscriptReady(
+                    data={
+                        "workspace_id": workspace_id,
+                        "meeting_id": str(meeting.id),
+                        "source": "livekit",
+                        "file_id": file_rec.id,
+                        "entry_count": entry_count,
+                        "speaker_count": speaker_count,
+                        "language": None,
+                    }
+                )
+            )
+            logger.info("Stored transcript for meeting %s (%d cues)", meeting.id, cue_count)
+        except Exception as exc:
+            logger.warning("Failed to store transcript: %s", exc)
+
+    # ── Create Mission Control tasks from action items ──
+    # Prefer the structured action_items list (already extracted by the LLM)
+    # over re-parsing the markdown summary.
+    if workspace_id and (action_items or summary):
+        try:
+            await _create_tasks_from_meeting_notes(
+                workspace_id=workspace_id,
+                group_id=group_id,
+                action_items=action_items,
+                summary=summary,
+                participant_map=participant_map,
+            )
+        except Exception as exc:
+            logger.warning("Failed to create tasks from meeting notes: %s", exc)
+
+
+async def post_call_bot_message(group_id: str, content: str, sender_name: str) -> str:
+    """Post ``content`` to the group chat as the call bot; returns the message id.
+
+    Same write path as the meeting notes: the call-bot is not a group member,
+    so the message doc is created directly, then the group stats, the internal
+    ``message.sent`` bus and the realtime ``message.new`` are updated.
+    """
+    from pocketpaw_ee.cloud.chat import group_service
+    from pocketpaw_ee.cloud.chat.message_service import _create_group_message_doc
+    from pocketpaw_ee.cloud.shared.events import event_bus
+
+    domain_msg = await _create_group_message_doc(
+        group_id=group_id,
+        sender=CALL_BOT_USER_ID,
+        sender_type="user",
+        sender_name=sender_name,
+        content=content,
+    )
+    try:
+        await group_service.bump_message_stats(
+            group_id, last_message_at=domain_msg.created_at or datetime.now(UTC)
+        )
+    except Exception:
+        logger.warning("call bot message: group stats bump failed for %s", group_id)
+    await event_bus.emit(
+        "message.sent",
+        {
+            "group_id": group_id,
+            "message_id": domain_msg.id,
+            "sender_id": CALL_BOT_USER_ID,
+            "sender_type": "user",
+            "content": content,
+            "mentions": [],
+        },
+    )
+    await emit(
+        MessageNew(
+            data={
+                "group": group_id,
+                "group_id": group_id,
+                "sender": CALL_BOT_USER_ID,
+                "senderName": sender_name,
+                "senderType": "user",
+                "created_at": datetime.now(UTC).isoformat(),
+                "message_id": domain_msg.id,
+                "_id": domain_msg.id,
+                "content": content,
+                "mentions": [],
+            }
+        )
+    )
+    return domain_msg.id
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
+async def _generate_token(
+    room_name: str,
+    identity: str,
+    *,
+    name: str | None = None,
+    can_publish: bool = True,
+    can_subscribe: bool = True,
+    is_admin: bool = False,
+    ttl_seconds: int = 3600,
+    publish_sources: list[str] | None = None,
+    can_publish_data: bool = True,
+) -> str:
+    """Internal: generate a LiveKit access token."""
+    if publish_sources is None:
+        publish_sources = ["microphone", "camera", "screen_share"]
+    grants = VideoGrants(
+        room_join=True,
+        room=room_name,
+        can_publish=can_publish,
+        can_subscribe=can_subscribe,
+        can_publish_data=can_publish_data,
+        can_publish_sources=publish_sources if can_publish else None,
+        can_update_own_metadata=True,
+        agent=is_admin or None,
+    )
+
+    # Use the provided display name, falling back to the identity (user ID)
+    display_name = name or identity
+
+    token = (
+        AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+        .with_identity(identity)
+        .with_ttl(timedelta(seconds=ttl_seconds))
+        .with_grants(grants)
+        .with_name(display_name)
+    )
+
+    jwt = token.to_jwt()
+    return jwt
+
+
+def _format_duration(seconds: int) -> str:
+    """Format seconds into a human-readable duration string."""
+    minutes, secs = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    elif minutes:
+        return f"{minutes}m {secs}s"
+    else:
+        return f"{secs}s"
+
+
+def _format_joined_at(joined_at: Any) -> str | None:
+    """Format a LiveKit participant's joined_at timestamp to ISO string.
+
+    The livekit-api may return joined_at as a protobuf Timestamp (with
+    ``ToDatetime()``) or as a plain Unix timestamp (int/float).  Handle both.
+    """
+    if joined_at is None:
+        return None
+    if hasattr(joined_at, "ToDatetime"):
+        return joined_at.ToDatetime().isoformat()
+    if isinstance(joined_at, int | float):
+        return datetime.fromtimestamp(joined_at, tz=UTC).isoformat()
+    return str(joined_at)
+
+
+# ---------------------------------------------------------------------------
+# Meeting notes → Mission Control tasks
+# ---------------------------------------------------------------------------
+
+
+async def _create_tasks_from_meeting_notes(
+    workspace_id: str,
+    group_id: str,
+    action_items: list[str] | None = None,
+    summary: str = "",
+    participant_map: list[dict[str, str]] | None = None,
+) -> None:
+    """Create Mission Control tasks from meeting notes action items.
+
+    Prefers the structured ``action_items`` list (already extracted by the
+    LLM), falling back to parsing ``## ✅ Action Items`` from the markdown
+    ``summary`` for backwards compatibility.
+    """
+    items: list[str] = []
+    if action_items:
+        items = action_items
+    elif summary:
+        items = _extract_action_items_from_markdown(summary)
+
+    if not items:
+        logger.info("No action items found in meeting notes for group %s", group_id)
+        return
+
+    # Build name→id lookup from participant_map (sent by agent, no DB needed)
+    name_to_id: dict[str, str] = {}
+    if participant_map:
+        for p in participant_map:
+            pid = p.get("identity", "")
+            pname = p.get("name", "")
+            if pid and pname:
+                name_to_id[pname.lower()] = pid
+                first_word = pname.split(" ", 1)[0].lower()
+                if first_word not in name_to_id:
+                    name_to_id[first_word] = pid
+
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest, SourceDTO
+
+    ctx = RequestContext(
+        user_id=CALL_BOT_USER_ID,
+        workspace_id=workspace_id,
+        request_id=f"meeting-notes-{group_id}",
+        scope=ScopeKind.NONE,
+        started_at=datetime.now(UTC),
+    )
+
+    created = 0
+    for item in items:
+        try:
+            # Parse @Name prefix from the action item, e.g. "@Admin: do X"
+            assignee_name, description = _parse_action_item_assignee(item)
+
+            # Resolve the @mention name to a user ID using participant_map.
+            q = assignee_name.strip().lower()
+            assignee_id = name_to_id.get(q)
+            if not assignee_id and participant_map:
+                # Check if mention is a substring of a participant name
+                # or if a participant name is a substring of the mention
+                for p in participant_map:
+                    pname = (p.get("name", "") or "").lower()
+                    if q in pname or pname in q:
+                        assignee_id = p.get("identity")
+                        break
+            assignee_id = assignee_id or "__unassigned__"
+
+            await tasks_service.agent_create_task(
+                ctx,
+                CreateTaskRequest(
+                    title=(description or item)[:200],
+                    summary=f"(from meeting notes, group {group_id})",
+                    assignee=AssigneeDTO(
+                        kind="human",
+                        id=assignee_id,
+                        name=assignee_name,
+                    ),
+                    source=SourceDTO(
+                        type="meeting_notes",
+                        ref_id=group_id,
+                        metadata={"group_id": group_id},
+                    ),
+                ),
+            )
+            created += 1
+        except Exception as exc:
+            logger.warning("Failed to create task for action item %r: %s", item, exc)
+
+    logger.info("Created %d tasks from meeting notes for group %s", created, group_id)
+
+
+def _parse_action_item_assignee(item: str) -> tuple[str, str]:
+    """Extract ``@Name`` prefix from an action item, returning (assignee, rest).
+
+    Strips markdown bold markers (``**``) before matching so the ``@``
+    prefix is at position 0 regardless of whether the LLM rendered
+    ``@Name:`` or ``**@Name:**`` (the format the DeepSeek + merge
+    prompts ask for).
+    """
+    import re
+
+    cleaned = item.strip()
+    # Strip bold markers so **@Name:** becomes @Name: (the regex requires
+    # @ at the start of the string).
+    cleaned = cleaned.replace("**", "").strip()
+
+    m = re.match(r"@(\S[\w\s]*?)\s*[:—\-]\s*(.*)", cleaned)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return "__unassigned__", item
+
+
+def _extract_action_items_from_markdown(markdown: str) -> list[str]:
+    """Extract bullet-point action items from the ✅ Action Items section.
+
+    Looks for a heading matching "Action Items" (with optional emoji prefix)
+    at any heading level (``##`` or ``###``) and collects all following list
+    items until the next heading or end of text.  The DeepSeek + merge
+    prompts use ``###`` level headings; the regex also accepts ``##`` for
+    backwards-compatibility with older prompt versions and LLMs that
+    normalise heading levels.
+
+    Strips markdown bold markers (``**``) from extracted items so the
+    ``@Name:`` assignee prefix is at position 0 for
+    ``_parse_action_item_assignee``.
+    """
+    import re
+
+    lines = markdown.split("\n")
+    in_section = False
+    items: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect the start of the Action Items section — accepts ``##`` or
+        # ``###`` headings, with or without emoji prefix.
+        if (
+            re.match(r"^#{2,3}\s*[✅📋📌⚠️🔜❓⚙️]*\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^#{2,3}\s*✅\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^#{2,3}\s*Action\s*Items", stripped, re.IGNORECASE)
+        ):
+            in_section = True
+            continue
+
+        # If we hit another heading, stop
+        if in_section and stripped.startswith("##"):
+            break
+
+        if in_section:
+            # Match bullet points: -, *, or numbered 1.
+            m = re.match(r"\s*[-*]\s+(.*)", stripped)
+            if not m:
+                m = re.match(r"\s*\d+[.)]\s+(.*)", stripped)
+            if m:
+                text = m.group(1).strip()
+                # Strip bold markers so **@Name:** becomes @Name: —
+                # the assignee parser expects @ at the start of the string.
+                text = text.replace("**", "")
+                if text and text != "None" and not text.startswith("```"):
+                    items.append(text)
+
+    return items

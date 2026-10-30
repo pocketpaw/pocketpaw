@@ -14,22 +14,22 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from pocketpaw.ee.automations.bridge import (
+from pocketpaw.automations.bridge import (
     SCHEDULE_TO_CRON,
     rule_to_intention_spec,
     sync_rule_to_daemon,
     unsync_rule_from_daemon,
 )
-from pocketpaw.ee.automations.evaluator import AutomationEvaluator
-from pocketpaw.ee.automations.models import (
+from pocketpaw.automations.evaluator import AutomationEvaluator
+from pocketpaw.automations.models import (
     CreateRuleRequest,
     ExecutionMode,
     Rule,
     RuleType,
     UpdateRuleRequest,
 )
-from pocketpaw.ee.automations.router import router
-from pocketpaw.ee.automations.store import AutomationStore
+from pocketpaw.automations.router import router
+from pocketpaw.automations.store import AutomationStore
 
 # ============================================================================
 # Helpers / factories
@@ -130,19 +130,19 @@ def client_with_mocks(app: FastAPI, tmp_path: Path):
 
     with (
         patch(
-            "pocketpaw.ee.automations.router.get_automation_store",
+            "pocketpaw.automations.router.get_automation_store",
             return_value=isolated_store,
         ),
         patch(
-            "pocketpaw.ee.automations.router.sync_rule_to_daemon",
+            "pocketpaw.automations.router.sync_rule_to_daemon",
             return_value=None,
         ),
         patch(
-            "pocketpaw.ee.automations.router.unsync_rule_from_daemon",
+            "pocketpaw.automations.router.unsync_rule_from_daemon",
             return_value=True,
         ),
         patch(
-            "pocketpaw.ee.automations.router.get_evaluator",
+            "pocketpaw.automations.router.get_evaluator",
             return_value=fresh_evaluator,
         ),
     ):
@@ -314,7 +314,7 @@ class TestEvaluatorEvaluateAll:
 
         with (
             patch(
-                "pocketpaw.ee.automations.evaluator.get_automation_store",
+                "pocketpaw.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
             patch.object(evaluator, "_evaluate_threshold", new_callable=AsyncMock) as mock_eval,
@@ -334,7 +334,7 @@ class TestEvaluatorEvaluateAll:
 
         with (
             patch(
-                "pocketpaw.ee.automations.evaluator.get_automation_store",
+                "pocketpaw.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
             patch.object(evaluator, "_evaluate_threshold", new_callable=AsyncMock) as mock_thresh,
@@ -361,7 +361,7 @@ class TestEvaluatorEvaluateAll:
 
         with (
             patch(
-                "pocketpaw.ee.automations.evaluator.get_automation_store",
+                "pocketpaw.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
             patch.object(evaluator, "_evaluate_threshold", new_callable=AsyncMock) as mock_eval,
@@ -386,7 +386,7 @@ class TestEvaluatorEvaluateAll:
         # _evaluate_threshold returns False so no _fire_rule occurs
         with (
             patch(
-                "pocketpaw.ee.automations.evaluator.get_automation_store",
+                "pocketpaw.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
             patch.object(
@@ -406,7 +406,7 @@ class TestEvaluatorEvaluateAll:
         fetched = store.get_rule(rule.id)
 
         with patch(
-            "pocketpaw.ee.automations.evaluator.get_automation_store",
+            "pocketpaw.automations.evaluator.get_automation_store",
             return_value=store,
         ):
             result = await evaluator._evaluate_threshold(fetched)
@@ -440,7 +440,7 @@ class TestFireRule:
 
         with (
             patch(
-                "pocketpaw.ee.automations.evaluator.get_automation_store",
+                "pocketpaw.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
             patch.object(evaluator, "_propose_action", new_callable=AsyncMock) as mock_propose,
@@ -460,7 +460,7 @@ class TestFireRule:
 
         with (
             patch(
-                "pocketpaw.ee.automations.evaluator.get_automation_store",
+                "pocketpaw.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
             patch.object(evaluator, "_execute_directly", new_callable=AsyncMock) as mock_execute,
@@ -480,7 +480,7 @@ class TestFireRule:
 
         with (
             patch(
-                "pocketpaw.ee.automations.evaluator.get_automation_store",
+                "pocketpaw.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
             patch.object(evaluator, "_notify", new_callable=AsyncMock) as mock_notify,
@@ -504,7 +504,7 @@ class TestFireRule:
 
         with (
             patch(
-                "pocketpaw.ee.automations.evaluator.get_automation_store",
+                "pocketpaw.automations.evaluator.get_automation_store",
                 return_value=store,
             ),
             patch.object(evaluator, "_propose_action", new_callable=AsyncMock),
@@ -617,11 +617,11 @@ class TestRouterBridgeIntegration:
 
         with (
             patch(
-                "pocketpaw.ee.automations.router.get_automation_store",
+                "pocketpaw.automations.router.get_automation_store",
                 return_value=isolated_store,
             ),
-            patch("pocketpaw.ee.automations.router.sync_rule_to_daemon", mock_sync),
-            patch("pocketpaw.ee.automations.router.get_evaluator", return_value=MagicMock()),
+            patch("pocketpaw.automations.router.sync_rule_to_daemon", mock_sync),
+            patch("pocketpaw.automations.router.get_evaluator", return_value=MagicMock()),
         ):
             client = TestClient(app)
             resp = client.post(
@@ -645,12 +645,12 @@ class TestRouterBridgeIntegration:
 
         with (
             patch(
-                "pocketpaw.ee.automations.router.get_automation_store",
+                "pocketpaw.automations.router.get_automation_store",
                 return_value=isolated_store,
             ),
-            patch("pocketpaw.ee.automations.router.unsync_rule_from_daemon", mock_unsync),
-            patch("pocketpaw.ee.automations.router.sync_rule_to_daemon", return_value=None),
-            patch("pocketpaw.ee.automations.router.get_evaluator", return_value=MagicMock()),
+            patch("pocketpaw.automations.router.unsync_rule_from_daemon", mock_unsync),
+            patch("pocketpaw.automations.router.sync_rule_to_daemon", return_value=None),
+            patch("pocketpaw.automations.router.get_evaluator", return_value=MagicMock()),
         ):
             client = TestClient(app)
             resp = client.delete(f"/api/v1/automations/rules/{rule.id}")
@@ -668,11 +668,11 @@ class TestRouterBridgeIntegration:
 
         with (
             patch(
-                "pocketpaw.ee.automations.router.get_automation_store",
+                "pocketpaw.automations.router.get_automation_store",
                 return_value=isolated_store,
             ),
-            patch("pocketpaw.ee.automations.router.sync_rule_to_daemon", mock_sync),
-            patch("pocketpaw.ee.automations.router.get_evaluator", return_value=MagicMock()),
+            patch("pocketpaw.automations.router.sync_rule_to_daemon", mock_sync),
+            patch("pocketpaw.automations.router.get_evaluator", return_value=MagicMock()),
         ):
             client = TestClient(app)
             resp = client.post(f"/api/v1/automations/rules/{rule.id}/toggle")

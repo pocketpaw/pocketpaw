@@ -1,4 +1,16 @@
-"""Tests for Google ADK backend — mocked (no real SDK needed)."""
+"""Tests for Google ADK backend — mocked SDK surface, real genai types.
+
+Updated: 2026-06-27 (test hermeticity for pytest-xdist) — back the mocked
+``google.genai`` module's ``types`` namespace with the REAL
+``google.genai.types`` module instead of a bare ``MagicMock``. The backend's
+run() path lazily imports ``google.adk`` (whose pydantic models annotate fields
+with ``genai.types.Content`` / ``.Part`` / etc.); a bare MagicMock ``types``
+made pydantic raise ``PydanticSchemaGenerationError`` on first cold import,
+so every TestGoogleADKRun test failed when run in isolation. Whenever the ADK
+run path executes, ``google.adk`` is importable, which guarantees its hard
+dependency ``google.genai`` is too — so the real types are always available
+here. The rest of ``google.genai`` stays mocked.
+"""
 
 import sys
 from types import SimpleNamespace
@@ -9,10 +21,18 @@ import pytest
 from pocketpaw.agents.backend import Capability
 from pocketpaw.config import Settings
 
-# --- Mock google.genai.types for all run() tests ---
-_mock_genai_types = MagicMock()
+# --- Mock the google.genai module surface, but back its ``types`` namespace
+# with the real google.genai.types so ADK's pydantic models can build schemas.
 _mock_genai = MagicMock()
-_mock_genai.types = _mock_genai_types
+try:
+    import google.genai.types as _real_genai_types
+
+    _mock_genai.types = _real_genai_types
+except ImportError:  # pragma: no cover — ADK/genai not installed in this env
+    _mock_genai.types = MagicMock()
+
+# Backwards-compatible alias retained for any external reference.
+_mock_genai_types = _mock_genai.types
 
 
 class TestGoogleADKInfo:

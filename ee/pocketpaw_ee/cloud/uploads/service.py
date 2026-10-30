@@ -1,0 +1,536 @@
+# service.py — EEUploadService: workspace-scoped upload pipeline on top of OSS.
+# Module-level helpers for other entities: ``get_records_scoped`` (metadata only)
+#   and ``read_bytes_scoped`` (server-internal byte read pinned to a workspace,
+#   size-capped, NO per-user ACL; callers must authorise upstream).
+# Updated: 2026-09-27 — fix/chat-attachment-name-backfill. Added module-level
+#   ``get_records_scoped(file_ids, workspace)``, a metadata-only batch lookup
+#   (no blob I/O) other entities call instead of reaching into the store, so
+#   session history can fill names on legacy nameless chat attachments.
+# Updated: 2026-08-29 — T0 "Persist the extracted text". ``delete`` now also
+#   removes the file's DERIVED extraction blob (``uploads.extracted_text``),
+#   which T0 introduced beside the uploaded bytes. Without this, every deleted
+#   file would leave its extracted text at rest forever. It runs after the
+#   tombstone and the primary blob delete, is keyed on ``file_id`` alone (so it
+#   needs no row read and works post-tombstone), and swallows its own failures
+#   — a derived orphan is a cleanup-job problem, never a failed delete.
+# Updated: 2026-06-26 — ART-4 security follow-up. ``presigned_get`` now forwards
+#   a Content-Disposition to the storage adapter: ``attachment; filename="…"``
+#   for any mime NOT in ``INLINE_MIMES`` (mirroring the streaming download
+#   route's policy in uploads/router.py), ``None`` (adapter default → inline)
+#   for inline-safe types (images, pdf, plain text). This closes the gap where
+#   an S3 presigned GET served delivered HTML/SVG/JS INLINE on the storage
+#   origin — the deliver_artifact path relaxes the mime allowlist, so without
+#   this an agent-built .html could render active content from its download URL.
+# Updated: 2026-05-17 — pocketpaw#1118 P1. Added ``write_text_file()`` —
+#   a programmatic text-content write path for callers that have bytes
+#   in memory rather than an inbound HTTP ``UploadFile``. The cloud
+#   planner uses it to land PRD / goal.md / plan.json into the
+#   workspace Files panel without spinning a fake multipart request.
+#   Same MongoFileStore + StorageAdapter + FileReady emit pipeline as
+#   the HTTP path — only the source-of-bytes differs.
+# Updated: 2026-04-30 — Stage 1.B "Files as Knowledge". FileReady now fires
+#   for every successful upload (chat-scoped or workspace-only) and always
+#   carries workspace_id so downstream subscribers (the KB indexer) can route
+#   the file into the right scope without a follow-up Mongo lookup.
+# Updated: 2026-05-03 — Stage 3.E "Files as Knowledge". ``upload_many`` /
+#   ``upload`` now thread ``pocket_id`` from the router through to
+#   ``MongoFileStore.save_scoped`` and into the FileReady event payload.
+#   The KB listener picks up the new key and routes the article into
+#   ``pocket:{id}`` instead of ``workspace:{wid}``. Storage layout is
+#   unchanged — partitioning is metadata-only (Captain Option A).
+#
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
+"""EEUploadService — workspace-scoped upload pipeline on top of the OSS service."""
+
+from __future__ import annotations
+
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi import UploadFile
+
+from pocketpaw.uploads.adapter import StorageAdapter
+from pocketpaw.uploads.config import INLINE_MIMES, UploadSettings
+from pocketpaw.uploads.errors import NotFound
+from pocketpaw.uploads.factory import build_adapter
+from pocketpaw.uploads.file_store import FileRecord
+from pocketpaw.uploads.keys import new_storage_key
+from pocketpaw.uploads.service import (
+    BulkUploadResult,
+    UploadService,
+    _raise,
+)
+from pocketpaw.uploads.service import (
+    generate_thumbnail as _oss_generate_thumbnail,
+)
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import FileDeleted, FileReady
+from pocketpaw_ee.cloud.uploads.extracted_text import delete_extracted_text
+from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+
+def _safe_disposition_filename(filename: str) -> str:
+    """Strip characters that could break out of a ``Content-Disposition``
+    header value (quotes, backslashes, control chars). Returns ``"download"``
+    when nothing usable remains."""
+    cleaned = "".join(c for c in (filename or "") if c.isprintable() and c not in '"\\\r\n')
+    return cleaned or "download"
+
+
+def _download_disposition(mime: str, filename: str) -> str | None:
+    """``Content-Disposition`` to serve a presigned download with, or ``None``.
+
+    Mirrors the streaming download route (``uploads/router.py``): mimes in
+    ``INLINE_MIMES`` (images, pdf, plain text) may render inline, so we return
+    ``None`` and leave the adapter/object default untouched (byte-identical to
+    before). Everything else — including the HTML/SVG/JS the deliver_artifact
+    path can now store — is forced to ``attachment`` so a presigned GET
+    downloads it instead of rendering active content on the storage origin.
+    """
+    if mime in INLINE_MIMES:
+        return None
+    return f'attachment; filename="{_safe_disposition_filename(filename)}"'
+
+
+class _NullMeta:
+    """Stub JSONLFileStore — validates but doesn't persist (EE uses Mongo)."""
+
+    def save(self, record: FileRecord) -> None:
+        pass
+
+    def get(self, file_id: str) -> FileRecord | None:
+        return None
+
+    def soft_delete(self, file_id: str) -> None:
+        pass
+
+
+class EEUploadService:
+    """Workspace-scoped upload pipeline.
+
+    Wraps the OSS ``UploadService`` for validation + magic-byte sniff + adapter
+    writes, then persists metadata to Mongo with workspace scoping.
+    """
+
+    def __init__(
+        self,
+        adapter: StorageAdapter,
+        meta: MongoFileStore,
+        cfg: UploadSettings,
+        is_chat_member: Callable[[str, str, str], Awaitable[bool]] | None = None,
+        is_workspace_admin: Callable[[str, str], Awaitable[bool]] | None = None,
+    ) -> None:
+        self._adapter = adapter
+        self._meta = meta
+        self._cfg = cfg
+        # Optional collaborator checks. When ``None``, the corresponding
+        # branch is skipped and the gate reduces to owner-only — preserving
+        # behaviour for tests and callers that don't wire them.
+        self._is_chat_member = is_chat_member
+        self._is_workspace_admin = is_workspace_admin
+        # Use a null meta under OSS service so we control Mongo writes here
+        self._oss = UploadService(adapter=adapter, meta=_NullMeta(), cfg=cfg)  # type: ignore[arg-type]
+
+    async def _assert_can_write(
+        self,
+        rec: FileRecord,
+        requester_id: str,
+        workspace: str,
+    ) -> None:
+        """Gate a write on a file record.
+
+        Owner OR workspace admin/owner only. Chat-member does NOT grant
+        write. Mirrors :meth:`_assert_can_read` but does not fall through
+        silently — callers translate the raised exception to a 403.
+        """
+        if rec.owner_id == requester_id:
+            return
+        if self._is_workspace_admin is not None:
+            try:
+                if await self._is_workspace_admin(requester_id, workspace):
+                    return
+            except Exception:
+                pass
+        raise PermissionError("files.forbidden")
+
+    async def _assert_can_read(
+        self,
+        rec: FileRecord,
+        requester_id: str,
+        workspace: str,
+    ) -> None:
+        """Gate a read on a file record.
+
+        Allows owner, chat-members (when the file is pinned to a chat), and
+        workspace admins/owners. Every denial raises :class:`NotFound` so
+        callers cannot distinguish "missing" from "forbidden".
+        """
+        if rec.owner_id == requester_id:
+            return
+        chat_id = getattr(rec, "chat_id", None)
+        if chat_id and self._is_chat_member is not None:
+            try:
+                if await self._is_chat_member(chat_id, requester_id, workspace):
+                    return
+            except Exception:
+                # Defensive: collaborator lookup must never leak info or
+                # convert a 404 into a 500.
+                pass
+        if self._is_workspace_admin is not None:
+            try:
+                if await self._is_workspace_admin(requester_id, workspace):
+                    return
+            except Exception:
+                pass
+        raise NotFound()
+
+    async def upload(
+        self,
+        file: UploadFile,
+        owner_id: str,
+        chat_id: str | None,
+        workspace: str,
+        folder_path: str = "/",
+        pocket_id: str | None = None,
+    ) -> FileRecord:
+        result = await self.upload_many(
+            [file],
+            owner_id,
+            chat_id,
+            workspace,
+            folder_path=folder_path,
+            pocket_id=pocket_id,
+        )
+        if result.failed:
+            f = result.failed[0]
+            _raise(f.code, f.reason)
+        return result.uploaded[0]
+
+    async def upload_many(
+        self,
+        files: list[UploadFile],
+        owner_id: str,
+        chat_id: str | None,
+        workspace: str,
+        folder_path: str = "/",
+        pocket_id: str | None = None,
+    ) -> BulkUploadResult:
+        # Delegate validation + adapter writes; metadata is discarded inside OSS
+        result = await self._oss.upload_many(files, owner_id, chat_id)
+        # feat/billing-storage-caps: block a batch that would push the workspace
+        # over its plan's S3 cap. We check the ACTUAL written sizes (from the
+        # OSS result — not a pre-write guess) and roll back the just-written
+        # blobs so an over-cap batch is a no-op: no Mongo row, no FileReady.
+        # GATED on ``billing_enforced`` (a no-op for OSS / self-host), and never
+        # retroactive — existing blobs are untouched.
+        from pocketpaw_ee.cloud.storage import service as storage_service
+
+        incoming = sum(rec.size for rec in result.uploaded)
+        if incoming:
+            exceeded, _used, limit = await storage_service.storage_cap_exceeded(workspace, incoming)
+            if exceeded:
+                for rec in result.uploaded:
+                    with contextlib.suppress(Exception):
+                        await self._adapter.delete(rec.storage_key)
+                from pocketpaw_ee.cloud._core.errors import StorageLimitError
+
+                raise StorageLimitError(limit)
+        # feat/abuse-budgets: the plan cap above only runs when billing is
+        # enforced, which is off by default — so on an unbilled deployment it
+        # is not a bound at all. This one always runs. Same rollback, and it
+        # sits AFTER the plan cap so a billed workspace still gets the 402 that
+        # names a real upgrade path rather than a 429 that says "wait".
+        if result.uploaded:
+            from pocketpaw_ee.cloud.uploads import upload_budget
+
+            allowed, over = await upload_budget.try_spend(workspace, len(result.uploaded), incoming)
+            if not allowed:
+                for rec in result.uploaded:
+                    with contextlib.suppress(Exception):
+                        await self._adapter.delete(rec.storage_key)
+                from pocketpaw_ee.cloud._core.errors import DailyUploadLimitError
+
+                raise DailyUploadLimitError(over)
+        # Persist each successful record in Mongo with workspace + pocket scoping.
+        for rec in result.uploaded:
+            await self._meta.save_scoped(
+                rec,
+                workspace=workspace,
+                folder_path=folder_path,
+                pocket_id=pocket_id,
+            )
+            # Emit FileReady for every successful upload. Chat-scoped rows
+            # carry ``group_id`` so the timeline broadcast still works;
+            # workspace-only uploads (avatars, KB files) skip the broadcast
+            # but still fire local subscribers (the KB indexer). Pocket-
+            # scoped uploads carry ``pocket_id`` so the KB listener routes
+            # the article into ``pocket:{id}`` rather than the workspace
+            # pool.
+            data: dict = {
+                "workspace_id": workspace,
+                "file_id": rec.id,
+                "filename": rec.filename,
+                "mime": rec.mime,
+                "size": rec.size,
+                "storage_key": rec.storage_key,
+                "url": f"/api/v1/uploads/{rec.id}",
+            }
+            if rec.chat_id:
+                data["group_id"] = rec.chat_id
+            if pocket_id:
+                data["pocket_id"] = pocket_id
+            await emit(FileReady(data=data))
+        return result
+
+    async def stream(
+        self,
+        file_id: str,
+        requester_id: str,
+        workspace: str,
+    ) -> tuple[FileRecord, AsyncIterator[bytes]]:
+        rec = await self._meta.get_scoped(file_id, workspace=workspace)
+        if rec is None:
+            raise NotFound()
+        await self._assert_can_read(rec, requester_id, workspace)
+        return rec, self._adapter.open(rec.storage_key)
+
+    async def presigned_get(
+        self,
+        file_id: str,
+        requester_id: str,
+        workspace: str,
+        ttl_seconds: int,
+    ) -> tuple[FileRecord, str | None]:
+        rec = await self._meta.get_scoped(file_id, workspace=workspace)
+        if rec is None:
+            raise NotFound()
+        await self._assert_can_read(rec, requester_id, workspace)
+        # Force a download for anything that isn't inline-safe so a presigned
+        # GET can't render active content (HTML/SVG/JS) on the storage origin —
+        # the deliver_artifact path stores arbitrary mimes, so this is the gate
+        # that keeps a delivered .html from rendering from its download URL.
+        disposition = _download_disposition(rec.mime, rec.filename)
+        url = await self._adapter.presigned_get(
+            rec.storage_key, ttl_seconds, response_content_disposition=disposition
+        )
+        return rec, url
+
+    async def thumbnail(
+        self,
+        file_id: str,
+        requester_id: str,
+        workspace: str,
+        *,
+        width: int = 0,
+        height: int = 0,
+        quality: int = 80,
+        fmt: str = "webp",
+    ) -> tuple[FileRecord, str, AsyncIterator[bytes]]:
+        """Return ``(record, mime_type, chunk_iterator)`` for a resized thumbnail.
+
+        Workspace-scoped lookup + access check, then delegates to the shared
+        ``generate_thumbnail`` helper for the actual fetch + resize + cache.
+        """
+        rec = await self._meta.get_scoped(file_id, workspace=workspace)
+        if rec is None:
+            raise NotFound()
+        await self._assert_can_read(rec, requester_id, workspace)
+        return await _oss_generate_thumbnail(
+            self._adapter,
+            rec,
+            self._cfg.local_root,
+            width=width,
+            height=height,
+            quality=quality,
+            fmt=fmt,
+        )
+
+    async def delete(
+        self,
+        file_id: str,
+        requester_id: str,
+        workspace: str,
+    ) -> None:
+        rec = await self._meta.get_scoped(file_id, workspace=workspace)
+        if rec is None:
+            raise NotFound()
+        if rec.owner_id != requester_id:
+            raise NotFound()
+        # Mark deleted in Mongo first — if the adapter call fails, the record
+        # stays tombstoned and the blob becomes an orphan (picked up by a
+        # future cleanup job) rather than silently surviving visibility.
+        await self._meta.soft_delete_scoped(file_id, workspace=workspace)
+        await self._adapter.delete(rec.storage_key)
+        # T0: the upload's DERIVED extraction blob goes with it. Keyed
+        # deterministically on file_id, so no row read is needed — which also
+        # means it works after the tombstone above. Best-effort by contract:
+        # ``delete_extracted_text`` swallows its own failures, because a
+        # leftover derived blob is a cleanup-job problem and never a reason to
+        # fail a delete the user asked for.
+        await delete_extracted_text(file_id, adapter=self._adapter)
+        # Emit FileDeleted on every delete so subscribers can prune cached
+        # state (KB index, search caches). Chat-scoped rows include group_id
+        # for the timeline broadcast; workspace-only rows skip it.
+        data: dict = {
+            "workspace_id": workspace,
+            "file_id": rec.id,
+        }
+        if rec.chat_id:
+            data["group_id"] = rec.chat_id
+        await emit(FileDeleted(data=data))
+
+
+# ---------------------------------------------------------------------------
+# Programmatic write helper (pocketpaw#1118 P1)
+# ---------------------------------------------------------------------------
+
+
+async def get_records_scoped(file_ids: list[str], workspace: str) -> dict[str, FileRecord]:
+    """Metadata for a batch of uploads in one workspace, keyed by file_id.
+
+    One query, no storage access. Ids that are unknown, soft-deleted or owned
+    by another workspace are absent from the result.
+    """
+    return await MongoFileStore().get_many_scoped(file_ids, workspace)
+
+
+async def read_bytes_scoped(file_id: str, workspace: str, *, max_bytes: int) -> bytes | None:
+    """A live upload's bytes, read server-side, or ``None``.
+
+    For server-internal copies of a file the platform itself wrote (a site's
+    screenshot copied onto a template), so there is no requester and no
+    ``_assert_can_read``: the caller must already have authorised the read of
+    whatever pointed it at ``file_id``. Workspace-pinned like ``get_scoped``, so
+    an id from another workspace, an unknown id or a deleted row is ``None``.
+    ``None`` too past ``max_bytes``: the read stops there rather than buffer a
+    file the caller would refuse.
+    """
+    rec = await MongoFileStore().get_scoped(file_id, workspace=workspace)
+    if rec is None:
+        return None
+    adapter = build_adapter(Path.home() / ".pocketpaw" / "uploads")
+    buf = bytearray()
+    async for chunk in adapter.open(rec.storage_key):
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            return None
+    return bytes(buf)
+
+
+_PLANNER_EXTENSION_BY_MIME = {
+    "text/markdown": "md",
+    "text/plain": "txt",
+    "text/vtt": "vtt",
+    "application/json": "json",
+}
+
+
+async def write_text_file(
+    *,
+    workspace_id: str,
+    owner_id: str,
+    folder_path: str,
+    filename: str,
+    content: str | bytes,
+    mime: str = "text/markdown",
+    pocket_id: str | None = None,
+) -> FileRecord:
+    """Persist a text blob into the workspace Files panel.
+
+    Programmatic counterpart to ``EEUploadService.upload`` for callers
+    that have bytes in memory rather than a FastAPI ``UploadFile``. The
+    cloud planner uses it to land PRD / goal.md / plan.json against a
+    Project without spinning a fake multipart request. Same
+    ``MongoFileStore`` + ``StorageAdapter`` + ``FileReady`` emit pipeline
+    the HTTP path uses — only the source-of-bytes differs.
+
+    Lives at module scope (not on :class:`EEUploadService`) because most
+    callers (services, listeners, jobs) don't have a built service
+    instance and shouldn't have to thread one through. Module-level
+    state stays minimal — the StorageAdapter is built per-call against
+    ``~/.pocketpaw/uploads`` so tests that monkeypatch ``Path.home``
+    get isolation for free.
+
+    Returns the persisted :class:`FileRecord` so callers can grab
+    ``rec.id`` for downstream linking (PlanSession.prd_file_id, etc.).
+    """
+
+    if not workspace_id:
+        raise ValueError("write_text_file: workspace_id is required")
+    if not filename:
+        raise ValueError("write_text_file: filename is required")
+
+    root = Path.home() / ".pocketpaw" / "uploads"
+    root.mkdir(parents=True, exist_ok=True)
+    adapter = build_adapter(root)
+
+    payload = content.encode("utf-8") if isinstance(content, str) else content
+    storage_key = new_storage_key("planner", _PLANNER_EXTENSION_BY_MIME.get(mime, "bin"))
+
+    # We always write UTF-8 here, so tell storage as much. Without an explicit
+    # charset the object is served as bare ``text/vtt`` and a browser opening
+    # the signed URL guesses an 8-bit codepage (Windows-1252) — non-ASCII text
+    # (Hindi, etc.) renders as mojibake. The base mime is still what we persist
+    # to Mongo so the FE's exact-match mime checks stay intact.
+    content_type = mime
+    if mime.startswith("text/") or mime == "application/json":
+        content_type = f"{mime}; charset=utf-8"
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield payload
+
+    obj = await adapter.put(storage_key, _body(), content_type)
+
+    # feat/billing-storage-caps: the programmatic writer honours the workspace's
+    # S3 cap the same way the HTTP upload path does. ``assert_storage_available``
+    # raises ``StorageLimitError`` (402) BEFORE the Mongo row lands; on the raise
+    # we also remove the just-written blob so an over-cap write leaves no orphan.
+    from pocketpaw_ee.cloud.storage import service as storage_service
+
+    try:
+        await storage_service.assert_storage_available(workspace_id, obj.size)
+    except Exception:
+        with contextlib.suppress(Exception):
+            await adapter.delete(storage_key)
+        raise
+
+    rec = FileRecord(
+        id=uuid4().hex,
+        storage_key=obj.key,
+        filename=filename,
+        mime=mime,
+        size=obj.size,
+        owner_id=owner_id,
+        chat_id=None,
+        created=datetime.now(UTC),
+    )
+
+    store = MongoFileStore()
+    await store.save_scoped(
+        rec,
+        workspace=workspace_id,
+        folder_path=folder_path or "/",
+        pocket_id=pocket_id,
+    )
+
+    # Mirror the FileReady payload the HTTP path emits so the KB indexer
+    # and the unified Files panel don't need a separate code path for
+    # planner-written files.
+    data: dict = {
+        "workspace_id": workspace_id,
+        "file_id": rec.id,
+        "filename": rec.filename,
+        "mime": rec.mime,
+        "size": rec.size,
+        "storage_key": rec.storage_key,
+        "url": f"/api/v1/uploads/{rec.id}",
+    }
+    if pocket_id:
+        data["pocket_id"] = pocket_id
+    await emit(FileReady(data=data))
+
+    return rec

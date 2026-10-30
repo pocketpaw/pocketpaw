@@ -42,7 +42,7 @@ async def test_spotify_search_no_auth():
 
     tool = SpotifySearchTool()
     with patch(
-        "pocketpaw.integrations.spotify.SpotifyClient._get_token",
+        "pocketpaw.clients.spotify.SpotifyClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute(query="bohemian rhapsody")
@@ -55,7 +55,7 @@ async def test_spotify_now_playing_no_auth():
 
     tool = SpotifyNowPlayingTool()
     with patch(
-        "pocketpaw.integrations.spotify.SpotifyClient._get_token",
+        "pocketpaw.clients.spotify.SpotifyClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute()
@@ -76,7 +76,7 @@ async def test_spotify_playback_no_auth():
 
     tool = SpotifyPlaybackTool()
     with patch(
-        "pocketpaw.integrations.spotify.SpotifyClient._get_token",
+        "pocketpaw.clients.spotify.SpotifyClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute(action="play")
@@ -89,7 +89,7 @@ async def test_spotify_playlist_add_missing_args():
     tool = SpotifyPlaylistTool()
     # Mock _get_token so we get past auth, test arg validation
     with patch(
-        "pocketpaw.integrations.spotify.SpotifyClient._get_token",
+        "pocketpaw.clients.spotify.SpotifyClient._get_token",
         new_callable=AsyncMock,
         return_value="fake",
     ):
@@ -116,12 +116,12 @@ async def test_spotify_search_success():
     ]
 
     with patch(
-        "pocketpaw.integrations.spotify.SpotifyClient._get_token",
+        "pocketpaw.clients.spotify.SpotifyClient._get_token",
         new_callable=AsyncMock,
         return_value="fake",
     ):
         with patch(
-            "pocketpaw.integrations.spotify.SpotifyClient.search",
+            "pocketpaw.clients.spotify.SpotifyClient.search",
             new_callable=AsyncMock,
             return_value=mock_results,
         ):
@@ -137,12 +137,12 @@ async def test_spotify_now_playing_nothing():
     tool = SpotifyNowPlayingTool()
 
     with patch(
-        "pocketpaw.integrations.spotify.SpotifyClient._get_token",
+        "pocketpaw.clients.spotify.SpotifyClient._get_token",
         new_callable=AsyncMock,
         return_value="fake",
     ):
         with patch(
-            "pocketpaw.integrations.spotify.SpotifyClient.now_playing",
+            "pocketpaw.clients.spotify.SpotifyClient.now_playing",
             new_callable=AsyncMock,
             return_value=None,
         ):
@@ -167,12 +167,12 @@ async def test_spotify_playlist_list_success():
     ]
 
     with patch(
-        "pocketpaw.integrations.spotify.SpotifyClient._get_token",
+        "pocketpaw.clients.spotify.SpotifyClient._get_token",
         new_callable=AsyncMock,
         return_value="fake",
     ):
         with patch(
-            "pocketpaw.integrations.spotify.SpotifyClient.get_playlists",
+            "pocketpaw.clients.spotify.SpotifyClient.get_playlists",
             new_callable=AsyncMock,
             return_value=mock_playlists,
         ):

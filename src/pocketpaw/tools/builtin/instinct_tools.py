@@ -10,9 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_instinct_store():
-    """Lazy import to avoid circular deps and missing ee/ module."""
+    """Lazy import to avoid circular deps at module load."""
     try:
-        from ee.api import get_instinct_store
+        from pocketpaw.stores import get_instinct_store
 
         return get_instinct_store()
     except ImportError:
@@ -95,7 +95,7 @@ class InstinctProposeTool(BaseTool):
             return "Instinct is not available (enterprise feature)."
 
         try:
-            from ee.instinct.models import ActionCategory, ActionPriority, ActionTrigger
+            from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
 
             action = await store.propose(
                 pocket_id=pocket_id,

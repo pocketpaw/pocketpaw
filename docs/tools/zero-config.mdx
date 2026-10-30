@@ -1,0 +1,114 @@
+---
+title: "Zero-Config Tools: Weather, Wikipedia & Currency (No API Key)"
+description: "Three built-in PocketPaw tools that work the moment you start chatting — weather forecasts, Wikipedia summaries, and currency conversion. No API key, no setup, no provider to wire up."
+section: Tools
+ogType: article
+keywords: ["zero config", "no api key", "weather", "wikipedia", "currency conversion", "open-meteo", "frankfurter"]
+tags: ["tools", "zero-config"]
+---
+
+# Zero-Config Tools: Weather, Wikipedia & Currency
+
+Most tools need an API key before they do anything useful. These three don't. They call free, keyless public APIs, so they work the first time you open a chat — nothing to configure, no provider to register.
+
+| Tool | Source | API key |
+|------|--------|---------|
+| `weather` | [Open-Meteo](https://open-meteo.com) | None |
+| `wiki` | [Wikipedia REST API](https://en.wikipedia.org/api/rest_v1/) | None |
+| `currency` | [Frankfurter](https://frankfurter.dev) (ECB rates) | None |
+
+## Weather
+
+Returns current conditions plus a multi-day forecast for any place. The location is resolved through Open-Meteo's geocoder, so a plain city name is enough.
+
+```
+User: What's the weather in Tokyo this week?
+Agent: [uses weather tool] → Now: Mainly clear, 18°C... 5-day forecast: ...
+```
+
+```json
+{
+  "name": "weather",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "location": { "type": "string", "description": "City or place name" },
+      "days": { "type": "integer", "description": "Forecast days (1-14, default 5)" },
+      "units": { "type": "string", "description": "'celsius' (default) or 'fahrenheit'" }
+    },
+    "required": ["location"]
+  }
+}
+```
+
+## Wikipedia
+
+Pulls a concise summary for a topic from Wikipedia's REST API — good for "what is X", "who is X", or background facts.
+
+```
+User: Tell me about the Eiffel Tower.
+Agent: [uses wiki tool] → The Eiffel Tower is a wrought-iron lattice tower in Paris...
+```
+
+```json
+{
+  "name": "wiki",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "topic": { "type": "string", "description": "The topic to look up" }
+    },
+    "required": ["topic"]
+  }
+}
+```
+
+## Currency
+
+Converts an amount between two currencies using live European Central Bank reference rates from Frankfurter. Covers roughly 30 major currencies.
+
+```
+User: How much is 100 USD in Japanese yen?
+Agent: [uses currency tool] → $100.00 USD = ¥15,927 JPY (1 USD = 159.27 JPY)
+```
+
+```json
+{
+  "name": "currency",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "amount": { "type": "number", "description": "Amount to convert" },
+      "from_currency": { "type": "string", "description": "Source code, e.g. USD" },
+      "to_currency": { "type": "string", "description": "Target code, e.g. JPY" }
+    },
+    "required": ["amount", "from_currency", "to_currency"]
+  }
+}
+```
+
+## Policy Group
+
+All three belong to `group:knowledge`. To control access:
+
+```bash
+# Allow only the zero-config knowledge tools
+export POCKETPAW_TOOLS_ALLOW="group:knowledge"
+
+# Or deny one of them
+export POCKETPAW_TOOLS_DENY="currency"
+```
+
+## Related
+
+<CardGroup>
+  <Card title="Web Search" icon="lucide:search" href="/tools/web-search">
+    Search the live web via Tavily or Brave when a topic needs fresh results.
+  </Card>
+  <Card title="Tool Policy" icon="lucide:shield-check" href="/tools/tool-policy">
+    Control which tools the agent can reach with profiles and allow/deny lists.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>

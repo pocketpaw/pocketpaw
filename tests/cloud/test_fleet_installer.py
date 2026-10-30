@@ -2,6 +2,12 @@
 # Created: 2026-04-13 — Manifest loader, install orchestration with mocked
 # soul/connector/pocket dependencies, partial-failure reporting, bundled
 # Sales Fleet contract, and the install report shape.
+# Updated: 2026-04-19 (fix/fleet-install-auth-guard) — Added
+# ``TestLoaderBundledNameClamp`` to pin the P0 path-traversal fix on
+# ``load_fleet``. Covers the four contract cases the reviewer called out:
+# bundled name still loads, relative traversal rejects, absolute paths
+# reject, unknown bundled names reject — all with the same generic
+# "not found" error so 4xx responses never leak filesystem state.
 
 from __future__ import annotations
 
@@ -11,8 +17,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from ee.fleet import (
+from pocketpaw_ee.fleet import (
     FleetConnector,
     FleetInstallReport,
     FleetTemplate,
@@ -71,6 +76,46 @@ class TestLoader:
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError):
             load_fleet(tmp_path / "nope.yaml")
+
+
+class TestLoaderBundledNameClamp:
+    """String inputs to ``load_fleet`` must be clamped to ``_BUNDLED_DIR``.
+
+    The REST router passes untrusted user input as a string into
+    ``load_fleet``. Before the clamp, a workspace admin could pass
+    ``"../../etc/passwd"`` and get the server to read + parse the file.
+    These tests lock the clamp behaviour in place so the P0 does not
+    regress.
+    """
+
+    def test_bundled_name_still_loads(self) -> None:
+        # Regression: the clamp must not break the happy path.
+        fleet = load_fleet("sales-fleet")
+        assert isinstance(fleet, FleetTemplate)
+        assert fleet.name
+
+    def test_relative_traversal_rejects_as_not_found(self) -> None:
+        with pytest.raises(FileNotFoundError) as exc_info:
+            load_fleet("../../etc/passwd")
+        # The error message must not reveal where on disk we looked —
+        # only the user-supplied string (which the caller already knows).
+        message = str(exc_info.value)
+        assert "/etc/passwd" not in message or message.endswith("../../etc/passwd")
+        assert "fleet_templates" not in message
+
+    def test_absolute_path_rejects_as_not_found(self) -> None:
+        with pytest.raises(FileNotFoundError):
+            load_fleet("/etc/passwd")
+
+    def test_unknown_bundled_name_rejects_as_not_found(self) -> None:
+        with pytest.raises(FileNotFoundError):
+            load_fleet("definitely-not-a-real-fleet-name")
+
+    def test_dotdot_segment_in_name_rejects(self) -> None:
+        # Extra belt-and-braces: even a single ``..`` segment must not
+        # escape the bundled dir.
+        with pytest.raises(FileNotFoundError):
+            load_fleet("..")
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +316,7 @@ class TestInstallReport:
         assert report.succeeded()
 
     def test_failed_steps_filters(self) -> None:
-        from ee.fleet.models import FleetInstallStep
+        from pocketpaw_ee.fleet.models import FleetInstallStep
 
         report = FleetInstallReport(
             fleet="x",

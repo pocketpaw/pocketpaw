@@ -1,0 +1,76 @@
+"""In-process MCP servers exposed to agent backends for cloud features.
+
+Updated: 2026-09-06 (feat/fx-mcp-server) — added ``fx.py`` (``pocketpaw_fx``).
+
+Updated: 2026-09-06 (BR-1, feat/browser-surface-server) — added ``browser.py``
+(``pocketpaw_browser``) to the listing below: the /browser surface's agentic
+browser. Unlike its siblings it is scoped by DENY as well as allow — every
+non-BROWSER surface profile forbids its ids.
+
+Updated: 2026-07-28 (feat/growth-mcp) — added ``growth.py`` (``pocketpaw_growth``)
+to the listing below: the agent-facing /growth surface, read-and-propose only.
+
+Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) — added the server
+surface listing below, plus the two new read-only servers (``fabric.py`` /
+``instinct.py``). On the claude_agent_sdk backend, registry tools (BaseTool)
+never reach the agent — only MCP servers do — so anything the cloud chat agent
+must touch needs a server here.
+
+Each module here builds a Claude Agent SDK ``create_sdk_mcp_server`` and is
+surfaced to core via a ``pocketpaw.mcp_servers`` ``McpServerProvider`` entry-
+point (see ``pocketpaw_ee.extensions``). Core discovers them through
+``pocketpaw._registry`` and never imports this package directly — the OSS-EE
+boundary.
+
+Server surfaces (module → server name → tools):
+
+* ``belt.py`` → ``pocketpaw_belt`` → ``belt_propose_change`` (gated code change)
+* ``browser.py`` → ``pocketpaw_browser`` → ``navigate`` / ``snapshot`` /
+  ``click`` / ``type`` / ``scroll`` / ``screenshot`` / ``close`` (one real
+  browser per workspace; request-level SSRF in the OSS driver, credential
+  fields refused in code, one audit row per action)
+* ``connectors.py`` → ``pocketpaw_connectors`` → connector listing + execution
+* ``decisions.py`` → ``pocketpaw_decisions`` → Decision-Graph queries
+* ``deliver.py`` → ``pocketpaw_deliver`` → ``deliver_artifact`` (land a built
+  file/dir in tenant blob storage, return a download URL)
+* ``external_actions.py`` → ``pocketpaw_external_actions`` →
+  ``propose_external_action`` (gated connector call — the propose path for
+  this backend)
+* ``fabric.py`` → ``pocketpaw_fabric`` → ``fabric_query`` / ``fabric_stats``
+  (READ-ONLY ontology access, workspace-scoped)
+* ``foresight.py`` → ``pocketpaw_foresight`` → scenario save/run
+* ``growth.py`` → ``pocketpaw_growth`` → the /growth outbound surface:
+  ``growth_list_prospects`` / ``growth_get_prospect`` / ``growth_list_drafts``
+  / ``growth_linkedin_queue`` (reads), ``growth_upsert_prospect`` /
+  ``growth_create_draft`` / ``growth_update_draft`` (authoring writes), and
+  ``growth_propose_send`` / ``growth_propose_send_batch`` (gated). NOTHING here
+  sends and nothing reaches the gate-owned draft statuses ``approved`` /
+  ``sent`` — the agent's reach ends at ``proposed``, a human approves in the
+  Tray, and the dispatch worker sends
+* ``fx.py`` → ``pocketpaw_fx`` → ``search_effects`` / ``get_effect`` /
+  ``list_effect_categories`` (the paw-fx drop-in visual-effects registry read
+  from ``PAW_FX_REGISTRY_DIR``; pure read, no identity)
+* ``icons.py`` → ``pocketpaw_icons`` → ``search_icons`` (free open-source
+  icon/SVG search via Iconify for site iconography; pure read, no identity)
+* ``instinct.py`` → ``pocketpaw_instinct`` → ``instinct_pending`` /
+  ``instinct_audit`` (READ-ONLY gate visibility, workspace-scoped; proposing
+  goes through ``pocketpaw_external_actions``)
+* ``loom.py`` → ``loom`` (stdio config) → codebase orientation reads
+* ``media.py`` → ``pocketpaw_media`` → ``image_generate`` / ``audio_generate`` /
+  ``audio_transcribe`` / ``video_generate`` (routed through the LiteLLM proxy)
+* ``meetings.py`` → ``pocketpaw_meetings`` → meeting queries
+* ``palette.py`` → ``pocketpaw_palette`` → ``extract_palette`` (derive a full
+  50–900 role-scaled color palette from a reference image URL for site theming;
+  pure read, no identity)
+* ``planner.py`` → ``pocketpaw_planner`` (opt-in) + ``pocketpaw_pocket_planner``
+* ``pockets.py`` → ``pocketpaw_pocket`` → pocket context + widget pinning
+* ``sites.py`` / ``sites_create.py`` → ``pocketpaw_sites_manager`` → Paw Sites
+* ``stock_images.py`` → ``pocketpaw_stock`` → ``search_stock_images`` (free
+  Pexels + Unsplash photo search for site imagery; pure read, no identity)
+* ``tasks.py`` → ``pocketpaw_tasks`` → task CRUD
+
+Moved here from ``src/pocketpaw/agents/sdk_mcp_*.py`` in the OSS-EE split
+(Phase 3b): these servers are cloud-only (tasks, planner, pocket context),
+so they belong in ``pocketpaw_ee``. The ripple widget-spec tools, which have
+no cloud dependency, stayed in core as ``pocketpaw.agents.sdk_mcp_widgets``.
+"""

@@ -1,0 +1,255 @@
+"""Tier 2 arq worker: ``execute_run_job`` rehydrates a ``RunSpec`` and
+delegates to ``execute_run``; ``_startup`` sweeps runs orphaned by the
+previous worker.
+
+Updated: 2026-09-28 (fix/chat-run-heartbeat) — the boot-sweep orphan is aged past
+``_boot_sweep_older_than_seconds()`` instead of a fixed 30s, now that the cutoff
+is three heartbeat intervals rather than 5 seconds."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from pocketpaw_ee.cloud.chat.runs import worker
+from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+pytestmark = pytest.mark.asyncio
+
+
+def _spec(run_id: str = "r1") -> RunSpec:
+    return RunSpec(
+        run_id=run_id,
+        workspace_id="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="session:s1",
+        group=None,
+        user_id="u1",
+        agent_id="a1",
+        client_message_id=f"c-{run_id}",
+        user_message_id="m1",
+        content="hi",
+        history=[],
+        intent=None,
+    )
+
+
+async def test_execute_run_job_calls_execute_run(monkeypatch):
+    seen: list[str] = []
+
+    async def fake_execute_run(spec):
+        seen.append(spec.run_id)
+
+    monkeypatch.setattr(worker, "execute_run", fake_execute_run)
+
+    await worker.execute_run_job({}, _spec().model_dump())
+
+    assert seen == ["r1"]
+
+
+async def test_execute_run_job_rehydrates_spec_from_dict(monkeypatch):
+    received: list[RunSpec] = []
+
+    async def fake_execute_run(spec):
+        received.append(spec)
+
+    monkeypatch.setattr(worker, "execute_run", fake_execute_run)
+
+    await worker.execute_run_job({}, _spec("r2").model_dump())
+
+    assert isinstance(received[0], RunSpec)
+    assert received[0].run_id == "r2"
+    assert received[0].workspace_id == "w1"
+
+
+async def test_startup_runs_short_cutoff_sweep(mongo_db, monkeypatch):  # noqa: ARG001
+    """The boot sweep must catch a run orphaned a few seconds ago by the
+    previous worker — the 10-minute default cutoff would leave it visible
+    until the next heartbeat tick."""
+
+    # Stub the DB + realtime init since the test fixture already initialised
+    # Beanie and the realtime bus is not under test here.
+    async def _noop_db(_uri):
+        return None
+
+    def _noop_realtime():
+        return None
+
+    monkeypatch.setattr(worker, "init_cloud_db", _noop_db)
+    monkeypatch.setattr(worker, "init_realtime", _noop_realtime)
+    monkeypatch.setenv(worker._BOOT_SWEEP_ENV, "true")
+
+    orphan = ChatRunDoc(
+        run_id="r-orphan",
+        workspace="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="k1",
+        user_id="u1",
+        agent_id="a1",
+        client_message_id="c-orphan",
+        user_message_id="um1",
+        status="running",  # type: ignore[arg-type]
+        # Just past the boot cutoff, which is three heartbeat intervals (so a
+        # booting replica leaves runs another replica is still beating alone).
+        createdAt=datetime.now(UTC)
+        - timedelta(seconds=worker._boot_sweep_older_than_seconds() + 30),
+    )
+    await orphan.insert()
+
+    await worker._startup({})
+
+    refreshed = await ChatRunDoc.find_one(ChatRunDoc.run_id == orphan.run_id)
+    assert refreshed is not None and refreshed.status == "interrupted"
+
+
+async def test_startup_skips_sweep_when_gate_off(mongo_db, monkeypatch):  # noqa: ARG001
+    """Default off: a fresh worker booting alongside a healthy sibling must
+    NOT mark the sibling's in-flight runs as interrupted."""
+
+    async def _noop_db(_uri):
+        return None
+
+    def _noop_realtime():
+        return None
+
+    monkeypatch.setattr(worker, "init_cloud_db", _noop_db)
+    monkeypatch.setattr(worker, "init_realtime", _noop_realtime)
+    monkeypatch.delenv(worker._BOOT_SWEEP_ENV, raising=False)
+
+    inflight = ChatRunDoc(
+        run_id="r-sibling",
+        workspace="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="k1",
+        user_id="u1",
+        agent_id="a1",
+        client_message_id="c-sibling",
+        user_message_id="um1",
+        status="running",  # type: ignore[arg-type]
+        createdAt=datetime.now(UTC) - timedelta(seconds=30),
+    )
+    await inflight.insert()
+
+    await worker._startup({})
+
+    refreshed = await ChatRunDoc.find_one(ChatRunDoc.run_id == inflight.run_id)
+    assert refreshed is not None and refreshed.status == "running"
+
+
+async def test_worker_settings_exposes_execute_run_job():
+    chat = [
+        f for f in worker.WorkerSettings.functions if getattr(f, "name", "") == "execute_run_job"
+    ]
+    assert [f.coroutine for f in chat] == [worker.execute_run_job]
+    assert worker.WorkerSettings.max_tries == 1
+    assert worker.WorkerSettings.on_startup is worker._startup
+    assert worker.WorkerSettings.on_shutdown is worker._shutdown
+
+
+async def test_startup_registers_builtin_jobs(mongo_db, monkeypatch):  # noqa: ARG001
+    """PRODUCTION FIX — the worker boots in its OWN process, so the registry
+    ``mount_cloud`` populates for the web process is empty here. ``_startup``
+    must call ``register_builtins()`` or ``execute_workspace_job`` →
+    ``resolve_job(name)`` raises ``UnknownJobError`` for EVERY job in a real
+    deploy. Clear the registry, run ``_startup``, and assert the built-ins are
+    registered.
+    """
+    from pocketpaw_ee.cloud.jobs.registry import (
+        UnknownJobError,
+        get_job_registry,
+        resolve_job,
+    )
+
+    async def _noop_db(_uri):
+        return None
+
+    def _noop_realtime():
+        return None
+
+    monkeypatch.setattr(worker, "init_cloud_db", _noop_db)
+    monkeypatch.setattr(worker, "init_realtime", _noop_realtime)
+    # Sweep off — we are only exercising the registration step on boot.
+    monkeypatch.delenv(worker._BOOT_SWEEP_ENV, raising=False)
+
+    # Start from an empty registry so the assertion can ONLY pass if `_startup`
+    # registered the built-ins itself (not because the web mount happened to run
+    # earlier in the test session). Restore afterwards so the module-level dict
+    # doesn't leak state to sibling tests.
+    registry = get_job_registry()
+    saved = dict(registry)
+    registry.clear()
+    try:
+        # Pre-condition: with an empty registry the resolve raises.
+        with pytest.raises(UnknownJobError):
+            resolve_job("score_applications")
+
+        await worker._startup({})
+
+        # Post-condition: the built-in is now resolvable.
+        assert "score_applications" in registry
+        job = resolve_job("score_applications")
+        assert job.name == "score_applications"
+    finally:
+        registry.clear()
+        registry.update(saved)
+
+
+async def test_startup_registers_entrypoint_custom_jobs(mongo_db, monkeypatch):  # noqa: ARG001
+    """``_startup`` must also call ``load_entrypoint_jobs()`` so the worker
+    process (separate from the web ``mount_cloud``) registers WORKSPACE-CUSTOM
+    jobs declared under the ``pocketpaw.jobs`` entry-point group. Without it a
+    custom job dispatched by the web app resolves there but raises
+    ``UnknownJobError`` in the worker that actually runs it. We don't install a
+    real package — we monkeypatch the ``entry_points`` symbol the loader calls.
+    """
+    from pocketpaw_ee.cloud.jobs import plugins as jobs_plugins
+    from pocketpaw_ee.cloud.jobs.registry import (
+        UnknownJobError,
+        get_job_registry,
+        resolve_job,
+    )
+
+    async def _noop_db(_uri):
+        return None
+
+    def _noop_realtime():
+        return None
+
+    monkeypatch.setattr(worker, "init_cloud_db", _noop_db)
+    monkeypatch.setattr(worker, "init_realtime", _noop_realtime)
+    monkeypatch.delenv(worker._BOOT_SWEEP_ENV, raising=False)
+
+    class _StubCustomJob:
+        name = "custom_from_entrypoint"
+
+        async def __call__(self, *, workspace_id, pocket_id, job_id, params):
+            return {"state": {"ran": self.name}}
+
+    class _FakeEP:
+        name = "tenant_jobs"
+
+        def load(self):
+            return lambda: _StubCustomJob()
+
+    def _fake_entry_points(*, group):
+        return [_FakeEP()] if group == jobs_plugins.JOBS_ENTRYPOINT_GROUP else []
+
+    monkeypatch.setattr(jobs_plugins, "entry_points", _fake_entry_points)
+
+    registry = get_job_registry()
+    saved = dict(registry)
+    registry.clear()
+    try:
+        with pytest.raises(UnknownJobError):
+            resolve_job("custom_from_entrypoint")
+
+        await worker._startup({})
+
+        assert resolve_job("custom_from_entrypoint").name == "custom_from_entrypoint"
+    finally:
+        registry.clear()
+        registry.update(saved)

@@ -1,0 +1,147 @@
+---
+title: "Foresight: Population-Scale Simulation"
+description: "Foresight is PocketPaw's IS-era simulation primitive — vendored OASIS substrate, soul-seeded personas, calibrated LLM tier pool, retroactive backtest gate, and projected decisions that land in the Decision Graph."
+section: Core Concepts
+ogType: article
+keywords: ["foresight", "simulation", "OASIS", "CAMEL", "projected decisions", "backtest"]
+tags: ["foresight", "simulation", "rfc-08"]
+---
+
+# Foresight: Population-Scale Simulation
+
+> Rehearse the future before living it.
+
+Foresight is the IS-era primitive for forward-simulating real Paw agents against a real org's Fabric snapshot under a real Instinct policy. One engine, seven simulation sub-types, projected Decisions that land in the Decision Graph (RFC 07) as forward-precedents.
+
+<Callout type="info">
+**Status (2026-05-25):** IMPLEMENTED through PR 7.
+
+**Implementation PRs:** #1224, #1227, #1230, #1232, #1233, #1234
+
+**Workspace RFC:** [docs/rfc/08-foresight-module-rfc.md](https://github.com/qbtrix/paw-workspace/blob/main/docs/rfc/08-foresight-module-rfc.md)
+
+**What's live:** scaffold + minimum loop, vendored OASIS + CAMEL adapter, cloud router + Beanie persistence, substrate + calibration + tier pool + LiteLLM fallback, retroactive backtest gate + aggregator primitives, market sim + org change sub-types + projected decisions.
+
+**What's planned:** decision projection back-references, richer scenario libraries, calibration tier expansion.
+</Callout>
+
+## What Foresight Is
+
+Foresight runs **populations of agents** through scenario templates. A scenario configures personas (each soul-seeded with an OCEAN drift profile), a sub-type (decision forecast, market sim, org change, etc.), a tick count, and an optional anchor list. The engine ticks the world forward, lets the personas act, scores the predicted outcomes against reality, and emits **projected Decisions** that the Decision Graph (RFC 07) treats as forward-precedents.
+
+Three things distinguish Foresight from a generic agent harness:
+
+1. **Soul-seeded personas.** A `SoulSeededPersona` wraps a real `PawAgent` — same identity, same OCEAN trait vector — so the simulation behaves like the people / agents it models, not like a generic LLM.
+2. **Calibration loop.** Predictions go into a `PredictionBuffer`; once reality lands, `pair_against_reality` scores them and `aggregate_pairs` produces a `CalibrationSummary`. A workspace cannot run forward sims until the **backtest gate** unlocks (default threshold 0.65 accuracy).
+3. **Tier pool.** Different personas / steps run on different model tiers via a `TierMix`, with a `LiteLLMFallbackBackend` proxy as the always-available floor. Token cost and latency are bounded by configuration, not by hope.
+
+## The Five Core Primitives
+
+| Primitive | Lives in | Job |
+|----------|----------|-----|
+| **Adapters** | `foresight/llm/adapter.py` | Bridge real backends to CAMEL. `ClaudeCodeBackend` exposes the Claude Code SDK as a CAMEL `BaseModelBackend`; `LiteLLMFallbackBackend` is the litellm proxy; `DeterministicFakeBackend` is the test floor. |
+| **Substrate** | `foresight/substrate/oasis/` + `foresight/llm/tier_pool.py` | Vendored OASIS fork (~6000 LOC, upstream SHA `46cdc8d`, Apache-2.0) drives the agent graph. `build_tier_pool` + `TierMix` distribute personas across model tiers. |
+| **Calibrator** | `foresight/calibration.py` | `PredictionRecord` / `PredictionBuffer` capture forecasts; `pair_against_reality` and `aggregate_pairs` score them; `apply_correction` (bounded by `CORRECTION_CAP`) feeds learnings back. |
+| **Backtest gate + aggregator** | `foresight/aggregator.py` + cloud `foresight_backtests` collection | `accuracy_meets_threshold` / `ThresholdDecision` gate forward sims on a passing retroactive run. Rollups: `rolling_accuracy`, `confidence_drift`, `modal_outcome_distribution`. |
+| **Market simulator** | `foresight/subtypes/market_sim.py` (plus `decision_forecast.py`, `org_change.py`) | Sub-type drivers that read a `ScenarioConfig`, fan out personas across anchors, and emit projected decisions in `(tick_id ASC, anchor_id ASC)` order. |
+
+## Module Layout
+
+```
+ee/pocketpaw_ee/foresight/
+├── __init__.py            # Lazy re-export surface (CAMEL is heavy)
+├── world.py               # ForesightWorld — Fabric-backed world + OASIS AgentGraph
+├── persona.py             # SoulSeededPersona, OceanDrift, make_paw_social_agent
+├── calibration.py         # PredictionBuffer, pair_against_reality, apply_correction
+├── aggregator.py          # rolling_accuracy, modal_outcome_distribution, ThresholdDecision
+├── insights.py            # 5 v0.1 synthesizer rules (accuracy_drop, persona_outlier, …)
+├── decision_graph_ref.py  # DecisionGraphRef protocol + NoOpDecisionGraphRef
+├── instinct_bridge.py     # Foresight → Instinct EVIDENCE-only proposal spawn
+├── llm/
+│   ├── adapter.py         # ClaudeCodeBackend, LiteLLMFallbackBackend, FakeBackend
+│   └── tier_pool.py       # TierMix, build_tier_pool, tier_distribution
+├── subtypes/              # decision_forecast.py, market_sim.py, org_change.py
+├── scenarios/             # runner.py + bundled YAML scenario templates
+├── api/                   # In-memory run store (v0.1 stand-in; cloud has Beanie now)
+└── substrate/oasis/       # Vendored OASIS fork — Apache-2.0, see NOTICE
+
+ee/pocketpaw_ee/cloud/foresight/
+├── router.py              # /api/v1/foresight/* surface (see Cloud Router below)
+├── service.py             # Beanie persistence + tenancy filter
+├── dto.py                 # Request/response DTOs per RFC 08 §11
+└── domain.py              # Frozen value objects with workspace_id
+```
+
+## How a Run Executes
+
+A typical `POST /api/v1/foresight/scenarios` call walks this path:
+
+<Steps>
+  <Step title="Validate + persist the request">
+    The router parses `CreateScenarioRequest` (personas inline, sub_type, n_ticks, optional anchors), service re-validates with `model_validate`, then writes a `ForesightRun` row to MongoDB scoped on `workspace_id`.
+  </Step>
+  <Step title="Pull calibration state">
+    Service looks up the workspace's most recent `CalibrationSummary`. If the backtest gate is locked (`OnboardingGateResponse.unlocked = false`), the call returns 422; forward sims require a passing retroactive backtest first.
+  </Step>
+  <Step title="Build the tier pool + substrate">
+    `build_tier_pool(TierMix)` distributes personas across model tiers; OASIS's `AgentGraph` hosts the `SoulSeededPersona` instances wrapped as `PawSocialAgent(SocialAgent)` via `make_paw_social_agent`. The `LiteLLMFallbackBackend` is the floor when a tier's primary model fails open.
+  </Step>
+  <Step title="Tick the world">
+    `ForesightWorld.tick()` drives `n_ticks` rounds. Each tick: snapshot the world, ask every persona to propose its next action, run the sub-type's driver (`subtypes/market_sim.py` etc.), record each prediction via `build_prediction_record` into the run's `PredictionBuffer`.
+  </Step>
+  <Step title="Aggregate + emit projected decisions">
+    `aggregate_pairs` collapses the buffer into a `CalibrationSummary`; the sub-type emits one `ProjectedDecision` row per anchor (or per persona) keyed for the projection-list endpoint to return in `(tick_id, anchor_id)` order.
+  </Step>
+  <Step title="Optional Instinct fan-out">
+    When the run opted into `route_to_instinct = true`, `instinct_bridge` spawns EVIDENCE-only Instinct rows whose `parameters._foresight.run_id` matches the run. Approving a row acknowledges the forecast but does NOT execute any real side-effect — the underlying Instinct policy still owns that decision.
+  </Step>
+  <Step title="Persist + fire events">
+    The run completes synchronously (v0.5 contract), emits `foresight.run.created`, and a passing backtest also fires `foresight.onboarding.unlocked`. The Beanie collection survives restarts so `GET /runs/{id}` is idempotent across deploys.
+  </Step>
+</Steps>
+
+<Callout type="info">
+**Synchronous today, queued tomorrow.** The v0.5 contract completes runs inline before returning. v1.0 will return `status="queued"` with a websocket URL and fan out to a background task, emitting `foresight.run_started` so the Live panel can distinguish accepted-but-pending from actively-ticking runs.
+</Callout>
+
+## Where the UI Lives
+
+The frontend rail ships in paw-enterprise issue #252 — five panels:
+
+| Panel | Drives off | Endpoint |
+|-------|-----------|----------|
+| **Scenarios** | Bundled YAML catalog + workspace-owned scenarios (v1.0) | `GET /api/v1/foresight/scenarios` |
+| **Live** | Per-run progress while ticking | `GET /api/v1/foresight/runs` (list) + websocket (v1.0) |
+| **Results** | One run's full payload + projected decisions | `GET /runs/{id}` + `GET /runs/{id}/projected-decisions` |
+| **Aggregate** | Rolling accuracy + drift + outcome distribution | `GET /aggregate?window_days=30` |
+| **Insights** | Five pattern rules (accuracy_drop / persona_outlier / tier_imbalance / trend_break / threshold_unmet) | `GET /insights` |
+
+## Cloud Router
+
+The Foresight cloud router is mounted from `pocketpaw_ee.cloud.__init__:mount_cloud` and lives under `/api/v1/foresight/*`. Every route is gated on `require_license` and the standard `request_context` dep so it surfaces a clean 401 when auth fails.
+
+| Endpoint | Purpose |
+|---------|---------|
+| `POST /scenarios` | Run a scenario inline; persists to `foresight_runs` |
+| `GET /runs/{id}` | Fetch a stored run (404 on cross-tenant ids — existence is not leakable) |
+| `GET /runs` | List runs in the workspace, most recent first; lighter list shape |
+| `GET /runs/{id}/projected-decisions` | Paginated projection list, optional `anchor_id` filter |
+| `GET /runs/{id}/instinct-proposals` | Instinct rows spawned by this run (EVIDENCE-only) |
+| `POST /backtests` | Run a retroactive backtest + score it against the unlock threshold |
+| `GET /backtests/{id}` / `GET /backtests` | Fetch / list backtests |
+| `GET /onboarding/gate` | Unlock posture (`no_backtest` / `in_flight` / `below_threshold` / `unlocked`) |
+| `GET /scenarios` | Bundled scenario template catalog |
+| `GET /aggregate?window_days=30` | Rolling accuracy + drift + modal outcome distribution |
+| `GET /insights` | Pattern-based insight synthesizer output |
+
+Service-owned writes go to the `ForesightRun` and `ForesightBacktest` Beanie collections — persistence is workspace-scoped and survives restarts. Per-run thresholds may tighten above the workspace default (`GATE_DEFAULT_THRESHOLD = 0.65`) but cannot relax below it; a relaxation request returns 422 `foresight.threshold_below_default`.
+
+## Open Questions and Future Work
+
+- **Decision projection back-references.** The Decision Graph (RFC 07) will surface the projected decisions a Foresight run anchored against alongside the real ones. v0.5 emits the projections but the back-edge in the Decision Graph is still stubbed via `NoOpDecisionGraphRef`.
+- **Richer scenario libraries.** v0.5 ships three bundled templates (`decision_forecast`, `market_sim`, `org_change`). v1.0 will accept workspace-owned scenarios authored against the RFC §18 grammar — the catalog response shape is already forward-compatible (additive `items` rows).
+- **Calibration tier expansion.** PR 3's tier_pool ships a stub config. v1.0 will widen the tier mix (premium / standard / floor) and surface per-tier accuracy in the Aggregate panel.
+- **Async run execution.** Synchronous-inline is fine for the v0.5 ticks budget; market sims and org-change runs at full scale need the queued + websocket-streamed path.
+- **vLLM hosting.** Long-horizon: a self-hosted vLLM tier would close the loop on cost and data residency for tenants that cannot send simulation traffic to the public LLM APIs.
+
+For the full design rationale, see [RFC 08 — Foresight Module](https://github.com/qbtrix/paw-workspace/blob/main/docs/rfc/08-foresight-module-rfc.md) in the workspace repo, and the internal handover at `pocketpaw/docs/internal/2026-05-foresight.md`.

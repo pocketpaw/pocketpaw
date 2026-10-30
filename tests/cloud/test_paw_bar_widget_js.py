@@ -1,0 +1,386 @@
+# tests/cloud/test_paw_bar_widget_js.py — GET /paw-bar/widget.js, the public
+# glass-bar loader route.
+# Created 2026-07-30 (feat/paw-bar-autoembed). Before this route there was no URL
+# that served the bar at all: the only one ever advertised pointed at an
+# unprovisioned CDN placeholder, so even a hand-pasted embed snippet 404'd. The
+# publish path now bakes this URL into customers' deployed HTML, which makes three
+# things worth pinning down:
+#   * it serves the bundle as JavaScript, cacheably, with NOTHING tenant-specific
+#     in it (it is one file shared by every visitor of every site — the credential
+#     is presented later, by the iframe it mounts, at /paw-bar/frame);
+#   * the path resolves from PAW_BAR_WIDGET_JS when set and from the copy vendored
+#     in the package otherwise, so a machine with no sibling checkout still serves
+#     a working loader;
+#   * a missing bundle is a clean 404 naming the fix, not a FileNotFoundError
+#     surfacing as an opaque 500 to whoever is debugging a barless site.
+# The vendored default is also syntax-relevant: it is served raw to a foreign page,
+# so the last test asserts it stays wrapped in one IIFE and keeps its globals to
+# window.PawBar.
+# Updated 2026-10-02 (CN-8, fix/canon-cross-repo-pins): the vendored loader is now
+#   hash-pinned to a paw-bar build (paw-bar-loader.pin.json), so drift from
+#   paw-bar fails here; the re-vendor picked up the microphone iframe permission.
+#   The pin test reads the package copy directly (not via PAW_BAR_WIDGET_JS) and
+#   relies on the sha alone, with no hardcoded loader strings.
+# Updated 2026-09-27 (new Paw Bar): the vendored loader must speak the two
+#   additions the rebuilt bar relies on, pawbar:viewport and a corner `side` on
+#   pawbar:resize.
+# Updated 2026-09-26 (frame sandbox): the vendored loader must put the SAME
+#   sandbox flags on its iframe that the router sends as a CSP sandbox header,
+#   set before the iframe's src so the first load is already sandboxed.
+
+from __future__ import annotations
+
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+
+@pytest_asyncio.fixture
+async def widget_client():
+    """A bare app client. The route reads no DB and needs no store — that IS the
+    contract under test, so mounting it alone is the honest harness."""
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.paw_bar.router import router
+
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(router)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client
+
+
+@pytest.mark.asyncio
+async def test_serves_the_loader_as_javascript(widget_client):
+    res = await widget_client.get("/paw-bar/widget.js")
+
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("application/javascript")
+    assert "max-age" in res.headers["cache-control"]
+    # It is the loader, not some other asset: it mounts the concierge iframe.
+    assert "/paw-bar/frame" in res.text
+
+
+@pytest.mark.asyncio
+async def test_the_loader_carries_nothing_tenant_specific(widget_client):
+    """This one file is served byte-identically to every visitor of every site. A
+    key, a widget id or a workspace baked into it would leak across tenants; the
+    per-site config rides on the embedding <script> tag's data attributes instead."""
+    res = await widget_client.get("/paw-bar/widget.js")
+
+    body = res.text
+    assert "site_key_" not in body
+    assert "workspace" not in body.lower()
+    # It READS the config attributes; it must not contain a resolved value.
+    assert "data-site-key" in body
+
+
+@pytest.mark.asyncio
+async def test_env_override_wins(widget_client, tmp_path, monkeypatch):
+    """PAW_BAR_WIDGET_JS is the seam for serving a freshly built bundle without a
+    redeploy."""
+    custom = tmp_path / "built-widget.js"
+    # write_bytes, not write_text: text mode translates "\n" to "\r\n" on Windows,
+    # so the route served CRLF and this assertion failed on a Windows dev box while
+    # passing in Linux CI. The route copies bytes; the fixture must write bytes.
+    custom.write_bytes(b"/* a newer build */\n")
+    monkeypatch.setenv("PAW_BAR_WIDGET_JS", str(custom))
+
+    res = await widget_client.get("/paw-bar/widget.js")
+
+    assert res.status_code == 200
+    assert res.text == "/* a newer build */\n"
+
+
+@pytest.mark.asyncio
+async def test_missing_bundle_is_a_clean_404(widget_client, tmp_path, monkeypatch):
+    """The operator hitting this is debugging why a live site shows no bar, so the
+    message has to name the fix rather than dump a traceback."""
+    monkeypatch.setenv("PAW_BAR_WIDGET_JS", str(tmp_path / "nope.js"))
+
+    res = await widget_client.get("/paw-bar/widget.js")
+
+    assert res.status_code == 404
+    assert "PAW_BAR_WIDGET_JS" in res.json()["detail"]
+
+
+def test_default_path_is_the_vendored_copy(monkeypatch):
+    """The default must live IN the package: the publish path bakes this URL into
+    customers' HTML, so it has to resolve on every machine running the backend, not
+    only on a developer's with a sibling checkout."""
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    monkeypatch.delenv("PAW_BAR_WIDGET_JS", raising=False)
+    path = paw_bar_widget_file()
+
+    assert path.is_file()
+    assert path.parent.name == "static"
+    assert path.parent.parent.name == "paw_bar"
+
+
+def test_vendored_loader_keeps_its_globals_to_itself():
+    """It is served raw as a CLASSIC script onto a page we do not own. A bare
+    top-level ``const clamp`` would collide with the host site's own globals (and a
+    duplicate ``const`` is a hard SyntaxError that kills the whole file), so the
+    bundle must stay wrapped and expose only window.PawBar."""
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    body = [ln for ln in source.splitlines() if ln and not ln.startswith("//")]
+
+    # esbuild emits `"use strict";` then an arrow IIFE; the hand-vendored copy
+    # opened with `(function`. Either is a wrapper — what matters is that the
+    # file opens with one and declares nothing at column 0 outside it.
+    opener = [ln for ln in body if ln != '"use strict";'][0]
+    assert opener.startswith("(function") or opener.startswith("(() =>")
+    # Nothing declared at column 0 except the wrapper itself and its close.
+    stray = [
+        ln for ln in body[1:] if (ln.startswith(("const ", "let ", "var ", "function ", "class ")))
+    ]
+    assert stray == []
+    assert "win.PawBar" in source
+
+
+def test_the_vendored_loader_docks_a_column_rather_than_covering_the_page():
+    """The bug this exists for: the vendored copy was hand-transcribed from the
+    paw-bar source with the type annotations stripped BY HAND, so it drifted
+    silently. It sat a whole session behind, still calling ``goFullscreen()`` on
+    ``pawbar:open`` — a real published site opened the messenger over the entire
+    viewport and made the page unclickable, while the source it claimed to mirror
+    had docked it to a 400px column for days.
+
+    Nothing could see it. paw-bar's own tests load paw-bar's build, not this
+    file, and this file is what every published site actually downloads.
+
+    Asserting on the specific behaviours the served widget depends on, rather
+    than diffing against a sibling checkout that is not present on a CI box.
+    """
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    # The open panel is a sized column. A full-viewport iframe swallows every
+    # click on the host page whether or not the app paints a backdrop.
+    #
+    # The exact numbers are pinned deliberately, and the friction is the feature:
+    # a panel resize in paw-bar that never gets vendored here fails THIS test
+    # rather than shipping a site whose widget is a different size from the one
+    # its author was looking at. Update them when you re-vendor, not before.
+    assert "PANEL_W = 520" in code
+    assert "PANEL_MAX_H = 840" in code
+
+    # Both doors into the widget — the app's message and the host's own button —
+    # must dock. goFullscreen() survives ONLY in the drag protocol.
+    assert code.count("goFullscreen()") == 1, "goFullscreen belongs to drag alone"
+
+    # The opt-in big reading surface, and the box animation, both reached here.
+    assert "pawbar:expand" in code
+    assert "BOX_MS" in code
+
+    # The blurred host-page scrim (2026-09-01) is a HOST-DOCUMENT div, and this
+    # is the assertion that keeps it one. The obvious way to paint a backdrop is
+    # to grow the frame and draw it inside — which is the exact modal the two
+    # assertions above exist to prevent, arriving through a different door. A
+    # scrim element sits one below the frame's own z-index; nothing else in this
+    # file uses that number.
+    assert "2147483646" in code, "the scrim must sit under the frame, not inside it"
+
+
+def test_the_vendored_loader_speaks_the_frame_protocol_the_app_expects():
+    """The loader and the glass app are two halves of one protocol shipped from two
+    places, and only this half lives in this repo. The app is built in paw-bar and
+    dropped into ``PAWBAR_APP_DIR``; nothing here can see its version. So when the
+    loader falls behind, the app keeps sending messages into a copy with no case for
+    them and the failures are all silent and all cosmetic-looking.
+
+    That is not hypothetical. The vendored copy sat two loader commits behind while
+    the app had already moved, and every symptom was a half of this protocol going
+    unanswered:
+
+      * ``scheme.ts`` reads the ``s`` query param off its own iframe URL. Only the
+        loader can know the HOST page's colour scheme — the iframe's own
+        ``prefers-color-scheme`` is the visitor's OS, not the site's. Without ``s``
+        a light site got a dark widget bolted to it.
+      * the app posts ``pawbar:overlay`` whenever a menu opens, expecting
+        ``pawbar:host-pointerdown`` back when the visitor clicks the page outside
+        the frame. An old loader ignores the first and never sends the second, so
+        popovers stay open forever.
+
+    Asserting on the wire vocabulary rather than diffing against a sibling checkout,
+    which is not present on a CI box. This is the same reasoning as the dock test
+    above, applied to the messages instead of the geometry.
+    """
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    # The host's scheme rides the frame URL, and it is DERIVED from the host page
+    # rather than read off the iframe's own media query.
+    assert '"&s=" + hostScheme(win)' in code
+
+    # ...and it stays live: a host that changes theme after load tells the frame.
+    assert "pawbar:scheme" in code
+
+    # The overlay handshake, both directions.
+    assert "pawbar:overlay" in code, "app announces menus; loader must have a case"
+    assert "pawbar:host-pointerdown" in code, "loader must report host clicks back"
+
+    # The docked bar's resting width, and the THIRD time this drift has bitten.
+    #
+    # The app rests the bar as a narrow pill and widens it when the visitor hovers
+    # — it hides the grip, the minimize control and the send button, then posts
+    # {pawbar:bar, compact, expanded} and expects the loader to ease the FRAME
+    # between BAR_W_REST and BAR_W. The loader owns both widths on purpose: an
+    # app that animates its own width feeds a ResizeObserver that the loader
+    # chases, and the frame ends up permanently behind the content it is clipping.
+    #
+    # A vendored copy with no case for this does not fail loudly. It shows up as
+    # the captain's 2026-09-01 report — "the width is the same and the icon and
+    # texts just appear and disappear, which looks extremely bad" — because the
+    # app half had shipped and this half had not. Cosmetic-looking, entirely
+    # silent, and invisible to every other test in this repo.
+    assert "pawbar:bar" in code, "app declares a resting width; loader must ease to it"
+    assert "BAR_W_REST" in code, "the compact width is loader policy, never a report"
+
+    # The host-close reply. The scrim takes the dismissing press on the host page,
+    # so the frame has to be TOLD — it owns the panel's own state and would
+    # otherwise still believe it is open.
+    assert "pawbar:host-close" in code
+
+
+def test_the_vendored_loader_speaks_the_new_bar_additions():
+    """The rebuilt Paw Bar (paw-bar #19) docks as a content-sized box and sizes
+    itself against the HOST page, which only the loader can see. Two additions
+    carry that, and a copy without them fails the same silent way as the ones
+    above: the app keeps working, just subtly wrong.
+
+      * ``pawbar:viewport`` tells the frame the host viewport on load and on every
+        resize. Without it the app falls back to the screen size, so a desktop
+        window narrower than the screen gets a card sized for the screen.
+      * ``side`` on ``pawbar:resize`` docks the icon launcher in its corner.
+        Without it the corner launcher sits centred at the bottom of the page.
+    """
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    assert "pawbar:viewport" in code, "the app sizes against the host viewport the loader reports"
+    assert "data.side" in code, "the icon launcher's corner rides on pawbar:resize"
+
+
+def test_the_vendored_loader_follows_spa_navigation():
+    """The concierge answers about the visitor's page from ``pawbar:page``. On a
+    client-routed store the frame never reloads, so a loader that posts the page
+    only on load leaves the concierge on the first page forever: a visitor on a
+    product asks "should I buy it?" and is asked which product (paw-bar #32).
+    The loader re-posts on back/forward and polls for path or title changes."""
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    assert "pawbar:page" in code
+    assert '"popstate"' in code, "back/forward re-sends the page"
+    assert "setInterval" in code, "a pushState navigation is caught by the poll"
+
+
+def test_the_vendored_loader_is_generated_not_hand_edited():
+    """A header that says where it came from is the only thing standing between
+    this file and the silent drift above. If someone hand-edits it again, the
+    next reader has no way to know which source it is behind."""
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    header = paw_bar_widget_file().read_text(encoding="utf-8").split('"use strict";')[0]
+
+    assert "GENERATED, DO NOT EDIT BY HAND" in header
+    assert "loader/src/loader.ts" in header
+
+
+def test_the_vendored_loader_matches_its_pinned_paw_bar_build():
+    """The header names the source; this proves the body IS that build. The pin
+    records the paw-bar commit and the sha256 of loader/dist/loader.readable.js
+    built there, so a hand edit or a stale copy fails here instead of shipping
+    (the copy missed paw-bar e50b593's microphone permission for exactly that
+    reason). Refresh with scripts/vendor-paw-bar-loader.sh."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    import pocketpaw_ee.paw_bar as paw_bar
+
+    # The package's own copy, not paw_bar_widget_file(): that follows
+    # PAW_BAR_WIDGET_JS, and the pin is about what we commit.
+    package = Path(paw_bar.__file__).parent
+    path = package / "static" / "paw-bar.js"
+    pin = json.loads((package / "paw-bar-loader.pin.json").read_text("utf-8"))
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    body = text[text.index('"use strict";') :]
+
+    assert hashlib.sha256(body.encode()).hexdigest() == pin["sha256"], (
+        "static/paw-bar.js drifted from paw-bar-loader.pin.json; "
+        "run scripts/vendor-paw-bar-loader.sh"
+    )
+    assert pin["source_repo"] == "qbtrix/paw-bar" and len(pin["source_commit"]) == 40
+
+
+# --------------------------------------------------------------------------- #
+# frame-ancestors port matching
+#
+# Found 2026-07-30 by framing a real published site: the bar rendered as an empty
+# grey box because a CSP host-source with no port matches only the scheme's
+# DEFAULT port, so a site served on any other port could not be framed at all.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_vendored_loader_sandboxes_the_frame_with_the_server_flags():
+    """The loader's ``sandbox`` attribute and the router's CSP ``sandbox`` header
+    are two copies of one flag list, shipped by two different paths (this file is
+    hand-vendored from paw-bar). If they drift, the browser enforces the stricter
+    one, so a flag added on one side only silently does nothing, and a flag the
+    widget needs removed on one side only breaks it. Pin them equal, and pin the
+    attribute ahead of ``src``: sandbox flags apply on navigation, so setting them
+    afterwards would leave the first load unsandboxed."""
+    import re
+
+    from pocketpaw_ee.paw_bar.router import PAWBAR_FRAME_SANDBOX, paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    match = re.search(r'var FRAME_SANDBOX = "([^"]*)";', source)
+    assert match, "vendored loader no longer declares FRAME_SANDBOX; re-vendor it"
+    assert match.group(1) == PAWBAR_FRAME_SANDBOX
+    assert "allow-top-navigation" not in match.group(1)
+
+    set_sandbox = source.index('iframe.setAttribute("sandbox", FRAME_SANDBOX)')
+    set_src = source.index("iframe.src = src")
+    assert set_sandbox < set_src
+
+
+def test_portless_allowlist_entry_permits_any_port():
+    """``allowed_origins`` is normalized to bare HOSTS, so without this every site
+    not on 80/443 was unframeable — every local, dev and demo deploy."""
+    from pocketpaw_ee.paw_bar.router import _frame_ancestors_csp
+
+    assert _frame_ancestors_csp(["localhost", "127.0.0.1"]) == (
+        "frame-ancestors localhost:* 127.0.0.1:*"
+    )
+
+
+def test_explicit_port_is_honored_as_written():
+    from pocketpaw_ee.paw_bar.router import _frame_ancestors_csp
+
+    assert _frame_ancestors_csp(["example.com:8443"]) == "frame-ancestors example.com:8443"
+
+
+def test_scheme_and_path_are_still_stripped_and_junk_still_dropped():
+    """The port change must not weaken the header-injection guard."""
+    from pocketpaw_ee.paw_bar.router import _frame_ancestors_csp
+
+    assert _frame_ancestors_csp(["https://shop.example.com/embed"]) == (
+        "frame-ancestors shop.example.com:*"
+    )
+    # A newline would split the header into extra directives; still refused.
+    assert _frame_ancestors_csp(["evil.example\nscript-src *"]) is None

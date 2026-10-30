@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from ee.cloud.sessions.schemas import (
+from pocketpaw_ee.cloud.sessions.dto import (
     CreateSessionRequest,
     SessionResponse,
     UpdateSessionRequest,

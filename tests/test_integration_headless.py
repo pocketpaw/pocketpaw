@@ -14,6 +14,11 @@
 # deps and are skipped in CI by default. Run locally with:
 #   uv run pytest tests/test_integration_headless.py -v
 #   uv run pytest tests/test_integration_headless.py -v -m integration  # integration only
+#
+# Updated: 2026-06-17 — the permission_mode bypass assignment moved from run()
+#   into the shared _build_options() helper (feat/claude-sdk-prewarm); the
+#   source-inspection guards now read both via _sdk_options_source() so they
+#   follow the assignment instead of going stale on the refactor.
 
 from __future__ import annotations
 
@@ -26,6 +31,24 @@ import pytest
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+
+def _sdk_options_source() -> str:
+    """Combined source of the SDK backend methods that build agent options.
+
+    The unconditional ``permission_mode = "bypassPermissions"`` assignment was
+    refactored out of ``run()`` into the shared ``_build_options()`` helper
+    (feat/claude-sdk-prewarm), which ``run()`` calls. Inspecting both keeps these
+    guards valid wherever the assignment lives — the invariant is "set, and never
+    gated on a setting", not "set inside run() specifically".
+    """
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+    return (
+        inspect.getsource(ClaudeSDKBackend.run)
+        + "\n"
+        + inspect.getsource(ClaudeSDKBackend._build_options)
+    )
 
 
 def _make_settings(*, tool_profile: str = "full", bypass: bool = False) -> MagicMock:
@@ -198,7 +221,7 @@ class TestToolBridgeCompleteness:
         this reset the memory-tool assertions below fail non-deterministically
         depending on test order. Mirrors the pattern in test_soul_v024_smoke.py.
         """
-        from pocketpaw.soul.manager import _reset_manager
+        from pocketpaw.soul._manager import _reset_manager
 
         _reset_manager()
         yield
@@ -327,9 +350,7 @@ class TestHeadlessChannelToolAccess:
         Complements test_headless_permissions.py::test_no_conditional_bypass_in_options_build
         by also checking that the assignment line is not indented under a settings check.
         """
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
-        source = inspect.getsource(ClaudeSDKBackend.run)
+        source = _sdk_options_source()
         lines = source.split("\n")
 
         # Find the permission_mode assignment line
@@ -375,9 +396,10 @@ class TestHeadlessChannelToolAccess:
         """
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
-        # Construct with bypass=False (the default / the bug scenario)
-        backend = ClaudeSDKBackend(_make_settings(bypass=False))
-        source = inspect.getsource(backend.run)
+        # Construct with bypass=False (the default / the bug scenario) as a smoke
+        # check, then assert on the option-building source (run() + _build_options).
+        _ = ClaudeSDKBackend(_make_settings(bypass=False))
+        source = _sdk_options_source()
 
         # The source must not have the old conditional pattern
         assert "if self.settings.bypass_permissions:" not in source, (
@@ -618,21 +640,74 @@ class TestToolBridgePipelineIntegration:
             )
 
     def test_tool_count_is_consistent_across_backends(self):
-        """The number of tools for non-SDK backends should be equal.
+        """Non-SDK backends split into two groups by pocket_specialist integration.
 
-        All non-claude_agent_sdk backends use the same exclusion set
-        (_ALWAYS_EXCLUDED only), so they should return the same tool count.
+        Function-tool bridge backends (``openai_agents``, ``google_adk``) receive
+        ``PocketSpecialistTool`` as a native function tool, so — when the
+        enterprise package ``pocketpaw_ee`` is installed — their count is exactly
+        one more than shell-CLI backends (``opencode``, ``codex_cli``,
+        ``copilot_sdk``), which dispatch the specialist via
+        ``cloud_pocket_specialist_create`` from ``_CLOUD_HANDLERS`` instead.
+        See ``_SPECIALIST_FUNCTION_TOOL_BACKENDS`` in ``tool_bridge.py``. On an
+        OSS-only install the specialist is absent and the groups match exactly.
+
+        Within each group the counts must match exactly. Any other divergence
+        is a backend-specific exclusion that crept in by accident.
         """
         from pocketpaw.agents.tool_bridge import _instantiate_all_tools
 
-        non_sdk_backends = ["openai_agents", "google_adk", "opencode", "codex_cli", "copilot_sdk"]
-        counts = {b: len(_instantiate_all_tools(backend=b)) for b in non_sdk_backends}
+        function_tool_backends = ["openai_agents", "google_adk"]
+        shell_cli_backends = ["opencode", "codex_cli", "copilot_sdk"]
 
-        # All non-SDK backends must return the same count
-        unique_counts = set(counts.values())
-        assert len(unique_counts) == 1, (
-            f"Non-SDK backends returned different tool counts: {counts}. "
-            "This means backend-specific exclusions were accidentally added."
+        fn_counts = {b: len(_instantiate_all_tools(backend=b)) for b in function_tool_backends}
+        cli_counts = {b: len(_instantiate_all_tools(backend=b)) for b in shell_cli_backends}
+
+        assert len(set(fn_counts.values())) == 1, (
+            f"Function-tool bridge backends returned different counts: {fn_counts}. "
+            "Backend-specific exclusion crept in."
+        )
+        assert len(set(cli_counts.values())) == 1, (
+            f"Shell-CLI backends returned different counts: {cli_counts}. "
+            "Backend-specific exclusion crept in."
+        )
+
+        fn_count = next(iter(fn_counts.values()))
+        cli_count = next(iter(cli_counts.values()))
+        # On an OSS-only install there are no EE extensions, so the two groups
+        # match exactly. With pocketpaw_ee installed, function-tool backends
+        # receive extra tools from EE agent extensions (PocketSpecialistTool,
+        # Daytona sandbox tools, etc.). Compute the expected delta dynamically
+        # by checking what EE extensions contribute to each group.
+        import importlib.util
+
+        if importlib.util.find_spec("pocketpaw_ee"):
+            from pocketpaw._registry import providers as _ext_providers
+
+            fn_extra = 0
+            cli_extra = 0
+            example_fn = function_tool_backends[0]
+            example_cli = shell_cli_backends[0]
+            for ext in _ext_providers("pocketpaw.agent_extensions"):
+                try:
+                    fn_extra += len(ext.agent_tools(example_fn))
+                except Exception:
+                    pass
+                try:
+                    cli_extra += len(ext.agent_tools(example_cli))
+                except Exception:
+                    pass
+            expected_delta = fn_extra - cli_extra
+        else:
+            fn_extra = 0
+            cli_extra = 0
+            expected_delta = 0
+
+        assert fn_count == cli_count + expected_delta, (
+            f"Function-tool backends ({fn_count}) should have exactly "
+            f"{expected_delta} more tool(s) than shell-CLI backends ({cli_count}) "
+            f"— EE extensions contribute {fn_extra} tools to function-tool backends "
+            f"and {cli_extra} to shell-CLI backends. "
+            f"Got fn={fn_counts}, cli={cli_counts}."
         )
 
     def test_claude_sdk_backend_has_fewer_tools_than_others(self):

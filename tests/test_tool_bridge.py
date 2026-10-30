@@ -52,8 +52,16 @@ class TestInstantiateAllTools:
         """If a tool module fails to import, it's skipped without crashing."""
         from pocketpaw.agents.tool_bridge import _instantiate_all_tools
 
-        # Patch one module to raise ImportError
-        with patch("importlib.import_module") as mock_import:
+        # Patch one module to raise ImportError. Also pin the global soul
+        # manager to None: _instantiate_all_tools appends soul tools after the
+        # builtin loop via a direct import that the import_module mock does not
+        # block, so a soul left active by an earlier test on the same xdist
+        # worker would make `tools` non-empty. Pinning it keeps this test
+        # hermetic — it asserts only the builtin import-error path.
+        with (
+            patch("importlib.import_module") as mock_import,
+            patch("pocketpaw.soul.get_soul_manager", return_value=None),
+        ):
             mock_import.side_effect = ImportError("test failure")
             tools = _instantiate_all_tools()
             # Should return empty list (all tools failed to import)

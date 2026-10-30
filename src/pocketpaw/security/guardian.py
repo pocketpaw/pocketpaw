@@ -7,6 +7,11 @@ This module provides a secondary LLM check for dangerous actions.
 
 import logging
 
+# Deferred import — `pocketpaw.config` imports `validate_external_url` from
+# `pocketpaw.security.url_validators`, and `pocketpaw.security.__init__`
+# eagerly imports this module. Importing `get_settings` at module load time
+# creates a circular import during `config.py` initialization. The call
+# inside `__init__` below resolves the import lazily at runtime.
 from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
 from pocketpaw.security.rails import COMPILED_DANGEROUS_PATTERNS
 

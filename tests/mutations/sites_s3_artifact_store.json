@@ -1,0 +1,139 @@
+[
+  {
+    "label": "the write path stops checking for a capture key, so a rendered body carrying a real per-site secret is uploaded into durable blob storage — the exact exposure the ephemeral-container decision in build_job / daytona_runner rests on NOT happening",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "        if carries_capture_key(body_html, css):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestTheCaptureKeyNeverReachesBlobStorage"
+    ]
+  },
+  {
+    "label": "the guard scans only body_html, so a key substituted into the stylesheet half of the artifact is stored — a payload is two fields and checking one of them is how the next substitution site gets missed",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "        if carries_capture_key(body_html, css):",
+    "replace": "        if carries_capture_key(body_html):",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestTheCaptureKeyNeverReachesBlobStorage::test_a_stylesheet_carrying_a_capture_key_is_never_stored"
+    ]
+  },
+  {
+    "label": "the key detector requires the token at the START of a value, so the real case — a key substituted INTO a rendered hidden input, mid-document — never matches and the guard is decorative",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "    return any(_CAPTURE_KEY_RE.search(value) for value in values if isinstance(value, str))",
+    "replace": "    return any(_CAPTURE_KEY_RE.match(value) for value in values if isinstance(value, str))",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestTheCaptureKeyNeverReachesBlobStorage"
+    ]
+  },
+  {
+    "label": "the refusal logs and then writes anyway — the operator sees a warning saying the artifact was refused while the secret sits in the bucket, which is worse than no guard because it reads as covered",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "                pocket_id,\n            )\n            return\n\n        key = artifact_key(pocket_id, content_hash)",
+    "replace": "                pocket_id,\n            )\n\n        key = artifact_key(pocket_id, content_hash)",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestTheCaptureKeyNeverReachesBlobStorage::test_a_body_carrying_a_capture_key_is_never_stored"
+    ]
+  },
+  {
+    "label": "a read failure propagates instead of degrading to a MISS, so an unreachable bucket / denied credentials turns every preview into a 500 rather than a rebuild — a cache outage becomes a site outage",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "            raw = _run_coro(_read_all(self._adapter.open(key)), self._timeout)\n        except Exception:",
+    "replace": "            raw = _run_coro(_read_all(self._adapter.open(key)), self._timeout)\n        except ZeroDivisionError:",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestEveryFailureDegradesToARebuild::test_a_cold_key_is_a_miss_not_an_error",
+      "tests/ee/sites/test_artifact_store_s3.py::TestEveryFailureDegradesToARebuild::test_an_unreachable_backend_reads_as_a_miss"
+    ]
+  },
+  {
+    "label": "a corrupt or truncated object is handed to the caller instead of read as a MISS, so a half-written artifact is unpacked as two strings and the preview fails on data the store itself stored",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "        except (ValueError, KeyError, TypeError):\n            logger.debug(\"sites.artifact_store_s3: corrupt artifact at %s\", key)\n            return None",
+    "replace": "        except (KeyError, TypeError):\n            logger.debug(\"sites.artifact_store_s3: corrupt artifact at %s\", key)\n            return None",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestEveryFailureDegradesToARebuild::test_a_corrupt_object_is_a_miss"
+    ]
+  },
+  {
+    "label": "a failed write is re-raised, so a full / denied / unreachable bucket breaks the preview that had already rendered successfully — the cache write is the last thing get_native_artifact does before returning",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "            logger.warning(\n                \"sites.artifact_store_s3: write failed for pocket %s\", pocket_id, exc_info=True\n            )",
+    "replace": "            raise",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestEveryFailureDegradesToARebuild::test_a_failed_write_is_swallowed"
+    ]
+  },
+  {
+    "label": "the blob round-trip loses its deadline, so a wedged bucket blocks the SYNC store call — which runs on the request's event loop — until the socket gives up, stalling every other request on that replica and not just this preview",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "        return executor.submit(asyncio.run, coro).result(timeout=timeout)",
+    "replace": "        return executor.submit(asyncio.run, coro).result()",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestEveryFailureDegradesToARebuild::test_a_hung_backend_does_not_block_forever"
+    ]
+  },
+  {
+    "label": "the sync->async bridge calls asyncio.run directly on the caller's thread, so the store works in a unit test and raises 'cannot be called from a running event loop' on the first real preview — every call site is inside a running loop",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=\"paw-artifact-blob\")",
+    "replace": "    if True:\n        return asyncio.run(coro)\n    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=\"paw-artifact-blob\")",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestFromInsideARunningLoop"
+    ]
+  },
+  {
+    "label": "the blob key drops the content hash, so every render of a pocket overwrites the same object and a stale artifact is served for source it was never built from — the cache stops being keyed on what it caches",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "    return f\"{ARTIFACT_KEY_PREFIX}/{pocket_id}/{content_hash}.json\"",
+    "replace": "    return f\"{ARTIFACT_KEY_PREFIX}/{pocket_id}.json\"",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestTheRoundTrip::test_the_key_is_the_pocket_id_and_content_hash_pair"
+    ]
+  },
+  {
+    "label": "the blob key drops the pocket id, so two pockets whose source hashes identically share one object — a cross-tenant read of a rendered page, through a store whose only isolation IS the key",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "    return f\"{ARTIFACT_KEY_PREFIX}/{pocket_id}/{content_hash}.json\"",
+    "replace": "    return f\"{ARTIFACT_KEY_PREFIX}/{content_hash}.json\"",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestTheRoundTrip::test_two_pockets_do_not_collide_on_a_shared_hash",
+      "tests/ee/sites/test_artifact_store_s3.py::TestTheRoundTrip::test_the_key_is_the_pocket_id_and_content_hash_pair"
+    ]
+  },
+  {
+    "label": "the store defaults to blob storage instead of the filesystem, so every OSS install and every local dev box starts writing site artifacts at whatever adapter is configured — the opposite of the opt-in this was specified as",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "    return (os.environ.get(\"PAW_SITES_ARTIFACT_STORE\") or _MODE_FILESYSTEM).strip().lower()",
+    "replace": "    return (os.environ.get(\"PAW_SITES_ARTIFACT_STORE\") or _MODE_S3).strip().lower()",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestSelectingTheStore::test_the_default_is_the_filesystem_store"
+    ]
+  },
+  {
+    "label": "an unbuildable adapter (POCKETPAW_UPLOAD_ADAPTER=s3 with no bucket configured) propagates out of the selector, so a misconfigured deploy fails every preview with a 500 instead of degrading to the local store",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "        _adapter = build_adapter(LOCAL_ADAPTER_ROOT)\n    except Exception:",
+    "replace": "        _adapter = build_adapter(LOCAL_ADAPTER_ROOT)\n    except ZeroDivisionError:",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestSelectingTheStore::test_an_unbuildable_adapter_falls_back_instead_of_failing_a_preview"
+    ]
+  },
+  {
+    "label": "a failed adapter build is retried on every call, so a box with no S3 credentials re-runs the construction and logs the same warning once per preview — the log that would have told an operator what is wrong becomes the noise that hides it",
+    "file": "ee/pocketpaw_ee/sites/artifact_store_s3.py",
+    "find": "    if _adapter_failed:\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestSelectingTheStore::test_a_failed_adapter_build_is_not_retried_on_every_preview"
+    ]
+  },
+  {
+    "label": "the service stops consulting the shared store, so PAW_SITES_ARTIFACT_STORE=s3 is silently ignored and a deploy that believes its artifacts are shared across replicas is still on per-container disk",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    return shared_artifact_store() or _DEFAULT_ARTIFACT_STORE",
+    "replace": "    return _DEFAULT_ARTIFACT_STORE",
+    "tests": [
+      "tests/ee/sites/test_artifact_store_s3.py::TestSelectingTheStore::test_s3_mode_selects_the_shared_store"
+    ]
+  }
+]

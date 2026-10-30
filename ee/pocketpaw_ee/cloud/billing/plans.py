@@ -1,0 +1,521 @@
+# ee/pocketpaw_ee/cloud/billing/plans.py — the PLAN CATALOG: the billing/
+# declarative view of the workspace plan tiers (BC-6, the Plan primitive).
+#
+# This is the read-only catalog the subscription (BC-7) and per-site (BC-9)
+# layers build on. For each EXISTING tier in ``guards.abac.PLAN_FEATURES`` it
+# pairs the tier's feature set with its billing facts:
+#   * ``monthly_credit_allotment`` — credits granted per renewal (integer credits,
+#     1 credit == $0.01). Config-tunable constants live below; BC-7 will grant
+#     these on a subscription renewal.
+#   * ``monthly_ceiling`` — the per-plan monthly credit CAP (integer credits, or
+#     None = uncapped) that credit-quota enforcement caps spend against. Tunable
+#     ``_CEILING`` constants live below, mirroring ``_MONTHLY_CREDIT_ALLOTMENT``;
+#     later quota chunks consume this field.
+#   * ``dodo_product_id`` — the Dodo recurring-product id for the tier, or None
+#     until BC-7 / config populates it (optionally read from the
+#     ``POCKETPAW_DODO_PLAN_PRODUCTS`` mapping setting when configured).
+#   * ``features`` — SOURCED FROM ``PLAN_FEATURES`` (referenced, never duplicated)
+#     so there is exactly one source of truth for what a tier unlocks.
+#
+# Read-only by design: no DB, no writes, no emit. ``list_plans`` / ``get_plan``
+# return frozen ``PlanTier`` value objects built fresh from the live
+# ``PLAN_FEATURES`` mapping + the allotment constants, so the catalog can never
+# drift from the policy gate.
+#
+# Created 2026-06-24 (integration/billing-credits, BC-6): new module.
+# Updated 2026-06-25 (feat/consumer-plan-ladder) — rekeyed the catalog to the
+#   approved CONSUMER ladder {free, go, pro, pro_max, enterprise} (was {free, team,
+#   business, enterprise}); reset ``_MONTHLY_CREDIT_ALLOTMENT`` + ``_TIER_ORDER``
+#   to the new keys; ADDED user-facing display + price metadata (``_PLAN_DISPLAY``)
+#   so the billing UI can show ChatGPT/Claude-style "usage" wording (display_name,
+#   usage_label, usage_detail) and INR/USD monthly+annual prices instead of raw
+#   credits. ``monthly_credit_allotment`` stays in the catalog as a back-office
+#   field; it is NOT the headline the UI shows. Enterprise prices are None ("talk
+#   to us").
+# Updated 2026-06-30 (feat/billing-quota-enforcement, chunk 1) — ADDED a per-plan
+#   ``monthly_ceiling`` (the credit-quota cap later chunks enforce): a tunable
+#   ``_CEILING`` constants dict mirroring ``_MONTHLY_CREDIT_ALLOTMENT``, surfaced on
+#   ``PlanTier`` next to ``monthly_credit_allotment``. The cap is allotment × 1.5 for
+#   the paid usage tiers; Free is an explicit trial cap (1000 — its 0 allotment can't
+#   derive it) and Enterprise is uncapped (None). The ``_build`` default for an
+#   unknown key FAILS CLOSED to the Free ceiling, never None/uncapped.
+# Updated 2026-07-08 (feat/billing-smb-caps) — ADDED three SMB resource ceilings the
+#   plan ladder now carries alongside ``monthly_ceiling``: ``max_seats`` (workspace
+#   members), ``max_pockets`` (pockets per workspace), and ``max_connectors``
+#   (enabled connectors per workspace). Each is a tunable dict (``_MAX_SEATS`` /
+#   ``_MAX_POCKETS`` / ``_MAX_CONNECTORS``) mirroring ``_CEILING`` in shape, surfaced
+#   on ``PlanTier`` as ``int | None`` (None = uncapped, Enterprise only).
+# Updated 2026-08-08 (feat/billing-rbac-member-caps) — LOCKED the approved CONSUMER
+#   member (seat) caps: Free = 0 (a Free workspace cannot invite ANY members),
+#   Paw Go = 5, Paw Pro = 25 total workspace members (owner included), Paw Pro Max
+#   and Enterprise = None (uncapped). These replace the earlier generous placeholders
+#   (5 / 10 / 25 / 100). The seat gate became plan-AUTHORITATIVE so Free=0 actually
+#   blocks invites (see ``workspace.service._effective_seat_limit``). The ``_build``
+#   default for an unknown key still FAILS CLOSED to the Free value, never None.
+# Updated 2026-08-08 (feat/billing-rbac-member-caps) — ADDED ``max_call_seconds_per_day``:
+#   the daily LiveKit CALL-TIME budget in seconds (Free = 0 → no calls, Go = 1_800
+#   = 30 min, Pro = 7_200 = 2 hrs, Pro Max = 28_800 = 8 hrs, Enterprise = None).
+#   Enforced at CALL-START time by ``livekit.service.create_room``; an over-budget
+#   in-progress call is force-ended at its budget deadline.
+# Updated 2026-08-08 (feat/billing-storage-caps) — ADDED ``max_storage_bytes``: the
+#   workspace S3 STORAGE cap in bytes (Free = 5 GB, Go = 15 GB, Pro = 50 GB,
+#   Pro Max = 100 GB, Enterprise = None = uncapped). Enforced at UPLOAD time by the
+#   uploads pipeline (``storage.service.storage_cap_exceeded``) against the sum of
+#   the workspace's live ``FileUpload`` blob sizes (the Files → Knowledge Base
+#   store). ``GET /storage/usage`` surfaces used vs cap for the Settings page.
+# Updated 2026-09-06 (feat/plan-included-sites) — ADDED ``included_sites``: how many
+#   published Paw Sites the workspace plan CARRIES at ``staff`` quality (custom
+#   domain, no badge, concierge) for no extra money — Free 0, Go 1, Pro 3, Pro Max
+#   10, Enterprise uncapped. The concierge block that comes with them is NOT here:
+#   a carried site is a ``staff`` site and ``staff`` already sells 200 a month per
+#   site, enforced per widget — see the note where the constant would have gone.
+#   This is the first field here that makes the workspace plan decide
+#   what a DIFFERENT primitive costs, and it demotes the per-site ladder
+#   (``billing.site_plans``) to an overflow price. See the constants for the
+#   arithmetic; the short version is that Paw Pro is the same $19 as one ``staff``
+#   site and carries three, so the rungs now price overflow and free workspaces.
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from pocketpaw_ee.guards.abac import PLAN_FEATURES
+
+# ---------------------------------------------------------------------------
+# Tunable constants — the monthly credit allotment per tier.
+# ---------------------------------------------------------------------------
+#
+# Integer credits, 1 credit == $0.01 (the same denomination the ledger and Dodo
+# top-ups use). These are the per-renewal grant amounts BC-7 applies on a
+# subscription cycle. The SHAPE (free=0, then a growing ladder) is the contract:
+# free grants nothing, each paid tier is a clear step up. These are a BACK-OFFICE
+# field — the UI headlines the ``usage_label`` from ``_PLAN_DISPLAY`` instead.
+#
+#   free        =         0 credits  — no recurring grant
+#   go          =     1_500 credits  — everyday usage
+#   pro         =     7_500 credits  — ~5x the everyday usage
+#   pro_max     =    30_000 credits  — ~20x the usage
+#   enterprise  = 1_000_000 credits  — custom / effectively uncapped
+_MONTHLY_CREDIT_ALLOTMENT: dict[str, int] = {
+    "free": 0,
+    "go": 1_500,
+    "pro": 7_500,
+    "pro_max": 30_000,
+    "enterprise": 1_000_000,
+}
+
+# ---------------------------------------------------------------------------
+# Tunable constants — the monthly credit CEILING per tier.
+# ---------------------------------------------------------------------------
+#
+# The per-plan cap (integer credits, 1 credit == $0.01, or None = uncapped) that
+# credit-quota enforcement caps a workspace's monthly spend against. Mirrors
+# ``_MONTHLY_CREDIT_ALLOTMENT`` above. The RULE for the paid usage tiers is
+# ``allotment × 1.5`` — headroom over the grant before the cap bites. Two
+# deliberate exceptions:
+#   * ``free`` is an EXPLICIT trial cap (1000) — its allotment is 0, so the ×1.5
+#     rule can't derive a usable ceiling; we set the trial cap directly. It is
+#     also the FAIL-CLOSED floor: an unknown/unresolvable plan caps here, never
+#     uncapped (see ``_build``).
+#   * ``enterprise`` is UNCAPPED (None) — custom contracts set their own limits.
+#
+#   free        =     1_000 credits  — explicit trial cap (allotment is 0)
+#   go          =     2_250 credits  — 1_500 × 1.5
+#   pro         =    11_250 credits  — 7_500 × 1.5
+#   pro_max     =    45_000 credits  — 30_000 × 1.5
+#   enterprise  =      None          — uncapped (custom)
+_CEILING: dict[str, int | None] = {
+    "free": 1_000,
+    "go": 2_250,
+    "pro": 11_250,
+    "pro_max": 45_000,
+    "enterprise": None,
+}
+
+# ---------------------------------------------------------------------------
+# Tunable constants — SMB resource ceilings per tier (feat/billing-smb-caps).
+# ---------------------------------------------------------------------------
+#
+# Three per-plan caps enforced at CREATE / INVITE / ENABLE time (never
+# retroactively): the max workspace SEATS (workspace members, owner included),
+# the max POCKETS a workspace may hold, and the max ENABLED CONNECTORS. Same
+# shape as ``_CEILING`` — an ``int`` ceiling, or ``None`` for an uncapped tier.
+# The ``_build`` default for an unknown key FAILS CLOSED to the Free value
+# (never None/uncapped).
+#
+# SEATS ARE THE ABAC/RBAC MEMBER GATE: the seat ceiling is the plan ATTRIBUTE
+# the invite gates enforce (see ``workspace.service._effective_seat_limit``),
+# so a Free workspace (``max_seats=0``) cannot invite ANY members, while the
+# paid tiers allow exactly their seat count (owner included — e.g. Paw Go = 5
+# total members, so 4 invitations on top of the owner). These are the approved
+# CONSUMER numbers, not placeholders:
+#   * free      =  0 seats — no invitations allowed (the owner alone)
+#   * go        =  5 seats —  5 total members (owner + 4 invited)
+#   * pro       = 25 seats — 25 total members (owner + 24 invited)
+#   * pro_max   = None     — UNLIMITED seats (uncapped)
+#   * enterprise = None    — uncapped; negotiated contracts set their own limit.
+#
+# The seat gate is plan-AUTHORITATIVE (not ``max(doc.seats, plan)``): the stored
+# ``Workspace.seats`` field is a legacy/display ceiling that never overrides the
+# plan on downgrade, so a workspace that cancels Pro → Free immediately loses
+# the ability to invite (existing members are never removed — the gate only
+# blocks NEW invites / acceptances).
+_MAX_SEATS: dict[str, int | None] = {
+    "free": 0,
+    "go": 5,
+    "pro": 25,
+    "pro_max": None,
+    "enterprise": None,
+}
+
+_MAX_POCKETS: dict[str, int | None] = {
+    "free": 200,
+    "go": 1_000,
+    "pro": 5_000,
+    "pro_max": 20_000,
+    "enterprise": None,
+}
+
+_MAX_CONNECTORS: dict[str, int | None] = {
+    "free": 50,
+    "go": 100,
+    "pro": 250,
+    "pro_max": 1_000,
+    "enterprise": None,
+}
+
+# The daily LiveKit CALL-TIME budget, in SECONDS per workspace per calendar day
+# (feat/billing-rbac-member-caps, 2026-08-08). The approved consumer numbers:
+#   * free      =        0 — no calls at all (a single-seat workspace has no one
+#                            to call); every room-create is blocked.
+#   * go        =    1_800 — 30 minutes of calls a day.
+#   * pro       =    7_200 —  2 hours of calls a day.
+#   * pro_max   =   28_800 —  8 hours of calls a day.
+#   * enterprise = None    — uncapped; negotiated contracts set their own limit.
+# Enforced at CALL-START time (``livekit.service.create_room``): the workspace's
+# today's cumulative LiveKit call duration (from the ``Meeting`` docs) is checked
+# against the cap, and an in-progress call is force-ended once it hits its budget
+# deadline. The ``_build`` default for an unknown key FAILS CLOSED to the Free
+# value (0), never None/uncapped.
+_MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
+    "free": 0,
+    "go": 1_800,
+    "pro": 7_200,
+    "pro_max": 28_800,
+    "enterprise": None,
+}
+
+# The workspace S3 STORAGE cap, in BYTES (feat/billing-storage-caps, 2026-08-08).
+# The approved consumer numbers — the Files → Knowledge Base / memory store a
+# workspace may hold (decimal GB, the SI convention Google/consumer storage uses):
+#   * free      =          1 GB — 1_000_000_000 bytes — a trial, not a stash
+#
+# Free was 5 GB until 2026-09-12 and was never enforced, because the gate in
+# ``storage.service`` was behind ``billing_enforced`` and nothing sets that.
+# 5 GB of unbilled object storage per signup is a real bill the moment the
+# product is public, so the number came down to 1 GB and the gate came off the
+# flag in the same change. Every paid rung is unchanged.
+#   * go        =         15 GB — everyday file + KB usage
+#   * pro       =         50 GB — ~3.3× Go, for daily drivers
+#   * pro_max   =        100 GB — ~2× Pro, for power users
+#   * enterprise = None        — uncapped; negotiated contracts set their own limit.
+# Enforced at UPLOAD time by the uploads pipeline (``storage.service``): the
+# workspace's live ``FileUpload`` blob sizes are summed and a new upload is
+# blocked with ``StorageLimitError`` when it would push the total over the cap.
+# The ``_build`` default for an unknown key FAILS CLOSED to the Free value
+# (1 GB), never None/uncapped.
+_MAX_STORAGE_BYTES: dict[str, int | None] = {
+    "free": 1_000_000_000,
+    "go": 15_000_000_000,
+    "pro": 50_000_000_000,
+    "pro_max": 100_000_000_000,
+    "enterprise": None,
+}
+
+# ---------------------------------------------------------------------------
+# Tunable constants — INCLUDED PAW SITES per tier, and the pooled concierge block
+# that comes with them.
+# ---------------------------------------------------------------------------
+#
+# How many published sites the workspace plan CARRIES, at ``staff`` quality — the
+# custom domain, no attribution badge, and the visitor concierge — for no extra
+# money and no credit debit.
+#
+#   free        =  0 sites — the per-site ladder is the only way to buy one
+#   go          =  1 site
+#   pro         =  3 sites
+#   pro_max     = 10 sites
+#   enterprise  = None     — uncapped, like every other ceiling here
+#
+# THIS DEMOTES THE PER-SITE LADDER TO AN OVERFLOW PRICE, on purpose, and the
+# arithmetic is worth stating where someone will read it before changing a
+# number. ``staff`` is $19 a SITE; Paw Pro is $19 a MONTH and carries three of
+# them plus the agent. So nobody holding a workspace plan buys ``staff`` again:
+# the $7/$19 rungs now price site 2 on Go, site 4 on Pro, site 11 on Pro Max, and
+# every site a FREE workspace publishes. That is the deal — bundle sites to sell
+# subscriptions — but it means a change to these counts moves real revenue, and a
+# change to the workspace prices has to be checked against the site ladder rather
+# than against the credit allotment alone.
+_INCLUDED_SITES: dict[str, int | None] = {
+    "free": 0,
+    "go": 1,
+    "pro": 3,
+    "pro_max": 10,
+    "enterprise": None,
+}
+
+# THE CONCIERGE BLOCK IS PER SITE, and deliberately does NOT live here.
+#
+# A carried site is a ``staff`` site, and ``staff`` already sells 200 conversations
+# a month to the site it covers — the number is on the site-plan catalog row
+# (``site_plans.SitePlanTier.conversation_allowance``) and
+# ``billing.enforcement.concierge_conversation_quota_exceeded`` already counts
+# against it, per widget, from the start of the month.
+#
+# So a workspace plan carrying three sites carries three private blocks of 200,
+# and there is nothing to add here. A ``pooled_conversations`` field on this
+# catalog was written and then removed for exactly that reason: it would have been
+# a second number describing the same allowance, read by nothing, and the first
+# person to wire it up would have had two answers to choose between.
+
+# Order the catalog is listed in — the price ladder, cheapest first. Any tier in
+# PLAN_FEATURES not named here is appended afterwards (so a new tier never
+# silently drops out of the catalog).
+_TIER_ORDER: tuple[str, ...] = ("free", "go", "pro", "pro_max", "enterprise")
+
+# ---------------------------------------------------------------------------
+# User-facing DISPLAY + PRICE metadata.
+# ---------------------------------------------------------------------------
+#
+# What the billing UI actually shows. ``usage_label`` is the ChatGPT/Claude-style
+# headline ("Everyday", "5x the usage", ...) the UI renders INSTEAD of raw
+# credits; ``usage_detail`` is one supporting line. Prices are integers in the
+# tier's natural denomination (INR rupees, USD dollars), monthly + annual.
+# ``free`` is all-zero; ``enterprise`` prices are None ("talk to us").
+_PLAN_DISPLAY: dict[str, dict[str, object]] = {
+    "free": {
+        "display_name": "Free",
+        "usage_label": "Limited",
+        "usage_detail": "Chat + pockets to get started",
+        "price_inr_monthly": 0,
+        "price_inr_annual": 0,
+        "price_usd_monthly": 0,
+        "price_usd_annual": 0,
+    },
+    "go": {
+        "display_name": "Paw Go",
+        "usage_label": "Everyday",
+        "usage_detail": "Everyday agent + site usage",
+        "price_inr_monthly": 399,
+        "price_inr_annual": 3990,
+        "price_usd_monthly": 9,
+        "price_usd_annual": 90,
+    },
+    "pro": {
+        "display_name": "Paw Pro",
+        "usage_label": "5× the usage",
+        "usage_detail": "5× the everyday usage — for daily drivers",
+        "price_inr_monthly": 1499,
+        "price_inr_annual": 14990,
+        "price_usd_monthly": 19,
+        "price_usd_annual": 190,
+    },
+    "pro_max": {
+        "display_name": "Paw Pro Max",
+        "usage_label": "20× the usage",
+        "usage_detail": "20× the usage — uncapped power users",
+        "price_inr_monthly": 4999,
+        "price_inr_annual": 49990,
+        "price_usd_monthly": 49,
+        "price_usd_annual": 490,
+    },
+    "enterprise": {
+        "display_name": "Enterprise",
+        "usage_label": "Custom",
+        "usage_detail": "Custom usage, SSO, audit — talk to us",
+        "price_inr_monthly": None,
+        "price_inr_annual": None,
+        "price_usd_monthly": None,
+        "price_usd_annual": None,
+    },
+}
+
+# A safe display default for a tier that has no ``_PLAN_DISPLAY`` row (a tier
+# added to PLAN_FEATURES but not yet given UI copy). Keeps the catalog readable
+# rather than NPE-ing on a missing key.
+_DISPLAY_FALLBACK: dict[str, object] = {
+    "display_name": "",
+    "usage_label": "",
+    "usage_detail": "",
+    "price_inr_monthly": None,
+    "price_inr_annual": None,
+    "price_usd_monthly": None,
+    "price_usd_annual": None,
+}
+
+
+@dataclass(frozen=True)
+class PlanTier:
+    """One row of the billing plan catalog — the declarative view of a tier.
+
+    ``key`` matches the ``Workspace.plan`` string and the ``PLAN_FEATURES`` key.
+    ``features`` is a copy of the tier's ``PLAN_FEATURES`` set (the source of
+    truth), so a caller can read it without reaching into the policy module.
+    ``monthly_credit_allotment`` is integer credits (1 credit == $0.01) granted
+    per renewal — a BACK-OFFICE field, NOT the headline. ``monthly_ceiling`` is
+    the per-plan monthly credit CAP (integer credits, or None = uncapped) that
+    credit-quota enforcement caps spend against (allotment × 1.5 for paid tiers;
+    Free is the explicit 1000 trial cap; Enterprise is None). ``max_seats`` /
+    ``max_pockets`` / ``max_connectors`` are the SMB resource ceilings enforced at
+    create/invite/enable time (integer, or None = uncapped).
+    ``max_seats`` is the approved CONSUMER member cap (Free = 0 → no invites,
+    Go = 5, Pro = 25 total members, owner included; Pro Max and Enterprise are
+    uncapped/None); it is plan-AUTHORITATIVE at the invite gate, so Free blocks
+    all new invitations.
+    ``max_call_seconds_per_day`` is the approved CONSUMER daily LiveKit call
+    budget in SECONDS (Free = 0 → no calls, Go = 1800 = 30 min, Pro = 7200 =
+    2 hrs, Pro Max = 28800 = 8 hrs; Enterprise = None = uncapped). The LiveKit
+    room-create gate enforces it at CALL-START time, and an over-budget single
+    call is force-ended at its budget deadline.
+    ``max_storage_bytes`` is the approved CONSUMER workspace S3 STORAGE cap in
+    BYTES (Free = 5 GB, Go = 15 GB, Pro = 50 GB, Pro Max = 100 GB, Enterprise =
+    None = uncapped). The uploads pipeline enforces it at UPLOAD time against the
+    sum of the workspace's live ``FileUpload`` blob sizes (the Files → Knowledge
+    Base store), and ``GET /storage/usage`` surfaces used vs cap.
+    ``dodo_product_id`` is the recurring-product id, or None until BC-7 / config
+    populates it.
+
+    The display + price fields are what the billing UI renders: ``display_name``
+    ("Paw Pro"), ``usage_label`` (the ChatGPT/Claude-style "5x the usage" headline
+    shown instead of credits), ``usage_detail`` (one supporting line), and the
+    INR/USD monthly+annual prices (integers; ``free`` = 0; ``enterprise`` = None
+    ⇒ "talk to us").
+    """
+
+    key: str
+    monthly_credit_allotment: int
+    monthly_ceiling: int | None
+    max_seats: int | None
+    max_pockets: int | None
+    max_connectors: int | None
+    max_call_seconds_per_day: int | None
+    max_storage_bytes: int | None
+    included_sites: int | None
+    dodo_product_id: str | None
+    features: frozenset[str]
+    display_name: str
+    usage_label: str
+    usage_detail: str
+    price_inr_monthly: int | None
+    price_inr_annual: int | None
+    price_usd_monthly: int | None
+    price_usd_annual: int | None
+
+
+def _dodo_product_for(key: str) -> str | None:
+    """Resolve the Dodo recurring-product id for a tier, or None.
+
+    Reads an optional ``POCKETPAW_DODO_PLAN_PRODUCTS`` mapping
+    (``{tier_key: product_id}``) off settings when present. None is the correct
+    default in v1 — BC-7 wires recurring checkout and populates this. Lazy
+    ``get_settings`` import so building the catalog never forces config load in
+    a context that doesn't have it (e.g. a unit test of ``list_plans``); any
+    config error degrades safely to None rather than breaking the read.
+    """
+    try:
+        from pocketpaw.config import get_settings
+
+        mapping = getattr(get_settings(), "dodo_plan_products", None)
+    except Exception:
+        return None
+    if not isinstance(mapping, dict):
+        return None
+    val = mapping.get(key)
+    return val if isinstance(val, str) and val else None
+
+
+def _build(key: str) -> PlanTier:
+    """Construct a ``PlanTier`` for ``key`` from the live PLAN_FEATURES + config.
+
+    ``features`` is copied from PLAN_FEATURES (referenced, not duplicated) so the
+    catalog can never drift from the policy gate. The display + price fields come
+    from ``_PLAN_DISPLAY`` (a missing row degrades to ``_DISPLAY_FALLBACK`` rather
+    than NPE-ing). An unknown ``key`` yields an empty feature set and a 0
+    allotment — but callers go through ``get_plan`` / ``list_plans``, which only
+    ever pass known keys. ``monthly_ceiling`` and the SMB caps (``max_seats`` /
+    ``max_pockets`` / ``max_connectors`` / ``max_storage_bytes``) FAIL CLOSED: an
+    unknown key defaults to the Free value (the most restrictive tier), never
+    None/uncapped.
+    """
+    display = _PLAN_DISPLAY.get(key, _DISPLAY_FALLBACK)
+    return PlanTier(
+        key=key,
+        monthly_credit_allotment=_MONTHLY_CREDIT_ALLOTMENT.get(key, 0),
+        # Fail closed: an unknown key caps at the Free ceiling, never uncapped.
+        monthly_ceiling=_CEILING.get(key, _CEILING["free"]),
+        # Fail closed on every SMB cap too: an unknown key caps at the Free
+        # value (the most restrictive), never None/uncapped.
+        max_seats=_MAX_SEATS.get(key, _MAX_SEATS["free"]),
+        max_pockets=_MAX_POCKETS.get(key, _MAX_POCKETS["free"]),
+        max_connectors=_MAX_CONNECTORS.get(key, _MAX_CONNECTORS["free"]),
+        # Daily LiveKit call budget — fail closed to Free (0 = no calls).
+        max_call_seconds_per_day=_MAX_CALL_SECONDS_PER_DAY.get(
+            key, _MAX_CALL_SECONDS_PER_DAY["free"]
+        ),
+        # S3 storage cap — fail closed to Free (5 GB), never None/uncapped.
+        max_storage_bytes=_MAX_STORAGE_BYTES.get(key, _MAX_STORAGE_BYTES["free"]),
+        # Included Paw Sites and their pooled concierge block — fail closed to
+        # Free (0 of each), never None/uncapped. An unknown plan key must not hand
+        # a workspace free hosting: this is the one ceiling here whose generous
+        # default would be given away permanently rather than merely overspent,
+        # because a site covered by the plan stops being billed at all.
+        included_sites=_INCLUDED_SITES.get(key, _INCLUDED_SITES["free"]),
+        dodo_product_id=_dodo_product_for(key),
+        features=frozenset(PLAN_FEATURES.get(key, set())),
+        display_name=str(display["display_name"]),
+        usage_label=str(display["usage_label"]),
+        usage_detail=str(display["usage_detail"]),
+        price_inr_monthly=display["price_inr_monthly"],  # type: ignore[arg-type]
+        price_inr_annual=display["price_inr_annual"],  # type: ignore[arg-type]
+        price_usd_monthly=display["price_usd_monthly"],  # type: ignore[arg-type]
+        price_usd_annual=display["price_usd_annual"],  # type: ignore[arg-type]
+    )
+
+
+def _catalog_keys() -> list[str]:
+    """All tier keys, in ladder order, with any unlisted tiers appended.
+
+    Driven off the LIVE ``PLAN_FEATURES`` keys so a new tier added to the policy
+    module shows up in the catalog automatically (appended after the ordered
+    ones) instead of being silently dropped.
+    """
+    known = list(PLAN_FEATURES.keys())
+    ordered = [k for k in _TIER_ORDER if k in known]
+    extra = [k for k in known if k not in _TIER_ORDER]
+    return ordered + extra
+
+
+def list_plans() -> list[PlanTier]:
+    """Return the full plan catalog, cheapest tier first.
+
+    Each ``PlanTier`` is built fresh from the live ``PLAN_FEATURES`` mapping +
+    the allotment constants, so the catalog always matches the policy gate.
+    """
+    return [_build(key) for key in _catalog_keys()]
+
+
+def get_plan(key: str | None) -> PlanTier | None:
+    """Resolve a single tier by its ``key`` (the ``Workspace.plan`` string).
+
+    Returns None for an unknown / missing key. Callers that need a guaranteed
+    floor (the entitlements resolver) map a None back to the ``free`` base tier
+    themselves — this function does NOT silently substitute, so a typo in a
+    lookup is visible rather than masked.
+    """
+    if not key or key not in PLAN_FEATURES:
+        return None
+    return _build(key)
+
+
+# The base/floor tier key — a workspace with no/unknown plan resolves here.
+BASE_PLAN_KEY = "free"

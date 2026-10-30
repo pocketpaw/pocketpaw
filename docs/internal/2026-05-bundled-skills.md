@@ -1,0 +1,260 @@
+# Bundled Skills
+
+**Status:** Shipped 2026-05-14 via PR for `feat/pocket-creator-skill`.
+**Lives at:** `src/pocketpaw/bundled_skills/` (the Python installer) and
+`src/pocketpaw/bundled_skills/_bundled/skills/<skill-name>/` (the skill content).
+
+**Updated 2026-08-07 (RX-2):** added `pocketpaw-create-react-site` to the
+Currently-bundled table, and corrected the content path above. Skills have lived
+under `_bundled/skills/<name>/` since the local-plugin route landed
+(`installer.py::_SKILLS_DIR`); several `_bundled/<name>/` spellings further down
+this file predate that move and are still stale.
+
+## What this is
+
+PocketPaw ships **AgentSkills-format SKILL.md files** (the same format
+the skills.sh ecosystem uses — YAML frontmatter + markdown body) and
+auto-installs them to `~/.claude/skills/<name>/SKILL.md` on every
+dashboard boot. The Python module here is the **shipping side**;
+PocketPaw's existing `pocketpaw.skills` module is the **runtime side**
+(loader / executor that consumes the installed files).
+
+The install destination (`~/.claude/skills/`) is one of the three
+paths PocketPaw's own `SkillLoader.SKILL_PATHS` scans, so bundled
+skills are available to the **non-SDK** backends — codex_cli,
+openai_agents, deep_agents, langchain_react — via PocketPaw's
+slash-command dispatcher in `dashboard_ws.py`, plus the desktop
+dashboard.
+
+The default `claude_agent_sdk` backend is the exception: it launches
+with `setting_sources=[]` for persona isolation, which disables the
+SDK's filesystem skill discovery — `~/.claude/skills/` is invisible to
+it (verified 2026-06-03 — a slash hits the SDK as an unknown command
+and the run returns with no assistant turn; the SDK `skills=` option is
+gated by `setting_sources` too). So that backend gets the bundled
+skills a different way: the `_bundled/` directory is also a Claude Code
+**local plugin** (`.claude-plugin/plugin.json` + `skills/`), and the
+backend passes it via the SDK `plugins=` option, which loads regardless
+of `setting_sources`. The skills then load by slash command and by
+natural-language intent, without leaking the rest of `~/.claude`
+(CLAUDE.md, output styles) into the agent. Toggle with
+`POCKETPAW_SDK_LOAD_BUNDLED_SKILLS` (default on).
+
+## Why ship them with PocketPaw
+
+The pocket-creation workflow ships with **~12k tokens of design
+guidance** (pattern-first decision tree, 150-widget catalog, rich
+widget-by-pattern map, composition recipes, canonical examples). If
+that content sits in the chat agent's always-on system prompt, every
+chat turn pays for it — even turns that have nothing to do with
+pockets. By moving it into a skill that loads on demand, the chat
+agent's steady-state context drops by ~12k tokens and only pays the
+cost when the user actually wants a pocket.
+
+## The auto-install flow
+
+On every PocketPaw dashboard boot, `dashboard_lifecycle.startup_event`
+calls `install_bundled_skills()`, which:
+
+1. Iterates `src/pocketpaw/bundled_skills/_bundled/<name>/` directories
+2. For each bundled skill, mirrors its file tree to
+   `~/.claude/skills/<name>/` preserving subdirectory structure
+3. Per file, compares SHA-256 hash of source vs destination:
+   - Destination missing → copy, status `installed`
+   - Hash differs → overwrite, status `updated`
+   - Hash matches → no-op, status `skipped`
+4. Logs the install summary at INFO. Failures logged at WARNING and
+   surfaced via `InstallResult.status == "failed"`, never raised.
+
+The whole operation is best-effort. A permission error on
+`~/.claude/skills/` doesn't block dashboard boot or pocket creation —
+just means the chat agent falls back to the MCP-tool flow.
+
+## Opt-out
+
+```bash
+export POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false
+```
+
+Use this if:
+- You've manually customized a skill file and don't want PocketPaw to
+  overwrite it on the next boot
+- You're running in an environment where `~/.claude/skills/` is
+  read-only (CI, locked-down machines)
+- You want to test pocket creation with the skill disabled
+
+With auto-install off, the MCP-tool surface (`pocket_specialist__create`)
+still works — pocket creation just won't benefit from the skill's
+loaded-on-demand context economy.
+
+## Manual install
+
+If auto-install is off OR the boot logs show
+`Bundled-skills install failed`, you can stage the files manually:
+
+```bash
+# from the pocketpaw repo root:
+mkdir -p ~/.claude/skills
+cp -r src/pocketpaw/bundled_skills/_bundled/* ~/.claude/skills/
+```
+
+Verify:
+
+```bash
+ls ~/.claude/skills/pocketpaw-create-pocket/
+# → SKILL.md
+```
+
+The next time you chat with the PocketPaw agent and ask to create a
+pocket, Claude Code should pick up the skill.
+
+## Adding a new bundled skill
+
+1. Create a directory under
+   `src/pocketpaw/bundled_skills/_bundled/<your-skill-name>/`
+2. Drop a `SKILL.md` inside with YAML frontmatter:
+
+   ```markdown
+   ---
+   name: <your-skill-name>
+   description: |
+     One-paragraph description of what the skill does and when the
+     chat agent should invoke it.
+   ---
+
+   # Workflow
+
+   ...
+   ```
+
+3. Re-boot PocketPaw. The installer discovers the new directory
+   automatically (no code changes) and copies it to the user's
+   `~/.claude/skills/`.
+
+No registration needed — directory iteration is the discovery
+primitive.
+
+## Currently bundled
+
+| Name | Purpose |
+| --- | --- |
+| `pocketpaw-create-pocket` | Pattern-first pocket creation workflow with 150-widget catalog reference, rich-widgets-by-pattern map, and the canonical invocation flow. |
+| `pocketpaw-edit-pocket` | READ / EDIT / CHAT path-selection + the Type A / B / C edit decision tree for delegating to `pocket_specialist__edit`. Routes simple state edits, structural edits, and open-ended redesigns through the right shape of specialist call. |
+| `pocketpaw-create-svelte-site` | Paw Sites **svelte track** — authoring SvelteKit components, the §4.3 source-map contract, and the prerender resting-state rule. |
+| `pocketpaw-create-react-site` | Paw Sites **react track** (RX-2) — authoring React components, the `src/App.tsx` source-map contract, the reserved build-shell paths, and the `interactive` flag that decides whether the site keeps its client bundle. |
+| `pocketpaw-design-taste` | The engine-agnostic creative-director system every site track composes with. Owns taste; the per-engine skills own their contract and never restate it. |
+
+*(The table lists the skills whose design is documented here; `_bundled/skills/`
+is the authoritative list, since discovery is directory iteration.)*
+
+Planned (not yet shipped):
+- `pocketpaw-audit-pocket` — review an existing pocket for design issues
+- `pocketpaw-migrate-dashboard` — convert dashboard-style pockets to the right pattern
+
+## How this fits across chat backends
+
+Bundled skills work for **every** backend because the AgentSkills
+format is universal — but the *route* differs by backend, because
+the default SDK backend can't see `~/.claude/skills/`:
+
+| Backend | Discovery | Invocation |
+| --- | --- | --- |
+| `claude_agent_sdk` | `_bundled/` passed as a local plugin via the SDK `plugins=` option (NOT `~/.claude/skills/` — `setting_sources=[]` disables that) | Natural-language intent OR `/<skill>` slash command, handled inside the SDK run |
+| `codex_cli`, `openai_agents`, `deep_agents`, `langchain_react` | PocketPaw's `SkillLoader.SKILL_PATHS` (includes `~/.claude/skills/`) | `/<skill>` slash command in chat UI → `dashboard_ws.py` → `SkillExecutor.execute_skill` |
+
+Both routes read the same single-source SKILL.md files under
+`_bundled/skills/`. The `~/.claude/skills/` mirror and the local
+plugin are two installs of one set of files, so a skill added once is
+picked up by every backend.
+
+## Per-entity skills and system-message override (entity rooms)
+
+**Status:** Shipped 2026-06-07 via `feat/entity-pocket-profile-field` (PR #1343).
+
+A pocket-entity can carry a `surface_profile` override. Two of its fields are
+now **live at runtime** (they were composed-but-inert before this PR):
+
+- **`skill_names: frozenset[str]`** — the skills this entity surfaces to its
+  agent. Composed as a **UNION** over the surface base (`compose_entity_profile`):
+  the entity adds its skills to whatever the surface already offers.
+- **`system_message_override: str | None`** — a full base-identity swap for the
+  entity. Composed **entity-wins-when-set** (a `None` override means "no opinion,
+  keep the base").
+
+Both cross the EE→OSS boundary as **plain data** (a `frozenset[str]` and a
+`str`) — no `pocketpaw_ee` symbol enters `src/pocketpaw/`. They are resolved once
+per run onto `ctx.resolved_profile` (in `run_core.execute_run`), then read in
+`_drive_agent_loop` and forwarded into `AgentPool.run` with the same
+withhold-when-empty idiom the `deny_mcp_tool_ids` / `allowed_sdk_tools` fields
+use, so non-entity runs are byte-identical.
+
+### How each field is consumed
+
+**`system_message_override` — SWAP THE BASE, KEEP THE LAYERS.** Applied in
+`AgentPool.run` before any backend dispatch. It replaces ONLY the base
+persona/soul identity portion of the assembled system prompt; every downstream
+layer still appends. The final prompt is:
+
+```
+override + instructions (incl. ripple LAW) + soul-memory recall + knowledge-base wrapper
+```
+
+Because it rides the existing `system_prompt` channel, it works for **every**
+backend — no backend signature change.
+
+**`skill_names` — per-run materialized plugin (SDK) / filtered advertisement
+(non-SDK).** The consumption route differs by backend, mirroring how the bundled
+skills already differ:
+
+| Backend | How `skill_names` is applied |
+| --- | --- |
+| `claude_agent_sdk` | `materialize_run_skills()` copies ONLY the named skills into a throwaway local-plugin dir (`.claude-plugin/plugin.json` + `skills/<slug>/`) and appends it to the SDK `plugins=` list, coexisting with the bundled plugin. So the agent sees the bundled skills PLUS exactly the entity's named skills. The temp dir is cleaned up after the run. |
+| non-SDK (`codex_cli`, `openai_agents`, `deep_agents`, `langchain_react`) | `AgentContextBuilder.build_system_prompt(skill_names=...)` FILTERS the "Available Skills" block to the named set, so the agent is advertised only those skills. |
+
+The SDK path is the keystone: `setting_sources=[]` disables filesystem and
+`skills=` discovery (see above), so a **local plugin is the only channel** that
+surfaces a per-run skill subset. We build a fresh plugin per run rather than
+reusing `~/.claude/skills` so the entity gets exactly its named subset, never the
+full installed set.
+
+### Warm-client caveat (SDK)
+
+The Claude SDK backend keeps a persistent ("warm") `ClaudeSDKClient` per
+session. That client applies its options **only at first `connect()`**, and the
+warm-client cache key (`_client_cache_key`) does **not** include `plugins=`. So a
+warm client connected without the per-run skills would silently ignore them (and
+one connected with them would leak them into later non-skill turns). To stay
+correct, a run with a non-empty `skill_names` **bypasses the warm client** and
+runs on a fresh stateless query whose options carry the materialized plugin.
+Empty `skill_names` keeps the normal warm-client fast path.
+
+### Precedence summary
+
+| Field | Composition | Consumer |
+| --- | --- | --- |
+| `skill_names` | UNION (base ∪ entity) | SDK: per-run plugin; non-SDK: filtered advertisement |
+| `system_message_override` | entity-wins-when-set, else base | all backends (base swap, layers kept) |
+
+Implementation: `src/pocketpaw/skills/materialize.py` (materializer +
+cleanup), `src/pocketpaw/agents/pool.py` (override base-swap + skill forwarding),
+`src/pocketpaw/agents/claude_sdk.py` (plugin wiring + warm-client bypass),
+`src/pocketpaw/bootstrap/context_builder.py` (non-SDK filter),
+`ee/pocketpaw_ee/cloud/chat/runs/run_core.py` (reads `ctx.resolved_profile`,
+forwards as plain data). Compose rules:
+`ee/pocketpaw_ee/cloud/surface/service.py::compose_entity_profile`.
+
+## Implementation notes
+
+- Module: `src/pocketpaw/bundled_skills/`
+- Installer: `src/pocketpaw/bundled_skills/installer.py`
+- Bundled content: `src/pocketpaw/bundled_skills/_bundled/<name>/SKILL.md`
+- Config flag: `auto_install_bundled_skills: bool = True`
+  (`POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS` env var)
+- Wired into: `dashboard_lifecycle.startup_event`
+- Tests: `tests/test_bundled_skills_installer.py`
+- Runtime consumer: `pocketpaw.skills.SkillLoader` (existing —
+  scans `~/.claude/skills/` via `SKILL_PATHS`) and
+  `pocketpaw.skills.SkillExecutor` (existing — runs skill body
+  through `AgentRouter`)
+- Hatchling config: `src/pocketpaw` already includes non-Python files
+  recursively, so `SKILL.md` ships in the wheel without extra config.

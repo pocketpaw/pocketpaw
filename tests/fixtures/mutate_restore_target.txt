@@ -1,0 +1,7 @@
+# Inert, tracked fixture for scripts/mutate.py --restore tests.
+#
+# --restore recovers a file via `git checkout --`, so its target must be TRACKED;
+# a tmp-dir file cannot exercise that path at all. This file exists so those tests
+# never have to mutate a real module — nothing imports it, nothing reads it, and a
+# mutation left in it by a failed test cannot break anything.
+RESTORE_TARGET_SENTINEL = "original"

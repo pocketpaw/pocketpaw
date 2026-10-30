@@ -1,0 +1,84 @@
+# src/pocketpaw/bundled_templates/_bundled/renewals-radar/template.pocket.yaml
+# Created: 2026-06-11 (feat/demo-template-suite) — RFC 03 v2 Pocket Template
+# Schema metadata for the generic renewals-radar pocket. DEMO-GRADE from the
+# start, mirroring the applications-triage redesign (#1435): a revenue-at-risk
+# stat strip across the top (count cards banded by churn risk + headline
+# stats: members expiring, revenue at risk, auto-renew share), a scannable
+# left queue of members ordered by renewal risk (name, a days-left countdown
+# chip, a risk bar color-banded high/medium/safe, auto-renew status), and a
+# loud detail panel (member header + risk/auto-renew pills + a risk RING, a
+# grace-deadline callout, the renewal facts as a key-value table, and a
+# renewal-history timeline). The detail binds to a denormalized flat
+# `state.selected` object kept in sync by the queue cards' on_click (the
+# on_click `set` value is a method chain that ENDS in `)`, the only chain
+# form the renderer resolves) so every detail binding is a plain
+# `{state.selected.X}` path. `state.selected` is also SEEDED to the first
+# member so the panel renders before any click. `shape: custom` because the
+# canvas is a composite — RFC 03's shape enum has no value for it, so the
+# pattern is recorded in the sibling index.json (`pattern: app`) and the
+# shape stays `custom`. `needs: [paw.db.v1]` declares the generic data-source
+# capability a tenant wires so the queue hydrates from a real memberships
+# endpoint; without one the seeded sample members render. The two renewal
+# actions declare `instinct_policy: require_approval` so each surfaces as a
+# PENDING gated proposal in The Tray rather than executing inline — the
+# deployment wires the action row to external_actions.propose at the
+# documented binding point (see the ripple_spec _placeholder_note).
+schema_version: "2"
+name: renewals-radar
+version: 1.0.0
+pattern: app
+vertical: operations
+display_name: Renewals Radar
+shape: custom
+description: |
+  A renewal-risk console for memberships. A color-banded strip across the top
+  counts members by churn risk — high, medium, safe — and adds the headline
+  numbers: how many are expiring soon, how much revenue is at risk, and what
+  share have auto-renew on. A scannable queue on the left orders members by
+  risk and shows each one's name, a days-left countdown chip, a risk bar
+  color-banded by churn likelihood, and whether auto-renew is on. Selecting a
+  member opens a detail panel where the renewal picture is the loudest thing
+  on the canvas: the churn risk as a ring, a grace-deadline callout, the
+  renewal facts as a key-value table, and a renewal-history timeline. Renew
+  and remind actions propose the next step, surfaced as pending proposals for
+  a human to confirm rather than acting on their own. Ships a placeholder
+  live-data source so a connected backend hydrates the queue from a real
+  memberships endpoint; with no backend it renders the seeded sample members.
+icon: refresh-cw
+color: "#99775b"
+state:
+  entity_type: Membership
+  id_field: id
+  columns:
+    - { field: member, label: Member, widget: text }
+    - { field: tier, label: Tier, widget: badge }
+    - { field: risk_band, label: Risk, widget: badge }
+    - { field: days_left, label: Days left, widget: number }
+    - { field: auto_renew, label: Auto-renew, widget: badge }
+    - { field: value, label: Value, widget: text }
+data_sources:
+  - name: memberships
+    method: GET
+    path: /memberships?expiring=true
+    bind: state.members
+    refresh: [pocket_open, manual]
+needs:
+  - paw.db.v1
+actions:
+  - name: renew_membership
+    label: Renew
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [membership_renewed]
+    description: Proposes renewing the selected membership. Gated — a human confirms in The Tray.
+  - name: send_renewal_reminder
+    label: Send reminder
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [renewal_reminder_sent]
+    description: Proposes sending a renewal reminder to the member. Gated — a human confirms in The Tray.
+outcomes:
+  - membership_renewed
+  - renewal_reminder_sent
+connectors: []
+skill_refs: []

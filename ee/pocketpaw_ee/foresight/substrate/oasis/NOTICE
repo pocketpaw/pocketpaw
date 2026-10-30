@@ -1,0 +1,13 @@
+OASIS — Open Agent Social Interaction Simulations
+Copyright 2023-2026 CAMEL-AI.org
+
+This product includes software developed by the CAMEL-AI.org community
+(https://github.com/camel-ai/oasis), licensed under the Apache License,
+Version 2.0 (see LICENSE).
+
+When OASIS source code is vendored into this directory in a follow-up
+PR (see README-FORK.md), each modified file will carry an explicit
+"Modified by PocketPaw, YYYY-MM-DD" notice per Apache-2.0 §4(b).
+
+This NOTICE file is provided per Apache-2.0 §4(d) and is for
+informational purposes only; it does not modify the License.

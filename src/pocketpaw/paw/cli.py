@@ -1,7 +1,12 @@
 # Paw CLI — Click-based universal entry point for PocketPaw with soul-protocol.
 # Created: 2026-03-02
 # Updated: 2026-03-02 — Fixed _print() call without args in doctor command.
-# Commands: init, ask, chat, serve, status, doctor, os, channels.
+# Updated: 2026-07-11 (feat/paw-cli, C1) — the CLI is now a real console script
+#   (`paw` in [project.scripts]) and grew a `paw fabric` remote group (stats,
+#   types, query) that talks HTTP to a running PocketPaw server through the new
+#   thin PawClient (paw/client.py) — base URL / API key from --base-url /
+#   --api-key or PAW_BASE_URL / PAW_API_KEY.
+# Commands: init, ask, chat, serve, status, doctor, os, channels, fabric.
 
 from __future__ import annotations
 
@@ -554,6 +559,103 @@ def channels(telegram: bool, slack: bool, discord: bool) -> None:
         _print("Install channel extras: pip install pocketpaw[telegram,discord,slack]", style="dim")
     except KeyboardInterrupt:
         _print("Channels stopped.", style="dim")
+
+
+# ---------------------------------------------------------------------------
+# paw fabric — remote ontology reads over HTTP (C1)
+# ---------------------------------------------------------------------------
+
+_BASE_URL_OPT = click.option(
+    "--base-url",
+    envvar="PAW_BASE_URL",
+    default="http://127.0.0.1:8888",
+    show_default=True,
+    help="PocketPaw server origin (env: PAW_BASE_URL).",
+)
+_API_KEY_OPT = click.option(
+    "--api-key",
+    envvar="PAW_API_KEY",
+    default=None,
+    help="Bearer credential — a paw_... API key or JWT (env: PAW_API_KEY).",
+)
+
+
+def _make_client(base_url: str, api_key: str | None):
+    """Build the PawClient for the remote commands. One seam — tests stub it."""
+    from pocketpaw.paw.client import PawClient
+
+    return PawClient(base_url, api_key)
+
+
+def _echo_json(payload) -> None:
+    """Render an API payload as pretty JSON (scripting-friendly)."""
+    import json
+
+    click.echo(json.dumps(payload, indent=2, default=str))
+
+
+@main.group()
+def fabric() -> None:
+    """Read the Fabric ontology on a running PocketPaw server."""
+
+
+@fabric.command(name="stats")
+@_BASE_URL_OPT
+@_API_KEY_OPT
+def fabric_stats(base_url: str, api_key: str | None) -> None:
+    """Show ontology counts for your workspace."""
+    _fabric_call(base_url, api_key, lambda c: c.fabric_stats())
+
+
+@fabric.command(name="types")
+@_BASE_URL_OPT
+@_API_KEY_OPT
+def fabric_types(base_url: str, api_key: str | None) -> None:
+    """List the object types visible to your workspace."""
+    _fabric_call(base_url, api_key, lambda c: c.list_types())
+
+
+@fabric.command(name="query")
+@click.option("--type-name", "-t", default=None, help="Object type to search.")
+@click.option("--linked-to", default=None, help="Find objects linked to this object id.")
+@click.option("--link-type", default=None, help="Filter links by type.")
+@click.option("--limit", default=20, show_default=True, type=int, help="Max results.")
+@_BASE_URL_OPT
+@_API_KEY_OPT
+def fabric_query(
+    type_name: str | None,
+    linked_to: str | None,
+    link_type: str | None,
+    limit: int,
+    base_url: str,
+    api_key: str | None,
+) -> None:
+    """Run a Fabric query and print the matching objects as JSON."""
+    _fabric_call(
+        base_url,
+        api_key,
+        lambda c: c.query(
+            type_name=type_name, linked_to=linked_to, link_type=link_type, limit=limit
+        ),
+    )
+
+
+def _fabric_call(base_url: str, api_key: str | None, fn) -> None:
+    """Run one client call with uniform connection/API error handling."""
+    from pocketpaw.paw.client import PawAPIError
+
+    client = _make_client(base_url, api_key)
+    try:
+        _echo_json(fn(client))
+    except PawAPIError as e:
+        _print(f"API error: {e}", style="red")
+        raise SystemExit(1)
+    except Exception as e:  # httpx.ConnectError etc. — no server at base_url
+        _print(f"Could not reach {base_url}: {e}", style="red")
+        _print("Is a PocketPaw server running? Try: pocketpaw serve", style="dim")
+        raise SystemExit(1)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":

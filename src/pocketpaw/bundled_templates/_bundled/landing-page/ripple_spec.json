@@ -1,0 +1,151 @@
+{
+  "_placeholder_note": "Built-in pocket template (landing-page) — the FAST-PATH skeleton for a Paw Site marketing landing page. Every section is its purpose-built Ripple marketing widget; only the lead form is flat (SSR rule 1). All copy carries [bracketed] placeholders — the create-paw-site brain replaces them with the user's real domain (business name, services, prices, testimonials) and does NOT redesign the tree. Conversion order top→bottom: navbar → hero → services (feature-grid) → proof (testimonial×2 + logo-cloud) → pricing (pricing-table.tiers) → CTA band → lead form (flat) → footer. The five SSR rules are baked in BY CONSTRUCTION: (1) lead form is flat input/textarea/button{type:submit}, never a form/newsletter widget; (2) pricing-table uses `tiers`, never `plans`/`columns`, currency is the symbol `$`; (3) no `accordion` anywhere; (4) every CTA is an anchor `href`, never on_click; (5) `hero` is the marketing Hero (eyebrow/title/subtitle), never the dashboard hero+grid KPI layout. Tier-0 (CSS-only) animation only. Marketing widgets carry no `id` of their own, so anchor targets (#services/#reviews/#pricing/#book) live on the wrapping `section`/`card`. The page renders statically (csr=false) — anything needing client JS is dead.",
+  "state": {},
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "0" },
+    "children": [
+      {
+        "type": "navbar",
+        "props": {
+          "brand": "[Business Name]",
+          "links": [
+            { "label": "Services", "href": "#services" },
+            { "label": "Reviews", "href": "#reviews" },
+            { "label": "Pricing", "href": "#pricing" },
+            { "label": "Book", "href": "#book" }
+          ],
+          "cta": "[Book a visit]",
+          "ctaHref": "#book",
+          "sticky": true
+        }
+      },
+      {
+        "type": "hero",
+        "props": {
+          "eyebrow": "[Short category line]",
+          "title": "[The headline promise]",
+          "subtitle": "[One sentence on the offer, location, and what makes it easy to say yes.]",
+          "align": "center"
+        }
+      },
+      {
+        "type": "section",
+        "props": { "id": "services" },
+        "children": [
+          {
+            "type": "feature-grid",
+            "props": {
+              "columns": 4,
+              "features": [
+                { "icon": "sparkles", "title": "[Service one]", "description": "[One line on what it is and the outcome.]" },
+                { "icon": "shield", "title": "[Service two]", "description": "[One line on what it is and the outcome.]" },
+                { "icon": "smile", "title": "[Service three]", "description": "[One line on what it is and the outcome.]" },
+                { "icon": "star", "title": "[Service four]", "description": "[One line on what it is and the outcome.]" }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "props": { "id": "reviews" },
+        "children": [
+          {
+            "type": "testimonial",
+            "props": {
+              "quote": "[A real-sounding quote about the result the customer got.]",
+              "author": "[Customer name]",
+              "role": "[Customer since 2023]"
+            }
+          },
+          {
+            "type": "testimonial",
+            "props": {
+              "quote": "[A second quote about how easy or trustworthy the experience was.]",
+              "author": "[Customer name]",
+              "role": "[Customer since 2021]"
+            }
+          },
+          {
+            "type": "logo-cloud",
+            "props": {
+              "heading": "[Trusted by 400+ customers]",
+              "logos": []
+            }
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "props": { "id": "pricing" },
+        "children": [
+          {
+            "type": "pricing-table",
+            "props": {
+              "currency": "$",
+              "tiers": [
+                {
+                  "id": "starter",
+                  "name": "[Starter]",
+                  "price": "[89]",
+                  "period": "[one-time]",
+                  "features": ["[Feature line]", "[Feature line]", "[Feature line]"],
+                  "cta": "[Get started]"
+                },
+                {
+                  "id": "popular",
+                  "name": "[Most popular]",
+                  "price": "[299]",
+                  "period": "[per month]",
+                  "popular": true,
+                  "features": ["[Feature line]", "[Feature line]", "[Feature line]"],
+                  "cta": "[Choose plan]"
+                },
+                {
+                  "id": "pro",
+                  "name": "[Pro]",
+                  "price": "[3,900]",
+                  "period": "[full plan]",
+                  "features": ["[Feature line]", "[Feature line]", "[Feature line]"],
+                  "cta": "[Talk to us]"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "type": "cta",
+        "props": {
+          "headline": "[Ready to get started?]",
+          "subtext": "[A short nudge — limited slots, fast turnaround, or a guarantee.]",
+          "button": "[Request an appointment]",
+          "href": "#book",
+          "align": "center"
+        }
+      },
+      {
+        "type": "card",
+        "props": { "id": "book", "title": "[Book your visit]" },
+        "children": [
+          { "type": "input", "props": { "name": "name", "label": "Your name", "placeholder": "[Jane Doe]", "required": true } },
+          { "type": "input", "props": { "name": "email", "label": "Email", "type": "email", "placeholder": "[jane@email.com]", "required": true } },
+          { "type": "input", "props": { "name": "phone", "label": "Phone", "type": "tel", "placeholder": "[(555) 010-1234]" } },
+          { "type": "textarea", "props": { "name": "message", "label": "[What do you need?]", "placeholder": "[Tell us a little about what you're looking for...]" } },
+          { "type": "button", "props": { "label": "[Request appointment]", "type": "submit", "variant": "primary" } }
+        ]
+      },
+      {
+        "type": "footer",
+        "props": {
+          "columns": [
+            { "title": "[Visit]", "links": [ { "label": "[421 Main St, Your City]", "href": "#book" }, { "label": "[(555) 010-1234]", "href": "tel:5550101234" } ] },
+            { "title": "[Explore]", "links": [ { "label": "Services", "href": "#services" }, { "label": "Pricing", "href": "#pricing" }, { "label": "Book", "href": "#book" } ] }
+          ],
+          "copyright": "[© 2026 Business Name]"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,535 @@
+{
+  "_placeholder_note": "Built-in pocket template (orders-fulfillment), DEMO-GRADE 2026-06-11 (feat/demo-template-suite). The orders, customers, line items, and shipping below are real sample copy — no placeholder brackets — so a pocket created straight from this template renders as a finished fulfillment console. The create specialist still rewrites the sample orders to the user's real domain. BINDING CONTRACT (same as applications-triage): the Ripple expression engine resolves a method chain ONLY when the chain ENDS in `)`; a method call FOLLOWED BY a property access resolves to undefined, and `each` `items` resolves a FLAT dot-path from state ONLY. So the detail panel binds to a denormalized FLAT `state.selected` object — every detail binding is a plain `{state.selected.X}` path and the items / shipping / timeline loops read `{state.selected.items}` / `{state.selected.shipping}` / `{state.selected.timeline}`. Clicking a queue card keeps `state.selected` in sync via an on_click chain whose `set` value is `{state.orders.where('id', ord.id).first()}` — a chain that ENDS in `)`, so it resolves at dispatch time. `state.selected` is also SEEDED to the first order so the panel renders before any click. KANBAN: the stage board binds the order list with `bind: orders` and `columnKey: stage_id`; each order carries a `stage_id` matching one of the four column ids (to_ship / shipped / delivered / refund_requested) so the board groups them — kanban is the ONLY widget here with a top-level `bind`. ENUM NOTE: badge variants are {default,secondary,destructive,outline,success,warning}; chip variants are {default,primary,success,warning,destructive}; callout variants are {info,success,warning,insight}. Stage colors: amber (#d97706) to-ship, blue (#0284c7) shipped, green (#059669) delivered, red (#dc2626) refund-requested. The `sources` block is a PLACEHOLDER live-data binding: with a backend keep it so GET /orders hydrates state.orders; with NO backend remove it and keep the seeded orders. ACTION-ROW BINDING POINT: the ship / refund buttons set state.pending_proposal to a generic {action, order_id, summary} proposal — they do NOT execute. A deployment wires this state event to the Instinct gate so a human confirms in The Tray. Keep the fulfillment stat strip, the kanban stage board, the queue each-loop, the selected-sync on_click, the items grid, the shipping kv-table, the fulfillment timeline, and the action row intact.",
+  "sources": {
+    "orders": {
+      "method": "GET",
+      "path": "/orders?open=true",
+      "bind": "state.orders",
+      "refresh": ["pocket_open", "manual"]
+    }
+  },
+  "state": {
+    "selected_id": "o1",
+    "pending_proposal": null,
+    "stage_counts": [
+      { "id": "st1", "label": "To ship", "value": 3, "color": "#d97706", "dot": "away" },
+      { "id": "st2", "label": "Shipped", "value": 2, "color": "#0284c7", "dot": "busy" },
+      { "id": "st3", "label": "Delivered", "value": 1, "color": "#059669", "dot": "online" },
+      { "id": "st4", "label": "Refund req.", "value": 1, "color": "#dc2626", "dot": "offline" }
+    ],
+    "to_ship_count": 3,
+    "units_in_flight": 14,
+    "open_refunds": 1,
+    "stage_columns": [
+      { "id": "to_ship", "title": "To ship" },
+      { "id": "shipped", "title": "Shipped" },
+      { "id": "delivered", "title": "Delivered" },
+      { "id": "refund_requested", "title": "Refund requested" }
+    ],
+    "orders": [
+      {
+        "id": "o1",
+        "ref": "#SN-4821",
+        "title": "#SN-4821 · Amara Okafor",
+        "customer": "Amara Okafor",
+        "stage": "To ship",
+        "stage_id": "to_ship",
+        "stage_variant": "warning",
+        "payment": "Paid",
+        "payment_variant": "success",
+        "total": "$340",
+        "units": 3,
+        "placed": "2026-06-09",
+        "summary": "Paid two days ago, awaiting pick + pack — oldest unshipped order in the queue",
+        "items": [
+          { "id": "i1", "item": "Branded tote", "qty": "1", "price": "$25" },
+          { "id": "i2", "item": "Event ticket — Midsummer", "qty": "1", "price": "$250" },
+          { "id": "i3", "item": "Members' candle set", "qty": "1", "price": "$65" }
+        ],
+        "shipping": [
+          { "key": "Recipient", "value": "Amara Okafor" },
+          { "key": "Address", "value": "14 Park Ave, New York, NY 10016" },
+          { "key": "Carrier", "value": "UPS Ground (Shippo)" },
+          { "key": "Tracking", "value": "Not yet generated" }
+        ],
+        "timeline": [
+          { "id": "tl1", "date": "2026-06-09", "title": "Order placed", "detail": "Web checkout" },
+          { "id": "tl2", "date": "2026-06-09", "title": "Payment captured", "detail": "$340 — Authorize.Net" }
+        ]
+      },
+      {
+        "id": "o2",
+        "ref": "#SN-4822",
+        "title": "#SN-4822 · Liam Petrov",
+        "customer": "Liam Petrov",
+        "stage": "To ship",
+        "stage_id": "to_ship",
+        "stage_variant": "warning",
+        "payment": "Paid",
+        "payment_variant": "success",
+        "total": "$90",
+        "units": 2,
+        "placed": "2026-06-10",
+        "summary": "Paid, ready to pack — two small items, ships same-day if picked this afternoon",
+        "items": [
+          { "id": "i1", "item": "Branded cap", "qty": "1", "price": "$35" },
+          { "id": "i2", "item": "Sticker pack", "qty": "1", "price": "$10" }
+        ],
+        "shipping": [
+          { "key": "Recipient", "value": "Liam Petrov" },
+          { "key": "Address", "value": "302 Mission St, San Francisco, CA 94105" },
+          { "key": "Carrier", "value": "USPS First Class (Shippo)" },
+          { "key": "Tracking", "value": "Not yet generated" }
+        ],
+        "timeline": [
+          { "id": "tl1", "date": "2026-06-10", "title": "Order placed", "detail": "Web checkout" },
+          { "id": "tl2", "date": "2026-06-10", "title": "Payment captured", "detail": "$90 — Authorize.Net" }
+        ]
+      },
+      {
+        "id": "o3",
+        "ref": "#SN-4818",
+        "title": "#SN-4818 · Priya Nair",
+        "customer": "Priya Nair",
+        "stage": "To ship",
+        "stage_id": "to_ship",
+        "stage_variant": "warning",
+        "payment": "Paid",
+        "payment_variant": "success",
+        "total": "$160",
+        "units": 4,
+        "placed": "2026-06-08",
+        "summary": "Bulk merch order — four units, needs the larger box, otherwise ready",
+        "items": [
+          { "id": "i1", "item": "Branded tote", "qty": "2", "price": "$50" },
+          { "id": "i2", "item": "Members' candle set", "qty": "1", "price": "$65" },
+          { "id": "i3", "item": "Sticker pack", "qty": "1", "price": "$10" }
+        ],
+        "shipping": [
+          { "key": "Recipient", "value": "Priya Nair" },
+          { "key": "Address", "value": "55 Hudson Yards, New York, NY 10001" },
+          { "key": "Carrier", "value": "UPS Ground (Shippo)" },
+          { "key": "Tracking", "value": "Not yet generated" }
+        ],
+        "timeline": [
+          { "id": "tl1", "date": "2026-06-08", "title": "Order placed", "detail": "Web checkout" },
+          { "id": "tl2", "date": "2026-06-08", "title": "Payment captured", "detail": "$160 — Authorize.Net" }
+        ]
+      },
+      {
+        "id": "o4",
+        "ref": "#SN-4805",
+        "title": "#SN-4805 · Sofia Marchetti",
+        "customer": "Sofia Marchetti",
+        "stage": "Shipped",
+        "stage_id": "shipped",
+        "stage_variant": "secondary",
+        "payment": "Paid",
+        "payment_variant": "success",
+        "total": "$120",
+        "units": 2,
+        "placed": "2026-06-05",
+        "summary": "Shipped yesterday — in transit, expected delivery June 12",
+        "items": [
+          { "id": "i1", "item": "Members' candle set", "qty": "1", "price": "$65" },
+          { "id": "i2", "item": "Branded cap", "qty": "1", "price": "$35" }
+        ],
+        "shipping": [
+          { "key": "Recipient", "value": "Sofia Marchetti" },
+          { "key": "Address", "value": "88 Greene St, New York, NY 10012" },
+          { "key": "Carrier", "value": "UPS Ground (Shippo)" },
+          { "key": "Tracking", "value": "1Z999AA10123456784" }
+        ],
+        "timeline": [
+          { "id": "tl1", "date": "2026-06-05", "title": "Order placed", "detail": "Web checkout" },
+          { "id": "tl2", "date": "2026-06-05", "title": "Payment captured", "detail": "$120" },
+          { "id": "tl3", "date": "2026-06-10", "title": "Shipped", "detail": "UPS — tracking generated" }
+        ]
+      },
+      {
+        "id": "o5",
+        "ref": "#SN-4801",
+        "title": "#SN-4801 · Hannah Berg",
+        "customer": "Hannah Berg",
+        "stage": "Shipped",
+        "stage_id": "shipped",
+        "stage_variant": "secondary",
+        "payment": "Paid",
+        "payment_variant": "success",
+        "total": "$50",
+        "units": 1,
+        "placed": "2026-06-04",
+        "summary": "In transit — single tote, expected delivery June 11",
+        "items": [
+          { "id": "i1", "item": "Branded tote", "qty": "2", "price": "$50" }
+        ],
+        "shipping": [
+          { "key": "Recipient", "value": "Hannah Berg" },
+          { "key": "Address", "value": "21 Pearl St, Brooklyn, NY 11201" },
+          { "key": "Carrier", "value": "USPS Priority (Shippo)" },
+          { "key": "Tracking", "value": "9400111899223818796534" }
+        ],
+        "timeline": [
+          { "id": "tl1", "date": "2026-06-04", "title": "Order placed", "detail": "Web checkout" },
+          { "id": "tl2", "date": "2026-06-04", "title": "Payment captured", "detail": "$50" },
+          { "id": "tl3", "date": "2026-06-09", "title": "Shipped", "detail": "USPS — tracking generated" }
+        ]
+      },
+      {
+        "id": "o6",
+        "ref": "#SN-4790",
+        "title": "#SN-4790 · Daniel Cho",
+        "customer": "Daniel Cho",
+        "stage": "Delivered",
+        "stage_id": "delivered",
+        "stage_variant": "success",
+        "payment": "Paid",
+        "payment_variant": "success",
+        "total": "$65",
+        "units": 1,
+        "placed": "2026-05-30",
+        "summary": "Delivered June 6 and confirmed — order complete, no issues",
+        "items": [
+          { "id": "i1", "item": "Members' candle set", "qty": "1", "price": "$65" }
+        ],
+        "shipping": [
+          { "key": "Recipient", "value": "Daniel Cho" },
+          { "key": "Address", "value": "9 Beacon St, Boston, MA 02108" },
+          { "key": "Carrier", "value": "UPS Ground (Shippo)" },
+          { "key": "Tracking", "value": "1Z999AA10198765432 — delivered" }
+        ],
+        "timeline": [
+          { "id": "tl1", "date": "2026-05-30", "title": "Order placed", "detail": "Web checkout" },
+          { "id": "tl2", "date": "2026-06-02", "title": "Shipped", "detail": "UPS" },
+          { "id": "tl3", "date": "2026-06-06", "title": "Delivered", "detail": "Left at front desk — confirmed" }
+        ]
+      },
+      {
+        "id": "o7",
+        "ref": "#SN-4777",
+        "title": "#SN-4777 · Marcus Webb",
+        "customer": "Marcus Webb",
+        "stage": "Refund requested",
+        "stage_id": "refund_requested",
+        "stage_variant": "destructive",
+        "payment": "Refund pending",
+        "payment_variant": "destructive",
+        "total": "$250",
+        "units": 1,
+        "placed": "2026-05-22",
+        "summary": "Customer requested a refund — event ticket, cannot attend. Within policy window, awaiting approval.",
+        "items": [
+          { "id": "i1", "item": "Event ticket — Summer Mixer", "qty": "1", "price": "$250" }
+        ],
+        "shipping": [
+          { "key": "Recipient", "value": "Marcus Webb" },
+          { "key": "Fulfillment", "value": "Digital — e-ticket" },
+          { "key": "Refund reason", "value": "Cannot attend" },
+          { "key": "Policy", "value": "Within 14-day refund window" }
+        ],
+        "timeline": [
+          { "id": "tl1", "date": "2026-05-22", "title": "Order placed", "detail": "Web checkout" },
+          { "id": "tl2", "date": "2026-05-22", "title": "E-ticket issued", "detail": "Delivered by email" },
+          { "id": "tl3", "date": "2026-06-08", "title": "Refund requested", "detail": "Customer cannot attend" }
+        ]
+      }
+    ],
+    "selected": {
+      "id": "o1",
+      "ref": "#SN-4821",
+      "title": "#SN-4821 · Amara Okafor",
+      "customer": "Amara Okafor",
+      "stage": "To ship",
+      "stage_id": "to_ship",
+      "stage_variant": "warning",
+      "payment": "Paid",
+      "payment_variant": "success",
+      "total": "$340",
+      "units": 3,
+      "placed": "2026-06-09",
+      "summary": "Paid two days ago, awaiting pick + pack — oldest unshipped order in the queue",
+      "items": [
+        { "id": "i1", "item": "Branded tote", "qty": "1", "price": "$25" },
+        { "id": "i2", "item": "Event ticket — Midsummer", "qty": "1", "price": "$250" },
+        { "id": "i3", "item": "Members' candle set", "qty": "1", "price": "$65" }
+      ],
+      "shipping": [
+        { "key": "Recipient", "value": "Amara Okafor" },
+        { "key": "Address", "value": "14 Park Ave, New York, NY 10016" },
+        { "key": "Carrier", "value": "UPS Ground (Shippo)" },
+        { "key": "Tracking", "value": "Not yet generated" }
+      ],
+      "timeline": [
+        { "id": "tl1", "date": "2026-06-09", "title": "Order placed", "detail": "Web checkout" },
+        { "id": "tl2", "date": "2026-06-09", "title": "Payment captured", "detail": "$340 — Authorize.Net" }
+      ]
+    }
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "20px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "Orders",
+          "subtitle": "Move orders left to right across the board — to ship, shipped, delivered",
+          "eyebrow": "Fulfillment"
+        }
+      },
+      {
+        "type": "grid",
+        "props": { "columns": "repeat(7, minmax(0, 1fr))", "gap": "12px" },
+        "children": [
+          {
+            "type": "each",
+            "items": "{state.stage_counts}",
+            "item_as": "bucket",
+            "children": [
+              {
+                "type": "card",
+                "props": { "variant": "outlined", "density": "compact" },
+                "children": [
+                  {
+                    "type": "flex",
+                    "props": { "direction": "column", "gap": "6px" },
+                    "children": [
+                      { "type": "status-dot", "props": { "variant": "{bucket.dot}", "label": "{bucket.label}", "size": 8 } },
+                      { "type": "text", "props": { "text": "{bucket.value}", "size": "2xl", "weight": "bold", "color": "{bucket.color}" } }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "card",
+            "props": { "variant": "muted", "density": "compact" },
+            "children": [
+              {
+                "type": "flex",
+                "props": { "direction": "column", "gap": "6px" },
+                "children": [
+                  { "type": "text", "props": { "text": "To ship", "size": "xs", "weight": "medium", "color": "#64748b" } },
+                  { "type": "text", "props": { "text": "{state.to_ship_count}", "size": "2xl", "weight": "bold", "color": "#d97706" } }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "card",
+            "props": { "variant": "muted", "density": "compact" },
+            "children": [
+              {
+                "type": "flex",
+                "props": { "direction": "column", "gap": "6px" },
+                "children": [
+                  { "type": "text", "props": { "text": "Units in flight", "size": "xs", "weight": "medium", "color": "#64748b" } },
+                  { "type": "text", "props": { "text": "{state.units_in_flight}", "size": "2xl", "weight": "bold" } }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "card",
+            "props": { "variant": "muted", "density": "compact" },
+            "children": [
+              {
+                "type": "flex",
+                "props": { "direction": "column", "gap": "6px" },
+                "children": [
+                  { "type": "text", "props": { "text": "Open refunds", "size": "xs", "weight": "medium", "color": "#64748b" } },
+                  { "type": "text", "props": { "text": "{state.open_refunds}", "size": "2xl", "weight": "bold", "color": "#dc2626" } }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "props": { "title": "Fulfillment board" },
+        "children": [
+          {
+            "type": "kanban",
+            "bind": "orders",
+            "props": {
+              "columns": "{state.stage_columns}",
+              "columnKey": "stage_id"
+            }
+          }
+        ]
+      },
+      {
+        "type": "grid",
+        "props": { "columns": "minmax(300px, 360px) minmax(0, 1fr)", "gap": "20px" },
+        "children": [
+          {
+            "type": "flex",
+            "props": { "direction": "column", "gap": "10px" },
+            "children": [
+              { "type": "text", "props": { "text": "ORDERS", "size": "xs", "weight": "semibold", "color": "#64748b" } },
+              {
+                "type": "each",
+                "items": "{state.orders}",
+                "item_as": "ord",
+                "children": [
+                  {
+                    "type": "card",
+                    "props": {
+                      "variant": "{ord.id == state.selected_id ? 'selected' : 'outlined'}",
+                      "density": "compact",
+                      "interactive": true
+                    },
+                    "on_click": [
+                      { "action": "set", "target": "selected_id", "value": "{ord.id}" },
+                      { "action": "set", "target": "selected", "value": "{state.orders.where('id', ord.id).first()}" }
+                    ],
+                    "children": [
+                      {
+                        "type": "flex",
+                        "props": { "direction": "column", "gap": "8px" },
+                        "children": [
+                          {
+                            "type": "flex",
+                            "props": { "direction": "row", "justify": "between", "align": "center", "gap": "8px" },
+                            "children": [
+                              { "type": "text", "props": { "text": "{ord.ref}", "weight": "semibold", "size": "base" } },
+                              { "type": "text", "props": { "text": "{ord.total}", "weight": "semibold", "size": "base", "color": "#059669" } }
+                            ]
+                          },
+                          { "type": "text", "props": { "text": "{ord.customer} · {ord.units} units", "size": "xs", "color": "#64748b" } },
+                          { "type": "badge", "props": { "text": "{ord.stage}", "variant": "{ord.stage_variant}" } }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "card",
+            "props": { "variant": "default" },
+            "children": [
+              {
+                "type": "flex",
+                "props": { "direction": "column", "gap": "18px" },
+                "children": [
+                  {
+                    "type": "flex",
+                    "props": { "direction": "row", "justify": "between", "align": "start", "gap": "16px", "wrap": "wrap" },
+                    "children": [
+                      {
+                        "type": "flex",
+                        "props": { "direction": "column", "gap": "8px" },
+                        "children": [
+                          { "type": "text", "props": { "text": "ORDER", "size": "xs", "weight": "semibold", "color": "#94a3b8" } },
+                          { "type": "heading", "props": { "text": "{state.selected.ref}", "level": 2 } },
+                          { "type": "text", "props": { "text": "{state.selected.customer} · placed {state.selected.placed}", "size": "sm", "color": "#64748b" } },
+                          {
+                            "type": "flex",
+                            "props": { "direction": "row", "gap": "8px", "align": "center", "wrap": "wrap" },
+                            "children": [
+                              { "type": "badge", "props": { "text": "{state.selected.stage}", "variant": "{state.selected.stage_variant}" } },
+                              { "type": "badge", "props": { "text": "{state.selected.payment}", "variant": "{state.selected.payment_variant}" } }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "flex",
+                        "props": { "direction": "column", "gap": "4px", "align": "end" },
+                        "children": [
+                          { "type": "text", "props": { "text": "{state.selected.total}", "size": "2xl", "weight": "bold", "color": "#059669" } },
+                          { "type": "text", "props": { "text": "{state.selected.units} units", "size": "xs", "color": "#94a3b8" } }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "callout",
+                    "props": {
+                      "title": "Status",
+                      "text": "{state.selected.summary}",
+                      "variant": "info"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "props": { "title": "Items" },
+                    "children": [
+                      {
+                        "type": "data-grid",
+                        "props": {
+                          "columns": [
+                            { "key": "item", "label": "Item", "sortable": true, "align": "left" },
+                            { "key": "qty", "label": "Qty", "sortable": true, "align": "right", "width": "80px" },
+                            { "key": "price", "label": "Price", "sortable": true, "align": "right", "width": "110px" }
+                          ],
+                          "rows": "{state.selected.items}",
+                          "dense": true
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "props": { "title": "Shipping" },
+                    "children": [
+                      { "type": "kv-table", "props": { "rows": "{state.selected.shipping}", "striped": true } }
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "props": { "title": "Fulfillment timeline" },
+                    "children": [
+                      { "type": "timeline", "props": { "events": "{state.selected.timeline}", "density": "compact" } }
+                    ]
+                  },
+                  { "type": "separator", "props": { "orientation": "horizontal" } },
+                  {
+                    "type": "flex",
+                    "props": { "direction": "row", "gap": "8px", "wrap": "wrap" },
+                    "children": [
+                      {
+                        "type": "button",
+                        "props": { "label": "Mark shipped", "variant": "primary" },
+                        "on_click": [
+                          {
+                            "action": "set",
+                            "target": "pending_proposal",
+                            "value": {
+                              "action": "mark_shipped",
+                              "order_id": "{state.selected_id}",
+                              "summary": "Mark {state.selected.ref} shipped"
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "type": "button",
+                        "props": { "label": "Refund", "variant": "danger" },
+                        "on_click": [
+                          {
+                            "action": "set",
+                            "target": "pending_proposal",
+                            "value": {
+                              "action": "process_refund",
+                              "order_id": "{state.selected_id}",
+                              "summary": "Refund {state.selected.ref}"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

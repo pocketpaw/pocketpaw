@@ -1,5 +1,12 @@
 # Deep Work Goal Parser — structured goal analysis via LLM.
 # Created: 2026-02-18
+# Updated: 2026-05-21 (feat/deep-work-intake) — issue #1161: added the
+#   interactive intake loop. GoalParser already produced a
+#   `clarifications_needed` list but nothing asked the questions. The new
+#   GoalIntake runs that conversation: it asks each clarification, takes an
+#   answer via an injected async callback, folds the Q&A back into the goal
+#   text, and re-parses so planning starts from a well-formed goal. A
+#   well-formed goal (no clarifications) skips the loop entirely.
 #
 # First primitive in the Deep Work pipeline. Takes messy human input
 # and produces a structured GoalAnalysis: domain detection, complexity
@@ -9,14 +16,23 @@
 #   GoalAnalysis — dataclass with parsed goal structure
 #   GoalParser.parse(user_input) -> GoalAnalysis
 #   GoalParser.parse_raw(raw_json) -> GoalAnalysis (for testing)
+#   IntakeResult — dataclass: enriched goal text + Q&A transcript + analysis
+#   GoalIntake.run(user_input, answer_provider) -> IntakeResult
 
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Max clarification rounds before the intake loop gives up. The parser
+# already caps `clarifications_needed` at 4, but a defensive bound here
+# keeps a misbehaving answer provider (one that keeps surfacing new
+# ambiguity) from looping forever.
+MAX_INTAKE_ROUNDS = 3
 
 # Regex to strip markdown code fences (```json ... ``` or ``` ... ```)
 _CODE_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
@@ -273,3 +289,188 @@ def _clamp(value, minimum, maximum):
         return max(minimum, min(maximum, float(value)))
     except (TypeError, ValueError):
         return minimum
+
+
+# ============================================================================
+# Interactive intake (issue #1161)
+# ============================================================================
+#
+# `clarifications_needed` is the half-built intake: it holds the exact
+# questions you would ask a human to disambiguate a vague goal, but nothing
+# asks them. GoalIntake closes that loop.
+#
+# An "answer provider" is any async callable `(question: str) -> str`. The
+# dashboard wires it to a chat turn; tests wire it to a dict lookup; a CLI
+# could wire it to `input()`. The intake layer doesn't care where answers
+# come from — it just asks, collects, and folds.
+
+
+# An answer provider takes a clarification question and returns the human's
+# answer. Async so a real implementation can await a chat round-trip.
+AnswerProvider = Callable[[str], Awaitable[str]]
+
+
+@dataclass
+class QAPair:
+    """A single clarification question and the answer the human gave."""
+
+    question: str
+    answer: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"question": self.question, "answer": self.answer}
+
+
+@dataclass
+class IntakeResult:
+    """Outcome of an interactive goal-intake conversation.
+
+    Attributes:
+        original_input: The raw goal the user first submitted.
+        enriched_goal: The goal text after folding in clarification answers.
+            This is what gets handed to the planner. When no clarification
+            was needed it equals ``original_input``.
+        transcript: Ordered Q&A pairs collected during intake (empty when
+            the goal was well-formed and intake was skipped).
+        analysis: The final GoalAnalysis (re-parsed after enrichment when
+            clarifications were folded in).
+        clarified: True if at least one clarification question was answered.
+    """
+
+    original_input: str = ""
+    enriched_goal: str = ""
+    transcript: list[QAPair] = field(default_factory=list)
+    analysis: GoalAnalysis = field(default_factory=GoalAnalysis)
+    clarified: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization / API output."""
+        return {
+            "original_input": self.original_input,
+            "enriched_goal": self.enriched_goal,
+            "transcript": [qa.to_dict() for qa in self.transcript],
+            "analysis": self.analysis.to_dict(),
+            "clarified": self.clarified,
+        }
+
+
+class GoalIntake:
+    """Runs the interactive clarification conversation for a vague goal.
+
+    Wraps :class:`GoalParser`. The flow:
+
+      1. Parse the raw input into a GoalAnalysis.
+      2. If ``clarifications_needed`` is empty, the goal is well-formed —
+         return immediately with the input unchanged (one-shot path).
+      3. Otherwise, ask each question via the injected answer provider,
+         collect the answers, and fold the Q&A into an enriched goal text.
+      4. Re-parse the enriched goal so planning starts from a clean
+         analysis. If the re-parse still surfaces clarifications, loop —
+         bounded by ``MAX_INTAKE_ROUNDS``.
+
+    GoalIntake never blocks on a real human directly; the caller supplies
+    the answer provider. That keeps this class testable and channel-agnostic.
+    """
+
+    def __init__(self, parser: GoalParser | None = None) -> None:
+        self.parser = parser or GoalParser()
+
+    async def run(
+        self,
+        user_input: str,
+        answer_provider: AnswerProvider,
+    ) -> IntakeResult:
+        """Run intake for ``user_input``, asking questions as needed.
+
+        Args:
+            user_input: The raw goal description from the user.
+            answer_provider: Async callable that, given a clarification
+                question, returns the human's answer. Called once per
+                question. An empty-string answer is treated as "skip this
+                question" and is not folded into the goal.
+
+        Returns:
+            An :class:`IntakeResult`. ``enriched_goal`` is what the caller
+            should hand to the planner.
+        """
+        analysis = await self.parser.parse(user_input)
+
+        # Fast path: a well-formed goal needs no conversation. This is the
+        # existing one-shot behaviour — start_deep_work(good_goal) still
+        # runs straight through.
+        if not analysis.needs_clarification:
+            logger.info("Goal intake: no clarifications needed, skipping intake loop")
+            return IntakeResult(
+                original_input=user_input,
+                enriched_goal=user_input,
+                transcript=[],
+                analysis=analysis,
+                clarified=False,
+            )
+
+        transcript: list[QAPair] = []
+        enriched_goal = user_input
+
+        for round_num in range(1, MAX_INTAKE_ROUNDS + 1):
+            questions = list(analysis.clarifications_needed)
+            if not questions:
+                break
+
+            logger.info(
+                "Goal intake round %d: asking %d clarification(s)",
+                round_num,
+                len(questions),
+            )
+
+            asked_this_round = 0
+            for question in questions:
+                answer = await answer_provider(question)
+                answer = (answer or "").strip()
+                if not answer:
+                    # Treat a blank answer as "no further detail" — record
+                    # nothing and move on rather than polluting the goal.
+                    continue
+                transcript.append(QAPair(question=question, answer=answer))
+                asked_this_round += 1
+
+            if asked_this_round == 0:
+                # The human skipped every question this round. Folding
+                # nothing in and re-parsing would just resurface the same
+                # questions, so stop here with what we have.
+                logger.info("Goal intake: all questions skipped, ending intake")
+                break
+
+            # Fold the full Q&A transcript into the goal and re-parse so
+            # the planner sees a single coherent, enriched goal.
+            enriched_goal = _fold_transcript(user_input, transcript)
+            analysis = await self.parser.parse(enriched_goal)
+
+        clarified = len(transcript) > 0
+        # When the goal was clarified, the enriched text is the real goal —
+        # make sure the analysis.goal reflects it rather than the vague input.
+        if clarified and not analysis.goal:
+            analysis.goal = enriched_goal[:200]
+
+        return IntakeResult(
+            original_input=user_input,
+            enriched_goal=enriched_goal,
+            transcript=transcript,
+            analysis=analysis,
+            clarified=clarified,
+        )
+
+
+def _fold_transcript(original_input: str, transcript: list[QAPair]) -> str:
+    """Build an enriched goal string from the original input + Q&A.
+
+    The result is plain text the planner's prompts can consume directly:
+    the original goal followed by a "Clarifications" block. Keeping it as
+    readable prose (not JSON) means every downstream prompt — research,
+    PRD, task breakdown — gets the extra context for free.
+    """
+    if not transcript:
+        return original_input
+    lines = [original_input.strip(), "", "Clarifications gathered during intake:"]
+    for qa in transcript:
+        lines.append(f"- {qa.question.strip()} → {qa.answer.strip()}")
+    return "\n".join(lines)

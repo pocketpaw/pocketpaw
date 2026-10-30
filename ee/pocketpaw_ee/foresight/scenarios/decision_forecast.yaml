@@ -1,0 +1,79 @@
+# ee/pocketpaw_ee/foresight/scenarios/decision_forecast.yaml
+# Updated: 2026-05-25 (feat/foresight-v14-decision-graph-stub) — RFC 08
+# §14.4 wiring. Two new optional scenario-root fields:
+#   - ``precedent_seed`` (string | null): scenario-wide seed the engine's
+#     DecisionGraphRef hashes into deterministic synthetic precedent
+#     ids on every emitted ProjectedDecision. Omit (or null) to keep
+#     ``forward_precedent_decision_id`` ``None`` (v0.1 behavior).
+#   - ``precedent_seeds`` (map | null): per-anchor overrides keyed by
+#     anchor_id (``decision:<name>`` / ``segment:<role>`` /
+#     ``rollout:<event>``). Anchor-level wins when both blocks are set.
+# Both fields stay absent in this smoke scenario by default — the
+# default loop is precedent-free until RFC 07 lands real Decision-Graph
+# lookup. Operators wanting synthetic ids for UI/dev work can add
+# ``precedent_seed: "abc"`` here.
+# Updated: 2026-05-25 (feat/foresight-v03-calibration) — PR 3:
+#   - Added the optional ``tier_mix:`` block. The 5/15/80 captain-
+#     locked default is implicit when the block is omitted; declaring
+#     it explicitly here documents the locked value for new readers.
+# Created: 2026-05-25 (feat/foresight-v01-scaffold) — RFC 08 v0.1 scaffold.
+#
+# v0.2 Decision Forecast scenario — the simplest end-to-end loop the
+# captain asked for. Five personas, one tick, decisions logged.
+#
+# This is intentionally a *fragment* of the full RFC §18 example YAML.
+# Fields like ``world.source``, ``activation``, ``action_space``,
+# ``instinct_policy_overlay``, ``aggregator``, ``projection``,
+# ``calibration``, ``cost_estimate``, ``ui_rail``, ``triggers``, and
+# ``permissions`` are all valid for v1.0 but ignored by the v0.2 loader
+# (``ScenarioConfig.from_yaml``). Adding them now would be dead schema
+# — v0.2 ships only what the runner reads.
+
+name: smoke-decision-forecast
+sub_type: decision_forecast
+n_ticks: 1
+
+# PR 8 (RFC 08 §8) — when true, every ProjectedDecision this scenario
+# emits is also fanned into the Instinct approval queue so The Tray
+# surfaces the forecast as evidence next to the matching real-world
+# decision. Defaults to false here (and in the request DTO) so smoke
+# runs don't pollute the Tray. The v0.8 cloud loader only reads this
+# flag from the POST body; the YAML carries it as documentation /
+# v1.0 loader hook. Backtests can NOT opt in — the cloud service
+# always passes route_to_instinct=false through the backtest path.
+#
+# route_to_instinct: false
+
+# PR 3 — Captain-locked default tier mix (RFC 08 §10). Per-scenario
+# overrides are allowed but trigger a cost-estimator warning in
+# paw-enterprise (PR 6 work).
+tier_mix:
+  premium: 0.05  # Claude Sonnet 4.7 — strategic / approver personas
+  mid:     0.15  # Claude Haiku 4.7 — mid-fidelity cohort
+  tail:    0.80  # Llama-3.1-8B via vLLM (hosting deferred to v2.0)
+
+personas:
+  - name: tenant-maria
+    role: tenant
+    ocean:
+      conscientiousness: 0.4
+      agreeableness: 0.5
+  - name: tenant-alex
+    role: tenant
+    ocean:
+      openness: 0.6
+      neuroticism: -0.2
+  - name: approver-prakash
+    role: approver
+    ocean:
+      conscientiousness: 1.2
+  - name: property-manager-anne
+    role: property_manager
+    ocean:
+      extraversion: 0.3
+      agreeableness: 0.4
+  - name: renewal-specialist
+    role: agent
+    ocean:
+      conscientiousness: 0.8
+      openness: 0.3

@@ -10,6 +10,21 @@
 # Updated: 2026-04-16 (feat/widget-journal-projection) — Added the
 #   Widgets router — journal-backed widget graduation + co-occurrence
 #   (supersedes held PRs #941 / #942).
+# Updated: 2026-06-07 (feat/plugin-installer-skills) — Added the Plugins
+#   router (POST /api/v1/plugins/install) for the .claude-plugin installer
+#   (skills slice). Non-critical: mounts best-effort like the rest.
+# Updated: 2026-06-10 (feat/link-unfurl) — Added the Unfurl router
+#   (GET /api/v1/unfurl?url=...) so the paw-enterprise composer can render
+#   OG link previews. Serves in both OSS and cloud since the core mount runs
+#   in both; the path is collision-free with ee/cloud's /files/* routes.
+#
+# Updated: 2026-06-22 (feat/code/cloud) — Added the Cloud Projects router
+#   (POST /api/v1/cloud/projects) for creating S3-backed project folders
+#   from the /code route's "New Cloud Project" card.
+#
+# Updated: 2026-10-01 (feat/atlas-canonical) — Added the Atlas read router
+#   (GET /api/v1/atlas/{surfaces,verbs,search}): the composer's slash commands,
+#   verb chips and command search read the atlas OS self-model from here.
 #
 # mount_v1_routers(app) registers all domain routers at /api/v1/ (canonical).
 # Existing dashboard.py endpoints at /api/ remain as backward-compat aliases.
@@ -36,6 +51,7 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.memory", "router", "Memory"),
     ("pocketpaw.api.v1.mcp", "router", "MCP"),
     ("pocketpaw.api.v1.skills", "router", "Skills"),
+    ("pocketpaw.api.v1.plugins", "router", "Plugins"),
     ("pocketpaw.api.v1.webhooks", "router", "Webhooks"),
     ("pocketpaw.api.v1.backends", "router", "Backends"),
     ("pocketpaw.api.v1.api_keys", "router", "API Keys"),
@@ -44,6 +60,8 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.reminders", "router", "Reminders"),
     ("pocketpaw.api.v1.intentions", "router", "Intentions"),
     ("pocketpaw.api.v1.files", "router", "Files"),
+    ("pocketpaw.api.v1.unfurl", "router", "Unfurl"),
+    ("pocketpaw.api.v1.atlas", "router", "Atlas"),
     ("pocketpaw.api.v1.plan_mode", "router", "Plan Mode"),
     ("pocketpaw.api.v1.remote", "router", "Remote"),
     ("pocketpaw.api.v1.telegram", "router", "Telegram"),
@@ -56,29 +74,40 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.alerts", "router", "Alerts"),
     ("pocketpaw.api.v1.agent_status", "router", "Status"),
     ("pocketpaw.api.v1.soul", "router", "Soul"),
-    ("pocketpaw.api.v1.pockets", "router", "Pockets"),
     ("pocketpaw.api.v1.connectors", "router", "Connectors"),
     ("pocketpaw.api.v1.tools", "router", "Tools"),
     ("pocketpaw.api.v1.oauth_integrations", "router", "OAuth Integrations"),
+    ("pocketpaw.api.v1.uploads", "router", "Uploads"),
+    # Media serving moved to EE: pocketpaw_ee.cloud.media.router
+    ("pocketpaw.api.v1.terminal", "router", "Terminal"),
+    ("pocketpaw.api.v1.cloud_projects", "router", "Cloud Projects"),
     ("pocketpaw.audit.router", "router", "Audit"),
+    # Cluster C / PR4 — canonical runtime audit surface. `/audit` stays as
+    # a deprecated alias in audit.router and `/instinct/audit` stays in
+    # ee.instinct.router; both forward semantically to this one.
+    ("pocketpaw.audit.runtime_router", "router", "Runtime Audit"),
+    # Moved to OSS core in the open-core split (Phase 2) — journal-backed
+    # retrieval + widget projections + rule-based automations, no
+    # multi-tenant cloud dependency.
+    ("pocketpaw.retrieval.router", "router", "Retrieval"),
+    ("pocketpaw.widget.router", "router", "Widgets"),
+    ("pocketpaw.automations.router", "router", "Automations"),
 ]
 
-# Enterprise API routes (require ee/ module) — skipped silently when ee/ is absent.
-_EE_ROUTERS: list[tuple[str, str, str]] = [
-    ("ee.fabric.router", "router", "Fabric"),
-    ("ee.fleet.router", "router", "Fleet"),
-    ("ee.instinct.router", "router", "Instinct"),
-    ("ee.retrieval.router", "router", "Retrieval"),
-    ("ee.widget.router", "router", "Widgets"),
-    ("pocketpaw.ee.automations.router", "router", "Automations"),
-]
+# Enterprise API routers (Fabric, Fleet, Instinct, and the Pockets chat
+# endpoint) are NOT listed here. They are mounted by the `pocketpaw.routes`
+# provider (mount_cloud) alongside the rest of the cloud route tree, so the
+# OSS core never imports `pocketpaw_ee`, statically or dynamically.
 
 
 def mount_v1_routers(app: FastAPI) -> None:
-    """Mount all v1 domain routers on *app*.
+    """Mount all core v1 domain routers on *app*.
 
     Each router is mounted at ``/api/v1/<prefix>`` (canonical).
     The original ``/api/`` endpoints in dashboard.py remain as backward-compat aliases.
+
+    Enterprise routers are mounted separately via the ``pocketpaw.routes``
+    extension provider — see ``dashboard.py`` / ``api/serve.py``.
     """
     import importlib
 
@@ -102,15 +131,3 @@ def mount_v1_routers(app: FastAPI) -> None:
                 )
                 raise
             logger.warning("Failed to mount v1 router %s", module_path, exc_info=True)
-
-    # Enterprise routers — optional, never critical
-    for module_path, attr_name, tag in _EE_ROUTERS:
-        try:
-            mod = importlib.import_module(module_path)
-            router: APIRouter = getattr(mod, attr_name)
-            app.include_router(router, prefix="/api/v1")
-            logger.debug("Mounted ee router: %s (%s)", module_path, tag)
-        except ImportError:
-            logger.debug("Skipping ee router %s (ee/ not available)", module_path)
-        except Exception:
-            logger.warning("Failed to mount ee router %s", module_path, exc_info=True)

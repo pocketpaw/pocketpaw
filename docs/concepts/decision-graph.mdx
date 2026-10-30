@@ -1,0 +1,167 @@
+---
+title: "Decision Graph: Queryable Why-Did-We-Do-That"
+description: "RFC 07's first-class Decision objects, folded out of the soul-protocol journal: one Decision per agent proposal, chained by correlation_id, with REST + MCP + NL-explain on top. The trace you can answer 'why' against."
+section: Core Concepts
+ogType: article
+keywords: ["decision graph", "rfc 07", "decision projection", "decision trace", "decision explain", "audit trail"]
+tags: ["architecture", "decisions", "rfc-07", "ee"]
+---
+
+# Decision Graph: Queryable Why-Did-We-Do-That
+
+The Decision Graph turns the append-only journal into queryable Decision objects. Every agent proposal that resolves becomes one Decision row plus zero-or-more correction, approval, and outcome events folded onto it. The graph then exposes `get`, `find`, `trace`, `downstream`, `count`, and `explain` over those rows — so "why did the agent do that?" becomes a query, not a forensic dig through journal events.
+
+<Callout type="info">
+**Status (2026-05-25):** IN FLIGHT — Slices 1, 2, and 3a are live on `dev`.
+
+**Implementation PRs:** #1226 (Slice 1 — `DecisionProjection` + Python API substrate), #1238 (Slice 2 — REST + MCP wrappers + outcomes back-reference), #1237 (Slice 3a — narrator + explain route + bundled pocket template), all rebase-merged via #1240 (umbrella).
+
+**Workspace RFC:** [docs/rfc/07-decision-graph-query-layer.md](https://github.com/qbtrix/paw-workspace/blob/main/docs/rfc/07-decision-graph-query-layer.md) (with amendments A1/A2/A3 — paw-workspace#58)
+
+**What's live:** `DecisionProjection` rebuilds from the journal. Five REST routes + `POST /decisions/explain`. Four MCP wrappers under `mcp__pocketpaw_decisions__`. Outcomes back-reference via `decision.outcome_attached`. NL extractor → narrator → SQLite cache pipeline. Bundled `decision-graph` pocket template.
+
+**What's planned:** scope-inference widening beyond `workspace:{id}`, post-merge cleanups flagged in slice reviews (singleton state leak across tests, `_compress_trace` cap alignment, public journal `query_with_seq` to replace the `_backend._conn` access in the timeline route).
+</Callout>
+
+## What a Decision Is
+
+A Decision is the **fold of an N-event journal subgraph into one queryable record**. The shape is pinned in `pocketpaw_ee.cloud.decisions.domain.Decision`:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `id` | `UUID` | Primary collision-defeater; v4 random |
+| `ts` | `datetime` | tz-aware UTC, matches `EventEntry.ts` |
+| `decided_by` | `Actor` | `agent` / `user` / `system` / `root` — same `Actor` as the journal |
+| `scope` | `list[str]` (min_length=1) | Scope tags (`workspace:abc`, `pocket:p1`); required at construction |
+| `intent` | `str` | What the agent set out to do |
+| `action` | `str` | The canonical action name (e.g. `lease.approved`) |
+| `inputs` | `list[InputRef]` | Facts considered — `fabric_object`, `dataref`, or another `decision` |
+| `approvers` | `list[ApproverRef]` | Each carries `approved_at` + `position` (RFC amendment A1, gap G1) |
+| `instinct_policy` / `_passed` | `str` / `bool` | Which Instinct policy gated this, and whether it passed |
+| `precedents` | `list[DecisionRef]` | Decisions cited as templates (`weight` ranks them) |
+| `outcome` | `OutcomeRef \| None` | Late-attached via `decision.outcome_attached` |
+| `pocket_id` | `str \| None` | If this Decision was made inside a Pocket |
+| `correlation_id` | `UUID \| None` | Chain key — every Decision in the chain shares this |
+| `hash_link` | `str` | SHA-256 over content + `prev_hash`; tampering breaks the chain |
+| `last_seq` | `int` | Latest journal `seq` the projection folded |
+
+The Decision is **mutable in exactly one place**: when a late `decision.outcome_attached` event lands, `outcome` is filled in. Everything else is content-bound and hashed. The hash material excludes `outcome` deliberately so that late mutation never invalidates the chain (RFC 07 gap G6, `compute_hash_link` doc-comment).
+
+## Where Decisions Come From
+
+The projection at `pocketpaw_ee.cloud.decisions.projection.DecisionProjection` replays the soul-protocol journal and folds tracked actions into Decisions. The chain shape:
+
+```
+agent.proposed (opens chain)
+  → human.corrected* (zero or more)
+  → policy.evaluated* (zero or more)
+  → fabric.object.{created,updated,archived}* (contribute inputs, do NOT close)
+  → decision.graduated (closes chain → emits Decision)
+  → decision.outcome_attached (late mutates Decision.outcome)
+```
+
+The terminal-action set is pinned by `_TERMINAL_ACTIONS = frozenset({"decision.graduated"})` (RFC amendment A2, gap G2). Fabric writes never close a chain on their own — they only contribute the target object as an `InputRef`. That decoupling means the projection doesn't have to know about Fabric's namespace; Fabric just shows up as an input.
+
+Precedent supply order (A3): the agent's own payload first, then a projection fallback (same-pocket / same-action / nearest-ts) if the proposer didn't supply any. Out-of-band reconciler is deferred.
+
+## The Python API
+
+`pocketpaw_ee.cloud.decisions.service.DecisionGraph` is the in-process surface. One instance per process (per org), accessed via `get_decision_graph()`. All methods are `async`:
+
+```python
+from pocketpaw_ee.cloud.decisions.service import get_decision_graph
+
+graph = get_decision_graph()
+
+# Single lookup — returns None for both "missing" and "scope-hidden"
+decision = await graph.get(decision_id, requester_scopes=["workspace:abc"])
+
+# Index-driven multi-axis filter with keyset pagination
+results = await graph.find(
+    actor="agent:claude",
+    since=datetime(2026, 5, 1),
+    scope_kind="pocket",
+    pocket_id="p_abc123",
+    outcome_status="landed",
+    limit=50,
+    before_ts=cursor_ts,
+    before_id=cursor_id,
+    requester_scopes=["workspace:abc"],
+)
+
+# Post-scope-filter total — the same iteration path as find(), no limit/cursor
+total = await graph.count(actor="agent:claude", requester_scopes=["workspace:abc"])
+
+# Depth-bounded BFS upstream — walks `precedent` + `input` edges
+trace = await graph.trace(decision_id, depth=3, max_fanout=20, requester_scopes=...)
+
+# Inverse — decisions that later cited this one as a precedent
+downstream = await graph.downstream(decision_id, depth=3, requester_scopes=...)
+```
+
+**The scope-filter-post-count invariant.** Every read filters by scope BEFORE counting. The store exposes unfiltered iterators; the service is the one place that enforces the filter. A caller cannot probe for hidden decisions by comparing pre- and post-filter counts because no pre-filter count is ever computed. This mirrors `FabricProjection.query`'s contract (`src/pocketpaw/fabric/projection.py`) that closed the #938 pagination leak.
+
+**Pagination.** Keyset-style on `(ts DESC, id DESC)` per RFC 07's perf budget. `find()` takes `before_ts` + `before_id` cursors from the prior page. OFFSET-based pagination gets pathologically slow at scale, so the API never offers it.
+
+## REST Routes (Slice 2)
+
+Mounted at `/api/v1/decisions` from `pocketpaw_ee.cloud.decisions.router`. License-gated via `Depends(require_license)`.
+
+| Route | Returns |
+|---|---|
+| `GET /decisions/:id` | `DecisionResponse` |
+| `GET /decisions?actor=&since=&until=&...` | `DecisionsListResponse` (paginated, post-filter `total`) |
+| `GET /decisions/:id/trace?depth=&max_fanout=` | `DecisionTraceResponse` |
+| `GET /decisions/:id/downstream?depth=` | `DecisionTraceResponse` |
+| `GET /decisions/:id/timeline` | `TimelineResponse` (raw journal events for this `correlation_id`) |
+| `POST /decisions/explain` | `ExplanationResponse` (Slice 3a — NL Q&A) |
+| `GET /decisions/_ping` | Smoke endpoint — projection cursor + row count for operator liveness |
+
+The router's scope inference is conservative today: `_requester_scopes(ctx)` returns `[f"workspace:{ctx.workspace_id}"]` if the caller has an active workspace, otherwise `[]` (sees nothing). A future iteration widens this once cross-pocket / cross-team membership lands.
+
+Privacy invariant: the scope filter returns `None` for both "missing" and "scope-hidden"; the router maps both to `404` with the same code so a caller cannot distinguish them.
+
+## MCP Wrappers
+
+The same five reads plus `explain` are exposed as in-process MCP tools under `mcp__pocketpaw_decisions__` so the cloud chat agent can query the graph directly from inside an SSE stream. Identity resolves through `ee.cloud.chat.agent_service` ContextVars — the same chokepoint the pocket and tasks MCP servers use.
+
+## The Explain Pipeline (Slice 3a)
+
+`POST /decisions/explain` accepts a natural-language question and returns a grounded narration. Pipeline:
+
+```
+question
+  → extractor       (extracts decision id / filter from the question)
+  → find()/get()    (load candidate decisions)
+  → trace()         (walk precedents + inputs)
+  → narrator        (LLM stitches the trace into prose)
+  → cache           (SQLite — invalidated on new Decision emit via post-apply hook)
+  → ExplanationResponse
+```
+
+The cache invalidator hooks into `DecisionProjection.register_post_apply_hook()` — a registry added in Slice 3a. Layering stays one-way: explain → decisions, never the reverse.
+
+## Outcomes Back-Reference
+
+Slice 2 added `OutcomeRecord.decision_id` so an outcome carries its parent Decision id. When the outcome lands, the service emits a `decision.outcome_attached` event with the same `correlation_id`; the projection folds it into the existing Decision and updates `outcome`. The hash chain stays valid because outcome is excluded from the hash material.
+
+## The Bundled Pocket Template
+
+`src/pocketpaw/bundled_templates/_bundled/decision-graph/` ships an RFC 03-conformant pocket template plus a `ripple_spec.json` that wires an "Explain" button to `POST /api/v1/decisions/explain`. The chat agent's STEP 0 template-library check picks this up via keywords like `audit trail`, `decision log`, `why did we`. See [Pocket Templates](/concepts/pocket-templates) for how the registry resolves.
+
+## Hash Chain Composition
+
+Per `compute_hash_link`:
+
+```
+sha256(id || ts || decided_by.id || action || sorted(input_ids) || prev_hash)
+```
+
+Each piece is content-bound. `id` is the primary collision-defeater (v4 UUIDs hash to different values even with identical content). `prev_hash` links Decisions within a `correlation_id` so tampering with one breaks every later one. Excluded fields: `outcome` (mutates late), `approvers` (kept symmetric with outcome case), `payload` (opaque, not indexed), `precedents` (A3 fallback can add more after the fact).
+
+## Related
+
+- [Foresight](/concepts/foresight) — projected Decisions land in this graph as forward-precedents (RFC 08 § 14.4).
+- [Pocket Templates](/concepts/pocket-templates) — the bundled `decision-graph` template is created from a brief like "audit trail for the leasing agent."
+- [OSS-EE Split](/concepts/oss-ee-split) — the Decision Graph lives under `pocketpaw_ee` and is license-gated; OSS core ships no decisions code.
+- [API Reference](/api) — full REST endpoint documentation.

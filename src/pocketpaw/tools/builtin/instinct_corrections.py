@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_instinct_store():
-    """Lazy import — degrades gracefully when ee/ is not installed."""
+    """Lazy import to avoid circular deps at module load."""
     try:
-        from ee.api import get_instinct_store
+        from pocketpaw.stores import get_instinct_store
 
         return get_instinct_store()
     except ImportError:

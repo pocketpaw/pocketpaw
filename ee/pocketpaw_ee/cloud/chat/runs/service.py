@@ -1,0 +1,608 @@
+"""Chat-run service: the only module that touches ``ChatRunDoc``.
+
+Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
+``RunSpec`` value object rather than the standard ``(workspace_id, user_id, body)``.
+
+- ``create_run`` is idempotent on ``(workspace, client_message_id)``; it copies
+  ``RunSpec.persist_user_text`` onto ``user_text`` (only the concierge surface
+  sets it).
+- Lifecycle writes are conditional where a race matters: ``mark_running`` is an
+  atomic ``queued -> running`` move that seeds ``last_heartbeat_at``, and
+  ``touch_heartbeat`` only stamps a run still ``running``, so neither can revive
+  a run the sweeper already ended. ``requeue_for_retry`` is the worker-shutdown
+  move back from ``running`` to ``queued`` (``attempt`` + 1, capped), and
+  ``is_queued`` is what a retried arq job checks before driving the run again.
+  ``mark_completed`` / ``mark_terminal`` record the backend's ``usage`` and
+  trigger a spend ingest; ``mark_billed`` is the metering service's write, made
+  here so metering never writes this document.
+  ``set_credential_source`` records who paid the provider (``platform`` or
+  ``byok``), which ``bill_run`` reads to decide whether to debit.
+  ``wait_until_terminal`` polls a run until it leaves the active statuses, so a
+  turn that supersedes it can wait out a cancel the worker has not seen yet.
+  ``set_early_access_reservation`` records what a free run reserved against the
+  daily early-access ceiling; ``take_early_access_reservation`` hands it to
+  ``bill_run`` exactly once (an atomic claim that zeroes it).
+- Reads for other modules return value objects, never the Beanie document:
+  ``RunActivityRow`` for the agent-activity board, ``StrandedReply`` for a
+  failed / cancelled / interrupted run's partial text (runs with an
+  ``assistant_message_id`` are skipped, their text is already a Message), and
+  ``(usage, createdAt)`` pairs for the concierge spend cap.
+- ``record_card_audit`` stores one chat card's browser audit counts on a
+  concierge run, matched on the visitor, workspace and pocket so a caller can only
+  write to its own runs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
+
+from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud.chat.runs.domain import RunActivityRow, RunSpec, StrandedReply
+from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+logger = logging.getLogger(__name__)
+
+# A run is ACTIVE while it has been accepted but has not reached a terminal
+# state. One definition, one place: the scope lookup, the jail guard, and the
+# agent-activity board all read the same pair, so "is this agent working right
+# now" can never disagree with "is this scope busy".
+ACTIVE_RUN_STATUSES = ("queued", "running")
+
+# A run whose reply is STRANDED: it reached a terminal state carrying text the
+# model had already produced, and no assistant ``Message`` was ever written for
+# it — ``execute_run`` writes one only from ``_persist_and_complete``, which all
+# three of these return before reaching. ``completed`` is absent on purpose (its
+# text IS a Message row, so replaying it from here would duplicate every answer
+# the agent ever gave) and so is the ACTIVE pair (that text is still streaming
+# into the turn in flight; it is not history yet).
+STRANDED_REPLY_STATUSES = ("failed", "cancelled", "interrupted")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+class _RunActivityProjection(BaseModel):
+    """Wire-minimal projection for the two activity reads (HR-12a).
+
+    Without this, both reads pull WHOLE run documents just to keep six fields —
+    and ``ChatRunDoc.partial_text`` holds the entire assistant answer (see
+    ``run_core`` writing ``partial_text=full_text``), plus ``usage``. On a
+    board polled every few seconds by every signed-in member, the recent read
+    would drag up to ``MAX_RECENT_RUNS_SCANNED`` full answers across the wire
+    and discard all of them; it also inflates the top-K sort buffer, which on a
+    workspace with long turns can reach Mongo's 32MB in-memory sort limit and
+    fail the endpoint outright. Field names mirror the document exactly so
+    ``_to_activity_row`` reads either shape.
+    """
+
+    run_id: str
+    agent_id: str
+    status: str
+    createdAt: datetime
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+def _to_activity_row(doc: ChatRunDoc | _RunActivityProjection) -> RunActivityRow:
+    """Project a run document onto the Beanie-free activity value object."""
+    return RunActivityRow(
+        run_id=doc.run_id,
+        agent_id=doc.agent_id,
+        status=doc.status,
+        created_at=doc.createdAt,
+        started_at=doc.started_at,
+        ended_at=doc.ended_at,
+    )
+
+
+async def create_run(spec: RunSpec) -> ChatRunDoc:
+    """Idempotent on ``(workspace, client_message_id)`` — unique index is the
+    source of truth; find-then-insert is the fast path."""
+    existing = await ChatRunDoc.find_one(
+        ChatRunDoc.workspace == spec.workspace_id,
+        ChatRunDoc.client_message_id == spec.client_message_id,
+    )
+    if existing is not None:
+        return existing
+    doc = ChatRunDoc(
+        run_id=spec.run_id,
+        workspace=spec.workspace_id,
+        context_type=spec.context_type,
+        scope_id=spec.scope_id,
+        session_key=spec.session_key,
+        group=spec.group,
+        user_id=spec.user_id,
+        agent_id=spec.agent_id,
+        client_message_id=spec.client_message_id,
+        user_message_id=spec.user_message_id,
+        user_text=spec.persist_user_text,
+    )
+    try:
+        await doc.insert()
+    except DuplicateKeyError:
+        winner = await ChatRunDoc.find_one(
+            ChatRunDoc.workspace == spec.workspace_id,
+            ChatRunDoc.client_message_id == spec.client_message_id,
+        )
+        if winner is None:
+            raise
+        return winner
+    return doc
+
+
+async def get_run(run_id: str) -> ChatRunDoc:
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == run_id)
+    if doc is None:
+        raise NotFound("chat_run", run_id)
+    return doc
+
+
+def _trigger_spend_ingest(doc: ChatRunDoc) -> None:
+    """Ask for this workspace's proxy spend to be billed shortly (live mode only).
+
+    Called from every terminal transition. In ``live`` the LiteLLM sweep is the
+    only meter and it runs every five minutes, so without this a customer's
+    balance lags their usage by up to that long — and the run-start balance gate
+    can admit a run the previous one had already spent the credits for.
+
+    Fire and forget, and deliberately last: it must never delay or fail a
+    transition that has already happened. The trigger schedules the SAME ingest
+    the sweep runs, keyed on the same ledger id, so the two racing is harmless
+    and the sweep remains the backstop for anything this misses.
+    """
+    try:
+        from pocketpaw_ee.cloud.llm_provisioning import run_end_trigger
+
+        run_end_trigger.schedule_spend_ingest(doc.workspace)
+    except Exception:  # noqa: BLE001 — a billing hint must not break the lifecycle
+        logger.debug("run spend-ingest trigger failed for %s", doc.run_id, exc_info=True)
+
+
+async def mark_running(run_id: str) -> bool:
+    """Atomically move a run from ``queued`` to ``running``. True when it moved.
+
+    One conditional update, never load-then-save: the web process's stale-run
+    sweeper can flip a queued run to ``interrupted`` between arq enqueueing it and
+    a worker picking it up, and by then the client has been sent the terminal
+    frame and stopped listening. A read-modify-write here would silently undo
+    that and run the agent for nobody. False means someone else already decided
+    this run's fate (swept, or claimed twice) and the caller must not drive it.
+    """
+    now = _utcnow()
+    result = await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id, "status": "queued"},
+        {"$set": {"status": "running", "started_at": now, "last_heartbeat_at": now}},
+    )
+    return result.modified_count == 1
+
+
+async def requeue_for_retry(run_id: str, *, max_attempts: int) -> int | None:
+    """Put a ``running`` run back to ``queued`` for one more attempt.
+
+    For a run the worker cancelled while shutting down. Returns the new attempt
+    number, or None when the run has used its attempts or is no longer running
+    (the user stopped it, the sweeper ended it). The text the cancelled attempt
+    streamed is dropped: the retry writes the whole reply, so keeping it would
+    duplicate it. Conditional on ``running`` and on the attempt read, so a racing
+    terminal write or a second requeue leaves the doc alone.
+    """
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == run_id)
+    if doc is None or doc.status != "running" or doc.attempt >= max_attempts:
+        return None
+    attempt_filter: Any = doc.attempt if doc.attempt != 1 else {"$in": [1, None]}
+    nxt = doc.attempt + 1
+    result = await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id, "status": "running", "attempt": attempt_filter},
+        {
+            "$set": {
+                "status": "queued",
+                "attempt": nxt,
+                "requeued_at": _utcnow(),
+                "partial_text": "",
+                "started_at": None,
+                "last_heartbeat_at": None,
+            }
+        },
+    )
+    return nxt if result.modified_count == 1 else None
+
+
+async def is_queued(run_id: str) -> bool:
+    """True when the run exists and is waiting to be driven."""
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == run_id)
+    return doc is not None and doc.status == "queued"
+
+
+async def touch_heartbeat(run_id: str) -> bool:
+    """Stamp ``last_heartbeat_at`` on a run that is still ``running``.
+
+    Conditional on the status so a tick that lands after the terminal write (or
+    after the sweeper gave up on the run) is a no-op rather than a write that
+    makes a finished run look alive. Returns whether the run is still running.
+    """
+    result = await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id, "status": "running"},
+        {"$set": {"last_heartbeat_at": _utcnow()}},
+    )
+    # matched, not modified: two beats inside one millisecond write the same
+    # value and modify nothing, but the run is still running.
+    return result.matched_count == 1
+
+
+async def mark_completed(
+    run_id: str,
+    *,
+    assistant_message_id: str | None,
+    partial_text: str,
+    usage: dict[str, Any] | None = None,
+) -> None:
+    doc = await get_run(run_id)
+    doc.status = "completed"
+    doc.assistant_message_id = assistant_message_id
+    doc.partial_text = partial_text
+    # Per-run token metering: persist the usage the backend reported (None =
+    # nothing to record, leave the stored value as-is).
+    if usage:
+        doc.usage = usage
+    doc.ended_at = _utcnow()
+    await doc.save()
+    _trigger_spend_ingest(doc)
+
+
+async def mark_terminal(
+    run_id: str,
+    *,
+    status: str,
+    partial_text: str = "",
+    error: str | None = None,
+    assistant_message_id: str | None = None,
+    usage: dict[str, Any] | None = None,
+) -> None:
+    """Set a non-completed terminal status (``interrupted`` | ``failed`` | ``cancelled``)."""
+    doc = await get_run(run_id)
+    doc.status = status  # type: ignore[assignment]
+    doc.partial_text = partial_text or doc.partial_text
+    doc.error = error
+    doc.assistant_message_id = assistant_message_id or doc.assistant_message_id
+    # A cancelled / interrupted run may still have consumed tokens before it
+    # stopped — record whatever the backend reported.
+    if usage:
+        doc.usage = usage
+    doc.ended_at = _utcnow()
+    await doc.save()
+    # A cancelled or failed run consumed tokens before it stopped, and the proxy
+    # priced them. Billing only completed runs would serve every interrupted one
+    # free — which is why the metering sweeper bills all four terminal states too.
+    _trigger_spend_ingest(doc)
+
+
+# A concierge stream's card ids ("c1", "c2", ...). Also a Mongo field-path guard.
+_CARD_ID_RE = re.compile(r"^c[1-9][0-9]?$")
+
+
+async def record_card_audit(
+    run_id: str,
+    card_id: str,
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    customer_ref: str,
+    row: dict[str, Any],
+) -> bool:
+    """Store ``row`` as ``card_audits[card_id]`` on a concierge run. True when it landed.
+
+    One conditional update: the run must be a concierge run of ``workspace_id``
+    and ``pocket_id`` whose ``user_id`` is ``customer_ref``, so a visitor can only write audit rows
+    onto its own turns. False (nothing written) for any other run or a bad card id.
+    """
+    if not _CARD_ID_RE.match(card_id):
+        return False
+    result = await ChatRunDoc.get_pymongo_collection().update_one(
+        {
+            "run_id": run_id,
+            "workspace": workspace_id,
+            "scope_id": pocket_id,
+            "user_id": customer_ref,
+            "context_type": "concierge",
+        },
+        {"$set": {f"card_audits.{card_id}": {**row, "at": _utcnow()}}},
+    )
+    return result.matched_count == 1
+
+
+async def record_card_breaches(run_id: str, breaches: dict[str, int]) -> None:
+    """Store chat cards that streamed past the card ceiling as
+    ``card_breaches[card_id] = chars``. Bad card ids are dropped."""
+    rows = {f"card_breaches.{cid}": int(n) for cid, n in breaches.items() if _CARD_ID_RE.match(cid)}
+    if rows:
+        await ChatRunDoc.get_pymongo_collection().update_one({"run_id": run_id}, {"$set": rows})
+
+
+async def set_credential_source(run_id: str, source: Literal["platform", "byok"]) -> None:
+    """Record who pays the provider for this run. One conditional write; a
+    missing run is a no-op, and the field's ``platform`` default then bills it."""
+    await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id}, {"$set": {"credential_source": source}}
+    )
+
+
+async def set_early_access_reservation(run_id: str, credits: int, day: str) -> None:
+    """Record that ``run_id`` reserved ``credits`` on the early-access meter on
+    UTC ``day``. A missing run is a no-op."""
+    await ChatRunDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id},
+        {"$set": {"early_access_reserved_credits": credits, "early_access_reserved_day": day}},
+    )
+
+
+async def take_early_access_reservation(run_id: str) -> tuple[int, str] | None:
+    """Claim ``run_id``'s early-access reservation as ``(credits, day)`` and
+    zero it, or None when nothing is held. One atomic write, so of two racing
+    bills (the executor and the sweeper) exactly one gets it."""
+    before = await ChatRunDoc.get_pymongo_collection().find_one_and_update(
+        {"run_id": run_id, "early_access_reserved_credits": {"$gt": 0}},
+        {"$set": {"early_access_reserved_credits": 0, "early_access_reserved_day": ""}},
+        return_document=ReturnDocument.BEFORE,
+    )
+    if before is None:
+        return None
+    return int(before["early_access_reserved_credits"]), str(
+        before.get("early_access_reserved_day") or ""
+    )
+
+
+async def mark_billed(run_id: str) -> None:
+    """Flag a run as billed (BC-3). The owner of ``ChatRunDoc`` makes this write
+    so the metering service never writes a foreign entity's document (EE Rule 2).
+    Idempotent — re-flagging an already-billed run is harmless; the ledger key is
+    the real double-debit guard, this flag just keeps the sweeper bounded."""
+    doc = await get_run(run_id)
+    doc.billed = True
+    await doc.save()
+
+
+async def find_active_run_for_scope(
+    *,
+    workspace_id: str,
+    context_type: str | Iterable[str],
+    scope_id: str,
+) -> ChatRunDoc | None:
+    """Newest non-terminal run for a scope. ``context_type`` may be a single
+    string or an iterable (the group history path queries both ``dm`` and
+    ``group`` at once)."""
+    if isinstance(context_type, str):
+        ctype_filter: dict = {"context_type": context_type}
+    else:
+        types = list(context_type)
+        ctype_filter = {"context_type": {"$in": types}} if types else {"context_type": None}
+    return (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.scope_id == scope_id,
+            ctype_filter,
+            {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
+        )
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+        .first_or_none()
+    )
+
+
+async def wait_until_terminal(run_id: str, *, timeout: float, interval: float = 0.1) -> bool:
+    """Poll ``run_id`` until it leaves ``ACTIVE_RUN_STATUSES``; False on timeout.
+
+    A cancel is a flag the worker polls, so a cancelled run keeps going until it
+    notices, then writes its partial reply and its terminal status (in that
+    order). A caller that must not overlap it, or must read history that
+    includes its partial, waits here. A missing doc counts as finished.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == run_id)
+        if doc is None or doc.status not in ACTIVE_RUN_STATUSES:
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(interval, remaining))
+
+
+async def find_stale_running(older_than: datetime) -> list[ChatRunDoc]:
+    """Runs left queued/running before a cutoff."""
+    return await ChatRunDoc.find(
+        {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
+        ChatRunDoc.createdAt < older_than,
+    ).to_list()
+
+
+async def find_active_run_scopes() -> set[tuple[str, str, str]]:
+    """Every ``(workspace, context_type, scope_id)`` with a non-terminal
+    (``queued`` / ``running``) run.
+
+    The active-jail guard for the ART-3 jail GC: a per-session agent jail dir is
+    named after its run's scope (``session`` runs → ``<scope_id>``; ``dm`` /
+    ``group`` / ``pocket`` runs share the workspace ``_shared`` dir), so a jail
+    whose scope is in this set is in use and must never be evicted. Uses the
+    same ``active = queued | running`` definition as ``find_active_run_for_scope``
+    — an ``interrupted`` run that the user retries spawns a NEW queued/running
+    run for the same scope, which re-protects the jail, so a retry can't race a
+    GC pass into deleting a jail it's about to reuse.
+    """
+    # Projected to the three fields the scope tuple needs. The unprojected read
+    # hydrated a full ChatRunDoc per active run, and a run document carries the
+    # model's entire answer in `partial_text` plus, on the concierge surface,
+    # the visitor's own text in `user_text`. This call is the jail GC's guard
+    # and runs every five minutes forever, so it was pulling every active run's
+    # complete answer over the wire and building a Pydantic model from it, to
+    # read three short strings.
+    #
+    # get_pymongo_collection(), not get_motor_collection() — Beanie 2.1.0
+    # renamed it, and the old name is an AttributeError at runtime.
+    cursor = ChatRunDoc.get_pymongo_collection().find(
+        {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
+        {"workspace": 1, "context_type": 1, "scope_id": 1},
+    )
+    return {
+        (row.get("workspace", ""), row.get("context_type", ""), row.get("scope_id", ""))
+        async for row in cursor
+    }
+
+
+# ---------------------------------------------------------------------------
+# Workspace-scoped activity reads (HR-12a)
+#
+# Both are TENANT-SCOPED by construction: ``workspace_id`` is a required
+# keyword and lands in the filter, so there is no call shape that returns
+# another workspace's runs. Both are also WINDOWED and CAPPED — an activity
+# board must never be able to ask Mongo for a workspace's whole run history.
+# The ``(workspace, context_type, scope_id, createdAt)`` index on ChatRunDoc
+# leads on ``workspace``, so the workspace + createdAt filter is served by its
+# prefix.
+# ---------------------------------------------------------------------------
+
+
+async def find_active_runs_for_workspace(
+    *,
+    workspace_id: str,
+    since: datetime,
+    limit: int,
+) -> list[RunActivityRow]:
+    """A workspace's currently-active (``queued``/``running``) runs, newest first.
+
+    Windowed like its sibling below on purpose: a run still marked ``running``
+    from days ago is a leaked run (that is what ``find_stale_running`` reaps),
+    not an agent at work, and showing it would pin an agent to ACTIVE forever.
+    """
+    docs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.createdAt >= since,
+            {"status": {"$in": list(ACTIVE_RUN_STATUSES)}},
+        )
+        .project(_RunActivityProjection)
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+        .to_list()
+    )
+    return [_to_activity_row(d) for d in docs]
+
+
+async def find_recent_runs_for_workspace(
+    *,
+    workspace_id: str,
+    since: datetime,
+    limit: int,
+) -> list[RunActivityRow]:
+    """A workspace's runs of any status since ``since``, newest first.
+
+    Truncation is by newest-first, so a busy workspace loses its least-recently
+    active agents from the tail — never its live ones, which the active read
+    above surfaces independently of this cap.
+    """
+    docs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.createdAt >= since,
+        )
+        .project(_RunActivityProjection)
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+        .to_list()
+    )
+    return [_to_activity_row(d) for d in docs]
+
+
+async def find_stranded_replies(
+    *,
+    workspace_id: str,
+    context_type: str,
+    scope_id: str,
+    agent_id: str,
+    limit: int,
+) -> list[StrandedReply]:
+    """This scope's newest ``limit`` replies that live on a run and nowhere else.
+
+    The four identity predicates are deliberately the ones
+    ``agent_service.session_key_for`` derives its ``Message.session_key`` from —
+    kind, scope, agent — plus an explicit ``workspace``. Matching on the stored
+    ``session_key`` string instead would look tighter and be wrong: the run
+    document's copy comes from ``RunSpec.session_key``, which every production
+    caller fills from ``session_key_for`` but which is simply a field any caller
+    may set. The tenant key is a predicate here, never an inference.
+
+    Ordered newest-first and capped, because the caller wants the END of the
+    conversation; ``(workspace, context_type, scope_id, createdAt)`` is a real
+    index, so that is a walk rather than a scan of a collection that has no TTL.
+
+    Empty ``partial_text`` is filtered in the query: a run that died before the
+    model emitted a token has nothing to contribute, and excluding it here keeps
+    it from spending one of the caller's window slots.
+
+    So is a run with ``assistant_message_id`` set: since 2026-09-27 ``execute_run``
+    persists a non-completed run's partial as a ``Message`` (flagged with
+    ``run_status``) and points the run at it. That reply is already in the
+    ``Message`` read, and returning it here too would put it in the prompt twice.
+    What is left is the runs from before that change, and any run whose Message
+    write failed.
+    """
+    docs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == context_type,
+            ChatRunDoc.scope_id == scope_id,
+            ChatRunDoc.agent_id == agent_id,
+            {"status": {"$in": list(STRANDED_REPLY_STATUSES)}},
+            {"partial_text": {"$ne": ""}},
+            {"assistant_message_id": None},
+        )
+        .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
+        .limit(limit)
+        .to_list()
+    )
+    return [
+        StrandedReply(status=d.status, text=d.partial_text, created_at=d.createdAt) for d in docs
+    ]
+
+
+class _RunUsageProjection(BaseModel):
+    """The two fields a spend read prices: never the answer text or history."""
+
+    usage: dict[str, Any] = {}
+    createdAt: datetime
+
+
+async def find_run_usage_since(
+    *,
+    workspace_id: str,
+    context_type: str,
+    scope_id: str,
+    since: datetime,
+) -> list[tuple[dict[str, Any], datetime]]:
+    """``(usage, createdAt)`` for every run of one scope created at or after ``since``.
+
+    Served by the ``(workspace, context_type, scope_id, createdAt)`` index and
+    projected to the two fields, so a busy scope's answers never cross the wire.
+    The caller prices each pair with ``metering.resolve_cost`` (at its own
+    ``createdAt``), the same meter that writes the ``compute_spend`` debits.
+    """
+    docs = (
+        await ChatRunDoc.find(
+            ChatRunDoc.workspace == workspace_id,
+            ChatRunDoc.context_type == context_type,
+            ChatRunDoc.scope_id == scope_id,
+            ChatRunDoc.createdAt >= since,
+        )
+        .project(_RunUsageProjection)
+        .to_list()
+    )
+    return [(dict(d.usage or {}), d.createdAt) for d in docs]

@@ -1,0 +1,53 @@
+# ee/pocketpaw_ee/catalog/litellm.config.example.yaml — REFERENCE LiteLLM proxy
+# config for the Model Catalog (MCG-1). The catalog reads its source of truth
+# from a self-hosted LiteLLM proxy started with a config like this:
+#
+#     litellm --config litellm.config.yaml
+#
+# This file is a starting point — one chat model in model_list, a router_settings
+# stub, and Postgres + Redis placeholders. Wiring the LIVE proxy into the Coolify
+# deploy with real credentials is a CAPTAIN HANDOFF (the controller has the box +
+# creds). Do NOT commit real keys here; keys belong in the proxy host's env.
+#
+# Catalog wiring on the app side (set in the enterprise env, see
+# .env.enterprise.example):
+#   POCKETPAW_LITELLM_API_BASE=http://<proxy-host>:4000
+#   POCKETPAW_LITELLM_API_KEY=<the master_key below, or a virtual key>
+#
+# Created 2026-06-26 (feat/mcg-1-catalog-api, MCG-1): reference proxy config.
+
+model_list:
+  # The canonical model_name "<provider>/<model>" IS the catalog's id. The
+  # litellm_params point at the upstream; api_key reads from the proxy host's env
+  # so no secret is stored in this file.
+  - model_name: anthropic/claude-3-5-sonnet
+    litellm_params:
+      model: anthropic/claude-3-5-sonnet-20241022
+      api_key: os.environ/ANTHROPIC_API_KEY
+    # model_info is OPTIONAL — LiteLLM derives most fields from its built-in
+    # model map. Override here only when the upstream metadata is wrong/missing.
+    model_info:
+      mode: chat
+
+router_settings:
+  # Stub — tune for the real deploy. routing_strategy controls how the proxy
+  # picks among duplicate deployments of the same model_name.
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  # redis_* lets the router share rate-limit + cooldown state across proxy
+  # replicas. Placeholders — point at the deploy's Redis.
+  redis_host: os.environ/REDIS_HOST
+  redis_port: os.environ/REDIS_PORT
+  redis_password: os.environ/REDIS_PASSWORD
+
+litellm_settings:
+  # Response/prompt caching at the proxy. Off by default in this reference.
+  set_verbose: false
+
+general_settings:
+  # The proxy admin key. The catalog sends this (or a virtual key minted from it)
+  # as POCKETPAW_LITELLM_API_KEY. Reads from the proxy host's env — never inline.
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Postgres backs the proxy's virtual-key / spend tables. Placeholder DSN —
+  # point at the deploy's Postgres.
+  database_url: os.environ/DATABASE_URL

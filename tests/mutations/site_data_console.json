@@ -1,0 +1,393 @@
+[
+  {
+    "label": "a second statement passes the splitter check",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if len(parts) > 1:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_classification_table"
+    ]
+  },
+  {
+    "label": "a quoted name holding ';' is sent to D1",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if any(t.type == \"ident\" and \";\" in t.value for t in toks):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_classification_table"
+    ]
+  },
+  {
+    "label": "DDL keywords inside a read or write pass",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "        if t.value in _DDL_WORDS:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_classification_table"
+    ]
+  },
+  {
+    "label": "a read may hold a write keyword (EXISTS (DELETE ...))",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "        if kind == \"read\" and t.value in _WRITE_VERBS:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_classification_table"
+    ]
+  },
+  {
+    "label": "PRAGMA assignment forms pass",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if not shape_ok:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_classification_table"
+    ]
+  },
+  {
+    "label": "any PRAGMA name passes (no allowlist)",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if name is None or name.type not in (\"word\", \"ident\") or name.name not in READ_PRAGMAS:",
+    "replace": "    if name is None or name.type not in (\"word\", \"ident\"):",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_classification_table"
+    ]
+  },
+  {
+    "label": "internal tables are reachable",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "        if not is_user_table(low):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_classification_table"
+    ]
+  },
+  {
+    "label": "any pragma_* table function is reachable",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "        if low.startswith(\"pragma_\") and low[len(\"pragma_\") :] not in READ_PRAGMAS:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_classification_table"
+    ]
+  },
+  {
+    "label": "unknown sources (views) are not refused",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "        if ref.name not in by_name and ref.name not in stmt.ctes:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_plan_refusals"
+    ]
+  },
+  {
+    "label": "a write may touch a login table",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if stmt.kind == \"write\" and login:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_plan_refusals"
+    ]
+  },
+  {
+    "label": "a CTE may shadow a credential table",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if stmt.ctes & guarded:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_plan_refusals"
+    ]
+  },
+  {
+    "label": "every mention of a credential table counts as placed",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    placed = {j for r in stmt.refs for j in range(r.start, r.end)}",
+    "replace": "    placed = set(range(len(toks)))",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_plan_refusals"
+    ]
+  },
+  {
+    "label": "a write may name a masked column of its target",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "                if t.type in (\"word\", \"ident\") and t.name in hidden:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_plan_refusals"
+    ]
+  },
+  {
+    "label": "credential sources are not rewritten",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "        if ref.role == \"target\" or t is None or ref.name in stmt.ctes or not t.masked:",
+    "replace": "        if True:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_no_expression_reads_a_credential",
+      "tests/ee/sites/test_site_data_console.py::test_filters_on_credentials_see_only_the_mask"
+    ]
+  },
+  {
+    "label": "the rewrite passes the real credential through",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "ELSE '{MASK}' END",
+    "replace": "ELSE {ident} END",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_no_expression_reads_a_credential",
+      "tests/ee/sites/test_site_data_console.py::test_filters_on_credentials_see_only_the_mask"
+    ]
+  },
+  {
+    "label": "result columns named like credentials are not masked",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "            row[name] = MASK if hide[k] and v is not None else d1.json_safe(v)",
+    "replace": "            row[name] = d1.json_safe(v)",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_credential_named_columns_are_masked_on_any_table"
+    ]
+  },
+  {
+    "label": "a WHERE inside a subquery bounds an UPDATE / DELETE",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "        elif depth == 0 and _is(t, \"WHERE\"):",
+    "replace": "        elif _is(t, \"WHERE\"):",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_classification_table"
+    ]
+  },
+  {
+    "label": "reads are not capped",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    sql = f\"SELECT * FROM ({body}) LIMIT {ROW_CAP + 1}\" if stmt.wrap else body",
+    "replace": "    sql = body",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_read_caps_at_500_and_flags_truncation"
+    ]
+  },
+  {
+    "label": "strings holding ';' are spliced into the SQL text",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "        if t.type == \"string\" and \";\" in t.value:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_plan_wraps_reads_and_parameterises_semicolon_strings"
+    ]
+  },
+  {
+    "label": "any confirm runs an unbounded write",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            if not (confirm == \"unbounded\" or (confirm == \"write\" and not stmt.unbounded)):",
+    "replace": "            if not (confirm in (\"write\", \"unbounded\")):",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_unbounded_write_needs_the_stronger_confirm"
+    ]
+  },
+  {
+    "label": "a write runs without a confirm",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            if not (confirm == \"unbounded\" or (confirm == \"write\" and not stmt.unbounded)):",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_write_needs_confirm"
+    ]
+  },
+  {
+    "label": "a write runs without sites.data_write",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        if not can_write:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_write_needs_permission_and_edit_access",
+      "tests/ee/sites/test_site_data_console.py::test_route_member_reads_but_cannot_write"
+    ]
+  },
+  {
+    "label": "a write takes no restore point",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "            restore_point = await _bookmark_now(cf, target)",
+    "replace": "            restore_point = None",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_restore_point_is_taken_before_the_write"
+    ]
+  },
+  {
+    "label": "two console runs of one user overlap",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    if not await budget.claim_once(slot, _SQL_TTL_S):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_one_run_per_user_at_a_time"
+    ]
+  },
+  {
+    "label": "a console write's restore point is not one restore accepts",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\", \"site_data.sql\"]",
+    "replace": "_RESTORE_POINT_ACTIONS = [\"site_data.import\", \"site_data.row_delete\"]",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_console_restore_point_is_one_restore_accepts"
+    ]
+  },
+  {
+    "label": "console reads count as changes since a restore point",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "        target_type=_AUDIT_TARGET if changed else _SQL_QUERY_TARGET,",
+    "replace": "        target_type=_AUDIT_TARGET,",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_console_reads_do_not_count_as_changes",
+      "tests/ee/sites/test_site_data_console.py::test_every_run_is_audited"
+    ]
+  },
+  {
+    "label": "a foreign-key cascade into a login table is allowed",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                if is_login(child) or c.name in child.masked:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_write_that_cascades_into_a_login_table_is_refused"
+    ]
+  },
+  {
+    "label": "a cascade chain stops at the first ordinary table",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                queue.append((fold(child.name), True, True, True))",
+    "replace": "                pass",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_cascade_chain_through_an_ordinary_table_is_followed"
+    ]
+  },
+  {
+    "label": "a trigger that writes a login table is allowed",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                if is_login(t):",
+    "replace": "                if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_write_whose_trigger_touches_a_login_table_is_refused"
+    ]
+  },
+  {
+    "label": "a trigger that copies a credential is allowed",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                if {fold(c) for c in t.masked} & mentioned:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_trigger_copying_a_credential_is_refused"
+    ]
+  },
+  {
+    "label": "a user delete's own login rows count as a refused cascade",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "                if keep_user_cascade and parent is not None and is_users(parent.name):",
+    "replace": "                if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_user_delete_keeps_its_deliberate_login_cascade"
+    ]
+  },
+  {
+    "label": "console DELETE / REPLACE don't check ON DELETE actions",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "            deletes=stmt.verb == \"DELETE\" or replaces,",
+    "replace": "            deletes=False,",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_a_write_that_cascades_into_a_login_table_is_refused"
+    ]
+  },
+  {
+    "label": "the Rows tab delete doesn't check cascades or triggers",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "        schema, [table.name], deletes=True, updates=False, keep_user_cascade=True",
+    "replace": "        schema, [table.name], deletes=False, updates=False, keep_user_cascade=True",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_delete_that_cascades_into_a_login_table_is_refused"
+    ]
+  },
+  {
+    "label": "the Rows tab delete refuses a user's deliberate login cascade",
+    "file": "ee/pocketpaw_ee/sites/site_data/writes.py",
+    "find": "        schema, [table.name], deletes=True, updates=False, keep_user_cascade=True",
+    "replace": "        schema, [table.name], deletes=True, updates=False, keep_user_cascade=False",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_user_delete_keeps_its_deliberate_login_cascade"
+    ]
+  },
+  {
+    "label": "Cloudflare's 429 is reported as a SQL error",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if status == 429:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_cloudflare_429_is_the_busy_answer"
+    ]
+  },
+  {
+    "label": "every Cloudflare failure is reported as a SQL error",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    if status in (None, 400) and _SQL_FAILURE.search(str(message or \"\")):",
+    "replace": "    if True:",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_non_sql_cloudflare_failures_are_502"
+    ]
+  },
+  {
+    "label": "SQL errors keep what follows the SQLite code",
+    "file": "ee/pocketpaw_ee/sites/site_data/console.py",
+    "find": "    text = _AFTER_MARKER.sub(lambda m: m.group(1), text)",
+    "replace": "    text = text",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_sql_errors_keep_the_message_up_to_the_sqlite_marker"
+    ]
+  },
+  {
+    "label": "a Rows-tab insert skips the trigger check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, inserts=True)\n    row = await writes.insert(",
+    "replace": "    row = await writes.insert(",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_insert_and_duplicate_with_a_login_insert_trigger_are_refused"
+    ]
+  },
+  {
+    "label": "a Rows-tab duplicate skips the trigger check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, inserts=True)\n    source = writes.key_value(",
+    "replace": "    source = writes.key_value(",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_insert_and_duplicate_with_a_login_insert_trigger_are_refused"
+    ]
+  },
+  {
+    "label": "a Rows-tab update skips the trigger check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, updates=True)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_update_with_a_login_update_trigger_is_refused"
+    ]
+  },
+  {
+    "label": "an import skips the trigger check",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, inserts=True, updates=mode == \"upsert\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_import_with_a_login_trigger_is_refused_and_keeps_the_upload"
+    ]
+  },
+  {
+    "label": "an upsert import ignores UPDATE triggers",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "    _refuse_exposure(w, inserts=True, updates=mode == \"upsert\")\n",
+    "replace": "    _refuse_exposure(w, inserts=True)\n",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_upsert_import_checks_update_triggers_too"
+    ]
+  },
+  {
+    "label": "every trigger counts whatever event it fires on",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "            if not trigger_events(sql) & events:\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_site_data_console.py::test_rows_tab_update_with_a_login_update_trigger_is_refused"
+    ]
+  }
+]

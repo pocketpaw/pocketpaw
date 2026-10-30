@@ -1,0 +1,432 @@
+# ee/fabric/journal_store.py — Journal-backed write path for Fabric objects.
+# Created: 2026-04-16 (feat/fabric-journal-projection) — Wave 3 / Org Architecture RFC,
+# Phase 3. Replaces the scope-filtering slice of #938, which had tried to bolt scope
+# onto the legacy SQLite FabricStore and hit two blockers (schema migration; pagination
+# leak). By writing to the org journal instead of a separate SQLite file, both blockers
+# vanish by construction: the journal is append-only (no schema migrations), and the
+# read path is a projection that applies scope filters BEFORE computing totals.
+#
+# This store is deliberately narrow — it handles object lifecycle only (create /
+# update / archive / query). Object-type definitions and object-to-object links still
+# live in the legacy ee/fabric/store.py::FabricStore. Those stay SQLite-backed until a
+# follow-up slice; types are low-churn config rather than per-tenant data, and links
+# need a richer projection model than one event fold. Callers can hold both: legacy
+# FabricStore for schema + links, FabricJournalStore for objects + scope filtering.
+#
+# The store owns a FabricProjection instance — a read-through cache in front of the
+# journal. Reads are served from the projection; writes go to the journal and the
+# projection applies the event immediately so the next read sees the change without
+# a full rebuild. On process start, bootstrap() replays from genesis to warm the
+# projection; operators who persist a cursor can skip ahead.
+#
+# Updated: 2026-07-10 (FST-4 — SHADOW mode at merge site 2) — optional
+# ``statement_store`` on the constructor wires the default projection to the
+# SQLite FabricStore's shadow machinery; update() drains the projection's
+# staged shadow observations after every live write (await flush_shadow()),
+# and the public flush_shadow() lets replay consumers drain after a sync
+# bootstrap(). Without a statement_store nothing changes — the flush is a
+# no-op and the projection never reads the mode flag.
+#
+# Updated: 2026-10-01 (CN-6 — write path vs read model) — THE SPLIT: this
+# journal store is the WRITE path for Fabric objects; the per-workspace SQLite
+# FabricStore is the READ MODEL every reader uses (Fabric API router, agents'
+# Fabric MCP, Ripple sources). Optional ``read_model`` (workspace_id ->
+# FabricStore) makes create/update/archive project the object's full current
+# state into the store of each ``workspace:<id>`` in the event scope
+# (pocketpaw.fabric.read_model); a re-scope drops it from workspaces it left,
+# archive drops it from the row's workspaces. sync_read_model() is the
+# explicit, re-runnable backfill (EE runs it as a startup background task —
+# never on a read path). Projection failures are logged, never raised: the
+# journal append already succeeded and a re-sync heals drift. The shadow hook
+# above is NOT this: it records statements only. Use the process-wide
+# ``pocketpaw.fabric.default_journal_store()``; never construct a second
+# ``FabricJournalStore(get_journal())`` (two projections, two backfills).
+# Without ``read_model`` nothing changes.
+# Updated: 2026-10-02 (CN-6 race fix) — every upsert is guarded by an
+# "is this snapshot still the live row?" check (row object identity + archived
+# flag) before AND after the write; a stale write that slipped through an
+# interleaved archive is undone. Closes the backfill-vs-live-archive race.
+
+from __future__ import annotations
+
+import logging
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
+
+from soul_protocol.engine.journal import Journal
+from soul_protocol.spec.journal import Actor, EventEntry
+
+from pocketpaw.fabric.events import (
+    ACTION_OBJECT_ARCHIVED,
+    ACTION_OBJECT_CREATED,
+    ACTION_OBJECT_UPDATED,
+    object_archived_payload,
+    object_created_payload,
+    object_updated_payload,
+)
+from pocketpaw.fabric.models import FabricObject, FabricQuery, FabricQueryResult
+from pocketpaw.fabric.projection import FabricProjection
+from pocketpaw.fabric.read_model import (
+    ReadModelResolver,
+    project_object,
+    unproject_object,
+    workspace_ids_from_scope,
+)
+
+if TYPE_CHECKING:
+    # Typing only (FST-4) — the statement_store kwarg is forwarded to the
+    # projection; this module never touches the SQLite store at runtime.
+    from pocketpaw.fabric.store import FabricStore
+
+_SYSTEM_ACTOR_ID = "system:fabric"
+
+logger = logging.getLogger(__name__)
+
+
+class FabricJournalStore:
+    """Journal-backed CRUD + query for Fabric objects.
+
+    The store is event-sourced: every write becomes an EventEntry on the
+    org journal, and reads are served from an in-memory FabricProjection.
+    Writes also fold the emitted event into the projection so reads are
+    consistent without waiting for a periodic rebuild.
+
+    Typical wiring:
+
+        from pocketpaw.journal_dep import get_journal
+        journal = get_journal()
+        store = FabricJournalStore(journal)
+        store.bootstrap()
+        await store.create(...)
+    """
+
+    def __init__(
+        self,
+        journal: Journal,
+        *,
+        projection: FabricProjection | None = None,
+        default_actor: Actor | None = None,
+        statement_store: FabricStore | None = None,
+        read_model: ReadModelResolver | None = None,
+    ) -> None:
+        # FST-4: ``statement_store`` wires the DEFAULT projection's shadow
+        # treatment (merge site 2). When the caller passes an explicit
+        # ``projection`` it owns that wiring itself and this kwarg is unused.
+        self._journal = journal
+        self._projection = projection or FabricProjection(statement_store=statement_store)
+        self._default_actor = default_actor or Actor(
+            kind="system",
+            id=_SYSTEM_ACTOR_ID,
+            scope_context=[],
+        )
+        # CN-6: workspace_id -> FabricStore the writes project into.
+        self._read_model = read_model
+
+    # -- Bootstrap ----------------------------------------------------------
+
+    def bootstrap(self, *, since_seq: int = 0) -> int:
+        """Warm the projection from the journal. Returns the number of
+        events applied. Call once at process start; callers that persist
+        a cursor can pass ``since_seq`` to skip already-applied events.
+
+        FST-4: with a statement_store-wired projection in shadow/enforce
+        mode, the replay STAGES shadow observations but cannot record them
+        (bootstrap is sync) — follow up with ``await flush_shadow()``.
+        Skipping the flush only delays it: the next live update() drains the
+        queue, and the store's event-id dedupe keeps any ordering honest.
+        """
+
+        return self._projection.rebuild(self._journal, since_seq=since_seq)
+
+    async def flush_shadow(self) -> int:
+        """Drain the projection's staged shadow observations (FST-4) —
+        the async companion to the sync :meth:`bootstrap`. Returns how many
+        journal events had their statements recorded. Safe to call anytime:
+        already-recorded events are deduped by id, an unwired projection
+        returns 0.
+        """
+
+        return await self._projection.flush_shadow()
+
+    @property
+    def projection(self) -> FabricProjection:
+        """Expose the projection for diagnostics + tests. Not part of
+        the stable API — if you're reaching for this in production code,
+        add a real method here instead.
+        """
+
+        return self._projection
+
+    # -- Writes -------------------------------------------------------------
+
+    async def create(
+        self,
+        obj: FabricObject,
+        *,
+        scope: list[str],
+        actor: Actor | None = None,
+        correlation_id: UUID | None = None,
+    ) -> FabricObject:
+        """Append a ``fabric.object.created`` event and return the object
+        as the projection now sees it.
+
+        ``scope`` is required — the journal's EventEntry invariant demands
+        a non-empty scope list, and callers that don't supply one should
+        make that explicit rather than having the store fabricate one.
+        """
+
+        _require_scope(scope)
+
+        payload = object_created_payload(
+            object_id=obj.id,
+            type_id=obj.type_id,
+            type_name=obj.type_name,
+            properties=obj.properties,
+            source_connector=obj.source_connector,
+            source_id=obj.source_id,
+        )
+        entry = self._build_entry(
+            action=ACTION_OBJECT_CREATED,
+            scope=scope,
+            actor=actor,
+            correlation_id=correlation_id,
+            payload=payload,
+        )
+        previous = self._scope_of(obj.id)
+        self._journal.append(entry)
+        self._projection.apply(entry)
+        await self._project(obj.id, previous)
+
+        projected = self._projection.query(
+            FabricQuery(type_id=obj.type_id, limit=10000),
+            requester_scopes=None,
+        )
+        for candidate in projected.objects:
+            if candidate.id == obj.id:
+                return candidate
+        # Fallback — should not happen because we just applied the event,
+        # but preserve the caller's view if the projection disagrees.
+        return obj
+
+    async def update(
+        self,
+        object_id: str,
+        properties: dict[str, Any],
+        *,
+        scope: list[str],
+        actor: Actor | None = None,
+        correlation_id: UUID | None = None,
+    ) -> FabricObject | None:
+        """Append a ``fabric.object.updated`` event. Returns the updated
+        object as the projection now sees it, or None if the object is
+        unknown.
+        """
+
+        _require_scope(scope)
+
+        payload = object_updated_payload(
+            object_id=object_id,
+            properties=properties,
+        )
+        entry = self._build_entry(
+            action=ACTION_OBJECT_UPDATED,
+            scope=scope,
+            actor=actor,
+            correlation_id=correlation_id,
+            payload=payload,
+        )
+        previous = self._scope_of(object_id)
+        self._journal.append(entry)
+        self._projection.apply(entry)
+        # FST-4: drain the shadow observation this update may have staged so
+        # statements land as part of the write call, matching site 1's
+        # semantics. No statement_store wired (or mode off) → no-op.
+        await self._projection.flush_shadow()
+        await self._project(object_id, previous)
+        return self._lookup(object_id)
+
+    async def archive(
+        self,
+        object_id: str,
+        *,
+        scope: list[str],
+        reason: str = "",
+        actor: Actor | None = None,
+        correlation_id: UUID | None = None,
+    ) -> bool:
+        """Append a ``fabric.object.archived`` event. Returns True when
+        the archive was applied, False when the object was unknown.
+
+        Archive is an event, not a delete — the journal preserves history
+        and the projection hides archived objects from query() without
+        actually removing them. Audit queries can still walk them.
+        """
+
+        _require_scope(scope)
+
+        payload = object_archived_payload(object_id=object_id, reason=reason)
+        entry = self._build_entry(
+            action=ACTION_OBJECT_ARCHIVED,
+            scope=scope,
+            actor=actor,
+            correlation_id=correlation_id,
+            payload=payload,
+        )
+        self._journal.append(entry)
+        self._projection.apply(entry)
+        await self._project(object_id, [])
+        return self._lookup(object_id) is None
+
+    # -- Reads --------------------------------------------------------------
+
+    async def query(
+        self,
+        q: FabricQuery,
+        *,
+        requester_scopes: list[str] | None = None,
+    ) -> FabricQueryResult:
+        """Run a query against the projection with the caller's scope
+        applied. ``requester_scopes=None`` or ``[]`` returns everything
+        (admin / system path).
+        """
+
+        return self._projection.query(q, requester_scopes=requester_scopes)
+
+    async def get(
+        self,
+        object_id: str,
+        *,
+        requester_scopes: list[str] | None = None,
+    ) -> FabricObject | None:
+        """Return the current projection of a single object, or None when
+        the caller's scope doesn't grant access (indistinguishable from
+        not-found — intentional so scope filtering can't be used as a
+        probe for hidden records).
+        """
+
+        result = await self.query(
+            FabricQuery(limit=10000),
+            requester_scopes=requester_scopes,
+        )
+        for obj in result.objects:
+            if obj.id == object_id:
+                return obj
+        return None
+
+    # -- Read model (CN-6) ---------------------------------------------------
+
+    async def sync_read_model(self) -> int:
+        """Mirror every projected row into its workspace store(s): live rows
+        are upserted, archived rows removed. The backfill for objects journaled
+        before the read model was wired, and the heal after a failed
+        projection. Idempotent and safe to re-run or cancel midway (no state is
+        kept; the next run redoes it). Returns how many rows were mirrored."""
+
+        if self._read_model is None:
+            return 0
+        rows = self._projection.rows()
+        for row in rows:
+            await self._project_row(row.obj, row.scope, archived=row.archived)
+        return len(rows)
+
+    def _scope_of(self, object_id: str) -> list[str]:
+        row = self._projection.row(object_id)
+        return list(row.scope) if row is not None else []
+
+    async def _project(self, object_id: str, previous_scope: list[str]) -> None:
+        """Mirror one object's post-write state into the read model, and drop
+        it from any workspace its previous scope had but the new one lacks."""
+
+        if self._read_model is None:
+            return
+        row = self._projection.row(object_id)
+        if row is None:
+            return
+        await self._project_row(row.obj, row.scope, archived=row.archived)
+        left = set(workspace_ids_from_scope(previous_scope)) - set(
+            workspace_ids_from_scope(row.scope)
+        )
+        if left:
+            await self._project_row(row.obj, [f"workspace:{ws}" for ws in left], archived=True)
+
+    async def _project_row(self, obj: FabricObject, scope: list[str], *, archived: bool) -> None:
+        assert self._read_model is not None
+        for ws in workspace_ids_from_scope(scope):
+            try:
+                target = self._read_model(ws)
+                if archived:
+                    await unproject_object(target, obj.id, workspace_id=ws)
+                    continue
+                await project_object(
+                    target, obj, workspace_id=ws, is_current=lambda: self._is_live(obj)
+                )
+                # The upsert itself awaits; an archive can still land between
+                # the check and the INSERT. Re-check and undo if so.
+                if not self._is_live(obj):
+                    row = self._projection.row(obj.id)
+                    if row is None or row.archived:
+                        await unproject_object(target, obj.id, workspace_id=ws)
+            except Exception:
+                logger.warning(
+                    "fabric read model: projecting %s into workspace %s failed —"
+                    " journal write kept; sync_read_model() re-heals",
+                    obj.id,
+                    ws,
+                    exc_info=True,
+                )
+
+    def _is_live(self, obj: FabricObject) -> bool:
+        """True while ``obj`` is still the projection's live state for its id.
+        Updates rebind ``row.obj`` and re-creates replace the row, so identity
+        is exact; archive flips the flag."""
+
+        row = self._projection.row(obj.id)
+        return row is not None and row.obj is obj and not row.archived
+
+    # -- Internals ----------------------------------------------------------
+
+    def _build_entry(
+        self,
+        *,
+        action: str,
+        scope: list[str],
+        actor: Actor | None,
+        correlation_id: UUID | None,
+        payload: dict[str, Any],
+    ) -> EventEntry:
+        return EventEntry(
+            id=uuid4(),
+            ts=datetime.now(UTC),
+            actor=actor or self._default_actor,
+            action=action,
+            scope=list(scope),
+            correlation_id=correlation_id,
+            payload=payload,
+        )
+
+    def _lookup(self, object_id: str) -> FabricObject | None:
+        """Pull one object out of the projection regardless of scope — for
+        internal read-after-write confirmation only. Public callers go
+        through query() / get() which apply scope.
+        """
+
+        result = self._projection.query(FabricQuery(limit=10000), requester_scopes=None)
+        for obj in result.objects:
+            if obj.id == object_id:
+                return obj
+        return None
+
+
+def _require_scope(scope: list[str]) -> None:
+    """Raise early if the caller forgot to pass a scope. Matches the
+    journal's own EventEntry invariant (min_length=1 on scope) but fires
+    before we build the entry so the error message points at the Fabric
+    API, not at a pydantic validation error deep inside soul-protocol.
+    """
+
+    if not scope:
+        raise ValueError(
+            "FabricJournalStore requires a non-empty scope on every write — "
+            "the journal invariant refuses events with scope=[]."
+        )

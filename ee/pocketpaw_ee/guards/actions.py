@@ -1,0 +1,453 @@
+# Single source of truth for RBAC action rules.
+# Each action maps to the minimum role/access required and the stable
+# machine-readable `code` emitted on denial. Tests iterate ACTIONS to
+# guarantee every guarded operation is covered.
+#
+# Updated: 2026-07-26 (site knowledge sync) — added ``paw_bar.manage`` (ADMIN) for
+# the owner-triggered site→pocket-KB sync. Same role as ``paw_bar.read`` but its
+# own action: the sync is a mutation that spends compute (ingest compiles
+# articles), and a write should not ride a read gate that could later be widened.
+#
+# Updated: 2026-07-16 (D2 concierge dashboard reads) — added ``paw_bar.read``
+# (ADMIN) so the per-site Concierge dashboard reads (ee.pocketpaw_ee.paw_bar
+# .router: overview / conversations / decisions / handoffs) gate on the caller's
+# workspace ROLE instead of the coarse ``require_scope("admin")`` (which admits
+# any authenticated dashboard user). ADMIN, mirroring ``audit.read``: a site's
+# concierge conversations, decisions, and handoffs carry visitor PII and owner
+# decision context, so they must not be visible to every workspace member.
+# Updated: 2026-07-27 (feat/growth-g4) — registered ``growth.read`` (MEMBER)
+# and ``growth.manage`` (ADMIN) for the /growth outbound engine, mirroring
+# ship.read/ship.manage: the manage tier gates the outbound send, which only
+# ever fires through an approved ``_growth_send`` Instinct proposal with an
+# execute-time re-check of the proposer's CURRENT role in ``growth.executor``.
+#
+# Updated: 2026-07-11 (feat/external-alerting-c2c3) — registered
+# ``automations.read`` (MEMBER) and ``automations.manage`` (ADMIN) for the
+# always-on automation status surface (ee.cloud.automations_status.router): view
+# the sweep registry / rules / per-workspace enable state, and flip the
+# per-workspace opt-out.
+#
+# Updated: 2026-04-19 (fix/fleet-install-auth-guard) — registered
+# ``fleet.install`` at ``WorkspaceRole.ADMIN`` with deny code
+# ``workspace.insufficient_role``. This lets the fleet router call
+# ``check_workspace_action`` (which already audits denials via
+# ``log_denial``) instead of hand-rolling the role check — closes the
+# P0 auth-bypass flagged in docs/plans/cluster-D-reality.md.
+#
+# Updated: 2026-05-06 (fix/rbac-connector-upload-guards) — registered
+# ``connector.execute`` (MEMBER), ``connector.manage`` (ADMIN),
+# ``uploads.write`` (MEMBER), and ``uploads.manage`` (ADMIN) so the
+# connector and uploads routers can use ``require_action_any_workspace``
+# instead of relying solely on ``require_license``.
+#
+# Updated: 2026-05-07 (fix/rbac-guards-fabric-instinct-agent-knowledge) —
+# added ``fabric.read``, ``fabric.write``, ``instinct.read``,
+# ``instinct.propose``, ``instinct.approve``, ``instinct.audit`` so the
+# Fabric and Instinct routers (previously fully unguarded) can use
+# ``require_action_any_workspace``.
+#
+# Updated: 2026-05-22 (feat/api-skills, Increment 2b) — added
+# ``skills.manage`` (ADMIN) so the new ee.cloud.skills router can guard
+# POST /skills/api-doc, the per-backend API-skill install endpoint.
+#
+# Updated: 2026-05-22 (RFC 05 M2b.2) — added ``outcomes.read`` (MEMBER) so
+# the pocket-outcomes count router (ee.cloud.outcomes) can guard
+# ``GET /api/v1/outcomes``.
+#
+# Updated: 2026-06-19 (feat/instinct-gate-integration, security-review FIX 1) —
+# added ``instinct.activate`` (OWNER) gating the workspace route that sets a
+# workspace's ``instinct_approval_level``. A non-ASK level turns on
+# auto-approval of agent WRITE actions workspace-wide, so the switch is
+# OWNER-only — the most restrictive workspace tier.
+#
+# Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — added ``belt.read``
+# (MEMBER) and ``belt.manage`` (ADMIN) so the Belt console router
+# (ee.cloud.belt.router) can guard its read routes (repos list, runs list, run
+# detail) and its add-repo route. ``belt.manage`` is ADMIN because adding a repo
+# root extends the code-change security boundary workspace-wide — it must not be
+# open to every member (mirrors connector.manage / skills.manage).
+#
+# Updated: 2026-07-01 (feat/sec-5-security-proxy, SEC-5) — added
+# ``security.manage`` (OWNER) gating EVERY route on the shield control-plane
+# proxy (ee.cloud.security.router). OWNER because the proxy fronts shield's
+# ban-capable writes (resolve a decision, PATCH the egress deny/allow config)
+# AND its read feed exposes who-tried-to-egress-what; the whole surface is
+# owner-only, mirroring workspace.delete / billing.manage / instinct.activate.
+#
+# Updated: 2026-07-28 (feat/cockpit-agent-activity, HR-12a) — added
+# ``agent_activity.read`` (MEMBER) gating the workspace agent-activity board
+# (ee.cloud.agent_activity.router). MEMBER, not the ADMIN ``cockpit.read``
+# below: this surface reads the caller's OWN workspace runs and is scoped to
+# them at the query, so it carries the tenancy property that keeps the herdr
+# cockpit admin-only.
+#
+# Updated: 2026-07-24 (feat/herdr-cockpit-sse, HR-10a) — added ``cockpit.read``
+# (ADMIN) gating both routes of the herdr cockpit telemetry surface
+# (ee.cloud.herdr_cockpit.router). ADMIN (not MEMBER) because herdr panes are not
+# paw-workspace-scoped, so a member-visible cockpit on a shared box could leak
+# other tenants' panes; see the entry's inline note and the router's TODO(track-b).
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+
+from pocketpaw_ee.guards.rbac import Forbidden, PocketAccess, WorkspaceRole
+
+# ---------------------------------------------------------------------------
+# Group role — mirrors WorkspaceRole shape but scoped to a single group.
+# Stored in Group.member_roles as "owner" | "admin" | "edit" | "view".
+# "edit" maps to GroupRole.MEMBER, "view" is a posting restriction flag.
+# ---------------------------------------------------------------------------
+
+
+class GroupRole(StrEnum):
+    VIEW = "view"
+    MEMBER = "edit"
+    ADMIN = "admin"
+    OWNER = "owner"
+
+    @classmethod
+    def from_str(cls, value: str) -> GroupRole:
+        try:
+            return cls(value.lower())
+        except ValueError:
+            raise ValueError(f"Unknown group role: {value!r}") from None
+
+    @property
+    def level(self) -> int:
+        return _GROUP_ROLE_LEVELS[self]
+
+
+_GROUP_ROLE_LEVELS: dict[GroupRole, int] = {
+    GroupRole.VIEW: 0,
+    GroupRole.MEMBER: 1,
+    GroupRole.ADMIN: 2,
+    GroupRole.OWNER: 3,
+}
+
+
+def check_group_role(
+    role: str | GroupRole,
+    *,
+    minimum: GroupRole,
+    deny_code: str = "group.insufficient_role",
+) -> None:
+    """Raise Forbidden if role is below minimum."""
+    resolved = role if isinstance(role, GroupRole) else GroupRole.from_str(role)
+    if resolved.level < minimum.level:
+        raise Forbidden(
+            code=deny_code,
+            detail=f"Requires {minimum.value}, got {resolved.value}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Action rule
+# ---------------------------------------------------------------------------
+
+
+RoleType = WorkspaceRole | GroupRole | PocketAccess
+
+
+@dataclass(frozen=True, slots=True)
+class ActionRule:
+    """A guarded action's minimum required role and deny code."""
+
+    minimum: RoleType
+    deny_code: str
+
+
+# ---------------------------------------------------------------------------
+# ACTIONS — the canonical matrix. Keep keys in dotted "resource.action" form.
+# ---------------------------------------------------------------------------
+
+
+ACTIONS: dict[str, ActionRule] = {
+    # Workspace
+    "workspace.view": ActionRule(WorkspaceRole.MEMBER, "workspace.not_member"),
+    "workspace.update": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "workspace.delete": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    "workspace.transfer": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    "workspace.invite": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "workspace.member.remove": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "workspace.member.role_change": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Member-permission management (route + connector access). EDITOR is the
+    # minimum: editors can assign routes, connectors, and channel/group
+    # memberships to members but cannot change workspace-level roles or
+    # remove members (those stay ADMIN-gated).
+    "workspace.member.permissions": ActionRule(WorkspaceRole.EDITOR, "workspace.insufficient_role"),
+    # Group (chat)
+    "group.view": ActionRule(GroupRole.VIEW, "group.not_member"),
+    "group.create": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "channel.create": ActionRule(WorkspaceRole.EDITOR, "workspace.insufficient_role"),
+    "group.post": ActionRule(GroupRole.MEMBER, "group.view_only"),
+    "group.admin": ActionRule(GroupRole.ADMIN, "group.not_admin"),
+    "group.delete": ActionRule(GroupRole.OWNER, "group.not_owner"),
+    "group.transfer": ActionRule(GroupRole.OWNER, "group.not_owner"),
+    # Message
+    "message.edit_own": ActionRule(GroupRole.MEMBER, "message.not_author"),
+    "message.delete_any": ActionRule(GroupRole.ADMIN, "group.not_admin"),
+    # Pocket
+    "pocket.read": ActionRule(PocketAccess.VIEW, "pocket.access_denied"),
+    "pocket.comment": ActionRule(PocketAccess.COMMENT, "pocket.access_denied"),
+    "pocket.edit": ActionRule(PocketAccess.EDIT, "pocket.access_denied"),
+    "pocket.share": ActionRule(PocketAccess.OWNER, "pocket.not_owner"),
+    "pocket.delete": ActionRule(PocketAccess.OWNER, "pocket.not_owner"),
+    # Agent
+    "agent.run": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "agent.create": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "agent.edit": ActionRule(WorkspaceRole.EDITOR, "agent.not_owner"),
+    "agent.delete": ActionRule(WorkspaceRole.EDITOR, "agent.not_owner"),
+    # Session
+    "session.read_own": ActionRule(WorkspaceRole.MEMBER, "session.not_owner"),
+    "session.read_any": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # KB
+    "kb.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "kb.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    # Invite
+    "invite.create": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "invite.revoke": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "invite.resend": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Billing
+    "billing.view": ActionRule(WorkspaceRole.ADMIN, "billing.admin_only"),
+    "billing.manage": ActionRule(WorkspaceRole.OWNER, "billing.owner_only"),
+    # Fleet — spawning agents + pockets is a workspace-admin action.
+    # Previously the install route had no auth guard at all, so any
+    # authenticated caller could install into any workspace
+    # (docs/plans/cluster-D-reality.md#106-112, P0 fix 2026-04-19).
+    "fleet.install": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Fabric — ontology read/write + schema authoring.
+    # read/write are MEMBER so any workspace member can query objects and author
+    # object DATA (create/update objects, add links). SCHEMA authoring — defining
+    # object types, adding typed properties, declaring link types, and versioning
+    # a type (ontology-operator-ux, the /fabric/schema surface) — is the more
+    # privileged "operator" tier and is ADMIN: changing the ontology reshapes
+    # write-time enforcement for the whole workspace, so it sits above the member
+    # data tier (mirrors connector.manage / rules.manage / skills.manage).
+    "fabric.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "fabric.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "fabric.admin": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Sites — buying a PAID per-site plan commits the workspace to a recurring
+    # charge, so it is not the same question as publishing.
+    #
+    # Publishing needs ``fabric.write`` (MEMBER) and stays there: an employee
+    # building and shipping a site on the free tier is the ordinary workflow and
+    # must not need an approval. But a paid tier bills the workspace's OWN
+    # subscription now (site plans are add-on lines on it), so a MEMBER selecting
+    # one was spending company money — while being too junior to so much as VIEW
+    # the billing page (``billing.view`` is ADMIN). That is the hole this closes.
+    #
+    # ADMIN rather than OWNER, and the line is deliberately easy to change. OWNER
+    # is the tier that governs money (``billing.manage``), and committing $7-19 a
+    # month is a smaller act than changing the workspace plan; requiring the owner
+    # personally for every site a company publishes makes the feature unusable at
+    # any real size. ADMIN is also exactly the tier that can already SEE the bill
+    # it is adding to. If that trade is wrong for a given deployment, this is one
+    # word.
+    "sites.buy_plan": ActionRule(WorkspaceRole.ADMIN, "sites.plan_purchase_forbidden"),
+    # Confirming that a publish may DELETE a site's Durable Object data for good
+    # (``confirm_do_data_loss``). Publishing is MEMBER; destroying stored data is the
+    # irreversible half, so it needs the same tier as buying a plan.
+    "sites.confirm_data_loss": ActionRule(WorkspaceRole.ADMIN, "sites.data_loss_confirm_forbidden"),
+    # The Sites Data dashboard: editing a site's live data (rows, files, KV keys) and
+    # restoring its database to an earlier point. Reading is ``fabric.read`` (MEMBER);
+    # changing what a live site's visitors see is ADMIN, like confirming data loss.
+    "sites.data_write": ActionRule(WorkspaceRole.ADMIN, "sites.data_write_forbidden"),
+    "sites.data_restore": ActionRule(WorkspaceRole.ADMIN, "sites.data_restore_forbidden"),
+    # /ship — managed deploys onto real infrastructure.
+    # Reading boxes / apps / logs is MEMBER. ``ship.manage`` (ADMIN) gates the
+    # DESTRUCTIVE verbs — destroy, rollback, prod deploy — which never execute
+    # from a request anyway: they route through an Instinct proposal, and the
+    # executor RE-CHECKS this action against the proposer's CURRENT role, so a
+    # since-demoted proposer's approved teardown fails closed. ADMIN mirrors
+    # connector.manage: irreversible work on shared infrastructure, but not the
+    # owner-only tier that governs money or the human-in-the-loop switch itself.
+    "ship.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "ship.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # /growth — outbound engine (prospects, drafts, gated sends).
+    # Reading prospects / drafts is MEMBER; authoring them (create / update /
+    # draft / non-gated lifecycle moves) is MEMBER too — the fabric.read /
+    # fabric.write split, because staging outreach copy is ordinary team work.
+    # ``growth.manage`` (ADMIN) gates the OUTBOUND verb — proposing a send.
+    # An approved send goes out under the company's name to a real prospect and
+    # cannot be unsent. Like ship.manage it never executes from a request: the
+    # send routes through a ``_growth_send`` Instinct proposal, and
+    # ``growth.executor`` RE-CHECKS this action against the proposer's CURRENT
+    # role at dispatch time, so a since-demoted proposer's approved send fails
+    # closed. The propose ROUTE therefore has to sit at the same ADMIN tier the
+    # executor re-checks, or every member-filed proposal would fail closed at
+    # approve time. (feat/growth-g4, mirroring /ship.)
+    "growth.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "growth.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "growth.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Instinct — human-in-the-loop decision pipeline.
+    # Propose and read are MEMBER (agents and analysts can propose + view actions).
+    # Approve/reject and audit are ADMIN — governance actions with downstream
+    # consequences (triggering automations, recording corrections).
+    "instinct.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "instinct.propose": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "instinct.approve": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "instinct.audit": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Activating the layered Instinct gate's triager (setting a workspace's
+    # ``instinct_approval_level`` to a non-ASK value) turns ON AUTO-APPROVAL of
+    # agent WRITE actions for the whole workspace — the single most sensitive
+    # governance switch in the gate. OWNER-only, the most restrictive workspace
+    # tier (mirrors workspace.delete / billing.manage): a mere admin must not
+    # be able to disable the human-in-the-loop for everyone.
+    "instinct.activate": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    # Governed rules — the UI-authored guardrail surface (ee.cloud.rules.router:
+    # create / list / archive a rule + the per-workspace enforcement toggle).
+    # ADMIN, mirroring the other governance write surfaces (instinct.approve /
+    # audit.read): authoring a rule and flipping enforcement change workspace-wide
+    # governance and can only ADD blocks/escalations (never relax the template
+    # floor), so an admin bar — not the OWNER-only bar reserved for
+    # instinct.activate (which turns OFF the human-in-the-loop) — is correct.
+    "rules.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Automations status — the always-on automation surface (external-alerting C3).
+    # read is MEMBER (any team member can view which sweeps/rules are running and
+    # the per-workspace enable state). manage is ADMIN because flipping the
+    # per-workspace opt-out turns the always-on background sweeps ON/OFF for the
+    # whole workspace (mirrors rules.manage / connector.manage).
+    "automations.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "automations.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Connector — workspace-level connector lifecycle.
+    # execute is MEMBER so any team member can run actions against enabled connectors.
+    # manage (enable/disable/config) is ADMIN because it changes workspace-wide state
+    # visible to all members and can trigger OAuth flows or expose credentials.
+    "connector.execute": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "connector.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Uploads — workspace-scoped file storage.
+    # write is MEMBER so any team member can upload files or create folders.
+    # manage is ADMIN for bulk moves, cross-user deletes, and storage policy changes.
+    "uploads.write": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "uploads.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Admin — operational endpoints (perf timing dumps, etc.). Owner-only
+    # because per-route timing reveals traffic patterns and request
+    # cadence that shouldn't be visible to every admin in a workspace.
+    "admin.perf": ActionRule(WorkspaceRole.OWNER, "admin.access_denied"),
+    # Audit — workspace-scoped audit log read surface (ee.cloud.audit).
+    # ADMIN because audit entries can carry decision context, connector
+    # payloads, and AI recommendations that should not be visible to
+    # every workspace member. The role choice mirrors the existing
+    # abac.ACTION_ROLES["audit.read"] entry.
+    "audit.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Skills — installing a backend's OpenAPI spec as a per-backend API
+    # skill (ee.cloud.skills). ADMIN, mirroring connector.manage: the
+    # installed skill changes workspace-wide pocket-authoring behaviour
+    # and the install accepts an uploaded document, so it should not be
+    # open to every member.
+    "skills.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Outcomes — workspace-scoped pocket-outcome count surface
+    # (ee.cloud.outcomes, RFC 05 M2b.2). MEMBER: an outcome count is a
+    # non-sensitive activity metric (how many "renewal_completed" events a
+    # pocket produced), with no credentials or decision payloads — any
+    # workspace member may view it, mirroring instinct.read.
+    "outcomes.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    # Paw Bar concierge dashboard — the per-site owner aggregation reads
+    # (ee.pocketpaw_ee.paw_bar.router: overview / conversations / decisions /
+    # handoffs, D2). ADMIN, mirroring audit.read (NOT the MEMBER bar of
+    # outcomes.read): a site's visitor conversations, decisions, and handoffs
+    # carry visitor PII and owner decision context, so the surface is owner/admin
+    # only and must not be visible to every workspace member.
+    "paw_bar.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Paw Bar concierge dashboard — the owner WRITE surface (today: the
+    # site→pocket-KB knowledge sync). ADMIN like the read, but its own action
+    # because it is a mutation that also spends compute (ingest compiles articles),
+    # so it must not inherit a read gate. Mirrors belt.read / belt.manage.
+    "paw_bar.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Belt console — the develop-station read + repo-admin surface
+    # (ee.cloud.belt.router, feat/belt-console-backend SC-1). read is MEMBER so
+    # any team member can list discoverable repos + their own station runs.
+    # manage is ADMIN because adding a repo root EXTENDS the code-change security
+    # boundary workspace-wide (an admin authorizing where the agent may apply
+    # diffs), mirroring connector.manage / skills.manage.
+    "belt.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "belt.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Notifications external-delivery config (ee.cloud.notifications.router,
+    # feat/external-alerting-delivery). ADMIN because the config sets where the
+    # server POSTs on EVERY notification (a Slack / generic webhook URL) — it
+    # extends the workspace's egress surface, mirroring connector.manage /
+    # belt.manage. There is no separate read action: the config is admin-only to
+    # view too (it holds the webhook URLs), so GET reuses ``notifications.manage``.
+    "notifications.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Security — the shield control-plane proxy (ee.cloud.security.router,
+    # SEC-5). OWNER-only, the most restrictive workspace tier (mirrors
+    # workspace.delete / billing.manage / instinct.activate). shield fronts the
+    # ban-capable write endpoints (resolve a decision, PATCH the deny/allow
+    # config) and IS the workspace's egress security gate, so read AND write
+    # must both be owner-gated: a mere admin must not be able to see the
+    # decision stream or flip the security posture for everyone. A single
+    # action guards every route (reads included) because the decision feed
+    # itself carries who-tried-to-egress-what, which is sensitive.
+    "security.manage": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    # Agent health (ee.cloud.lens.router) — mute / resolve an issue in paw-lens.
+    # ADMIN because muting silences alerting for the whole workspace; the lens
+    # reads stay member-level (any member may view their workspace's health).
+    "lens.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Herdr cockpit — the read-only pane-telemetry surface (ee.cloud.herdr_cockpit
+    # .router, HR-10a). ADMIN because herdr panes are NOT paw-workspace-scoped
+    # (herdr mints its own workspace ids), so on a shared box a member-visible
+    # cockpit could leak other tenants' panes. ADMIN + the default-off
+    # ``herdr_runtime_enabled`` flag keeps v1 safe on the dedicated-box case; a
+    # single read action gates both the stream and the preview. TODO(track-b):
+    # scope panes to the caller's workspace before relaxing this for multi-tenant.
+    "cockpit.read": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Agent activity — the workspace's own agent board (ee.cloud.agent_activity
+    # .router, HR-12a): which of MY agents are working right now. MEMBER, the
+    # same bar as session.read_own / outcomes.read, because every row is the
+    # caller's own workspace data — the board is built from ChatRunDoc rows
+    # filtered to the caller's workspace at the query, so there is no cross-tenant
+    # leak of the kind that forces ``cockpit.read`` above to stay ADMIN. Its
+    # payload is activity metadata only (agent id, status, run count, timestamps)
+    # — no message content, no credentials.
+    #
+    # MEMBER is the whole RBAC statement for this surface, and it is deliberate:
+    # the board is workspace-WIDE, so any member sees every member's agent
+    # activity. That is the team-coordination fact an Agent — a workspace
+    # resource, not a personal one — exists to expose. It knowingly reads wider
+    # than ``chat.runs.router._authorize``, which hides another member's
+    # individual run; the split is aggregate-state-is-shared,
+    # individual-turn-is-private (no user_id, no run id, no content on the wire).
+    # Narrowing to a personal board would be a ``user_id`` filter on the two
+    # reads in ``chat.runs.service``, NOT a role change here — and raising this
+    # to ADMIN would hide the board from exactly the people who need it.
+    # See ee.cloud.agent_activity.router's header for the full rationale.
+    "agent_activity.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+}
+
+
+def get_rule(action: str) -> ActionRule:
+    """Fetch an action's rule. Raises KeyError if unknown (by design — unknown
+    actions must fail loud, not silently allow)."""
+    try:
+        return ACTIONS[action]
+    except KeyError:
+        raise KeyError(
+            f"Unknown action {action!r}. Register it in ACTIONS before guarding a route."
+        ) from None
+
+
+def check_action(
+    action: str,
+    actor_level: RoleType,
+) -> None:
+    """Raise Forbidden if actor_level is below the action's minimum.
+
+    Both sides of the comparison must be the same enum family
+    (WorkspaceRole vs. WorkspaceRole, PocketAccess vs. PocketAccess, etc.)
+    — mixing families is a programming error.
+    """
+    rule = get_rule(action)
+    if type(actor_level) is not type(rule.minimum):
+        raise TypeError(
+            f"Action {action!r} expects {type(rule.minimum).__name__}, "
+            f"got {type(actor_level).__name__}"
+        )
+    if actor_level.level < rule.minimum.level:  # type: ignore[attr-defined]
+        raise Forbidden(
+            code=rule.deny_code,
+            detail=(
+                f"Action {action!r} requires {rule.minimum.value}, got {actor_level.value}"  # type: ignore[attr-defined]
+            ),
+        )

@@ -8,6 +8,9 @@ display_name: MongoDB
 type: database
 icon: database
 
+senses:
+  - paw.db.v1
+
 auth:
   method: none
   credentials:

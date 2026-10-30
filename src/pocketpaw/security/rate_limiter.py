@@ -3,8 +3,11 @@
 Pre-configured tiers:
   - api:      10 req/s, burst 30  (general API endpoints)
   - auth:      1 req/s, burst  5  (token/QR endpoints)
+  - login:    5 per 15 min, burst 5  (login/register/bearer-login, keyed by (ip, email))
   - ws:        2 conn/s, burst  5  (WebSocket connections)
   - api_key:   configurable per-key limiter (default 60 req/min)
+  - mfa_password: 5 per 15 min, burst 5  (MFA disable / backup-code regenerate, keyed by user id)
+  - guest_mint: 3 per hour, burst 3  (POST /auth/guest, keyed by IP — 2026-09-01)
 
 No external dependencies — pure stdlib.
 """
@@ -14,12 +17,16 @@ from __future__ import annotations
 import math
 import threading
 import time
+import weakref
 
 __all__ = [
     "RateLimiter",
     "RateLimitInfo",
     "api_limiter",
     "auth_limiter",
+    "login_limiter",
+    "mfa_challenge_limiter",
+    "mfa_password_limiter",
     "ws_limiter",
     "get_api_key_limiter",
     "cleanup_all",
@@ -59,6 +66,21 @@ class RateLimitInfo:
         return h
 
 
+#: Every live RateLimiter, so ``cleanup_all()`` can sweep them all.
+#:
+#: This used to be a hand-written list inside ``cleanup_all``, naming the six
+#: limiters defined in this module. The three cloud limiters in
+#: ``pocketpaw_ee.cloud._core.rate_limit`` were therefore never swept, and
+#: could not have been added: the OSS core must not import ``pocketpaw_ee``
+#: (an import-linter contract enforces it), so the list was structurally
+#: incapable of naming them. One of those three keys its buckets on a
+#: caller-supplied header on an unauthenticated endpoint.
+#:
+#: A WeakSet so a limiter built in a test, or any other short-lived one, is
+#: collected normally instead of being pinned here for the process lifetime.
+_REGISTRY: weakref.WeakSet[RateLimiter] = weakref.WeakSet()
+
+
 class RateLimiter:
     """Token-bucket rate limiter keyed by client identifier (IP address or API key).
 
@@ -78,6 +100,9 @@ class RateLimiter:
         # can't both see `tokens >= 1.0` and both decrement (issue #891).
         # The operation is O(1), so the lock is near-zero cost in practice.
         self._lock = threading.Lock()
+        # Self-register so the periodic sweep finds this limiter without
+        # anyone remembering to add it anywhere. See _REGISTRY.
+        _REGISTRY.add(self)
 
     def allow(self, key: str) -> bool:
         """Return True if the request is allowed, consuming one token."""
@@ -107,6 +132,34 @@ class RateLimiter:
             reset_after = (1.0 - bucket.tokens) / self.rate if self.rate > 0 else 1.0
             return RateLimitInfo(False, self.capacity, 0, reset_after)
 
+    def try_consume(self, key: str, n: int) -> RateLimitInfo:
+        """Atomically consume ``n`` tokens if available — no partial consumption.
+
+        Why: callers that need N tokens (e.g. bulk-create endpoints) can't
+        use ``check()`` in a loop without burning the budget when the Nth
+        call fails. ``try_consume`` checks once and decrements all-or-nothing.
+        """
+        if n <= 0:
+            return self.check(key)
+        now = time.monotonic()
+        with self._lock:
+            if key not in self._buckets:
+                self._buckets[key] = _Bucket(self.capacity, now)
+            bucket = self._buckets[key]
+            elapsed = now - bucket.last_refill
+            bucket.tokens = min(self.capacity, bucket.tokens + elapsed * self.rate)
+            bucket.last_refill = now
+
+            if bucket.tokens >= float(n):
+                bucket.tokens -= float(n)
+                remaining = int(bucket.tokens)
+                reset_after = (self.capacity - bucket.tokens) / self.rate if self.rate > 0 else 0
+                return RateLimitInfo(True, self.capacity, remaining, reset_after)
+
+            deficit = float(n) - bucket.tokens
+            reset_after = deficit / self.rate if self.rate > 0 else 1.0
+            return RateLimitInfo(False, self.capacity, int(bucket.tokens), reset_after)
+
     def cleanup(self, max_age: float = 3600.0) -> int:
         """Remove stale entries older than *max_age* seconds. Returns count removed."""
         now = time.monotonic()
@@ -120,6 +173,19 @@ class RateLimiter:
 # Pre-configured limiter instances
 api_limiter = RateLimiter(rate=10.0, capacity=30)
 auth_limiter = RateLimiter(rate=1.0, capacity=5)
+# Login / register / bearer-login: 5 attempts per 15 min, keyed by (ip, email)
+# so attackers can't bypass the bucket by rotating the email field behind one IP.
+login_limiter = RateLimiter(rate=5.0 / 900.0, capacity=5)
+# MFA challenge: 5 wrong codes per 5 min, keyed by (ip, mfa_token_jti).
+mfa_challenge_limiter = RateLimiter(rate=5.0 / 300.0, capacity=5)
+# MFA disable / backup-code regenerate re-check the account password: 5 per
+# 15 min, keyed by user id, so a stolen session cannot brute-force it.
+mfa_password_limiter = RateLimiter(rate=5.0 / 900.0, capacity=5)
+# Guest mint (BYOK-first onboarding, 2026-09-01): each mint is a provider
+# round trip on our egress plus a user+workspace row — unthrottled it is both
+# a free key-checking oracle and a row-spam vector. 3 burst, ~3/hour refill,
+# per client IP. In-memory token bucket: denies when empty (fail closed).
+guest_mint_limiter = RateLimiter(rate=3.0 / 3600.0, capacity=3)
 ws_limiter = RateLimiter(rate=2.0, capacity=5)
 _api_key_limiter: RateLimiter | None = None
 
@@ -138,9 +204,18 @@ def get_api_key_limiter() -> RateLimiter:
     return _api_key_limiter
 
 
-def cleanup_all() -> int:
-    """Run cleanup on all global limiters. Returns total entries removed."""
-    total = api_limiter.cleanup() + auth_limiter.cleanup() + ws_limiter.cleanup()
-    if _api_key_limiter is not None:
-        total += _api_key_limiter.cleanup()
-    return total
+def cleanup_all(max_age: float = 3600.0) -> int:
+    """Sweep every live limiter. Returns total entries removed.
+
+    Walks the registry rather than a hand-written list of the limiters defined
+    in this module. That list silently excluded the cloud limiters, which are
+    defined in a package the OSS core is forbidden to import — so the omission
+    could not have been fixed by adding a name to it. Anything that constructs
+    a RateLimiter is now swept, wherever it lives.
+    """
+    return sum(limiter.cleanup(max_age) for limiter in list(_REGISTRY))
+
+
+def registered_limiter_count() -> int:
+    """How many live limiters the sweep currently covers. For tests and /doctor."""
+    return len(_REGISTRY)

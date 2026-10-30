@@ -88,7 +88,7 @@ The module depends only on `base` (for TimestampedDocument), keeping its scope t
 class Settings:
     name = "agents"  # collection name
     indexes = [
-        [('workspace', 1), ('slug', 1)]  # compound index for efficient scoped queries
+        [("workspace", 1), ("slug", 1)]  # compound index for efficient scoped queries
     ]
 ```
 

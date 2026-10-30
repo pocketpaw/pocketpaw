@@ -1,0 +1,735 @@
+"""Auth domain — FastAPI router.
+
+POST /auth/guest mints an anonymous BYOK guest (rate-limited per IP, key
+validated before anything is created, answers with the same cookie login
+response /auth/login uses); POST /auth/guest/upgrade attaches email+password to
+the SAME guest user id, after the register password policy (a rejection answers
+with register's 400 ``REGISTER_INVALID_PASSWORD`` shape). Both, and the
+MFA-gated login overrides, are registered BEFORE the fastapi-users
+sub-routers, because route order is the override.
+
+``password_signup_open`` (settings) gates the two password sign-up doors,
+/auth/register and /auth/guest/upgrade: while False both answer 403
+``auth.password_signup_closed`` and social sign-in is the only way in. Login
+for existing password accounts is untouched.
+
+Password checks in this module (MFA disable, backup-code regenerate) go
+through ``auth.password_hashing`` so argon2 never runs on the event loop, and
+are rate-limited per user (``mfa_password_limiter``, 429).
+
+Profile endpoints use ``Depends(request_context)`` and call into
+``ee.cloud.auth.service`` module functions directly. The fastapi-users
+sub-routers (login/logout/register) and the avatar file-serving / upload
+endpoints stay here unchanged in behavior.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import jwt as pyjwt
+from beanie import PydanticObjectId
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordRequestForm
+from fastapi_users.exceptions import InvalidPasswordException
+from fastapi_users.router.common import ErrorCode
+from pydantic import BaseModel
+from starlette.responses import FileResponse
+
+from pocketpaw.config import get_settings  # type: ignore[import-untyped]
+from pocketpaw.security.rate_limiter import (
+    guest_mint_limiter,
+    mfa_challenge_limiter,
+    mfa_password_limiter,
+)
+from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.errors import Forbidden
+from pocketpaw_ee.cloud.audit import service as audit_service
+from pocketpaw_ee.cloud.auth import guest as guest_service
+from pocketpaw_ee.cloud.auth import mfa as mfa_service
+from pocketpaw_ee.cloud.auth import password_hashing
+from pocketpaw_ee.cloud.auth import service as auth_service
+from pocketpaw_ee.cloud.auth import sessions as sessions_service
+from pocketpaw_ee.cloud.auth._login_helpers import mint_and_record as _mint_and_record
+from pocketpaw_ee.cloud.auth.api_keys_router import router as api_keys_router
+from pocketpaw_ee.cloud.auth.core import (
+    UserCreate,
+    UserManager,
+    UserRead,
+    bearer_backend,
+    cookie_backend,
+    current_active_user,
+    fastapi_users,
+    get_user_manager,
+)
+from pocketpaw_ee.cloud.auth.dto import (
+    ProfileOut,
+    ProfileUpdateRequest,
+    SetWorkspaceRequest,
+    auth_user_to_profile_out,
+)
+from pocketpaw_ee.cloud.auth.mfa_tokens import mint_mfa_pending, verify_mfa_pending
+from pocketpaw_ee.cloud.auth.sessions_dto import RevokeOthersResponse, SessionOut
+from pocketpaw_ee.cloud.auth.ws_tickets import mint_ws_ticket
+
+router = APIRouter(tags=["Auth"])
+
+# Avatar storage — local filesystem for now (could swap for S3/R2 later)
+_AVATAR_DIR = Path.home() / ".pocketpaw" / "avatars"
+_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+_ALLOWED_AVATAR_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+_MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5 MB
+
+
+# ---------------------------------------------------------------------------
+# MFA-gated login (Wave 3 Task 4)
+#
+# These two routes MUST be registered before the fastapi-users auth
+# sub-routers below — FastAPI matches the first route registered for a
+# path, so this is how we override the stock fastapi-users /auth/login
+# and /auth/bearer/login without forking the upstream router.
+#
+# Flow: authenticate via the user manager; if mfa_enabled, return a
+# short-lived `mfa_pending` JWT instead of minting the session cookie /
+# bearer token. The client then calls /auth/mfa/challenge with the
+# pending token + TOTP/backup code.
+#
+# Both transports stay live during the cookie+CSRF rollout (security
+# #1117 P1). Cookie is the long-term path for browser clients; Bearer
+# is retained for back-compat with the Tauri desktop client and any
+# automation / MCP tools that hold a token directly.
+# ---------------------------------------------------------------------------
+
+
+def _bad_credentials() -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail=ErrorCode.LOGIN_BAD_CREDENTIALS,
+    )
+
+
+async def _authenticate_or_400(
+    credentials: OAuth2PasswordRequestForm,
+    manager: UserManager,
+) -> Any:
+    user = await manager.authenticate(credentials)
+    if user is None or not user.is_active:
+        raise _bad_credentials()
+    return user
+
+
+def _current_jti(request: Request) -> str | None:
+    token = request.cookies.get("paw_auth")
+    if not token:
+        authz = request.headers.get("authorization", "")
+        if authz.lower().startswith("bearer "):
+            token = authz[7:].strip()
+    if not token:
+        return None
+    try:
+        payload = pyjwt.decode(token, options={"verify_signature": False})
+    except pyjwt.PyJWTError:
+        return None
+    jti = payload.get("jti")
+    return jti if isinstance(jti, str) else None
+
+
+@router.post("/auth/login", name="auth:cookie.login.mfa-gated")
+async def login_cookie(
+    request: Request,
+    credentials: OAuth2PasswordRequestForm = Depends(),
+    manager: UserManager = Depends(get_user_manager),
+):
+    user = await _authenticate_or_400(credentials, manager)
+    if user.mfa_enabled:
+        token, _ = mint_mfa_pending(str(user.id))
+        return JSONResponse({"mfa_required": True, "mfa_token": token})
+
+    response = await _mint_and_record(cookie_backend, user, request)
+    await manager.on_after_login(user, request, response)
+    return response
+
+
+@router.post("/auth/bearer/login", name="auth:bearer.login.mfa-gated")
+async def login_bearer(
+    request: Request,
+    credentials: OAuth2PasswordRequestForm = Depends(),
+    manager: UserManager = Depends(get_user_manager),
+):
+    user = await _authenticate_or_400(credentials, manager)
+    if user.mfa_enabled:
+        token, _ = mint_mfa_pending(str(user.id))
+        return JSONResponse({"mfa_required": True, "mfa_token": token})
+
+    response = await _mint_and_record(bearer_backend, user, request)
+    await manager.on_after_login(user, request, response)
+    return response
+
+
+class _MfaChallengeRequest(BaseModel):
+    mfa_token: str
+    code: str
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+@router.post("/auth/mfa/challenge")
+async def mfa_challenge(
+    body: _MfaChallengeRequest,
+    request: Request,
+    manager: UserManager = Depends(get_user_manager),
+):
+    decoded = verify_mfa_pending(body.mfa_token)
+    if decoded is None:
+        raise HTTPException(status_code=401, detail="invalid_mfa_token")
+    user_id, jti = decoded
+
+    limiter_key = f"{_client_ip(request)}|{jti}"
+    if not mfa_challenge_limiter.allow(limiter_key):
+        raise HTTPException(status_code=429, detail="mfa_too_many_attempts")
+
+    try:
+        user = await manager.get(PydanticObjectId(user_id))
+    except Exception as exc:  # noqa: BLE001 — UserNotExists/InvalidID both surface as 401
+        raise HTTPException(status_code=401, detail="invalid_mfa_token") from exc
+    if not user.is_active or not user.mfa_enabled:
+        raise HTTPException(status_code=401, detail="invalid_mfa_token")
+
+    ok = False
+    if user.mfa_totp_secret and mfa_service.verify_totp(user.mfa_totp_secret, body.code):
+        ok = True
+    elif mfa_service.consume_backup_code(user, body.code):
+        await user.save()
+        ok = True
+
+    if not ok:
+        raise HTTPException(status_code=401, detail="mfa_invalid_code")
+
+    response = await _mint_and_record(cookie_backend, user, request)
+    await manager.on_after_login(user, request, response)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# WebSocket ticket — short-lived single-use JWT the SPA uses to authenticate
+# the /ws/cloud upgrade. The browser can't ride the HttpOnly paw_auth
+# cookie onto a cross-origin WS handshake (SameSite=Lax excludes script-
+# initiated cross-origin WS upgrades), so the SPA pays one REST round-trip
+# to swap its cookie session for a 30-second ticket consumed at upgrade.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/ws/ticket")
+async def issue_ws_ticket(user: Any = Depends(current_active_user)) -> dict:
+    ticket = await mint_ws_ticket(str(user.id))
+    return {"ticket": ticket}
+
+
+# ---------------------------------------------------------------------------
+# Logout — flips session.revoked + adds jti to Redis set, then clears the
+# cookie / bearer 204 response. The fastapi-users sub-router's /auth/logout
+# is shadowed by these because they're registered first.
+# ---------------------------------------------------------------------------
+
+
+async def _revoke_current(request: Request, user: Any) -> None:
+    jti = _current_jti(request)
+    if not jti:
+        return
+    try:
+        await sessions_service.revoke_session(str(user.id), jti, by_user_id=str(user.id))
+    except Exception:  # noqa: BLE001 — already-revoked / missing row is non-fatal
+        pass
+
+
+@router.post("/auth/logout", name="auth:cookie.logout.revoke")
+async def logout_cookie(
+    request: Request,
+    user: Any = Depends(current_active_user),
+):
+    from pocketpaw_ee.cloud._core.csrf import clear_csrf_cookie
+
+    await _revoke_current(request, user)
+    response = await cookie_backend.transport.get_logout_response()
+    clear_csrf_cookie(response)
+    return response
+
+
+@router.post("/auth/bearer/logout", name="auth:bearer.logout.revoke")
+async def logout_bearer(
+    request: Request,
+    user: Any = Depends(current_active_user),
+):
+    from pocketpaw_ee.cloud._core.csrf import clear_csrf_cookie
+
+    await _revoke_current(request, user)
+    response = Response(status_code=204)
+    clear_csrf_cookie(response)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Session list + revoke endpoints (Wave 3 Task 6)
+# ---------------------------------------------------------------------------
+
+
+def _session_to_out(doc, *, current_jti: str | None) -> SessionOut:
+    return SessionOut(
+        id=str(doc.id),
+        jti=doc.jti,
+        ip=doc.ip,
+        device_label=doc.device_label,
+        issued_at=doc.issued_at.isoformat() if doc.issued_at else None,
+        last_seen_at=doc.last_seen_at.isoformat() if doc.last_seen_at else None,
+        is_current=(doc.jti == current_jti),
+    )
+
+
+@router.get("/auth/sessions", response_model=list[SessionOut])
+async def list_my_sessions(
+    request: Request,
+    user: Any = Depends(current_active_user),
+) -> list[SessionOut]:
+    rows = await sessions_service.list_sessions(str(user.id))
+    cur = _current_jti(request)
+    return [_session_to_out(r, current_jti=cur) for r in rows]
+
+
+@router.delete("/auth/sessions/{jti}")
+async def revoke_my_session(
+    jti: str,
+    user: Any = Depends(current_active_user),
+) -> dict:
+    await sessions_service.revoke_session(str(user.id), jti, by_user_id=str(user.id))
+    return {"ok": True}
+
+
+@router.post("/auth/sessions/revoke-others", response_model=RevokeOthersResponse)
+async def revoke_other_sessions(
+    request: Request,
+    user: Any = Depends(current_active_user),
+) -> RevokeOthersResponse:
+    cur = _current_jti(request) or ""
+    n = await sessions_service.revoke_all_others(str(user.id), cur)
+    return RevokeOthersResponse(revoked=n)
+
+
+# ---------------------------------------------------------------------------
+# Guest accounts (BYOK-first onboarding, 2026-09-01, feat/byok-guest-backend).
+# Registered BEFORE the fastapi-users sub-routers below, same as the MFA login
+# overrides at the top of this file. /auth/guest mints an anonymous account
+# from a validated provider key and answers with the SAME cookie login
+# response /auth/login answers with; /auth/guest/upgrade attaches real
+# credentials to the SAME user id (the stock /auth/register cannot — it
+# always creates a new user).
+# ---------------------------------------------------------------------------
+
+
+class _GuestMintRequest(BaseModel):
+    api_key: str
+    provider: str = "anthropic"
+    # Only meaningful for provider "openai_compatible". The URL is checked
+    # against the strict SSRF guard inside ``mint_guest``'s validation call,
+    # not here, so that one guard covers both the guest route and /byok/key.
+    base_url: str | None = None
+    model: str | None = None
+
+
+class _GuestUpgradeRequest(BaseModel):
+    email: str
+    password: str
+
+
+@router.post("/auth/guest", name="auth:guest.mint")
+async def guest_mint(
+    body: _GuestMintRequest,
+    request: Request,
+):
+    """Try-before-signup: validate the key, mint guest user + workspace.
+
+    Rate-limited per IP as literally the first step — the key validation
+    inside ``mint_guest`` is a provider round trip on our egress, and an
+    unthrottled mint route doubles as a key-checking oracle.
+    """
+    if not guest_mint_limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="guest_mint_rate_limited")
+    user = await guest_service.mint_guest(
+        body.api_key,
+        provider=body.provider,
+        base_url=body.base_url,
+        model=body.model,
+    )
+    response = await _mint_and_record(cookie_backend, user, request)
+    return response
+
+
+def _require_password_signup_open() -> None:
+    """Refuse a new password account while the launch switch has it closed."""
+    if not get_settings().password_signup_open:
+        raise Forbidden(
+            "auth.password_signup_closed",
+            "Sign-up with email and password is closed during early access. "
+            "Continue with Google instead.",
+        )
+
+
+@router.post(
+    "/auth/guest/upgrade",
+    name="auth:guest.upgrade",
+    dependencies=[Depends(_require_password_signup_open)],
+)
+async def guest_upgrade(
+    body: _GuestUpgradeRequest,
+    user: Any = Depends(current_active_user),
+) -> dict:
+    """Attach email+password to the authenticated guest — same user id,
+    workspace/sessions/pages/key all stay. The existing session keeps working;
+    the client should re-fetch /auth/me."""
+    try:
+        upgraded = await guest_service.upgrade_guest(user, email=body.email, password=body.password)
+    except InvalidPasswordException as exc:
+        # Register's exact shape, so the client's password-field mapping works.
+        raise HTTPException(
+            status_code=400,
+            detail={"code": ErrorCode.REGISTER_INVALID_PASSWORD, "reason": exc.reason},
+        ) from exc
+    return {
+        "id": str(upgraded.id),
+        "email": upgraded.email,
+        "is_guest": upgraded.is_guest,
+    }
+
+
+# ---------------------------------------------------------------------------
+# fastapi-users sub-routers (logout/register). The login + logout routes
+# are overridden above; register still comes from upstream.
+# ---------------------------------------------------------------------------
+
+router.include_router(
+    fastapi_users.get_auth_router(cookie_backend),
+    prefix="/auth",
+)
+router.include_router(
+    fastapi_users.get_auth_router(bearer_backend),
+    prefix="/auth/bearer",
+)
+router.include_router(
+    fastapi_users.get_register_router(UserRead, UserCreate),
+    prefix="/auth",
+    dependencies=[Depends(_require_password_signup_open)],
+)
+router.include_router(
+    fastapi_users.get_reset_password_router(),
+    prefix="/auth",
+)
+router.include_router(
+    fastapi_users.get_verify_router(UserRead),
+    prefix="/auth",
+)
+
+router.include_router(api_keys_router)
+
+from pocketpaw_ee.cloud.auth.social import router as social_router  # noqa: E402
+from pocketpaw_ee.cloud.auth.sso import router as sso_router  # noqa: E402
+
+router.include_router(sso_router)
+router.include_router(social_router)
+
+
+# ---------------------------------------------------------------------------
+# Profile endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/auth/me", response_model=ProfileOut)
+async def get_me(
+    ctx: RequestContext = Depends(request_context),
+) -> ProfileOut:
+    user = await auth_service.get_profile(ctx)
+    return auth_user_to_profile_out(user)
+
+
+@router.patch("/auth/me", response_model=ProfileOut)
+async def update_me(
+    body: ProfileUpdateRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> ProfileOut:
+    user = await auth_service.update_profile(
+        ctx,
+        full_name=body.full_name,
+        avatar=body.avatar,
+        status=body.status,
+    )
+    return auth_user_to_profile_out(user)
+
+
+@router.post("/auth/set-active-workspace")
+async def set_active_workspace(
+    body: SetWorkspaceRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> dict:
+    await auth_service.set_active_workspace(ctx, body.workspace_id)
+    return {"ok": True, "activeWorkspace": body.workspace_id}
+
+
+# ---------------------------------------------------------------------------
+# MFA / TOTP enrollment (Wave 3 Task 3)
+# ---------------------------------------------------------------------------
+
+
+class _MfaVerifyRequest(BaseModel):
+    code: str
+
+
+class _MfaDisableRequest(BaseModel):
+    password: str
+    code: str
+
+
+async def _audit_mfa(workspace: str | None, user_id: str, action: str) -> None:
+    await audit_service.record(
+        workspace or "system",
+        user_id,
+        action,
+        target_type="user",
+        target_id=user_id,
+    )
+
+
+@router.post("/auth/mfa/setup")
+async def mfa_setup(
+    user: Any = Depends(current_active_user),
+) -> dict:
+    if user.mfa_enabled:
+        raise HTTPException(status_code=409, detail="mfa_already_enabled")
+
+    secret = mfa_service.generate_secret()
+    user.mfa_totp_secret = secret
+    user.mfa_pending_setup = True
+    await user.save()
+
+    otpauth_url = mfa_service.build_otpauth_url(secret, user.email)
+    qr_svg = mfa_service.build_qr_svg(otpauth_url)
+    return {"secret": secret, "otpauth_url": otpauth_url, "qr_svg": qr_svg}
+
+
+@router.post("/auth/mfa/verify")
+async def mfa_verify(
+    body: _MfaVerifyRequest,
+    user: Any = Depends(current_active_user),
+) -> dict:
+    if user.mfa_enabled:
+        raise HTTPException(status_code=409, detail="mfa_already_enabled")
+    if not user.mfa_pending_setup or not user.mfa_totp_secret:
+        raise HTTPException(status_code=400, detail="mfa_setup_not_started")
+    if not mfa_service.verify_totp(user.mfa_totp_secret, body.code):
+        raise HTTPException(status_code=400, detail="mfa_invalid_code")
+
+    plaintext, hashed = mfa_service.generate_backup_codes()
+    user.mfa_enabled = True
+    user.mfa_pending_setup = False
+    user.mfa_verified_at = datetime.now(UTC)
+    user.mfa_backup_codes = hashed
+    await user.save()
+
+    await _audit_mfa(user.active_workspace, str(user.id), "mfa.enable")
+    return {"enabled": True, "backup_codes": plaintext}
+
+
+@router.post("/auth/mfa/disable")
+async def mfa_disable(
+    body: _MfaDisableRequest,
+    user: Any = Depends(current_active_user),
+    manager: UserManager = Depends(get_user_manager),
+) -> dict:
+    if not user.mfa_enabled:
+        raise HTTPException(status_code=400, detail="mfa_not_enabled")
+    if not mfa_password_limiter.allow(str(user.id)):
+        raise HTTPException(status_code=429, detail="mfa_too_many_attempts")
+
+    verified, _ = await password_hashing.verify_and_update(
+        body.password, user.hashed_password, manager.password_helper
+    )
+    if not verified:
+        raise HTTPException(status_code=400, detail="mfa_invalid_password")
+    if not mfa_service.verify_totp(user.mfa_totp_secret or "", body.code):
+        raise HTTPException(status_code=400, detail="mfa_invalid_code")
+
+    user.mfa_enabled = False
+    user.mfa_pending_setup = False
+    user.mfa_totp_secret = None
+    user.mfa_backup_codes = []
+    user.mfa_verified_at = None
+    await user.save()
+
+    await _audit_mfa(user.active_workspace, str(user.id), "mfa.disable")
+    return {"enabled": False}
+
+
+@router.post("/auth/mfa/backup-codes/regenerate")
+async def mfa_regenerate_backup_codes(
+    body: _MfaDisableRequest,
+    user: Any = Depends(current_active_user),
+    manager: UserManager = Depends(get_user_manager),
+) -> dict:
+    if not user.mfa_enabled:
+        raise HTTPException(status_code=400, detail="mfa_not_enabled")
+    if not mfa_password_limiter.allow(str(user.id)):
+        raise HTTPException(status_code=429, detail="mfa_too_many_attempts")
+
+    verified, _ = await password_hashing.verify_and_update(
+        body.password, user.hashed_password, manager.password_helper
+    )
+    if not verified:
+        raise HTTPException(status_code=400, detail="mfa_invalid_password")
+    if not mfa_service.verify_totp(user.mfa_totp_secret or "", body.code):
+        raise HTTPException(status_code=400, detail="mfa_invalid_code")
+
+    plaintext, hashed = mfa_service.generate_backup_codes()
+    user.mfa_backup_codes = hashed
+    await user.save()
+
+    await _audit_mfa(user.active_workspace, str(user.id), "mfa.backup_codes.regenerate")
+    return {"backup_codes": plaintext}
+
+
+# ---------------------------------------------------------------------------
+# Avatar upload + serve — file I/O stays here; persistence via service
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/avatar", response_model=ProfileOut)
+async def upload_avatar(
+    file: UploadFile = File(...),
+    user: Any = Depends(current_active_user),
+    ctx: RequestContext = Depends(request_context),
+) -> ProfileOut:
+    """Upload a profile picture. Returns the updated profile with the avatar URL."""
+    if file.content_type not in _ALLOWED_AVATAR_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: {', '.join(_ALLOWED_AVATAR_TYPES)}",
+        )
+
+    content = await file.read()
+    if len(content) > _MAX_AVATAR_SIZE:
+        raise HTTPException(status_code=413, detail="Avatar must be under 5MB")
+
+    ext_map = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    ext = ext_map.get(file.content_type or "", ".png")
+    filename = f"{user.id}{ext}"
+    dest = _AVATAR_DIR / filename
+
+    for old in _AVATAR_DIR.glob(f"{user.id}.*"):
+        if old.name != filename:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+    dest.write_bytes(content)
+
+    avatar_path = f"/api/v1/auth/avatar/{filename}"
+    updated = await auth_service.set_avatar_path(ctx, avatar_path)
+    return auth_user_to_profile_out(updated)
+
+
+@router.get("/auth/avatar/{filename}")
+async def get_avatar(
+    filename: str,
+    w: int = Query(default=0, ge=0, le=2048, description="Thumbnail width"),
+    h: int = Query(default=0, ge=0, le=2048, description="Thumbnail height"),
+    q: int = Query(default=80, ge=1, le=100, description="Quality"),
+    f: str = Query(default="webp", description="Format: webp, jpeg, png"),
+):
+    """Serve a user's avatar file, optionally resized."""
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    path = _AVATAR_DIR / filename
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Avatar not found")
+
+    has_thumb = w > 0 or h > 0
+    if not has_thumb:
+        return FileResponse(path)
+
+    # Resize the local avatar file on-the-fly with Pillow.
+    import asyncio
+    import io
+    import os
+
+    from PIL import Image as PILImage
+
+    fmt_key = f.lower() if f.lower() in ("webp", "jpeg", "jpg", "png") else "webp"
+    _FMT_MAP = {
+        "webp": ("WEBP", "image/webp"),
+        "jpeg": ("JPEG", "image/jpeg"),
+        "jpg": ("JPEG", "image/jpeg"),
+        "png": ("PNG", "image/png"),
+    }
+    pil_fmt, out_mime = _FMT_MAP[fmt_key]
+
+    cache_dir = _AVATAR_DIR / "_thumbs"
+    cache_dir.mkdir(exist_ok=True)
+    cache_file = cache_dir / f"{filename}_{w}x{h}_q{q}.{fmt_key}"
+
+    # Cache hit — serve from disk.
+    if cache_file.exists():
+        try:
+            os.utime(cache_file, None)
+        except OSError:
+            pass
+        return FileResponse(
+            cache_file,
+            media_type=out_mime,
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
+
+    def _resize() -> bytes:
+        img = PILImage.open(path)
+        if fmt_key in ("jpeg", "jpg", "webp"):
+            if img.mode in ("RGBA", "P", "LA"):
+                img = img.convert("RGB")
+        elif img.mode == "P":
+            img = img.convert("RGBA")
+        size = (w, h) if (w and h) else ((w, w) if w else (h, h))
+        img.thumbnail(size, PILImage.LANCZOS)
+        out = io.BytesIO()
+        kwargs: dict = {"format": pil_fmt}
+        if fmt_key != "png":
+            kwargs["quality"] = q
+        else:
+            kwargs["optimize"] = True
+        img.save(out, **kwargs)
+        return out.getvalue()
+
+    try:
+        thumb_bytes = await asyncio.to_thread(_resize)
+    except Exception:
+        # Fall back to original on resize failure.
+        return FileResponse(path)
+
+    # Write-through cache (atomic).
+    tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
+    try:
+        tmp.write_bytes(thumb_bytes)
+        tmp.rename(cache_file)
+    except OSError:
+        pass
+
+    return Response(
+        content=thumb_bytes,
+        media_type=out_mime,
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )

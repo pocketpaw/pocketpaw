@@ -1,0 +1,690 @@
+"""Canonical error hierarchy for ee/cloud.
+
+Routers must never raise `HTTPException`; services raise these `CloudError`
+subclasses and `_core.http.cloud_error_handler` maps them to the JSON envelope
+`{"error": {"code", "message"}}` (plus `"details"` only when an error sets it, so
+every envelope without details is byte-identical). `code` is the machine-readable
+contract clients key on; `details` carries structured data a client would otherwise
+parse out of `message` (e.g. the classes in `sites.do_data_loss_unconfirmed`).
+
+Status families: 400 `BadRequest`, 402 for money/plan refusals (the `*LimitError`
+caps, `InsufficientCredits`, `QuotaExceeded`, `NoActiveSubscription`, and the
+per-site capability gates `CustomDomainNotEntitled`, `ProjectDownloadNotEntitled`,
+`BadgeRemovalNotEntitled`), 403 `Forbidden` and `EarlyAccessNotAvailable`, 404
+`NotFound`, 409 `ConflictError`, 412 `PreconditionFailed` (stale If-Match), 413
+`PayloadTooLarge`, 422 `ValidationError`, 429 `RateLimited`, 500 `Internal`, 503
+`EarlyAccessPaused`.
+The guest/BYOK family (`GuestLimitError` and siblings) adds top-level
+`code`/`kind` keys beside the envelope: a frozen frontend contract. Re-exported
+via `ee.cloud.shared.errors` (a shim); new code imports from here.
+"""
+
+from __future__ import annotations
+
+
+class CloudError(Exception):
+    """Base cloud error with status_code, code (machine-readable),
+    message (human-readable)."""
+
+    def __init__(
+        self, status_code: int, code: str, message: str, details: dict | None = None
+    ) -> None:
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        self.details = details
+        super().__init__(f"{code}: {message}")
+
+    def to_dict(self) -> dict:
+        """Return a JSON-serializable error envelope. ``details`` is included only
+        when set, so an error without it serializes exactly as before."""
+        error: dict = {"code": self.code, "message": self.message}
+        if self.details is not None:
+            error["details"] = self.details
+        return {"error": error}
+
+
+class NotFound(CloudError):
+    """Resource not found (404)."""
+
+    def __init__(self, resource: str, resource_id: str = "") -> None:
+        code = f"{resource}.not_found"
+        if resource_id:
+            message = f"{resource} '{resource_id}' not found"
+        else:
+            message = f"{resource} not found"
+        super().__init__(404, code, message)
+
+
+class Forbidden(CloudError):
+    """Access denied (403)."""
+
+    def __init__(self, code: str, message: str = "Access denied") -> None:
+        super().__init__(403, code, message)
+
+
+class ConflictError(CloudError):
+    """Resource conflict (409)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(409, code, message)
+
+
+class PreconditionFailed(CloudError):
+    """A conditional request precondition failed (412).
+
+    Standard HTTP ``If-Match`` optimistic-concurrency semantics: the caller
+    supplied an ``If-Match`` etag (here the file's ``content_version``) that no
+    longer matches the current resource, so the write is refused. Distinct from
+    ``ConflictError`` (409, a generic resource conflict) — a stale ``If-Match``
+    is precisely a 412. Added by FL-2 (file-version spine, port of #1193) so a
+    stale-etag PUT/revert returns 412.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(412, code, message)
+
+
+class PayloadTooLarge(CloudError):
+    """The request names more bytes than this endpoint will accept (413).
+
+    Added 2026-09-14 for the multipart upload contract, where a file over
+    ``max_large_file_bytes`` is refused at INIT — before a single part moves —
+    and again at complete against the size storage actually reports, because
+    the size named at init is client-supplied.
+
+    Distinct from ``StorageLimitError`` (402, the workspace's priced storage
+    plan) and ``DailyUploadLimitError`` (429, the daily abuse ceiling): both of
+    those are about the account, clear by upgrading or by waiting, and say
+    nothing about this file. This one is about THIS file, and the only cure is
+    a smaller one.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(413, code, message)
+
+
+class ValidationError(CloudError):
+    """Validation failure (422)."""
+
+    def __init__(self, code: str, message: str, details: dict | None = None) -> None:
+        super().__init__(422, code, message, details)
+
+
+class GuestLimitError(CloudError):
+    """A guest account hit one of its hard caps (402, ``guest_limit_reached``).
+
+    Added 2026-09-01 (feat/byok-guest-backend). ``kind`` says WHICH cap:
+    ``"sessions"`` (session create) or ``"turns"`` (daily turn budget). The wire
+    body carries top-level ``code`` + ``kind`` — the exact shape the frontend's
+    signup prompt keys on — BESIDE the standard ``{"error": {...}}`` envelope,
+    so generic error handling keeps working.
+    """
+
+    def __init__(self, kind: str, message: str | None = None) -> None:
+        self.kind = kind
+        noun = "sessions" if kind == "sessions" else "turns for today"
+        super().__init__(
+            402,
+            "guest_limit_reached",
+            message or f"You've used all your guest {noun}. Sign up to keep going.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["code"] = self.code
+        base["kind"] = self.kind
+        return base
+
+
+class GuestIllustrateForbidden(CloudError):
+    """Guests cannot generate illustrations (403, ``guest_illustrate_forbidden``).
+
+    Added 2026-09-01. The daily budget is a COST CEILING, not an entitlement:
+    it caps how much a workspace can spend, and a guest can mint a fresh
+    workspace to get a fresh ceiling. Generation costs real money on the
+    PLATFORM's account (a guest's own BYOK key pays for their tokens and not
+    for this), so the ceiling alone left an unbounded bill attached to a
+    signup form that asks for nothing.
+
+    Same contract discipline as ``GuestUploadForbidden``: top-level ``code``
+    beside the standard envelope, and the refusal doubles as the signup hook.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            403,
+            "guest_illustrate_forbidden",
+            "Sign up to have Otherhand draw for you.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["code"] = self.code
+        return base
+
+
+class GuestUploadForbidden(CloudError):
+    """Guests cannot upload files (403, ``guest_upload_forbidden``).
+
+    Added 2026-09-01 (feat/byok-guest-backend). Top-level ``code`` beside the
+    standard envelope — same contract discipline as ``GuestLimitError``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            403,
+            "guest_upload_forbidden",
+            "Sign up to upload files and keep your pages.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["code"] = self.code
+        return base
+
+
+class ByokKeyRequired(CloudError):
+    """A signed-up kiosk turn found no usable BYOK key (402, ``byok_key_required``).
+
+    Added 2026-09-12 (feat/kiosk-require-byok). The account sibling of
+    ``GuestKeyRequired``, and deliberately a DIFFERENT code: a guest is told to
+    create an account, while someone who already has one must be told to add a
+    key. Reusing the guest code would show a logged-in user a "create an
+    account" prompt, which is the kind of dead end that reads as a broken
+    product rather than a missing setting.
+
+    Only ever raised on the Otherhand surface, and only while
+    ``other_hand_require_byok`` is on — the window between launching the kiosk
+    and switching billing on. Everywhere else the platform fallback stands.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            402,
+            "byok_key_required",
+            "Add your own API key in Settings to keep going.",
+        )
+
+
+class GuestKeyRequired(CloudError):
+    """A guest turn found no usable BYOK key (402, ``guest_key_required``).
+
+    Added 2026-09-01 (feat/byok-guest-backend). Guests have NO platform
+    fallback by design — a missing/undecryptable stored key refuses the turn
+    with this code (the frontend re-prompts for the key) instead of silently
+    billing the platform.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            402,
+            "guest_key_required",
+            "Your API key is missing or no longer usable. Re-enter it to keep going.",
+        )
+
+    def to_dict(self) -> dict:
+        base = super().to_dict()
+        base["code"] = self.code
+        return base
+
+
+class BadRequest(CloudError):
+    """Malformed / untrusted request (400).
+
+    Distinct from ``ValidationError`` (422, a well-formed request that fails a
+    field-level rule): a 400 is for a request that can't be trusted at all — a
+    webhook whose signature doesn't verify, a body that isn't parseable. Used by
+    the billing webhook so an unverifiable Dodo delivery returns 400, not 422.
+    """
+
+    def __init__(self, code: str, message: str = "Bad request") -> None:
+        super().__init__(400, code, message)
+
+
+class SeatLimitError(CloudError):
+    """Seat/billing limit reached (402)."""
+
+    def __init__(self, seats: int) -> None:
+        super().__init__(402, "billing.seat_limit", f"Seat limit of {seats} reached")
+
+
+class PocketLimitError(CloudError):
+    """Workspace hit its plan's pocket cap (402).
+
+    Sibling of ``SeatLimitError`` for the pocket-create seam: the workspace holds
+    its plan's ``max_pockets`` and a new create would exceed it. 402 (same
+    money-adjacent family) with a distinct ``billing.pocket_limit`` code so the UI
+    can prompt a plan upgrade. Enforced at CREATE time only — never removes an
+    existing pocket — and only when ``billing_enforced`` is on.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(402, "billing.pocket_limit", f"Pocket limit of {limit} reached")
+
+
+class ConnectorLimitError(CloudError):
+    """Workspace hit its plan's connector cap (402).
+
+    Sibling of ``SeatLimitError`` for the connector-enable seam: the workspace
+    already has its plan's ``max_connectors`` enabled and enabling another would
+    exceed it. 402 with a distinct ``billing.connector_limit`` code so the UI can
+    prompt a plan upgrade. Enforced at ENABLE time only — never disables an
+    already-enabled connector — and only when ``billing_enforced`` is on.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(402, "billing.connector_limit", f"Connector limit of {limit} reached")
+
+
+class CustomDomainNotEntitled(CloudError):
+    """A site tried to attach a custom domain its per-site plan does not grant (402).
+
+    Sibling of ``PocketLimitError`` / ``ConnectorLimitError`` for the domain-attach
+    seam, and the same money-adjacent 402 family, with a distinct
+    ``billing.custom_domain_not_entitled`` code so the UI prompts a per-SITE plan
+    upgrade rather than a workspace one.
+
+    The distinction from its siblings is that this is not a COUNT limit: there is no
+    ceiling to report, only a capability the site's tier either grants or does not.
+    ``CustomDomainLimitError`` below is the count sibling, and it is the one that
+    normally fires — the free floor grants every site its own domain, so a tier
+    granting NONE only exists if the catalog is edited to say so, or if a
+    resolve lands on a tier whose allowance is 0. The class stays because that is
+    exactly the fail-closed case worth having a distinct code for.
+    Two different failures land here and the message separates them, because the
+    remedies differ — a free site upgrades its plan, while a paid site whose
+    subscription lapsed fixes its billing and keeps the tier it already chose.
+
+    Enforced at ATTACH time only — never retroactive. A downgrade does not rip a
+    live domain off a deployed site, and re-adding an already-connected domain
+    (the only self-service repair for a missing Worker route) stays reachable. The
+    spec's period-end detach is a different lane. Gated on ``billing_enforced``,
+    so OSS / self-host never sees it.
+    """
+
+    def __init__(self, *, plan_tier: str, subscription_active: bool) -> None:
+        if subscription_active:
+            detail = (
+                f"the {plan_tier} plan does not include a custom domain — "
+                "upgrade this site's plan to connect one"
+            )
+        else:
+            detail = (
+                f"this site is on {plan_tier} without an active subscription — "
+                "renew it to connect a custom domain"
+            )
+        super().__init__(402, "billing.custom_domain_not_entitled", f"Custom domain: {detail}")
+
+
+class CustomDomainLimitError(CloudError):
+    """A free site already carries as many custom hostnames as the floor allows (402).
+
+    The COUNT sibling of ``CustomDomainNotEntitled``, and a separate class because
+    the remedies differ: that one means "this site's subscription is not paying",
+    this one means "this site has used its free domain, upgrade it to add more".
+    A UI that collapses them tells a paying customer to renew a subscription that
+    never lapsed.
+
+    **The allowance is per site.** Every free site may carry its own custom domain,
+    apex + ``www``; ``limit`` is that per-site hostname count. Nothing another site
+    in the workspace holds counts against it, and paid tiers are uncapped.
+
+    Enforced at ATTACH time only, never retroactive: an existing domain is never
+    detached, and re-adding an already-connected hostname (the only self-service
+    repair for a missing Worker route) never reaches this check. Gated on
+    ``billing_enforced``, so OSS / self-host never sees it.
+    """
+
+    def __init__(self, *, limit: int) -> None:
+        detail = (
+            f"this site already has {limit} custom hostnames, which is the limit "
+            "on the free plan — upgrade it to connect more"
+        )
+        super().__init__(402, "billing.custom_domain_limit", f"Custom domain: {detail}")
+
+
+class ProjectDownloadNotEntitled(CloudError):
+    """A site's project was requested on a plan that does not include the download (402).
+
+    Sibling of ``CustomDomainNotEntitled`` — same 402 family, same per-SITE shape,
+    same two-remedies message — for the project-download seam. Distinct
+    ``billing.project_download_not_entitled`` code so the UI prompts a per-site plan
+    upgrade rather than a workspace one, exactly as its sibling does.
+
+    Not a count limit: there is no ceiling to report, only a capability
+    ``SiteEntitlements.project_download`` either grants or does not.
+
+    The builder's Code tab asks the same per-site predicate
+    (``entitlements.service.site_code_entitled``), so a site that may download its
+    project may also see its source, and the reverse. The one difference is the
+    operator's workspace override (``WorkspaceOverrides.site_source_visible``), which
+    reaches the Code tab only: it is a visibility lever, not a refund of a paid
+    download. Do not add the override as a second check at this seam.
+
+    Gated on ``sites_enforced()`` like every other per-site cap, so OSS / self-host
+    never sees it.
+    """
+
+    def __init__(self, *, plan_tier: str, subscription_active: bool) -> None:
+        if subscription_active:
+            detail = (
+                f"the {plan_tier} plan does not include the project download — "
+                "upgrade this site's plan to download its source"
+            )
+        else:
+            detail = (
+                f"this site is on {plan_tier} without an active subscription — "
+                "renew it to download the project"
+            )
+        super().__init__(
+            402, "billing.project_download_not_entitled", f"Project download: {detail}"
+        )
+
+
+class BadgeRemovalNotEntitled(CloudError):
+    """A site asked to hide the PocketPaw badge on a plan that does not remove it (402).
+
+    Sibling of ``CustomDomainNotEntitled`` / ``ProjectDownloadNotEntitled`` — same
+    402 family, same per-SITE shape, same two-remedies message. Raised by
+    ``PATCH /sites/{id}/branding`` when ``badge_hidden=True`` is requested and
+    ``SiteEntitlements.badge_required`` is still True, BEFORE anything is written.
+
+    Refusing here is a UI courtesy, not the enforcement. The stamper would badge a
+    free site whatever the stored preference says; this only stops the switch from
+    reading "hidden" on a site that will keep shipping the badge. Gated on
+    ``sites_enforced()`` like its siblings, so OSS / self-host never sees it.
+    """
+
+    def __init__(self, *, plan_tier: str, subscription_active: bool) -> None:
+        if subscription_active:
+            detail = (
+                f"the {plan_tier} plan does not include removing the PocketPaw badge — "
+                "upgrade this site's plan to hide it"
+            )
+        else:
+            detail = (
+                f"this site is on {plan_tier} without an active subscription — "
+                "renew it to hide the PocketPaw badge"
+            )
+        super().__init__(402, "billing.badge_removal_not_entitled", f"Badge removal: {detail}")
+
+
+class CallLimitError(CloudError):
+    """Workspace hit its plan's daily LiveKit call-time cap (402).
+
+    Sibling of ``SeatLimitError`` for the LiveKit room-create seam: Free has no
+    call minutes at all (``max_call_seconds_per_day`` == 0), and a paid tier
+    blocks a NEW call once today's cumulative call time would exceed its daily
+    budget. 402 with a distinct ``billing.call_limit`` code so the UI can prompt
+    a plan upgrade. Enforced at CALL-START time only — an already-running call is
+    force-ended at its budget deadline rather than removed.
+    """
+
+    def __init__(self, limit_seconds: int | None) -> None:
+        if limit_seconds == 0:
+            label = "no call minutes on your plan"
+        elif limit_seconds is not None:
+            label = f"daily call limit of {limit_seconds // 60} minutes reached"
+        else:  # pragma: no cover - uncapped plans never raise
+            label = "daily call limit reached"
+        super().__init__(402, "billing.call_limit", f"Call limit: {label}")
+
+
+def _human_bytes(n: int) -> str:
+    """Format a byte count the way storage products do (GB for this scale)."""
+    if n % 1_000_000_000 == 0:
+        return f"{n // 1_000_000_000} GB"
+    if n % 1_000_000 == 0:
+        return f"{n // 1_000_000} MB"
+    if n % 1_000 == 0:
+        return f"{n // 1_000} KB"
+    return f"{n} bytes"
+
+
+class StorageLimitError(CloudError):
+    """Workspace hit its plan's S3 storage cap (402).
+
+    Sibling of ``SeatLimitError`` for the UPLOAD seam: the sum of the workspace's
+    live ``FileUpload`` blob sizes (the Files → Knowledge Base store) is at its
+    plan's ``max_storage_bytes`` and the new upload would push it over. 402 with
+    a distinct ``billing.storage_limit`` code so the UI can prompt a plan
+    upgrade. Enforced at UPLOAD time only — never deletes an existing blob — and
+    only when ``billing_enforced`` is on.
+    """
+
+    def __init__(self, limit_bytes: int | None) -> None:
+        # Says what to DO, not only what happened. A cap with no way out reads
+        # as a broken upload; there are exactly two ways out and both belong in
+        # the sentence. "Storage limit: storage limit of 1 GB reached" was the
+        # old text, which managed to say the same thing twice and neither of
+        # them useful.
+        if limit_bytes is None:  # pragma: no cover - uncapped plans never raise
+            message = "Storage limit reached. Delete some files to free space."
+        else:
+            message = (
+                f"You've used all {_human_bytes(limit_bytes)} of storage. "
+                "Delete some files, or upgrade for more room."
+            )
+        super().__init__(402, "billing.storage_limit", message)
+
+
+class WorkspaceLimitError(CloudError):
+    """Account already owns as many workspaces as it may (429).
+
+    An abuse ceiling, not a plan feature. Every per-workspace bound in the
+    product is keyed on the workspace, so an account that can mint workspaces
+    in a loop gets a fresh empty counter each time and is bounded by nothing.
+    Being INVITED to many workspaces is normal and unaffected — only owning is
+    counted, and deleting one frees a slot.
+    """
+
+    def __init__(self, cap: int) -> None:
+        super().__init__(
+            429,
+            "workspace.owned_limit",
+            f"You already own {cap} workspaces. Delete one to create another.",
+        )
+
+
+class DailyUploadLimitError(CloudError):
+    """Workspace hit its daily upload ceiling (429).
+
+    Distinct from ``StorageLimitError`` in both cause and cure. That one is a
+    PLAN cap, priced, cleared by upgrading, and only enforced when billing is
+    on. This is an ABUSE ceiling that is always on and clears at the next UTC
+    midnight, so the code is ``uploads.daily_limit`` and the status is 429
+    rather than 402 — nothing is for sale here, the answer is to wait.
+    """
+
+    def __init__(self, dimension: str) -> None:
+        label = {
+            "files": "too many files uploaded today",
+            "bytes": "too much uploaded today",
+            "workspace": "no workspace on this upload",
+        }.get(dimension, "daily upload limit reached")
+        super().__init__(429, "uploads.daily_limit", f"Daily upload limit: {label}")
+
+
+class DailyTurnLimitError(CloudError):
+    """Workspace hit its daily agent-run ceiling (429).
+
+    Sibling of ``DailyUploadLimitError`` on the RUN seam, and deliberately not
+    ``credits.quota_exceeded``: that one is the priced quota and is gated on
+    ``billing_enforced``, while this is always on and resets at the next UTC
+    midnight.
+    """
+
+    def __init__(self, cap: int) -> None:
+        super().__init__(
+            429,
+            "runs.daily_limit",
+            f"Daily limit of {cap} agent runs reached for this workspace",
+        )
+
+
+class InsufficientCredits(CloudError):
+    """Credit wallet has too few credits for the requested debit (402)."""
+
+    def __init__(self, requested: int, available: int) -> None:
+        super().__init__(
+            402,
+            "credits.insufficient",
+            f"Insufficient credits: requested {requested}, available {available}",
+        )
+
+
+class QuotaExceeded(CloudError):
+    """Workspace hit its monthly credit ceiling for the period (402).
+
+    Distinct from ``InsufficientCredits`` (the wallet is empty): the wallet may
+    still hold credits, but the workspace has spent up to its plan's monthly cap
+    (the ``monthly_ceiling`` entitlement, extended by any purchased top-ups in the
+    period). Same 402 status as ``InsufficientCredits`` so the client treats both
+    as "can't spend right now", but a distinct machine code so the UI can prompt a
+    plan upgrade / top-up rather than just a balance refill. ``ceiling`` is the
+    EFFECTIVE cap (plan ceiling + period top-ups) and ``spent`` is the
+    month-to-date spend that met or crossed it.
+    """
+
+    def __init__(self, ceiling: int, spent: int) -> None:
+        self.ceiling = ceiling
+        self.spent = spent
+        super().__init__(
+            402,
+            "credits.quota_exceeded",
+            f"Monthly credit quota exceeded: spent {spent} of {ceiling} this month",
+        )
+
+
+class NoActiveSubscription(CloudError):
+    """Workspace has no active recurring subscription to act on (402).
+
+    Raised by the cancel path when a workspace asks to cancel but has no ``active``
+    subscription row — only historical / already-cancelled rows, or it never
+    subscribed. 402 (the same family as ``InsufficientCredits`` / ``QuotaExceeded``,
+    "you can't do the money action right now") so the client prompts a
+    not-subscribed state rather than treating it as a 404-style missing resource.
+
+    ``message`` is overridable because there are now TWO callers and the default
+    names only one of them. The site add-on rail raises this when a workspace with
+    no subscription tries to buy a paid site — the same 402, the same code, and a
+    client that reads the code keeps working — but telling that buyer there is
+    "no active subscription to cancel" describes an action they did not attempt.
+    The default is unchanged, so the cancel path and every existing test are
+    untouched.
+    """
+
+    def __init__(
+        self, message: str = "No active subscription to cancel for this workspace"
+    ) -> None:
+        super().__init__(
+            402,
+            "billing.no_active_subscription",
+            message,
+        )
+
+
+class EarlyAccessPaused(CloudError):
+    """Free early-access usage is paused platform-wide (503).
+
+    The operator kill switch (``launch_controls.free_usage_paused``) or the daily
+    free ceiling. Only unpaid, platform-funded runs see it; the wallet is not the
+    reason, so the answer is to wait, not to top up.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            "early_access.paused",
+            "Early access is busy right now. Your credits are safe; please try again later.",
+        )
+
+
+class EarlyAccessNotAvailable(CloudError):
+    """A spend surface the credit ledger does not meter, refused for an unpaid
+    early-access workspace (403).
+
+    Belt, mandates, Foresight runs, Studio and media generation, the Paw Bar
+    concierge and meeting notes. Nothing the user can top up fixes it while
+    payments are closed, so the copy says "not yet", not "upgrade".
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            403,
+            "early_access.not_available",
+            "This is not in early access yet.",
+        )
+
+
+class ModelNotAllowed(CloudError):
+    """A platform-funded early-access turn asked for a model it may not use (400).
+
+    Not on ``free_model_allowlist``, or nothing prices it (an unpriced model
+    bills 0). Paid workspaces and BYOK turns never see it.
+    """
+
+    def __init__(self, model: str) -> None:
+        super().__init__(
+            400,
+            "model.not_allowed",
+            f"'{model}' isn't available with early access credits yet. "
+            "Pick another model from the menu.",
+        )
+
+
+class RateLimited(CloudError):
+    """Rate limit exceeded (429)."""
+
+    def __init__(self, code: str, message: str = "Rate limit exceeded") -> None:
+        super().__init__(429, code, message)
+
+
+class Internal(CloudError):
+    """Unexpected internal error (500). Use sparingly — prefer specific codes."""
+
+    def __init__(self, code: str = "internal", message: str = "Internal server error") -> None:
+        super().__init__(500, code, message)
+
+
+def with_cause(error: CloudError, cause: BaseException) -> CloudError:
+    """Attach an underlying exception for log context. Returns the same error
+    so it can be used fluently: `raise with_cause(NotFound(...), exc)`.
+
+    The cause is stored on `__cause__` (Python's standard exception-chaining
+    slot). The `to_dict()` envelope sent to clients still contains only
+    `code` and `message`; the cause is not leaked.
+    """
+    error.__cause__ = cause
+    return error
+
+
+__all__ = [
+    "ByokKeyRequired",
+    "GuestKeyRequired",
+    "GuestLimitError",
+    "GuestUploadForbidden",
+    "BadRequest",
+    "CallLimitError",
+    "CloudError",
+    "ConflictError",
+    "ConnectorLimitError",
+    "Forbidden",
+    "InsufficientCredits",
+    "Internal",
+    "ModelNotAllowed",
+    "NoActiveSubscription",
+    "NotFound",
+    "PocketLimitError",
+    "PreconditionFailed",
+    "QuotaExceeded",
+    "RateLimited",
+    "SeatLimitError",
+    "DailyTurnLimitError",
+    "DailyUploadLimitError",
+    "StorageLimitError",
+    "WorkspaceLimitError",
+    "ValidationError",
+    "with_cause",
+]

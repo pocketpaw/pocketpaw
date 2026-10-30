@@ -1,0 +1,182 @@
+[
+  {
+    "label": "join: drop the workspace check",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if doc.workspace != workspace_id or not room_id:",
+    "replace": "    if not room_id:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "join: grant membership before the budget gate",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    result = await _run_meeting_call(doc, room_id, workspace_id, user_id)\n    if meeting_room:\n        await group_service.add_meeting_room_member(room_id, user_id)\n",
+    "replace": "    if meeting_room:\n        await group_service.add_meeting_room_member(room_id, user_id)\n    result = await _run_meeting_call(doc, room_id, workspace_id, user_id)\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "join: skip the membership check on a chat-room meeting",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if not meeting_room:\n        await livekit_service.require_call_group(room_id, user_id, workspace_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "join: stop extending the link",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "        doc.link_expires_at = now + LINK_TTL\n    # no-event",
+    "replace": "        pass\n    # no-event",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "closed: forget link expiry",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    return expires is not None and expires <= now",
+    "replace": "    return False",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "lookup: ignore room presence",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    return bool(info and info.get(\"active\"))",
+    "replace": "    return bool(info)",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "lookup: dashes not stripped",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    c = code.replace(\"-\", \"\").strip().lower()",
+    "replace": "    c = code.strip().lower()",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "join: emit meeting.started on every join",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if call_started:\n        # Same realtime-only",
+    "replace": "    if True:\n        # Same realtime-only",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "for later: start a call at create",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    try:\n        doc = await _create_meeting_row(workspace_id, user_id, body, meeting_room_id)\n",
+    "replace": "    try:\n        doc = await _create_meeting_row(workspace_id, user_id, body, meeting_room_id)\n        if meeting_room_id:\n            from pocketpaw_ee.cloud.livekit import service as _lk\n\n            await _lk.create_room(meeting_room_id, workspace_id, user_id, record_meeting=False)\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "rate limit: no per-IP bucket",
+    "file": "ee/pocketpaw_ee/cloud/_core/rate_limit.py",
+    "find": "    if not _meeting_lookup_limiter.check(f\"meeting-lookup:{_client_ip(request)}\").allowed:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "membership: any room type joinable by code",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "    if group.type != MEETING_GROUP_TYPE:\n        raise Forbidden(\"group.not_joinable\", \"Only meeting rooms are joined by meeting code\")\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py::test_add_meeting_room_member_refuses_other_rooms"
+    ]
+  },
+  {
+    "label": "self-heal: expired undated rows stay scheduled",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "            \"link_expires_at\": {\"$lt\": now_utc.replace(tzinfo=None)},",
+    "replace": "            \"link_expires_at\": {\"$lt\": datetime(1970, 1, 1)},",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "rooms route: meeting rooms back on the Instant-call path",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    result = await meetings_service.start_meeting_room_call(\n        workspace_id, str(user.id), body.group_id\n    )\n",
+    "replace": "    result = None\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "meeting call: record_meeting=True (twin row)",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    result = await livekit_service.create_room(room_id, workspace_id, user_id, record_meeting=False)\n\n    call_started",
+    "replace": "    result = await livekit_service.create_room(room_id, workspace_id, user_id)\n\n    call_started",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "meeting call: no ended check",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if _is_closed(doc, now):\n        raise CloudError(410, \"meeting.ended\", \"This meeting has ended.\")\n\n    result",
+    "replace": "    result",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "meeting call: keep the old budget deadline on a restart",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if call_started or doc.status != \"in_progress\":",
+    "replace": "    if doc.status != \"in_progress\":",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "rooms route: every room treated as a meeting room",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "    if not await group_service.is_meeting_room(group_id):\n        return None\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "notify: undated livekit meetings announced again",
+    "file": "ee/pocketpaw_ee/cloud/meetings/bridges/notifications.py",
+    "find": "    if source == \"livekit\" and not data.get(\"scheduled_start\"):\n        # A meeting \"for later\" with no date: nothing is scheduled to announce.\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "notify: provider copy for dated meetings",
+    "file": "ee/pocketpaw_ee/cloud/meetings/bridges/notifications.py",
+    "find": "    if starts is not None:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  },
+  {
+    "label": "service: payload drops scheduled_start",
+    "file": "ee/pocketpaw_ee/cloud/meetings/service.py",
+    "find": "            \"scheduled_start\": body.scheduled_start.isoformat() if body.scheduled_start else None,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/meetings/test_meeting_by_code.py"
+    ]
+  }
+]

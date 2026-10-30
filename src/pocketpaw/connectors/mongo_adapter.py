@@ -1,5 +1,10 @@
 # MongoDB adapter — document database connector via motor (async pymongo).
 # Created: 2026-03-30
+# Updated: 2026-06-12 (connector-store-unification CS-5) — reconnect-safe
+#   connect(): a second connect() closes the previous motor client before
+#   building a new one (no leaked socket pool on double-connect / config
+#   change), and a failed connect resets ``_connected`` so the adapter never
+#   reports a connection it no longer has.
 
 from __future__ import annotations
 
@@ -70,6 +75,15 @@ class MongoDBAdapter:
             )
 
         try:
+            # Reconnect-safety (CS-5): a second connect() — config change,
+            # post-restart recovery race — must not leak the previous
+            # client's socket pool.
+            if self._client is not None:
+                self._client.close()
+                self._client = None
+                self._db = None
+                self._connected = False
+
             self._client = AsyncIOMotorClient(uri, serverSelectionTimeoutMS=5000)
             # Test connection
             await self._client.admin.command("ping")
@@ -84,6 +98,7 @@ class MongoDBAdapter:
         except Exception as e:
             self._client = None
             self._db = None
+            self._connected = False
             return ConnectionResult(
                 success=False,
                 connector_name=self.name,

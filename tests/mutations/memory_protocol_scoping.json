@@ -1,0 +1,72 @@
+[
+  {
+    "label": "drop scoping from the fact search — the shipped state",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "        scoped_facts = _scoped(fact_filters)\n        if scoped_facts is None:\n            _refused(\"search\")\n            return []\n        facts = await MemoryFactDoc.find(scoped_facts).sort(\"-createdAt\").limit(limit).to_list()",
+    "replace": "        facts = await MemoryFactDoc.find(fact_filters).sort(\"-createdAt\").limit(limit).to_list()",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  },
+  {
+    "label": "drop scoping from the SESSION search branch",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "            scoped = _scoped(filters)\n            if scoped is None:\n                _refused(\"search\")\n                return []\n            messages = await Message.find(scoped).sort(\"-createdAt\").limit(limit).to_list()",
+    "replace": "            messages = await Message.find(filters).sort(\"-createdAt\").limit(limit).to_list()",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  },
+  {
+    "label": "answer globally when no workspace is bound instead of refusing",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "    workspace_id = _active_workspace_scope()\n    if not workspace_id:\n        return None\n    return {**filters, field: workspace_id}",
+    "replace": "    workspace_id = _active_workspace_scope()\n    if not workspace_id:\n        return filters\n    return {**filters, field: workspace_id}",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  },
+  {
+    "label": "fail OPEN when the multi-tenant signal cannot be read",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "            \"scoping memory reads to the active workspace (fail-closed).\"\n        )\n        return True",
+    "replace": "            \"scoping memory reads to the active workspace (fail-closed).\"\n        )\n        return False",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  },
+  {
+    "label": "treat any present value of the override as truthy, so =0 means yes",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "    if os.environ.get(_ALLOW_GLOBAL_ENV, \"\").strip().lower() in (\"1\", \"true\", \"yes\", \"on\"):",
+    "replace": "    if _ALLOW_GLOBAL_ENV in os.environ:",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  },
+  {
+    "label": "accept a blank workspace as a scope",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "    if not isinstance(value, str):\n        return None\n    return value.strip() or None",
+    "replace": "    if not isinstance(value, str):\n        return None\n    return value",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  },
+  {
+    "label": "drop scoping from clear_session — the destructive half",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "        scoped = _scoped({\"context_type\": \"pocket\", \"session_key\": key})\n        if scoped is None:\n            _refused(\"clear_session\")\n            return 0\n        messages = await Message.find(scoped).to_list()",
+    "replace": "        messages = await Message.find({\"context_type\": \"pocket\", \"session_key\": key}).to_list()",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  },
+  {
+    "label": "let the id-keyed methods through without a tenant comparison",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "    workspace_id = _active_workspace_scope()\n    if not workspace_id:\n        return False\n    return row_workspace == workspace_id",
+    "replace": "    return True",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  },
+  {
+    "label": "scope get_session_info on workspace_id, the field Session does not have",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "        scoped = _scoped({\"sessionId\": session_key}, field=\"workspace\")",
+    "replace": "        scoped = _scoped({\"sessionId\": session_key})",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  },
+  {
+    "label": "isolate always, breaking single-tenant and local installs",
+    "file": "ee/pocketpaw_ee/cloud/memory/mongo_store.py",
+    "find": "    if not _tenant_isolation_required():\n        return filters\n    workspace_id = _active_workspace_scope()",
+    "replace": "    workspace_id = _active_workspace_scope()",
+    "tests": ["tests/cloud/memory/test_protocol_reads_are_scoped.py"]
+  }
+]

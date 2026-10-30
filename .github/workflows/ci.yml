@@ -1,14 +1,34 @@
-# CI — runs tests and lint on every PR targeting dev.
-# Created: 2026-02-26
-# Updated: 2026-03-11 — Added Python version matrix (3.11, 3.12, 3.13) for
-# the test job. Lint job pinned to 3.12 only.
+# CI for pocketpaw: lint, wheel build and separation, tests and the OSS-EE
+# boundary on every PR to dev/main or a feat/*-integration branch, and on push.
+#
+# Jobs:
+#   lint              ruff check + format, header-dates check (PRs only, diffs the
+#                     merge commit against its first parent), atlas build --check.
+#   build             core and EE wheels; asserts no EE file leaks into the core wheel.
+#   test-oss          OSS core only (no pocketpaw_ee): the import boundary script and
+#                     the core suite with tests/ee ignored. Proves pip install pocketpaw
+#                     is self-sufficient.
+#   test              core + EE. PRs run 3.12 (the prod version); pushes run the
+#                     3.11/3.12/3.13 matrix. The pyproject addopts hide tests/cloud, so
+#                     this job collects the whole tree once (--co) and runs the
+#                     hand-listed tests/cloud files with -o addopts="". A new test under
+#                     tests/cloud needs its own step here or it never runs in CI.
+#   mutation-anchors  python scripts/mutate.py --validate (anchors only, no sweep;
+#                     see the job comment). Not in deploy's needs on purpose.
+#   import-linter     the core and the ee/pyproject.toml contracts.
+#   deploy-coolify    on push to dev with every job green, fires the Coolify deploy
+#                     hook for the cloud stack (defined in paw-workspace deploy/coolify/).
+#                     Lives here, not in workflow_run, because the default branch is main
+#                     and workflow_run only fires from the default branch's file.
+#
+# The flag-mode isolation lane (POCKETPAW_REQUIRE_WORKSPACE_SCOPE=1) is in tests.yaml.
 name: CI
 
 on:
   pull_request:
-    branches: [dev, main]
+    branches: [dev, main, 'feat/*-integration']
   push:
-    branches: [dev]
+    branches: [dev, 'feat/*-integration']
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -20,6 +40,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Two commits so the header-dates check can diff the PR merge
+          # commit against its first parent (the base branch).
+          fetch-depth: 2
+
+      - name: No dated change entries in file headers
+        # Headers describe the file's current state; history is git's job
+        # (CLAUDE.md § File header comments). Only fires on ADDED lines, so
+        # existing entries are not a failure until someone appends another.
+        if: github.event_name == 'pull_request'
+        run: scripts/check_header_dates.sh HEAD^1 HEAD
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -37,13 +68,148 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+      # AT-4 — the checked-in atlas artifact is compiled (lockfile-style);
+      # fail with a diff summary when it lags the authored files or the
+      # connector YAMLs. Cheap: compiles to memory, byte-compare only.
+      - name: Atlas artifact freshness (atlas build --check)
+        run: uv run pocketpaw atlas build --check
+
+  build:
+    name: Build wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set Python version
+        run: uv python install 3.12
+
+      # Two wheels: `pocketpaw` (OSS core, only src/pocketpaw) and
+      # `pocketpaw-ee` (only pocketpaw_ee). Fail if either leaks the other.
+      - name: Build core wheel
+        run: uv build --wheel
+
+      - name: Build EE wheel
+        run: cd ee && uv build --wheel
+
+      - name: Assert wheel separation
+        run: |
+          python - <<'PY'
+          import sys, zipfile, glob
+          core = glob.glob("dist/pocketpaw-*.whl")[0]
+          ee = glob.glob("ee/dist/pocketpaw_ee-*.whl")[0]
+          core_names = zipfile.ZipFile(core).namelist()
+          ee_names = zipfile.ZipFile(ee).namelist()
+          bad = []
+          if any(n.startswith("pocketpaw_ee/") for n in core_names):
+              bad.append(f"core wheel {core} contains pocketpaw_ee/")
+          if any(n.startswith("pocketpaw/") for n in ee_names):
+              bad.append(f"ee wheel {ee} contains pocketpaw/")
+          if "pocketpaw/ripple/manifest.json" not in core_names:
+              bad.append(f"core wheel {core} is missing the bundled Ripple manifest")
+          if bad:
+              print("\n".join(bad)); sys.exit(1)
+          print(f"OK: {core} and {ee} are cleanly separated")
+          PY
+
+      # The `pocketpaw` wheel ships to PyPI via publish.yml on release. The
+      # `pocketpaw-ee` wheel is NOT published — for now it is distributed
+      # in-house, and this artifact is where you grab the built EE wheel.
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels
+          path: |
+            dist/*.whl
+            ee/dist/*.whl
+
+  test-oss:
+    # OSS-only: install just the `pocketpaw` core (no `pocketpaw-ee`) and run
+    # the core test scope. Proves `pip install pocketpaw` is self-sufficient.
+    name: Test (OSS-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set Python version
+        run: uv python install 3.12
+
+      # OSS core + all core extras, but NOT the `ee` group — so pocketpaw_ee
+      # stays absent (the point of this job) while optional-extra-gated tests
+      # (codex-sdk, voice, ocr, …) still have their deps.
+      - name: Install OSS core (all extras, no enterprise)
+        run: uv sync --dev --all-extras
+
+      # Runtime boundary: with pocketpaw_ee absent every reworked core module
+      # must still import and the EE extension registry must degrade to empty.
+      # ALLOW_INTERNAL_URLS: importing dashboard_state builds Settings, whose
+      # defaults are localhost URLs the SSRF validator rejects in a bare env.
+      - name: OSS-only import boundary
+        run: uv run python scripts/check_oss_boundary.py
+        env:
+          POCKETPAW_ALLOW_INTERNAL_URLS: "true"
+
+      - name: Run core tests
+        # tests/ee + tests/cloud are EE suites (tests/cloud is also skipped by
+        # the addopts in pyproject.toml). tests/e2e needs Playwright browsers.
+        # --deselect: pre-existing flakes/failures, mirrored from tests.yaml
+        # (#1079 concurrency, #1080 kb-context) — tracked separately.
+        run: >-
+          uv run pytest tests/ -n 4 -m "not serial"
+          --ignore=tests/e2e
+          --ignore=tests/ee
+          --ignore=tests/test_frontend_syntax.py
+          --deselect tests/test_concurrency.py::test_session_lock_serialises_same_session
+          --deselect tests/test_concurrency.py::test_cross_session_runs_in_parallel
+          --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
+          --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
+          -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run serial-marked tests
+        # Tests marked `serial` can't share a process pool; the parallel step
+        # above skips them and they run alone here. No marked test, no run.
+        run: |
+          scope=(
+            --ignore=tests/e2e
+            --ignore=tests/ee
+            --ignore=tests/test_frontend_syntax.py
+            --deselect tests/test_concurrency.py::test_session_lock_serialises_same_session
+            --deselect tests/test_concurrency.py::test_cross_session_runs_in_parallel
+            --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
+            --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
+          )
+          if grep -rqE --include='*.py' 'mark\.serial' tests/; then
+            uv run pytest tests/ -m serial "${scope[@]}" -q --tb=short
+          fi
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
   test:
+    # Full install: OSS core + the `pocketpaw-ee` enterprise package. Runs the
+    # complete (non-e2e) suite across the 3.11/3.12/3.13 matrix — broader than
+    # tests.yaml's single-version gate, so it runs on every PR including `ee`.
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # PRs test only the prod version (3.12, per the Dockerfile) for speed;
+        # the full 3.11/3.12/3.13 matrix runs on push to dev/main so version-
+        # specific breaks are still caught at the merge gate.
+        python-version: ${{ (github.event_name == 'push') && fromJSON('["3.11", "3.12", "3.13"]') || fromJSON('["3.12"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -54,11 +220,497 @@ jobs:
       - name: Set Python version
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: uv sync --dev
+      - name: Install core + enterprise
+        run: uv sync --dev --all-extras --group ee
 
       - name: Run tests
-        run: uv run pytest tests/ --ignore=tests/e2e --ignore=tests/test_frontend_syntax.py -x -q --tb=short
+        # No -x — surface every failure. --deselect: pre-existing flakes
+        # (#1079, #1080), mirrored from tests.yaml and the test-oss job.
+        run: >-
+          uv run pytest tests/ -n 4 -m "not serial"
+          --ignore=tests/e2e
+          --ignore=tests/test_frontend_syntax.py
+          --deselect tests/test_concurrency.py::test_session_lock_serialises_same_session
+          --deselect tests/test_concurrency.py::test_cross_session_runs_in_parallel
+          --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
+          --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
+          -q --tb=short
         env:
           POCKETPAW_LLM_PROVIDER: "ollama"
           POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run serial-marked tests
+        # Tests marked `serial` can't share a process pool; the parallel step
+        # above skips them and they run alone here. No marked test, no run.
+        run: |
+          scope=(
+            --ignore=tests/e2e
+            --ignore=tests/test_frontend_syntax.py
+            --deselect tests/test_concurrency.py::test_session_lock_serialises_same_session
+            --deselect tests/test_concurrency.py::test_cross_session_runs_in_parallel
+            --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency
+            --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
+          )
+          if grep -rqE --include='*.py' 'mark\.serial' tests/; then
+            uv run pytest tests/ -m serial "${scope[@]}" -q --tb=short
+          fi
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Collect every tests/cloud test
+        # The pyproject addopts hide tests/cloud from "Run tests" above, and the
+        # hand-listed steps below reach a fraction of its ~900 files. Collecting
+        # the whole tree catches what rots unseen: a missing enterprise install
+        # (tests/cloud/conftest.py now fails instead of skipping), a dropped extra
+        # (pypdf, 2026-10-01), or an import left behind by a move. Collection
+        # only, not a run: tests/cloud is not green on dev today.
+        run: uv run pytest tests/cloud -o addopts="" --co -q
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run herdr cockpit tests
+        # tests/cloud is excluded by the addopts in pyproject.toml, so the step
+        # above never reaches this file — which would leave the cockpit's ADMIN
+        # gate (test_endpoints_require_admin) and its fail-open contract with NO
+        # automated coverage on any PR. `-o addopts=""` clears that ignore for
+        # this one file. The wider "no lane runs tests/cloud" gap is pre-existing
+        # and tracked separately; this keeps the new RBAC surface out of the
+        # blind spot rather than quietly widening it.
+        run: uv run pytest tests/cloud/test_herdr_cockpit.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Belt mandates and the craft factory develop station
+        # The mandate shift loop, the headless develop runner, the cadence
+        # scheduler, the develop station (real tmp git repo, real check
+        # commands, a faked claude binary), its step feed stored and live, the
+        # blueprint file join and file_touched, the crew roster (agents as
+        # workers), the mandate line branch (real tmp repos and a bare origin),
+        # the console's run events (belt_run_updated), the upstream patrol (a
+        # faked gh) and the Pulley block manifest -> C4 mapper. tests/cloud is
+        # excluded by the pyproject addopts; mongomock stands in for Mongo.
+        run: >-
+          uv run pytest tests/cloud/test_belt_develop_station.py
+          tests/cloud/test_belt_crew.py
+          tests/cloud/test_belt_headless.py
+          tests/cloud/test_belt_line.py
+          tests/cloud/test_belt_mandates.py
+          tests/cloud/test_belt_console.py
+          tests/cloud/test_belt_pulley_c4.py
+          tests/cloud/test_belt_scheduler.py
+          tests/cloud/test_belt_upstream_patrol.py
+          tests/cloud/test_belt_feed.py
+          tests/cloud/test_belt_live_feed.py
+          tests/cloud/test_belt_live_atlas.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Growth WhatsApp consent tests (tests/cloud blind spot)
+        # The inbound webhook decides prospect.opted_in (a STOP reply is an
+        # opt-out, never an opt-in) and the dispatch guard refuses a send
+        # without it. tests/cloud is excluded by the pyproject addopts.
+        run: >-
+          uv run pytest tests/cloud/growth/test_whatsapp_webhook.py
+          tests/cloud/growth/test_whatsapp_dispatch.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Craft studio preambles (tests/cloud blind spot)
+        # The /studio/vector, /studio/photo and /studio/design preambles render
+        # the page's document projection; tests/cloud is excluded by the
+        # pyproject addopts.
+        run: uv run pytest tests/cloud/surface/test_studio_craft_preamble.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run agent activity tests
+        # Same addopts escape as the cockpit step above. This one guards a
+        # CROSS-TENANT property — the board is filtered to the caller's
+        # workspace at the query — so it must not sit in the tests/cloud blind
+        # spot: a dropped filter would be a silent leak between tenants that no
+        # other lane runs a test for.
+        run: uv run pytest tests/cloud/test_agent_activity.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run platform credits tests
+        # Same addopts escape. The operator credit routes move real money, and
+        # the 404 for an unknown workspace is the only thing stopping ledger rows
+        # for a tenant that does not exist (an adjust on /workspaces/None/...).
+        run: uv run pytest tests/cloud/platform/test_credits.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run workspace API key tests
+        # Same addopts escape. The only end-to-end proof that request_context
+        # enforces a paw_ key's scopes: a key with the scope passes, a key
+        # without it or on an unmapped route gets 403, JWT sessions unchanged.
+        run: uv run pytest tests/cloud/auth/test_api_keys.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run route auth audit and coverage ratchet
+        # Same addopts escape. The audit asserts every route on an audited
+        # router has a session guard or a named allowlist reason; the coverage
+        # file pins how many mounted routers sit outside that audit, so a PR
+        # that mounts a router without auditing it fails here. Neither ran in
+        # CI before, so eight routers were mounted past the pin unnoticed.
+        run: >-
+          uv run pytest tests/cloud/auth/test_route_auth_coverage.py
+          tests/cloud/auth/test_route_auth_audit.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run Discover tests
+        # Same addopts escape. tests/cloud is otherwise a blind spot; this
+        # directory pins the slug contract (write-once, unique across sources)
+        # the public /discover/{id_or_slug} route and the frontend depend on,
+        # the HTTP layer (public allow-list, per-IP rate limit, use / report)
+        # and the source contract every DiscoverSource must meet.
+        run: uv run pytest tests/cloud/discover -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run paw-lens proxy tests
+        # Same addopts escape. Proves the lens proxy injects the caller's
+        # workspace_id (never a client-supplied one), degrades to a 503, never a
+        # 500, when paw-lens is down, redacts content for non-admins, and that
+        # the lens MCP tools load only on the agent_health surface (whose
+        # handler test rides along, since tests/cloud/surface has no CI step).
+        run: uv run pytest tests/cloud/lens tests/cloud/surface/test_agent_health_handler.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run daily cap and run-start gate tests
+        # Same addopts escape. Every daily cap (chat turns, uploads, file
+        # comprehension, transcription, illustrations, guest turns) counts
+        # through one metering primitive, and these files are the only proof
+        # that each meter still allows and refuses at its boundaries, fails the
+        # way its caller needs, and that the chat route's billing leg is the
+        # shared credits guard. Mutations: tests/mutations/abuse_budgets.json,
+        # file_comprehension.json, transcription.json, byok_image_key.json.
+        run: >-
+          uv run pytest tests/cloud/metering/test_daily_usage.py
+          tests/cloud/test_daily_caps_characterization.py
+          tests/cloud/uploads/test_abuse_budgets.py
+          tests/cloud/uploads/test_comprehension.py
+          tests/cloud/uploads/test_transcription.py
+          tests/cloud/auth/test_guest_gates.py
+          tests/cloud/other_hand/test_illustrate_endpoint.py
+          tests/cloud/other_hand/test_illustrate_tool.py
+          tests/cloud/test_agent_router_run_start_gates.py
+          tests/cloud/credits/test_enforcement.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run Paw Partners and public rate-limit tests
+        # Same addopts escape. The Find a Pro directory, /pros/{slug} and
+        # /pros/apply answer anonymous callers; these files are the only
+        # proof that a private partner field never reaches the wire, that hidden
+        # partners stay hidden, that applications land in the operator queue
+        # (and the daily cap and both public buckets return 429), that the
+        # paw-web X-Paw-Client-IP header is honoured only with the key AND only
+        # on the limiters that opted in, and that Turnstile refuses when its
+        # secret is unset in production. Mutations: tests/mutations/partner_public.json.
+        run: >-
+          uv run pytest tests/cloud/partners/test_partner_public.py
+          tests/cloud/partners/test_partners.py
+          tests/cloud/partners/test_partner_tiers.py
+          tests/cloud/_core/test_unbounded_maps.py
+          tests/cloud/_core/test_turnstile.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run dashboard WS ticket auth tests
+        # Same addopts escape. /api/v1/ws accepts a single-use ws_ticket in its
+        # first frame; this file is the only proof that a ticket works once, a
+        # replay or a ?token= ticket is refused, a bad or missing first frame
+        # closes 4001 without hanging, and the old token/cookie auth still holds.
+        run: uv run pytest tests/cloud/auth/test_dashboard_ws_ticket.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run v2 concierge runner tests
+        # Same addopts escape. The v2 runner answers anonymous visitors on
+        # customers' sites in one model call, and this file is the only proof
+        # that the call carries zero tools, that every public gate still fires
+        # before it, and that legacy sites are untouched. The _output file is
+        # the only proof that code never reaches the widget and that product
+        # cards carry catalog prices, not the model's. The _guided_fields file
+        # is the only proof that owner text stays quoted in the data half and
+        # never reaches the frame. The _page file is the only proof that a page
+        # off the site's allowed origins is dropped and that its title stays
+        # quoted data. The _degrade file is the only proof that a capped,
+        # over-quota or failing site gets the leave-a-message reply and no
+        # model call. The _contact file is the only proof that a request for
+        # a person always gets a route to the team and that the output cap
+        # never fails a turn. The _evals and _eval_gate files pin the eval scorers
+        # and the rollout gate that decides whether new concierges get v2.
+        # The _page_actions and _declared_tools files are the only proof that
+        # a pawbar-action fence is validated (known pages, declared tools with
+        # schema-checked args) before it becomes the action frame.
+        # The _actions and _escape_hatch files pin the concierge preamble (the
+        # action catalog, form cards, the request-a-person step) and the
+        # visitor-cart and handoff routes.
+        # Mutations: tests/mutations/concierge_v2_runtime.json,
+        # tests/mutations/concierge_guided_fields.json,
+        # tests/mutations/concierge_eval_gate.json and
+        # tests/mutations/concierge_declared_tools.json.
+        run: >-
+          uv run pytest tests/cloud/test_paw_bar_concierge_v2.py
+          tests/cloud/test_paw_bar_concierge_v2_output.py
+          tests/cloud/test_paw_bar_concierge_v2_degrade.py
+          tests/cloud/test_paw_bar_concierge_v2_contact.py
+          tests/cloud/test_paw_bar_concierge_guided_fields.py
+          tests/cloud/test_paw_bar_concierge_page.py
+          tests/cloud/test_paw_bar_concierge_evals.py
+          tests/cloud/test_paw_bar_concierge_eval_gate.py
+          tests/cloud/test_paw_bar_page_actions.py
+          tests/cloud/test_paw_bar_declared_tools.py
+          tests/cloud/test_paw_bar_actions.py
+          tests/cloud/test_paw_bar_escape_hatch.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run the recorded v2 concierge eval
+        # Replays tests/evals/concierge/recorded/ through the real v2 runner and
+        # output filter, no network. Fails on pipeline properties only (a code
+        # leak, a frame leak, an invalid card, a turn error, a case with no
+        # recording); the model thresholds apply to real runs, not replays.
+        run: uv run python -m tests.evals.concierge.run --recorded
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run concierge pinned FAQ tests
+        # Same addopts escape. Owners pin answers the v2 concierge reads first;
+        # this file proves the routes are tenant-scoped and role-gated, and that
+        # owner text only ever reaches the model as data. Mutations:
+        # tests/mutations/concierge_pinned_faqs.json.
+        run: uv run pytest tests/cloud/test_paw_bar_concierge_faqs.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run concierge knowledge source tests
+        # Same addopts escape. Owners upload files and add links the v2 concierge
+        # answers from; this file proves links go through the SSRF-safe fetcher,
+        # the file type is sniffed from the bytes, the per-plan caps hold, removal
+        # un-indexes, and the routes are tenant-scoped and role-gated. The DOCX
+        # case skips here (python-docx ships in ee[extraction], which this job does
+        # not install). Mutations: tests/mutations/concierge_knowledge_sources.json.
+        run: uv run pytest tests/cloud/test_paw_bar_concierge_sources.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run Paw Bar loader tests
+        # Same addopts escape. GET /paw-bar/widget.js serves a copy of paw-bar's
+        # built loader; this file pins that copy's sha256 to the paw-bar commit in
+        # paw-bar-loader.pin.json, so a hand edit or a stale copy fails here.
+        # test_paw_bar_actions_js.py does the same for the vendored page-actions
+        # host script: protocol strings, IIFE, and its only two page globals.
+        run: >-
+          uv run pytest tests/cloud/test_paw_bar_widget_js.py
+          tests/cloud/test_paw_bar_actions_js.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run Paw Bar frame tests
+        # Same addopts escape. GET /paw-bar/frame is the iframe a customer's site
+        # embeds. This file proves the frame-ancestors allowlist and CSP sandbox,
+        # the dead shell, and that the self-hosted dashboard's security-headers
+        # middleware keeps the frame's own headers (no X-Frame-Options: DENY, mic open).
+        run: uv run pytest tests/cloud/test_paw_bar_frame.py -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run AI visibility tests
+        # Same addopts escape. The visibility core (engines, judge, fixes,
+        # run_check) and the public free check (Turnstile, per-IP limit, daily
+        # spend cap) live in the tests/cloud blind spot otherwise.
+        run: uv run pytest tests/cloud/ai_visibility -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run concierge manual-create tests
+        # Same addopts escape. A concierge exists only because its owner created
+        # one: these prove no trigger (widget create, enable PATCH, publish,
+        # foreign attach, empty-id rebind) creates one, that "none" reads as "off"
+        # to a visitor, and that the backfill keeps every bar that was live on
+        # the old model live. Mutations: tests/mutations/concierge_manual_create.json.
+        run: >-
+          uv run pytest
+          tests/cloud/test_paw_bar_concierge_manual_create.py
+          tests/cloud/sites/test_concierge_marker_backfill.py
+          tests/cloud/sites/test_foreign_concierge_bind.py
+          -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run agent plan + narration surface tests
+        # Same addopts escape as the two steps above. These four files are the
+        # ONLY coverage of the plan panel and tool narration, and both features
+        # ship on two independent transports (the group/DM bus and the SSE
+        # stream). Living in the tests/cloud blind spot is how HTN-2 merged
+        # green while breaking an assertion in HTN-5's own sibling file: no lane
+        # ran either one, so "CI is green" said nothing about this surface.
+        #
+        # test_run_core_narration.py in particular compares the two transports
+        # against each other, which is the check that catches a feature wired to
+        # one surface and silently not the other — the bug this step exists for.
+        run: >-
+          uv run pytest
+          tests/cloud/runs/test_run_core_narration.py
+          tests/cloud/runs/test_run_core_plan_surface.py
+          tests/cloud/shared/test_agent_bridge_plan.py
+          tests/cloud/shared/test_agent_bridge_narration.py
+          -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+      - name: Run public concierge tool-lockdown tests
+        # Same addopts escape. The Paw Bar concierge answers anonymous visitors
+        # on customers' sites, and these two files are the only end-to-end proof
+        # that it is offered nothing but its own pawbar tools on both backends
+        # (run_core -> AgentPool -> real backend). In the tests/cloud blind spot
+        # a regression here would merge green. Mutations:
+        # tests/mutations/concierge_web_deny.json, concierge_exclusive_tools.json.
+        run: >-
+          uv run pytest
+          tests/cloud/test_concierge_pydantic_ai_web_deny.py
+          tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py
+          -o addopts="" -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"
+
+  mutation-anchors:
+    # ANCHOR VALIDATION ONLY, NOT A SWEEP. `mutate.py --validate` reads each plan, counts
+    # its `find` string in the target file, and exits. It applies no mutation, runs no
+    # test and writes no marker — so this job needs no dependency install and finishes in
+    # seconds.
+    #
+    # WHY IT EXISTS (#1903). A plan's `find` is a substring of source, so any refactor can
+    # invalidate one. mutate.py handles that correctly on its own — it aborts before the
+    # first mutation and names the offender — but nothing ran it, so a rotted plan sat at
+    # ZERO applied mutations while still reading as covered. `fault_ladder.json` (19
+    # entries) and `site_preview_refresh.json` (5) were both found in that state on the
+    # same day, in unrelated subsystems. The tool was never the problem; nobody was
+    # listening.
+    #
+    # A FULL SWEEP IS DELIBERATELY NOT HERE. A sweep applies a mutation and runs a test
+    # subset per entry — minutes of compute across ~194 entries — and requiring that of
+    # every PR is probably the wrong trade. Real mutation signal still comes from running
+    # the plans, which stays a deliberate act. If it should become automatic, the shape is
+    # a scheduled or label-gated job, or one that runs only the plans whose covered files
+    # the PR touched. That is a separate decision, not something to bolt on here.
+    #
+    # NOT IN `deploy-coolify`'s `needs`, on purpose: a stale anchor is a hole in our
+    # verification, not a defect in the code being deployed, so it must not block a
+    # production deploy. It still shows red on the PR, which is where it is actionable.
+    name: Mutation plan anchors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # setup-python rather than uv: this runs stdlib-only code against JSON and source
+      # text, so there is nothing to resolve or sync. If this step ever needs dependencies,
+      # the validator has started doing more than counting substrings and should be
+      # reviewed rather than fed a `uv sync`.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate every mutation plan's anchors
+        run: python scripts/mutate.py --validate
+
+  import-linter:
+    name: OSS-EE boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set Python version
+        run: uv python install 3.12
+
+      # The root contract ("OSS core may not import from EE") references the
+      # `pocketpaw_ee` package, so it must be importable — install both.
+      - name: Install core + enterprise
+        run: uv sync --dev --group ee
+
+      # Root pyproject.toml: the OSS-EE boundary contract.
+      - name: import-linter (core)
+        run: uv run lint-imports
+
+      # ee/pyproject.toml: the cloud Beanie-chokepoint contracts. Run from the
+      # repo root (where import-linter is installed) against the EE config.
+      - name: import-linter (enterprise)
+        run: uv run lint-imports --config ee/pyproject.toml
+
+  deploy-coolify:
+    # Auto-deploy the cloud backend after a green dev push. The Coolify app
+    # (qbtrix/paw-workspace deploy/coolify/) clones this repo's dev branch at
+    # image-build time, and its Dockerfile cache-busts on the dev tip — so a
+    # plain (cached) deploy rebuilds exactly the commit this run validated.
+    # Requires two repo secrets:
+    #   COOLIFY_DEPLOY_HOOK — the app's deploy-hook URL (Coolify → Webhooks)
+    #   COOLIFY_API_TOKEN   — a Coolify API token with deploy permission
+    # While the secrets are unset the job warns and exits green, so dev CI
+    # doesn't go red before the one-time Coolify setup is done.
+    #
+    # Paw Sites toolchain (feat/paw-sites-prod-deploy, DEP-4): Dockerfile.enterprise
+    # bundles bun + the paw-sites generator + the @ripple-ui/svelte tarball so a live
+    # publish works. The vendored trees (deploy/paw-sites/, deploy/ripple/) are
+    # gitignored, so they are NOT in Coolify's clone — the Coolify app's build config
+    # MUST set the CLONE source for both:
+    #     PAW_SITES_SOURCE=clone   RIPPLE_SOURCE=clone
+    # (Coolify owns the docker build; this job only fires the webhook, so the args
+    # live in Coolify's app settings, not here.) See deploy/README-build.md.
+    name: Deploy to Coolify
+    runs-on: ubuntu-latest
+    needs: [lint, build, test-oss, test, import-linter]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    steps:
+      - name: Fire Coolify deploy hook
+        env:
+          HOOK: ${{ secrets.COOLIFY_DEPLOY_HOOK }}
+          TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+        run: |
+          if [ -z "$HOOK" ] || [ -z "$TOKEN" ]; then
+            echo "::warning::COOLIFY_DEPLOY_HOOK / COOLIFY_API_TOKEN secrets not set — skipping backend deploy."
+            exit 0
+          fi
+          code=$(curl -sS -o resp.json -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" "$HOOK")
+          cat resp.json; echo
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "::error::Coolify deploy hook returned HTTP $code"
+            exit 1
+          fi
+          echo "Coolify deploy queued for \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"

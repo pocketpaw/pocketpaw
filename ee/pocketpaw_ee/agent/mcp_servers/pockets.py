@@ -1,0 +1,522 @@
+"""In-process SDK MCP server exposing cloud pocket context to agent backends.
+
+Why MCP: the Claude Agent SDK passes the system prompt to ``claude.exe`` as a
+CLI argument. Windows ``CreateProcess`` caps command lines at ~32KB (WinError
+206), so embedding a full pocket document — including a large ``rippleSpec.ui``
+tree — in the prompt is unsafe. The agent instead fetches the pocket on demand;
+the response flows through the SDK's tool-result channel (stdio JSON, unbounded)
+and never touches the CLI command line.
+
+Pocket *designs* are still mutated through the ``pocket_specialist__create`` /
+``pocket_specialist__edit`` MCP tools (see
+``pocketpaw_ee.agent.pocket_specialist.mcp_tool``) — those rewrite a pocket's
+``rippleSpec.ui``. This server now ALSO carries a writable ``add_widget`` tool:
+it appends a single tile to a pocket's ``widgets[]`` array, which is the
+surface the home grid renders. ``add_widget`` exists so the home-pocket agent
+(on the ``claude_agent_sdk`` backend) can pin a real widget — a chart, a
+table — without delegating to the design specialist.
+
+Moved here from ``src/pocketpaw/agents/sdk_mcp_pocket.py`` in the OSS-EE split
+(Phase 3b). That file also carried the ripple widget-spec tools, which have no
+cloud dependency and stayed in core as ``pocketpaw.agents.sdk_mcp_widgets``.
+
+Changes: 2026-05-24 (#1205) — added ``update_widget`` MCP tool for in-place
+widget refresh. Same shape as ``add_widget`` — agent passes the widget id
+from ``get_pocket`` and the fields to overwrite (usually ``spec`` with a
+fresh data series). Validates the new spec through the same manifest path
+``add_widget`` uses; the server version bumped to ``1.2.0``.
+Changes: 2026-05-22 (#1174) — added the writable ``add_widget`` tool, its
+``ADD_WIDGET_TOOL_ID`` allowlist id, manifest validation of the widget's
+rippleSpec ``spec`` subtree (skipped for ``type="native"`` widgets), and the
+``_get_manifest_for_validation`` seam tests patch.
+Changes: 2026-05-24 (#1208) — ``_validate_widget_spec`` now also runs the
+OSS-side ``validate_action_verbs`` walker over the widget's ``spec``
+subtree. This catches hallucinated dispatcher verbs (``action: "fetch"``,
+``action: "backend_fetch"``) earlier than the service-layer gate so the
+agent's retry loop sees a tight, focused corrective hint that names the
+exact bad verb without needing a cloud round-trip. The service-layer gate
+in ``pockets/service.py`` is still the authoritative ground truth — this
+is a cheap belt-and-suspenders that runs first.
+Changes: 2026-05-31 (feat/home-pocket-sources-authoring) — the ``add_widget``
+tool now documents an optional ``widget.sources`` field: a dict keyed by
+source name of RFC-04 GET bindings ({method, path, bind, refresh}) that the
+home grid runs to hydrate the tile's state. ``add_widget_for_agent`` pulls
+``sources`` off the widget dict and the service layer merges it (logged /
+drift-allowed) onto the pocket's top-level ``rippleSpec.sources`` in the same
+write — so the agent can create a live tile AND the source feeding it in one
+call. The handler itself is unchanged (it forwards the whole ``widget``); only
+the tool schema/description grew.
+Changes: 2026-05-31 (feat/home-agent-source-authoring) — the REFINE half.
+The ``update_widget`` tool now documents an optional ``fields.sources`` field
+(same RFC-04 GET-binding shape) so refining a static tile into a live one is
+one call. Both ``add_widget`` and ``update_widget`` descriptions now point the
+agent at the ``authored_sources`` / ``skipped_sources`` honesty fields the
+result carries — confirm only the authored keys. The handlers are unchanged
+(they forward the whole ``widget`` / ``fields``); ``update_widget_for_agent``
+pulls ``sources`` off ``fields`` so it never lands as a widget field.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+
+from ._audit import record_tool_call
+
+logger = logging.getLogger(__name__)
+
+SERVER_NAME = "pocketpaw_pocket"
+# Claude Code namespaces in-process MCP tools as ``mcp__<server>__<tool>``.
+# Allowlist entries must use this exact form.
+GET_POCKET_TOOL_ID = f"mcp__{SERVER_NAME}__get_pocket"
+LIST_POCKETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_pockets"
+ADD_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__add_widget"
+UPDATE_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__update_widget"
+
+POCKET_TOOL_IDS = (
+    GET_POCKET_TOOL_ID,
+    LIST_POCKETS_TOOL_ID,
+    ADD_WIDGET_TOOL_ID,
+    UPDATE_WIDGET_TOOL_ID,
+)
+
+# Widget ``type`` whose tiles carry no rippleSpec — the frontend renders them
+# as a built-in Svelte component keyed on ``name``. Manifest validation, which
+# only walks rippleSpec trees, is skipped for these.
+_NATIVE_WIDGET_TYPE = "native"
+
+
+def _result_payload(result: dict) -> dict:
+    """Translate an ``agent_context`` ``{ok, pocket|error}`` dict into the MCP
+    response shape."""
+    if not result.get("ok"):
+        return {
+            "content": [{"type": "text", "text": f"Error: {result.get('error')}"}],
+            "is_error": True,
+        }
+    body = result.get("pocket", result)
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(body, separators=(",", ":")),
+            }
+        ]
+    }
+
+
+def _error(text: str) -> dict:
+    """Build an MCP error response. The agent reads ``text`` and retries."""
+    return {"content": [{"type": "text", "text": f"Error: {text}"}], "is_error": True}
+
+
+def _identity() -> tuple[str | None, str | None]:
+    """Resolve the active workspace + user id from ContextVars."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import current_user_id, current_workspace_id
+
+        return current_workspace_id(), current_user_id()
+    except Exception:
+        return None, None
+
+
+async def _get_pocket_handler(args: dict) -> dict:
+    from pocketpaw_ee.cloud.pockets.agent_context import fetch_pocket_for_agent
+
+    ws_id, uid = _identity()
+    result = await fetch_pocket_for_agent(args.get("pocket_id", ""))
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server=SERVER_NAME,
+        tool_name="get_pocket",
+        status="ok" if result.get("ok") else "error",
+        ok=result.get("ok", False),
+    )
+    return _result_payload(result)
+
+
+async def _list_pockets_handler(args: dict) -> dict:
+    ws_id, uid = _identity()
+    from pocketpaw_ee.cloud.pockets.agent_context import list_pockets_for_agent
+
+    result = await list_pockets_for_agent()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server=SERVER_NAME,
+        tool_name="list_pockets",
+        status="ok" if result.get("ok") else "error",
+        ok=result.get("ok", False),
+    )
+    if not result.get("ok"):
+        return {
+            "content": [{"type": "text", "text": f"Error: {result.get('error')}"}],
+            "is_error": True,
+        }
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps({"pockets": result.get("pockets", [])}, separators=(",", ":")),
+            }
+        ]
+    }
+
+
+async def _get_manifest_for_validation() -> dict[str, Any] | None:
+    """Fetch the Ripple widget manifest used to validate a widget's ``spec``.
+
+    Best-effort: returns ``None`` on any failure so a manifest outage never
+    blocks a widget add. A standalone seam so tests can patch it.
+    """
+    try:
+        from pocketpaw.config import get_settings
+        from pocketpaw.ripple.manifest import get_manifest
+
+        settings = get_settings()
+        return await get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("ripple manifest fetch failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _format_manifest_issues(issues: list[dict[str, Any]]) -> str:
+    """Render ``validate_against_manifest`` issues as an agent-readable error
+    string naming each offending prop so the agent can re-emit a fixed spec."""
+    lines: list[str] = []
+    for issue in issues[:10]:
+        wtype = issue.get("type", "?")
+        path = issue.get("path", "?")
+        unknown = ", ".join(f"`{p}`" for p in issue.get("unknown_props", []))
+        allowed = ", ".join(f"`{p}`" for p in issue.get("allowed_props", []))
+        if unknown:
+            lines.append(f"{path} ({wtype}): unknown props {unknown}; allowed: {allowed}")
+    return "; ".join(lines)
+
+
+def _format_action_verb_issues(issues: list[dict[str, Any]]) -> str:
+    """Render ``validate_action_verbs`` issues as an agent-readable error.
+
+    Mirrors the corrective hint in ``ripple_validator.format_action_violations_for_agent``
+    so the agent sees the same wording whether the verb gate fires at the
+    MCP layer (this function) or the service layer (#1208). Suggestions are
+    surfaced verbatim when ``difflib`` produced a close match.
+    """
+    lines = ["The widget spec uses event-handler verbs the renderer does not dispatch:"]
+    for issue in issues[:5]:
+        verb = issue.get("action", "<missing>")
+        suggestion = issue.get("suggestion")
+        path = issue.get("path", "?")
+        hint = (
+            f" Use '{suggestion}' instead."
+            if suggestion
+            else " Use one of: set, push, run_source, api, navigate, toast, emit."
+        )
+        lines.append(f"  - {path}: action '{verb}' is not a recognized verb.{hint}")
+    if len(issues) > 5:
+        lines.append(f"  - …and {len(issues) - 5} more")
+    return " ".join(lines)
+
+
+async def _validate_widget_spec(widget: dict) -> str | None:
+    """Validate the widget's rippleSpec ``spec`` subtree against the manifest
+    and the closed action-verb allowlist.
+
+    Two layered checks:
+
+    1. ``validate_action_verbs`` (OSS, no manifest needed) — catches the
+       most common LLM failure mode: invented dispatcher verbs like
+       ``action: "fetch"`` or ``action: "backend_fetch"``. This runs first
+       because it works without a manifest and the corrective hint is
+       tighter than the manifest one.
+    2. ``validate_against_manifest`` (needs a manifest fetch) — catches
+       props the renderer would silently ignore.
+
+    Returns an error string on the first failing check, or ``None`` when
+    the spec passes both. ``type="native"`` widgets carry no rippleSpec —
+    validation is skipped. Best-effort: a manifest outage returns ``None``
+    for the manifest half (never block the agent on a transient outage);
+    the verb check runs regardless because it's a pure function.
+    """
+    if widget.get("type") == _NATIVE_WIDGET_TYPE:
+        return None
+    spec = widget.get("spec")
+    if not isinstance(spec, dict):
+        return None
+    # Action-verb gate (#1208) — pure walker, no manifest dependency. The
+    # service-layer gate in pockets/service.py runs this same walker (and
+    # the unwired-button walker) on the same subtree; surfacing the verb
+    # half here saves a cloud round-trip on the most common failure mode.
+    from pocketpaw.ripple.manifest import validate_action_verbs, validate_against_manifest
+
+    verb_issues = validate_action_verbs(spec)
+    if verb_issues:
+        return _format_action_verb_issues(verb_issues)
+    manifest = await _get_manifest_for_validation()
+    if manifest is None:
+        return None
+
+    issues = validate_against_manifest(spec, manifest, apply_aliases=True)
+    actionable = [i for i in issues if i.get("unknown_props")]
+    if not actionable:
+        return None
+    return (
+        "The widget spec uses props the renderer ignores. "
+        f"{_format_manifest_issues(actionable)}. "
+        "Re-emit the widget using only the allowed props for each type."
+    )
+
+
+async def _add_widget_handler(args: dict) -> dict:
+    """Append one widget tile to a pocket's ``widgets[]`` array.
+
+    Validates the widget's rippleSpec ``spec`` against the renderer's
+    manifest first (skipped for native widgets); on a validation failure
+    nothing is persisted and the agent gets a corrective error.
+    """
+    ws_id, uid = _identity()
+    pocket_id = args.get("pocket_id")
+    if not pocket_id or not isinstance(pocket_id, str):
+        return _error(
+            "add_widget requires a `pocket_id` — pass the id of the pocket "
+            "(the current home pocket) the widget should be pinned to."
+        )
+    # Decode a `widget` that the model serialized as a JSON string rather than
+    # a real object, so the first call succeeds instead of forcing a retry.
+    args = coerce_json_object_args(args, ("widget",))
+    widget = args.get("widget")
+    if not isinstance(widget, dict):
+        return _error("add_widget requires a `widget` object.")
+
+    validation_error = await _validate_widget_spec(widget)
+    if validation_error is not None:
+        return _error(validation_error)
+
+    from pocketpaw_ee.cloud.pockets.agent_context import add_widget_for_agent
+
+    result = await add_widget_for_agent(pocket_id, widget)
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server=SERVER_NAME,
+        tool_name="add_widget",
+        status="ok" if result.get("ok") else "error",
+        ok=result.get("ok", False),
+        metadata={"pocket_id": pocket_id},
+    )
+    return _result_payload(result)
+
+
+async def _update_widget_handler(args: dict) -> dict:
+    """Patch fields on an existing widget tile — the in-place refresh path.
+
+    Validates a freshly-supplied ``spec`` against the renderer's manifest
+    the same way ``add_widget`` does; on failure nothing is persisted and
+    the agent gets a corrective error. ``type="native"`` skips validation.
+    """
+    ws_id, uid = _identity()
+    pocket_id = args.get("pocket_id")
+    if not pocket_id or not isinstance(pocket_id, str):
+        return _error(
+            "update_widget requires a `pocket_id` — pass the id of the pocket "
+            "(the current home pocket) the widget belongs to."
+        )
+    widget_id = args.get("widget_id")
+    if not widget_id or not isinstance(widget_id, str):
+        return _error(
+            "update_widget requires a `widget_id` — pass the widget's id from "
+            "`get_pocket`'s widgets[] array."
+        )
+    args = coerce_json_object_args(args, ("fields",))
+    fields = args.get("fields")
+    if not isinstance(fields, dict):
+        return _error(
+            "update_widget requires a `fields` object — the widget fields to "
+            "overwrite, usually `{spec: <new rippleSpec>}` for a refresh."
+        )
+
+    if fields.get("spec") is not None:
+        # Wrap the spec in a widget-shaped dict so the existing validator
+        # walks the same path ``add_widget`` does. ``type`` defaults to a
+        # non-native marker so validation runs; the caller can pass
+        # ``type:"native"`` to opt out.
+        validation_error = await _validate_widget_spec(
+            {"spec": fields["spec"], "type": fields.get("type", "spec")}
+        )
+        if validation_error is not None:
+            return _error(validation_error)
+
+    from pocketpaw_ee.cloud.pockets.agent_context import update_widget_for_agent
+
+    result = await update_widget_for_agent(pocket_id, widget_id, fields)
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server=SERVER_NAME,
+        tool_name="update_widget",
+        status="ok" if result.get("ok") else "error",
+        ok=result.get("ok", False),
+        metadata={"pocket_id": pocket_id, "widget_id": widget_id},
+    )
+    return _result_payload(result)
+
+
+def build_pocket_context_server() -> tuple[str, Any] | None:
+    """Build the in-process SDK MCP server, or None if the SDK is unavailable."""
+    try:
+        from claude_agent_sdk import create_sdk_mcp_server, tool
+    except ImportError:
+        logger.debug("claude_agent_sdk not installed; pocket_context MCP disabled")
+        return None
+
+    @tool(
+        "get_pocket",
+        (
+            "Fetch the full PocketPaw pocket document (rippleSpec, widgets, "
+            "visibility, metadata) by id. Call this before answering any "
+            "question about what a pocket contains, its widgets, or its layout."
+        ),
+        {"pocket_id": str},
+    )
+    async def get_pocket(args):  # type: ignore[no-untyped-def]
+        return await _get_pocket_handler(args)
+
+    @tool(
+        "list_pockets",
+        (
+            "List every pocket in the user's workspace they can access "
+            "(owned, shared, or workspace-visible). Returns id + name + "
+            "description + type + icon + color per pocket — no rippleSpec, "
+            "so the call is cheap. No arguments — workspace identity is "
+            "inferred from the active stream."
+        ),
+        {},
+    )
+    async def list_pockets(args):  # type: ignore[no-untyped-def]
+        return await _list_pockets_handler(args)
+
+    @tool(
+        "add_widget",
+        (
+            "Pin one widget tile onto a pocket's home grid. Use this on the "
+            "home page to add a chart, table, list, stat, kanban, or any "
+            "other Ripple-catalog widget the user asked for. Args: "
+            "`pocket_id` (the pocket to pin onto — the current home pocket) "
+            "and `widget`, an object with `name`, `type` (the Ripple "
+            "catalog widget type, e.g. `chart`/`table`/`stat`/`list`/"
+            "`kanban`), optional `icon`/`color`, and `spec` — a Ripple "
+            "rippleSpec subtree for the tile (e.g. a `chart` node with a "
+            "real `data` series). Call `get_widget_spec` for the widget "
+            "type FIRST so the spec uses valid props; a spec with invented "
+            'props is rejected. Native widgets pass `type:"native"` and '
+            "no `spec`. To make the tile LIVE, also pass `widget.sources` — "
+            "a dict keyed by source name; each value is a read-only GET "
+            "binding `{method:'GET', path:'/...', bind:'state.<key>', "
+            "refresh:['pocket_open'|'manual']}`. The source hydrates the "
+            "state path the tile's `spec` binds to (e.g. tile "
+            "`value:'{state.revenue}'` + source `bind:'state.revenue'`). "
+            "Sources are authored onto the pocket's top-level "
+            "rippleSpec.sources and run by the source executor; an invalid "
+            "source is dropped without blocking the tile."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "Id of the pocket to pin the widget onto.",
+                },
+                "widget": {
+                    "type": "object",
+                    "description": (
+                        "Widget entry: name, type, optional icon/color, a "
+                        "rippleSpec `spec` subtree (omit for native widgets), "
+                        "and optional `sources` — a dict keyed by source name "
+                        "of RFC-04 GET bindings ({method, path, bind, refresh}) "
+                        "that feed the tile's state. Omit `sources` for a "
+                        "static tile."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "widget"],
+        },
+    )
+    async def add_widget(args):  # type: ignore[no-untyped-def]
+        return await _add_widget_handler(args)
+
+    @tool(
+        "update_widget",
+        (
+            "Update an existing widget tile in place — use this to REFRESH a "
+            "widget's data (e.g., fetch latest sales numbers and rewrite the "
+            "chart's spec) without removing and re-adding. Args: `pocket_id` "
+            "(current home pocket), `widget_id` (from `get_pocket` widgets[]), "
+            "`fields` — object of widget fields to overwrite, usually "
+            "`{spec: <new spec>}`. Validation runs on the new spec the same "
+            "way `add_widget` does; an invalid spec is rejected. Use this "
+            "when the user says 'refresh', 'reload', 'update', 'show latest' "
+            "on an existing tile. To turn a STATIC tile LIVE, also pass "
+            "`fields.sources` — a dict keyed by source name; each value is a "
+            "read-only GET binding `{method:'GET', path:'/...', "
+            "bind:'state.<key>', refresh:['pocket_open'|'manual']}` — and bind "
+            "the tile's `spec` to the same `{state.<key>}` (mirrors "
+            "`add_widget`'s `widget.sources`). Sources are authored onto the "
+            "pocket's top-level rippleSpec.sources; an invalid source is "
+            "dropped without blocking the patch. The result carries "
+            "`authored_sources` / `skipped_sources` — confirm ONLY the "
+            "authored keys; never report a skipped one as written."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "Id of the pocket holding the widget.",
+                },
+                "widget_id": {
+                    "type": "string",
+                    "description": "Id of the widget to update (from get_pocket widgets[]).",
+                },
+                "fields": {
+                    "type": "object",
+                    "description": (
+                        "Widget fields to overwrite. Usually "
+                        "{spec: <new rippleSpec>} for a refresh. Pass optional "
+                        "`sources` (a dict keyed by source name of RFC-04 GET "
+                        "bindings {method, path, bind, refresh}) to make the "
+                        "tile live — bind the spec to the same state path. "
+                        "`sources` is authored at the pocket's top-level "
+                        "sources, never as a widget field."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "widget_id", "fields"],
+        },
+    )
+    async def update_widget(args):  # type: ignore[no-untyped-def]
+        return await _update_widget_handler(args)
+
+    server = create_sdk_mcp_server(
+        name=SERVER_NAME,
+        version="1.2.0",
+        tools=[get_pocket, list_pockets, add_widget, update_widget],
+    )
+    return SERVER_NAME, server
+
+
+__all__ = [
+    "ADD_WIDGET_TOOL_ID",
+    "GET_POCKET_TOOL_ID",
+    "LIST_POCKETS_TOOL_ID",
+    "POCKET_TOOL_IDS",
+    "SERVER_NAME",
+    "UPDATE_WIDGET_TOOL_ID",
+    "build_pocket_context_server",
+]

@@ -1,8 +1,13 @@
 # pocketpaw/audit/router.py — FastAPI router for the enterprise audit log API.
 # Created: 2026-03-27
+# Updated: 2026-04-19 (Cluster C / PR4) — Soft-deprecated. The canonical
+#   surface is now `/api/v1/runtime/audit` (see audit/runtime_router.py).
+#   `/api/v1/audit` is kept as a legacy alias that forwards to the new
+#   store.search_entries API so existing integrations keep working. A
+#   Deprecation + Link response header points callers to the new path.
 # Endpoints:
-#   GET  /api/v1/audit                    — query entries with filters
-#   GET  /api/v1/audit/export             — export as CSV or JSON for compliance
+#   GET  /api/v1/audit                    — legacy alias → runtime audit
+#   GET  /api/v1/audit/export             — legacy alias → runtime export
 # Auth: requires "audit" scope (same pattern as memory/settings routers).
 
 from __future__ import annotations
@@ -38,8 +43,15 @@ class AuditQueryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+_DEPRECATION_HEADERS = {
+    "Deprecation": "true",
+    "Link": '</api/v1/runtime/audit>; rel="successor-version"',
+}
+
+
 @router.get("/audit", response_model=AuditQueryResponse)
 async def query_audit_log(
+    response: Response,
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
     category: str | None = Query(
         None, description="Filter by category: decision|data|config|security"
@@ -52,9 +64,14 @@ async def query_audit_log(
 ) -> AuditQueryResponse:
     """Query the enterprise audit log with optional filters.
 
+    DEPRECATED: use ``/api/v1/runtime/audit`` instead. Kept for backwards
+    compatibility with existing callers; emits Deprecation + Link headers.
+
     Returns entries sorted newest-first. All parameters are optional.
     """
-    entries = await store.query_entries(
+    for k, v in _DEPRECATION_HEADERS.items():
+        response.headers[k] = v
+    entries = await store.search_entries(
         pocket_id=pocket_id,
         category=category,
         actor=actor,

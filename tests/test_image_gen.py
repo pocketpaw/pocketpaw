@@ -1,5 +1,8 @@
 # Tests for Feature 4: ImageGenerateTool
 # Created: 2026-02-06
+# 2026-06-10: added TestGenerateImageFile — route tests for the shared
+#   generate_image_file helper (gemini-*-image → generate_content,
+#   imagen-* → generate_images).
 
 import tempfile
 from pathlib import Path
@@ -156,3 +159,61 @@ class TestImageGenerateTool:
                 d = _get_generated_dir()
                 assert d.exists()
                 assert d.name == "generated"
+
+
+class TestGenerateImageFile:
+    """Route tests for generate_image_file (2026-06-10): gemini-*-image models
+    go through generate_content; imagen-* models through generate_images."""
+
+    def test_gemini_model_uses_generate_content(self):
+        from pocketpaw.tools.builtin.image_gen import generate_image_file
+
+        part = MagicMock()
+        part.inline_data = MagicMock(mime_type="image/png", data=b"png-bytes")
+        candidate = MagicMock()
+        candidate.content.parts = [part]
+        response = MagicMock(candidates=[candidate])
+        client = MagicMock()
+        client.models.generate_content.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / "out.png"
+            err = generate_image_file(client, "gemini-2.5-flash-image", "a cat", "1:1", out_path)
+            assert err is None
+            assert out_path.read_bytes() == b"png-bytes"
+
+        client.models.generate_content.assert_called_once()
+        client.models.generate_images.assert_not_called()
+
+    def test_imagen_model_uses_generate_images(self):
+        from pocketpaw.tools.builtin.image_gen import generate_image_file
+
+        image = MagicMock()
+        response = MagicMock(generated_images=[MagicMock(image=image)])
+        client = MagicMock()
+        client.models.generate_images.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / "out.png"
+            err = generate_image_file(client, "imagen-4.0-generate-001", "a cat", "16:9", out_path)
+            assert err is None
+            image.save.assert_called_once_with(out_path)
+
+        client.models.generate_content.assert_not_called()
+
+    def test_gemini_model_no_image_part_returns_error(self):
+        from pocketpaw.tools.builtin.image_gen import generate_image_file
+
+        text_part = MagicMock()
+        text_part.inline_data = None
+        candidate = MagicMock()
+        candidate.content.parts = [text_part]
+        response = MagicMock(candidates=[candidate])
+        client = MagicMock()
+        client.models.generate_content.return_value = response
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = Path(tmpdir) / "out.png"
+            err = generate_image_file(client, "gemini-2.5-flash-image", "a cat", "1:1", out_path)
+            assert err is not None
+            assert not out_path.exists()

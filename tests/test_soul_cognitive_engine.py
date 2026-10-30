@@ -18,10 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pocketpaw.agents.protocol import AgentEvent
-from pocketpaw.soul.cognitive import (
-    _COGNITIVE_SYSTEM_PROMPT,
-    PocketPawCognitiveEngine,
-)
+from pocketpaw.soul import PocketPawCognitiveEngine
+from pocketpaw.soul._cognitive import _COGNITIVE_SYSTEM_PROMPT
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -168,7 +166,8 @@ async def test_pocketpaw_engine_ignores_non_text_events():
 @pytest.mark.asyncio
 async def test_soul_manager_try_awaken_passes_engine(tmp_path):
     """SoulManager._try_awaken() forwards the engine kwarg to Soul.awaken()."""
-    from pocketpaw.soul.manager import SoulManager, _reset_manager
+    from pocketpaw.soul import SoulManager
+    from pocketpaw.soul._manager import _reset_manager
 
     _reset_manager()
 
@@ -206,7 +205,8 @@ async def test_soul_manager_try_awaken_passes_engine(tmp_path):
 @pytest.mark.asyncio
 async def test_soul_manager_initialize_passes_engine_to_birth(tmp_path):
     """SoulManager._birth_soul() includes engine in kwargs forwarded to Soul.birth()."""
-    from pocketpaw.soul.manager import SoulManager, _reset_manager
+    from pocketpaw.soul import SoulManager
+    from pocketpaw.soul._manager import _reset_manager
 
     _reset_manager()
 
@@ -243,7 +243,8 @@ async def test_soul_manager_initialize_passes_engine_to_birth(tmp_path):
 @pytest.mark.asyncio
 async def test_soul_manager_initialize_no_engine_works(tmp_path):
     """SoulManager._birth_soul() without engine does not pass engine kwarg."""
-    from pocketpaw.soul.manager import SoulManager, _reset_manager
+    from pocketpaw.soul import SoulManager
+    from pocketpaw.soul._manager import _reset_manager
 
     _reset_manager()
 
@@ -321,8 +322,8 @@ async def test_agent_loop_wires_cognitive_engine_on_start():
     with (
         patch("pocketpaw.agents.loop.Settings.load", return_value=settings),
         patch("pocketpaw.agents.loop.get_message_bus", return_value=MagicMock()),
-        patch("pocketpaw.soul.manager.SoulManager", return_value=mock_soul_manager),
-        patch("pocketpaw.soul.cognitive.PocketPawCognitiveEngine") as MockEngine,
+        patch("pocketpaw.soul.SoulManager", return_value=mock_soul_manager),
+        patch("pocketpaw.soul.PocketPawCognitiveEngine") as MockEngine,
         patch.object(loop, "_gc_session_locks", new_callable=lambda: lambda self: _never()),
         patch.object(loop, "_loop", new_callable=lambda: lambda self: _never()),
     ):
@@ -333,8 +334,8 @@ async def test_agent_loop_wires_cognitive_engine_on_start():
             patch.dict(
                 "sys.modules",
                 {
-                    "pocketpaw.soul.manager": MagicMock(SoulManager=lambda s: mock_soul_manager),
-                    "pocketpaw.soul.cognitive": MagicMock(PocketPawCognitiveEngine=MockEngine),
+                    "pocketpaw.soul._manager": MagicMock(SoulManager=lambda s: mock_soul_manager),
+                    "pocketpaw.soul._cognitive": MagicMock(PocketPawCognitiveEngine=MockEngine),
                 },
             ),
         ):

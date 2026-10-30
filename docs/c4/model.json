@@ -1,523 +1,79 @@
 {
   "version": "1.0",
   "scope": "pocketpaw",
-  "generated_at": "2026-04-07T07:37:46Z",
-  "source_path": "/Users/prakash/Documents/Qbtrix/OCEAN-workspace/pocketPaw/src",
+  "generated_at": "2026-06-21T12:30:00Z",
+  "source_path": "/Users/prakash-1/Documents/paw-workspace/pocketpaw",
+  "authored": true,
   "model": {
-    "people": [
-      {
-        "id": "end-user",
-        "name": "End User",
-        "description": "Users interacting with Pocketpaw through various messaging platforms (Discord, Slack, Telegram) to access AI-powered features and services",
-        "tags": [
-          "user"
-        ]
-      },
-      {
-        "id": "discord-user",
-        "name": "Discord User",
-        "description": "Users accessing Pocketpaw through Discord servers and direct messages for AI-assisted conversations and commands",
-        "tags": [
-          "user",
-          "discord"
-        ]
-      },
-      {
-        "id": "slack-user",
-        "name": "Slack User",
-        "description": "Team members using Pocketpaw integrated within Slack workspaces for collaborative AI-powered assistance",
-        "tags": [
-          "user",
-          "slack"
-        ]
-      },
-      {
-        "id": "telegram-user",
-        "name": "Telegram User",
-        "description": "Users interacting with Pocketpaw through Telegram bot for on-the-go AI assistance and conversations",
-        "tags": [
-          "user",
-          "telegram"
-        ]
-      },
-      {
-        "id": "system-admin",
-        "name": "System Administrator",
-        "description": "Administrator responsible for managing Pocketpaw deployment, monitoring system health, and configuring external AI service integrations",
-        "tags": [
-          "admin",
-          "operator"
-        ]
-      }
-    ],
+    "people": [],
     "systems": [
       {
         "id": "pocketpaw",
-        "name": "Pocketpaw",
-        "description": "Software system: pocketpaw",
-        "tags": [
-          "internal"
-        ],
+        "name": "PocketPaw",
+        "description": "Self-hosted agentic OS: agents live, decide, and remember on the customer's own infrastructure. OSS runtime (src/pocketpaw) plus the multi-tenant enterprise cloud tier (ee/pocketpaw_ee).",
+        "tags": ["internal"],
         "containers": [
           {
-            "id": "pocketpaw-core",
-            "name": "Pocketpaw Core",
-            "description": "Core Python/FastAPI backend providing agent orchestration, LLM integration, knowledge management, security, and extensible adapters for multiple platforms including Discord, Slack, Telegram, and OpenAI.",
-            "technology": "Python/FastAPI",
-            "tags": [
-              "async",
-              "auth",
-              "database",
-              "web",
-              "internal"
-            ],
-            "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents",
+            "id": "pocketpaw-app",
+            "name": "PocketPaw Runtime + Cloud",
+            "description": "The Python application: the OSS agent runtime and the enterprise cloud tier (FastAPI). Components below are the major logical subsystems.",
+            "technology": "Python 3.12, FastAPI, Pydantic",
+            "tags": ["internal"],
+            "kb_article": "",
             "components": [
-              {
-                "id": "api",
-                "name": "API Layer",
-                "description": "REST API endpoints and HTTP routing for external and internal requests. Handles versioning and endpoint management.",
-                "technology": "Python/FastAPI",
-                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
-              },
-              {
-                "id": "agents",
-                "name": "Agent Orchestration",
-                "description": "Manages AI agent creation, configuration, lifecycle, and execution. Coordinates agent-to-agent communication and markdown-based agent definitions.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "llm",
-                "name": "LLM Integration",
-                "description": "Interfaces with language models including Anthropic and OpenAI. Manages model selection, prompting, and response handling.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "knowledge",
-                "name": "Knowledge Management",
-                "description": "Manages knowledge bases, vector database operations, and semantic search capabilities for agent context and memory.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "memory",
-                "name": "Memory \u0026 State",
-                "description": "Handles conversation history, agent state persistence, and context management across sessions.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "adapters",
-                "name": "Platform Adapters",
-                "description": "Integrates with Discord, Slack, Telegram, and other messaging platforms. Transforms platform-specific formats to unified internal protocols.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "tools",
-                "name": "Tools \u0026 Skills",
-                "description": "Extensible tool system enabling agents to execute actions. Includes built-in tools, custom skill definitions, and integration kits.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "mcp",
-                "name": "Model Context Protocol",
-                "description": "Implements MCP server and client for standardized tool and resource integration with language models.",
-                "technology": "Python",
-                "kb_article": "ripplenormalizer-normalizes-ai-generated-pocket-specifications-into-a-consistent"
-              },
-              {
-                "id": "security",
-                "name": "Security \u0026 Authentication",
-                "description": "Handles OAuth2 authentication, authorization, encryption, and secure credential management across all components.",
-                "technology": "Python",
-                "kb_article": "deps-fastapi-dependency-injection-layer-for-cloud-router-authentication-and-auth"
-              },
-              {
-                "id": "audit",
-                "name": "Audit \u0026 Compliance",
-                "description": "Tracks system events, user actions, and compliance logging for security and regulatory requirements.",
-                "technology": "Python",
-                "kb_article": "deps-fastapi-dependency-injection-layer-for-cloud-router-authentication-and-auth"
-              },
-              {
-                "id": "automations",
-                "name": "Automation Engine",
-                "description": "Defines and executes automated workflows, triggers, and scheduled tasks for agent-driven operations.",
-                "technology": "Python",
-                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
-              },
-              {
-                "id": "integrations",
-                "name": "Integrations",
-                "description": "Third-party service connectors and external system bridges for extended functionality and data exchange.",
-                "technology": "Python",
-                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
-              },
-              {
-                "id": "connectors",
-                "name": "Data Connectors",
-                "description": "Manages connections to databases, APIs, and data sources used by agents and tools.",
-                "technology": "Python",
-                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
-              },
-              {
-                "id": "providers",
-                "name": "Service Providers",
-                "description": "Abstracts service implementations including LLM providers, vector database providers, and storage backends.",
-                "technology": "Python",
-                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
-              },
-              {
-                "id": "daemon",
-                "name": "Background Daemon",
-                "description": "Long-running background processes for event processing, cleanup, and asynchronous task execution.",
-                "technology": "Python",
-                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
-              },
-              {
-                "id": "bus",
-                "name": "Event Bus",
-                "description": "Asynchronous message bus for inter-component communication and event-driven architecture.",
-                "technology": "Python",
-                "kb_article": "message-data-model-for-group-chat-messages-with-mentions-reactions-and-threading"
-              },
-              {
-                "id": "health",
-                "name": "Health \u0026 Monitoring",
-                "description": "System health checks, status reporting, and diagnostic endpoints for operational monitoring.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "bootstrap",
-                "name": "Bootstrap \u0026 Initialization",
-                "description": "Application startup, configuration loading, dependency injection, and system initialization.",
-                "technology": "Python",
-                "kb_article": "deps-fastapi-dependency-injection-layer-for-cloud-router-authentication-and-auth"
-              },
-              {
-                "id": "cli",
-                "name": "Command Line Interface",
-                "description": "CLI tools for system administration, testing, deployment, and manual operations.",
-                "technology": "Python",
-                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
-              },
-              {
-                "id": "schemas",
-                "name": "Data Schemas",
-                "description": "Request/response validation schemas, data models, and serialization definitions using Pydantic.",
-                "technology": "Python",
-                "kb_article": "schemas-pydantic-requestresponse-data-models-for-workspace-domain-operations"
-              },
-              {
-                "id": "constants",
-                "name": "Constants \u0026 Configuration",
-                "description": "Centralized application constants, configuration values, and environment-based settings.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "browser",
-                "name": "Browser Automation",
-                "description": "Web automation and browser control capabilities for agents to interact with web applications.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "deepwork",
-                "name": "Deep Work Engine",
-                "description": "Complex task decomposition and multi-step reasoning for sophisticated agent workflows.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "checks",
-                "name": "Validation Checks",
-                "description": "Pre and post-execution validation, sanity checks, and error detection throughout the system.",
-                "technology": "Python",
-                "kb_article": "ripplenormalizer-normalizes-ai-generated-pocket-specifications-into-a-consistent"
-              },
-              {
-                "id": "soul",
-                "name": "Agent Personality \u0026 Soul",
-                "description": "Manages agent personality traits, behavioral patterns, and character definitions.",
-                "technology": "Python",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "ee",
-                "name": "Enterprise Edition",
-                "description": "Enterprise-specific features, advanced capabilities, and specialized functionality.",
-                "technology": "Python",
-                "kb_article": "core-enterprise-jwt-authentication-with-cookie-and-bearer-transport-for-fastapi"
-              },
-              {
-                "id": "features",
-                "name": "Feature Flags",
-                "description": "Feature toggle management and experimental feature control.",
-                "technology": "JavaScript",
-                "kb_article": "agent-agent-configuration-and-metadata-storage-for-workspace-scoped-ai-agents"
-              },
-              {
-                "id": "js",
-                "name": "JavaScript Utilities",
-                "description": "JavaScript-based utilities and client-side functionality.",
-                "technology": "JavaScript",
-                "kb_article": "deps-fastapi-dependency-injection-layer-for-cloud-router-authentication-and-auth"
-              }
+              {"id": "runtime", "name": "Runtime", "description": "Agent core: 8 pluggable LLM backends, 11 channel adapters, the message bus, the tool registry with trust-level policy, and bundled-skills auto-install. src/pocketpaw/{agents,bus,tools,runtime}.", "technology": "Python", "kb_article": ""},
+              {"id": "fabric", "name": "Fabric (ontology)", "description": "Typed-object + typed-link ontology with provenance and multi-hop (<=5) queries. Two SQLite stores: live objects/links (async) and the type registry (sync). src/pocketpaw/fabric + ee/pocketpaw_ee/fabric.", "technology": "Python, SQLite", "kb_article": ""},
+              {"id": "instinct", "name": "Instinct (governance gate)", "description": "Propose -> approve/reject -> meter governance with a tamper-evident audit ledger and Decision-Graph events. Gates pocket writes, code changes, connectors, and mandates. src/pocketpaw/instinct + ee/pocketpaw_ee/instinct + ee/cloud/pockets/instinct_*.", "technology": "Python, SQLite, MongoDB", "kb_article": ""},
+              {"id": "connectors", "name": "Connectors", "description": "Workspace-scoped typed data integrations (Gmail/Stripe/Postgres/...). CLOUD vs LOCAL execution; derives per-pocket surface profiles. src/pocketpaw/connectors + ee/cloud/connectors.", "technology": "Python, YAML, httpx", "kb_article": ""},
+              {"id": "discovery", "name": "Discovery (Sovereign Zero-Setup)", "description": "On-box digesters turn connector exhaust and Instinct corrections into Fabric objects and governed rules, proposed for human review. Pure/deterministic, no off-box calls. ee/pocketpaw_ee/discovery. NOTE: currently branch-only (feat/szd-*), not yet merged to dev.", "technology": "Python", "kb_article": ""},
+              {"id": "cloud-chat-surface", "name": "Cloud Chat + Surface engine", "description": "Cloud agent orchestration: resolves the chat surface (home/pockets/sites/code/studio/belt), injects per-surface preambles, and assembles scope/pocket/participant context. ee/cloud/chat (agent_service) + ee/cloud/surface.", "technology": "Python, claude_agent_sdk", "kb_article": ""},
+              {"id": "pockets", "name": "Pockets + rippleSpec", "description": "Pocket workspace containers (agents+data+tools+KB+rules). The rippleSpec merge endpoint; data sources (read GETs) and write actions gated through Instinct. ee/cloud/pockets.", "technology": "Python", "kb_article": ""},
+              {"id": "sites", "name": "Paw Sites", "description": "Publish pockets as edge sites. Two engines x two modes: {ripple,svelte} x {static,dynamic}; dynamic = per-tenant Cloudflare D1. ee/pocketpaw_ee/sites + the paw-sites generator.", "technology": "Python, Bun, SvelteKit", "kb_article": ""},
+              {"id": "integrations", "name": "Sites integrations", "description": "One-click integrations for Paw Sites: encrypted workspace connection vault with a leased token-refresh path, provider registry (built-in / connect / embed), hosted OAuth connect + callback, site bindings, the public site gateway (POST /sites/{id}/x/{provider}/{action}), provider webhook ingress and site orders. ee/pocketpaw_ee/integrations.", "technology": "Python, FastAPI", "kb_article": ""},
+              {"id": "foresight", "name": "Foresight", "description": "Scenario simulation / rehearsal: soul-seeded personas run per-tick cognition loops with calibration and backtest gating. ee/pocketpaw_ee/foresight.", "technology": "Python", "kb_article": ""},
+              {"id": "enterprise-ops", "name": "Enterprise Ops", "description": "Fleet install, Calendar (external sync + conflict detection), Guards (RBAC/ABAC), Audit (placeholder), and the Paw Bar customer decision loop. ee/pocketpaw_ee/{fleet,calendar,guards,audit,paw_bar}.", "technology": "Python", "kb_article": ""},
+              {"id": "belt-blueprint", "name": "Belt blueprint reader", "description": "One repo's app blueprint graph (features, components, journeys, gaps) each app's planned C4 view with a status per component, and the suite feature map joined to those statuses, derived from git on the bound clone plus GitHub issues, PRs and lead branches, cached 60 s per workspace and repo. GET /belt/blueprints, /belt/blueprints/c4 and /belt/blueprints/suite-map. ee/pocketpaw_ee/cloud/belt/app_blueprint*.py.", "technology": "Python, git, gh", "kb_article": ""}
             ]
-          }
+          },
+          {"id": "mongo", "name": "MongoDB", "description": "Primary cloud datastore: pockets, sessions, messages, agents, sites, Instinct approvals, connectors.", "technology": "MongoDB (Beanie ODM)", "tags": ["database"], "kb_article": "", "components": []},
+          {"id": "redis", "name": "Redis / Dragonfly", "description": "Resumable chat-run streams (SSE transport) and source-refresh rate budgets.", "technology": "Redis / Dragonfly", "tags": ["database", "queue"], "kb_article": "", "components": []},
+          {"id": "qdrant", "name": "Qdrant", "description": "Vector store for embeddings and semantic retrieval.", "technology": "qdrant/qdrant:latest", "tags": ["database"], "kb_article": "", "components": []},
+          {"id": "ollama", "name": "Ollama", "description": "Local LLM inference for self-hosted / sovereign deployments.", "technology": "ollama/ollama:latest", "tags": [], "kb_article": "", "components": []}
         ]
       },
-      {
-        "id": "anthropic-api",
-        "name": "Anthropic API",
-        "description": "Claude AI service providing large language model capabilities for natural language processing and intelligent conversation features in Pocketpaw",
-        "tags": [
-          "external"
-        ],
-        "containers": []
-      },
-      {
-        "id": "discord-api",
-        "name": "Discord API",
-        "description": "Discord messaging platform API enabling Pocketpaw to integrate with Discord servers and provide bot functionality for Discord users",
-        "tags": [
-          "external"
-        ],
-        "containers": []
-      },
-      {
-        "id": "openai-api",
-        "name": "OpenAI API",
-        "description": "GPT-based AI service providing alternative language model capabilities for text generation and conversation features in Pocketpaw",
-        "tags": [
-          "external"
-        ],
-        "containers": []
-      },
-      {
-        "id": "slack-api",
-        "name": "Slack API",
-        "description": "Slack workplace messaging platform API enabling Pocketpaw integration with Slack workspaces for team-based AI assistance",
-        "tags": [
-          "external"
-        ],
-        "containers": []
-      },
-      {
-        "id": "telegram-bot-api",
-        "name": "Telegram Bot API",
-        "description": "Telegram messaging platform API enabling Pocketpaw to operate as a Telegram bot for direct user interactions and conversations",
-        "tags": [
-          "external"
-        ],
-        "containers": []
-      }
+      {"id": "soul-protocol", "name": "Soul Protocol", "description": "External: portable identity + 5-tier memory (.soul). PocketPaw runtime, Fabric, and Instinct write to the soul journal (Decision Graph).", "tags": ["external"], "containers": []},
+      {"id": "ripple", "name": "Ripple", "description": "External: Svelte 5 generative-UI runtime that renders rippleSpec into live UI. Pockets and the static/ripple site track compile through it.", "tags": ["external"], "containers": []},
+      {"id": "cloudflare", "name": "Cloudflare Workers + D1", "description": "External: edge deploy target for Paw Sites; per-tenant D1 backs dynamic sites; Email Service (REST) sends owner lead/handoff email.", "tags": ["external"], "containers": []},
+      {"id": "kb-go", "name": "kb-go", "description": "External: on-box knowledge-base compiler. Discovery uses its keyless convo-ingest path to compile unstructured exhaust without any off-box call.", "tags": ["external"], "containers": []},
+      {"id": "paw-lens", "name": "paw-lens", "description": "External: on-box agent/automation health service (Go). Receives OTLP traces from pocketpaw's Logfire exporter and serves a token-guarded read API that the cloud lens proxy forwards.", "tags": ["external"], "containers": []}
     ],
     "relationships": [
-      {
-        "source": "a2a",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "adapters",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "async"
-      },
-      {
-        "source": "agents",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "agentsmd",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "audit",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "automations",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "bootstrap",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "builtin",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "async"
-      },
-      {
-        "source": "bus",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "async"
-      },
-      {
-        "source": "checks",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "cli",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "connectors",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "daemon",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "deepwork",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "health",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "integrations",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "kits",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "knowledge",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "llm",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "mcp",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "memory",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "missioncontrol",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "oauth2",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "paw",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "pocketpaw",
-        "target": "anthropic-api",
-        "description": "Uses Anthropic API",
-        "style": "async"
-      },
-      {
-        "source": "pocketpaw",
-        "target": "discord-api",
-        "description": "Uses Discord API",
-        "style": "async"
-      },
-      {
-        "source": "pocketpaw",
-        "target": "openai-api",
-        "description": "Uses OpenAI API",
-        "style": "async"
-      },
-      {
-        "source": "pocketpaw",
-        "target": "slack-api",
-        "description": "Uses Slack API",
-        "style": "async"
-      },
-      {
-        "source": "pocketpaw",
-        "target": "telegram-bot-api",
-        "description": "Uses Telegram Bot API",
-        "style": "async"
-      },
-      {
-        "source": "providers",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "security",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "tools",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "sync"
-      },
-      {
-        "source": "v1",
-        "target": "pocketpaw",
-        "description": "imports pocketpaw",
-        "style": "async"
-      }
+      {"source": "connectors", "target": "fabric", "description": "ingests typed records", "technology": "", "style": "sync"},
+      {"source": "discovery", "target": "fabric", "description": "reads objects, proposes types", "technology": "", "style": "async"},
+      {"source": "discovery", "target": "instinct", "description": "proposes governed rules", "technology": "", "style": "async"},
+      {"source": "discovery", "target": "kb-go", "description": "on-box compile (keyless)", "technology": "subprocess", "style": "sync"},
+      {"source": "pockets", "target": "instinct", "description": "gates write actions", "technology": "", "style": "sync"},
+      {"source": "belt-blueprint", "target": "instinct", "description": "reads the workspace's lead runs", "technology": "", "style": "sync"},
+      {"source": "pockets", "target": "ripple", "description": "renders rippleSpec", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "pockets", "description": "creates / edits pockets", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "fabric", "description": "queries the ontology", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "instinct", "description": "routes approvals", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "mongo", "description": "persists sessions / messages", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "redis", "description": "streams run events", "technology": "SSE", "style": "async"},
+      {"source": "sites", "target": "pockets", "description": "publishes from a pocket spec", "technology": "", "style": "sync"},
+      {"source": "sites", "target": "ripple", "description": "compiles the ripple track", "technology": "", "style": "sync"},
+      {"source": "sites", "target": "cloudflare", "description": "deploys worker + D1", "technology": "", "style": "sync"},
+      {"source": "sites", "target": "cloudflare", "description": "owner lead email via the notification outbox", "technology": "Email Service REST", "style": "async"},
+      {"source": "sites", "target": "integrations", "description": "published pages and Workers call the gateway", "technology": "HTTPS", "style": "sync"},
+      {"source": "integrations", "target": "mongo", "description": "persists encrypted connections, bindings, orders", "technology": "", "style": "sync"},
+      {"source": "integrations", "target": "redis", "description": "single-use OAuth state", "technology": "", "style": "sync"},
+      {"source": "cloud-chat-surface", "target": "integrations", "description": "agent asks the owner to connect a provider", "technology": "SSE card", "style": "async"},
+      {"source": "runtime", "target": "soul-protocol", "description": "loads / saves memory", "technology": "", "style": "sync"},
+      {"source": "fabric", "target": "soul-protocol", "description": "writes the object journal", "technology": "", "style": "async"},
+      {"source": "instinct", "target": "soul-protocol", "description": "emits Decision-Graph events", "technology": "", "style": "async"},
+      {"source": "pockets", "target": "mongo", "description": "persists pocket + spec", "technology": "", "style": "sync"},
+      {"source": "runtime", "target": "paw-lens", "description": "agent traces", "technology": "OTLP/HTTP", "style": "async"},
+      {"source": "pocketpaw-app", "target": "paw-lens", "description": "read API proxy", "technology": "HTTP + X-Lens-Token", "style": "sync"}
     ]
   }
 }

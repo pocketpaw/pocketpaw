@@ -33,9 +33,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from soul_protocol.engine.journal import open_journal
 
-from ee.journal_dep import get_journal, reset_journal_cache
-from ee.widget.events import ACTION_WIDGET_INTERACTION_RECORDED
-from ee.widget.router import reset_store_cache, router
+from pocketpaw.journal_dep import get_journal, reset_journal_cache
+from pocketpaw.widget.events import ACTION_WIDGET_INTERACTION_RECORDED
+from pocketpaw.widget.router import reset_store_cache, router
 
 # ---------------------------------------------------------------------------
 # Fixtures — mirror tests/ee/test_widget_journal.py so the caches don't

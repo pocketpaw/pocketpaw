@@ -12,15 +12,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ee.instinct.correction import Correction, CorrectionPatch
-from ee.instinct.correction_soul_bridge import CorrectionSoulBridge
-from ee.instinct.models import (
+from pocketpaw.instinct.correction import Correction, CorrectionPatch
+from pocketpaw.instinct.correction_soul_bridge import CorrectionSoulBridge
+from pocketpaw.instinct.models import (
     Action,
     ActionCategory,
     ActionPriority,
     ActionTrigger,
 )
-from ee.instinct.store import InstinctStore
+from pocketpaw.instinct.store import InstinctStore
 
 
 @pytest.fixture(autouse=True)
@@ -272,7 +272,7 @@ class TestInstinctCorrectionsTool:
         empty_store = InstinctStore(tmp_path / "empty.db")
         monkeypatch.setattr(
             "pocketpaw.tools.builtin.instinct_corrections._get_instinct_store",
-            lambda: empty_store,
+            lambda *a, **k: empty_store,
         )
 
         tool = InstinctCorrectionsTool()
@@ -297,7 +297,7 @@ class TestInstinctCorrectionsTool:
         )
         monkeypatch.setattr(
             "pocketpaw.tools.builtin.instinct_corrections._get_instinct_store",
-            lambda: store,
+            lambda *a, **k: store,
         )
 
         tool = InstinctCorrectionsTool()
@@ -316,7 +316,7 @@ class TestInstinctCorrectionsTool:
 
         monkeypatch.setattr(
             "pocketpaw.tools.builtin.instinct_corrections._get_instinct_store",
-            lambda: None,
+            lambda *a, **k: None,
         )
 
         tool = InstinctCorrectionsTool()

@@ -1,0 +1,483 @@
+# ee/pocketpaw_ee/sites/public_assets.py — the PUBLIC asset rail for Paw Sites.
+#
+# A published site is read by anonymous visitors, so the media it shows needs an
+# address with no credential and no expiry. A presign expires (S3 caps it at 7
+# days) and ``/api/v1/uploads/{id}`` is auth-gated, and the bytes cannot ride the
+# build (``generator_client`` sends a text-only source map). This rail stores
+# stills and video on a world-readable bucket and hands back durable URLs, which
+# also keeps visitor-supplied bytes out of the build tree.
+#
+# ONLY PUBLISHABLE MEDIA lands here: PNG/JPEG/GIF/WebP and MP4/WebM, decided by
+# magic bytes. SVG (executes script), QuickTime and documents are refused; a PRD
+# is agent input and stays on the private rail. Images cap at 10 MiB, video at
+# 50 MiB (the S3 adapter buffers a whole body before it PUTs; raising the cap
+# means multipart upload first, not a config bump).
+#
+# KEY LAYOUT: ``sites-assets/{workspace_id}/{pocket_id}/{sha256[:16]}-{stem}{ext}``.
+# Tenant-scoped so one workspace can never enumerate or overwrite another's, and
+# content-addressed so a key's bytes never change (safe for the year-long
+# immutable Cache-Control, and a repeat put is free).
+#
+# ``key_for_url`` + ``read`` let a caller turn one of this workspace's public URLs
+# back into bytes from storage, so nothing here ever fetches a URL. ``purge`` and
+# ``can_list`` serve the delete cascade: an orphan on this bucket is public
+# forever, and ``StorageAdapter.browse`` defaults to ``[]`` rather than raising,
+# which would make an unlistable adapter look like a site with no assets.
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import re
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+
+from pocketpaw.uploads.adapter import StorageAdapter
+from pocketpaw.uploads.config import extension_for
+
+logger = logging.getLogger(__name__)
+
+# Raster images only. SVG is absent ON PURPOSE: it is an XML document that
+# executes script, and serving one from a bucket origin we control turns an image
+# upload into stored XSS / hosted phishing. HTML is absent for the same reason.
+# Anything added here becomes world-readable at a stable URL forever — treat this
+# set as a security boundary, not a convenience list.
+PUBLIC_IMAGE_MIMES: frozenset[str] = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+    }
+)
+
+# Web-playable containers only. A .mov/quicktime upload is common off a phone but
+# does not play in every browser, so accepting it would publish a video that is
+# silently blank for some visitors — worse than refusing it at the door.
+PUBLIC_VIDEO_MIMES: frozenset[str] = frozenset(
+    {
+        "video/mp4",
+        "video/webm",
+    }
+)
+
+PUBLIC_MEDIA_MIMES: frozenset[str] = PUBLIC_IMAGE_MIMES | PUBLIC_VIDEO_MIMES
+
+# Magic-byte signatures for the allowlist above. The public rail must NOT reuse
+# ``uploads.service._sniff_mime``: that helper FALLS BACK to the client's own
+# Content-Type header when nothing matches, so a caller can label arbitrary bytes
+# ``image/png`` and have them stored and served under that type. On a private,
+# auth-gated rail that is survivable. On a public origin it is how you end up
+# hosting somebody else's payload, so here a file must PROVE what it is.
+_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    # Matroska/WebM: the EBML header is a plain prefix.
+    (b"\x1a\x45\xdf\xa3", "video/webm"),
+)
+
+# ISO-BMFF brands that are actually web-playable MP4. `qt  ` (QuickTime) is
+# deliberately absent — see PUBLIC_VIDEO_MIMES.
+_MP4_BRANDS: frozenset[bytes] = frozenset(
+    {b"isom", b"iso2", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"dash", b"M4V "}
+)
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MiB — a hero image.
+# 50 MiB, NOT an arbitrary round number: the S3 adapter buffers the whole body in
+# memory and warns past 64 MiB. Staying under that is the difference between a
+# refusal the user can act on and a worker that dies mid-upload.
+MAX_VIDEO_BYTES = 50 * 1024 * 1024
+# Back-compat alias — the endpoint's read cap must admit the largest kind.
+MAX_ASSET_BYTES = MAX_VIDEO_BYTES
+
+_KEY_PREFIX = "sites-assets"
+_HASH_LEN = 16
+_STEM_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+_MAX_STEM_LEN = 48
+# Every stored name starts with the content hash and a dash, so a listing can
+# split the display name back off the key.
+_LISTED_RE = re.compile(r"^([0-9a-f]{16})-(.+)$")
+
+
+class PublicAssetError(Exception):
+    """Raised when an asset is rejected. The message is safe to show a user."""
+
+
+@dataclass(frozen=True)
+class PublicAsset:
+    """One stored asset and the durable address a site can reference."""
+
+    key: str
+    url: str
+    mime: str
+    size: int
+    filename: str
+    sha256: str
+    # "image" | "video" — the agent needs this to emit <img> vs <video>, and it
+    # cannot reliably infer it from the extension alone in a listing.
+    kind: str = "image"
+
+
+def sniff_media_mime(head: bytes) -> str | None:
+    """Return the media mime ``head`` actually proves, or ``None``.
+
+    Unlike the private rail's sniffer there is no fallback to a caller-supplied
+    Content-Type — unrecognised bytes are simply not publishable media.
+    """
+    for magic, mime in _SIGNATURES:
+        if head.startswith(magic):
+            return mime
+    # WebP is the one image format whose marker is not a plain prefix: "RIFF",
+    # then a 4-byte little-endian length, then "WEBP" at offset 8.
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return "image/webp"
+    # MP4/ISO-BMFF: a 4-byte box length, then "ftyp", then the brand. Only the
+    # brands a browser actually plays are accepted — an unrecognised brand (HEIF
+    # off a phone, say) falls through to None rather than being published as
+    # video/mp4 and rendering as a blank player on the live page.
+    if head[4:8] == b"ftyp" and head[8:12] in _MP4_BRANDS:
+        return "video/mp4"
+    return None
+
+
+def kind_for_mime(mime: str) -> str:
+    """Return ``"image"`` or ``"video"`` — what the agent must emit for this asset."""
+    return "video" if mime in PUBLIC_VIDEO_MIMES else "image"
+
+
+def max_bytes_for_mime(mime: str) -> int:
+    """The size ceiling that applies to this media kind."""
+    return MAX_VIDEO_BYTES if mime in PUBLIC_VIDEO_MIMES else MAX_IMAGE_BYTES
+
+
+def _safe_stem(filename: str) -> str:
+    """Reduce a user filename to a short, URL-safe stem. Never empty."""
+    # Basename only — a filename arrives from a browser and may carry path
+    # separators from a hostile client.
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    stem = _STEM_RE.sub("-", stem).strip("-.")[:_MAX_STEM_LEN]
+    return stem or "asset"
+
+
+def build_key(workspace_id: str, pocket_id: str, digest: str, filename: str, mime: str) -> str:
+    """Return the tenant-scoped, content-addressed storage key for one asset."""
+    stem = _safe_stem(filename)
+    # ``extension_for`` is the shared private-rail map and carries no video
+    # mimes, so fall back to the local one rather than emit ".bin" for an mp4 —
+    # some CDNs and players still sniff the extension.
+    ext = extension_for(mime) or _MEDIA_EXT.get(mime) or ".bin"
+    return f"{_KEY_PREFIX}/{workspace_id}/{pocket_id}/{digest[:_HASH_LEN]}-{stem}{ext}"
+
+
+def prefix_for(workspace_id: str, pocket_id: str) -> str:
+    """Return the listing prefix owning every asset of one site."""
+    return f"{_KEY_PREFIX}/{workspace_id}/{pocket_id}/"
+
+
+class PublicAssetStore:
+    """Store site assets on a world-readable bucket and hand back durable URLs.
+
+    Construct via :func:`public_asset_store`, which returns ``None`` when the
+    deployment has no public bucket — callers must surface that as "not
+    configured" rather than silently falling back to the private adapter.
+    """
+
+    def __init__(self, adapter: StorageAdapter) -> None:
+        self._adapter = adapter
+
+    async def put(
+        self,
+        data: bytes,
+        *,
+        filename: str,
+        workspace_id: str,
+        pocket_id: str,
+    ) -> PublicAsset:
+        """Validate, store, and return the asset. Raises :class:`PublicAssetError`."""
+        if not data:
+            raise PublicAssetError("That file is empty.")
+
+        # Sniff BEFORE the size check: the ceiling depends on the kind, and a
+        # 30 MB video rejected against the 10 MB image cap would be a confusing
+        # lie about why it failed.
+        mime = sniff_media_mime(data[:512])
+        if mime is None or mime not in PUBLIC_MEDIA_MIMES:
+            raise PublicAssetError(
+                "A site can publish PNG, JPEG, GIF and WebP images, or MP4 and WebM "
+                "video. (SVG is not accepted — it can carry script. QuickTime .mov is "
+                "not accepted — it does not play in every browser.) "
+                "Documents like a PRD are read as context instead, not published."
+            )
+
+        cap = max_bytes_for_mime(mime)
+        if len(data) > cap:
+            noun = "Video" if kind_for_mime(mime) == "video" else "Images"
+            raise PublicAssetError(
+                f"That file is {len(data) // (1024 * 1024)} MB. "
+                f"{noun} for a site are capped at {cap // (1024 * 1024)} MB."
+            )
+
+        digest = hashlib.sha256(data).hexdigest()
+        key = build_key(workspace_id, pocket_id, digest, filename, mime)
+
+        url = self._adapter.public_url(key)
+        if not url:
+            # Belt-and-braces: public_asset_store() already refuses to build a
+            # store over an adapter with no public address, so reaching here
+            # means the adapter changed under us. Fail rather than store bytes
+            # nobody can ever reference.
+            raise PublicAssetError("Public asset storage is not configured for this deployment.")
+
+        async def _body() -> AsyncIterator[bytes]:
+            yield data
+
+        await self._adapter.put(key, _body(), mime)
+        logger.info(
+            "sites.public_assets: stored %d bytes for pocket %s at %s",
+            len(data),
+            pocket_id,
+            key,
+        )
+        return PublicAsset(
+            key=key,
+            url=url,
+            mime=mime,
+            size=len(data),
+            filename=filename,
+            sha256=digest,
+            kind=kind_for_mime(mime),
+        )
+
+    def key_for_url(
+        self, url: str, *, workspace_id: str, pocket_id: str | None = None
+    ) -> str | None:
+        """Map a public URL back to its storage key, or ``None``.
+
+        Only a URL this adapter minted for an asset under ``workspace_id`` (and
+        ``pocket_id``, when given) maps; anything else — another tenant, another
+        host, a nested or dotted path, a query string — is ``None``. This is what
+        lets a caller read an asset back from storage instead of fetching a URL.
+        """
+        base = self._adapter.public_url("")
+        if not base or not url.startswith(base):
+            return None
+        key = url[len(base) :]
+        if ".." in key or any(c in key for c in "?#\\%"):
+            return None
+        parts = key.split("/")
+        if len(parts) != 4 or parts[0] != _KEY_PREFIX or parts[1] != workspace_id:
+            return None
+        if not parts[2] or not parts[3]:
+            return None
+        if pocket_id is not None and parts[2] != pocket_id:
+            return None
+        return key
+
+    async def read(self, key: str, *, max_bytes: int = MAX_ASSET_BYTES) -> bytes:
+        """Read one stored asset's bytes. Raises :class:`PublicAssetError` when it
+        is missing or larger than ``max_bytes``."""
+        from pocketpaw.uploads.errors import NotFound
+
+        buf = bytearray()
+        try:
+            async for chunk in self._adapter.open(key):
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    raise PublicAssetError(
+                        f"That file is over the {max_bytes // (1024 * 1024)} MB limit."
+                    )
+        except NotFound as exc:
+            raise PublicAssetError("That file is no longer in storage.") from exc
+        return bytes(buf)
+
+    async def list(self, *, workspace_id: str, pocket_id: str) -> list[PublicAsset]:
+        """Return every asset stored for one site. Empty on an unlistable adapter."""
+        prefix = prefix_for(workspace_id, pocket_id)
+        items = await self._adapter.browse(prefix)
+        out: list[PublicAsset] = []
+        for item in items:
+            if item.is_dir:
+                continue
+            key = f"{prefix}{item.name}"
+            url = self._adapter.public_url(key)
+            if not url:
+                continue
+            match = _LISTED_RE.match(item.name)
+            digest, display = (match.group(1), match.group(2)) if match else ("", item.name)
+            out.append(
+                PublicAsset(
+                    key=key,
+                    url=url,
+                    mime=_mime_for_name(item.name),
+                    size=item.size,
+                    filename=display,
+                    sha256=digest,
+                    kind=kind_for_mime(_mime_for_name(item.name)),
+                )
+            )
+        return sorted(out, key=lambda a: a.filename)
+
+    async def delete(self, *, workspace_id: str, pocket_id: str, key: str) -> None:
+        """Delete one asset, refusing any key outside this site's own prefix."""
+        prefix = prefix_for(workspace_id, pocket_id)
+        if not key.startswith(prefix) or "/" in key[len(prefix) :]:
+            # The key arrives from the client. Without this the endpoint is an
+            # arbitrary-object delete against the whole bucket, across tenants.
+            raise PublicAssetError("That asset does not belong to this site.")
+        await self._adapter.delete(key)
+
+    def can_list(self) -> bool:
+        """Whether the underlying adapter actually implements prefix listing.
+
+        ``StorageAdapter.browse`` DEFAULTS TO RETURNING ``[]`` — it is a base-class
+        no-op that adapters override, not an abstract method that fails loudly. So an
+        adapter without listing is indistinguishable, from the outside, from a site
+        that has no assets. That ambiguity is harmless in :meth:`list`, which is
+        rendering a panel, and dangerous in :meth:`purge`, which reports what it
+        destroyed: an unlistable adapter would purge nothing, return zero, and the
+        caller would record a completed teardown over a bucket still holding every
+        asset. Checking the override is the only way to tell the two apart, so the
+        distinction lives here rather than in each caller's head."""
+        impl = getattr(type(self._adapter), "browse", None)
+        # Three cases, and only one of them can list: no ``browse`` at all (a
+        # duck-typed adapter), the base class no-op, or a real override.
+        return impl is not None and impl is not StorageAdapter.browse
+
+    async def purge(self, *, workspace_id: str, pocket_id: str) -> int:
+        """Delete EVERY asset under one site's prefix. Returns the number removed.
+
+        The teardown counterpart of :meth:`put`, and the reason it exists separately
+        from :meth:`delete` is that a site's assets outlive the record that lists
+        them: deleting a site removes the Site document, after which nothing can
+        enumerate what it left on a world-readable bucket. Those objects are served
+        with an immutable year-long cache from the bucket origin with no backend hop,
+        so an orphan here is public forever.
+
+        RAISES rather than returning 0 when the adapter cannot list. A silent zero is
+        the specific failure this method must not have — see :meth:`can_list`.
+
+        Deliberately does NOT reuse :meth:`list`. That method skips any item whose
+        ``public_url`` is falsy, which is correct when rendering a panel of openable
+        assets and wrong here: an object we cannot build a URL for is exactly one a
+        purge still has to remove. It also drops the per-key prefix guard, which stays
+        enforced because every key is rebuilt from ``prefix`` rather than taken from
+        the listing.
+
+        Idempotent: a prefix that is already empty returns 0 without erroring, so a
+        resumed teardown can re-run this step safely."""
+        if not self.can_list():
+            raise PublicAssetError(
+                "This deployment's storage adapter cannot list objects, so a site's "
+                "assets cannot be enumerated or removed. Purging would report success "
+                "over a bucket it never touched."
+            )
+        return await self.purge_prefix(prefix_for(workspace_id, pocket_id))
+
+    async def purge_prefix(self, prefix: str) -> int:
+        """Delete every object under an explicit prefix. Returns the number removed.
+
+        THIS EXISTS FOR TRANSFERRED SITES, and the reason is worth stating because
+        the obvious reading of :meth:`purge` is that it already covers everything.
+        It does not. It derives the prefix from the site's CURRENT workspace, and a
+        transferred site's images are still under the workspace that MINTED them —
+        the object key embeds that id and is baked into an immutable, year-cached
+        public URL inside the deployed HTML, so moving the bytes would blank the
+        images on a live site (``sites/transfer.py:_move_assets``). The prefixes
+        left behind are recorded on ``Site.asset_source_prefixes``.
+
+        So a teardown that only calls :meth:`purge` reclaims an EMPTY prefix and
+        leaves the real objects world-readable forever. A caller tearing a site down
+        must purge this site's own prefix AND each retained one.
+
+        Same two guarantees as :meth:`purge`: it raises rather than reporting a
+        silent zero when the adapter cannot list, and every key is rebuilt from the
+        passed prefix rather than taken from the listing, so a hostile or odd name
+        cannot walk outside it."""
+        if not self.can_list():
+            raise PublicAssetError(
+                "This deployment's storage adapter cannot list objects, so a site's "
+                "assets cannot be enumerated or removed. Purging would report success "
+                "over a bucket it never touched."
+            )
+        if not prefix.endswith("/"):
+            # A prefix that does not end in a separator matches sibling directories
+            # by string prefix, so "…/pk1" would also sweep "…/pk10".
+            prefix = f"{prefix}/"
+        removed = 0
+        for item in await self._adapter.browse(prefix):
+            if item.is_dir:
+                continue
+            # Rebuilt from the trusted prefix, never taken from the listing, so this
+            # cannot walk outside the site even if the adapter returns odd names.
+            await self._adapter.delete(f"{prefix}{item.name}")
+            removed += 1
+        return removed
+
+
+_MEDIA_EXT: dict[str, str] = {
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+}
+
+_NAME_MIMES: tuple[tuple[str, str], ...] = (
+    (".mp4", "video/mp4"),
+    (".webm", "video/webm"),
+    (".png", "image/png"),
+    (".jpg", "image/jpeg"),
+    (".jpeg", "image/jpeg"),
+    (".gif", "image/gif"),
+    (".webp", "image/webp"),
+)
+
+
+def _mime_for_name(name: str) -> str:
+    lowered = name.lower()
+    for ext, mime in _NAME_MIMES:
+        if lowered.endswith(ext):
+            return mime
+    return "application/octet-stream"
+
+
+def public_asset_store() -> PublicAssetStore | None:
+    """Return the configured store, or ``None`` when no public bucket exists.
+
+    ``None`` is a deployment fact, not an error: a local dev box with
+    ``POCKETPAW_UPLOAD_ADAPTER=local`` has nowhere world-readable to put bytes.
+    Callers turn it into a clear "not configured" response instead of pretending.
+    """
+    from pocketpaw.uploads.factory import build_public_adapter
+
+    adapter = build_public_adapter()
+    if adapter is None:
+        return None
+    # An adapter that cannot mint a public address is useless here even if it
+    # exists, and the failure would otherwise surface as a broken image later.
+    if adapter.public_url("probe") is None:
+        logger.warning(
+            "sites.public_assets: a public adapter was built but mints no public URL — "
+            "set S3_PUBLIC_BASE_URL or S3_ENDPOINT"
+        )
+        return None
+    return PublicAssetStore(adapter)
+
+
+__all__ = [
+    "MAX_ASSET_BYTES",
+    "MAX_IMAGE_BYTES",
+    "MAX_VIDEO_BYTES",
+    "PUBLIC_IMAGE_MIMES",
+    "PUBLIC_MEDIA_MIMES",
+    "PUBLIC_VIDEO_MIMES",
+    "PublicAsset",
+    "PublicAssetError",
+    "PublicAssetStore",
+    "build_key",
+    "prefix_for",
+    "kind_for_mime",
+    "max_bytes_for_mime",
+    "public_asset_store",
+    "sniff_media_mime",
+]

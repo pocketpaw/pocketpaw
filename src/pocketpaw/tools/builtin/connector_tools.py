@@ -1,5 +1,10 @@
 # Connector tools — let the agent list, connect, and execute connector actions.
 # Created: 2026-03-29 — Wires ConnectorRegistry into agent tool interface.
+# Updated: 2026-06-12 (connector-store-unification, PR-A review follow-up) —
+#   ConnectorExecuteTool goes through registry.ensure_connected instead of
+#   get_adapter, so agent-tool executes survive a process restart exactly like
+#   the HTTP /connectors/execute router: a persisted config reconnects lazily,
+#   no in-session connector_connect required.
 
 import json
 import logging
@@ -188,7 +193,10 @@ class ConnectorExecuteTool(BaseTool):
         pocket_id: str = "default",
     ) -> str:
         reg = _get_registry()
-        adapter = reg.get_adapter(pocket_id, connector_name)
+        # ensure_connected (not get_adapter): if no adapter is live but config
+        # is persisted in the state store — e.g. after a restart — reconnect
+        # on the fly, matching the HTTP /connectors/execute behavior.
+        adapter = await reg.ensure_connected(connector_name, pocket_id)
         if not adapter:
             return f"Connector '{connector_name}' is not connected. Use connector_connect first."
 

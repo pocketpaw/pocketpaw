@@ -755,14 +755,46 @@
               Requires Codex CLI installed. Install with: <code class="text-[var(--accent-color)]">npm install -g @openai/codex</code>
             </p>
             <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">API Key</label>
+              <input
+                type="password"
+                x-model="settings.codexCliApiKey"
+                @change="saveSettings()"
+                :placeholder="settings.openaiApiKey ? 'falling back to OpenAI API Key' : 'OpenAI / Codex API key'"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+              <small class="text-white/50 text-[11px]">
+                Leave empty to inherit from the global <code>OpenAI API Key</code>. Set when Codex should
+                talk to a different account than other OpenAI-backed tooling.
+              </small>
+            </div>
+            <div class="flex flex-col gap-1">
+              <label class="text-[12px] font-medium text-[var(--text-secondary)]">Base URL</label>
+              <input
+                type="text"
+                x-model="settings.codexCliBaseUrl"
+                @change="saveSettings()"
+                placeholder="https://api.openai.com/v1 (default)"
+                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
+              />
+              <small class="text-white/50 text-[11px]">
+                Point Codex at an OpenAI-compatible proxy (LiteLLM, Azure OpenAI, etc.). Leave empty for
+                the OpenAI default.
+              </small>
+            </div>
+            <div class="flex flex-col gap-1">
               <label class="text-[12px] font-medium text-[var(--text-secondary)]">Model</label>
               <input
                 type="text"
                 x-model="settings.codexCliModel"
                 @change="saveSettings()"
-                placeholder="gpt-5.3-codex"
+                placeholder="(use ~/.codex/config.toml default)"
                 class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2 px-3 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40"
               />
+              <small class="text-white/50 text-[11px]">
+                Leave empty to inherit the model your codex CLI was logged in with (gpt-5.5 on most
+                ChatGPT plans).
+              </small>
             </div>
             <div class="flex flex-col gap-1">
               <label class="text-[12px] font-medium text-[var(--text-secondary)]">Max Turns</label>

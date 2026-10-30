@@ -1,0 +1,155 @@
+# ee/pocketpaw_ee/cloud/models/payment.py — the Payment record document
+# (BC-2, the Gateway primitive).
+#
+# One row per captured (or in-flight) top-up payment, workspace-scoped. The
+# webhook handler upserts it on a verified ``payment.succeeded`` so the credit
+# grant has an auditable payment provenance alongside the BC-1 ledger entry. It
+# is NOT the idempotency authority — exactly-once is enforced by BC-1's unique
+# ``(workspace, idempotency_key)`` ledger index, keyed on the webhook event id —
+# this doc is the human-facing payment record. The UNIQUE compound index on
+# ``(gateway, gateway_event_id)`` keeps a replayed webhook from inserting a
+# second row.
+#
+# Only ``ee.cloud.billing.service`` writes this doc (entity-isolation boundary,
+# mirroring the credits/pockets entities). Registered in
+# ``cloud.models.__init__`` (``get_all_documents()`` + ``__all__``) so
+# ``init_beanie`` wires the ``billing_payments`` collection.
+#
+# Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning, M1 / M1a): a row is now
+#   written for EVERY verified ``payment.succeeded`` that carries a routable
+#   workspace, not only for the ones that granted. That is what makes a refunded
+#   non-USD charge traceable at all — the currency gate used to return before the
+#   write, so the population most likely to demand a refund was the one with no
+#   record. Recording refused payments forces a field split the row needed
+#   anyway: ``amount_credits`` is what the buyer PAID and ``credits_granted`` is
+#   what we actually handed over, which is 0 on every refused path. Added
+#   alongside them: ``credits_reversed`` + ``reversal_event_ids`` (the running
+#   clawback total and the deliveries already applied to it) and a
+#   ``(gateway, gateway_ref)`` index, because the reversal join runs through
+#   ``payment_id`` and was otherwise a collection scan.
+# Updated 2026-09-16 (feat/platform-stats-revenue, chunk 9) — added a
+#   ``createdAt`` index. The revenue screen's ``summary``/``series`` reads
+#   are platform-wide time ranges with no workspace term (errata C1 in
+#   2026-09-15-paw-admin-prd-corrections.md caught the master PRD asking for
+#   the wrong index — a workspace-prefixed one on Subscription — and missed
+#   this doc entirely).
+# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): optional audit fields for an
+#   INR top-up — ``settlement_amount`` / ``settlement_currency`` (Dodo's figure)
+#   and ``conversion`` + ``fx_inr_per_usd`` (the source and rate the base credits
+#   were granted at, from the ledger entry). Defaulted,
+#   so every existing row and writer is unchanged.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 review): ``subscription_id``
+#   stamps a subscription's own charge (recorded, never granted) so a refund of
+#   it can be told from a top-up with nothing left to reverse.
+#   ``commission_reversed`` + ``commission_reversal_event_ids`` are the running
+#   clawback of a partner client payment's commission — the claim a reversal
+#   wins before it debits, so a refund and a lost dispute (or several partial
+#   refunds) can never take back more than was granted. Defaulted; no migration.
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 re-check): ``refunded_minor``
+#   sums the refunds those claims counted, so cumulative partials reaching the
+#   amount paid lapse the client-paid year. Defaulted; no migration.
+
+from __future__ import annotations
+
+from beanie import Indexed
+from pymongo import IndexModel
+
+from pocketpaw_ee.cloud.models.base import TimestampedDocument
+
+
+class Payment(TimestampedDocument):
+    """A top-up payment captured through a gateway (Dodo in v1).
+
+    ``amount_credits`` is integer credits (1 credit == $0.01). ``status`` is
+    ``succeeded`` once a verified ``payment.succeeded`` webhook landed; the row
+    may be created in ``pending`` at top-up time in a later task. ``gateway`` +
+    ``gateway_event_id`` are unique together so a replayed webhook never inserts
+    a duplicate record.
+    """
+
+    # Tenant scope. Indexed (non-unique) — many payments per workspace.
+    workspace: Indexed(str)  # type: ignore[valid-type]
+    # The gateway that processed this payment, e.g. ``dodo``.
+    gateway: str
+    # The gateway's own payment reference (Dodo ``payment_id``), when known.
+    gateway_ref: str | None = None
+    # The webhook delivery id that captured this payment (Standard-Webhooks
+    # ``webhook-id``). The BC-1 grant's idempotency key. Part of the unique index.
+    gateway_event_id: str
+    # What the buyer PAID, in the gateway's lowest denomination (== credits for
+    # a USD charge, where 1 credit == $0.01). NOT what we granted — see below.
+    amount_credits: int
+    # What we actually GRANTED for this payment. 0 on every refused path (a
+    # non-USD charge, a non-positive amount), and it is the CAP a reversal claws
+    # back against: we can never take more credits than we handed out.
+    #
+    # None means a row written before this field existed. Those rows were ONLY
+    # ever written when the grant applied, so "missing" reads as "granted
+    # everything that was paid" — treating it as 0 would quietly make every
+    # pre-existing payment un-reversible.
+    credits_granted: int | None = None
+    # Running total already clawed back by refunds / lost disputes. Capped at
+    # ``credits_granted``, which is what stops a payment carrying BOTH a refund
+    # and a lost dispute from being reversed twice (routine, because Verifi RDR
+    # resolves disputes by refunding).
+    credits_reversed: int = 0
+    # The reversal webhook deliveries already applied to ``credits_reversed``.
+    # The running total is incremented under a ``$ne`` filter on this list, so a
+    # redelivery adds nothing even if it gets past the remaining-credits check.
+    reversal_event_ids: list[str] = []  # noqa: RUF012 — Beanie field default
+    # ISO currency the buyer was charged in (e.g. ``USD``), informational.
+    currency: str | None = None
+    # AUDIT for a converted top-up. ``settlement_*`` is Dodo's own settlement
+    # figure as the verified body stated it (None when it sent none).
+    # ``conversion`` is which figure the base grant came from (``settlement`` /
+    # ``fx`` / ``fx_settlement_distrusted``; None for a plain USD charge) and
+    # ``fx_inr_per_usd`` the configured rate in force at
+    # that grant — both copied off the base LEDGER entry's ref, so a redelivery
+    # at a different rate cannot rewrite them. Informational — the cap is
+    # ``credits_granted``.
+    settlement_amount: int | None = None
+    settlement_currency: str | None = None
+    conversion: str | None = None
+    fx_inr_per_usd: float | None = None
+    # The GATEWAY's outcome, not ours: a non-USD charge is genuinely
+    # ``succeeded`` with ``credits_granted == 0``.
+    # ``succeeded`` | ``failed`` | ``pending``.
+    status: str = "succeeded"
+    # PH-13: set when the payment was a SUBSCRIPTION's charge (never a top-up).
+    subscription_id: str | None = None
+    # PH-13: partner commission clawed back from this client payment so far, and
+    # the reversal deliveries that took it (the claim, as for ``credits_reversed``).
+    commission_reversed: int = 0
+    commission_reversal_event_ids: list[str] = []  # noqa: RUF012 — Beanie field default
+    # PH-13: the client's refunds counted by those claims, summed, so partial
+    # refunds that reach ``amount_credits`` lapse the site like a full one.
+    refunded_minor: int = 0
+
+    class Settings:
+        name = "billing_payments"
+        indexes = [
+            # A replayed webhook (same gateway + delivery id) collides here on
+            # insert → the service treats it as already-recorded.
+            IndexModel(
+                [("gateway", 1), ("gateway_event_id", 1)],
+                unique=True,
+                name="uq_gateway_event_id",
+            ),
+            # The REVERSAL join. A dispute carries no metadata, so a clawback
+            # finds its workspace by matching the event's ``payment_id`` against
+            # ``gateway_ref``. Non-unique: the field is nullable, and one payment
+            # can legitimately appear under more than one delivery id.
+            IndexModel(
+                [("gateway", 1), ("gateway_ref", 1)],
+                name="ix_gateway_ref",
+            ),
+            # Platform revenue reads (chunk 9, Paw Admin PRD) are time-ranged
+            # and carry no workspace term — ``summary``/``series`` both
+            # ``$match`` on ``createdAt`` alone. Without this index that is a
+            # full collection scan; see the corrections doc (errata C1), which
+            # found this missing entirely (the PRD only asked for a
+            # workspace-prefixed index on Subscription, which this document
+            # does not even have).
+            IndexModel([("createdAt", 1)], name="ix_created_at"),
+        ]

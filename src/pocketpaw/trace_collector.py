@@ -1,4 +1,11 @@
-"""TraceCollector subscribes to system events and persists request traces."""
+"""TraceCollector subscribes to system events and persists request traces.
+
+Updated 2026-09-02 (fix/metering-partial-usage-capture) — a ``token_usage``
+payload is the RUN's running total, so each ``llm_calls`` row stores the
+DIFFERENCE from what the trace already holds. Storing them whole would put a
+running total in every row and, worse, ``total.total_cost_usd`` is a plain sum
+over those rows, so it would charge the whole run once per payload.
+"""
 
 from __future__ import annotations
 
@@ -170,6 +177,30 @@ class TraceCollector:
                     data.get("cached_input_tokens", data.get("cached_tokens", 0)),
                     0,
                 )
+                # A ``token_usage`` payload is the RUN's running total, not one
+                # call's, so store the DIFFERENCE from what this trace already
+                # holds. Each stored entry is itself a delta, so their sum is
+                # the cumulative already recorded — which keeps one entry per
+                # model call and, more importantly, keeps the ``total_cost``
+                # roll-up below (a plain sum over these entries) from counting
+                # the whole run once per payload.
+                prev_input = sum(_to_int(c.get("input_tokens"), 0) for c in active.llm_calls)
+                prev_output = sum(_to_int(c.get("output_tokens"), 0) for c in active.llm_calls)
+                prev_cached = sum(
+                    _to_int(c.get("cached_input_tokens"), 0) for c in active.llm_calls
+                )
+                prev_cost = sum(_to_float(c.get("cost_usd")) for c in active.llm_calls)
+
+                # max(0, ...) — a payload that went backwards is a backend
+                # regression, never a refund.
+                input_tokens = max(0, input_tokens - prev_input)
+                output_tokens = max(0, output_tokens - prev_output)
+                cached_input_tokens = max(0, cached_input_tokens - prev_cached)
+                cost_delta = max(
+                    0.0,
+                    _to_float(data.get("total_cost_usd", data.get("cost_usd", 0.0))) - prev_cost,
+                )
+
                 active.llm_calls.append(
                     {
                         "timestamp": str(data.get("timestamp") or _now_iso()),
@@ -179,10 +210,7 @@ class TraceCollector:
                         "output_tokens": output_tokens,
                         "cached_input_tokens": cached_input_tokens,
                         "total_tokens": input_tokens + output_tokens + cached_input_tokens,
-                        "cost_usd": round(
-                            _to_float(data.get("total_cost_usd", data.get("cost_usd", 0.0))),
-                            6,
-                        ),
+                        "cost_usd": round(cost_delta, 6),
                         "latency_ms": _to_int(data.get("latency_ms"), 0),
                     }
                 )

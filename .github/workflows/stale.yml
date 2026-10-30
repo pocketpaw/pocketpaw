@@ -1,5 +1,15 @@
 # Stale — auto-close abandoned PRs and issues.
 # Created: 2026-02-26
+# Updated: 2026-07-28 — the PR window was eating live work. Three changes:
+#   1. `needs-work` added to exempt-pr-labels. It's this repo's review-queue
+#      label, so nearly every open PR carries it while it waits on captain
+#      review — the one state the bot must never treat as abandonment.
+#      It wasn't exempt, and the bot closed 25 unmerged PRs on that path.
+#   2. `security` added to exempt-pr-labels. Issues already had it; PRs
+#      didn't, so a security fix could age out silently.
+#   3. days-before-pr-stale 14 -> 45. Review here is batched and captain-gated,
+#      so a PR sitting three weeks is normal, not dead. 45 + 7 still reaps
+#      genuinely abandoned work within two months.
 name: Stale
 
 on:
@@ -18,11 +28,11 @@ jobs:
       - uses: actions/stale@v9
         with:
           # PRs
-          days-before-pr-stale: 14
+          days-before-pr-stale: 45
           days-before-pr-close: 7
           stale-pr-label: 'stale'
           stale-pr-message: >
-            This PR has been inactive for 14 days. It will be closed in 7 days
+            This PR has been inactive for 45 days. It will be closed in 7 days
             if there's no further activity. If you're still working on this,
             push an update or leave a comment.
           close-pr-message: >
@@ -41,5 +51,5 @@ jobs:
 
           # Don't stale these
           exempt-issue-labels: 'pinned,good first issue,roadmap,security'
-          exempt-pr-labels: 'pinned,work-in-progress'
+          exempt-pr-labels: 'pinned,work-in-progress,needs-work,security'
           exempt-all-assignees: true

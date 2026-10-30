@@ -37,7 +37,7 @@ class TestToolDefinitions:
 async def test_calendar_list_no_auth():
     tool = CalendarListTool()
     with patch(
-        "pocketpaw.integrations.gcalendar.CalendarClient._get_token",
+        "pocketpaw.clients.gcalendar.CalendarClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute()
@@ -48,7 +48,7 @@ async def test_calendar_list_no_auth():
 async def test_calendar_create_no_auth():
     tool = CalendarCreateTool()
     with patch(
-        "pocketpaw.integrations.gcalendar.CalendarClient._get_token",
+        "pocketpaw.clients.gcalendar.CalendarClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute(
@@ -62,7 +62,7 @@ async def test_calendar_create_no_auth():
 async def test_calendar_prep_no_auth():
     tool = CalendarPrepTool()
     with patch(
-        "pocketpaw.integrations.gcalendar.CalendarClient._get_token",
+        "pocketpaw.clients.gcalendar.CalendarClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute()

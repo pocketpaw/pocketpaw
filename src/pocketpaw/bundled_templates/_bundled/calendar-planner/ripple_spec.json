@@ -1,0 +1,84 @@
+{
+  "_placeholder_note": "Built-in pocket template (calendar-planner). Event titles, dates, and category names below carry [bracketed] placeholders — the create specialist rewrites them to the user's real schedule and domain. The calendar widget reads each event as {id, title, start}; keep the calendar bound to state.events and keep the add-event composer row so the canvas is usable on first load.",
+  "state": {
+    "draft_title": "",
+    "draft_date": "",
+    "draft_category": "meeting",
+    "next_id": 6,
+    "category_options": [
+      { "value": "meeting", "label": "Meeting" },
+      { "value": "deadline", "label": "Deadline" },
+      { "value": "personal", "label": "Personal" },
+      { "value": "travel", "label": "Travel" }
+    ],
+    "events": [
+      { "id": "e1", "title": "[Sprint planning]", "start": "2026-06-01", "category": "meeting" },
+      { "id": "e2", "title": "[Design review with the client]", "start": "2026-06-03", "category": "meeting" },
+      { "id": "e3", "title": "[Q3 budget submission due]", "start": "2026-06-05", "category": "deadline" },
+      { "id": "e4", "title": "[Flight to the conference]", "start": "2026-06-09", "category": "travel" },
+      { "id": "e5", "title": "[Dentist appointment]", "start": "2026-06-12", "category": "personal" }
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "16px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "[Planner]",
+          "subtitle": "[Your month, at a glance]"
+        }
+      },
+      {
+        "type": "flex",
+        "props": { "direction": "row", "gap": "8px", "align": "end" },
+        "children": [
+          {
+            "type": "input",
+            "bind": "draft_title",
+            "props": { "label": "Event", "placeholder": "[What's happening?]" }
+          },
+          {
+            "type": "date-picker",
+            "bind": "draft_date",
+            "props": { "label": "Date" }
+          },
+          {
+            "type": "select",
+            "bind": "draft_category",
+            "props": { "label": "Category", "options": "{state.category_options}" }
+          },
+          {
+            "type": "button",
+            "props": { "label": "Add event", "variant": "primary" },
+            "on_click": [
+              { "action": "validate", "condition": "{state.draft_title.length > 0}", "message": "Type an event title first" },
+              { "action": "validate", "condition": "{state.draft_date.length > 0}", "message": "Pick a date first" },
+              {
+                "action": "push",
+                "target": "events",
+                "value": {
+                  "id": "e-{state.next_id}",
+                  "title": "{state.draft_title}",
+                  "start": "{state.draft_date}",
+                  "category": "{state.draft_category}"
+                }
+              },
+              { "action": "set", "target": "next_id", "value": "{state.next_id + 1}" },
+              { "action": "set", "target": "draft_title", "value": "" },
+              { "action": "set", "target": "draft_date", "value": "" }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "calendar",
+        "bind": "events",
+        "props": {
+          "view": "month"
+        }
+      }
+    ]
+  }
+}

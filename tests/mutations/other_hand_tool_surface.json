@@ -1,0 +1,20 @@
+[
+  {
+    "label": "bridged builtins offered again — every tenant-safe schema, ~6.6k uncacheable tokens, back on every Otherhand turn",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "            deny_mcp_tool_ids=_OTHER_HAND_POCKET_DENY | _OTHER_HAND_BRIDGED_DENY,",
+    "replace": "            deny_mcp_tool_ids=_OTHER_HAND_POCKET_DENY,",
+    "tests": [
+      "tests/cloud/surface/test_other_hand_handler.py::test_profile_offers_only_the_tools_the_prompt_names"
+    ]
+  },
+  {
+    "label": "the deny swallows illustrate too — the prompt commands a tool the agent no longer has",
+    "file": "ee/pocketpaw_ee/cloud/surface/surface_registry.py",
+    "find": "_OTHER_HAND_TOOLS: frozenset[str] = frozenset({\"illustrate\", \"image_generate\"})",
+    "replace": "_OTHER_HAND_TOOLS: frozenset[str] = frozenset({\"image_generate\"})",
+    "tests": [
+      "tests/cloud/surface/test_other_hand_handler.py::test_profile_offers_only_the_tools_the_prompt_names"
+    ]
+  }
+]

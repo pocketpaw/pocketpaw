@@ -2,7 +2,33 @@
 
 Uses the backend registry to lazily discover and instantiate the
 configured agent backend. Supports optional user-configured fallback
-backends if the primary backend fails.
+backends if the primary backend fails. ``create_isolated_backend`` builds an
+uncached backend for one caller (BYOK turns, specialists), carrying a per-agent
+ToolPolicy when given one; the caller owns and releases it. ``stop`` takes an
+optional ``session_key`` so one session's failure stops only that session on
+backends that can scope a stop.
+
+Changes:
+  - 2026-08-03 (PA-7b, feat/prompt-assembler-channel): ``run`` and
+    ``run_with_failover`` accept ``system_prompt_digest`` — the assembler's
+    ``stable_digest`` for the prompt they were handed — and forward it to a
+    backend only when that backend's ``run`` declares the parameter
+    (``agents.backend.forward_prompt_digest``). The check is per BACKEND, on
+    every one of the three dispatch points here and in ``BackendFailoverRunner``,
+    because both fallback lists mix backends that took the kwarg with backends
+    that never did; a router-level decision would either crash the old ones or
+    withhold from the new ones. This is what lets the channel path's warm Claude
+    subprocess key on the prompt's LAYERS instead of on a pattern-match of its
+    rendered text.
+  - 2026-06-26 (MCG-10): Added ``run_with_failover`` — the OSS hook for L2
+    cross-backend HARNESS failover. When ``settings.backend_failover_enabled``
+    is True it drives the run through ``BackendFailoverRunner`` over
+    ``settings.backend_failover_chain`` (Claude Code -> Codex -> opencode),
+    switching harnesses only on a pre-stream lane-down failure and audit-
+    logging each switch. When the flag is False it is a thin pass-through to
+    ``run`` (behavior unchanged). Distinct from the generic ``fallback_backends``
+    path in ``run`` (which trips on ANY failure, with no streaming guard). The
+    EE cloud run path wiring is a follow-up.
 """
 
 import asyncio
@@ -11,12 +37,23 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo
+from pocketpaw.agents.backend import BackendInfo, forward_prompt_digest, forward_turn_context
+from pocketpaw.agents.failover import BackendFailoverRunner
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.agents.registry import get_backend_class
 from pocketpaw.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _stop_takes_session(backend: Any) -> bool:
+    """Does this backend's ``stop`` declare ``session_key``?"""
+    import inspect
+
+    try:
+        return "session_key" in inspect.signature(backend.stop).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
 
 
 class AgentRouter:
@@ -90,6 +127,47 @@ class AgentRouter:
             )
             return None
 
+    @classmethod
+    def create_isolated_backend(
+        cls,
+        backend_name: str,
+        settings: Settings,
+        *,
+        settings_override: dict[str, Any] | None = None,
+        policy: Any = None,
+    ) -> Any:
+        """Build a fresh, non-cached AgentBackend with optional settings overrides.
+
+        Used for short-lived specialist runs that should not share state with
+        the main chat backend. Each call returns a new instance; nothing is
+        cached on the router, so the caller releases it when done.
+
+        ``policy`` is a per-agent ToolPolicy, handed to a backend whose
+        ``__init__`` declares one; without it the backend builds the
+        process-wide policy from settings.
+        """
+        backend_cls = get_backend_class(backend_name)
+        if backend_cls is None:
+            raise ValueError(
+                f"Backend '{backend_name}' is not registered or its dependencies are not installed."
+            )
+
+        if settings_override:
+            effective = settings.model_copy(update=settings_override)
+        else:
+            effective = settings
+
+        if policy is not None:
+            import inspect
+
+            try:
+                takes_policy = "policy" in inspect.signature(backend_cls.__init__).parameters
+            except (TypeError, ValueError):  # pragma: no cover - exotic callables
+                takes_policy = False
+            if takes_policy:
+                return backend_cls(effective, policy=policy)
+        return backend_cls(effective)
+
     @asynccontextmanager
     async def scoped_tool_policy(self, policy: "ToolPolicy"):  # noqa: F821
         """Scope a ToolPolicy for one request across primary + all fallback backends.
@@ -120,19 +198,45 @@ class AgentRouter:
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        system_prompt_digest: str = "",
+        turn_split: tuple[str, str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
-        """Run the agent with optional fallback backends."""
+        """Run the agent with optional fallback backends.
+
+        ``turn_split`` is ``(stable system prompt, per-turn layers)``. A backend
+        whose ``run`` takes ``turn_context`` gets them apart; every other backend
+        gets the full ``system_prompt`` (``agents.backend.forward_turn_context``).
+
+        ``system_prompt_digest`` (PA-7b) is the assembler's ``stable_digest`` for
+        ``system_prompt``, supplied by ``AgentLoop`` on the channel path. It is
+        forwarded to a backend ONLY when that backend's ``run`` declares the
+        parameter — see ``agents.backend.forward_prompt_digest``. That check is
+        per BACKEND and not per router because the fallback list is heterogeneous
+        by construction: the primary may be the Claude SDK backend (which keys
+        its warm subprocess on the digest) while a fallback is one of the
+        backends that never grew the kwarg, and passing it to the latter would
+        raise TypeError mid-failover — a crash on the path taken when something
+        is already wrong. Callers with no digest (``paw/cli``, deep-work,
+        mission-control) leave it "" and nothing about their call changes.
+        """
 
         last_error: str | None = None
+        base_kwargs: dict[str, Any] = {
+            "system_prompt": system_prompt,
+            "history": history,
+            "session_key": session_key,
+        }
 
         # Primary backend (streaming, no buffering, no error-event fallback)
         if self._backend is not None:
             try:
                 async for event in self._backend.run(
                     message,
-                    system_prompt=system_prompt,
-                    history=history,
-                    session_key=session_key,
+                    **forward_turn_context(
+                        self._backend,
+                        forward_prompt_digest(self._backend, base_kwargs, system_prompt_digest),
+                        turn_split,
+                    ),
                 ):
                     yield event
 
@@ -160,9 +264,11 @@ class AgentRouter:
             try:
                 async for event in backend.run(
                     message,
-                    system_prompt=system_prompt,
-                    history=history,
-                    session_key=session_key,
+                    **forward_turn_context(
+                        backend,
+                        forward_prompt_digest(backend, base_kwargs, system_prompt_digest),
+                        turn_split,
+                    ),
                 ):
                     yield event
 
@@ -184,20 +290,92 @@ class AgentRouter:
         )
         yield AgentEvent(type="done", content="")
 
-    async def stop(self) -> None:
-        """Stop all backend instances."""
+    def _failover_backend_factory(self, backend_name: str) -> Any:
+        """Resolve a harness name to a (cached) backend instance for failover.
 
-        if self._backend:
-            try:
-                await self._backend.stop()
-            except Exception as exc:
-                logger.debug("Error stopping primary backend: %s", exc)
+        Reuses the already-initialized primary instance when the name matches
+        the active backend, otherwise reuses/creates a cached instance via the
+        same path the generic fallback uses — so the failover chain shares warm
+        subprocesses with the rest of the router instead of spawning a fresh
+        one per attempt. Returns None if the harness is unavailable.
+        """
+        if backend_name == self._active_backend_name and self._backend is not None:
+            return self._backend
+        return self._get_fallback_backend(backend_name)
 
-        for backend in self._fallback_instances.values():
+    async def run_with_failover(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+        session_key: str | None = None,
+        system_prompt_digest: str = "",
+        turn_split: tuple[str, str] | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Run with L2 cross-backend (harness) failover when enabled.
+
+        This is the MCG-10 hook. When ``backend_failover_enabled`` is False it
+        delegates to :meth:`run` (identical behavior, including the generic
+        ``fallback_backends`` path). When True it drives the run through
+        :class:`BackendFailoverRunner` over ``backend_failover_chain``, which
+        switches HARNESSES only on a pre-stream lane-down failure (overload /
+        unavailable / auth) and audit-logs every switch.
+
+        The EE cloud run path (``run_core``) calling this is a follow-up; the
+        mechanism + this hook ship in the OSS slice.
+
+        ``system_prompt_digest`` (PA-7b) travels down BOTH branches. Threading
+        only :meth:`run` would drop it exactly when the flag is on and the chain
+        is in use — a silent downgrade to text-hash keying on the path taken when
+        the primary harness is already down, which is the worst moment to also
+        start rebuilding the warm client every turn. The runner re-asks the
+        signature question per harness, because the chain deliberately mixes
+        backends of different vintages.
+        """
+        if not self.settings.backend_failover_enabled:
+            async for event in self.run(
+                message,
+                system_prompt=system_prompt,
+                history=history,
+                session_key=session_key,
+                system_prompt_digest=system_prompt_digest,
+                turn_split=turn_split,
+            ):
+                yield event
+            return
+
+        chain = self.settings.backend_failover_chain or [self.settings.agent_backend]
+        runner = BackendFailoverRunner(chain, self._failover_backend_factory)
+        async for event in runner.run(
+            message,
+            system_prompt=system_prompt,
+            history=history,
+            session_key=session_key,
+            system_prompt_digest=system_prompt_digest,
+            turn_split=turn_split,
+        ):
+            yield event
+
+    async def stop(self, session_key: str | None = None) -> None:
+        """Stop all backend instances.
+
+        With ``session_key``, a backend whose ``stop`` declares it stops only
+        that session's runs; one session's failure must not kill every other
+        session's stream on a shared backend. Backends with a bare ``stop()``
+        are stopped as before.
+        """
+
+        for label, backend in [("primary", self._backend), *self._fallback_instances.items()]:
+            if not backend:
+                continue
             try:
-                await backend.stop()
+                if session_key is not None and _stop_takes_session(backend):
+                    await backend.stop(session_key=session_key)
+                else:
+                    await backend.stop()
             except Exception as exc:
-                logger.debug("Error stopping fallback backend: %s", exc)
+                logger.debug("Error stopping %s backend: %s", label, exc)
 
     def get_backend_info(self) -> BackendInfo | None:
         """Return metadata about the active backend."""

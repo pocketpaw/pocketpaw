@@ -1,0 +1,44 @@
+[
+  {
+    "label": "read only the per-key half, as the compare used to",
+    "file": "ee/pocketpaw_ee/cloud/llm_provisioning/service.py",
+    "find": "    customer_rows: list[dict[str, Any]] = []\n    if window is None:",
+    "replace": "    customer_rows: list[dict[str, Any]] = []\n    if True:\n        return [(row, True) for row in (await client.spend_logs(api_key=doc.litellm_key) if doc is not None and doc.litellm_key else [])]\n    if window is None:",
+    "tests": ["tests/cloud/llm_provisioning/test_reconcile_two_reads.py"]
+  },
+  {
+    "label": "derive the compare's start from the tenant row, not the caller",
+    "file": "ee/pocketpaw_ee/cloud/llm_provisioning/service.py",
+    "find": "    window_since = since if since is not None else _ALL_TIME_START",
+    "replace": "    window_since = since if since is not None else datetime.now(UTC) - _SPEND_READ_OVERLAP",
+    "tests": ["tests/cloud/llm_provisioning/test_reconcile_two_reads.py::test_reconcile_without_a_window_compares_the_same_span_on_both_sides"]
+  },
+  {
+    "label": "let the ledger side keep the caller's open bound while the proxy side is resolved",
+    "file": "ee/pocketpaw_ee/cloud/llm_provisioning/service.py",
+    "find": "        workspace, _BC3_COMPUTE_SPEND_CAUSE, since=window_since, until=window_until",
+    "replace": "        workspace, _BC3_COMPUTE_SPEND_CAUSE, since=since, until=until",
+    "tests": ["tests/cloud/llm_provisioning/test_reconcile_two_reads.py"]
+  },
+  {
+    "label": "record the caller's bounds instead of the span actually compared",
+    "file": "ee/pocketpaw_ee/cloud/llm_provisioning/service.py",
+    "find": "    window_start = window_since.isoformat()\n    window_end = window_until.isoformat()",
+    "replace": "    window_start = since.isoformat() if since is not None else None\n    window_end = until.isoformat() if until is not None else None",
+    "tests": ["tests/cloud/llm_provisioning/test_reconcile_two_reads.py::test_reconcile_without_a_window_compares_the_same_span_on_both_sides"]
+  },
+  {
+    "label": "accept an inverted window",
+    "file": "ee/pocketpaw_ee/cloud/llm_provisioning/service.py",
+    "find": "    if since is not None and until is not None and since > until:",
+    "replace": "    if False:",
+    "tests": ["tests/cloud/llm_provisioning/test_reconcile_two_reads.py::test_reconcile_refuses_an_inverted_window"]
+  },
+  {
+    "label": "mint the bookkeeping row from the read-only compare",
+    "file": "ee/pocketpaw_ee/cloud/llm_provisioning/service.py",
+    "find": "    doc = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == workspace)\n    client = admin_client if admin_client is not None else LiteLLMAdminClient()",
+    "replace": "    doc = await _spend_bookkeeping_row(workspace)\n    client = admin_client if admin_client is not None else LiteLLMAdminClient()",
+    "tests": ["tests/cloud/llm_provisioning/test_reconcile_two_reads.py::test_reconcile_sees_a_workspace_with_spend_and_no_key"]
+  }
+]

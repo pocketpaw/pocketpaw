@@ -1,3 +1,14 @@
+# Changes:
+# 2026-09-27: Set POCKETPAW_CLAUDE_SDK_CLI_PATH=/usr/local/bin/claude so the Claude
+#   SDK backend spawns the npm-installed CLI instead of the older one bundled in the
+#   claude-agent-sdk wheel, which rejected newer models.
+# 2026-06-16: Harden the runtime-stage CLI shims. Resolve the claude/codex bin
+#   entry from each package's package.json instead of hardcoding cli.js — newer
+#   claude-code releases ship bin/claude.exe, so the old symlink dangled and the
+#   Agent SDK reported "Claude Code CLI not found". Added a `claude --version`
+#   build-check so a bad shim fails the build, and seeded a minimal ~/.claude.json
+#   so `claude -p` runs non-interactively on a fresh container.
+
 # ---- Node.js stage ----
 # Copy Node.js from the official image instead of curl|bash from NodeSource
 FROM node:22.14.0-slim AS node
@@ -9,6 +20,11 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex && \
 # ---- Builder stage ----
 FROM python:3.12-slim AS builder
 
+# Edition selector. "oss" (default) builds the MIT core only; "enterprise"
+# also installs the FSL enterprise layer (pocketpaw-ee) from ee/. Override
+# with: docker build --build-arg POCKETPAW_EDITION=enterprise
+ARG POCKETPAW_EDITION=oss
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc python3-dev git \
     && rm -rf /var/lib/apt/lists/*
@@ -19,10 +35,32 @@ WORKDIR /build
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ src/
 
-# Create venv and install all extras
+# Create venv and install the OSS core.
+# `[all]` is a CURATED list, not every extra — it does not reference
+# `[knowledge]` (trafilatura / bm25s / pypdf) or `[extraction]`. The comment here
+# used to say "install all extras", which is how the missing document-extraction
+# libraries went unnoticed until a PDF attached in chat reached the agent as
+# nothing at all. Adding an extra to pyproject does NOT put it in this image.
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir '.[all]'
+RUN pip install --no-cache-dir '.[all]' '.[knowledge]'
+
+# Enterprise edition: also install the FSL enterprise layer (pocketpaw-ee).
+# For an OSS build, ee/ lands only in this throwaway builder stage and is
+# never installed — the runtime image below copies just the venv, so it
+# stays genuinely EE-free.
+COPY ee/ ee/
+# `[extraction]` is NOT optional in practice, despite the name. It carries the
+# libraries ee/pocketpaw_ee/cloud/extraction lazy-imports — pypdf, python-docx,
+# trafilatura, pymupdf — and without them a PDF or .docx a user attaches in chat
+# raises inside the adapter, the attachment loop swallows it, and the agent is
+# handed NO entry for that file. The user sees a reply saying no document was
+# attached. Measured 2026-09-01: `.[all]` above does not cover this (it is a
+# curated list that never references `[knowledge]`, where root keeps pypdf), and
+# a bare `pip install ./ee` takes no extras, so the image had none of them.
+RUN if [ "$POCKETPAW_EDITION" = "enterprise" ]; then \
+        pip install --no-cache-dir './ee[extraction]' ; \
+    fi
 
 # Install Playwright Chromium browser
 RUN playwright install chromium
@@ -57,10 +95,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy Node.js + globally-installed CLI backends from the official node image
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+# Re-create the bin shims. claude-code / codex move their package `bin` entry
+# between releases (e.g. cli.js -> bin/claude.exe), so resolve the real entry
+# from each package.json instead of hardcoding a path that silently dangles.
+# A dangling `claude` shim makes the Agent SDK report "CLI not found"; the
+# `claude --version` at the end fails the build if the shim is wrong.
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
-    ln -s /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude && \
-    ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+    ln -sf "/usr/local/lib/node_modules/@anthropic-ai/claude-code/$(node -e "const b=require('/usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json').bin;process.stdout.write(typeof b==='string'?b:b.claude)")" /usr/local/bin/claude && \
+    ln -sf "/usr/local/lib/node_modules/@openai/codex/$(node -e "const b=require('/usr/local/lib/node_modules/@openai/codex/package.json').bin;process.stdout.write(typeof b==='string'?b:b.codex)")" /usr/local/bin/codex && \
+    claude --version
 
 # Copy venv from builder
 COPY --from=builder /opt/venv /opt/venv
@@ -75,6 +119,13 @@ RUN groupadd --system pocketpaw && \
     mkdir -p /home/pocketpaw/.pocketpaw /home/pocketpaw/workspace && \
     chown -R pocketpaw:pocketpaw /home/pocketpaw
 
+# Seed a minimal Claude CLI config so the Agent SDK can invoke `claude`
+# non-interactively on a fresh container (the onboarding gate otherwise blocks
+# `claude -p`). OAuth credentials are NOT baked (secret + they expire) — they
+# ride a runtime-restored ~/.claude/.credentials.json per the deploy runbook.
+RUN echo '{"hasCompletedOnboarding":true}' > /home/pocketpaw/.claude.json && \
+    chown pocketpaw:pocketpaw /home/pocketpaw/.claude.json
+
 USER pocketpaw
 WORKDIR /home/pocketpaw
 
@@ -85,8 +136,20 @@ ENV POCKETPAW_WEB_PORT=8888
 # arrive from 172.x.x.x, not 127.0.0.1, so the bypass would never trigger.
 # Users authenticate with the access token instead.
 ENV POCKETPAW_LOCALHOST_AUTH_BYPASS=false
+# Production posture (security W0e): the shipped image is prod by default so a
+# non-expert operator can't boot an ownable tenant. With this set, the cloud
+# auth boot REFUSES to start unless AUTH_SECRET is a real (non-placeholder)
+# value, and the initial admin password is generated/operator-supplied — never
+# the old "admin123". Set AUTH_SECRET (and optionally ADMIN_PASSWORD) when you
+# run the container.
+ENV POCKETPAW_ENV=production
 # Agent-created files land here — bind-mount to access them on the host
 ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
+# The Claude SDK backend runs the CLI bundled in the claude-agent-sdk wheel
+# unless told otherwise, and that CLI lags new models ("Claude Code 2.1.276 does
+# not support this model; version 2.1.280 or newer is required"). Point it at
+# the npm-installed CLI above, which each build takes at its latest release.
+ENV POCKETPAW_CLAUDE_SDK_CLI_PATH=/usr/local/bin/claude
 
 EXPOSE 8888
 

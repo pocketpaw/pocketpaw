@@ -56,7 +56,7 @@ class TestDocsTextExtraction:
     """Test plain text extraction from Docs API response."""
 
     def test_simple_text(self):
-        from pocketpaw.integrations.gdocs import DocsClient
+        from pocketpaw.clients.gdocs import DocsClient
 
         doc = {
             "body": {
@@ -68,7 +68,7 @@ class TestDocsTextExtraction:
         assert DocsClient._extract_text(doc) == "Hello world"
 
     def test_multiple_paragraphs(self):
-        from pocketpaw.integrations.gdocs import DocsClient
+        from pocketpaw.clients.gdocs import DocsClient
 
         doc = {
             "body": {
@@ -83,13 +83,13 @@ class TestDocsTextExtraction:
         assert "Second paragraph" in text
 
     def test_empty_doc(self):
-        from pocketpaw.integrations.gdocs import DocsClient
+        from pocketpaw.clients.gdocs import DocsClient
 
         doc = {"body": {"content": []}}
         assert DocsClient._extract_text(doc) == ""
 
     def test_no_text_run(self):
-        from pocketpaw.integrations.gdocs import DocsClient
+        from pocketpaw.clients.gdocs import DocsClient
 
         doc = {"body": {"content": [{"paragraph": {"elements": [{"inlineObjectElement": {}}]}}]}}
         assert DocsClient._extract_text(doc) == ""
@@ -100,7 +100,7 @@ async def test_docs_read_no_auth():
 
     tool = DocsReadTool()
     with patch(
-        "pocketpaw.integrations.gdocs.DocsClient._get_token",
+        "pocketpaw.clients.gdocs.DocsClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute(document_id="abc123")
@@ -113,7 +113,7 @@ async def test_docs_create_no_auth():
 
     tool = DocsCreateTool()
     with patch(
-        "pocketpaw.integrations.gdocs.DocsClient._get_token",
+        "pocketpaw.clients.gdocs.DocsClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute(title="Test Doc")
@@ -125,7 +125,7 @@ async def test_docs_search_no_auth():
 
     tool = DocsSearchTool()
     with patch(
-        "pocketpaw.integrations.gdocs.DocsClient._get_token",
+        "pocketpaw.clients.gdocs.DocsClient._get_token",
         side_effect=RuntimeError("Not authenticated"),
     ):
         result = await tool.execute(query="meeting notes")
@@ -145,7 +145,7 @@ async def test_docs_search_success():
         }
     ]
     with patch(
-        "pocketpaw.integrations.gdocs.DocsClient._get_token",
+        "pocketpaw.clients.gdocs.DocsClient._get_token",
         new_callable=AsyncMock,
         return_value="fake-token",
     ):

@@ -88,8 +88,8 @@ class CloudAgentChatRequest(BaseModel):
     content: str
     attachments: list[Attachment] = []
     reply_to: str | None = None
-    mentions: list[str] = []            # user/agent ids explicitly addressed
-    agent_id: str | None = None         # required for group scope when >1 agent member
+    mentions: list[str] = []  # user/agent ids explicitly addressed
+    agent_id: str | None = None  # required for group scope when >1 agent member
     client_message_id: str | None = None  # idempotency key for the user message
 ```
 

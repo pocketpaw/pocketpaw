@@ -1,10 +1,30 @@
+<!-- Updated 2026-10-01 (CN-1): added "Canonical primitives — use X, never Y" section; hmac rule scoped to outbound signing. -->
 # CLAUDE.md
+
+<!-- Updated 2026-10-02 (feat/discover-index, review): cloud rules 2 and 7 name <entity>/service_admin.py for cross-tenant reads/writes. -->
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
 PocketPaw is a self-hosted AI agent that runs locally and is controlled via Telegram, Discord, Slack, WhatsApp, or a web dashboard. The Python package is named `pocketpaw` (the internal/legacy name), while the public-facing name is `pocketpaw`. Python 3.11+ required.
+
+### Two packages: `pocketpaw` (OSS) + `pocketpaw-ee` (enterprise)
+
+The backend ships as **two installable wheels** (open-core split):
+
+- **`pocketpaw`** (MIT) — the OSS core. Source in `src/pocketpaw/`, packaged by
+  the root `pyproject.toml`. `pip install pocketpaw` gives a fully working local
+  agent with no enterprise code on disk.
+- **`pocketpaw-ee`** (FSL-1.1) — the enterprise layer (multi-tenant cloud, auth,
+  rooms, billing, knowledge base, file storage, fleet, instinct, pocket
+  specialist). Source in `ee/pocketpaw_ee/`, packaged by `ee/pyproject.toml`. It
+  depends on `pocketpaw` and activates through the core's entry-point extension
+  registry (`pocketpaw/extensions.py` + `pocketpaw/_registry.py`).
+
+The OSS core never statically imports `pocketpaw_ee` — an import-linter contract
+enforces it. Optional enterprise behaviour is reached at runtime via
+entry-points. For a full development environment use `uv sync --dev --group ee`.
 
 ## Knowledge Base
 
@@ -18,7 +38,7 @@ cd /path/to/knowledge-base && kb search "GroupService" --scope paw-cloud
 kb show group_service --scope paw-cloud
 
 # Rebuild after big changes (also runs automatically via PostCommit hook)
-kb build ./ee/cloud --scope paw-cloud --output docs/wiki/
+kb build ./ee/pocketpaw_ee/cloud --scope paw-cloud --output docs/wiki/
 
 # Check wiki health
 kb lint --scope paw-cloud
@@ -32,13 +52,17 @@ Key wiki articles for the enterprise cloud module:
 - `docs/wiki/agent_bridge.md` — Agent orchestration for cloud chat
 - `docs/wiki/errors.md` — CloudError hierarchy
 
-The wiki auto-rebuilds on commits that touch `ee/cloud/` files (via `.claude/hooks/kb-rebuild.sh`).
+The wiki auto-rebuilds on commits that touch `ee/pocketpaw_ee/cloud/` files (via `.claude/hooks/kb-rebuild.sh`).
 
 ## Commands
 
 ```bash
-# Install dev dependencies
+# Install dev dependencies (OSS core only — no enterprise code, no pocketpaw_ee)
 uv sync --dev
+
+# Full dev install — OSS core + the pocketpaw-ee enterprise package (editable).
+# Required to run tests/ee, tests/cloud, or anything touching ee/pocketpaw_ee.
+uv sync --dev --group ee
 
 # Run the app (web dashboard is the default — auto-starts all configured adapters)
 uv run pocketpaw
@@ -82,8 +106,26 @@ uv run pocketpaw errors                     # Show recent errors (--limit, --sea
 uv run pocketpaw logs                       # Show audit log (--follow to tail)
 uv run pocketpaw update                     # Update to latest version via uv
 
-# Run all tests (excluding E2E tests)
-uv run pytest --ignore=tests/e2e
+# Run all tests (excluding E2E tests) — needs the full install:
+#   uv sync --group ee --group dev --extra knowledge
+# Without pocketpaw_ee, tests/ee and tests/cloud FAIL collection (they used to skip).
+# The pyproject addopts hide tests/cloud: run it explicitly with -o addopts="".
+# The default is 4 pytest-xdist workers (what CI runs); plain serial still works.
+uv run pytest -n 4 --ignore=tests/e2e
+uv run pytest tests/cloud -o addopts=""
+
+# Changing global state (a module-level cache, singleton, env var, file under
+# HOME)? Run the flake census: the default suite N times on xdist in random
+# order, then once serially, ranking the tests that fail
+# (writes .flake-census/<stamp>.tsv + -summary.txt).
+scripts/flake_census.sh -r 10 -n 4
+# A test that truly cannot share a worker pool gets @pytest.mark.serial plus a
+# one-line reason comment; CI skips it in the parallel run and runs it alone after.
+# Tests that only collide with each other (one on-disk file, say) share a worker
+# with @pytest.mark.xdist_group("name"); addopts runs --dist loadgroup.
+
+# Run only the OSS-core test scope (passes on an OSS-only `uv sync --dev`)
+uv run pytest --ignore=tests/e2e --ignore=tests/cloud --ignore=tests/ee
 
 # Run a single test file
 uv run pytest tests/test_bus.py
@@ -150,19 +192,25 @@ The processing pipeline lives in `agents/loop.py` and `agents/router.py`:
 - `WebSocketAdapter` — FastAPI WebSockets
 - `DiscliAdapter` — `discord-cli-agent` subprocess wrapper (optional dep `pocketpaw[discord]`). Slash command `/paw` + DM/mention support. Stream buffering with edit-in-place (1.5s rate limit). Auto-registers a `pocketpaw-discord` MCP server on startup exposing Discord operations to all MCP-capable backends. Admin commands (`/converse`, `/setstatus`, etc.) require Administrator or Manage Server permission.
 - `SlackAdapter` — slack-bolt Socket Mode (optional dep `pocketpaw[slack]`). Handles `app_mention` + DM events. No public URL needed. Thread support via `thread_ts` metadata.
-- `WhatsAppAdapter` — WhatsApp Business Cloud API via `httpx` (core dep). No streaming; accumulates chunks and sends on `stream_end`. Dashboard exposes `/webhook/whatsapp` routes; standalone mode runs its own FastAPI server.
+- `WhatsAppAdapter` — WhatsApp Business Cloud API via `httpx` (core dep). No streaming; accumulates chunks and sends on `stream_end`. Dashboard exposes `/webhook/whatsapp` routes; standalone mode runs its own FastAPI server. Both POST routes reject (403) a body whose `X-Hub-Signature-256` does not match `whatsapp_app_secret`, and reject everything while it is unset.
 
 **Dashboard channel management:** The web dashboard (default mode) auto-starts all configured adapters on startup. Channels can be configured, started, and stopped dynamically from the Channels modal in the sidebar. REST API: `GET /api/channels/status`, `POST /api/channels/save`, `POST /api/channels/toggle`.
 
 ### Key Subsystems
 
 - **Memory** (`memory/`) — Session history + long-term facts, file-based storage in `~/.pocketpaw/memory/`. Protocol-based (`MemoryStoreProtocol`) for future backend swaps
-- **Browser** (`browser/`) — Playwright-based automation using accessibility tree snapshots (not screenshots). `BrowserDriver` returns `NavigationResult` with a `refmap` mapping ref numbers to CSS selectors
+- **Browser** (`browser/`) — Playwright-based automation using semantic DOM snapshots (not screenshots). One `page.evaluate` walks the visible DOM and stamps `data-paw-ref="N"` on interactive elements; `BrowserDriver` returns `NavigationResult` with a `refmap` mapping ref numbers to those CSS selectors. Playwright's `page.accessibility` API — which this used until 2026-09-06 — no longer exists
 - **Security** (`security/`) — Guardian AI (secondary LLM safety check) + append-only audit log (`~/.pocketpaw/audit.jsonl`)
 - **Tools** (`tools/`) — `ToolProtocol` with `ToolDefinition` supporting both Anthropic and OpenAI schema export. Built-in tools in `tools/builtin/`
 - **Bootstrap** (`bootstrap/`) — `AgentContextBuilder` assembles the system prompt from identity, memory, and current state
-- **Config** (`config.py`) — Pydantic Settings with `POCKETPAW_` env prefix, JSON config at `~/.pocketpaw/config.json`. Channel-specific config: `discord_bot_token`, `discord_allowed_guild_ids`, `discord_allowed_user_ids`, `slack_bot_token`, `slack_app_token`, `slack_allowed_channel_ids`, `whatsapp_access_token`, `whatsapp_phone_number_id`, `whatsapp_verify_token`, `whatsapp_allowed_phone_numbers`
+- **Config** (`config.py`) — Pydantic Settings with `POCKETPAW_` env prefix, JSON config at `~/.pocketpaw/config.json`. Channel-specific config: `discord_bot_token`, `discord_allowed_guild_ids`, `discord_allowed_user_ids`, `slack_bot_token`, `slack_app_token`, `slack_allowed_channel_ids`, `whatsapp_access_token`, `whatsapp_phone_number_id`, `whatsapp_verify_token`, `whatsapp_app_secret`, `whatsapp_allowed_phone_numbers`
 - **Soul** (`soul/`) -- Optional soul-protocol integration for persistent AI identity, psychology-informed memory, OCEAN personality, emotional state, and portable `.soul` files. Enable via `soul_enabled=true`. SoulManager handles lifecycle (birth/awaken/save), auto-saves periodically, recovers from corrupt files, and wires SoulBootstrapProvider into the system prompt. Soul tools (`soul_remember`, `soul_recall`, `soul_edit_core`, `soul_status`) auto-register with all backends when active. Can be toggled at runtime via the dashboard settings.
+- **Bundled skills** (`bundled_skills/`) — AgentSkills-format SKILL.md files (under `_bundled/skills/<name>/`) that ship with PocketPaw. They reach the chat agent by two **independent** routes, because no single route covers every backend:
+  1. **`~/.claude/skills/` mirror** (boot-time install, `auto_install_bundled_skills`). That path is one of the three `pocketpaw.skills.SKILL_PATHS` PocketPaw's own `SkillLoader` scans, so the desktop slash-command dispatcher resolves them on the non-SDK backends (codex_cli / openai_agents / deep_agents). **This mirror is invisible to the default `claude_agent_sdk` backend** — it launches with `setting_sources=[]` for persona isolation, which disables the SDK's filesystem skill discovery (verified 2026-06-03: a slash hits the SDK as an unknown command and the run returns with no assistant turn).
+  2. **Local plugin** (`sdk_load_bundled_skills`). `_bundled/` is also a valid Claude Code local plugin (`.claude-plugin/plugin.json` + `skills/`); the `claude_agent_sdk` backend passes it via the SDK `plugins=` option, which loads regardless of `setting_sources`. This is the only route that reaches that backend — the bundled skills become invokable by slash command **and** natural-language intent without leaking the rest of `~/.claude` (CLAUDE.md, output styles) into the agent.
+
+  Distinct from `pocketpaw/skills/` (the runtime loader/executor) — this module is the *shipping* side. Bundles `pocketpaw-create-pocket`, `pocketpaw-edit-pocket`, `pocketpaw-create-site`, `pocketpaw-pocket-planner`, `pocketpaw-pocket-specialist`, `foresight-create-sim`, the per-engine Paw Sites authoring brains (`pocketpaw-create-paw-site`, `pocketpaw-create-svelte-site`, `pocketpaw-create-react-site`, `pocketpaw-create-dynamic-site`), `pocketpaw-edit-react-site` (the react-track EDIT brain — a site already exists and needs changing, which is a different tool and a different failure mode from a create), and the engine-agnostic `pocketpaw-design-taste` they all compose with. Adding one: drop `_bundled/skills/<name>/SKILL.md` — the installer and the plugin both discover it by directory iteration — **then run `uv run pocketpaw atlas build` and commit the regenerated `src/pocketpaw/atlas/data/atlas.json`**. Directory iteration covers the two runtime routes, but atlas is a COMPILED artifact: `tests/atlas/test_widgets_skills.py::test_every_bundled_skill_has_a_valid_entry` requires one `skill:<slug>` entry per skill dir, so a new skill fails the suite until the artifact is rebuilt. Check `tests/atlas/test_eval.py` too — a new skill name enters the search corpus and can re-rank intents that have nothing to do with it. Opt out via `POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false` (mirror) and `POCKETPAW_SDK_LOAD_BUNDLED_SKILLS=false` (SDK plugin). See `docs/internal/2026-05-bundled-skills.md` for design + how to add a new skill.
+- **Bundled KB** — *removed 2026-07-12.* PocketPaw previously shipped a `ripple-recipes` kb-go scope (hand-authored pattern recipes auto-installed to `~/.knowledge-base/` and retrieved at pocket-creation time). It was retired because the fixed recipes biased the agent's design toward a handful of canned compositions; design breadth now comes from live design references rather than a shipped scope. The general `_get_kb_context` injection in `bootstrap/context_builder.py` (workspace/agent/pocket KB) is unchanged — only the bundled ripple-recipes scope and its boot-time installer were removed.
 
 ### Frontend
 
@@ -174,10 +222,569 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 - **Protocol-oriented**: Core interfaces (`AgentProtocol`, `ToolProtocol`, `MemoryStoreProtocol`, `BaseChannelAdapter`) are Python `Protocol` classes for swappable implementations
 - **Env vars**: All settings use `POCKETPAW_` prefix (e.g., `POCKETPAW_ANTHROPIC_API_KEY`)
 - **Soul config**: `POCKETPAW_SOUL_ENABLED=true`, `POCKETPAW_SOUL_NAME`, `POCKETPAW_SOUL_ARCHETYPE`, `POCKETPAW_SOUL_PATH`, `POCKETPAW_SOUL_AUTO_SAVE_INTERVAL`
+- **Files-as-Knowledge config** (Phase 1): `POCKETPAW_EXTRACTION_CHAIN` (JSON list of adapter names, e.g. `'["gemini-flash","local"]'`), `POCKETPAW_EXTRACTION_PER_MIME` (JSON map of mime→adapter), `POCKETPAW_GEMINI_API_KEY` for the cloud captioning adapter; `POCKETPAW_KB_SCOPES` (JSON list, e.g. `'["workspace:w1","agent:a1"]'`) drives multi-scope KB injection in the agent system prompt. The legacy `POCKETPAW_KB_SCOPE` (single string) still works via a deprecation shim that copies it into `kb_scopes` on startup. Phase 3 (Stage 3.E): uploads can carry `pocket_id` (form field on `POST /api/v1/uploads`, query on `GET /api/v1/files`); the FileReady listener routes pocket uploads into `pocket:{id}` KB and the agent's `_get_kb_context` resolves scope priority `pocket > agent > workspace` via the per-request `KbContext` threaded from the cloud chat path.
+- **Media transcription config** (T2, ingest-time speech-to-text): `audio/*` and
+  `video/*` uploads skip the extraction chain entirely and go to
+  `ee/pocketpaw_ee/cloud/uploads/transcription.py`, which calls fal directly —
+  the LiteLLM gateway serves no speech-to-text model (probed 2026-08-29: 80
+  models, zero). The transcript is returned as an ordinary `ExtractionResult`
+  and persisted through T0's `persist_extracted_text`, so the existing
+  comprehension, auto-tagging and kb-go ingest give a recording a summary, tags
+  and content search with no new code in any of those paths.
+  `POCKETPAW_FILE_TRANSCRIPTION_MODEL` (default `fal-ai/wizper` — measured
+  $0.0017/audio-min against `fal-ai/whisper`'s $0.0062 for the same clip;
+  **the code sends `language: null` explicitly and must keep doing so**, because
+  wizper defaults that parameter to `"en"` and then returns confident English for
+  audio that was not in English);
+  `POCKETPAW_FILE_TRANSCRIPTION_MAX_MINUTES` (default `30`) and
+  `POCKETPAW_FILE_TRANSCRIPTION_MAX_MB` (default `256`) are the ceilings, both
+  checked BEFORE the spend — the duration is read from the container header by
+  `uploads/media_duration.py` (stdlib; mp4/mov/m4a, wav, mp3 — ogg/webm/flac
+  return "unknown" and fall to the size ceiling);
+  `POCKETPAW_FILE_TRANSCRIPTION_DAILY` (default `100`, `0` disables the feature)
+  is a per-workspace/UTC-day cap that fails CLOSED, the sibling of
+  `POCKETPAW_FILE_COMPREHENSION_DAILY` (default `500`) and a SEPARATE counter,
+  so a bulk photo import cannot exhaust the ceiling that exists to stop a
+  podcast library; `POCKETPAW_FILE_TRANSCRIPTION_TIMEOUT_S` (default `600`) is
+  the end-to-end deadline. The fal key resolves via
+  `studio.fal_edit.fal_api_key` (`FAL_AI_API_KEY`, then `FAL_KEY`); with no key
+  configured, media uploads simply carry no transcript.
+- **Resumable chat runs config**: `POCKETPAW_REDIS_URL` (e.g.
+  `redis://redis:6379/0`; Dragonfly / Valkey work as drop-in since they
+  speak the Redis wire protocol). When unset, the transport falls back to
+  an in-process buffer (Tier 0, dev-only — runs do not survive restart and
+  the Tier 2 arq worker is unavailable). Production deploys must set it;
+  startup logs a WARN if missing;
+  `POCKETPAW_CLOUD_RUN_EXECUTOR` (`inprocess` default, `arq` for the Tier 2
+  worker — added in the follow-up PR);
+  `POCKETPAW_CLOUD_STREAM_TRANSPORT` (`redis` default — adapter selector for
+  future non-Redis backends like NATS JetStream);
+  `POCKETPAW_CLOUD_RUN_STREAM_TTL` (default `3600`, the Redis Stream retention
+  after a run terminates; every append also sets `EXPIRE NX` of run timeout +
+  120s grace + this value, so a stream orphaned by a killed worker still
+  expires, and a TTL already on the key is never overwritten);
+  `POCKETPAW_REDIS_MAX_CONNECTIONS` (default `128`, the shared non-blocking
+  pool for short commands: ws tickets, cancel keys, session revocation, rate
+  limits, arq enqueue; exhaustion raises at once);
+  `POCKETPAW_REDIS_STREAM_MAX_CONNECTIONS` (default `512`, a separate
+  `BlockingConnectionPool` used only by `XREAD`/`XREADGROUP BLOCK` — the SSE
+  run-stream reader and the xproc consumer — roughly one per open SSE stream
+  per process; an over-limit reader waits up to 5s, then fails with a
+  ConnectionError without touching the shared pool);
+  `POCKETPAW_CLOUD_RUN_JOB_TIMEOUT` (default `1800` = 30 min, the arq per-run
+  job timeout — arq's own default is 300s, which cancels a long agent run
+  mid-generation, so a big coding task halts after ~5 min; lift it for long
+  runs, the 10-minute stale-run sweeper is the backstop). See `docs/plans/2026-05-22-resumable-chat-runs-design.md`.
+  A run enqueued on the arq executor gets a `queued` frame on its stream at once,
+  so a client can show "waiting for a free slot" while every worker slot is busy.
+  A background sweeper runs on cloud startup and every 5 minutes, marking running
+  `ChatRunDoc`s whose heartbeat is older than 10 minutes, and queued ones older than
+  `POCKETPAW_CLOUD_RUN_QUEUED_TIMEOUT_MINUTES` (default `10`, floor `1`), as
+  `interrupted`. A queued run it interrupts always gets a terminal `interrupted`
+  frame (reason `queue_timeout`, code `run.queue_timeout`, a "too busy" message),
+  even when it never started and had no stream, so the client ends within one sweep
+  instead of waiting out the job timeout.
+  Provider rate-limit / overloaded errors (429, 529) reach the client as
+  `agent.provider_busy` with a plain message; the raw provider text stays in logs.
+- **Growth worker (`POCKETPAW_GROWTH_WORKER_ENABLED`)**: default OFF. When on, the
+  worker supervisor also runs the growth arq lane (live email/WhatsApp sends plus
+  the daily follow-up cron), and the web process may enqueue approved growth sends.
+  When off, approving a send fails the action with a clear reason instead of
+  queueing work nothing consumes. Set it on BOTH the backend and the worker, and
+  set `GROWTH_SENDING_DOMAIN` (below), or nothing goes out.
+- **Abuse ceilings (always on, NOT gated on billing)**: four knobs that bound what
+  one account can do in a day, regardless of whether billing is configured. They
+  exist because the priced ceilings — the per-plan storage cap in
+  `cloud/storage/service.py` and the credit quota in `chat/runs/run_core.py` —
+  are both gated on `billing_enforced`, which defaults to False. On a deployment
+  that has not switched billing on, those are not ceilings at all, and the only
+  remaining bound is the per-IP limiter in `dashboard_auth` (10 req/s, in-memory
+  per process, so N replicas means N buckets).
+  `POCKETPAW_WORKSPACE_TURNS_DAILY` (default `500`) — agent runs per workspace
+  per UTC day. ONE counter covers every model call the platform pays for,
+  because they all happen inside a run: the reply, plus image generation,
+  speech, OCR, translate, research and web search when a run calls them.
+  `POCKETPAW_WORKSPACE_UPLOAD_FILES_DAILY` (default `2000`) and
+  `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` (default `20000000000`, 20 GB) — two
+  ceilings checked together on every upload, because a file count alone is
+  beaten by fifty 25 MiB files and a byte total alone is beaten by a hundred
+  thousand one-byte ones.
+  `POCKETPAW_MAX_OWNED_WORKSPACES` (default `10`) — the one that makes the other
+  three mean anything. Every ceiling above is keyed on the workspace, so an
+  account that can mint workspaces in a loop gets a fresh empty counter each
+  time. Counts only workspaces the account OWNS; being invited to many is normal
+  collaboration and is governed by the inviter's seat limit.
+  All four read `0` as UNCAPPED, which DIVERGES from
+  `POCKETPAW_FILE_COMPREHENSION_DAILY`, where `0` disables the feature and
+  therefore blocks everything. Deliberate: a comprehension is an extra a
+  workspace can live without for a day, whereas uploading, chatting and creating
+  a workspace are the product, and an env typo must not take them off the air.
+  A non-integer value warns and uses the default rather than reading as `0`.
+  The two daily counters fail OPEN on a database error, logged at WARNING.
+  Both paths persist to the same Mongo a statement later, so an unreadable
+  counter never lets through work the database would have refused, and a
+  fail-closed draft refused every run in any harness that had not bound the
+  collection. Rejections are 429 with codes
+  `runs.daily_limit`, `uploads.daily_limit` and `workspace.owned_limit` —
+  deliberately not the 402 `billing.*` / `credits.*` codes, because nothing is
+  for sale here and the answer is to wait, not to upgrade.
+  Every daily cap (turns, uploads, the comprehension, transcription and illustration
+  caps, and the guest turn cap) counts through ONE primitive:
+  `metering.service.try_spend` on the `daily_usage` collection, one row per
+  (subject, meter, UTC day). Inside it a cap is `None` = uncapped, `0` =
+  disabled, `n` = cap; each meter's resolver maps its env var onto that, so the
+  `0` meanings above are unchanged.
+  Crude flood protection belongs at the proxy (Traefik on Coolify), not here.
+- **Social sign-in needs two URLs set, and returns to the face it started on**:
+  `POCKETPAW_PUBLIC_BASE_URL` (no default beyond `http://localhost:8888`) builds
+  the OAuth `redirect_uri` the provider is handed, so an unset value sends Google
+  and GitHub a localhost callback and every social login fails on a deployed
+  host. It must match a redirect URI registered in the provider's console.
+  `POCKETPAW_FRONTEND_BASE_URL` is where the browser lands after consent.
+  Since 2026-09-12 it is only the FALLBACK: the origin the login started from
+  (read from `Referer` in `auth/social/router.py`) is validated against the CORS
+  allowlist and pinned into the single-use OAuth state, then honoured at the
+  callback. One deployment serves two faces on two hostnames, so a single global
+  value landed kiosk users on the Paw OS. Validation is not optional — without
+  it this is an open redirect that also delivers the session cookie — and it runs
+  on the way in AND out, failing closed to the configured default.
+- **Storage caps are enforced, and free is 1 GB** (2026-09-12). The per-plan
+  workspace storage ceiling (`ee/pocketpaw_ee/cloud/billing/plans.py`,
+  `_MAX_STORAGE_BYTES`: free 1 GB, go 15 GB, pro 50 GB, pro_max 100 GB,
+  enterprise uncapped) is checked at UPLOAD time by
+  `cloud/storage/service.py`. It used to be gated on `billing_enforced`, which
+  defaults False and which nothing sets, so the number was shown on the
+  Settings storage page and enforced nowhere. The gate is now unconditional and
+  the opt-out is the PLAN, not a global flag: an uncapped plan returns early, so
+  a dedicated deployment sets its workspace plan once. Free came down from 5 GB
+  in the same change, because 5 GB of unbilled object storage per signup is a
+  real bill the moment the product is public.
+  The read FAILS OPEN, logged at WARNING, like the daily budgets beside it:
+  refusing every upload in the product because one aggregation could not run
+  is a bigger outage than one workspace briefly exceeding its plan, and the
+  file's own metadata row is written to the same Mongo a statement later.
+  Refusal is 402 `billing.storage_limit`.
+  Not to be confused with `POCKETPAW_WORKSPACE_UPLOAD_BYTES_DAILY` above: that
+  bounds throughput per day, this bounds total stored bytes.
+- **Kiosk BYOK gate (`POCKETPAW_OTHER_HAND_REQUIRE_BYOK`)**: default OFF. When
+  on, a SIGNED-UP user on the Otherhand surface must have their own provider
+  key and gets no platform fallback, refused with 402 `byok_key_required`.
+  Guests already have this rule unconditionally (`guest_key_required`,
+  feat/byok-guest-backend) and are untouched — two rules, two codes, because a
+  guest is told to create an account and an account is told to add a key.
+  Scoped to the SURFACE, never the workspace: the same deployment serves the
+  full Paw OS, where the platform fallback is the product, so a workspace-wide
+  gate would take chat off the air for every non-kiosk user the moment the
+  variable is set. The surface is read from the server-resolved
+  `ctx.surface_context`; the fast-reject in `agent_router` reads the
+  client-supplied hint and is therefore UX only, with the executor
+  (`run_core._requires_own_key`) as the enforcement. Exists for the window
+  between launching the kiosk and switching billing on; remove the variable to
+  revert.
+- **Concurrency / capacity config**: five ceilings that are easy to confuse. In a
+  cloud deploy the first two are the ones that bound how much work executes at once.
+  `POCKETPAW_ARQ_MAX_JOBS` (default `10`, arq's own) — the **chat lane's** ceiling:
+  concurrent jobs ONE arq worker runs on arq's default queue (chat runs,
+  workspace jobs, both `/ship` jobs). Site builds shared it until 2026-09-04 and
+  now have `POCKETPAW_SITES_ARQ_MAX_JOBS` (default `4`) on their own queue,
+  consumed by the same container — `pocketpaw_ee.cloud.worker_supervisor` runs both
+  lanes in one process, so neither can consume the other's slots. Raise the sites
+  one with the Daytona sandbox quota, not with the container's memory limit: a
+  build compiles remotely and what runs here is an await. This was unset until
+  2026-09-01, so every earlier deploy ran on arq's default with no way to raise
+  it; ten concurrent site publishes left no slot for a chat run, and job 11 was
+  neither rejected nor retried (`max_tries = 1`) — it waited in Redis behind a
+  30-minute `job_timeout`. Total concurrency is this value x worker replicas.
+  Raise it WITH the container's memory limit: the default `claude_agent_sdk`
+  backend spawns a Node subprocess per run, so RAM binds before CPU.
+  `POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL` (default `30`) — **worker only**, and not
+  a capacity knob at all: it is how often the worker refreshes its Redis health
+  key, and therefore how fast `arq --check` can notice the worker is gone (the
+  key's TTL is this plus a second). arq's own default is `3600`, which answers
+  "healthy" for up to an hour after the process died — so a container
+  healthcheck built on it looks like coverage and catches nothing. The deploy
+  compose polls it every 30s; keep this comfortably under whatever polls it.
+  `POCKETPAW_AGENT_POOL_MAX_INSTANCES` (default `20`) — **per-process** AgentPool
+  ceiling; the web process and each worker each hold their own pool.
+  `POCKETPAW_SESSION_WARM_MAX_PER_TENANT` (default `8`) /
+  `POCKETPAW_SESSION_WARM_MAX_GLOBAL` (default `64`) — **per-process** warm
+  session slots. The per-tenant one is the fairness knob that stops one workspace
+  holding every slot; over the limit the oldest IDLE slot is evicted, never a busy
+  one. Each warm slot pins a live agent client, so raise the global one with the
+  container's memory limit.
+  `POCKETPAW_MAX_CONCURRENT_CONVERSATIONS` (default `5`) — the OSS `AgentLoop`
+  semaphore, which gates the CHANNEL adapters only. The cloud chat path
+  (`ee.cloud.chat.runs.run_core`) never imports `AgentLoop`, so raising this does
+  nothing for a cloud deploy. Every default above is the value that was already in
+  force, so shipping these knobs moved no deploy. Sizing guidance:
+  `docs/internal/2026-05-resumable-runs-deploy.md` -> "Sizing the worker".
+- **Growth outbound config (`GROWTH_SENDING_DOMAIN`)**: the secondary domain the
+  `/growth` engine sends cold outreach from — **required**, with no default. The
+  dispatch worker fails closed when it is unset (nothing goes out), validates the
+  from-address against it at send time, and refuses a value equal to the
+  deployment's own host (`POCKETPAW_PUBLIC_BASE_URL`). Never point it at the apex:
+  cold outreach draws spam complaints at rates transactional mail never sees, and
+  the complaints land on the *sending* domain's reputation — a burnt secondary
+  domain costs a DNS record and a warm-up, a burnt apex takes password resets,
+  invoices and receipts with it. The provider credential itself is **not** an env
+  var: it is per-workspace connector state on the workspace's `mailtrap` connector
+  row (`MAILTRAP_API_TOKEN`, plus optional `MAILTRAP_FROM_EMAIL` /
+  `MAILTRAP_FROM_NAME`, `MAILTRAP_REPLY_TO`, and `MAILTRAP_PROJECT_SENDERS` — a
+  `{project_id: {from_email, from_name, reply_to}}` map so an agency sends as the
+  client whose project owns the prospect, resolved per field with the workspace
+  values as the fallback), so disabling the connector revokes sending immediately
+  for every project at once.
+  See `ee/pocketpaw_ee/cloud/growth/connector.py` and `docs/api-reference.md`.
+- **Session supervisor config**: `POCKETPAW_SESSION_SUPERVISOR` (default OFF). When
+  truthy (`1`/`true`/`yes`/`on`), the cloud chat executor drives every agent turn
+  through the `SessionSupervisor` + the durable `(workspace, session, agent) ->
+  cli_session_id` map (`ee/.../agent_sessions/runtime_service.py`) + the per-tenant
+  `MongoSessionStore`, so the agent RESUMES its native CLI session (durable across
+  restart, tenant-isolated) instead of replaying Mongo history into the prompt. OFF
+  leaves `pool.run` byte-for-byte the legacy path, and any supervisor/store error
+  during a turn falls back to legacy for that turn. v1 resumes cold from the store
+  each turn (no warm hot-process reuse yet). Design:
+  `docs/concepts/agent-session-management.mdx`; smoke:
+  `docs/handoff/2026-06-30-session-supervisor-smoke.md`.
+- **Per-tenant agent cwd jail (cloud, ART-2)**: In multi-tenant cloud each
+  workspace's chat agent runs with `cwd = ~/.pocketpaw/workspaces/<workspace_id>/agent/<session_id>/`
+  (resolved per-run from the `attach_agent_identity` ContextVars in
+  `ee/pocketpaw_ee/cloud/agent_jail.py`) so one tenant's file ops never
+  co-mingle in the shared home dir. It **fails closed**: a cloud run that
+  reaches the backend with no resolvable `workspace_id` RAISES rather than
+  falling back to `~`. OSS / dedicated installs (no cloud DB initialized) keep
+  `settings.file_jail_path` unchanged. Override the jail root with
+  `POCKETPAW_WORKSPACE_JAIL_ROOT` (default `~/.pocketpaw/workspaces`) to anchor
+  it on a data volume.
+- **Agent jail lifecycle (cloud, ART-3)**: bounds the ART-2 scratch jails so
+  disk scales with active concurrency, not user count (the jail is pure scratch;
+  durability lives in blob storage). Three knobs, all read from the environment
+  in `ee/pocketpaw_ee/cloud/agent_jail.py`:
+  `POCKETPAW_AGENT_JAIL_QUOTA_MB` (default `2048`) — per-workspace size cap
+  measured at RUN-START; an over-quota run is rejected cleanly (a terminal
+  `failed` run with an `agent.jail_over_quota` error frame, never an OOM/crash).
+  `0` disables it.
+  `POCKETPAW_AGENT_JAIL_TTL_GRACE_SECONDS` (default `3600`) — idle grace after
+  which a jail with no active run is garbage-collected.
+  `POCKETPAW_AGENT_JAIL_DISK_WATERMARK_PCT` (default `90`) — box disk-usage
+  high-water mark; over it, the GC evicts least-recently-used IDLE jails first
+  until back under. `0` disables watermark eviction.
+  `POCKETPAW_AGENT_JAIL_GC_ENABLED` (default `true`) — escape hatch to disable
+  the GC sweep entirely. The GC (`ee/pocketpaw_ee/cloud/agent_jail_gc.py`,
+  `sweep_agent_jails`) runs on cloud startup and the same 5-minute heartbeat as
+  the stale-run sweeper, and NEVER evicts a jail whose run is still queued or
+  running (resolved via `run_service.find_active_run_scopes`; a retried
+  interrupted run re-protects its jail by spawning a fresh queued run).
+- **Artifact delivery + storage boot guard (cloud, ART-4)**: the agent's jail is
+  pure scratch — durability lives in blob storage. The `deliver_artifact`
+  in-process MCP tool (`ee/pocketpaw_ee/agent/mcp_servers/deliver.py`, server
+  `pocketpaw_deliver`) lands a built file (or a zipped directory) from the jail
+  into the tenant's blob storage via `EEUploadService.upload` and returns a real
+  presigned download URL — so the agent shares a working link instead of a
+  container path or a `127.0.0.1` preview server. Path safety is jail-scoped
+  (rejects `..`, absolute paths out, symlinks out, another tenant's jail), and
+  `POCKETPAW_DELIVER_MAX_MB` (default `100`) caps artifact size. Because this
+  only works when uploads go to real object storage, `init_cloud_db` runs
+  `verify_cloud_storage_backend()` (`ee/pocketpaw_ee/cloud/uploads/bootstrap.py`,
+  mirroring the memory guard): in cloud, if `POCKETPAW_UPLOAD_ADAPTER` != `s3` it
+  **WARNs loudly** (a local-disk deploy that would silently no-op delivery is
+  visible in the boot logs), and `POCKETPAW_REQUIRE_S3_IN_CLOUD=1` escalates that
+  to a hard boot failure. The multi-tenant-cloud signal both the jail and this
+  guard read is `is_multi_tenant_cloud()` in `ee/pocketpaw_ee/cloud/shared/db.py`
+  (one name for the `get_client() is not None` check).
+- **In-process bus subscribers**: `pocketpaw_ee.cloud._core.realtime.bus.InProcessBus` exposes `subscribe(event_type, handler)` for cloud-side listeners (e.g. the `FileReady` → KB indexer wired in `ee/pocketpaw_ee/cloud/uploads/listeners.py`). Register subscribers from `mount_cloud()` after `init_realtime()` runs. Handler exceptions are logged and swallowed per-handler so one bad listener can't block the rest of the dispatch.
+- **Realtime across web processes (`POCKETPAW_REALTIME_BUS`)**: `inprocess`
+  (default) or `redis-streams`. Sockets live in the process that accepted them,
+  so running more than one web process (`uvicorn --workers N`, or replicas)
+  needs `redis-streams`, set on the web service AND the worker (web first or
+  both at once: a worker alone on it sends agent replies to a stream no
+  `inprocess` web process reads; without `POCKETPAW_REDIS_URL` it falls back
+  to `inprocess` with a warning). Then
+  `_core/realtime/broadcast.py` relays socket frames (bus audiences,
+  `broadcast_to_group`, `send_to_room`, worker ws envelopes) through the
+  `cloud:realtime:broadcast` stream, which each process reads with its OWN
+  consumer group (broadcast; a process skips frames it published). Bus
+  handlers are never relayed and worker bus envelopes stay on xproc's SHARED
+  `cloud-web` group, so side effects (agent runs, push, calendar) still fire
+  once. A process creates its group at startup, destroys it on clean shutdown,
+  and reaps siblings' groups idle over 10 minutes. The same stream carries
+  `cache.invalidate` (`register_invalidator` / `broadcast_invalidate`), wired
+  for API-key revocation, member action overrides, the settings cache and the
+  skill loader. The OSS side reaches it without importing EE:
+  `pocketpaw.cache_invalidation.clear_settings_cache()` / `reload_skills()`
+  clear locally and call a remote hook that `mount_cloud` installs
+  (`_wire_oss_cache_invalidation`); new settings/skill write paths should call
+  those, not `get_settings.cache_clear()` / `loader.reload()`. Skills live on
+  local disk, so a reload on another HOST finds only that host's skills.
+  The same knob is the multi-worker switch for two more things:
+  **Presence** (`_core/realtime/presence.py`): a Redis sorted set per user
+  (`presence:{user}`), one member per socket scored by its process's 30s
+  heartbeat; members older than 90s are ignored and pruned, so a crashed
+  process's sockets age out. Until they do (up to 90s), they still count: a
+  user whose real last socket closes meanwhile gets no `presence.offline`,
+  and none is emitted when the stale members expire.
+  Connect/disconnect are single Lua scripts, so `presence.online` /
+  `presence.offline` fire once cluster-wide. The router's first/last verdicts,
+  the connect snapshot, the grace timer and push dispatch read it; a
+  notification for a user whose socket is on another process is relayed to
+  that process instead of going out as Web Push (the zero-accept Web Push
+  fallback does not cover remote sockets). **Leases** (`_core/lease.py`):
+  every scheduled loop (the `POCKETPAW_CLOUD_SCHEDULER_ENABLED` set in
+  `mount_cloud`, the pocket refresh and temporal schedulers, meeting-job
+  recovery, the 5-minute sweeper) runs on the process holding its Redis lease
+  (`SET NX PX`, renewed every ttl/3, compare-and-delete on shutdown); losing
+  it stops the loop, and with Redis down nothing runs. The agent-jail GC and
+  the decisions reconciler/action sweeper (local SQLite) lease per HOST.
+  Mandate autopilot toggles handled on a non-holder are relayed to the holder.
+  Per process by design: the activity buffer and push coalescing (each process
+  buffers/coalesces only what it handles; a Mission Control read on another
+  process sees a partial feed), the xproc consumer, the dev-server reaper.
+  **Rollout:** set `POCKETPAW_REDIS_URL`, then `POCKETPAW_REALTIME_BUS=redis-streams`
+  on the web service (and worker) while still at one web process; confirm the
+  broadcast group, `presence:*` keys and `lease:*` keys appear; only then raise
+  `uvicorn --workers` or the replica count. Rolling back is the reverse: drop
+  to one process first. Design: workspace `docs/design/plans/pocketpaw/2026-09-04-redis-utilization-audit.md` §1-2.
+- **Paw Bar rate limits across processes**: Paw Bar data lives in one local
+  SQLite file (`src/pocketpaw/paw_bar/store.py`, WAL mode). With
+  `POCKETPAW_REDIS_URL` set, the per-widget event and chat rate check runs in
+  Redis (`ee/pocketpaw_ee/paw_bar/admit.py`: a Lua sliding 60s window per widget
+  and bucket, overall and per visitor) and SQLite only takes a plain insert for
+  admitted events. Without Redis, or for 30s after a Redis error, it falls back
+  to `store.admit_event`, which holds SQLite's exclusive write lock for every
+  event, admitted or not; that lock is what serializes several web processes.
+  Admitted events are still SQLite rows either way, because the read gates and
+  the gated-action cap count rows. SQLite is still one file per container, so
+  several containers need the store moved off SQLite first.
+- **Memory backend (`POCKETPAW_MEMORY_BACKEND`)**: OSS self-hosted defaults to `"file"` (local JSON under `~/.pocketpaw/memory/`). The cloud forces `"mongodb"` via `register_default_backend()` (`ee/pocketpaw_ee/cloud/memory/bootstrap.py`) unless explicitly overridden. The cloud now **fails to boot** if the active store isn't `MongoMemoryStore` (`verify_cloud_memory_backend()` in `init_cloud_db`) — a deliberate guard so a misconfigured backend can never silently write chat history (files-surface chats included) to local disk. Don't set `POCKETPAW_MEMORY_BACKEND=file` on a cloud deployment.
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.
 - **Ruff config**: line-length 100, target Python 3.11, lint rules E/F/I/UP
 - **Entry point**: `pocketpaw.__main__:main`
 - **Lazy imports**: Agent backends are imported inside `AgentRouter._initialize_agent()` to avoid loading unused dependencies
+
+## Canonical primitives — use X, never Y
+
+These already exist. Don't build a parallel copy; `scripts/dup-ratchet` and the
+import-linter contracts fail CI on new ones (they pin today's count and only shrink).
+Why: parallel copies drift (different caps, floors, SSRF checks), so one canonical copy wins.
+
+- **Approvals:** propose through `InstinctStore` (`update_parameters` / `_update_status`).
+  Never open `store._db_path` or raw-`UPDATE instinct_actions`; no new `InstinctApproval` writers.
+- **Audit:** through `ee/pocketpaw_ee/agent/mcp_servers/_audit`. Never hand-roll
+  `get_audit_logger()` + `audit_service.record`; cloud code never writes the SQLite `AuditStore`.
+- **Caps and meters:** caps from `entitlements.resolve_entitlements`, meters from `cloud/metering`
+  (0 = disabled, None = uncapped). No new `*_DAILY` env cap, `try_spend` copy or inline `check_quota`.
+- **Outbound HTTP to user-supplied URLs:** `pocketpaw.security` pinned fetch
+  (`safe_fetch` / `url_validators`). No new `_ip_is_unsafe`.
+- **Webhooks and system email:** the notifications outbox (`cloud/notifications/outbox.py`).
+  Outbound signatures use `webhook_signing.py`, never a hand-rolled `hmac.new`; inbound
+  verifiers for a provider's own scheme (growth, Recall webhooks) are fine. No `smtplib`.
+- **Fabric / people:** no new Fabric type (Customer/Partner/Client) and no Beanie doc for an
+  external person until the object-store decision lands. `Project` = work scope only, never a
+  client container.
+- **Realtime:** import from `pocketpaw_ee.cloud._core.realtime`, never the `cloud.realtime` shim.
+
+## pocketpaw_ee/cloud Code Rules
+
+Applies to code under `ee/pocketpaw_ee/cloud/`. Local-runtime code (`src/pocketpaw/`)
+uses different patterns; these rules don't apply there.
+
+1. **Each entity has a 4-file shape.** `<entity>/{domain.py, dto.py, service.py, router.py}`. No `repositories.py`. The service IS the repository — Beanie writes are inline.
+
+2. **Writes go through `<entity>/service.py`.** Never import Beanie document classes (`pocketpaw_ee.cloud.models.*`) from routers, DTOs, domains, channels, tools, or agents. Only `<entity>/service.py` may import its own `models.<entity>`. `<entity>/service_admin.py` may too, for cross-tenant reads/writes only, each function marked `# admin-cross-tenant: <reason>` (first example: `discover/service_admin.py`).
+
+3. **Domain enforces multi-tenancy at construction.** `domain.py` value objects are frozen with required tenancy fields (`workspace_id`, `scope`, etc.) — no defaults. Constructing a domain object without tenancy info is a type error.
+
+4. **DTOs separate request and response.** `dto.py` defines distinct `<Op>Request` and `<Entity>Response` classes. Never reuse one model for both input and output — fields leak silently.
+
+5. **Service signature.**
+   ```python
+   async def op(workspace_id: str, user_id: str, body: <RequestSchema>) -> dict:
+   ```
+   Module-level `async def`, not a class. Multi-tenancy via the explicit `workspace_id` parameter. `user_id` carries the viewer context for permission checks. Public APIs return wire dicts (`dict`) for legacy router compatibility — see `pockets/service.py` for the canonical shape, including the `_resolved_wire_dict` helper that produces the wire dict from a Beanie doc.
+
+   *Note: a future migration may move toward a `RequestContext` value object that bundles `(workspace_id, user_id, viewer_metadata)`. New modules that anticipate this can mint a private `_context.py:RequestContext` (see `ee/pocketpaw_ee/calendar/_context.py` in PR #1132 for an example), but the mainline pattern remains the explicit parameter pair until pockets migrates.*
+
+6. **Validate at entry.** First line of every service function: `body = <RequestSchema>.model_validate(body)`. FastAPI parses HTTP bodies; services re-parse for internal callers (bus handlers, MCP tools, CLI, jobs).
+
+7. **Tenant filter on every read.** Every `_FooDoc.find(...)` / `find_one(...)` call includes `workspace=ctx.workspace_id` (or has an explicit `# global-read: <reason>` comment, or lives in a `service_admin.py` function marked `# admin-cross-tenant: <reason>`). Domain-level required fields catch construction-time leaks; this rule catches read-path leaks.
+
+8. **Mapping via Pydantic, not hand-rolled helpers.** Use `Domain.model_validate(doc, from_attributes=True)` and `Response.model_validate(domain, from_attributes=True)` where field names align. When the wire format renames or transforms fields (e.g., camelCase ↔ snake_case, nested → flat), keep mapping as a private helper *in the same `service.py`* rather than a separate file.
+
+9. **Emit on every write.** State-mutating service functions end with `await emit(<Event>(data=...))` — or have an explicit `# no-event: <reason>` comment on the line before return. Silent mutations desync downstream handlers (search index, soul memory, ripple invalidation).
+
+10. **Errors via CloudError.** Use `_core.errors` subclasses (`NotFound`, `Forbidden`, `Conflict`, `ValidationError`, etc.). The canonical location is `ee/pocketpaw_ee/cloud/_core/errors.py`; `ee/pocketpaw_ee/cloud/shared/errors.py` is a transitional re-export shim from the 2026-04-27 cloud-restructure that remains for backwards compatibility. **New code should import from `pocketpaw_ee.cloud._core.errors` directly.** Some existing modules (including `pockets/service.py`) still import via the shared shim; that's tracked for touch-time migration. Never `raise HTTPException` in services or routers — `_core.http` maps `CloudError` to JSON.
+
+11. **Prefer events over transactions.** Only money, identity, and permission flows reach for `session.start_transaction()`.
+
+### Touch-time migration rule
+
+When you touch any `ee/pocketpaw_ee/cloud/<entity>/*.py` file for any reason — bug fix, feature add, refactor — bring that entity onto the 4-file shape in the same PR:
+
+1. Check whether `<entity>/{domain.py, dto.py, service.py, router.py}` exists with no `repositories.py`. If not, refactor on the way out.
+2. Add `<Entity>Document` to the failing list in the `import-linter` contract; add `<entity>/router.py`, `<entity>/dto.py`, `<entity>/domain.py` to the source-modules list.
+3. Ship the original change + the consolidation in the same PR.
+
+`pockets/` is the canonical reference. Copy its shape.
+
+### Atlas touch-time rule — the OS self-model must not drift
+
+atlas (`src/pocketpaw/atlas/`) is the runtime OS self-model: the compiled corpus
+agents query via `atlas_search` / `atlas_describe` and the always-on Paw OS
+Primer. **A primitive, surface, or agent-facing capability that isn't in atlas is
+undiscoverable to agents — and its CI drift check only proves the compiled
+`atlas.json` matches the authored JSON, NOT that the authored facts match the
+live OS.** Two whole subsystems (Fabric source-truth, the verify loop) shipped
+after atlas was seeded and stayed invisible for weeks; three live routes were
+once missing/stale while the check stayed green.
+
+When you **add, rename, or remove a primitive, a user-facing surface/route, a
+composer verb, or an agent-facing capability** — in the same PR:
+
+1. Update `src/pocketpaw/atlas/authored/{primitives,surfaces,capabilities,verbs}.json`
+   (all 10 base `AtlasEntry` fields; primitives carry a `gist`; capabilities carry a
+   `role:*` marker in `requires`; surfaces carry `slash` / `presentation` /
+   `agent_openable`, and `agent_openable` IS the `open_surface` allowlist;
+   composer verbs carry `slash` / `applies_to` / `triggers` / `risk` / `undo`;
+   verify every route/fact against the real frontend routes, not just that it
+   recompiles).
+2. Recompile: `uv run pocketpaw atlas build`, then `atlas build --check` green;
+   commit `src/pocketpaw/atlas/data/atlas.json`.
+3. Pin the new intent(s) in `tests/atlas/eval_cases.json` (both directions — the
+   new entry wins its intents, existing primitives still win theirs).
+
+Routine refactors and bug fixes don't need atlas updates. If a subsystem ships
+behind a rollout flag, keep the entry discoverable and let the overlay mark its
+live `mode` (see `docs/atlas.md`) — never hide it.
+
+---
+
+## Prompt rows must carry the id the tools take
+
+Applies to every prompt block that lists entities — cloud surface preambles
+(`ee/pocketpaw_ee/cloud/surface/handlers/`) and the channel prompt layers
+(`src/pocketpaw/prompt/`) alike.
+
+**The rule:** if any tool declares a required `<kind>_id`, every prompt row that
+lists `<kind>`s must carry that id.
+
+**Never hand-roll a row.** Use `pocketpaw.prompt.entity.entity_line(label,
+entity_id, **facts)`. `entity_id` is a required positional, so a row cannot
+silently omit it; pass `None` where there genuinely is no id and it renders a
+visible `id=?`.
+
+**Why:** four handlers independently rendered `- {name} (…)` with no id while
+`update_widget` required `widget_id`, so the prompt named widgets and pockets the
+agent could not address. Two pockets called "Sales" rendered identical rows and
+the tool call resolved to the wrong one silently. `rows.append(f"- {name} …")` is
+the obvious thing to type, which is why this is a gate and not a review note.
+
+**Enforcement** (`tests/cloud/surface/test_entity_id_contract.py`): an AST scan
+fails any hand-rolled row; allow-listed modules pin their row *count*, so an
+exempt file cannot grow a new one; and the set of addressable kinds is **derived
+from the MCP tool schemas**, so adding a tool with a required `site_id` fails the
+build until someone decides whether the sites preamble owes an id.
+
+**No id to render?** Use `unaddressed_line("<kind>", label, **facts)` — it emits
+no id, and the `<kind>` literal is *checked* against the tool schemas, so the
+exemption fails the moment a tool starts requiring that id. Prefer it over adding
+an allow-list entry.
+
+**Ids render short.** `entity_line` shows the last 8 characters
+(`id=…3f9a1c07`), and `ee/pocketpaw_ee/cloud/pockets/id_resolve.py` resolves a
+tail back to the whole id, scoped to the workspace/pocket, erroring on ambiguity
+rather than picking. The **tail**, not the head: an ObjectId starts with a
+timestamp, so 12 widgets created together share their first 20 characters.
+
+**Check the cap when you convert a list, and make the fixture realistic.** A test
+entity with no `id` measures rows ~23 chars shorter than production, and the cap
+test will pass while reporting headroom that isn't there.
+
+---
+
+## The prompt may not command a tool the agent doesn't have
+
+Applies to every system-prompt block — `src/pocketpaw/ripple/_inline.py`, the
+rule constants in `ee/pocketpaw_ee/cloud/chat/agent_service.py`, and any new
+block you add.
+
+**The rule:** before a prompt block names a tool, confirm the agent it reaches
+actually has that tool. If the answer depends on the backend, gate the block on
+`backend_name` — `build_behavior_instructions` already takes it.
+
+**Why it fails silently.** A model handed an unsatisfiable instruction does not
+raise; it improvises, and the improvisation looks like a normal reply. Two live
+examples, both found by dumping the wire body rather than reading the code:
+
+- `# MUST CALL BEFORE EMIT` made `get_inline_widget_help` mandatory and said "if
+  the tool returns an error, OMIT the widget". The tool was on the
+  `pocketpaw_widgets` MCP server, which only `agents/claude_sdk.py` builds — so
+  on every other backend it did not error, it was absent, and the agent's only
+  consistent move was to drop the widget. A block written to protect widget
+  quality was destroying it.
+- `<composio-auth-flow>` taught a four-step OAuth sequence on
+  `initiate_connection` / `verify_connection`, gated on credentials alone.
+  Composio builds tools for four backend kinds; this deploy runs a fifth. The
+  agent was told it had Gmail/Slack/GitHub — and told the *user* so.
+
+**Naming an existing-but-wrong tool is the same defect.** The MUST-CALL block
+was satisfiable on the SDK backend and still wrong: `get_inline_widget_help`
+returns hand-written design prose for 16 widgets, while `get_widget_spec` reads
+the manifest and returns the prop schema. For `definition-list` — the block's own
+cited failure — that is 18,623 chars without the answer versus 759 chars with it.
+
+**Gate from one source of truth.** `providers.py` owns
+`supports_composio_tools` / `supports_connection_tools` next to the code that
+builds the tools, so adding a wrapper widens the prompt in the same commit. Never
+hand-maintain a second backend list in the prompt layer.
+
+**Enforcement** (`tests/test_prompt_names_only_real_tools.py`): every backticked
+`tool(` call in the inline prompt must resolve in the runtime builtin registry —
+the registry every backend gets, not the SDK's MCP surface. Per-backend gating is
+tested next to the assembly in
+`tests/cloud/test_agent_service_tools_context.py`.
+
+**Bridging beats deleting.** When the instruction is right and the tool is
+merely unreachable, add it to `tools/builtin/` and `tools/cli.py::_TOOLS` (see
+`widget_spec.py`, and `flow_tool.py` before it) rather than dropping the rule.
+Then classify it in `pydantic_ai._TENANT_SAFE_TOOLS` — an unclassified tool is
+withheld, so registry presence alone still leaves the prompt lying.
+
+**A tool result is prompt too.** A lookup miss that returns the whole catalog is
+not "erring toward too much": `widget_help` answered any unknown type with all
+58,765 chars of the design rulebook, which never contained the answer. Return the
+miss, name what can answer it.
+
+---
+
+## A gate is not a gate until a mutation has been observed to break it
+
+Applies to any test you are treating as protection — a contract test, a cap
+assertion, a security check, a regression guard.
+
+**Before claiming a test guards something, break the code on purpose and watch it
+fail.** Use `scripts/mutate.py`:
+
+```bash
+uv run python scripts/mutate.py --plan tests/mutations/<area>.json
+```
+
+A plan is a JSON list of `{label, file, find, replace, tests}`. The script applies
+each mutation, runs the tests, restores the file, and exits non-zero if any
+mutation **escaped** (tests still passed).
+
+**Why:** a passing test means the code and the test agree, which is also true when
+both are wrong. That is not hypothetical here — `updatedAt` never updated and
+every key on it reported "unchanged"; a `FunctionModel` double advertised native
+tool search and a deferred-loading probe reported 0% saving; a cap fixture with no
+`id` measured rows 23 chars short and kept passing; a positional-only test
+asserted a `TypeError` that came from a missing argument, not from the property it
+named. Each was found by mutation, not by review.
+
+**How to apply:** when you add or change a gate, add its mutations to a plan under
+`tests/mutations/` and run it. Docstrings in this repo name the mutation that
+breaks each test — that convention is only worth anything if the mutation was
+actually run, so run it. An escaping mutation is a bug in your test, not a
+curiosity.
 
 ---
 

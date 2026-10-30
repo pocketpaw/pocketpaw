@@ -171,15 +171,20 @@ async def _check_openrouter_reachable(settings) -> HealthCheckResult:
 
 
 async def _check_litellm_reachable(settings) -> HealthCheckResult:
-    """Ping the LiteLLM proxy /health or /models endpoint."""
-    import os
+    """Ping the LiteLLM proxy /health or /models endpoint.
 
+    Fixed 2026-09-16 (L1, paw-admin-prd-corrections): this used to read
+    ``settings.litellm_base_url``, a field that has never existed on
+    ``Settings`` — the real field is ``litellm_api_base``. The ``getattr``
+    default swallowed the AttributeError, so every deployment silently probed
+    ``http://localhost:4000`` regardless of actual configuration. Reading the
+    real field directly means a missing/renamed field now raises instead of
+    silently no-oping.
+    """
     import httpx
 
-    base_url = getattr(settings, "litellm_base_url", "") or os.environ.get(
-        "LITELLM_BASE_URL", "http://localhost:4000"
-    )
-    api_key = getattr(settings, "litellm_api_key", None) or os.environ.get("LITELLM_API_KEY", "")
+    base_url = settings.litellm_api_base
+    api_key = settings.litellm_api_key or ""
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

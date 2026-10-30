@@ -1,0 +1,106 @@
+# ee/pocketpaw_ee/foresight/scenarios/market_sim.yaml
+# Updated: 2026-05-25 (feat/foresight-v14-decision-graph-stub) — RFC 08
+# §14.4 wiring. Optional scenario-root fields:
+#   - ``precedent_seed`` (string | null): scenario-wide seed the engine's
+#     DecisionGraphRef hashes into synthetic forward-precedent ids for
+#     every emitted ProjectedDecision.
+#   - ``precedent_seeds`` (map | null): per-anchor overrides keyed by
+#     anchor_id (``segment:<role>``). Anchor-level wins.
+# Absent by default — synthetic ids only surface when a scenario opts in.
+# Created: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) —
+# RFC 08 PR 5. Market Sim sub-type smoke scenario — RFC §4.2.
+#
+# Six personas across three market segments (enterprise / smb / channel)
+# plus a competitor reactor. The deterministic-fake backend will fan
+# acceptable actions per persona; the adapter buckets them into
+# per-segment market-position outcomes.
+#
+# v0.5 keeps the persona count small (six) so the smoke runs in
+# milliseconds; v1.0 will load a 10K-100K persona pool from a Fabric
+# synthesizer per RFC §4.2. The persona ``role`` is the segment label
+# the adapter keys on for the per-anchor projection fanout.
+#
+# Fields the v0.5 loader ignores but v1.0 will read live as comments
+# below the active block so this YAML can absorb the full RFC §18
+# grammar without changing shape.
+
+name: smoke-market-sim
+sub_type: market_sim
+n_ticks: 2
+
+# PR 8 (RFC 08 §8) — when true, every ProjectedDecision this scenario
+# emits is also fanned into the Instinct approval queue so The Tray
+# surfaces the forecast as evidence next to the matching real-world
+# decision. Defaults to false here (and in the request DTO) so smoke
+# runs don't pollute the Tray. The v0.8 cloud loader only reads this
+# flag from the POST body; the YAML carries it as documentation /
+# v1.0 loader hook.
+#
+# route_to_instinct: false
+
+# Captain-locked 5/15/80 default per RFC §10. Declared explicitly so
+# new readers see the tier mix without chasing the loader's default.
+tier_mix:
+  premium: 0.05  # Claude Sonnet 4.7 — competitor reactor + segment-1
+  mid:     0.15  # Claude Haiku 4.7 — mid-tier customers
+  tail:    0.80  # Llama-3.1-8B via vLLM — synthesized tail personas
+
+personas:
+  - name: enterprise-acme
+    role: enterprise
+    ocean:
+      conscientiousness: 0.6
+      neuroticism: -0.2
+  - name: enterprise-globex
+    role: enterprise
+    ocean:
+      openness: 0.4
+      agreeableness: 0.2
+  - name: smb-quickserve
+    role: smb
+    ocean:
+      extraversion: 0.5
+      openness: 0.6
+  - name: smb-corner-coffee
+    role: smb
+    ocean:
+      agreeableness: 0.7
+      conscientiousness: -0.1
+  - name: channel-partner-east
+    role: channel
+    ocean:
+      extraversion: 0.8
+      conscientiousness: 0.3
+  - name: competitor-alpha
+    role: competitor
+    ocean:
+      openness: 0.9
+      conscientiousness: 0.4
+
+# v1.0 will read these blocks — they're parked here as documentation so
+# operators editing this file can see where the next-version grammar
+# lands. The v0.5 loader silently skips unknown top-level keys.
+#
+# world:
+#   source: fabric
+#   funnel_stages: [awareness, consideration, purchase, retention]
+#   comp_set_delta_pct: 3.6
+#
+# triggers:
+#   - kind: pricing_change
+#     at_tick: 1
+#     payload:
+#       comp_set_delta_pct: 5.0
+#   - kind: new_entrant
+#     at_tick: 2
+#     payload:
+#       competitor: "Newco"
+#
+# aggregator:
+#   per_segment:
+#     - win_rate
+#     - churn_rate
+#     - nps_delta
+#   totals:
+#     - revenue_trajectory
+#     - modal_segment

@@ -1,0 +1,138 @@
+[
+  {
+    "label": "bridge: drop the event_type filter",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "    if event.event_type != \"alert\":\n        return",
+    "replace": "    if False:\n        return",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: drop the fan-out entirely",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "        await _fan_out(event.data)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: re-raise from the top-level handler",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "    except Exception:\n        logger.exception(\"alert → notification fan-out failed\")",
+    "replace": "    except Exception:\n        raise",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: weaken the alert_type guard to None-only",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "    if not isinstance(alert_type, str) or not alert_type:",
+    "replace": "    if alert_type is None:",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: silently drop unknown alert types",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "    title = _TITLES.get(alert_type, alert_type.replace(\"_\", \" \").capitalize())",
+    "replace": "    title = _TITLES[alert_type]",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: drop the alert_ kind prefix",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "    kind = f\"alert_{alert_type}\"",
+    "replace": "    kind = alert_type",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: drop the NotificationSource",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "                source=NotificationSource(type=\"alert\", id=alert_type),",
+    "replace": "                source=None,",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: per-recipient failure starves the remaining admins",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "        except Exception:\n            logger.exception(\"failed to create %s notification for admin=%s\", kind, recipient)",
+    "replace": "        except Exception:\n            raise",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: notify members instead of admins",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "        admins = await workspace_service.list_admin_ids(workspace_id)",
+    "replace": "        admins = await workspace_service.list_member_ids(workspace_id)",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: register without dedup (double subscription)",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "    bus.unsubscribe_system(_on_system_event)\n    bus.subscribe_system(_on_system_event)",
+    "replace": "    bus.subscribe_system(_on_system_event)\n    bus.subscribe_system(_on_system_event)",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "bridge: register never subscribes",
+    "file": "ee/pocketpaw_ee/cloud/notifications/bridges/alerts.py",
+    "find": "    bus.unsubscribe_system(_on_system_event)\n    bus.subscribe_system(_on_system_event)",
+    "replace": "    bus.unsubscribe_system(_on_system_event)",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py",
+      "tests/cloud/test_integration.py"
+    ]
+  },
+  {
+    "label": "workspace: default workspace resolves NEWEST instead of oldest",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "        .sort(\"+_id\")\n        .first_or_none()",
+    "replace": "        .sort(\"-_id\")\n        .first_or_none()",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "mount: delete the bridge registration from mount_cloud",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    register_alert_notification_listeners()",
+    "replace": "    pass  # mutation: registration dropped",
+    "tests": [
+      "tests/cloud/test_integration.py"
+    ]
+  },
+  {
+    "label": "workspace: default workspace ignores soft-delete",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "        await _WorkspaceDoc.find(\n            _WorkspaceDoc.deleted_at == None,  # noqa: E711\n        )",
+    "replace": "        await _WorkspaceDoc.find()",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  },
+  {
+    "label": "push: remove the alert arm from _target_url",
+    "file": "ee/pocketpaw_ee/cloud/push/listeners.py",
+    "find": "    if source_type == \"alert\":",
+    "replace": "    if source_type == \"alert_NEVER\":",
+    "tests": [
+      "tests/cloud/notifications/test_alerts_bridge.py"
+    ]
+  }
+]

@@ -30,8 +30,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from soul_protocol.engine.retrieval import Credential
-from soul_protocol.spec.retrieval import RetrievalCandidate, RetrievalRequest
+from soul_protocol.spec.retrieval import Credential, RetrievalCandidate, RetrievalRequest
 
 from .auth import resolve_bearer_token
 from .client import DriveClient, DriveFile, DriveRevision
@@ -189,28 +188,37 @@ def _dataref_payload(
 ) -> dict[str, Any]:
     """Build the DataRef-shaped dict the router hands to the decision-maker.
 
-    Shape is deliberately loose (soul-protocol's ``RetrievalCandidate.content``
-    is ``dict[str, Any]`` so the router never inspects it). We follow the
-    Zero-Copy convention agreed in the RFC: ``kind="dataref"``, plus enough
-    identifiers for a downstream resolver to fetch live bytes on demand.
+    As of soul-protocol 0.4.0, ``RetrievalCandidate.content`` is typed
+    ``dict[str, Any] | DataRef``. A dict whose ``kind == "dataref"`` is
+    auto-promoted to a typed :class:`soul_protocol.spec.retrieval.DataRef`
+    on validation, and ``DataRef`` has a fixed field set
+    (``kind, source, id, scopes, revision_id, extra``). Any loose top-level
+    key outside that set is dropped on promotion, so adapter-specific Drive
+    metadata (name, mime type, links, owners, ...) must travel inside the
+    ``extra`` dict — the router still never inspects it. ``revision_id`` is a
+    real top-level DataRef field (the point-in-time pin) and stays at the top.
     """
-    ref: dict[str, Any] = {
-        "kind": "dataref",
-        "source": "drive",
-        "id": drive_file.id,
+    extra: dict[str, Any] = {
         "name": drive_file.name,
         "mime_type": drive_file.mime_type,
         "modified_time": drive_file.modified_time,
         "web_view_link": drive_file.web_view_link,
-        "scopes": request_scopes,
     }
     if drive_file.size is not None:
-        ref["size"] = drive_file.size
+        extra["size"] = drive_file.size
     if drive_file.owners:
-        ref["owners"] = drive_file.owners
+        extra["owners"] = drive_file.owners
+
+    ref: dict[str, Any] = {
+        "kind": "dataref",
+        "source": "drive",
+        "id": drive_file.id,
+        "scopes": request_scopes,
+        "extra": extra,
+    }
     if revision is not None:
         ref["revision_id"] = revision.id
-        ref["revision_modified_time"] = revision.modified_time
+        extra["revision_modified_time"] = revision.modified_time
     elif drive_file.revision_id:
         ref["revision_id"] = drive_file.revision_id
     return ref

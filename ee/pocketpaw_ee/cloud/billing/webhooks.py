@@ -1,0 +1,66 @@
+# ee/pocketpaw_ee/cloud/billing/webhooks.py — the PUBLIC inbound gateway webhook
+# (BC-2, the Gateway primitive).
+#
+# ``POST /billing/webhooks/dodo`` carries NO auth dependency — Dodo is the
+# caller. Trust is established by the Standard-Webhooks signature, verified
+# inside ``billing.service.handle_webhook`` (which delegates to the provider)
+# against the RAW request bytes BEFORE any field is trusted. This router is
+# mounted SEPARATELY from the licensed top-up router in ee/cloud/__init__.py so
+# no auth/license dependency ever attaches to it.
+#
+# On a verified ``payment.succeeded`` the service grants credits EXACTLY ONCE
+# (BC-1's idempotent grant, keyed on the webhook event id), but only while
+# payments are open in live mode; otherwise it records the payment, grants
+# nothing and still acks 200. A bad signature raises ``BadRequest`` → 400 via
+# the cloud error handler — no grant.
+#
+# Deliveries that move money the OTHER way (``refund.succeeded`` /
+# ``dispute.lost``) arrive on this same route and debit the credits back; the
+# route is unchanged for them because the trust boundary is identical.
+# ``WebhookAck`` stays ``{ok, granted}`` on the wire — the service's per-event
+# ``reversed`` count is internal, because the gateway's only question is whether
+# to stop retrying.
+#
+# SECURITY: read RAW bytes (the signature is over the exact bytes — never
+# re-serialize). Never log the secret or customer PII.
+#
+# Created 2026-06-24 (integration/billing-credits, BC-2): new module.
+# Updated 2026-06-24 (security): correct the bad-signature docstring — the
+#   provider raises ``BadRequest`` (400), not ``ValidationError`` (422).
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning): document that reversal
+#   and dunning deliveries ride this same unauthenticated route. No route change
+#   was needed — the signature is the trust boundary for every family — but the
+#   comment above claimed the route only ever granted, which is no longer true.
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter, Request
+
+from pocketpaw_ee.cloud.billing import service as billing_service
+from pocketpaw_ee.cloud.billing.dto import WebhookAck
+
+logger = logging.getLogger(__name__)
+
+# NO license / auth dependency — the Standard-Webhooks signature is the trust
+# boundary. Mounted on its own in mount_cloud().
+router = APIRouter(prefix="/billing/webhooks", tags=["Billing"])
+
+
+@router.post("/dodo", response_model=WebhookAck)
+async def dodo_webhook(request: Request) -> WebhookAck:
+    """Ingest a Dodo Payments webhook.
+
+    Reads the RAW body + headers, verifies the Standard-Webhooks signature, and
+    on a ``payment.succeeded`` event grants the purchased credits to the
+    workspace named in the payment metadata — EXACTLY ONCE (a replay is a no-op).
+    Returns 200 with ``{ok, granted}``; a signature that does not verify raises
+    ``BadRequest`` → 400 (no grant).
+    """
+    raw = await request.body()
+    # Starlette headers are case-insensitive; hand the service a plain dict (the
+    # Standard-Webhooks verifier lowercases keys itself).
+    headers = dict(request.headers)
+    result = await billing_service.handle_webhook(payload=raw, headers=headers)
+    return WebhookAck(ok=bool(result.get("ok", True)), granted=bool(result.get("granted", False)))

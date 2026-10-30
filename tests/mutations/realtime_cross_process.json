@@ -1,0 +1,166 @@
+[
+  {
+    "label": "a process delivers its own relayed frame again (origin skip removed)",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py",
+    "find": "                if envelope.get(\"origin\") == self.group:\n                    continue",
+    "replace": "                if False:\n                    continue",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_a_bus_frame_on_a_reaches_b_exactly_once_and_a_once",
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_broadcast_to_group_crosses_processes",
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_broadcast_invalidate_runs_once_on_every_process"
+    ]
+  },
+  {
+    "label": "every process joins one shared broadcast group, so frames reach one process",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py",
+    "find": "        self.group = _new_group_name()",
+    "replace": "        self.group = \"web-0-shared\"",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_a_bus_frame_on_a_reaches_b_exactly_once_and_a_once"
+    ]
+  },
+  {
+    "label": "the consumer relays a group frame again, looping it around the cluster",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py",
+    "find": "                envelope[\"scope_id\"], envelope.get(\"recipients\", []), frame, relay=False",
+    "replace": "                envelope[\"scope_id\"], envelope.get(\"recipients\", []), frame, relay=True",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_broadcast_to_group_crosses_processes"
+    ]
+  },
+  {
+    "label": "the consumer relays a room frame again, looping it around the cluster",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py",
+    "find": "                exclude_user=envelope.get(\"exclude_user\"),\n                relay=False,",
+    "replace": "                exclude_user=envelope.get(\"exclude_user\"),\n                relay=True,",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_send_to_room_crosses_processes_and_keeps_the_exclusion"
+    ]
+  },
+  {
+    "label": "the bus stops relaying, so B's sockets never see A's events",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/bus.py",
+    "find": "            channel = self._channel or broadcast.active_channel()\n            if channel is not None:",
+    "replace": "            channel = None\n            if channel is not None:",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_a_bus_frame_on_a_reaches_b_exactly_once_and_a_once"
+    ]
+  },
+  {
+    "label": "broadcast_to_group stops relaying (Tier-1 agent replies stay on one process)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "        if channel is not None and targets:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_broadcast_to_group_crosses_processes"
+    ]
+  },
+  {
+    "label": "send_to_room stops relaying (typing and read receipts stay on one process)",
+    "file": "ee/pocketpaw_ee/cloud/chat/ws.py",
+    "find": "            await channel.publish_room(group_id, message.type, data[\"data\"], exclude_user)",
+    "replace": "            pass",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_send_to_room_crosses_processes_and_keeps_the_exclusion"
+    ]
+  },
+  {
+    "label": "worker ws envelopes go to the shared group again, reaching one process",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "    channel = broadcast.active_channel()\n    if channel is not None:\n        await channel.publish_group(scope_id, recipients, ws_type, ws_data)\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_a_worker_ws_envelope_reaches_both_processes"
+    ]
+  },
+  {
+    "label": "each web process gets its own bus group, so a worker event runs N times",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "        await redis.xgroup_create(XPROC_STREAM, XPROC_GROUP, id=\"$\", mkstream=True)\n    except redis_exceptions.ResponseError as exc:\n        if \"BUSYGROUP\" not in str(exc):\n            raise\n\n    name = consumer_name or f\"web-{uuid.uuid4().hex[:8]}\"\n    logger.info(\"xproc consumer %s starting on %s\", name, XPROC_STREAM)\n\n    # Exponential backoff so a Redis outage doesn't spam tracebacks.\n    backoff_seconds = 1.0\n    while True:\n        try:\n            resp = await redis.xreadgroup(\n                XPROC_GROUP,\n                name,",
+    "replace": "        await redis.xgroup_create(XPROC_STREAM, f\"{XPROC_GROUP}-{consumer_name}\", id=\"$\", mkstream=True)\n    except redis_exceptions.ResponseError as exc:\n        if \"BUSYGROUP\" not in str(exc):\n            raise\n\n    name = consumer_name or f\"web-{uuid.uuid4().hex[:8]}\"\n    logger.info(\"xproc consumer %s starting on %s\", name, XPROC_STREAM)\n\n    # Exponential backoff so a Redis outage doesn't spam tracebacks.\n    backoff_seconds = 1.0\n    while True:\n        try:\n            resp = await redis.xreadgroup(\n                f\"{XPROC_GROUP}-{consumer_name}\",\n                name,",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_a_worker_bus_event_is_handled_once_across_two_web_processes"
+    ]
+  },
+  {
+    "label": "cleanup never reaps an idle group",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py",
+    "find": "                if idle > self._stale_ms:",
+    "replace": "                if False:",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_cleanup_reaps_dead_groups_and_spares_live_and_fresh_ones"
+    ]
+  },
+  {
+    "label": "cleanup reaps a sibling's group between its create and first read",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py",
+    "find": "                    idle = now_ms - created",
+    "replace": "                    idle = self._stale_ms + 1",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_cleanup_reaps_dead_groups_and_spares_live_and_fresh_ones"
+    ]
+  },
+  {
+    "label": "a process whose group was reaped never rejoins",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py",
+    "find": "                    try:\n                        await self._create_group()\n                    except Exception:",
+    "replace": "                    try:\n                        await asyncio.sleep(0.05)\n                    except Exception:",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_a_process_whose_group_was_reaped_rejoins"
+    ]
+  },
+  {
+    "label": "remote processes ignore cache.invalidate",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py",
+    "find": "            fn = self._invalidators.get(envelope.get(\"name\", \"\"))",
+    "replace": "            fn = None",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_broadcast_invalidate_runs_once_on_every_process"
+    ]
+  },
+  {
+    "label": "broadcast_invalidate skips the local cache",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py",
+    "find": "    if local:\n        fn = _INVALIDATORS.get(name)",
+    "replace": "    if False:\n        fn = _INVALIDATORS.get(name)",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_broadcast_invalidate_runs_once_on_every_process"
+    ]
+  },
+  {
+    "label": "a received action-override drop is re-broadcast",
+    "file": "ee/pocketpaw_ee/guards/deps.py",
+    "find": "    lambda key: invalidate_action_overrides(*json.loads(key), _broadcast=False),",
+    "replace": "    lambda key: invalidate_action_overrides(*json.loads(key), _broadcast=True),",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_an_action_override_drop_is_broadcast_but_a_remote_one_is_not"
+    ]
+  },
+  {
+    "label": "an action-override drop stays on the process that made it",
+    "file": "ee/pocketpaw_ee/guards/deps.py",
+    "find": "    if _broadcast:\n        broadcast_invalidate_soon(",
+    "replace": "    if False:\n        broadcast_invalidate_soon(",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_an_action_override_drop_is_broadcast_but_a_remote_one_is_not"
+    ]
+  },
+  {
+    "label": "an API key revoke is not broadcast, so other processes keep the key for the TTL",
+    "file": "ee/pocketpaw_ee/cloud/auth/api_keys.py",
+    "find": "    await broadcast_invalidate(_API_KEY_CACHE, str(doc.id), local=False)\n    _invalidate_cached_key(str(doc.id))\n    return doc",
+    "replace": "    _invalidate_cached_key(str(doc.id))\n    return doc",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_revoking_an_api_key_broadcasts_the_eviction"
+    ]
+  },
+  {
+    "label": "redis-streams is ignored and broadcast is always on",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    broadcast.configure(enabled=mode == \"redis-streams\")",
+    "replace": "    broadcast.configure(enabled=True)",
+    "tests": [
+      "tests/cloud/realtime/test_broadcast_cross_process.py::test_init_realtime_reads_the_knob"
+    ]
+  }
+]

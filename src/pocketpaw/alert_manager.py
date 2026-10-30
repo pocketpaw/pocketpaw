@@ -362,6 +362,12 @@ class AlertManager:
             "details": details or {},
             "timestamp": timestamp,
         }
+        # FOLLOW-UP (external alerting): this OSS alert path is in-app only (local
+        # store + bus). The cloud external fan-out (Slack / generic webhook) lives
+        # in ee.cloud.notifications.delivery, but OSS core MUST NOT import EE
+        # (import-linter "OSS core may not import from EE"). Routing these alerts
+        # to external sinks needs a bus-indirection the EE layer subscribes (or an
+        # OSS-side sink impl), not a direct import — tracked as a separate slice.
         # Store locally
         self._store.append({**alert_data, "_unread": True})
         logger.info("Alert [%s/%s]: %s", severity, alert_type, message)

@@ -10,6 +10,42 @@
 #   - 2026-03-12: Added EditFileTool, RunPythonTool, InstallPackageTool (issue #581)
 #   - 2026-03-27: Added AddWidgetTool, RemoveWidgetTool for pocket mutations
 #   - 2026-03-28: Added Fabric + Instinct enterprise tools (guarded by ee/ availability)
+#   - 2026-05-31: Added StartFlowTool — the RFC 13 M3 Chain Flow authoring tool
+#   - 2026-05-31: Added zero-config WeatherTool, WikiTool, CurrencyTool (no API key)
+#   - 2026-06-16: Added CodeModeTool — Programmatic Tool Calling v1 (read-only):
+#     the agent scripts N read-safe tool calls; only final stdout returns.
+#   - 2026-07-03: Added FL-3 Library verbs (EE) — TagFileTool, MoveFileTool,
+#     AnnotateFileTool, SearchLibraryTool — the single-file agent verbs that
+#     make /files agentic. Registered in _EE_TOOLS (guarded by ee/ availability).
+#   - 2026-07-03: Added FL-4 OrganizeFolderTool (EE) — the folder-batch executor
+#     that fans an FL-3 verb (annotate | tag) over every file in a folder as
+#     separate metered invocations, capped + partial-failure isolated.
+#   - 2026-07-03: Added FL-5 structural edit tools (EE, port of dewani12's #1193)
+#     — EditDocumentTool / EditSlidesTool / EditSpreadsheetTool. Each edits a
+#     Library file by id (Editor.js document / reveal.js deck / Univer workbook),
+#     applies structural block/deck/cell operations, and writes the result back
+#     through file_versions.service.update_file_content so every edit lands as a
+#     new revertable version. Registered in _EE_TOOLS at trust_level "medium"
+#     (mutating, matching the FL-3 verbs).
+#   - 2026-07-04: Added StockImageTool — search free Pexels/Unsplash stock photos
+#     for Paw Sites imagery (shared search_stock_images() helper; EE MCP surface
+#     for the SDK backend).
+#   - 2026-09-15: Added ReferoStylesTool + ReferoScreensTool — design research
+#     against real shipped design systems (shared pocketpaw.tools.builtin.refero
+#     helpers; EE `pocketpaw_refero` MCP surface for the SDK backend). Same
+#     two-surface split as StockImageTool, and for the same reason: the site
+#     skills run on claude_agent_sdk, which cannot see a BaseTool. Both return
+#     empty when no Refero token is set.
+#   - 2026-09-24: Added InspoResearchTool + InspoDesignSystemTool — design
+#     research over real shipped pages for the non-SDK backends (shared
+#     pocketpaw.tools.builtin.inspo helpers; the EE `pocketpaw_inspo` MCP
+#     server now wraps the same code). Before this, only claude_agent_sdk
+#     could reach Inspo.
+#   - 2026-08-04: Added WidgetSpecTool + InlineWidgetHelpTool. Both tools already
+#     existed on the `pocketpaw_widgets` in-process MCP server, which only
+#     `agents/claude_sdk.py` builds — so every other backend ran without them
+#     while the chat-inline system prompt called one of them MANDATORY before
+#     emitting a non-core widget. Same gap, same fix, as StartFlowTool above.
 
 import importlib as _importlib
 
@@ -27,6 +63,11 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "WebSearchTool": (".web_search", "WebSearchTool"),
     "UrlExtractTool": (".url_extract", "UrlExtractTool"),
     "ImageGenerateTool": (".image_gen", "ImageGenerateTool"),
+    "StockImageTool": (".stock_images", "StockImageTool"),
+    "ReferoStylesTool": (".refero", "ReferoStylesTool"),
+    "ReferoScreensTool": (".refero", "ReferoScreensTool"),
+    "InspoResearchTool": (".inspo", "InspoResearchTool"),
+    "InspoDesignSystemTool": (".inspo", "InspoDesignSystemTool"),
     "CreateSkillTool": (".skill_gen", "CreateSkillTool"),
     "GmailSearchTool": (".gmail", "GmailSearchTool"),
     "GmailReadTool": (".gmail", "GmailReadTool"),
@@ -78,15 +119,36 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "CreatePocketTool": (".pocket", "CreatePocketTool"),
     "AddWidgetTool": (".pocket", "AddWidgetTool"),
     "RemoveWidgetTool": (".pocket", "RemoveWidgetTool"),
+    "StartFlowTool": (".flow_tool", "StartFlowTool"),
+    "WidgetSpecTool": (".widget_spec", "WidgetSpecTool"),
+    "InlineWidgetHelpTool": (".widget_spec", "InlineWidgetHelpTool"),
+    "StepPipelineTool": (".step_pipeline_tool", "StepPipelineTool"),
     "DiscordCLITool": (".discord", "DiscordCLITool"),
     "ConnectorListTool": (".connector_tools", "ConnectorListTool"),
     "ConnectorConnectTool": (".connector_tools", "ConnectorConnectTool"),
     "ConnectorExecuteTool": (".connector_tools", "ConnectorExecuteTool"),
     "ConnectorActionsTool": (".connector_tools", "ConnectorActionsTool"),
+    # Zero-config capability tools — no API key required.
+    "WeatherTool": (".weather", "WeatherTool"),
+    "WikiTool": (".wiki", "WikiTool"),
+    "CurrencyTool": (".currency", "CurrencyTool"),
+    # Code Mode — Programmatic Tool Calling v1 (read-only). Lives one package
+    # up in ``pocketpaw.tools.code_mode``; the ``..code_mode`` relative path
+    # resolves against this package's ``pocketpaw.tools.builtin`` anchor.
+    "CodeModeTool": ("..code_mode", "CodeModeTool"),
+    # Studio — agent-drawn /studio Flow node graphs. The agent builds a
+    # model→text→[picture]→image/video→[toolcall]→output pipeline from a
+    # natural-language goal; the loop fans a dedicated ``studio_flow`` SSE
+    # event so paw-enterprise materialises the canvas. No generation happens
+    # here — "Run all" does that later.
+    "StudioFlowTool": (".studio_flow_tool", "StudioFlowTool"),
 }
 
 # Enterprise tools (require ee/ module) — guarded so community installs don't break.
 try:
+    from pocketpaw.tools.builtin.edit_document import EditDocumentTool
+    from pocketpaw.tools.builtin.edit_slides import EditSlidesTool
+    from pocketpaw.tools.builtin.edit_spreadsheet import EditSpreadsheetTool
     from pocketpaw.tools.builtin.fabric_tools import (
         FabricCreateTool,
         FabricQueryTool,
@@ -98,6 +160,13 @@ try:
         InstinctPendingTool,
         InstinctProposeTool,
     )
+    from pocketpaw.tools.builtin.library_verbs import (
+        AnnotateFileTool,
+        MoveFileTool,
+        OrganizeFolderTool,
+        SearchLibraryTool,
+        TagFileTool,
+    )
 
     _EE_TOOLS: list[type] = [
         FabricQueryTool,
@@ -107,6 +176,18 @@ try:
         InstinctPendingTool,
         InstinctAuditTool,
         InstinctCorrectionsTool,
+        # FL-3 — agent Library verbs (tag / move / annotate / search).
+        TagFileTool,
+        MoveFileTool,
+        AnnotateFileTool,
+        SearchLibraryTool,
+        # FL-4 — folder-batch executor (fans an FL-3 verb over a folder).
+        OrganizeFolderTool,
+        # FL-5 — structural edit tools (port of dewani12's #1193). Each edits a
+        # Library file by id + writes a revertable FL-2 version.
+        EditDocumentTool,
+        EditSlidesTool,
+        EditSpreadsheetTool,
     ]
     _EE_NAMES = {cls.__name__: cls for cls in _EE_TOOLS}
 except ImportError:

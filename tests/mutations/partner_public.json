@@ -1,0 +1,103 @@
+[
+  {
+    "label": "X-Paw-Client-IP honoured on every limiter, not just the opted-in public ones",
+    "file": "ee/pocketpaw_ee/cloud/_core/rate_limit.py",
+    "find": "    if trusted_header_ok:\n        trusted = _trusted_client_ip(request)",
+    "replace": "    if True:\n        trusted = _trusted_client_ip(request)",
+    "tests": [
+      "tests/cloud/_core/test_unbounded_maps.py::TestPublicWebKeyTrust::test_default_path_ignores_a_valid_key",
+      "tests/cloud/_core/test_unbounded_maps.py::TestPublicWebKeyTrust::test_non_public_limiters_ignore_the_header"
+    ]
+  },
+  {
+    "label": "the Worker key is not checked, so anyone can pick a bucket on a public route",
+    "file": "ee/pocketpaw_ee/cloud/_core/rate_limit.py",
+    "find": "    if not compare_digest(sent.encode(), key.encode()):\n        return None",
+    "replace": "    if False:\n        return None",
+    "tests": [
+      "tests/cloud/_core/test_unbounded_maps.py::TestPublicWebKeyTrust::test_wrong_key_is_ignored"
+    ]
+  },
+  {
+    "label": "the partner public limiter stops opting in, every Worker visitor shares one bucket",
+    "file": "ee/pocketpaw_ee/cloud/_core/rate_limit.py",
+    "find": "    message=\"Too many requests - wait a moment and try again.\",\n    trusted_header_ok=True,\n)\nrate_limit_partner_apply",
+    "replace": "    message=\"Too many requests - wait a moment and try again.\",\n)\nrate_limit_partner_apply",
+    "tests": [
+      "tests/cloud/_core/test_unbounded_maps.py::TestPublicWebKeyTrust::test_opted_in_limiter_buckets_on_the_visitor"
+    ]
+  },
+  {
+    "label": "Turnstile fails open in production when the secret is unset",
+    "file": "ee/pocketpaw_ee/cloud/_core/turnstile.py",
+    "find": "        if _is_production():\n            logger.error(",
+    "replace": "        if False:\n            logger.error(",
+    "tests": [
+      "tests/cloud/_core/test_turnstile.py::test_production_refuses",
+      "tests/cloud/_core/test_turnstile.py::test_production_is_the_shared_signal"
+    ]
+  },
+  {
+    "label": "the global daily application cap never trips",
+    "file": "ee/pocketpaw_ee/cloud/partners/service_admin.py",
+    "find": "    if await _applications_today() >= APPLY_DAILY_CAP:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/partners/test_partner_public.py::test_apply_global_daily_cap"
+    ]
+  },
+  {
+    "label": "the submitting address is stored raw instead of hashed",
+    "file": "ee/pocketpaw_ee/cloud/partners/service_admin.py",
+    "find": "    return hashlib.sha256(remote_ip.encode()).hexdigest() if remote_ip else None",
+    "replace": "    return remote_ip",
+    "tests": [
+      "tests/cloud/partners/test_partner_public.py::test_apply_stores_exactly_one_application"
+    ]
+  },
+  {
+    "label": "a public card no longer needs a slug",
+    "file": "ee/pocketpaw_ee/cloud/partners/service_admin.py",
+    "find": "    \"partner.public\": True,\n    \"partner.slug\": {\"$type\": \"string\"},\n}",
+    "replace": "    \"partner.public\": True,\n}",
+    "tests": [
+      "tests/cloud/partners/test_partner_public.py::test_public_without_a_slug_is_not_listed"
+    ]
+  },
+  {
+    "label": "the directory cursor is the raw workspace id again",
+    "file": "ee/pocketpaw_ee/cloud/partners/service_admin.py",
+    "find": "    next_cursor = _encode_cursor(rows[limit - 1]) if len(rows) > limit else None",
+    "replace": "    next_cursor = str(rows[limit - 1].id) if len(rows) > limit else None",
+    "tests": [
+      "tests/cloud/partners/test_partner_public.py::test_directory_filters_and_pages"
+    ]
+  },
+  {
+    "label": "a partner's sites are no longer capped",
+    "file": "ee/pocketpaw_ee/cloud/partners/service_admin.py",
+    "find": "SITES_PER_PARTNER = 12",
+    "replace": "SITES_PER_PARTNER = 10000",
+    "tests": [
+      "tests/cloud/partners/test_partner_public.py::test_public_profile_shows_only_the_newest_sites"
+    ]
+  },
+  {
+    "label": "losing the slug unique-index race is a 500, not a 409",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "    except DuplicateKeyError:\n        raise taken from None",
+    "replace": "    except DuplicateKeyError:\n        raise",
+    "tests": [
+      "tests/cloud/partners/test_partner_public.py::test_slug_race_lost_at_the_index_is_a_409"
+    ]
+  },
+  {
+    "label": "a soft-deleted workspace keeps its partner slug",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "        doc.partner.slug = None\n        doc.partner.public = False",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/partners/test_partner_public.py::test_deleting_the_workspace_releases_its_slug"
+    ]
+  }
+]

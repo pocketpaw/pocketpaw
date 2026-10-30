@@ -1,0 +1,86 @@
+[
+  {
+    "label": "the grant ignores ownership and lands in the active workspace",
+    "file": "ee/pocketpaw_ee/cloud/credits/service.py",
+    "find": "    owned = await Workspace.find({\"owner\": user_id}).sort(\"_id\").to_list()\n",
+    "replace": "    owned = await Workspace.find({\"_id\": PydanticObjectId(user.active_workspace)}).to_list()\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_an_invited_users_grant_never_lands_in_the_inviters_workspace"
+    ]
+  },
+  {
+    "label": "the ledger check is skipped, so a wiped claim plus a deleted workspace farms a second grant",
+    "file": "ee/pocketpaw_ee/cloud/credits/service.py",
+    "find": "    if prior is not None:\n        workspace_id: str = prior.workspace\n",
+    "replace": "    if False:\n        workspace_id: str = prior.workspace\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_wiped_claim_and_deleted_workspace_cannot_farm_a_second_grant"
+    ]
+  },
+  {
+    "label": "the per-user ledger key becomes per-call, so a retry grants twice",
+    "file": "ee/pocketpaw_ee/cloud/credits/service.py",
+    "find": "        idempotency_key=key,\n",
+    "replace": "        idempotency_key=f\"{key}:{datetime.now(UTC).timestamp()}\",\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_a_retry_after_a_crash_before_the_stamp_does_not_grant_twice"
+    ]
+  },
+  {
+    "label": "unverified users are granted",
+    "file": "ee/pocketpaw_ee/cloud/credits/service.py",
+    "find": "    if not user.is_verified or not user.is_active or user.is_guest:\n",
+    "replace": "    if not user.is_active:\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_an_unverified_user_gets_no_grant",
+      "tests/cloud/credits/test_early_access_grant.py::test_social_guest_upgrade_grants_exactly_once"
+    ]
+  },
+  {
+    "label": "workspace create never grants",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "            await credits_service.grant_early_access_best_effort(owner)\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_first_owned_workspace_gets_the_grant_once"
+    ]
+  },
+  {
+    "label": "the social guest upgrade never grants",
+    "file": "ee/pocketpaw_ee/cloud/auth/guest.py",
+    "find": "    await credits_service.grant_early_access(user)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_social_guest_upgrade_grants_exactly_once"
+    ]
+  },
+  {
+    "label": "the password sign-up switch is ignored",
+    "file": "ee/pocketpaw_ee/cloud/auth/router.py",
+    "find": "    if not get_settings().password_signup_open:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_register_is_refused_when_password_signup_is_closed",
+      "tests/cloud/credits/test_early_access_grant.py::test_guest_password_upgrade_is_refused_when_closed"
+    ]
+  },
+  {
+    "label": "social sign-in never grants, so a pre-launch owner is locked out at 0",
+    "file": "ee/pocketpaw_ee/cloud/auth/social/service.py",
+    "find": "    await credits_service.grant_early_access_best_effort(user)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_social_sign_in_grants_an_existing_owner_exactly_once",
+      "tests/cloud/credits/test_early_access_grant.py::test_a_failed_grant_fails_neither_create_nor_sign_in"
+    ]
+  },
+  {
+    "label": "a failed grant is raised, so workspace create and sign-in fail",
+    "file": "ee/pocketpaw_ee/cloud/credits/service.py",
+    "find": "        logger.exception(\"early access grant failed for user=%s; will retry\", user.id)\n",
+    "replace": "        raise\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_grant.py::test_a_failed_grant_fails_neither_create_nor_sign_in"
+    ]
+  }
+]

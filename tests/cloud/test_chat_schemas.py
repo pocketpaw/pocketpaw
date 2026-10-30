@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError as PydanticValidationError
-
-from ee.cloud.chat.schemas import (
+from pocketpaw_ee.cloud.chat.schemas import (
     AddGroupAgentRequest,
     AddGroupMembersRequest,
     CreateGroupRequest,
@@ -17,6 +15,7 @@ from ee.cloud.chat.schemas import (
     WsInbound,
     WsOutbound,
 )
+from pydantic import ValidationError as PydanticValidationError
 
 
 def test_create_group_defaults():
@@ -34,9 +33,14 @@ def test_send_message_content_required():
     assert req.content == "hello" and req.reply_to is None and req.mentions == []
 
 
-def test_send_message_max_length():
-    with pytest.raises(PydanticValidationError):
-        SendMessageRequest(content="x" * 10_001)
+def test_send_message_accepts_long_content():
+    """No upper bound on message content — see fix/uncap-chat-message-content.
+
+    100_001 chars is 10x the cap this field used to carry, so a pass here means
+    "uncapped", not merely "the number went up".
+    """
+    body = "x" * 100_001
+    assert SendMessageRequest(content=body).content == body
 
 
 def test_send_message_min_length():
@@ -57,6 +61,47 @@ def test_react_request():
 def test_ws_inbound_message_send():
     msg = WsInbound.model_validate({"type": "message.send", "group_id": "g1", "content": "hello"})
     assert msg.type == "message.send"
+
+
+def test_ws_inbound_envelope_lift_flattens_bus_payload():
+    """``{type, data: {...}}`` (browser bus shape) parses the same as flat."""
+    from pocketpaw_ee.cloud.chat.router import _normalize_ws_inbound
+
+    payload = {
+        "type": "message.send",
+        "data": {
+            "group_id": "g1",
+            "content": "hello",
+            "attachments": [{"type": "file", "url": "/api/v1/uploads/u1", "name": "x.pdf"}],
+        },
+    }
+    flat = _normalize_ws_inbound(payload)
+    msg = WsInbound.model_validate(flat)
+    assert msg.type == "message.send"
+    assert msg.group_id == "g1"
+    assert msg.content == "hello"
+    assert msg.attachments == [{"type": "file", "url": "/api/v1/uploads/u1", "name": "x.pdf"}]
+
+
+def test_ws_inbound_envelope_lift_is_noop_for_flat():
+    from pocketpaw_ee.cloud.chat.router import _normalize_ws_inbound
+
+    payload = {"type": "typing.start", "group_id": "g1"}
+    assert _normalize_ws_inbound(payload) == payload
+
+
+def test_ws_inbound_envelope_lift_prefers_top_level_on_conflict():
+    """Explicit top-level ``group_id`` wins over a nested duplicate."""
+    from pocketpaw_ee.cloud.chat.router import _normalize_ws_inbound
+
+    payload = {
+        "type": "message.send",
+        "group_id": "explicit",
+        "data": {"group_id": "nested", "content": "hi"},
+    }
+    flat = _normalize_ws_inbound(payload)
+    assert flat["group_id"] == "explicit"
+    assert flat["content"] == "hi"
 
 
 def test_ws_inbound_typing():
@@ -154,7 +199,9 @@ def test_add_group_members():
 def test_add_group_agent_defaults():
     req = AddGroupAgentRequest(agent_id="a1")
     assert req.role == "assistant"
-    assert req.respond_mode == "mention_only"
+    # Default in schemas.py is "auto"; test originally asserted
+    # "mention_only" which never matched the schema.
+    assert req.respond_mode == "auto"
 
 
 def test_add_group_agent_custom():
@@ -175,9 +222,9 @@ def test_send_message_with_attachments():
     assert len(req.attachments) == 1
 
 
-def test_edit_message_max_length():
-    with pytest.raises(PydanticValidationError):
-        EditMessageRequest(content="x" * 10_001)
+def test_edit_message_accepts_long_content():
+    body = "x" * 100_001
+    assert EditMessageRequest(content=body).content == body
 
 
 def test_edit_message_min_length():

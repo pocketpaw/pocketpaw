@@ -57,6 +57,7 @@ These settings apply specifically to the Claude Agent SDK backend:
 |---------|-------------|---------|-------------|
 | `claude_sdk_model` | `POCKETPAW_CLAUDE_SDK_MODEL` | `""` (auto) | Model override. Leave empty to let Claude Code auto-select the best model (recommended). |
 | `claude_sdk_max_turns` | `POCKETPAW_CLAUDE_SDK_MAX_TURNS` | `25` | Maximum tool-use turns per query. Safety net against runaway tool loops. |
+| `claude_sdk_tool_search` | `POCKETPAW_CLAUDE_SDK_TOOL_SEARCH` | `""` (CLI default) | Passed to the Claude Code CLI as `ENABLE_TOOL_SEARCH`: `true`, `false`, `auto` or `auto:N`. Skipped on the `ollama` and `gemini` providers. See [MCP tool search behind a gateway](#mcp-tool-search-behind-a-gateway). |
 
 ```bash
 # Let Claude Code auto-select the model (recommended — no override needed)
@@ -106,6 +107,48 @@ export POCKETPAW_LITELLM_MODEL="gpt-4o"
 ```
 
 The adapter sets `ANTHROPIC_BASE_URL` to point at the LiteLLM proxy, so the Claude SDK sends Anthropic-format requests to the proxy which translates them for the target provider.
+
+### MCP tool search behind a gateway
+
+Claude Code normally defers MCP tool schemas and loads the ones a turn needs through its `ToolSearch` tool. It turns this off when `ANTHROPIC_BASE_URL` points anywhere other than `api.anthropic.com`, because most proxies don't forward `tool_reference` blocks. The LiteLLM, OpenRouter, OpenAI-compatible, Ollama and Gemini providers all set `ANTHROPIC_BASE_URL`, so on those providers every MCP tool schema goes out with every fresh request. With PocketPaw's 37 MCP servers (235 tools) we measured about 19k input tokens per fresh request with tool search and about 105k without it.
+
+On the LiteLLM, OpenRouter and OpenAI-compatible providers, PocketPaw logs this once per process at INFO level, naming the provider and the gateway host. To turn tool search back on:
+
+```bash
+export POCKETPAW_CLAUDE_SDK_TOOL_SEARCH=true
+```
+
+The value reaches the CLI as `ENABLE_TOOL_SEARCH`:
+
+| Value | Effect |
+|-------|--------|
+| unset (default) | Claude Code decides: on for `api.anthropic.com`, off behind a gateway |
+| `true` | MCP tools are always deferred |
+| `auto` | MCP tools are deferred once their schemas reach 10% of the context window |
+| `auto:N` | Same, with an `N`% threshold (0-100) |
+| `false` | MCP tools always load upfront |
+
+A JSON `true` or `false` (in `config.json` or a `PUT /api/v1/settings` body) works the same as the string. Any other value is ignored and logged as a warning. A non-empty `ENABLE_TOOL_SEARCH` in PocketPaw's own process environment wins over this setting.
+
+Ollama and Gemini never reach a Claude model, and tool search needs one, so PocketPaw skips the setting on those two providers and logs one warning naming the provider.
+
+<Callout type="warning">
+  With `true`, or with `auto` / `auto:N` once the threshold is reached, Claude Code sends the tool-search `anthropic-beta` header, `defer_loading` tool fields and `tool_reference` blocks to the gateway. If the gateway drops any of them, or routes to a non-Claude model or a Claude model older than the 4.5 generation, requests fail with HTTP 400 and the agent stops answering. Check the gateway before you turn this on.
+</Callout>
+
+Run the check on the box, with the same environment and `~/.pocketpaw` config the server uses:
+
+```bash
+uv run python scripts/check_gateway_tool_search.py
+```
+
+It runs one turn through the configured provider with tool search forced on and an in-process MCP server holding two tools. It prints `PASS` when the model found the tool through `ToolSearch` and called it, and `FAIL` with the reason otherwise. The turn bills whatever account the route uses.
+
+What we found for common gateways (checked 2026-10-03):
+
+- LiteLLM with a Claude model on an Anthropic-family upstream (Anthropic API, Bedrock Invoke, Vertex AI, Azure Foundry) works on current releases. v1.100.0 stopped dropping `tool_reference` results in its guardrail and adapter paths, and since v1.101.0 LiteLLM's own `lite claude` launcher turns tool search on by default.
+- LiteLLM routing to a non-Claude model (the OpenAI Responses bridge, OpenAI models on Bedrock) has open upstream bugs that break tool search. Leave it off there.
+- OpenRouter doesn't document it either way. Run the check first.
 
 ## Built-in Tools
 
@@ -170,14 +213,27 @@ export POCKETPAW_TOOLS_DENY="group:mcp"
 
 In addition to the SDK's built-in tools, PocketPaw registers its own tools (web_search, image_gen, etc.) as custom tool definitions passed to the SDK.
 
-## Skill Auto-Discovery
+## Skills
 
-The backend passes `setting_sources=["user", "project"]` to the SDK, enabling automatic discovery of SKILL.md files from:
+The backend launches with `setting_sources=[]` for persona isolation, which
+**disables** the SDK's filesystem skill discovery — `~/.claude/skills/` and
+`.claude/skills/` are invisible to it, and the SDK `skills=` option is gated by
+`setting_sources` too. So skills reach this backend through the SDK `plugins=`
+option (a local plugin loads regardless of `setting_sources`):
 
-- `~/.claude/skills/` — User-level skills
-- `.claude/skills/` — Project-level skills
+- **Bundled skills** — PocketPaw's `_bundled/` directory is a Claude Code local
+  plugin, passed via `plugins=` when `POCKETPAW_SDK_LOAD_BUNDLED_SKILLS` is on
+  (default). See [Bundled Skills](../internal/2026-05-bundled-skills.md).
+- **Per-entity skills** — when a pocket-entity's `surface_profile.skill_names` is
+  set, those skills are materialized into a throwaway per-run local plugin and
+  appended to `plugins=`, so the agent sees only the entity's named subset (plus
+  the bundled skills). A skill run bypasses the persistent client to ensure the
+  per-run plugin takes effect. See the entity-rooms section of
+  [Bundled Skills](../internal/2026-05-bundled-skills.md).
 
-This means skills created by the `skill_gen` tool (which writes to `~/.claude/skills/`) are automatically available to the SDK without additional configuration.
+Non-SDK backends (codex_cli, openai_agents, deep_agents, langchain_react) DO see
+`~/.claude/skills/` via PocketPaw's own `SkillLoader`, so `skill_gen`-created
+skills are available to them through the slash-command dispatcher.
 
 ## Response Format
 
@@ -191,6 +247,21 @@ AgentEvent(type="done", content="")
 ```
 
 All backends use the same `AgentEvent` format, defined in `agents/backend.py`.
+
+## Native session resume
+
+This backend can continue a conversation by resuming the SDK's **native session**
+instead of replaying chat history into the prompt each turn. When `run()` receives
+a `SessionHandle` carrying a `cli_session_id`, it sets `ClaudeAgentOptions.resume`
+and launches a fresh subprocess that reloads that session's transcript; the
+per-turn system prompt is still applied, so a resumed turn honors fresh
+instructions and KB context. A `session_store` on the handle points the SDK at a
+custom `SessionStore` (durable, tenancy-keyed) so resume reads from there rather
+than local disk.
+
+This path is owned by the session supervisor and gated behind
+`POCKETPAW_SESSION_SUPERVISOR` (off by default). See
+[Agent Session Management](/concepts/agent-session-management) for the full design.
 
 ## Related
 

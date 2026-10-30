@@ -1,0 +1,60 @@
+# src/pocketpaw/bundled_templates/_bundled/revenue-pulse/template.pocket.yaml
+# Created: 2026-06-11 (feat/demo-template-suite) — RFC 03 v2 Pocket Template
+# Schema metadata for the generic revenue-pulse executive dashboard. This is
+# the ONE dashboard in the demo suite, so it deliberately uses the hero+grid
+# layout the create-pocket guidance reserves for dashboards (a KPI stat row,
+# full-width trend charts, then a breakdown table) — the three sibling
+# pockets (events-board / renewals-radar / orders-fulfillment) are app/queue
+# layouts, so this reads as a distinct, finished surface. The canvas: a top
+# stat row (recurring revenue, events revenue, store revenue, active
+# memberships), a full-width six-month revenue-trend `area` chart, a
+# by-category split (a `bar` chart beside a breakdown record grid), and an
+# approval-rate stat strip. Every chart and grid binds to a flat seeded
+# `{state.<key>}` list — no method-chain-then-property access. `shape: chart`
+# because the focal organising widget IS the trend chart (the RFC 03 shape
+# enum has a chart value) and the pattern is `dashboard` in the sibling
+# index.json. `needs: [paw.db.v1]` declares the generic data-source
+# capability a tenant wires so the numbers hydrate from a real reports
+# endpoint; without one the seeded six-month sample renders. READ-ONLY by
+# design: no actions, no on_click, no mutation — an executive review surface,
+# not an operating tool.
+schema_version: "2"
+name: revenue-pulse
+version: 1.0.0
+pattern: dashboard
+vertical: operations
+display_name: Revenue Pulse
+shape: chart
+description: |
+  An executive dashboard for the business at a glance. A top stat row carries
+  the headline numbers — recurring revenue, events revenue, store revenue, and
+  active memberships, each with its month-over-month change. Below it, a
+  full-width six-month revenue-trend chart, then a by-category split: a bar
+  chart of revenue by line of business beside a breakdown table with each
+  category's revenue, share, and change. An approval-rate strip closes the
+  view with the application funnel — submitted, approved, and the approval
+  rate. Read-only by design: it shows the shape of the business without
+  offering any action. Ships a placeholder live-data source so a connected
+  backend hydrates the numbers from a real reports endpoint; with no backend
+  it renders the seeded six-month sample.
+icon: trending-up
+color: "#5b995b"
+state:
+  entity_type: RevenueSnapshot
+  id_field: id
+  columns:
+    - { field: category, label: Category, widget: text }
+    - { field: revenue, label: Revenue, widget: text }
+    - { field: share, label: Share, widget: text }
+    - { field: change_pct, label: Change %, widget: number }
+data_sources:
+  - name: revenue
+    method: GET
+    path: /reports/revenue?window=6m
+    bind: state.trend
+    refresh: [pocket_open, manual]
+needs:
+  - paw.db.v1
+actions: []
+connectors: []
+skill_refs: []

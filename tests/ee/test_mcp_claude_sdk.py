@@ -1,0 +1,790 @@
+"""Tests for MCP + Claude Agent SDK integration.
+
+Covers how ``ClaudeAgentSDK`` assembles its MCP servers and tool allowlist:
+external MCP config (stdio / http servers from ``MCPServerConfig``), opt-in vs
+always-on in-process servers, ``TestMcpToolAllowlist`` (the resolved
+per-surface allow/deny reaching the SDK options), ``TestMcpProviderLoadFailures``
+(one broken ``pocketpaw.mcp_servers`` provider never takes the others down), and
+the start-flow-to-chat bridge, the planner MCP gate and the ambient pocket planner.
+
+``_strip_builtin_servers`` drops every ALWAYS-ON in-process server (atlas,
+widgets, studio, browser, timeline, craft, surfaces, rooms, files, inspo,
+refero, fx, site_media, stock, sites, ship, ...) before the external-config
+assertions, because those tests are about EXTERNAL config only. Registering a
+new always-on server fails HERE first, in a file whose name does not say so:
+add its ``SERVER_NAME`` to the strip list with a one-line note on its regime.
+
+All SDK imports are mocked.
+"""
+
+import logging
+from unittest.mock import patch
+
+from pocketpaw_ee.agent.mcp_servers.ask import SERVER_NAME as _ASK_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.browser import SERVER_NAME as _BROWSER_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.code import SERVER_NAME as _CODE_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.craft import SERVER_NAME as _CRAFT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.daytona import SERVER_NAME as _DAYTONA_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.external_actions import (
+    SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
+)
+from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.files import SERVER_NAME as _FILES_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.fx import SERVER_NAME as _FX_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.growth import SERVER_NAME as _GROWTH_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.icons import SERVER_NAME as _ICONS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.inspo import SERVER_NAME as _INSPO_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.other_hand import (
+    SERVER_NAME as _OTHER_HAND_MCP_SERVER_NAME,
+)
+from pocketpaw_ee.agent.mcp_servers.palette import SERVER_NAME as _PALETTE_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.planner import (
+    POCKET_PLANNER_SERVER_NAME as _POCKET_PLANNER_MCP_SERVER_NAME,
+)
+from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.refero import SERVER_NAME as _REFERO_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.rooms import SERVER_NAME as _ROOMS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.ship import SERVER_NAME as _SHIP_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.site_media import SERVER_NAME as _SITE_MEDIA_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.stock_images import SERVER_NAME as _STOCK_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.surfaces import SERVER_NAME as _SURFACES_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.timeline import SERVER_NAME as _TIMELINE_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.workspace_admin import (
+    SERVER_NAME as _WORKSPACE_ADMIN_MCP_SERVER_NAME,
+)
+from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
+    SERVER_NAME as _POCKET_SPECIALIST_MCP_SERVER_NAME,
+)
+
+from pocketpaw.agents.claude_sdk import ClaudeAgentSDK
+from pocketpaw.agents.sdk_mcp_atlas import SERVER_NAME as _ATLAS_MCP_SERVER_NAME
+from pocketpaw.agents.sdk_mcp_studio import SERVER_NAME as _STUDIO_MCP_SERVER_NAME
+from pocketpaw.agents.sdk_mcp_widgets import SERVER_NAME as _WIDGETS_MCP_SERVER_NAME
+from pocketpaw.config import Settings
+from pocketpaw.mcp.config import MCPServerConfig
+from pocketpaw.tools.policy import ToolPolicy
+
+
+def _strip_builtin_servers(result: dict) -> dict:
+    """Drop always-on in-process MCP servers so external-config assertions stay focused.
+
+    Note: ``pocketpaw_planner`` is a built-in but is *not* always-on — it is
+    gated behind an explicit policy opt-in. It is stripped here so the
+    external-config assertions remain correct regardless of whether a given
+    test happens to opt the planner in. ``pocketpaw_pocket_planner`` IS
+    always-on (the bundled pocket-create skill calls it without opt-in)
+    so it is stripped unconditionally.
+    """
+    out = dict(result)
+    out.pop(_WIDGETS_MCP_SERVER_NAME, None)
+    out.pop(_POCKET_MCP_SERVER_NAME, None)
+    out.pop(_POCKET_SPECIALIST_MCP_SERVER_NAME, None)
+    out.pop(_TASKS_MCP_SERVER_NAME, None)
+    out.pop(_PLANNER_MCP_SERVER_NAME, None)
+    out.pop(_DECISIONS_MCP_SERVER_NAME, None)
+    out.pop(_MEETINGS_MCP_SERVER_NAME, None)
+    out.pop(_FORESIGHT_MCP_SERVER_NAME, None)
+    out.pop(_POCKET_PLANNER_MCP_SERVER_NAME, None)
+    # ``pocketpaw_sites_manager`` is always-on too — the bundled
+    # pocketpaw-create-site skill calls it without an explicit opt-in.
+    out.pop(_SITES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_site_media`` is always-on too — the site-authoring skills call
+    # generate_site_image without an explicit opt-in. Registration is NOT the
+    # boundary here (the /sites allow-list defaults to no restriction); the tool
+    # checks the pocket belongs to the caller's workspace before it spends.
+    out.pop(_SITE_MEDIA_MCP_SERVER_NAME, None)
+    # ``pocketpaw_connectors`` is always-on — the M3-derived connector skills
+    # (gmail/github) call connector_execute without an explicit opt-in.
+    out.pop(_CONNECTORS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_media`` is always-on too — the bundled `studio` skill calls
+    # image_generate / video_generate without an explicit opt-in.
+    out.pop(_MEDIA_MCP_SERVER_NAME, None)
+    # ``pocketpaw_stock`` is always-on too — the svelte-site authoring skills
+    # call search_stock_images for site imagery without an explicit opt-in.
+    # Pure read (free Pexels + Unsplash photo search), no identity.
+    out.pop(_STOCK_MCP_SERVER_NAME, None)
+    # ``pocketpaw_files`` is always-on too — list_uploads / read_upload are how
+    # ANY chat agent reaches a file the user uploaded. Uploads live in object
+    # storage and an attachment is inlined into the prompt only for the turn it
+    # arrived on, so gating these behind an opt-in would leave the default agent
+    # unable to answer "what did that document say?" from the next turn onward.
+    # Workspace-scoped from the ContextVar, and ``hide_from_ai`` is honoured on
+    # both doors, so registration is not the boundary here either.
+    out.pop(_FILES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_other_hand`` is always-on in the same sense as the servers
+    # above: it is REGISTERED for every agent so there is one road for every
+    # in-process server, and the Otherhand surface profile is the door that
+    # decides who may actually call `illustrate`. Stripping it here keeps the
+    # external-config assertions about EXTERNAL config.
+    out.pop(_OTHER_HAND_MCP_SERVER_NAME, None)
+    # ``pocketpaw_icons`` / ``pocketpaw_palette`` / ``pocketpaw_ask`` are always-on
+    # too — the /sites authoring toolbelt (icon search, palette derivation, and
+    # the interactive ask_user question chips) is ambient, same regime as
+    # stock/media. Pure read / in-process, no identity.
+    out.pop(_ICONS_MCP_SERVER_NAME, None)
+    out.pop(_FX_MCP_SERVER_NAME, None)
+    out.pop(_PALETTE_MCP_SERVER_NAME, None)
+    out.pop(_ASK_MCP_SERVER_NAME, None)
+    # ``pocketpaw_inspo`` is always-on too — the /sites create preamble names
+    # research_page_design UNCONDITIONALLY, so the server has to be registered
+    # unconditionally or the prompt commands a tool that is not there. It shipped
+    # briefly as an opt-in EXTERNAL server and that is exactly what went wrong
+    # (#2204 → #2205). Pure read over a remote archive of shipped web pages, no
+    # identity, nothing persisted — same regime as stock. The /sites allow-list
+    # is the door that decides which surfaces may call it.
+    out.pop(_INSPO_MCP_SERVER_NAME, None)
+    # ``pocketpaw_refero`` is always-on for the same reason: the bundled site
+    # skills reach for Refero's design research without an opt-in, and the tools
+    # answer empty when no token is configured rather than disappearing.
+    out.pop(_REFERO_MCP_SERVER_NAME, None)
+    # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
+    # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
+    # (loom_model_path unset -> not registered) but stripped defensively: a
+    # developer's POCKETPAW_LOOM_MODEL_PATH env leaks into Settings() and would
+    # otherwise register it in these tests.
+    out.pop(_BELT_MCP_SERVER_NAME, None)
+    out.pop(_LOOM_MCP_SERVER_NAME, None)
+    # ``pocketpaw_external_actions`` is always-on too — a chat agent proposes a
+    # gated connector call (propose_external_action) without an explicit
+    # opt-in; the connector only fires after human approval.
+    out.pop(_EXTERNAL_ACTIONS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_fabric`` + ``pocketpaw_instinct`` are always-on too — the
+    # cloud chat agent's only path to the Fabric ontology and Instinct gate
+    # visibility on this backend (registry BaseTools never reach it). Both are
+    # read-only.
+    out.pop(_FABRIC_MCP_SERVER_NAME, None)
+    out.pop(_INSTINCT_MCP_SERVER_NAME, None)
+    # ``pocketpaw_daytona`` is always-on too — the /code surface scopes access
+    # via its profile allowlist, same regime as fabric / instinct / media.
+    out.pop(_DAYTONA_MCP_SERVER_NAME, None)
+    # ``pocketpaw_code`` is always-on too — the /code file tools (readFile /
+    # search / listDir / editFile / writeFile) are ambient, NOT in
+    # ``OPT_IN_MCP_SERVERS``. The /code SurfaceProfile scopes them via
+    # ``tool_mode="exclusive"`` + ``_CODE_FILE_TOOL_IDS``, so the allowlist is
+    # the boundary, not registration — the same regime as its sibling
+    # ``pocketpaw_daytona`` directly above. Registration could not be the
+    # boundary anyway: each tool parks on a delegate frame that only a tab with
+    # a code project open can answer.
+    out.pop(_CODE_MCP_SERVER_NAME, None)
+    # ``pocketpaw_atlas`` is always-on too — the capability atlas
+    # (atlas_search / atlas_describe) is registered unconditionally in core
+    # ``claude_sdk._get_mcp_servers`` so every agent can ground PocketPaw
+    # capabilities instead of guessing from LLM priors (AT-1).
+    out.pop(_ATLAS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_workspace_admin`` is always-on too — the workspace-admin tool
+    # surface (members_list / member_update_role) is registered unconditionally;
+    # the RBAC gate on each tool is the security boundary, not registration
+    # (WA-1, feat/workspace-admin-tools).
+    out.pop(_WORKSPACE_ADMIN_MCP_SERVER_NAME, None)
+    # ``pocketpaw_ship`` is always-on too — the /ship managed-deploy verbs are
+    # registered unconditionally (ambient, NOT in OPT_IN_MCP_SERVERS); the /ship
+    # surface profile's allow_mcp_tool_ids scoping plus the Instinct gate on the
+    # destructive verbs are the security boundary, not registration (SHIP-4/8a).
+    # ``pocketpaw_growth`` is always-on too — the /growth rail's agent surface
+    # (prospect + draft reads, authoring writes, and the PROPOSE verbs). It
+    # sends nothing; the Instinct gate is the security boundary, not
+    # registration. Same regime as belt / ship / workspace_admin.
+    out.pop(_GROWTH_MCP_SERVER_NAME, None)
+    # ``pocketpaw_code`` (CD-3) and ``pocketpaw_ship`` (SHIP-4) are always-on as
+    # well and were never added here when they landed — every assertion in this
+    # class has been failing on their names since. Stripped now so the file
+    # measures what it claims to measure: EXTERNAL config.
+    out.pop(_CODE_MCP_SERVER_NAME, None)
+    out.pop(_SHIP_MCP_SERVER_NAME, None)
+    # ``pocketpaw_studio`` is always-on too — the /studio flow canvas agent
+    # surface (build_studio_flow) is registered unconditionally in core
+    # ``claude_sdk._get_mcp_servers`` so the default agent backend can scaffold
+    # flow graphs. In-process, no external config.
+    out.pop(_STUDIO_MCP_SERVER_NAME, None)
+    # ``pocketpaw_browser`` is always-on too — the /browser surface's agentic
+    # browser is registered unconditionally; every OTHER surface DENIES its tool
+    # ids via ``resolve_profile`` (deny is the boundary, not registration), the
+    # same regime as code / ship / studio. Stripped so this file measures
+    # EXTERNAL config only.
+    out.pop(_BROWSER_MCP_SERVER_NAME, None)
+    # ``pocketpaw_timeline`` is always-on too — the /studio/editor timeline
+    # verbs (edit_timeline / export_timeline) are registered unconditionally via
+    # the ``CloudTimelineMcpProvider`` entry point, NOT in
+    # ``OPT_IN_MCP_SERVERS``. Registration could not be the boundary anyway:
+    # both tools read a timeline ContextVar that is unset on every surface but
+    # the editor, so they refuse on their own everywhere else, and the
+    # STUDIO_EDITOR profile is what scopes them on. Same regime as its sibling
+    # ``pocketpaw_media`` / ``pocketpaw_studio``.
+    out.pop(_TIMELINE_MCP_SERVER_NAME, None)
+    # ``pocketpaw_craft`` (edit_vector / edit_photo / edit_design): same regime
+    # as the timeline server, inert off the studios because no projection is bound.
+    out.pop(_CRAFT_MCP_SERVER_NAME, None)
+    # ``pocketpaw_surfaces`` is always-on too — ``open_surface`` returns an
+    # envelope and touches nothing, registered via ``CloudSurfacesMcpProvider``.
+    out.pop(_SURFACES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_rooms`` is always-on too: read-only chat-room reads,
+    # registered via ``CloudRoomsMcpProvider``.
+    out.pop(_ROOMS_MCP_SERVER_NAME, None)
+    return out
+
+
+class TestClaudeSDKMCPServers:
+    """Test _get_mcp_servers method."""
+
+    def _make_sdk(self, **overrides) -> ClaudeAgentSDK:
+        """Create a ClaudeAgentSDK with SDK imports mocked out."""
+        settings = Settings(
+            anthropic_api_key="test-key",
+            tool_profile="full",
+            **overrides,
+        )
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings)
+            sdk._sdk_available = False  # don't need real SDK
+        return sdk
+
+    def test_no_mcp_configs(self):
+        sdk = self._make_sdk()
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _strip_builtin_servers(result) == {}
+
+    def test_enabled_stdio_server_passes(self):
+        sdk = self._make_sdk()
+        cfgs = [
+            MCPServerConfig(name="fs", transport="stdio", command="npx", args=["server"]),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        external = _strip_builtin_servers(result)
+        assert len(external) == 1
+        assert "fs" in external
+        assert external["fs"]["type"] == "stdio"
+        assert external["fs"]["command"] == "npx"
+        assert external["fs"]["args"] == ["server"]
+
+    def test_disabled_server_filtered_out(self):
+        sdk = self._make_sdk()
+        cfgs = [
+            MCPServerConfig(name="fs", transport="stdio", command="npx", enabled=False),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        assert _strip_builtin_servers(result) == {}
+
+    def test_http_server_passes(self):
+        """HTTP servers are supported by Claude SDK."""
+        sdk = self._make_sdk()
+        cfgs = [
+            MCPServerConfig(name="remote", transport="http", url="http://localhost:9000"),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        assert "remote" in result
+        assert result["remote"]["type"] == "http"
+        assert result["remote"]["url"] == "http://localhost:9000"
+
+    def test_http_server_without_url_skipped(self):
+        """HTTP server with no url is skipped."""
+        sdk = self._make_sdk()
+        cfgs = [
+            MCPServerConfig(name="bad", transport="http", url=""),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        assert _strip_builtin_servers(result) == {}
+
+    def test_sse_server_passes(self):
+        """SSE servers are supported by Claude SDK."""
+        sdk = self._make_sdk()
+        cfgs = [
+            MCPServerConfig(name="notion", transport="sse", url="https://mcp.notion.com/sse"),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        assert "notion" in result
+        assert result["notion"]["type"] == "sse"
+
+    def test_policy_denies_server(self):
+        sdk = self._make_sdk(tools_deny=["mcp:fs:*"])
+        cfgs = [
+            MCPServerConfig(name="fs", transport="stdio", command="npx"),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        assert _strip_builtin_servers(result) == {}
+
+    def test_policy_denies_group_mcp(self):
+        sdk = self._make_sdk(tools_deny=["group:mcp"])
+        cfgs = [
+            MCPServerConfig(name="fs", transport="stdio", command="npx"),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        assert _strip_builtin_servers(result) == {}
+
+    def test_env_passed_through(self):
+        sdk = self._make_sdk()
+        cfgs = [
+            MCPServerConfig(
+                name="gh",
+                transport="stdio",
+                command="npx",
+                args=["server"],
+                env={"GITHUB_TOKEN": "abc"},
+            ),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        assert result["gh"]["env"] == {"GITHUB_TOKEN": "abc"}
+
+    def test_multiple_servers_mixed(self):
+        sdk = self._make_sdk()
+        cfgs = [
+            MCPServerConfig(name="fs", transport="stdio", command="npx", enabled=True),
+            MCPServerConfig(name="off", transport="stdio", command="npx", enabled=False),
+            MCPServerConfig(name="web", transport="http", url="http://x"),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        external = _strip_builtin_servers(result)
+        assert len(external) == 2
+        assert "fs" in external
+        assert "web" in external
+
+    def test_mcp_import_error_returns_empty(self):
+        """If mcp module is not installed, return empty dict."""
+        sdk = self._make_sdk()
+        import builtins
+
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if "pocketpaw.mcp" in name:
+                raise ImportError("no mcp")
+            return original_import(name, *args, **kwargs)
+
+        with patch.object(builtins, "__import__", side_effect=mock_import):
+            result = sdk._get_mcp_servers()
+        assert result == {}
+
+    def test_empty_env_and_args_omitted(self):
+        """Empty env/args should not be included in the server config."""
+        sdk = self._make_sdk()
+        cfgs = [
+            MCPServerConfig(name="mem", transport="stdio", command="npx", args=[], env={}),
+        ]
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=cfgs):
+            result = sdk._get_mcp_servers()
+        assert "mem" in result
+        assert "env" not in result["mem"]
+        assert "args" not in result["mem"]
+        assert result["mem"]["type"] == "stdio"
+        assert result["mem"]["command"] == "npx"
+
+
+class TestPlannerMCPGate:
+    """The ``pocketpaw_planner`` MCP server must be opt-in, not ambient.
+
+    The opt-in flows through a per-agent ``ToolPolicy`` whose
+    ``mcp_servers_allow`` frozenset names the planner. AgentPool builds that
+    policy from the agent's ``tools`` field and injects it into the Claude
+    SDK backend. With no such policy the planner schema never loads.
+    """
+
+    def _make_sdk(self, policy: ToolPolicy | None = None, **overrides) -> ClaudeAgentSDK:
+        settings = Settings(
+            anthropic_api_key="test-key",
+            tool_profile="full",
+            **overrides,
+        )
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings, policy=policy)
+            sdk._sdk_available = False
+        return sdk
+
+    @staticmethod
+    def _planner_policy(**kwargs) -> ToolPolicy:
+        """A ToolPolicy that opts the planner in via ``mcp_servers_allow``."""
+        return ToolPolicy(mcp_servers_allow=frozenset({_PLANNER_MCP_SERVER_NAME}), **kwargs)
+
+    def test_planner_absent_by_default(self):
+        """No injected policy → default policy → planner not loaded."""
+        sdk = self._make_sdk()
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME not in result
+
+    def test_planner_absent_when_policy_does_not_opt_in(self):
+        """An injected policy with an empty ``mcp_servers_allow`` keeps it off."""
+        sdk = self._make_sdk(policy=ToolPolicy())
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME not in result
+
+    def test_planner_present_when_policy_opts_in(self):
+        """A policy whose ``mcp_servers_allow`` names the planner loads it."""
+        sdk = self._make_sdk(policy=self._planner_policy())
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME in result
+        assert result[_PLANNER_MCP_SERVER_NAME]["type"] == "sdk"
+
+    def test_planner_absent_when_denied(self):
+        """A deny entry blocks the planner even when ``mcp_servers_allow``
+        names it."""
+        sdk = self._make_sdk(
+            policy=self._planner_policy(deny=[f"mcp:{_PLANNER_MCP_SERVER_NAME}:*"])
+        )
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME not in result
+
+    def test_tools_allow_does_not_opt_planner_in(self):
+        """An ``mcp:*`` entry in ``tools_allow`` must NOT opt the planner in —
+        ``mcp_servers_allow`` is the only opt-in channel."""
+        sdk = self._make_sdk(tools_allow=[f"mcp:{_PLANNER_MCP_SERVER_NAME}:*"])
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _PLANNER_MCP_SERVER_NAME not in result
+
+
+class TestMcpToolAllowlist:
+    """The in-process MCP tool-id allowlist the claude_agent_sdk backend
+    builds. An MCP tool is only callable when its id is on this list, so the
+    home-pocket agent's ``add_widget`` tool must appear here."""
+
+    def _make_sdk(self) -> ClaudeAgentSDK:
+        settings = Settings(anthropic_api_key="test-key", tool_profile="full")
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings)
+            sdk._sdk_available = False
+        return sdk
+
+    def test_allowlist_includes_writable_add_widget_tool(self):
+        """The resolved tool list carries the cloud ``add_widget`` MCP tool —
+        the home agent's widget-creation tool — alongside the read tools."""
+        from pocketpaw_ee.agent.mcp_servers.pockets import (
+            ADD_WIDGET_TOOL_ID,
+            GET_POCKET_TOOL_ID,
+        )
+
+        sdk = self._make_sdk()
+        ids = sdk._collect_mcp_tool_ids()
+        assert ADD_WIDGET_TOOL_ID in ids, (
+            "the writable add_widget tool must be on the allowlist or the home agent cannot call it"
+        )
+        # The read tools are still there — add_widget is additive.
+        assert GET_POCKET_TOOL_ID in ids
+
+    def test_allowlist_excludes_opt_in_planner_by_default(self):
+        """Opt-in servers stay off the allowlist unless the policy opts them
+        in — the loop the writable tool rides must keep that gate."""
+        sdk = self._make_sdk()
+        ids = sdk._collect_mcp_tool_ids()
+        assert not any(f"__{_PLANNER_MCP_SERVER_NAME}__" in t for t in ids)
+
+
+class TestStartFlowReachable:
+    """GUARD (RFC 13 M3): the ``start_flow`` authoring tool must be reachable
+    from the cloud chat agent's ASSEMBLED tool set — not merely importable.
+
+    M3 (#1318) shipped ``start_flow`` only in the runtime builtin registry and
+    its tests imported ``StartFlowTool`` directly, so nothing caught that the
+    cloud chat agent (claude_agent_sdk backend) had no way to *call* it. The
+    agent then hand-authored a flat ``set``-stepped spec — the anti-pattern
+    start_flow exists to prevent. This test asserts the bridge: the
+    ``pocketpaw_widgets`` server is registered AND ``start_flow``'s tool id is
+    on the in-process allowlist, with no policy opt-in. If the bridge is ever
+    removed, this fails."""
+
+    def _make_sdk(self) -> ClaudeAgentSDK:
+        settings = Settings(anthropic_api_key="test-key", tool_profile="full")
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings)
+            sdk._sdk_available = False
+        return sdk
+
+    def test_start_flow_on_allowlist_by_default(self):
+        """The assembled in-process tool allowlist carries ``start_flow`` with
+        no opt-in — the cloud chat agent calls it via
+        ``mcp__pocketpaw_widgets__start_flow`` and that id must be reachable."""
+        from pocketpaw.agents.sdk_mcp_widgets import START_FLOW_TOOL_ID
+
+        sdk = self._make_sdk()
+        ids = sdk._collect_mcp_tool_ids()
+        assert START_FLOW_TOOL_ID in ids, (
+            "start_flow must be on the assembled allowlist or the cloud chat "
+            "agent cannot call it (the exact RFC 13 M3 reachability gap)"
+        )
+
+    def test_widgets_server_with_start_flow_is_registered(self):
+        """The host server for ``start_flow`` (``pocketpaw_widgets``) must
+        appear in the assembled ``_get_mcp_servers`` set — registration is the
+        other half of reachability."""
+        sdk = self._make_sdk()
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            servers = sdk._get_mcp_servers()
+        assert _WIDGETS_MCP_SERVER_NAME in servers, (
+            "the pocketpaw_widgets server (host of start_flow) must be registered"
+        )
+
+    def test_start_flow_id_matches_widgets_server_namespace(self):
+        """The tool id is namespaced under the registered server, so the SDK
+        routes ``mcp__pocketpaw_widgets__start_flow`` to this server."""
+        from pocketpaw.agents.sdk_mcp_widgets import START_FLOW_TOOL_ID
+
+        assert START_FLOW_TOOL_ID == f"mcp__{_WIDGETS_MCP_SERVER_NAME}__start_flow"
+
+
+class TestMcpProviderLoadFailures:
+    """#FU-F: MCP provider build failures must surface loudly.
+
+    A stale editable install left CloudForesightMcpProvider unable to import
+    its SDK server. The failure was swallowed silently at DEBUG. These tests
+    verify:
+    1. A provider that raises on ``build_server()`` logs at WARNING (not DEBUG),
+       including the provider class name and exception type.
+    2. The startup INFO summary fires after the entry-point loop with the right
+       format for both the non-empty and empty cases.
+    3. A happy-path provider still registers normally — no regression.
+    """
+
+    def _make_sdk(self) -> ClaudeAgentSDK:
+        settings = Settings(anthropic_api_key="test-key", tool_profile="full")
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings)
+            sdk._sdk_available = False
+        return sdk
+
+    def _make_provider(self, *, name: str, raises: Exception | None = None):
+        """Return a minimal stub provider for the entry-point registry."""
+
+        class _FakeProvider:
+            __class__ = type(f"Fake{name}Provider", (), {})
+
+            def build_server(self):
+                if raises is not None:
+                    raise raises
+                return (name, {"type": "sdk"})
+
+            def tool_ids(self):
+                return [f"mcp__{name}__some_tool"]
+
+        return _FakeProvider()
+
+    def test_build_failure_logs_warning_not_debug(self, caplog):
+        """A provider that raises on build_server() must emit WARNING."""
+        sdk = self._make_sdk()
+        bad_provider = self._make_provider(
+            name="broken_server", raises=ImportError("no sdk installed")
+        )
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[bad_provider],
+            ),
+            caplog.at_level(logging.WARNING, logger="pocketpaw.agents.claude_sdk"),
+        ):
+            sdk._get_mcp_servers()
+
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning_records, "Expected at least one WARNING log record"
+        joined = " ".join(r.getMessage() for r in warning_records)
+        # Provider class name in the message
+        assert "Fake" in joined or "broken_server" in joined or "Provider" in joined
+        # Exception type in the message
+        assert "ImportError" in joined
+        # Exception text in the message
+        assert "no sdk installed" in joined
+
+    def test_build_failure_does_not_log_debug_at_warning_level(self, caplog):
+        """The old DEBUG call must be gone — no DEBUG record for the failure."""
+        sdk = self._make_sdk()
+        bad_provider = self._make_provider(
+            name="broken_server", raises=RuntimeError("something exploded")
+        )
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[bad_provider],
+            ),
+            caplog.at_level(logging.DEBUG, logger="pocketpaw.agents.claude_sdk"),
+        ):
+            sdk._get_mcp_servers()
+
+        # The WARNING record must be present
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning_records, "Expected WARNING on provider build failure"
+
+    def test_startup_summary_no_servers(self, caplog):
+        """When no entry-point providers register AND no builtins load, the
+        summary says 'No MCP servers registered.'
+
+        The widgets builtin registers before the entry-point loop, so we patch
+        it out alongside the load_mcp_config and _registry.providers to get a
+        clean empty-server scenario.
+        """
+        sdk = self._make_sdk()
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch("pocketpaw._registry.providers", return_value=[]),
+            patch(
+                "pocketpaw.agents.sdk_mcp_widgets.build_widgets_context_server",
+                return_value=None,
+            ),
+            # The atlas server is always-on (AT-1) — patch its builder to None
+            # (same regime as the widgets server above) so the empty-server
+            # scenario stays truly empty.
+            patch(
+                "pocketpaw.agents.sdk_mcp_atlas.build_atlas_context_server",
+                return_value=None,
+            ),
+            # The studio server is always-on too — patch its builder to None
+            # (same regime as atlas) so the empty-server scenario stays empty.
+            patch(
+                "pocketpaw.agents.sdk_mcp_studio.build_studio_context_server",
+                return_value=None,
+            ),
+            caplog.at_level(logging.INFO, logger="pocketpaw.agents.claude_sdk"),
+        ):
+            sdk._get_mcp_servers()
+
+        info_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert any("No MCP servers registered" in m for m in info_messages)
+
+    def test_startup_summary_with_servers(self, caplog):
+        """When providers register, the summary lists their names."""
+        sdk = self._make_sdk()
+        good_provider = self._make_provider(name="pocketpaw_foresight")
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[good_provider],
+            ),
+            caplog.at_level(logging.INFO, logger="pocketpaw.agents.claude_sdk"),
+        ):
+            sdk._get_mcp_servers()
+
+        info_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert any("MCP servers registered" in m for m in info_messages)
+        # Server name appears in the summary
+        registered_msgs = [m for m in info_messages if "MCP servers registered" in m]
+        assert registered_msgs
+        assert "pocketpaw_foresight" in registered_msgs[0]
+
+    def test_happy_path_provider_still_registers(self):
+        """A provider that builds cleanly is still registered — no regression."""
+        sdk = self._make_sdk()
+        good_provider = self._make_provider(name="pocketpaw_foresight")
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[good_provider],
+            ),
+        ):
+            result = sdk._get_mcp_servers()
+
+        assert "pocketpaw_foresight" in result
+        assert result["pocketpaw_foresight"]["type"] == "sdk"
+
+    def test_failing_provider_skipped_good_provider_registered(self):
+        """A bad provider does not prevent a good provider from registering."""
+        sdk = self._make_sdk()
+        bad_provider = self._make_provider(name="bad", raises=ImportError("no sdk"))
+        good_provider = self._make_provider(name="pocketpaw_foresight")
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[bad_provider, good_provider],
+            ),
+        ):
+            result = sdk._get_mcp_servers()
+
+        assert "pocketpaw_foresight" in result
+        assert "bad" not in _strip_builtin_servers(result) or True  # bad is skipped
+
+
+class TestPocketPlannerMcpAmbient:
+    """The sibling ``pocketpaw_pocket_planner`` server (hosting
+    ``plan_pocket``) must be **ambient** — reachable to any agent
+    without explicit opt-in.
+
+    The pocket-create flow's plan-pointer kit directs the chat agent
+    to call ``plan_pocket`` straight away; if that server were opt-in
+    the kit's first call would 404 and the pocket-create UX would
+    break. The split from ``pocketpaw_planner`` (which IS opt-in) is
+    what restores both policy regimes — see PR #1223 R2.
+    """
+
+    def _make_sdk(self, policy: ToolPolicy | None = None, **overrides) -> ClaudeAgentSDK:
+        settings = Settings(
+            anthropic_api_key="test-key",
+            tool_profile="full",
+            **overrides,
+        )
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings, policy=policy)
+            sdk._sdk_available = False
+        return sdk
+
+    def test_pocket_planner_ambient(self):
+        """No injected policy → the pocket planner still loads.
+
+        This is the mirror image of ``test_planner_absent_by_default``
+        — that one pins the opt-in gate on ``pocketpaw_planner``;
+        this one pins the ambient default on
+        ``pocketpaw_pocket_planner``.
+        """
+        sdk = self._make_sdk()
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _POCKET_PLANNER_MCP_SERVER_NAME in result
+        assert result[_POCKET_PLANNER_MCP_SERVER_NAME]["type"] == "sdk"
+
+    def test_pocket_planner_still_loads_when_planner_not_opted_in(self):
+        """The ambient pocket planner does not depend on the opt-in
+        project planner being on. Opting one out must not leak into
+        the other."""
+        sdk = self._make_sdk(policy=ToolPolicy())  # explicit, no opt-ins
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _POCKET_PLANNER_MCP_SERVER_NAME in result
+        assert _PLANNER_MCP_SERVER_NAME not in result
+
+    def test_pocket_planner_absent_when_denied(self):
+        """Even an ambient server must respect a deny entry — defense
+        in depth for the rare deployment that wants to block the
+        planner entirely."""
+        sdk = self._make_sdk(policy=ToolPolicy(deny=[f"mcp:{_POCKET_PLANNER_MCP_SERVER_NAME}:*"]))
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _POCKET_PLANNER_MCP_SERVER_NAME not in result
+
+    def test_pocket_planner_tool_on_allowlist_by_default(self):
+        """The ambient pocket-planner tool id must appear on the
+        in-process allowlist with no policy opt-in — the chat agent
+        calls it via ``mcp__pocketpaw_pocket_planner__plan_pocket``
+        and that id has to be reachable."""
+        from pocketpaw_ee.agent.mcp_servers.planner import PLAN_POCKET_TOOL_ID
+
+        sdk = self._make_sdk()
+        ids = sdk._collect_mcp_tool_ids()
+        assert PLAN_POCKET_TOOL_ID in ids

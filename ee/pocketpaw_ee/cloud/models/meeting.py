@@ -1,0 +1,298 @@
+# Meeting Beanie documents — per-workspace meeting state + transcripts.
+# Created: 2026-05-19 — Native meetings integration (Google Meet + Zoom).
+# See docs/plans/2026-05-19-meetings-integration-design.md.
+#
+# 2026-10-01 (feat/meetings-instant, MC-1): Meeting gains the Google-Meet-style
+# fields — ``code`` (10 letters stored WITHOUT dashes, unique via a partial
+# index so the many code-less rows don't collide), ``room_group_id`` (the
+# hidden ``type="meeting"`` chat room backing the meeting), ``host_user_id``,
+# ``access`` ("ask" | "open"), ``guest_emails``, ``description`` and
+# ``link_expires_at``.
+#
+# 2026-10-01 (feat/meetings-by-code, MC-2): no schema change. A LiveKit
+# meeting "for later" is ``status="scheduled"`` with ``scheduled_start=None``
+# (no date; the reminder/auto-start jobs skip it). ``link_expires_at`` is 30
+# days out for undated meetings (pushed out on each join) and ``scheduled_end``
+# for dated ones; see meetings/service.py.
+#
+# 2026-10-01 (feat/meetings-lobby, MC-3): ``MeetingKnock`` — one row per guest
+# asking to join a meeting. Holds only a sha256 of the guest's bearer secret.
+# Waiting knocks read as expired after 10 minutes (meetings/lobby_service.py);
+# a TTL index drops every row a day after it was made. ``ip_hash`` (salted with
+# the meeting id) backs the one-minute re-knock cooldown after a denial.
+#
+# Two documents:
+#   * Meeting — one row per provider meeting we know about.
+#   * MeetingTranscript — one row per transcript session. Transcript entries
+#     live in the .vtt/.txt blob (referenced via file_id), NOT here.
+#
+# Provider credentials live in MeetingProviderCredentials — one
+# deployment-global row per provider, set via the Settings connector
+# page, with secret values encrypted at rest (_core/crypto.py). The
+# ZOOM_* / GOOGLE_MEET_* environment variables remain a fallback when no
+# stored row exists.
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any, Literal
+
+from beanie import Document, Indexed
+from pydantic import Field
+from pymongo import IndexModel
+
+from pocketpaw_ee.cloud.models.base import TimestampedDocument
+
+# ---------------------------------------------------------------------------
+# Meeting
+# ---------------------------------------------------------------------------
+
+
+MeetingStatus = Literal[
+    "scheduled",
+    "in_progress",
+    "ended",
+    "transcript_ready",
+    "failed",
+    "cancelled",
+]
+
+
+class Meeting(TimestampedDocument):
+    """One meeting we know about, in one workspace.
+
+    ``provider_meeting_id`` is the provider's primary ID (Zoom meeting ID
+    as a string, or Meet ``conferenceRecords/{name}``); paired with
+    ``provider`` it is globally unique. ``provider_space_id`` is the Meet
+    ``spaces/{space}`` resource (the persistent "room" — separate from
+    each conference instance); null for Zoom.
+
+    ``recording_file_ids`` holds ``FileUpload.file_id`` strings — not
+    Mongo ObjectIds — to match the existing files convention.
+
+    ``participants`` is a best-effort snapshot of attendee data from
+    the provider; shape varies by provider so it stays as ``list[dict]``
+    rather than a typed sub-document.
+    """
+
+    workspace: Indexed(str)  # type: ignore[valid-type]
+    # source — which platform module owns this meeting's lifecycle.
+    # "recall" = an external Zoom/Meet/Teams meeting we capture via a
+    # Recall.ai bot. "livekit" = a native room hosted on our LiveKit
+    # Cloud. Default "recall" for back-compat: every row that existed
+    # before the unified meetings platform was a Recall meeting.
+    source: Literal["recall", "livekit"] = "recall"
+    # provider — Recall-specific external platform. Set when source="recall".
+    # For source="livekit" leave unset (the provider IS LiveKit, named in
+    # `source`). Optional so LiveKit-created rows can omit it.
+    provider: Literal["google_meet", "zoom"] | None = None
+    # External meeting id — Recall's view (Zoom meeting ID / Meet
+    # `conferenceRecords/{name}`). For source="livekit" use the room name
+    # or leave empty; nothing in the Recall paths reads it for LiveKit rows.
+    provider_meeting_id: str = ""
+    provider_space_id: str | None = None
+    title: str | None = None
+    # For LiveKit meetings this is the pocketpaw:// or web deep link that
+    # opens the in-app call. For Recall meetings it's the third-party
+    # Zoom/Meet join URL.
+    join_url: str
+    organizer_email: str | None = None
+    scheduled_start: datetime | None = None
+    scheduled_end: datetime | None = None
+    actual_start: datetime | None = None
+    actual_end: datetime | None = None
+    # For LiveKit instant calls this is the daily-budget cutoff (now + remaining
+    # plan call time). The ``livekit.service._force_end_at_budget`` watchdog
+    # force-ends the call once it passes. None for recall meetings and for
+    # uncapped (Enterprise) livekit calls.
+    call_budget_deadline: datetime | None = None
+    status: MeetingStatus = "scheduled"
+    participants: list[dict[str, Any]] = Field(default_factory=list)
+    recording_file_ids: list[str] = Field(default_factory=list)
+    raw_provider_payload: dict[str, Any] = Field(default_factory=dict)
+    # ``None`` = ingested from webhook (we didn't create it).
+    created_by_user_id: str | None = None
+    # Recall.ai bot lifecycle status — the latest ``status_changes`` code
+    # (``joining_call`` / ``in_waiting_room`` / ``in_call_recording`` /
+    # ``done`` / ``fatal`` / …). Updated by the bot.status_change webhook
+    # and by on-demand status checks. ``None`` until a bot is dispatched.
+    bot_status: str | None = None
+    bot_status_detail: str | None = None  # Recall sub_code, e.g. bot_kicked_from_call
+    bot_status_at: datetime | None = None
+    # Meeting code — 10 letters from an alphabet without l/i/o, stored
+    # canonical (no dashes); shown and linked as ``xxx-xxxx-xxx``. None for
+    # rows that predate meeting codes (and for Recall meetings).
+    code: str | None = None
+    # The hidden ``type="meeting"`` chat group this meeting runs in. Also
+    # mirrored into ``raw_provider_payload["group_id"]`` for older readers.
+    room_group_id: str | None = None
+    host_user_id: str | None = None
+    # "ask" = people outside the room wait for the host; "open" = anyone with
+    # the link joins. Enforced by the lobby slice.
+    access: Literal["ask", "open"] = "ask"
+    guest_emails: list[str] = Field(default_factory=list)
+    description: str | None = None
+    link_expires_at: datetime | None = None
+
+    class Settings(TimestampedDocument.Settings):
+        name = "meetings"
+        indexes = [
+            [("workspace", 1), ("status", 1)],
+            [("workspace", 1), ("scheduled_start", -1)],
+            [("provider", 1), ("provider_meeting_id", 1)],
+            # Partial: only rows that HAVE a code take part, so every
+            # code-less row (null) doesn't collide with the others.
+            IndexModel(
+                [("code", 1)],
+                unique=True,
+                name="uq_meeting_code",
+                partialFilterExpression={"code": {"$type": "string"}},
+            ),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Meeting knock (lobby)
+# ---------------------------------------------------------------------------
+
+
+class MeetingKnock(Document):
+    """A guest asking to join a meeting through its link.
+
+    ``secret_hash`` is ``sha256(secret)``; the plaintext secret goes to the
+    guest once and is what they present to read the knock's status.
+    ``guest_identity`` is the fixed ``guest-<hex>`` LiveKit identity the guest
+    joins under once admitted.
+    """
+
+    meeting: Indexed(str)  # type: ignore[valid-type]  # Meeting._id as str
+    workspace: str
+    name: str
+    email: str | None = None
+    status: Literal["waiting", "admitted", "denied", "expired", "cancelled"] = "waiting"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    guest_identity: str
+    secret_hash: str
+    # sha256(meeting id + client IP): lets a denial hold back a re-knock from the
+    # same address for a minute without storing the address itself.
+    ip_hash: str | None = None
+
+    class Settings:
+        name = "meeting_knocks"
+        indexes = [
+            [("meeting", 1), ("status", 1)],
+            IndexModel([("created_at", 1)], expireAfterSeconds=86400),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Meeting transcript
+# ---------------------------------------------------------------------------
+
+
+class MeetingTranscript(TimestampedDocument):
+    """One transcript session for one meeting.
+
+    Most meetings have exactly one transcript; Meet can produce multiple
+    if recording is stopped and restarted mid-conference. ``file_id``
+    references the stored ``.vtt`` / ``.txt`` blob in the uploads
+    pipeline — transcript *entries* live in that file, never in Mongo.
+
+    ``indexed_in_kb`` is the join field for the KB indexer's listener
+    so we know whether a transcript has been ingested.
+
+    Retention invariant: Google Meet deletes transcript entries from its
+    REST API 30 days after the conference ends. The polling fallback
+    job uses this window.
+    """
+
+    workspace: Indexed(str)  # type: ignore[valid-type]
+    meeting_id: Indexed(str)  # type: ignore[valid-type]  # Meeting._id as str
+    provider_transcript_id: str
+    file_id: str | None = None  # FileUpload.file_id
+    entry_count: int = 0
+    speaker_count: int = 0
+    language: str | None = None
+    fetched_at: datetime | None = None
+    indexed_in_kb: bool = False
+    # Version of the KB-extraction pipeline that last ingested this
+    # transcript. Bumped whenever the cleaner changes shape (e.g. the
+    # 2026-05-26 VTT-cue-stripper). The startup migration walks rows
+    # with version < TRANSCRIPT_KB_VERSION and re-emits FileReady so the
+    # newer extractor re-ingests cleaned text. Idempotent — runs once
+    # per row per upgrade.
+    kb_indexed_version: int = 0
+
+    class Settings(TimestampedDocument.Settings):
+        name = "meeting_transcripts"
+        indexes = [
+            [("workspace", 1), ("indexed_in_kb", 1)],
+            [("kb_indexed_version", 1)],
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Provider credentials
+# ---------------------------------------------------------------------------
+
+
+class MeetingProviderCredentials(TimestampedDocument):
+    """Stored credentials for ONE meeting provider — deployment-global.
+
+    Single-account model: exactly one row per provider for the whole
+    deployment (``provider`` is the unique key — there is deliberately no
+    ``workspace`` field). A workspace admin sets these via the
+    Settings → Meetings connector page.
+
+    Secret values (Zoom ``client_secret``; Google Meet ``client_secret``
+    + ``refresh_token``) are stored in ``secret_enc`` — a Fernet token
+    over a JSON dict (see _core/crypto.py). Non-secret values (Zoom
+    ``account_id`` + ``client_id``; Meet ``client_id``) live in
+    ``public_config`` in clear text so the UI can echo them back.
+
+    ``enabled`` flips True only once the credentials are validated — Zoom
+    via a live token grant, Google Meet once OAuth consent completes.
+    ``pending_state`` holds the in-flight OAuth ``state`` nonce between
+    the auth-url call and the consent callback.
+    """
+
+    provider: Indexed(str, unique=True)  # type: ignore[valid-type]  # "zoom" | "google_meet"
+    enabled: bool = False
+    public_config: dict[str, str] = Field(default_factory=dict)
+    secret_enc: str = ""
+    pending_state: str | None = None
+    last_validated_at: datetime | None = None
+    last_error: str = ""
+
+    class Settings(TimestampedDocument.Settings):
+        name = "meeting_provider_credentials"
+
+
+# ---------------------------------------------------------------------------
+# Deployment settings
+# ---------------------------------------------------------------------------
+
+
+class MeetingsSettings(TimestampedDocument):
+    """Deployment-global meetings configuration — a singleton row.
+
+    Holds the Recall.ai bot transcription choice. The service
+    (meetings/settings.py) reads and upserts the single row; the
+    ``RECALL_TRANSCRIPT_PROVIDER`` / ``RECALL_TRANSCRIPT_MODEL``
+    environment variables are the fallback when no row exists.
+
+    ``transcript_provider`` selects the path: a ``meeting_captions`` /
+    ``*_streaming`` value transcribes live on the bot; an ``*_async``
+    value records only, then transcribes post-call via Recall's
+    ``create_transcript`` endpoint. ``transcript_model`` is the provider
+    model name (e.g. Deepgram ``nova-3``) — used only by async providers
+    that accept one.
+    """
+
+    transcript_provider: str = "meeting_captions"
+    transcript_model: str = ""
+
+    class Settings(TimestampedDocument.Settings):
+        name = "meetings_settings"

@@ -1,0 +1,954 @@
+# Tests for the Sites Cloudflare client (ee/pocketpaw_ee/sites/cloudflare_client.py),
+# with httpx.MockTransport standing in for the real Cloudflare API (no network):
+#   * put_worker: the single-module PUT (static sites) and the one-module multipart
+#     with a ``bindings`` metadata part (dynamic sites' D1), URL and verb pinned.
+#   * custom hostnames: create returns the configured CNAME target; status maps CF's
+#     status/ssl pair onto HostnameStatus.
+#   * create_database: returns ``result.uuid``; the body carries the operator's
+#     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``, unknown values left
+#     out) and the opt-in ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication``).
+#   * query_analytics_sql: raw SQL body and a success body with no ``success`` key,
+#     both pinned because house-style tidying would break every read; fail-closed on
+#     a non-2xx, a non-JSON body and a 2xx with no data array.
+#   * every non-2xx or ``success: false`` fails closed with Cloudflare's own detail.
+from __future__ import annotations
+
+import json
+import re
+
+import httpx
+import pytest
+from pocketpaw_ee.sites.cloudflare_client import CloudflareClient
+from pocketpaw_ee.sites.domain import CustomHostname, HostnameStatus
+
+
+def _parse_multipart(body: bytes, content_type: str) -> dict[str, dict]:
+    """Tiny multipart/form-data parser for test assertions — returns
+    ``{field_name: {"filename": str|None, "content": bytes, "headers": str}}``.
+    Avoids a heavyweight dep; the CF upload body is small and well-formed."""
+    m = re.search(r"boundary=(.+)$", content_type)
+    assert m, f"no boundary in content-type: {content_type!r}"
+    boundary = m.group(1).strip('"')
+    delim = b"--" + boundary.encode()
+    parts: dict[str, dict] = {}
+    for chunk in body.split(delim):
+        chunk = chunk.strip(b"\r\n")
+        if not chunk or chunk == b"--":
+            continue
+        head, _, content = chunk.partition(b"\r\n\r\n")
+        head_text = head.decode("utf-8", "replace")
+        name_m = re.search(r'name="([^"]+)"', head_text)
+        if not name_m:
+            continue
+        fname_m = re.search(r'filename="([^"]*)"', head_text)
+        parts[name_m.group(1)] = {
+            "filename": fname_m.group(1) if fname_m else None,
+            "content": content,
+            "headers": head_text,
+        }
+    return parts
+
+
+def _client(handler, *, cname_target: str = "sites.pawzone.test") -> CloudflareClient:
+    transport = httpx.MockTransport(handler)
+    return CloudflareClient(
+        account_id="acct_1",
+        api_token="tok_1",
+        zone_id="zone_1",
+        dispatch_namespace="paw-sites",
+        cname_target=cname_target,
+        _transport=transport,
+    )
+
+
+@pytest.mark.asyncio
+async def test_put_worker_uploads_to_dispatch_namespace():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        return httpx.Response(200, json={"success": True, "result": {"id": "site_1"}})
+
+    client = _client(handler)
+    ok = await client.put_worker(script_name="site_1", bundle=b"export default {}")
+    assert ok is True
+    assert "dispatch/namespaces/paw-sites/scripts/site_1" in seen["url"]
+    assert seen["method"] == "PUT"
+
+
+@pytest.mark.asyncio
+async def test_put_worker_no_bindings_sends_single_module_unchanged():
+    """Guard against regress: with no bindings (static site) put_worker MUST send
+    the byte-for-byte single-module upload — content == bundle, Content-Type
+    application/javascript+module, NOT a multipart body."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["content"] = request.content
+        seen["content_type"] = request.headers.get("content-type", "")
+        return httpx.Response(200, json={"success": True, "result": {"id": "site_1"}})
+
+    client = _client(handler)
+    ok = await client.put_worker(script_name="site_1", bundle=b"export default {STATIC}")
+    assert ok is True
+    # Exact same single-module wire shape as before DS-2.
+    assert seen["content"] == b"export default {STATIC}"
+    assert seen["content_type"] == "application/javascript+module"
+    assert "multipart/form-data" not in seen["content_type"]
+
+
+@pytest.mark.asyncio
+async def test_put_worker_with_d1_binding_sends_multipart_metadata():
+    """A dynamic site supplies a d1 binding ⇒ put_worker switches to the Workers
+    multipart upload: a ``metadata`` JSON part naming the main module + carrying
+    the d1 binding (name + database id), plus the module file part referenced by
+    that filename. Asserts the exact metadata shape the CF API expects."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["content"] = request.content
+        seen["content_type"] = request.headers.get("content-type", "")
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"success": True, "result": {"id": "site_1"}})
+
+    client = _client(handler)
+    ok = await client.put_worker(
+        script_name="site_1",
+        bundle=b"export default {DYNAMIC}",
+        bindings=[{"type": "d1", "name": "DB", "id": "d1_abc123"}],
+    )
+    assert ok is True
+    assert seen["method"] == "PUT"
+    assert "dispatch/namespaces/paw-sites/scripts/site_1" in seen["url"]
+    assert seen["content_type"].startswith("multipart/form-data")
+
+    parts = _parse_multipart(seen["content"], seen["content_type"])
+    assert "metadata" in parts, f"no metadata part: {parts.keys()}"
+    meta = json.loads(parts["metadata"]["content"])
+
+    # The module part is referenced by filename via main_module.
+    main_module = meta["main_module"]
+    assert main_module in parts, f"main_module {main_module!r} has no file part"
+    assert parts[main_module]["content"] == b"export default {DYNAMIC}"
+    assert "application/javascript+module" in parts[main_module]["headers"]
+
+    # The d1 binding (name + id) rides the metadata bindings list.
+    d1 = [b for b in meta["bindings"] if b.get("type") == "d1"]
+    assert d1 == [{"type": "d1", "name": "DB", "id": "d1_abc123"}]
+    assert "compatibility_date" in meta
+
+
+@pytest.mark.asyncio
+async def test_put_worker_with_bindings_non_2xx_raises():
+    """Multipart path fails closed identically to the single-module path."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"success": False, "errors": [{"message": "boom"}]})
+
+    client = _client(handler)
+    with pytest.raises(Exception):
+        await client.put_worker(
+            script_name="x",
+            bundle=b"export default {}",
+            bindings=[{"type": "d1", "name": "DB", "id": "d1_x"}],
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_custom_hostname_returns_cname_target():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {
+                    "id": "ch_1",
+                    "hostname": "www.brightsmiledental.com",
+                    "status": "pending",
+                    "ssl": {"status": "pending_validation"},
+                },
+            },
+        )
+
+    client = _client(handler, cname_target="sites.pawzone.test")
+    ch: CustomHostname = await client.create_custom_hostname("www.brightsmiledental.com")
+    assert ch.hostname == "www.brightsmiledental.com"
+    assert ch.status == HostnameStatus.PENDING
+    # Clients paste ONE CNAME, and it is the CONFIGURED target verbatim.
+    #
+    # This assertion used to read ``endswith("zone_1.cdn.cloudflare.net") or
+    # ch.cname_target`` — a trailing truthy `or` that passed for any non-empty
+    # string, so it never checked anything. Under it the client shipped
+    # ``{zone_id}.cdn.cloudflare.net``, a name with no DNS records at all, as the
+    # one instruction the whole flow asks a customer to follow.
+    #
+    # MUTATION THAT BREAKS THIS: returning ``f"{self._zone_id}.cdn.cloudflare.net"``.
+    assert ch.cname_target == "sites.pawzone.test"
+
+
+@pytest.mark.asyncio
+async def test_get_hostname_status_maps_active_to_live():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {
+                    "id": "ch_1",
+                    "hostname": "www.brightsmiledental.com",
+                    "status": "active",
+                    "ssl": {"status": "active"},
+                },
+            },
+        )
+
+    client = _client(handler)
+    status = await client.get_hostname_status("ch_1")
+    assert status == HostnameStatus.LIVE
+
+
+@pytest.mark.asyncio
+async def test_non_2xx_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"success": False, "errors": [{"message": "denied"}]})
+
+    client = _client(handler)
+    with pytest.raises(Exception):
+        await client.put_worker(script_name="x", bundle=b"")
+
+
+@pytest.mark.asyncio
+async def test_create_database_returns_uuid_and_posts_name():
+    """DP0-1: create_database POSTs {"name": <name>} to the D1 create endpoint and
+    returns the new database's uuid from ``result.uuid``."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"success": True, "result": {"uuid": "d1_uuid_xyz", "name": "site-db"}},
+        )
+
+    client = _client(handler)
+    db_id = await client.create_database("site-db")
+    assert db_id == "d1_uuid_xyz"
+    assert seen["method"] == "POST"
+    assert seen["url"].endswith("/accounts/acct_1/d1/database")
+    assert seen["body"] == {"name": "site-db"}
+    # sanity: a real ValidationError type is importable (used by the fail path below).
+    assert ValidationError is not None
+
+
+@pytest.mark.asyncio
+async def test_create_database_error_envelope_raises_cloudflare_error():
+    """A Cloudflare error envelope (success:false) fails closed: create_database
+    raises ValidationError with code ``sites.cloudflare_error``."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"success": False, "errors": [{"message": "d1 quota exceeded"}]}
+        )
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_database("site-db")
+    assert exc.value.code == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+async def test_create_database_non_2xx_raises_cloudflare_error():
+    """A non-2xx response fails closed with the same ``sites.cloudflare_error`` code."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"success": False, "errors": [{"message": "boom"}]})
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_database("site-db")
+    assert exc.value.code == "sites.cloudflare_error"
+
+
+# ── The error body on a non-2xx is the diagnosis, and it was being discarded ──
+# Added 2026-08-12, from a live report: adding a custom domain answered 422 with
+# ``{"code": "sites.cloudflare_error", "message": "Cloudflare API 403"}``.
+#
+# A bare status code is not a diagnosis. Cloudflare 403s the custom-hostname
+# endpoint for several unrelated reasons — a token missing the SSL-and-Certificates
+# edit scope, a token with no access to that zone, a zone without Cloudflare for
+# SaaS enabled — and it names which one in the response body every time. ``_unwrap``
+# read that body only on the ``success: false`` branch, which cannot run on a
+# non-2xx, so the one useful sentence was dropped on exactly the responses where
+# somebody needed it.
+
+
+@pytest.mark.asyncio
+async def test_non_2xx_surfaces_cloudflares_own_error_message():
+    """MUTATION THAT BREAKS THIS: reverting _unwrap's non-2xx branch to
+    ``f"Cloudflare API {resp.status_code}"``. Everything still fails closed — the
+    loss is purely diagnostic, which is why it survived: no test asserted on the
+    message, only on the code."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # The shape Cloudflare actually returns for a token that cannot edit
+        # custom hostnames on this zone.
+        return httpx.Response(
+            403,
+            json={
+                "success": False,
+                "errors": [{"code": 9109, "message": "Unauthorized to access requested resource"}],
+            },
+        )
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_custom_hostname("www.example.com")
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "Unauthorized to access requested resource" in str(exc.value)
+    # The status is still worth carrying — it is how an operator tells a refusal
+    # (403) apart from an outage (5xx) at a glance.
+    assert "403" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_non_2xx_with_an_unparseable_body_still_reports_the_status():
+    """Cloudflare's edge can answer a non-2xx with an HTML error page rather than
+    the JSON envelope. Parsing must not become the new failure mode — the status
+    code is the floor, not the ceiling."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, text="<html><body>Bad gateway</body></html>")
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_custom_hostname("www.example.com")
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "502" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_non_2xx_reports_every_error_cloudflare_listed():
+    """Cloudflare returns an ARRAY. The ``success: false`` branch already only read
+    errors[0]; on a refusal the second entry is often the actionable one (the first
+    names the endpoint, the second names the missing permission)."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "success": False,
+                "errors": [
+                    {"code": 1109, "message": "Invalid access token"},
+                    {"code": 1049, "message": "zone is not entitled to Cloudflare for SaaS"},
+                ],
+            },
+        )
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_custom_hostname("www.example.com")
+    assert "Invalid access token" in str(exc.value)
+    assert "not entitled to Cloudflare for SaaS" in str(exc.value)
+
+
+# ── The routing half: a hostname Cloudflare accepts still has to reach a site ──
+# Added 2026-08-12 (the custom-domain routing lane). ``create_custom_hostname``
+# only makes Cloudflare willing to terminate TLS for the domain. A Worker route
+# scoped to ``<hostname>/*`` is what decides which site answers it, and without
+# one the domain validates, shows Live, and serves an error from the fallback
+# origin — a failure where every signal reports success.
+
+
+@pytest.mark.asyncio
+async def test_create_custom_hostname_refuses_without_a_cname_target():
+    """An unconfigured target is refused rather than handed out.
+
+    The value a customer pastes is the only instruction in the whole flow, and a
+    wrong one produces a hostname that can never validate with nothing able to say
+    why. Failing at create time turns a silent customer-side dead end into an
+    operator-side message naming the variable to set.
+
+    MUTATION THAT BREAKS THIS: dropping the ``if not self._cname_target`` guard, or
+    defaulting the constructor arg to any non-empty string.
+    """
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    called = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    client = _client(handler, cname_target="")
+    with pytest.raises(ValidationError) as exc:
+        await client.create_custom_hostname("www.example.com")
+    assert exc.value.code == "sites.cloudflare_unconfigured"
+    # And it refuses BEFORE spending a Cloudflare call — a hostname created against
+    # a target nobody configured is one somebody has to delete by hand later.
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_paid_tier_features_no_longer_send_custom_metadata():
+    """Per-hostname ``custom_metadata`` is not generally available — Cloudflare's
+    doc says "only certain customers have access to this feature". BC-10 attached it
+    for any tier declaring ``cloudflare_features``, which meant custom domains worked
+    on FREE sites and 403'd on PAID ones.
+
+    The ``ssl.settings`` map stays: it is not entitlement-gated, and it is the part
+    that actually provisions anything.
+
+    MUTATION THAT BREAKS THIS: restoring the ``ssl["custom_metadata"] = ...`` line in
+    ``_ssl_for_features``.
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {
+                    "id": "ch_1",
+                    "hostname": "www.example.com",
+                    "status": "pending",
+                    "ssl": {"status": "pending_validation"},
+                },
+            },
+        )
+
+    client = _client(handler)
+    await client.create_custom_hostname("www.example.com", features={"waf", "edge_cache"})
+    ssl = seen["body"]["ssl"]
+    assert "custom_metadata" not in ssl
+    # The entitlement-free half is untouched: both feature fragments still merge.
+    assert ssl["settings"] == {"min_tls_version": "1.2", "tls_1_3": "on", "http2": "on"}
+    assert ssl["method"] == "http" and ssl["type"] == "dv"
+
+
+@pytest.mark.asyncio
+async def test_create_worker_route_posts_the_pattern_and_returns_the_id():
+    """POST, not PUT: PUT on this collection is update-by-id and needs a route id we
+    do not have yet. The returned id is what makes teardown possible — a route nobody
+    recorded is an orphan nobody can delete.
+
+    MUTATION THAT BREAKS THIS: switching the verb to ``client.put``, or returning
+    ``True``/the whole result instead of ``result["id"]``.
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"success": True, "result": {"id": "route_9"}})
+
+    client = _client(handler)
+    route_id = await client.create_worker_route(pattern="www.example.com/*", script="paw-site-abc")
+    assert route_id == "route_9"
+    assert seen["method"] == "POST"
+    assert seen["url"].endswith("/zones/zone_1/workers/routes")
+    assert seen["body"] == {"pattern": "www.example.com/*", "script": "paw-site-abc"}
+
+
+@pytest.mark.asyncio
+async def test_create_worker_route_rejects_a_response_with_no_id():
+    """An id-less success is a FAILURE here, not a tolerable gap.
+
+    Returning "" would let the caller store an empty ``cf_route_id`` and report
+    success while the route exists on the zone. Teardown deletes BY id, so nothing
+    could ever remove it — the exact orphan the id is stored to prevent. This used to
+    be ``result.get("id", "")``; ``create_custom_hostname`` two methods up has always
+    indexed its id directly, and now these agree.
+
+    MUTATION THAT BREAKS THIS: restoring ``result.get("id", "")``.
+    """
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # 2xx, success:true, and no id — the shape that used to slip through.
+        return httpx.Response(200, json={"success": True, "result": {"pattern": "x.com/*"}})
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_worker_route(pattern="x.com/*", script="paw-site-1")
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "no id" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_create_worker_route_fails_closed_on_a_cloudflare_refusal():
+    """A route naming a script Cloudflare cannot find is rejected, and that must
+    surface — the caller rolls the custom hostname back on this exact signal."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "success": False,
+                "errors": [{"code": 10007, "message": "workers.api.error.script_not_found"}],
+            },
+        )
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.create_worker_route(pattern="www.example.com/*", script="missing")
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "script_not_found" in str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "arg"),
+    [("delete_worker_route", "route_9"), ("delete_custom_hostname", "ch_1")],
+)
+async def test_deletes_treat_a_404_as_already_done(method: str, arg: str):
+    """Teardown targets a STATE, not an event: "this is not on the zone" is already
+    satisfied by something that was never there. Raising on 404 would make a
+    half-finished teardown permanently un-finishable — which recreates the exact
+    orphan accumulation these methods exist to stop.
+
+    MUTATION THAT BREAKS THIS: deleting the ``if resp.status_code == 404: return``
+    guard, so ``_unwrap`` raises on the 404.
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["url"] = str(request.url)
+        return httpx.Response(404, json={"success": False, "errors": [{"message": "not found"}]})
+
+    client = _client(handler)
+    await getattr(client, method)(arg)  # must not raise
+    assert seen["method"] == "DELETE"
+    assert seen["url"].endswith(arg)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "arg"),
+    [("delete_worker_route", "route_9"), ("delete_custom_hostname", "ch_1")],
+)
+async def test_deletes_still_fail_closed_on_a_real_error(method: str, arg: str):
+    """404-tolerance is not error-tolerance. A 403 means we could not delete it and
+    it is still there; reporting success would strand the orphan silently."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"success": False, "errors": [{"message": "denied"}]})
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await getattr(client, method)(arg)
+    assert exc.value.code == "sites.cloudflare_error"
+
+
+# ── SA-4: the Analytics Engine SQL API ──────────────────────────────────────
+#
+# The one method on this client whose request body is RAW SQL and whose SUCCESS
+# response is NOT the Cloudflare envelope. Both are asserted here because both are easy
+# to "fix" back into the house style, and either fix breaks every query: sending JSON
+# gets a 400, and running the good response through ``_unwrap`` raises on the missing
+# ``success`` key so every successful read would surface as a Cloudflare error.
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_posts_the_raw_statement():
+    """The endpoint takes the statement as the body, not as a JSON field. Also pins the
+    URL — the account-scoped ``analytics_engine/sql`` path, which is a different surface
+    from the Workers ones above and needs a token scope they do not."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        seen["body"] = request.content
+        return httpx.Response(200, json={"meta": [], "data": [{"pageviews": 3}], "rows": 1})
+
+    client = _client(handler)
+    rows = await client.query_analytics_sql("SELECT 1 FROM ds FORMAT JSON")
+
+    assert rows == [{"pageviews": 3}]
+    assert seen["method"] == "POST"
+    assert seen["url"].endswith("/accounts/acct_1/analytics_engine/sql")
+    assert seen["body"] == b"SELECT 1 FROM ds FORMAT JSON"
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_reads_a_body_with_no_success_key():
+    """A successful query answers ``{meta, data, rows}`` and no ``success``. Running it
+    through this module's ``_unwrap`` would raise on every good response — the failure
+    would look like a Cloudflare outage and be one line of "consistency" away."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "meta": [{"name": "pageviews", "type": "UInt64"}],
+                "data": [{"pageviews": "12"}, {"pageviews": "7"}],
+                "rows": 2,
+            },
+        )
+
+    client = _client(handler)
+    assert await client.query_analytics_sql("SELECT 1") == [{"pageviews": "12"}, {"pageviews": "7"}]
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_returns_an_empty_result_as_empty():
+    """``data: []`` is a REAL answer — the query matched nothing — and is the only shape
+    that may come back as no rows. Everything else that produces no rows raises."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"meta": [], "data": [], "rows": 0})
+
+    client = _client(handler)
+    assert await client.query_analytics_sql("SELECT 1") == []
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_fails_closed_on_a_missing_scope():
+    """FAIL-CLOSED IS THE WHOLE REQUIREMENT HERE, not a habit. Returning ``[]`` on a
+    failure would render a customer's dashboard as "0 visitors" when the truth is "the
+    read failed", and a panel reporting an outage as a quiet week is worse than one
+    reporting nothing.
+
+    403 specifically, because the token scope this needs (``Account Analytics Read``) is
+    NOT one the deploy paths carry — so this is the first thing that goes wrong in a new
+    environment, and Cloudflare's own sentence has to survive into the message."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "success": False,
+                "errors": [{"code": 9109, "message": "Unauthorized to access"}],
+            },
+        )
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.query_analytics_sql("SELECT 1")
+
+    assert exc.value.code == "sites.cloudflare_error"
+    assert "403" in exc.value.message
+    assert "Unauthorized to access" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_fails_closed_on_a_non_json_body():
+    """The SQL endpoint answers text/plain for some errors, and a body that will not
+    parse is not an empty result."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="Code: 62. DB::Exception: Syntax error")
+
+    client = _client(handler)
+    with pytest.raises(ValidationError) as exc:
+        await client.query_analytics_sql("SELECT nonsense")
+    assert exc.value.code == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+async def test_analytics_sql_fails_closed_on_a_2xx_with_no_data_array():
+    """A 200 whose body has no ``data`` list is a contract break, not an empty result —
+    an empty result IS a ``data`` of ``[]``. Reporting it as no rows would manufacture
+    exactly the zeros this method exists never to manufacture."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    for body in ({"meta": [], "rows": 0}, {"data": None}, {"data": {"pageviews": 1}}, []):
+
+        def handler(request: httpx.Request, _body=body) -> httpx.Response:
+            return httpx.Response(200, json=_body)
+
+        client = _client(handler)
+        with pytest.raises(ValidationError) as exc:
+            await client.query_analytics_sql("SELECT 1")
+        assert exc.value.code == "sites.cloudflare_error", body
+
+
+# ── Teardown primitives (sites lifecycle, wave 1 chunk 1) ────────────────
+#
+# These assert the two things a teardown call can get wrong in a way nothing else
+# notices: the PATH (a delete aimed at the wrong surface silently removes nothing and
+# reports success) and the 404 CONTRACT (a resumed cascade re-runs completed steps, so
+# "already gone" must not raise). The house rule for every delete here is that 404 is
+# success — a teardown that cannot finish leaves exactly the orphan it was called to
+# remove.
+
+
+@pytest.mark.asyncio
+async def test_delete_worker_targets_the_dispatch_namespace_script():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    await _client(handler).delete_worker("site_abc")
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == (
+        "/client/v4/accounts/acct_1/workers/dispatch/namespaces/paw-sites/scripts/site_abc"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_account_script_targets_the_account_level_path():
+    """The ``workers`` deploy mode's script does NOT live in the dispatch namespace.
+
+    Sending this delete to the namespace path would 404 — and because 404 is success,
+    the cascade would record a completed teardown over a Worker still serving.
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    await _client(handler).delete_account_script("site_abc")
+    assert seen["path"] == "/client/v4/accounts/acct_1/workers/scripts/site_abc"
+
+
+@pytest.mark.asyncio
+async def test_delete_database_targets_the_d1_uuid():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    await _client(handler).delete_database("db-uuid-1")
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == "/client/v4/accounts/acct_1/d1/database/db-uuid-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.delete_worker("gone"),
+        lambda c: c.delete_account_script("gone"),
+        lambda c: c.delete_database("gone"),
+    ],
+)
+async def test_a_404_is_success_for_every_teardown_delete(call):
+    """A resumed cascade re-runs steps it already finished. If "already gone" raised,
+    a partial teardown could never be completed — the exact orphan these exist to stop.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"success": False, "errors": [{"message": "nope"}]})
+
+    await call(_client(handler))  # must not raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.delete_worker("x"),
+        lambda c: c.delete_account_script("x"),
+        lambda c: c.delete_database("x"),
+    ],
+)
+async def test_a_real_failure_still_raises(call):
+    """404 is the ONLY forgiven status. A 500 means the resource may still exist, and
+    swallowing it would mark the step done while the orphan survives."""
+
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"success": False, "errors": [{"message": "boom"}]})
+
+    with pytest.raises(ValidationError):
+        await call(_client(handler))
+
+
+# ── D1 create options: location hint and read replication (new databases only) ──
+
+
+def _create_body(monkeypatch, env: dict[str, str]) -> dict:
+    import asyncio
+
+    for key in ("PAW_SITES_D1_LOCATION_HINT", "PAW_SITES_D1_READ_REPLICATION"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"success": True, "result": {"uuid": "u1"}})
+
+    assert asyncio.run(_client(handler).create_database("site-db")) == "u1"
+    return seen["body"]
+
+
+def test_create_database_sends_only_the_name_by_default(monkeypatch):
+    assert _create_body(monkeypatch, {}) == {"name": "site-db"}
+
+
+def test_create_database_passes_the_configured_location_hint(monkeypatch):
+    body = _create_body(monkeypatch, {"PAW_SITES_D1_LOCATION_HINT": " APAC "})
+    assert body == {"name": "site-db", "primary_location_hint": "apac"}
+
+
+def test_an_unknown_location_hint_is_left_out_so_cloudflare_chooses(monkeypatch):
+    body = _create_body(monkeypatch, {"PAW_SITES_D1_LOCATION_HINT": "sam"})
+    assert body == {"name": "site-db"}
+
+
+def test_read_replication_is_opt_in_at_create(monkeypatch):
+    body = _create_body(
+        monkeypatch,
+        {"PAW_SITES_D1_READ_REPLICATION": "1", "PAW_SITES_D1_LOCATION_HINT": "weur"},
+    )
+    assert body == {
+        "name": "site-db",
+        "primary_location_hint": "weur",
+        "read_replication": {"mode": "auto"},
+    }
+    assert "read_replication" not in _create_body(
+        monkeypatch, {"PAW_SITES_D1_READ_REPLICATION": "0"}
+    )
+
+
+# --------------------------------------------------------------------------- D1 Time Travel
+
+_D1 = "/client/v4/accounts/acct_1/d1/database/db-1"
+
+
+@pytest.mark.asyncio
+async def test_d1_info_gets_the_database_and_returns_its_version():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(
+            200, json={"success": True, "result": {"uuid": "db-1", "version": "production"}}
+        )
+
+    info = await _client(handler).d1_info("db-1")
+    assert seen == {"method": "GET", "path": _D1}
+    assert info["version"] == "production"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timestamp", [None, "2026-10-27T10:00:00Z"])
+async def test_d1_bookmark_reads_the_time_travel_bookmark(timestamp):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"success": True, "result": {"bookmark": "00000085-ab"}})
+
+    assert await _client(handler).d1_bookmark("db-1", timestamp) == "00000085-ab"
+    assert seen["method"] == "GET"
+    assert seen["path"] == _D1 + "/time_travel/bookmark"
+    assert seen["params"] == ({"timestamp": timestamp} if timestamp else {})
+
+
+@pytest.mark.asyncio
+async def test_d1_bookmark_without_one_fails_closed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    with pytest.raises(Exception) as exc:
+        await _client(handler).d1_bookmark("db-1")
+    assert getattr(exc.value, "code", "") == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kw", "params"),
+    [
+        ({"timestamp": "2026-10-27T10:00:00Z"}, {"timestamp": "2026-10-27T10:00:00Z"}),
+        ({"bookmark": "00000085-ab"}, {"bookmark": "00000085-ab"}),
+    ],
+)
+async def test_d1_restore_posts_one_target_and_returns_the_undo_bookmark(kw, params):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {"bookmark": "b-new", "previous_bookmark": "b-old", "message": "ok"},
+            },
+        )
+
+    out = await _client(handler).d1_restore("db-1", **kw)
+    assert seen == {"method": "POST", "path": _D1 + "/time_travel/restore", "params": params}
+    assert out == {"bookmark": "b-new", "previous_bookmark": "b-old", "message": "ok"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw", [{}, {"bookmark": "a", "timestamp": "2026-10-27T10:00:00Z"}])
+async def test_d1_restore_needs_exactly_one_target(kw):
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("no request should be made")
+
+    with pytest.raises(Exception) as exc:
+        await _client(handler).d1_restore("db-1", **kw)
+    assert getattr(exc.value, "code", "") == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+async def test_d1_restore_refusal_fails_closed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"success": False, "errors": [{"code": 7500, "message": "too many"}]}
+        )
+
+    with pytest.raises(Exception) as exc:
+        await _client(handler).d1_restore("db-1", timestamp="2026-10-27T10:00:00Z")
+    assert "too many" in str(getattr(exc.value, "message", exc.value))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.d1_bookmark("db-1", "2020-01-01T00:00:00Z"),
+        lambda c: c.d1_restore("db-1", timestamp="2020-01-01T00:00:00Z"),
+    ],
+)
+async def test_a_timestamp_before_the_database_is_out_of_window(call):
+    """Live D1 answers 400 code 7400 for a moment before the database existed or
+    past retention; that is the owner's choice of time, not a Cloudflare fault."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "success": False,
+                "errors": [{"code": 7400, "message": "Provided timestamp is too old"}],
+            },
+        )
+
+    with pytest.raises(Exception) as exc:
+        await call(_client(handler))
+    assert getattr(exc.value, "code", "") == "sites.data_restore_out_of_window"
+    assert getattr(exc.value, "status_code", 0) == 422

@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# ee/scripts/build_compiled_wheel.sh
+#
+# Created 2026-07-01 (ee-cython gate): release build that produces the
+# SOURCE-PROTECTED pocketpaw_ee wheel.
+#
+# PURPOSE
+#   Emit a pocketpaw_ee wheel where every module is a native .so with NO readable
+#   .py/.c source. This is the enterprise / per-tenant release artifact.
+#
+#   The ordinary `uv build` (cython hook gated OFF — see ee/pyproject.toml) ships
+#   readable source on purpose and is fast (~15s); dev / CI / editable installs
+#   use it. Source protection is NOT a static hatch `exclude` (that empties the
+#   default wheel and can't be made conditional), so it is done here in two steps:
+#     1. compile with the cython hook ON (HATCH_BUILD_HOOK_ENABLE_CYTHON=true),
+#     2. strip the source from the built wheel, regenerating RECORD with the
+#        official `wheel` tool (NEVER hand-edit RECORD).
+#
+# USAGE
+#   ee/scripts/build_compiled_wheel.sh
+#       Full release build: compile (~25 min) -> strip -> stripped wheel in ee/dist/.
+#   ee/scripts/build_compiled_wheel.sh --strip-only <wheel.whl> [out-dir]
+#       Skip the compile; strip an ALREADY-compiled wheel (contains .py+.so) into
+#       out-dir (default ee/dist/). Fast — used to test/re-run the strip half
+#       without a 25-min recompile.
+#
+# REQUIRES
+#   uv (build front-end), the `wheel` tool (RECORD-safe unpack/pack), and a C
+#   toolchain (gcc) for the compile. The enterprise Docker stage installs uv +
+#   wheel and already ships gcc.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DIST_DIR="$EE_DIR/dist"
+
+CLEANUP=()
+cleanup() { for d in "${CLEANUP[@]:-}"; do [ -n "$d" ] && rm -rf "$d"; done; }
+trap cleanup EXIT
+
+# --- resolve a `wheel` CLI invocation (RECORD-safe unpack/pack) ---
+PY="$(command -v python || command -v python3 || true)"
+if command -v wheel >/dev/null 2>&1; then
+  wheel_cli() { wheel "$@"; }
+elif [ -n "$PY" ] && "$PY" -m wheel version >/dev/null 2>&1; then
+  wheel_cli() { "$PY" -m wheel "$@"; }
+elif command -v uvx >/dev/null 2>&1; then
+  wheel_cli() { uvx wheel "$@"; }
+else
+  echo "ERROR: the 'wheel' tool is required (pip install wheel / uv pip install wheel)." >&2
+  exit 1
+fi
+
+# --- strip: drop .py/.c/.pyx/.pxd from an already-compiled wheel, keep .so + data
+#     + .dist-info, and let `wheel pack` regenerate RECORD. Sets STRIPPED_WHEEL. ---
+STRIPPED_WHEEL=""
+strip_wheel() {
+  local raw_whl="$1" out_dir="$2"
+  [ -f "$raw_whl" ] || { echo "ERROR: wheel not found: $raw_whl" >&2; exit 1; }
+  mkdir -p "$out_dir"
+
+  local work; work="$(mktemp -d)"; CLEANUP+=("$work")
+  wheel_cli unpack "$raw_whl" -d "$work" >/dev/null
+
+  local pkgroot; pkgroot="$(find "$work" -maxdepth 1 -type d -name 'pocketpaw_ee-*' | head -1)"
+  [ -n "$pkgroot" ] || { echo "ERROR: unpacked dir not found under $work" >&2; exit 1; }
+
+  # Strip source from the package tree only (leave .dist-info + data untouched).
+  find "$pkgroot/pocketpaw_ee" -type f \
+    \( -name '*.py' -o -name '*.c' -o -name '*.pyx' -o -name '*.pxd' \) -delete
+
+  # Count + fail closed BEFORE repacking.
+  local py_n so_n c_n data_n
+  py_n=$(find "$pkgroot/pocketpaw_ee" -type f -name '*.py' | wc -l | tr -d ' ')
+  so_n=$(find "$pkgroot/pocketpaw_ee" -type f -name '*.so' | wc -l | tr -d ' ')
+  c_n=$(find  "$pkgroot/pocketpaw_ee" -type f -name '*.c'  | wc -l | tr -d ' ')
+  data_n=$(find "$pkgroot/pocketpaw_ee" -type f \
+    ! -name '*.py' ! -name '*.so' ! -name '*.c' ! -name '*.pyx' ! -name '*.pxd' | wc -l | tr -d ' ')
+
+  [ "$py_n" -eq 0 ]  || { echo "ERROR: strip left $py_n .py file(s) in the package" >&2; exit 1; }
+  [ "$so_n" -gt 0 ]  || { echo "ERROR: no .so in the package — was it compiled with the hook ON?" >&2; exit 1; }
+
+  wheel_cli pack "$pkgroot" -d "$out_dir" >/dev/null
+  STRIPPED_WHEEL="$(ls -t "$out_dir"/pocketpaw_ee-*.whl | head -1)"
+
+  echo "---------------------------------------------------------------"
+  echo "source-stripped compiled wheel: $STRIPPED_WHEEL"
+  echo "  pocketpaw_ee/*.py  : $py_n   (must be 0)"
+  echo "  pocketpaw_ee/*.so  : $so_n   (must be >0)"
+  echo "  pocketpaw_ee/*.c   : $c_n    (stripped)"
+  echo "  data files kept    : $data_n (yaml/sql/md/json/…)"
+  echo "---------------------------------------------------------------"
+}
+
+# --- mode dispatch ---
+if [ "${1:-}" = "--strip-only" ]; then
+  RAW="${2:?usage: build_compiled_wheel.sh --strip-only <wheel.whl> [out-dir]}"
+  OUT="${3:-$DIST_DIR}"
+  strip_wheel "$RAW" "$OUT"
+  exit 0
+fi
+
+# Full release build: compile (hook ON) into a temp dir, then strip -> ee/dist/.
+echo ">> compiling pocketpaw_ee with Cython (HATCH_BUILD_HOOK_ENABLE_CYTHON=true) — ~25 min"
+RAW_OUT="$(mktemp -d)"; CLEANUP+=("$RAW_OUT")
+( cd "$EE_DIR" && HATCH_BUILD_HOOK_ENABLE_CYTHON=true uv build --wheel --out-dir "$RAW_OUT" )
+RAW_WHL="$(ls -t "$RAW_OUT"/pocketpaw_ee-*.whl | head -1)"
+echo ">> compiled wheel: $RAW_WHL"
+echo ">> stripping source (.py/.c/.pyx/.pxd); keeping .so + data; RECORD regenerated by wheel pack"
+strip_wheel "$RAW_WHL" "$DIST_DIR"
+echo ">> done: $STRIPPED_WHEEL"

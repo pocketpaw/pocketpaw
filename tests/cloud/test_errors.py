@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ee.cloud.shared.errors import (
+from pocketpaw_ee.cloud.shared.errors import (
     CloudError,
     ConflictError,
     Forbidden,

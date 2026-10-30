@@ -18,7 +18,7 @@ from pocketpaw.connectors.yaml_engine import parse_connector_yaml
 # YAML Parsing
 # ---------------------------------------------------------------------------
 
-CONNECTORS_DIR = Path(__file__).resolve().parent.parent / "connectors"
+CONNECTORS_DIR = Path(__file__).resolve().parent.parent.parent / "connectors"
 
 
 class TestFirebaseYAML:

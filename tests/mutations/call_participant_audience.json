@@ -1,0 +1,50 @@
+[
+  {
+    "label": "participant events fall back out of the call branch (the original dead-event bug)",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "            \"call.notes_posted\",\n            \"call.participant_joined\",\n            \"call.participant_left\",\n        }:",
+    "replace": "            \"call.notes_posted\",\n        }:",
+    "tests": [
+      "tests/cloud/realtime/test_audience.py::test_call_participant_events_route_to_group_members",
+      "tests/cloud/realtime/test_audience_isolation.py::test_call_participant_joined_reaches_every_group_member",
+      "tests/cloud/realtime/test_audience_isolation.py::test_call_participant_left_reaches_every_group_member"
+    ]
+  },
+  {
+    "label": "only the joined half is wired (leave regresses to [])",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "            \"call.participant_left\",\n        }:",
+    "replace": "        }:",
+    "tests": [
+      "tests/cloud/realtime/test_audience_isolation.py::test_call_participant_left_reaches_every_group_member"
+    ]
+  },
+  {
+    "label": "audience keyed off the payload identity instead of DB-resolved membership",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "            \"call.participant_left\",\n        }:\n            if gid := d.get(\"group_id\"):\n                return await self._group(gid)",
+    "replace": "            \"call.participant_left\",\n        }:\n            if d.get(\"identity\"):\n                return [d[\"identity\"]]\n            if gid := d.get(\"group_id\"):\n                return await self._group(gid)",
+    "tests": [
+      "tests/cloud/realtime/test_audience.py::test_call_participant_events_exclude_non_members",
+      "tests/cloud/realtime/test_audience.py::test_call_participant_joined_keeps_the_joiner_in_the_audience"
+    ]
+  },
+  {
+    "label": "missing group_id no longer short-circuits (unscoped member lookup)",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "            \"call.participant_left\",\n        }:\n            if gid := d.get(\"group_id\"):\n                return await self._group(gid)\n            return []",
+    "replace": "            \"call.participant_left\",\n        }:\n            return await self._group(d.get(\"group_id\", \"\"))",
+    "tests": [
+      "tests/cloud/realtime/test_audience.py::test_call_participant_events_without_group_id_have_no_audience"
+    ]
+  },
+  {
+    "label": "call lifecycle events lose their audience (pin against collateral damage)",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "        if t in {\n            \"call.started\",\n            \"call.ended\",",
+    "replace": "        if t in {\n            \"call.__started\",\n            \"call.__ended\",",
+    "tests": [
+      "tests/cloud/realtime/test_audience.py::test_call_lifecycle_events_still_route_to_group_members"
+    ]
+  }
+]

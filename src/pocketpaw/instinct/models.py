@@ -1,0 +1,206 @@
+# Instinct data models — decision pipeline types.
+# Created: 2026-03-28
+# Updated: 2026-07-31 (AL-1, agent ledger spine) — added an ADDITIVE, optional
+#   ``Action.actor_agent_id``. Until now the only record of WHICH agent proposed
+#   an action was a free-text ``trigger.source`` string ("paw_bar:<widget_id>",
+#   "belt:develop") — parseable by a human, not joinable by a query. That gap is
+#   why "what did my agents do for me?" could not be asked: the approval
+#   pipeline every agent kind funnels through did not carry the agent. The field
+#   is a plain str defaulting to "" and nothing validates it as non-empty on
+#   purpose: an unattributed proposal must stay legal, land its row, and show up
+#   in an honest "unattributed" bucket rather than being dropped or blocked.
+# Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — added an
+#   ADDITIVE, nullable ``Action.scope_type`` so an Action can be scoped to a
+#   GENERIC artifact (pocket / site / dashboard / …) instead of being implicitly
+#   pocket-scoped. ``scope_type=None`` reads as the legacy "pocket" scope: every
+#   pre-BP-3 row (and every caller that does not set it) keeps working unchanged,
+#   with ``pocket_id`` reused as the pocket-scope id. When ``scope_type`` is set,
+#   ``pocket_id`` carries the scope id within that scope_type. Nothing was
+#   renamed — this is purely additive so the existing pocket-scoped pipeline is
+#   untouched.
+# Updated: 2026-05-21 (feat/instinct-outcome-verification) — issue #1162:
+#   Action.outcome can now hold a structured OutcomeVerdict (status +
+#   per-criterion results) instead of only a free-text "what happened"
+#   string. The field still accepts a plain string for backward
+#   compatibility — old executed actions and callers that pass a string
+#   keep working. Added OutcomeStatus, CriterionResult, OutcomeVerdict.
+# Updated: 2026-05-13 (feat/mission-control-facade) — added optional ``assignee``
+#   to Action so The Tray can filter pending items to a specific human approver.
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from pocketpaw.fabric.models import _gen_id
+
+
+class ActionStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXECUTED = "executed"
+    FAILED = "failed"
+
+
+class OutcomeStatus(StrEnum):
+    """Verdict on whether an executed action solved the original problem.
+
+    A completed action is an *output*. Whether it solved the problem is an
+    *outcome* — and those are not the same thing. This is the verdict half
+    of the distinction (issue #1162).
+    """
+
+    SOLVED = "solved"  # every success criterion was met
+    PARTIAL = "partial"  # some criteria met, some not
+    NOT_SOLVED = "not_solved"  # no criteria met
+    UNKNOWN = "unknown"  # no criteria were captured — nothing to check
+
+
+class CriterionResult(BaseModel):
+    """Whether one captured success criterion was met by the action result.
+
+    ``criterion`` is the verifiable "this is done when…" statement captured
+    at task intake (see deep_work issue #1161). ``met`` is the verifier's
+    deterministic verdict for it. ``detail`` carries a short human-readable
+    note on how the verdict was reached.
+    """
+
+    criterion: str
+    met: bool
+    detail: str = ""
+
+
+class OutcomeVerdict(BaseModel):
+    """A checked verdict on an executed action — the structured replacement
+    for the free-text ``Action.outcome`` string.
+
+    Produced by :func:`pocketpaw.instinct.verification.verify_outcome`. The
+    ``status`` summarizes the per-criterion ``criteria_results``; ``summary``
+    keeps a free-text "what happened" note so nothing is lost relative to
+    the old string-only field.
+    """
+
+    status: OutcomeStatus
+    criteria_results: list[CriterionResult] = Field(default_factory=list)
+    summary: str = ""
+
+    @property
+    def met_count(self) -> int:
+        """How many success criteria were met."""
+        return sum(1 for c in self.criteria_results if c.met)
+
+    @property
+    def total_count(self) -> int:
+        """How many success criteria were checked."""
+        return len(self.criteria_results)
+
+
+class ActionPriority(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class ActionCategory(StrEnum):
+    DATA = "data"
+    ALERT = "alert"
+    WORKFLOW = "workflow"
+    CONFIG = "config"
+    EXTERNAL = "external"
+
+
+class ActionTrigger(BaseModel):
+    """What triggered an action."""
+
+    type: str  # "agent", "automation", "user", "connector"
+    source: str  # agent name, rule ID, user ID, connector name
+    reason: str
+
+
+class ActionContext(BaseModel):
+    """Data context for a decision."""
+
+    object_ids: list[str] = Field(default_factory=list)
+    connector_data: dict[str, Any] = Field(default_factory=dict)
+    metrics: dict[str, float] = Field(default_factory=dict)
+    notes: str = ""
+
+
+class Action(BaseModel):
+    """A proposed action from the agent, waiting for approval."""
+
+    id: str = Field(default_factory=lambda: _gen_id("act"))
+    # ``scope_type`` (BP-3) makes the Action artifact-GENERIC. ``None`` is the
+    # legacy default and reads as "pocket": pre-BP-3 rows and every caller that
+    # does not set it stay pocket-scoped with ``pocket_id`` as the pocket-scope
+    # id. When set (e.g. "site"), ``pocket_id`` carries the scope id within that
+    # scope_type. Purely additive — nothing was renamed, so the pocket pipeline
+    # is unchanged.
+    scope_type: str | None = None
+    # ``actor_agent_id`` (AL-1) names the AGENT that proposed this action, so an
+    # approval can be attributed to the worker that asked for it rather than
+    # inferred from a trigger string. Stamped best-effort at the propose call
+    # sites that know it (paw-bar reads its widget's bound agent; a chat run
+    # knows its own; a belt station knows its identity). "" is legal and
+    # permanent-by-design: an action nobody could attribute still belongs in the
+    # ledger, counted honestly as unattributed.
+    actor_agent_id: str = ""
+    pocket_id: str
+    title: str
+    description: str
+    category: ActionCategory = ActionCategory.WORKFLOW
+    status: ActionStatus = ActionStatus.PENDING
+    priority: ActionPriority = ActionPriority.MEDIUM
+    trigger: ActionTrigger
+    recommendation: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    context: ActionContext = Field(default_factory=ActionContext)
+    # outcome holds the result of executing the action. Originally a
+    # free-text "what happened" string; issue #1162 lets it also be a
+    # structured OutcomeVerdict (a checked "did this solve the problem"
+    # answer). Both are accepted — a string is the legacy form, still
+    # valid. ``mark_executed`` writes whichever the caller passes.
+    outcome: str | OutcomeVerdict | None = None
+    error: str | None = None
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    rejected_reason: str | None = None
+    assignee: str | None = Field(
+        default=None,
+        description=(
+            "Optional human user id the Nudge is awaiting approval from. "
+            "Used by Mission Control's The Tray feed to filter to items "
+            "the current operator owns."
+        ),
+    )
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+    executed_at: datetime | None = None
+
+
+class AuditCategory(StrEnum):
+    DECISION = "decision"
+    DATA = "data"
+    CONFIG = "config"
+    SECURITY = "security"
+
+
+class AuditEntry(BaseModel):
+    """An audit log entry for every decision."""
+
+    id: str = Field(default_factory=lambda: _gen_id("aud"))
+    action_id: str | None = None
+    pocket_id: str | None = None
+    timestamp: datetime = Field(default_factory=datetime.now)
+    actor: str  # "agent:claude", "user:prakash", "system"
+    event: str  # "action_proposed", "action_approved", etc.
+    category: AuditCategory = AuditCategory.DECISION
+    description: str
+    context: dict[str, Any] = Field(default_factory=dict)
+    ai_recommendation: str | None = None
+    outcome: str | None = None

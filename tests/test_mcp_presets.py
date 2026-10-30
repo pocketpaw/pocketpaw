@@ -1,6 +1,9 @@
 """Tests for MCP Server Presets — catalog registry + dashboard endpoints.
 
 Created: 2026-02-09
+Updated: 2026-06-08 (feat/plugin-installer-mcp) — added coverage for
+``spec_to_config`` (standard .mcp.json spec -> MCPServerConfig mapping,
+transport derivation from the spec ``type`` field).
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -15,7 +18,54 @@ from pocketpaw.mcp.presets import (
     get_preset,
     get_presets_by_category,
     preset_to_config,
+    spec_to_config,
 )
+
+# ======================================================================
+# spec_to_config (standard .mcp.json mapping)
+# ======================================================================
+
+
+class TestSpecToConfig:
+    def test_stdio_default(self):
+        cfg = spec_to_config(
+            "plugin:p:svc",
+            {"command": "npx", "args": ["-y", "svc-mcp"], "env": {"K": "v"}},
+        )
+        assert cfg.name == "plugin:p:svc"
+        assert cfg.transport == "stdio"
+        assert cfg.command == "npx"
+        assert cfg.args == ["-y", "svc-mcp"]
+        assert cfg.env == {"K": "v"}
+        assert cfg.enabled is True
+
+    @pytest.mark.parametrize(
+        "spec_type,expected",
+        [
+            ("http", "http"),
+            ("sse", "sse"),
+            ("streamable-http", "streamable-http"),
+            ("streamable_http", "streamable-http"),
+            ("STDIO", "stdio"),
+            ("unknown-thing", "stdio"),
+        ],
+    )
+    def test_transport_from_type(self, spec_type, expected):
+        cfg = spec_to_config("n", {"type": spec_type, "url": "https://x"})
+        assert cfg.transport == expected
+
+    def test_coerces_non_string_values(self):
+        cfg = spec_to_config("n", {"args": [1, 2], "env": {"K": 3}})
+        assert cfg.args == ["1", "2"]
+        assert cfg.env == {"K": "3"}
+
+    def test_empty_spec(self):
+        cfg = spec_to_config("n", {})
+        assert cfg.transport == "stdio"
+        assert cfg.command == ""
+        assert cfg.args == []
+        assert cfg.env == {}
+
 
 # ======================================================================
 # Registry tests

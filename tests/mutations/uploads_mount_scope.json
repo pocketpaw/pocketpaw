@@ -1,0 +1,37 @@
+[
+  {
+    "label": "re-root the mount at the whole uploads tree, the shipped state",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    avatars_dir = Path.home() / \".pocketpaw\" / \"uploads\" / \"avatars\"\n    avatars_dir.mkdir(parents=True, exist_ok=True)\n    app.mount(\"/uploads/avatars\", StaticFiles(directory=str(avatars_dir)), name=\"uploads\")",
+    "replace": "    avatars_dir = Path.home() / \".pocketpaw\" / \"uploads\"\n    avatars_dir.mkdir(parents=True, exist_ok=True)\n    app.mount(\"/uploads\", StaticFiles(directory=str(avatars_dir)), name=\"uploads\")",
+    "tests": ["tests/cloud/test_uploads_mount_scope.py"]
+  },
+  {
+    "label": "keep the narrow path but serve the parent directory",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    avatars_dir = Path.home() / \".pocketpaw\" / \"uploads\" / \"avatars\"",
+    "replace": "    avatars_dir = Path.home() / \".pocketpaw\" / \"uploads\"",
+    "tests": ["tests/cloud/test_uploads_mount_scope.py"]
+  },
+  {
+    "label": "widen the middleware exempt_paths entry back to /uploads",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "        \"/uploads/avatars\",\n        \"/favicon.ico\",",
+    "replace": "        \"/uploads\",\n        \"/favicon.ico\",",
+    "tests": ["tests/cloud/test_uploads_mount_scope.py"]
+  },
+  {
+    "label": "widen the SPA-bootstrap allow-through back to /uploads/",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "        or request.url.path.startswith(\"/uploads/avatars/\")",
+    "replace": "        or request.url.path.startswith(\"/uploads/\")",
+    "tests": ["tests/cloud/test_uploads_mount_scope.py"]
+  },
+  {
+    "label": "widen the verify_token skip back to /uploads",
+    "file": "src/pocketpaw/dashboard_auth.py",
+    "find": "        or request.url.path.startswith(\"/uploads/avatars\")\n        or request.url.path.startswith(\"/pawbar-app\")",
+    "replace": "        or request.url.path.startswith(\"/uploads\")\n        or request.url.path.startswith(\"/pawbar-app\")",
+    "tests": ["tests/cloud/test_uploads_mount_scope.py"]
+  }
+]

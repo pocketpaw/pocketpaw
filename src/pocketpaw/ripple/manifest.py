@@ -1,0 +1,1209 @@
+# backend/src/pocketpaw/ripple/manifest.py
+"""Load, validate against and format the Ripple widget manifest.
+
+The one widget catalog every reader uses (chat agent, pocket tools, catalog
+gates, Paw Bar) is bundled beside this file as ``manifest.json``: the
+@ripple-ui/svelte release manifest pinned to ``RIPPLE_UI_SVELTE_VERSION``
+(``manifest.json.source`` says how to refresh it). ``load_bundled_manifest()``
+reads it once from disk; ``get_manifest(url, ttl)`` returns it when ``url`` is
+empty. A non-empty ``url`` (the ``ripple_manifest_url`` override) is fetched
+and TTL-cached, but a failed fetch, or a catalog older than the bundled one,
+logs a warning and serves the bundled catalog: never None, never a network
+call by default. Format for ``get_widget_spec``: the spec envelope, the
+action grammar (one line per verb), the node-level ``motion`` field with its
+budget rule, then each requested widget's props and example.
+
+Validators (all pure walkers over a rippleSpec; they descend `children`,
+`else_children` and Chain Flow step trees):
+  * ``validate_against_manifest`` — props not declared for a node's type, plus
+    known inner-item aliases (``apply_aliases`` rewrites them in place);
+    ``relax_ssr_props`` allows the SSR node-level props a static Paw Site uses.
+  * ``validate_against_catalog`` — node types missing from the manifest, and
+    the https-only, host-allowlisted URL policy for the ``embed`` escape hatch.
+  * ``validate_required_props`` — props the manifest marks ``required``.
+  * action-verb checks against ``_action_verbs.ACTION_VERBS``, which
+    ``scripts/vendor_ripple_verbs.py`` generates from ripple's EventAction enum.
+"""
+
+from __future__ import annotations
+
+import difflib
+import functools
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
+
+from pocketpaw.ripple._action_verbs import ACTION_VERBS
+
+logger = logging.getLogger(__name__)
+
+# Control-flow node types that are always allowed alongside catalog
+# widgets — they carry no widget ``type`` from the renderer's closed
+# registry, they're spec grammar (``each`` loops, ``if`` gates).
+_CONTROL_FLOW_TYPES: frozenset[str] = frozenset({"if", "each"})
+
+# Curated default host allow-list for the ``embed`` widget's ``url`` mode.
+# These providers ship sandbox-friendly iframe-embeddable pages. The
+# operator can widen this via ``POCKETPAW_RIPPLE_EMBED_ALLOWED_HOSTS``.
+DEFAULT_EMBED_ALLOWED_HOSTS: tuple[str, ...] = (
+    "youtube-nocookie.com",
+    "player.vimeo.com",
+    "codepen.io",
+    "codesandbox.io",
+    "observablehq.com",
+    "www.figma.com",
+)
+
+_FETCH_TIMEOUT_SECONDS = 5.0
+_SCHEMA = "ripple.manifest/v1"
+
+# The @ripple-ui/svelte version paw-enterprise renders (its package.json), which
+# the bundled manifest must match. pocketpaw CI can't read that repo, so a
+# Ripple upgrade bumps this, swaps manifest.json, and the pin test keeps the two
+# from drifting apart silently.
+RIPPLE_UI_SVELTE_VERSION = "0.8.2"
+BUNDLED_MANIFEST_PATH = Path(__file__).with_name("manifest.json")
+
+# Module-global cache: url -> (expires_at_monotonic, parsed_manifest)
+_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+@functools.cache
+def load_bundled_manifest() -> dict[str, Any]:
+    """The bundled Ripple manifest, parsed once. Shared: callers must not mutate it."""
+    return json.loads(BUNDLED_MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def _version_tuple(version: Any) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(part) for part in str(version).split("-")[0].split("."))
+    except ValueError:
+        return None
+
+
+async def get_manifest(url: str, ttl_seconds: int) -> dict[str, Any]:
+    """The Ripple manifest: the bundled one, or the ``url`` override when set.
+
+    An override is fetched and cached for ``ttl_seconds``. If the fetch fails,
+    or it serves a catalog older than the bundled one, the bundled manifest is
+    served (and cached under ``url`` so a dead override costs one timeout per
+    TTL, not one per call).
+    """
+    if not url:
+        return load_bundled_manifest()
+    now = time.monotonic()
+    cached = _cache.get(url)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    bundled = load_bundled_manifest()
+    parsed = await _fetch_and_validate(url)
+    if parsed is None:
+        logger.warning("ripple manifest override %s unavailable; using the bundled catalog", url)
+        parsed = bundled
+    else:
+        got, floor = _version_tuple(parsed.get("version")), _version_tuple(bundled["version"])
+        if got is None or (floor is not None and got < floor):
+            logger.warning(
+                "ripple manifest override %s is version %r, older than the bundled %s; "
+                "using the bundled catalog",
+                url,
+                parsed.get("version"),
+                bundled["version"],
+            )
+            parsed = bundled
+
+    _cache[url] = (now + ttl_seconds, parsed)
+    return parsed
+
+
+async def _fetch_and_validate(url: str) -> dict[str, Any] | None:
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=_FETCH_TIMEOUT_SECONDS)
+    except httpx.TimeoutException:
+        logger.warning("ripple manifest fetch timed out: %s", url)
+        return None
+    except httpx.HTTPError as exc:
+        logger.warning("ripple manifest fetch failed: %s (%s)", url, exc)
+        return None
+
+    if response.status_code >= 400:
+        logger.warning("ripple manifest fetch returned %s: %s", response.status_code, url)
+        return None
+
+    try:
+        parsed = response.json()
+    except (json.JSONDecodeError, ValueError):
+        logger.error("ripple manifest is not valid JSON: %s", url)
+        return None
+
+    if not isinstance(parsed, dict):
+        logger.error("ripple manifest is not a JSON object: %s", url)
+        return None
+    if parsed.get("schema") != _SCHEMA:
+        logger.error("ripple manifest schema mismatch (got %r): %s", parsed.get("schema"), url)
+        return None
+    if not isinstance(parsed.get("widgets"), list):
+        logger.error("ripple manifest missing widgets array: %s", url)
+        return None
+
+    # spec envelope is optional for backward compatibility with older
+    # manifests, but log if missing — agents fed a manifest without it
+    # have to fall back to the system prompt for the envelope contract.
+    if not isinstance(parsed.get("spec"), dict):
+        logger.info("ripple manifest has no spec envelope (older publish): %s", url)
+
+    return parsed
+
+
+# Per-widget inner-item alias table for KNOWN drift in widget item arrays.
+# The manifest declares item shapes as TypeScript strings (e.g.
+# ``Array<{ text: string; ... }>``) which are not machine-introspectable,
+# so a small hand-curated alias table covers the widgets whose item
+# arrays have empirically drifted in production. Add an entry here the
+# first time a new drift is observed — the comment trail below doubles
+# as a record of past LLM failures.
+#
+# Format: ``{ widget_type: { items_prop_key: { wrong_inner_key: right_inner_key } } }``
+_KNOWN_ITEM_ALIASES: dict[str, dict[str, dict[str, str]]] = {
+    # `timeline` events: agents emit `description` (universal name)
+    # instead of the manifest's `detail`. Clean rename.
+    "timeline": {"events": {"description": "detail"}},
+}
+
+
+# SSR-essential node-level props that the renderer honors on specific widgets
+# but the manifest's per-widget ``props`` map omits (they are universal
+# node-level attributes the renderer wraps on, not per-widget props). A
+# statically-rendered Paw Site (csr=false, no client JS) REQUIRES these:
+#
+#   * ``id`` on ``section`` / ``card`` — emitted as the HTML element ``id``
+#     so in-page anchor links (#services, #book) resolve. Confirmed in the
+#     ripple source: ``<section {id} …>`` / ``<div {id} … (Card)>``.
+#   * ``name`` on ``input`` / ``textarea`` — emitted on the native control so
+#     the page's outer <form> POSTs the field. Confirmed: ``<input {name} …>``
+#     / ``<textarea {name} …>``.
+#   * ``href`` on ``button`` — renders the button as an anchor CTA on a static
+#     page; ``href`` on ``cta`` is already a declared manifest prop but is
+#     included here so the relaxation is symmetric for anchor CTAs.
+#
+# These are flagged as ``unknown_props`` by the default manifest walk, which
+# drives the agent's redraft loop into stripping the marketing widgets. The
+# walk relaxes them ONLY when ``relax_ssr_props=True`` (the site-generation
+# path), keyed to this closed combo list — it is NOT a blanket "allow ``id``
+# everywhere". Dashboard / pocket validation passes the flag False and is
+# unaffected. When a new SSR-honored prop/widget combo is confirmed in the
+# renderer, add it here.
+#
+# Format: ``{ widget_type: frozenset({prop, …}) }``
+SSR_NODE_LEVEL_PROPS: dict[str, frozenset[str]] = {
+    "section": frozenset({"id"}),
+    "card": frozenset({"id"}),
+    "input": frozenset({"name"}),
+    "textarea": frozenset({"name"}),
+    "button": frozenset({"href", "name"}),
+    "cta": frozenset({"href"}),
+}
+
+
+def validate_against_manifest(
+    spec: dict[str, Any] | None,
+    manifest: dict[str, Any],
+    *,
+    apply_aliases: bool = False,
+    relax_ssr_props: bool = False,
+) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and flag nodes whose ``props`` keys are not
+    declared in the manifest for that ``type``.
+
+    Also covers a small set of widgets whose inner item arrays have
+    drifted in production (see ``_KNOWN_ITEM_ALIASES``). When
+    ``apply_aliases=True``, the spec is mutated in place to rewrite the
+    known wrong keys to their canonical form.
+
+    ``relax_ssr_props`` (site-generation path only): when True, the
+    SSR-essential renderer-honored node-level props in
+    :data:`SSR_NODE_LEVEL_PROPS` (``section.id`` / ``card.id`` anchor
+    targets, ``input.name`` / ``textarea.name`` native POST fields,
+    ``button.href`` / ``cta.href`` anchor CTAs) are NOT reported as
+    ``unknown_props``. They render correctly on a static Paw Site
+    (csr=false) but the manifest omits them from per-widget props, so the
+    default walk would flag them and trigger the agent's redraft loop into
+    stripping the marketing widgets. The relaxation is a closed combo list,
+    keyed to the specific widget — it does NOT blanket-allow ``id``/``name``/
+    ``href`` everywhere. Dashboard / pocket validation passes False (the
+    default) and is unaffected.
+
+    Returns one issue dict per offending node; ``[]`` when ``spec`` is not
+    a dict or no issues are found. Issue shape::
+
+        {
+          "path": "ui.children[2].children[1]",
+          "type": "timeline",
+          "unknown_props": ["maxItem"],          # top-level prop drift
+          "allowed_props": ["events", "maxItems"],
+          "item_issues": [                       # inner-item drift
+            {
+              "path": "...props.events[0]",
+              "from": "description",
+              "to": "detail",
+              "applied": True,
+            },
+          ],
+        }
+    """
+    if not isinstance(spec, dict):
+        return []
+    widgets = manifest.get("widgets") or []
+    by_type: dict[str, set[str]] = {}
+    for w in widgets:
+        t = w.get("type")
+        if isinstance(t, str):
+            by_type[t] = set((w.get("props") or {}).keys())
+
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_validate(root, "ui", by_type, apply_aliases, issues, relax_ssr_props)
+    return issues
+
+
+def _walk_validate(
+    node: Any,
+    path: str,
+    by_type: dict[str, set[str]],
+    apply_aliases: bool,
+    issues: list[dict[str, Any]],
+    relax_ssr_props: bool = False,
+) -> None:
+    if not isinstance(node, dict):
+        return
+
+    wtype = node.get("type")
+    props = node.get("props")
+    if isinstance(wtype, str) and wtype in by_type and isinstance(props, dict):
+        allowed = by_type[wtype]
+        # On the site-generation path, the SSR-essential renderer-honored
+        # node-level props (anchor ``id``, native-POST ``name``, anchor
+        # ``href``) are treated as allowed for the specific widget that
+        # carries them — they render fine on a static page but the manifest
+        # omits them from per-widget props. Closed combo list, NOT a blanket
+        # allow; dashboard validation (relax_ssr_props=False) is untouched.
+        ssr_ok = SSR_NODE_LEVEL_PROPS.get(wtype, frozenset()) if relax_ssr_props else frozenset()
+        unknown = sorted(k for k in props.keys() if k not in allowed and k not in ssr_ok)
+        item_issues: list[dict[str, Any]] = []
+
+        for items_key, alias_map in _KNOWN_ITEM_ALIASES.get(wtype, {}).items():
+            arr = props.get(items_key)
+            if not isinstance(arr, list):
+                continue
+            for i, item in enumerate(arr):
+                if not isinstance(item, dict):
+                    continue
+                for wrong_k, right_k in alias_map.items():
+                    if wrong_k not in item or right_k in item:
+                        continue
+                    if apply_aliases:
+                        item[right_k] = item.pop(wrong_k)
+                    item_issues.append(
+                        {
+                            "path": f"{path}.props.{items_key}[{i}]",
+                            "from": wrong_k,
+                            "to": right_k,
+                            "applied": apply_aliases,
+                        }
+                    )
+
+        if unknown or item_issues:
+            issues.append(
+                {
+                    "path": path,
+                    "type": wtype,
+                    "unknown_props": unknown,
+                    "allowed_props": sorted(allowed),
+                    "item_issues": item_issues,
+                }
+            )
+
+    children = node.get("children")
+    if isinstance(children, list):
+        for i, child in enumerate(children):
+            _walk_validate(
+                child,
+                f"{path}.children[{i}]",
+                by_type,
+                apply_aliases,
+                issues,
+                relax_ssr_props,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Catalog-as-allowlist ingest gate (Increment 5).
+#
+# Where ``validate_against_manifest`` checks per-widget *prop* drift, this
+# gate checks the ``type`` itself: a node whose ``type`` is not a known
+# catalog widget renders as a red "Unknown widget type" box. Catching it
+# at ingest time lets the agent-generation path retry with a corrective
+# prompt instead of shipping the broken box to the user.
+# ---------------------------------------------------------------------------
+
+
+def allowed_types_from_manifest(manifest: dict[str, Any]) -> list[str]:
+    """Extract the widget ``type`` list from a parsed manifest.
+
+    The widget-manifest's ``widgets`` array is the catalog allow-list.
+    Returns a sorted list of unique string types; ``[]`` when the
+    manifest has no widgets.
+    """
+    widgets = manifest.get("widgets") or []
+    types: set[str] = set()
+    for w in widgets:
+        t = w.get("type")
+        if isinstance(t, str) and t:
+            types.add(t)
+    return sorted(types)
+
+
+def validate_against_catalog(
+    spec: dict[str, Any] | None,
+    allowed_types: list[str] | set[str],
+) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and flag every node whose ``type`` is not in
+    the catalog allow-list.
+
+    ``allowed_types`` is the widget-manifest type list (the renderer's
+    closed widget registry). The control-flow types ``if`` and ``each``
+    are always allowed on top of it — they're spec grammar, not widgets.
+
+    Returns one issue dict per offending node; ``[]`` when ``spec`` is not
+    a dict or every node's type is known. Issue shape::
+
+        {
+          "path": "ui.children[2]",
+          "type": "revenue-card",
+          "suggestion": "card",      # nearest catalog match, or None
+        }
+
+    ``suggestion`` is the closest catalog widget by edit distance
+    (``difflib.get_close_matches``) so a corrective prompt can point the
+    agent at the right name. It is ``None`` when nothing is close.
+    """
+    if not isinstance(spec, dict):
+        return []
+    allowed: set[str] = set(allowed_types) | _CONTROL_FLOW_TYPES
+    # Suggestion pool excludes the control-flow types — suggesting `if`
+    # / `each` for a mistyped widget name is never the right fix.
+    pool = sorted(set(allowed_types))
+
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_catalog(root, "ui", allowed, pool, issues)
+    return issues
+
+
+def _walk_catalog(
+    node: Any,
+    path: str,
+    allowed: set[str],
+    pool: list[str],
+    issues: list[dict[str, Any]],
+) -> None:
+    if not isinstance(node, dict):
+        return
+
+    wtype = node.get("type")
+    if isinstance(wtype, str) and wtype and wtype not in allowed:
+        matches = difflib.get_close_matches(wtype, pool, n=1, cutoff=0.6)
+        issues.append(
+            {
+                "path": path,
+                "type": wtype,
+                "suggestion": matches[0] if matches else None,
+            }
+        )
+
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for i, child in enumerate(kids):
+                _walk_catalog(child, f"{path}.{key}[{i}]", allowed, pool, issues)
+
+    # Chain Flow descent (RFC 13): a step node carries its widget tree under
+    # `ui`, a linear next step under `chain`, and selection-branch steps under
+    # `chain_map`. Without descending these, a bad widget buried in step 2/3 of
+    # a materialized flow escapes catalog validation.
+    ui = node.get("ui")
+    if isinstance(ui, dict):
+        _walk_catalog(ui, f"{path}.ui", allowed, pool, issues)
+    chain = node.get("chain")
+    if isinstance(chain, dict):
+        _walk_catalog(chain, f"{path}.chain", allowed, pool, issues)
+    chain_map = node.get("chain_map")
+    if isinstance(chain_map, dict):
+        for branch_id, branch in chain_map.items():
+            if isinstance(branch, dict):
+                _walk_catalog(branch, f"{path}.chain_map[{branch_id}]", allowed, pool, issues)
+
+
+# ---------------------------------------------------------------------------
+# Embed URL / host policy (Increment 5).
+#
+# The `embed` widget is the sanctioned escape hatch for content the widget
+# catalog can't express (a CodePen, a Figma frame, a self-contained viz).
+# Its `mode: "url"` form points an iframe at a third-party page, so the URL
+# is an SSRF / clickjacking boundary: https-only, host must be allow-listed,
+# and loopback / private / link-local / cloud-metadata hosts are blocked
+# UNCONDITIONALLY — even if the allow-list is widened to ``["*"]``.
+# ---------------------------------------------------------------------------
+
+
+def _host_allowed(host: str, allowed_hosts: list[str] | set[str]) -> bool:
+    """Return True when ``host`` is permitted by the allow-list.
+
+    A literal ``"*"`` entry widens the allow-list to every host (the
+    operator's explicit opt-in). Otherwise a host matches when it equals
+    an allow-list entry exactly, or is a sub-domain of one.
+    """
+    host = host.lower().rstrip(".")
+    for entry in allowed_hosts:
+        if not isinstance(entry, str) or not entry:
+            continue
+        if entry == "*":
+            return True
+        e = entry.lower().rstrip(".")
+        if host == e or host.endswith("." + e):
+            return True
+    return False
+
+
+def check_embed_url(url: Any, allowed_hosts: list[str] | set[str]) -> str | None:
+    """Validate one ``embed`` node ``url`` against the embed policy.
+
+    Returns ``None`` when the URL passes. Returns a human-readable reason
+    string when it fails. The policy, in order:
+
+    * ``url`` must be a non-empty string.
+    * scheme must be ``https`` — plain ``http`` is rejected.
+    * host must be present.
+    * loopback / RFC1918 / link-local / carrier-grade-NAT / cloud-metadata
+      hosts are hard-blocked **unconditionally** — this survives an
+      ``allowed_hosts`` widened to ``["*"]``.
+    * host must be in ``allowed_hosts`` (or ``allowed_hosts`` contains
+      ``"*"``).
+    """
+    # Imported here, not at module top, to keep the OSS-core import graph
+    # of this module light — the SSRF host classifier lives in security/.
+    from pocketpaw.security.url_validators import host_is_internal
+
+    if not isinstance(url, str) or not url.strip():
+        return "embed url must be a non-empty string"
+    parts = urlsplit(url.strip())
+    if parts.scheme != "https":
+        return f"embed url scheme '{parts.scheme or '(none)'}' not allowed — must be https"
+    if not parts.hostname:
+        return f"embed url has no host: {url!r}"
+    host = parts.hostname
+    # Hard block runs BEFORE the allow-list check so a `["*"]` allow-list
+    # can never re-enable an internal target.
+    if host_is_internal(host):
+        return (
+            f"embed url host '{host}' is loopback/private/link-local — "
+            f"blocked unconditionally (SSRF / metadata-endpoint protection)"
+        )
+    if not _host_allowed(host, allowed_hosts):
+        return f"embed url host '{host}' is not in the embed allow-list"
+    return None
+
+
+def check_embed_node(
+    node: dict[str, Any],
+    allowed_hosts: list[str] | set[str],
+) -> str | None:
+    """Validate a single ``embed`` node's policy.
+
+    Only ``mode: "url"`` embeds carry a URL boundary — a ``mode:
+    "srcdoc"`` embed is self-contained HTML and is not checked here.
+    Returns ``None`` when the node passes (or is not a URL-mode embed);
+    a reason string otherwise.
+    """
+    if not isinstance(node, dict) or node.get("type") != "embed":
+        return None
+    props = node.get("props")
+    if not isinstance(props, dict):
+        return None
+    if props.get("mode") != "url":
+        return None
+    return check_embed_url(props.get("url"), allowed_hosts)
+
+
+def find_embed_nodes(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and return every ``embed`` node found.
+
+    Used by the ingest pipeline to decide whether a spec needs an
+    embed-policy check and an audit-log entry.
+    """
+    if not isinstance(spec, dict):
+        return []
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    found: list[dict[str, Any]] = []
+    _walk_collect_embeds(root, found)
+    return found
+
+
+def _walk_collect_embeds(node: Any, found: list[dict[str, Any]]) -> None:
+    if not isinstance(node, dict):
+        return
+    if node.get("type") == "embed":
+        found.append(node)
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for child in kids:
+                _walk_collect_embeds(child, found)
+
+
+def check_embed_nodes_in_spec(
+    spec: dict[str, Any] | None,
+    allowed_hosts: list[str] | set[str],
+) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and flag every ``embed`` node that violates
+    the URL/host policy.
+
+    Returns one issue dict per offending node; ``[]`` when the spec has no
+    policy-violating embeds. Issue shape::
+
+        { "path": "ui.children[1]", "url": "http://...", "reason": "..." }
+    """
+    if not isinstance(spec, dict):
+        return []
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_embed_policy(root, "ui", allowed_hosts, issues)
+    return issues
+
+
+def _walk_embed_policy(
+    node: Any,
+    path: str,
+    allowed_hosts: list[str] | set[str],
+    issues: list[dict[str, Any]],
+) -> None:
+    if not isinstance(node, dict):
+        return
+    reason = check_embed_node(node, allowed_hosts)
+    if reason is not None:
+        props = node.get("props")
+        url = props.get("url") if isinstance(props, dict) else None
+        issues.append({"path": path, "url": url, "reason": reason})
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for i, child in enumerate(kids):
+                _walk_embed_policy(child, f"{path}.{key}[{i}]", allowed_hosts, issues)
+
+
+# ---------------------------------------------------------------------------
+# Action-verb allowlist + unwired-live-button detector (2026-05-23).
+#
+# Two related failure modes the prompt-side "label without source" rule
+# (PR #1194) didn't catch:
+#
+#  A. Invented action verbs. The specialist authors ``on_click:
+#     {action: "fetch", endpoint: "/pet/1", target: "pet_rows"}``. The
+#     Ripple event dispatcher has no ``fetch`` verb — its default case
+#     ``console.warn``s and returns. The button looks live but does
+#     nothing.
+#
+#  B. "Live"-labelled buttons with no real wiring. A Refresh button
+#     whose ``on_click`` is empty (or only contains the invented verb
+#     above) renders, takes user clicks, and never fetches. Coupled
+#     with pre-seeded mock data in ``state.<key>``, the canvas looks
+#     alive but is inert.
+#
+# Both walks here run as siblings to the catalog gate — strict on the
+# agent-generation path (raises so the chat agent can retry), logged on
+# the human / import path.
+# ---------------------------------------------------------------------------
+
+# Canonical action verbs the Ripple event dispatcher understands. Generated
+# from ripple's ``EventAction`` enum (packages/core/src/schema/event-handler.ts)
+# by ``scripts/vendor_ripple_verbs.py``; refresh by re-running it, never by
+# hand. A stale set either lets an invented verb pass spec validation and
+# silently no-op at runtime, or rejects a valid one (``animate`` was rejected
+# until 2026-10-02).
+#
+# ``invoke_tool`` is the click-driven sibling of ``run_source`` /
+# ``call_binding`` (#1206 part a): a button hands the host a tool name +
+# resolved args, the host runs the named tool via the per-pocket
+# ``POST /pockets/{id}/tools/run`` wire, the result flows back into the
+# usual ``on_success`` / ``on_error`` chain.
+_KNOWN_ACTION_VERBS: frozenset[str] = ACTION_VERBS
+
+# Button labels (case-insensitive substring match) that promise a live
+# fetch. Used by :func:`find_unwired_live_buttons` to know which buttons
+# are advertising behavior that must actually be wired.
+_LIVE_BUTTON_KEYWORDS: tuple[str, ...] = (
+    "refresh",
+    "reload",
+    "sync",
+    "pull",
+    "fetch",
+    "update from",
+    "re-fetch",
+    "refetch",
+)
+
+# Event-prop names that carry one or more action handlers. Mirrors the
+# Ripple node shape — any prop value whose key matches and whose value
+# is a handler-shaped object (or list of them) is in scope.
+_EVENT_PROP_NAMES: frozenset[str] = frozenset(
+    {
+        "on_click",
+        "onClick",
+        "on_change",
+        "onChange",
+        "on_submit",
+        "onSubmit",
+        "on_input",
+        "onInput",
+        "on_blur",
+        "onBlur",
+        "on_focus",
+        "onFocus",
+        "on_select",
+        "onSelect",
+    }
+)
+
+
+def _iter_handlers(value: Any) -> list[dict[str, Any]]:
+    """Normalise a handler prop value into the list of handler dicts.
+
+    A handler is either a single object ``{action: ..., ...}`` or a
+    list of such objects (action chains). Returns the flat list — any
+    non-dict entries are dropped (the catalog already rejected those).
+    """
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [h for h in value if isinstance(h, dict)]
+    return []
+
+
+def _walk_action_verbs(node: Any, path: str, issues: list[dict[str, Any]]) -> None:
+    """Recursive walk that collects unknown-action-verb violations.
+
+    Each issue: ``{path, prop, action, suggestion}``. ``suggestion`` is
+    the nearest known verb (difflib) so the corrective hint can be
+    specific. A handler without an ``action`` field is skipped — that
+    is the catalog's concern, not the verb gate.
+    """
+    if isinstance(node, dict):
+        # node-level prop scan
+        props = node.get("props") if isinstance(node.get("props"), dict) else node
+        if isinstance(props, dict):
+            for prop_name, prop_value in props.items():
+                if prop_name not in _EVENT_PROP_NAMES:
+                    continue
+                for handler in _iter_handlers(prop_value):
+                    verb = handler.get("action")
+                    if not isinstance(verb, str) or not verb:
+                        # No action field — the renderer treats this as
+                        # a no-op too. Flag it: a Refresh button bound
+                        # to ``{}`` is identical to ``{action: "fetch"}``
+                        # in effect.
+                        issues.append(
+                            {
+                                "path": f"{path}.props.{prop_name}",
+                                "prop": prop_name,
+                                "action": "<missing>",
+                                "suggestion": None,
+                            }
+                        )
+                        continue
+                    if verb not in _KNOWN_ACTION_VERBS:
+                        matches = difflib.get_close_matches(
+                            verb, sorted(_KNOWN_ACTION_VERBS), n=1, cutoff=0.6
+                        )
+                        issues.append(
+                            {
+                                "path": f"{path}.props.{prop_name}",
+                                "prop": prop_name,
+                                "action": verb,
+                                "suggestion": matches[0] if matches else None,
+                            }
+                        )
+
+        for key in ("children", "else_children"):
+            kids = node.get(key)
+            if isinstance(kids, list):
+                for i, child in enumerate(kids):
+                    _walk_action_verbs(child, f"{path}.{key}[{i}]", issues)
+
+        # Chain Flow descent (RFC 13): descend a step node's `ui` tree, its
+        # linear `chain` next step, and each `chain_map` branch step, so a bad
+        # action verb buried in a later flow step is caught at author time.
+        ui = node.get("ui")
+        if isinstance(ui, dict):
+            _walk_action_verbs(ui, f"{path}.ui", issues)
+        chain = node.get("chain")
+        if isinstance(chain, dict):
+            _walk_action_verbs(chain, f"{path}.chain", issues)
+        chain_map = node.get("chain_map")
+        if isinstance(chain_map, dict):
+            for branch_id, branch in chain_map.items():
+                if isinstance(branch, dict):
+                    _walk_action_verbs(branch, f"{path}.chain_map[{branch_id}]", issues)
+
+
+def validate_action_verbs(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Walk the spec, flag every event-handler whose ``action`` verb
+    is not in :data:`_KNOWN_ACTION_VERBS`.
+
+    Returns one issue per offending handler; ``[]`` when ``spec`` is
+    not a dict or every handler's verb is recognized. Issue shape::
+
+        {
+          "path": "ui.children[2].props.on_click",
+          "prop": "on_click",
+          "action": "fetch",
+          "suggestion": "run_source",   # nearest known verb, or None
+        }
+
+    The renderer's event dispatcher silently no-ops unknown verbs (it
+    ``console.warn``s and returns), which masks broken buttons as
+    "working." Catching this at spec ingest forces the agent to use
+    the right verb.
+    """
+    if not isinstance(spec, dict):
+        return []
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_action_verbs(root, "ui", issues)
+    return issues
+
+
+def _node_label_text(node: dict[str, Any]) -> str:
+    """Return the user-visible text of a node — used to detect Refresh
+    / Sync / Fetch labels. Concatenates ``props.label``, ``props.text``,
+    ``props.title``, and ``props.aria_label`` if present.
+    """
+    props = node.get("props") if isinstance(node.get("props"), dict) else {}
+    parts: list[str] = []
+    for key in ("label", "text", "title", "aria_label", "ariaLabel"):
+        v = props.get(key) if isinstance(props, dict) else None
+        if isinstance(v, str):
+            parts.append(v)
+    return " ".join(parts)
+
+
+def _looks_live(label: str) -> bool:
+    """True when a button's label promises live fetching behaviour."""
+    if not label:
+        return False
+    lo = label.lower()
+    return any(kw in lo for kw in _LIVE_BUTTON_KEYWORDS)
+
+
+def _walk_live_buttons(
+    node: Any,
+    path: str,
+    sources: dict[str, Any],
+    issues: list[dict[str, Any]],
+) -> None:
+    """Recursive walk that flags Refresh-labelled buttons whose
+    ``on_click`` is empty or wired to an unrecognized verb / missing
+    source.
+    """
+    if isinstance(node, dict):
+        wtype = node.get("type")
+        if wtype == "button":
+            props = node.get("props") if isinstance(node.get("props"), dict) else {}
+            label = _node_label_text(node)
+            if _looks_live(label):
+                handlers = _iter_handlers(
+                    props.get("on_click") if isinstance(props, dict) else None
+                )
+                if not handlers:
+                    issues.append(
+                        {
+                            "path": f"{path}.props.on_click",
+                            "label": label,
+                            "reason": "live-labelled button has no on_click handler",
+                        }
+                    )
+                else:
+                    # Pick the first handler that's plausibly the
+                    # "fetch" — verb in {api, run_source, invoke, flow}.
+                    plausible = [
+                        h
+                        for h in handlers
+                        if h.get("action") in {"api", "run_source", "invoke", "flow"}
+                    ]
+                    if not plausible:
+                        # Either all handlers use non-fetching verbs
+                        # (set/toggle/etc.) or an unknown verb. Either
+                        # way the button doesn't fetch anything.
+                        verbs = sorted({str(h.get("action") or "<missing>") for h in handlers})
+                        issues.append(
+                            {
+                                "path": f"{path}.props.on_click",
+                                "label": label,
+                                "reason": (
+                                    "live-labelled button has no fetching action — "
+                                    f"verbs present: {verbs}; expected one of "
+                                    "['api', 'run_source', 'invoke', 'flow']"
+                                ),
+                            }
+                        )
+                    else:
+                        for h in plausible:
+                            if h.get("action") == "run_source":
+                                src_key = h.get("source")
+                                if not isinstance(src_key, str) or src_key not in sources:
+                                    issues.append(
+                                        {
+                                            "path": f"{path}.props.on_click",
+                                            "label": label,
+                                            "reason": (
+                                                f"run_source references source "
+                                                f"{src_key!r} which is not declared "
+                                                "in rippleSpec.sources"
+                                            ),
+                                        }
+                                    )
+                            elif h.get("action") == "api":
+                                if not isinstance(h.get("url"), str) or not h.get("url"):
+                                    issues.append(
+                                        {
+                                            "path": f"{path}.props.on_click",
+                                            "label": label,
+                                            "reason": "api handler has no url",
+                                        }
+                                    )
+
+        for key in ("children", "else_children"):
+            kids = node.get(key)
+            if isinstance(kids, list):
+                for i, child in enumerate(kids):
+                    _walk_live_buttons(child, f"{path}.{key}[{i}]", sources, issues)
+
+
+def find_unwired_live_buttons(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Walk the spec, flag every "live"-labelled button whose on_click
+    is empty, references an undeclared source, or uses an action verb
+    that doesn't actually fetch.
+
+    Returns one issue per offending button; ``[]`` when ``spec`` is
+    not a dict or every Refresh-class button is properly wired. Issue
+    shape::
+
+        {
+          "path": "ui.children[2].props.on_click",
+          "label": "Refresh",
+          "reason": "...",
+        }
+
+    Pairs with :func:`validate_action_verbs` — the verb check catches
+    the dispatcher-level failure (unknown verb), this catches the
+    semantic-level failure (verb known, but the wiring is broken for
+    the button's purpose).
+    """
+    if not isinstance(spec, dict):
+        return []
+    raw_sources = (spec.get("sources") if isinstance(spec.get("sources"), dict) else {}) or {}
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_live_buttons(root, "ui", raw_sources, issues)
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Required-prop "HARD constraint" gate (2026-05-31).
+#
+# The widget manifest declares ``required: true`` on the props a widget
+# cannot render without (a ``chart`` with no ``data``, a ``stat`` with no
+# ``value``, an ``each``-driven ``table`` with no ``columns``). Today that
+# flag is surfaced only in the system prompt — nothing mechanically enforces
+# it, so a node like ``{"type": "chart", "props": {}}`` sails through every
+# gate and renders an empty box.
+#
+# This is the rippleSpec analogue of the genesis "Constraint Zones" model's
+# 🔒 HARD ``required_fields`` zone: the agent is free to choose WHICH widgets
+# to use and HOW to fill the creative props, but the structural minimum — the
+# manifest-declared required props — is locked and checked, not merely asked
+# for. A prompt-side "include required props" rule rots at agent-write-rate;
+# this walker catches every omission for free, exactly like the catalog and
+# action-verb gates it sits beside.
+#
+# Runs as a sibling to ``validate_against_catalog`` — strict on the
+# agent-generation path (raises so the chat agent can retry with the missing
+# prop named), logged on the human / import path.
+# ---------------------------------------------------------------------------
+
+
+def required_props_from_manifest(manifest: dict[str, Any]) -> dict[str, list[str]]:
+    """Extract the per-widget required-prop map from a parsed manifest.
+
+    Returns ``{ widget_type: [required_prop, ...] }`` for every widget that
+    declares at least one ``required: true`` prop; widgets with no required
+    props are omitted entirely (so a membership test doubles as "does this
+    type have anything to enforce"). Prop order follows the manifest's
+    declaration order so corrective hints read naturally.
+
+    Mirrors :func:`allowed_types_from_manifest` — a pure manifest reader with
+    no spec involvement.
+    """
+    out: dict[str, list[str]] = {}
+    for w in manifest.get("widgets") or []:
+        if not isinstance(w, dict):
+            continue
+        wtype = w.get("type")
+        props = w.get("props")
+        if not isinstance(wtype, str) or not wtype or not isinstance(props, dict):
+            continue
+        required = [
+            name
+            for name, spec in props.items()
+            if isinstance(spec, dict) and spec.get("required") and isinstance(name, str)
+        ]
+        if required:
+            out[wtype] = required
+    return out
+
+
+def _prop_is_present(value: Any) -> bool:
+    """True when a prop value counts as "provided" for required-prop checks.
+
+    Present means the key exists with a non-``None`` value. An empty string,
+    empty list, empty dict, ``0``, or ``False`` all count as present — the
+    agent made a deliberate choice and the renderer can handle them; only a
+    missing key or an explicit ``null`` is a structural omission. A bound
+    expression string (``"{item.data}"``) is a non-empty string, so it counts
+    — key-presence, not value-resolution, is what this gate enforces.
+    """
+    return value is not None
+
+
+def _walk_required_props(
+    node: Any,
+    path: str,
+    required_by_type: dict[str, list[str]],
+    issues: list[dict[str, Any]],
+) -> None:
+    """Recursive walk that flags nodes missing a manifest-required prop.
+
+    Only nodes whose ``type`` is a key in ``required_by_type`` are checked —
+    an unknown ``type`` is the catalog gate's concern, not this one, so it is
+    never double-flagged here. A node that carries ``bind`` for a required
+    prop is treated as supplying it: the bound value populates the prop at
+    render time even though the literal key is absent from ``props``.
+    """
+    if not isinstance(node, dict):
+        return
+
+    wtype = node.get("type")
+    if isinstance(wtype, str) and wtype in required_by_type:
+        props = node.get("props")
+        props = props if isinstance(props, dict) else {}
+        # A node-level ``bind`` feeds exactly one prop (the widget's bind
+        # contract target). We can't know that prop's name here without the
+        # bind-contract map, so a present ``bind`` rescues the single most
+        # common bindable required prop families. Conservative: only suppress
+        # when bind is set AND there's exactly one required prop, the typical
+        # input-widget case (``value`` on input, ``checked`` on checkbox).
+        bound = isinstance(node.get("bind"), str) and bool(node.get("bind"))
+        required = required_by_type[wtype]
+        missing = [p for p in required if not _prop_is_present(props.get(p))]
+        if missing and bound and len(required) == 1:
+            missing = []
+        if missing:
+            issues.append(
+                {
+                    "path": path,
+                    "type": wtype,
+                    "missing": missing,
+                    "required": list(required),
+                }
+            )
+
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for i, child in enumerate(kids):
+                _walk_required_props(child, f"{path}.{key}[{i}]", required_by_type, issues)
+
+
+def validate_required_props(
+    spec: dict[str, Any] | None,
+    manifest_or_required: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and flag every node missing a prop the widget
+    manifest marks ``required: true`` for that ``type``.
+
+    ``manifest_or_required`` accepts either a full parsed manifest (a dict
+    with a ``widgets`` array) or an already-extracted required-prop map
+    (``{type: [prop, ...]}`` from :func:`required_props_from_manifest`); the
+    latter lets a hot path extract the map once and reuse it across specs.
+
+    Returns one issue dict per offending node; ``[]`` when ``spec`` is not a
+    dict or every node supplies its required props. Issue shape::
+
+        {
+          "path": "ui.children[2]",
+          "type": "chart",
+          "missing": ["data"],            # required props this node omitted
+          "required": ["data"],           # all required props for the type
+        }
+
+    The renderer draws a node with a missing required prop as an empty / broken
+    widget rather than erroring, so the failure is invisible until a human
+    looks at the canvas. Catching it at spec ingest forces the agent to fill
+    the structural minimum — the rippleSpec analogue of the genesis HARD
+    ``required_fields`` constraint zone.
+    """
+    if not isinstance(spec, dict):
+        return []
+    if "widgets" in manifest_or_required:
+        required_by_type = required_props_from_manifest(manifest_or_required)
+    else:
+        required_by_type = {
+            t: list(p)
+            for t, p in manifest_or_required.items()
+            if isinstance(t, str) and isinstance(p, (list, tuple))
+        }
+    if not required_by_type:
+        return []
+
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_required_props(root, "ui", required_by_type, issues)
+    return issues
+
+
+def _format_actions_and_motion(manifest: dict[str, Any]) -> list[str]:
+    """The action grammar (one line per verb: its fields and the first
+    sentence of its description) and the node-level ``motion``
+    field (description, budget rule, preset names). Examples and recipes are
+    left out: they run to kilobytes and the widget examples already show
+    handlers in place."""
+    lines: list[str] = []
+    actions = manifest.get("actions")
+    if isinstance(actions, dict) and actions:
+        lines.append("## Actions (event handler `action` values)")
+        lines.append("")
+        for name, entry in actions.items():
+            if not isinstance(entry, dict):
+                continue
+            shape = entry.get("shape") or {}
+            fields = ", ".join(k for k in shape if k != "action")
+            desc = " ".join(str(entry.get("description", "")).split()).split(". ")[0]
+            lines.append(f"- `{name}` {{{fields}}} — {desc}")
+        lines.append("")
+    motion = manifest.get("motion")
+    if isinstance(motion, dict) and motion.get("description"):
+        lines.append(f"## Motion (node-level `{motion.get('field') or 'motion'}` field)")
+        lines.append("")
+        lines.append(str(motion["description"]))
+        if motion.get("budgetRule"):
+            lines.append(str(motion["budgetRule"]))
+        presets = motion.get("presets")
+        if isinstance(presets, dict) and presets:
+            lines.append(
+                "Presets: " + "; ".join(f"`{k}` {str(v).rstrip('.')}" for k, v in presets.items())
+            )
+        lines.append("")
+    return lines
+
+
+def format_for_prompt(manifest: dict[str, Any]) -> str:
+    """Render the manifest as a markdown block for system-prompt injection.
+
+    Returns "" if the manifest has no widgets — caller treats this the same
+    as a fetch failure (i.e. falls back to kb search).
+    """
+    widgets = manifest.get("widgets") or []
+    if not widgets:
+        return ""
+
+    lines: list[str] = []
+    lines.append("\n\n<ripple-widget-reference>")
+
+    # The envelope contract goes FIRST. The agent's most expensive failure
+    # mode is inventing the wrong top-level field name (`root`, `tree`,
+    # `view`) for the renderable tree — anchoring `ui` here, before the
+    # widget catalog, prevents that. Per-widget examples below show
+    # node-shape only; this section shows how nodes wrap into a spec.
+    spec_envelope = manifest.get("spec")
+    if isinstance(spec_envelope, dict):
+        ui_field = spec_envelope.get("uiField") or "ui"
+        state_field = spec_envelope.get("stateField") or "state"
+        envelope_version = spec_envelope.get("version") or "1.0"
+        aliases = spec_envelope.get("aliasesNotAllowed") or []
+        description = spec_envelope.get("description") or ""
+        example = spec_envelope.get("example")
+
+        lines.append("## Spec envelope")
+        lines.append("")
+        if description:
+            lines.append(description)
+            lines.append("")
+        lines.append(
+            f'Top-level shape: `{{ "version": "{envelope_version}", '
+            f'"{state_field}": {{...}}, "{ui_field}": {{...}} }}`.'
+        )
+        if aliases:
+            alias_list = ", ".join(f"`{a}`" for a in aliases)
+            lines.append(
+                f"Do NOT name the renderable tree {alias_list}. The field is `{ui_field}` exactly."
+            )
+        if example:
+            lines.append("")
+            lines.append("**Envelope example:**")
+            lines.append("```json")
+            lines.append(json.dumps(example, indent=2))
+            lines.append("```")
+        lines.append("")
+        lines.append("## Widget catalog")
+        lines.append("")
+
+    lines.extend(_format_actions_and_motion(manifest))
+
+    lines.append(
+        "The following Ripple widgets are available. Use these props, types, "
+        "and example specs when building the UI."
+    )
+    lines.append("")
+
+    for w in widgets:
+        wtype = w.get("type", "?")
+        category = w.get("category", "?")
+        desc = w.get("description", "")
+        lines.append(f"### `{wtype}` ({category})")
+        lines.append(desc)
+        props = w.get("props") or {}
+        if props:
+            lines.append("")
+            lines.append("**Props:**")
+            for name, spec in props.items():
+                req = " *(required)*" if spec.get("required") else ""
+                lines.append(
+                    f"- `{name}`: `{spec.get('type', '?')}`{req} — {spec.get('description', '')}"
+                )
+        example = w.get("example")
+        if example:
+            lines.append("")
+            lines.append("**Example:**")
+            lines.append("```json")
+            lines.append(json.dumps(example, indent=2))
+            lines.append("```")
+        lines.append("")
+
+    lines.append("</ripple-widget-reference>")
+    return "\n".join(lines)

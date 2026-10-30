@@ -16,7 +16,7 @@ from pocketpaw.connectors.yaml_engine import parse_connector_yaml
 # Fixtures
 # ---------------------------------------------------------------------------
 
-CONNECTORS_DIR = Path(__file__).resolve().parent.parent / "connectors"
+CONNECTORS_DIR = Path(__file__).resolve().parent.parent.parent / "connectors"
 GCP_YAML = CONNECTORS_DIR / "gcp.yaml"
 
 

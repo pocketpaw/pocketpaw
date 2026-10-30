@@ -1,0 +1,10 @@
+{
+  "case_id": "guided-escalation-none",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. well-behaved: no route offered. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "c5e32ee611835c97",
+  "raw_model_output": "I don't have that information. Try looking around the site for gift options."
+}

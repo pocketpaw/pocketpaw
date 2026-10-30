@@ -1,0 +1,362 @@
+[
+  {
+    "label": "a read within the TTL goes back to git and gh",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if hit and now() - hit[\"at\"] < TTL:",
+    "replace": "if hit and now() - hit[\"at\"] < 0:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "every live lead RECORD is re-read, moved or not",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "moved = [f for f in heads if f in live and heads[f] != seen.get(f)]",
+    "replace": "moved = [f for f in heads if f in live]",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "no lead RECORD is ever read",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "moved = [f for f in heads if f in live and heads[f] != seen.get(f)]",
+    "replace": "moved = []",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a closed, done lead's RECORD is still read",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not (closed and f in done_prs) or f\"{app}/{f}\" in pending:",
+    "replace": "if True:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an open issue does not keep a merged lead live",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not (closed and f in done_prs) or f\"{app}/{f}\" in pending:",
+    "replace": "if f not in done_prs or f\"{app}/{f}\" in pending:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an unmerged feature-done PR does not keep a closed lead live",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not (closed and f in done_prs) or f\"{app}/{f}\" in pending:",
+    "replace": "if not closed or f\"{app}/{f}\" in pending:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a pending run does not keep a closed, done lead live",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not (closed and f in done_prs) or f\"{app}/{f}\" in pending:",
+    "replace": "if not (closed and f in done_prs):",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an issue gh did not list counts as closed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "str((issues.get(wave[\"issue\"]) or {}).get(\"state\")).lower() == \"closed\"",
+    "replace": "str((issues.get(wave[\"issue\"]) or {}).get(\"state\")).lower() != \"open\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a skipped lead drops its last RECORD",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "records = {f: kept.get(f) for f in heads}",
+    "replace": "records = {}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a skipped lead takes its fresh head, so a reopen is not re-read",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "read_at = {f: heads[f] if f in live else seen.get(f) for f in heads}",
+    "replace": "read_at = dict(heads)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "RECORD reads have no bound",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "_PARALLEL = 8  # RECORD reads in flight at once",
+    "replace": "_PARALLEL = 64  # RECORD reads in flight at once",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "RECORD reads run one at a time",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "gate = asyncio.Semaphore(_PARALLEL)",
+    "replace": "gate = asyncio.Semaphore(1)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a failed RECORD read escapes as an ExceptionGroup",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "raise eg.exceptions[0] from None",
+    "replace": "raise",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a failed refresh serves the last graph as fresh",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "entry = {**hit, \"graph\": {**hit[\"graph\"], \"stale\": True}}",
+    "replace": "entry = {**hit, \"graph\": {**hit[\"graph\"], \"stale\": False}}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a failed first read is not a 503",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if hit is None:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "the id guard admits dots and underscores",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "_ID = re.compile(r\"[a-z0-9][a-z0-9-]*\")",
+    "replace": "_ID = re.compile(r\"[A-Za-z0-9_.-]+\")",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a lead ref is used without the id check",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if _ID.fullmatch(f):",
+    "replace": "if f:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an oversized blueprint file is read",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if p not in shas or sizes[p] > MAX_MODEL_BYTES:",
+    "replace": "if p not in shas:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an oversized RECORD is parsed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if int(body.get(\"size\") or 0) > MAX_MODEL_BYTES:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "waits_on refs never resolve to a sibling repo",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "external = {str(s.get(\"id\")) for s in systems if s is not owned}",
+    "replace": "external = set()",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an unexpected error in a refresh is a bare 500",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "except Exception as exc:",
+    "replace": "except ReadFailed as exc:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "feature issues are listed without the feature-lead label",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "\"-R\", slug, \"--label\", \"feature-lead\", *_LIST]",
+    "replace": "\"-R\", slug, *_LIST]",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "waits_on states come from the feature-lead list only",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "states: dict[str, dict[Any, str]] = {\"\": {}}",
+    "replace": "states = {slug: {n: str(r.get(\"state\")).lower() for n, r in issues.items()}, \"\": {}}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a repo off GitHub has a null slug",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "await _github_slug(str(path), gh) or \"\"",
+    "replace": "await _github_slug(str(path), gh)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an app with no blueprint heading has no title",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if head else app",
+    "replace": "if head else None",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "the title keeps the blueprint suffix",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "re.sub(r\"(?i)\\s+blueprint$\", \"\", head[1])",
+    "replace": "head[1]",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "journeys are named from the whole blueprint, not its Journeys section",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "_JID.findall(section[2] if section else \"\")",
+    "replace": "_JID.findall(md)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "journeys are named only from a wave's journeys key",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "dict.fromkeys(_JID.findall(text))",
+    "replace": "dict.fromkeys(_JID.findall(json.dumps(raw.get(\"journeys\"))))",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "the grep reads no line after a journey comment",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "\"-A\", \"4\"",
+    "replace": "\"-A\", \"0\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a journey with no test takes the next group's",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "        elif ln == \"--\":\n            pending = []",
+    "replace": "        elif False:\n            pending = []",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a context line's id counts as a journey comment",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if m and (ids := _JID.findall(m[2])):",
+    "replace": "if ids := _JID.findall(ln):",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "gaps carry no text",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "| {\"text\": _GAP_TEXT[g[\"kind\"]]}",
+    "replace": "| {\"text\": \"\"}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an unowned component is never a gap",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not owners and status != \"built\":",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a built unowned component is a gap",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if not owners and status != \"built\":",
+    "replace": "if not owners:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "two stalls do not stick on the real int shape",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "stalls = lead.get(\"stalls\") if isinstance(lead.get(\"stalls\"), int) else 0",
+    "replace": "stalls = 0",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an app row does not count its slices",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "sc = Counter(s[\"status\"] for x in mine for s in x[\"slices\"])",
+    "replace": "sc = Counter()",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py::test_features_carry_their_slices_and_apps_count_them"
+    ]
+  },
+  {
+    "label": "a waiting owner paints failed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "\"waiting\": \"drift\"",
+    "replace": "\"waiting\": \"failed\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a Mac-Finish-Wanted line is not a mark",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "                mark = \"mac\"",
+    "replace": "                pass",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "a released run's comments are never read",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": ".get(\"status\") in (\"rejected\", \"failed\")",
+    "replace": ".get(\"status\") in ()",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  },
+  {
+    "label": "an issue's comments are reread every time",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "if n in asked and m[0] == stamp[n]}",
+    "replace": "if False}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint_read.py"
+    ]
+  }
+]

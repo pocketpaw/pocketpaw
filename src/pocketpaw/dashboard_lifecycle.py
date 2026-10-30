@@ -5,6 +5,40 @@ Extracted from dashboard.py — contains:
 - ``_broadcast_audit_entry()`` / ``_broadcast_health_update()`` — WS-only broadcasts
 - ``startup_event()`` — initializes bus, agent loop, channels, MCP, health, scheduler, daemon
 - ``shutdown_event()`` — tears down all services
+
+Changes:
+- 2026-09-04 (fix/unblock-event-loop, backend-perf H1): every broadcast helper
+  here was its own copy of "iterate ``active_connections``, ``await
+  ws.send_json`` with no timeout". Six copies, none bounded. A client that
+  stopped reading held the loop on TCP back-pressure with no deadline, and the
+  dashboard is one uvicorn process, so that await stalled every other request.
+  All six now go through ``_fanout``, which sends concurrently and gives each
+  socket its own 5s deadline. The cloud package had already learned this the
+  hard way — see ``SEND_TIMEOUT_SECONDS`` in ``ee/.../chat/ws.py`` — but the
+  OSS dashboard path never got the fix.
+- 2026-08-01: ``startup_event`` installs the asyncio accept-noise filter
+  (``pocketpaw.asyncio_noise``) as its first act, so the Windows proactor
+  stops logging a full traceback every time a client aborts a connection
+  mid-accept. Covers both server modes — ``dashboard.py`` and
+  ``api/serve.py`` share this lifespan. (fix/asyncio-accept-noise)
+- 2026-07-12: removed the ``bundled_kb`` (ripple-recipes) boot-time mirror.
+  The hand-authored ripple pattern recipes biased the agent toward fixed
+  layouts; design breadth now comes from live design references, not a
+  shipped scope. (chore/remove-bundled-kb-ripple-recipes)
+- 2026-07-11 (feat/external-alerting-c2c3): ``startup_event`` now autostarts the
+  ``AutomationEvaluator`` (background threshold/data-change rule loop) when
+  ``settings.automation_evaluator_autostart`` is true (the default) — the OSS
+  always-on automation switch. Same best-effort + ``_register_lifecycle``
+  shutdown pattern as AlertManager, so a clean shutdown cancels the loop.
+- 2026-05-22: ``startup_event`` also mirrors the built-in pocket
+  templates into ``~/.pocketpaw/templates/`` via the
+  ``bundled_templates`` installer — same best-effort, catch-and-log
+  pattern as the skills installer, gated on
+  ``auto_install_bundled_templates`` (feat/bundled-templates, 2a).
+- 2026-05-21: ``startup_event`` mirrors bundled SKILL.md files into the
+  user's home dir at boot via the ``bundled_skills`` installer.
+  Best-effort, gated on ``auto_install_bundled_skills``; reuses the
+  already-loaded ``settings`` object.
 """
 
 import asyncio
@@ -12,6 +46,7 @@ import logging
 from datetime import UTC
 
 import pocketpaw.dashboard_state as _state
+from pocketpaw.asyncio_noise import install_accept_noise_filter
 from pocketpaw.bus import get_message_bus
 from pocketpaw.config import Settings
 from pocketpaw.daemon import get_daemon
@@ -34,6 +69,57 @@ logger = logging.getLogger(__name__)
 # Broadcast helpers
 # ---------------------------------------------------------------------------
 
+# A single send must not be able to hold the dashboard's event loop open
+# indefinitely. A client that stops reading (backgrounded tab, sleeping laptop,
+# a NAT that dropped the flow without a FIN) leaves ``send_json`` waiting on
+# TCP back-pressure with no deadline of its own, and the dashboard runs one
+# uvicorn process: that await blocks every other request on the box.
+#
+# 5.0s matches ``SEND_TIMEOUT_SECONDS`` in the cloud package's ws.py, which
+# carries the reasoning in full — far above any healthy RTT, short enough that
+# a stalled fan-out is noticed.
+WS_SEND_TIMEOUT_SECONDS = 5.0
+
+# Cap on sends in flight per broadcast. The dashboard is single-tenant and
+# rarely has more than a handful of tabs open, so this is a guard rail rather
+# than a throttle.
+WS_FANOUT_CONCURRENCY = 32
+
+
+async def _fanout(message: dict) -> None:
+    """Deliver ``message`` to every dashboard socket, concurrently and bounded.
+
+    Every broadcast helper in this module used to be its own ``for`` loop with
+    one unbounded ``await ws.send_json(...)`` per socket, so delivery cost the
+    SUM of the connected clients' latencies and a single wedged client stalled
+    the rest indefinitely. Sends now run together, each with its own deadline.
+
+    A socket that raises OR times out is dropped from ``active_connections``.
+    Dropping on timeout is the part that matters: without it a wedged client
+    would be re-attempted on every subsequent broadcast, so adding the timeout
+    alone would have made the stall recur forever instead of once.
+    """
+    targets = list(active_connections)
+    if not targets:
+        return
+
+    sem = asyncio.Semaphore(WS_FANOUT_CONCURRENCY)
+
+    async def _send(ws):
+        async with sem:
+            try:
+                await asyncio.wait_for(ws.send_json(message), timeout=WS_SEND_TIMEOUT_SECONDS)
+            except Exception:
+                # Includes TimeoutError. CancelledError is a BaseException on
+                # 3.8+, so a cancelled broadcast still propagates rather than
+                # being mistaken for a dead socket.
+                return ws
+        return None
+
+    for ws in await asyncio.gather(*(_send(w) for w in targets)):
+        if ws is not None and ws in active_connections:
+            active_connections.remove(ws)
+
 
 async def broadcast_reminder(reminder: dict):
     """Broadcast a reminder notification to all connected clients."""
@@ -42,11 +128,7 @@ async def broadcast_reminder(reminder: dict):
 
     # Legacy broadcast (backup)
     message = {"type": "reminder", "reminder": reminder}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            pass
+    await _fanout(message)
 
     # Persist reminder as an assistant message in every active WebSocket session
     # so it survives session switches and page reloads.
@@ -87,12 +169,7 @@ async def broadcast_reminder(reminder: dict):
 async def broadcast_intention(intention_id: str, chunk: dict):
     """Broadcast intention execution results to all connected clients."""
     message = {"type": "intention_event", "intention_id": intention_id, **chunk}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            if ws in active_connections:
-                active_connections.remove(ws)
+    await _fanout(message)
 
     # Push message-type intention chunks to notification channels
     if chunk.get("type") == "message":
@@ -107,23 +184,13 @@ async def broadcast_intention(intention_id: str, chunk: dict):
 async def _broadcast_audit_entry(entry: dict):
     """Broadcast a new audit log entry to all connected WebSocket clients."""
     message = {"type": "system_event", "event_type": "audit_entry", "data": entry}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            if ws in active_connections:
-                active_connections.remove(ws)
+    await _fanout(message)
 
 
 async def _broadcast_health_update(summary: dict):
     """Broadcast health status update to all connected WebSocket clients."""
     message = {"type": "health_update", "data": summary}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            if ws in active_connections:
-                active_connections.remove(ws)
+    await _fanout(message)
 
 
 async def push_open_path(path: str, action: str = "navigate"):
@@ -138,11 +205,7 @@ async def push_open_path(path: str, action: str = "navigate"):
         ``"view"`` to open a file in the viewer.
     """
     message = {"type": "open_path", "path": path, "action": action}
-    for ws in active_connections[:]:
-        try:
-            await ws.send_json(message)
-        except Exception:
-            pass
+    await _fanout(message)
 
 
 # ---------------------------------------------------------------------------
@@ -162,35 +225,46 @@ async def startup_event(
         Callable for starting a channel adapter. Injected from dashboard.py
         to avoid circular import with dashboard_channels.
     """
+    # Silence the Windows proactor's aborted-accept tracebacks before any
+    # socket work starts. Real errors still reach the default handler.
+    install_accept_noise_filter()
+
     # Start Message Bus Integration
     bus = get_message_bus()
     await ws_adapter.start(bus)
 
-    # Load .env for enterprise config (license key, MongoDB URI, admin creds)
+    # Load .env for enterprise config (license key, MongoDB URI, admin creds). The
+    # working directory's file only, the one Settings reads: a bare load_dotenv()
+    # walks up and would import a parent project's .env.
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(".env")
     except ImportError:
         pass
 
-    # Initialize enterprise cloud DB (Beanie/MongoDB) — best-effort
+    # Run enterprise lifecycle startup hooks — best-effort. The cloud hook
+    # initializes the Beanie/MongoDB database, seeds the default admin +
+    # workspace, back-fills agents and registers the chat-title listener.
+    # Discovered via the `pocketpaw.lifecycle` entry-point; an OSS install
+    # has no provider and skips this entirely.
+    from pocketpaw._registry import providers as _ext_providers
+
+    for _hook in _ext_providers("pocketpaw.lifecycle"):
+        try:
+            await _hook.on_startup()
+        except Exception as exc:
+            logger.warning("Lifecycle startup hook failed (cloud features disabled): %s", exc)
+
+    # Start the cloud agent pool GC task. Previously registered via
+    # ``@app.on_event("startup")`` inside ``mount_cloud()`` but that path is
+    # silenced when the app is built with a custom ``lifespan=``.
     try:
-        import os
+        from pocketpaw.agents.pool import get_agent_pool
 
-        from ee.cloud.db import init_cloud_db
-
-        mongo_uri = os.environ.get("CLOUD_MONGODB_URI", "mongodb://localhost:27017/paw-enterprise")
-        await init_cloud_db(mongo_uri)
-        # Seed default admin user and workspace
-        from ee.cloud.auth.core import seed_admin, seed_workspace
-
-        admin = await seed_admin()
-        await seed_workspace(admin)
-    except ImportError:
-        logger.debug("Enterprise cloud module not available — skipping MongoDB init")
+        await get_agent_pool().start()
     except Exception as exc:
-        logger.warning("Enterprise cloud DB init failed (cloud features disabled): %s", exc)
+        logger.warning("Agent pool start failed: %s", exc)
 
     # Start Agent Loop
     asyncio.create_task(agent_loop.start())
@@ -198,6 +272,70 @@ async def startup_event(
 
     # Auto-start configured channel adapters (respects per-channel autostart setting)
     settings = Settings.load()
+
+    # Mirror PocketPaw's bundled AgentSkills-format SKILL.md files into
+    # ``~/.claude/skills/<name>/`` so PocketPaw's own ``SkillLoader``
+    # picks them up — that drives the slash-command dispatcher on the
+    # non-SDK backends (codex_cli / openai_agents / deep_agents) and the
+    # desktop dashboard. NOTE: this mirror is INVISIBLE to the default
+    # ``claude_agent_sdk`` backend, which runs ``setting_sources=[]`` and
+    # therefore ignores ``~/.claude/skills``; that backend loads the
+    # bundled skills as a local plugin instead (see
+    # ``bundled_skills_plugin_dir`` + ``sdk_load_bundled_skills`` in
+    # ``agents/claude_sdk.py``). Best-effort — a failure here just means
+    # the non-SDK backends won't have the bundled skills; the MCP tool
+    # surface still works. Opt-out:
+    # ``POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false``.
+    if settings.auto_install_bundled_skills:
+        try:
+            from pocketpaw.bundled_skills import install_bundled_skills
+
+            results = install_bundled_skills()
+            installed = sum(1 for r in results if r.status == "installed")
+            updated = sum(1 for r in results if r.status == "updated")
+            skipped = sum(1 for r in results if r.status == "skipped")
+            failed = [r for r in results if r.status == "failed"]
+            logger.info(
+                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed "
+                "— skills: %s",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+                ", ".join(sorted(r.name for r in results)) or "(none)",
+            )
+            for r in failed:
+                logger.warning("Skill %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled-skills install failed (non-fatal): %s", exc)
+
+    # Mirror PocketPaw's built-in pocket templates into
+    # ``~/.pocketpaw/templates/`` so the create specialist can
+    # instantiate-and-customize a matching template instead of
+    # cold-generating a pocket from scratch. Best-effort — a failure
+    # here just means the specialist falls back to cold generation;
+    # pocket creation still works. Opt-out:
+    # ``POCKETPAW_AUTO_INSTALL_BUNDLED_TEMPLATES=false``.
+    if settings.auto_install_bundled_templates:
+        try:
+            from pocketpaw.bundled_templates import install_bundled_templates
+
+            tpl_results = install_bundled_templates()
+            installed = sum(1 for r in tpl_results if r.status == "installed")
+            updated = sum(1 for r in tpl_results if r.status == "updated")
+            skipped = sum(1 for r in tpl_results if r.status == "skipped")
+            failed = [r for r in tpl_results if r.status == "failed"]
+            logger.info(
+                "Bundled pocket templates sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("Pocket template %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled pocket templates install failed (non-fatal): %s", exc)
 
     # Start StatusTracker (agent state for external integrations)
     from pocketpaw.dashboard_state import status_tracker
@@ -226,6 +364,24 @@ async def startup_event(
         logger.info("AlertManager started")
     except Exception as e:
         logger.warning("Failed to start AlertManager: %s", e)
+
+    # Start the AutomationEvaluator (background loop that fires threshold /
+    # data-change automation rules). Default-ON via
+    # ``automation_evaluator_autostart`` so external-alerting automations run
+    # without a manual POST /automations/evaluator/start — the OSS always-on
+    # switch. Same best-effort, register-shutdown pattern as AlertManager so a
+    # clean shutdown cancels the loop (mirrors the alert_manager lifecycle). A
+    # fresh install with no enabled rules just sleeps, so the default is safe.
+    if settings.automation_evaluator_autostart:
+        try:
+            from pocketpaw.automations.evaluator import get_evaluator
+
+            evaluator = get_evaluator()
+            evaluator.start()
+            _register_lifecycle("automation_evaluator", shutdown=evaluator.stop)
+            logger.info("AutomationEvaluator started")
+        except Exception as e:
+            logger.warning("Failed to start AutomationEvaluator: %s", e)
 
     # Start ChannelHealthStore (connects/disconnects uptime tracking)
     try:
@@ -304,17 +460,52 @@ async def startup_event(
     except Exception as e:
         logger.warning("Failed to ensure built-in PawKits: %s", e)
 
+    # In-process MCP servers (entry-point `pocketpaw.mcp_servers`). These
+    # are the claude_agent_sdk SDK servers contributed by extension wheels
+    # — tasks, planner, pocket, pocket_specialist, composio, meetings, …
+    # An empty list almost always means `pocketpaw-ee` wasn't installed
+    # (so no entry points registered), which silently disables every cloud
+    # MCP tool on the agent. Loud-log it once at boot.
+    try:
+        from pocketpaw._registry import providers as _ext_providers
+
+        names: list[str] = []
+        for provider in _ext_providers("pocketpaw.mcp_servers"):
+            try:
+                built = provider.build_server()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("In-process MCP provider %r failed to build: %s", provider, exc)
+                continue
+            if built is None:
+                # None means the provider chose to soft-disable itself —
+                # could be claude_agent_sdk missing, an unconfigured
+                # integration (composio with no toolkits), or no work to do.
+                # Distinguishing them is the provider's job; we just note it.
+                logger.info(
+                    "In-process MCP provider %s soft-disabled (build_server returned None)",
+                    type(provider).__name__,
+                )
+                continue
+            names.append(built[0])
+        if names:
+            logger.info("In-process MCP servers registered: %s", sorted(names))
+        else:
+            logger.warning(
+                "No in-process MCP servers registered — cloud tools (meetings, "
+                "tasks, pockets, composio, …) will be unavailable to the agent. "
+                "Install pocketpaw-ee (uv sync --dev --group ee) and the "
+                "claude_agent_sdk."
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to enumerate in-process MCP providers: %s", exc)
+
     # Wire MCP OAuth broadcast + auto-start enabled MCP servers (non-blocking)
     try:
         from pocketpaw.mcp.manager import get_mcp_manager, set_ws_broadcast
 
         async def _mcp_ws_broadcast(message: dict) -> None:
             """Broadcast an MCP message to all connected WebSocket clients."""
-            for ws in active_connections[:]:
-                try:
-                    await ws.send_json(message)
-                except Exception:
-                    pass
+            await _fanout(message)
 
         set_ws_broadcast(_mcp_ws_broadcast)
 
@@ -351,7 +542,23 @@ async def startup_event(
     scheduler = get_scheduler()
     scheduler.start(callback=broadcast_reminder)
 
-    # Start proactive daemon
+    # Start proactive daemon. Prune orphan ``[auto] *`` intentions first so
+    # bridged-from-EE entries whose Rule no longer exists don't keep
+    # firing crons forever (test fixtures, deleted rules, manual edits).
+    try:
+        from pocketpaw.automations.bridge import prune_orphan_auto_intentions
+        from pocketpaw.daemon.intentions import get_intention_store
+
+        prune_orphan_auto_intentions()
+        # Single line that tells the truth at startup-completion. The
+        # ``Loaded N intentions`` line from the IntentionStore singleton
+        # fires before pruning and can mislead readers when N includes
+        # orphans that get cleared a few lines later.
+        active = len(get_intention_store().get_enabled())
+        logger.info("Active intentions: %d", active)
+    except Exception:
+        logger.exception("Failed to prune orphan [auto] intentions; continuing")
+
     daemon = get_daemon()
     daemon.start(stream_callback=broadcast_intention)
 
@@ -427,39 +634,119 @@ async def startup_event(
 # ---------------------------------------------------------------------------
 
 
+async def _bounded(label: str, coro, *, timeout: float = 5.0) -> None:
+    """Await *coro* but never let a wedged subsystem hang process shutdown.
+
+    A cleanup step that exceeds *timeout* is abandoned (cancelled) with a
+    warning so the rest of shutdown — and the process exit — still proceeds.
+    Without this, a stuck ``await`` here blocks uvicorn's lifespan shutdown,
+    which has no timeout of its own: Ctrl+C appears to do nothing and the
+    port stays bound until the terminal is killed.
+    """
+    try:
+        await asyncio.wait_for(coro, timeout=timeout)
+    except TimeoutError:
+        logger.warning("Shutdown step '%s' timed out after %.0fs — skipping", label, timeout)
+    except Exception:
+        logger.warning("Shutdown step '%s' failed", label, exc_info=True)
+
+
 async def shutdown_event(*, _stop_channel_adapter_fn=None):
     """Stop services on app shutdown.
+
+    Every async cleanup step is time-bounded via ``_bounded`` — a single
+    subsystem that fails to stop cleanly must not wedge the whole process.
 
     Parameters
     ----------
     _stop_channel_adapter_fn:
         Callable for stopping a channel adapter. Injected from dashboard.py.
     """
-    # Stop Agent Loop
-    await agent_loop.stop()
-    await ws_adapter.stop()
+    # Stop Agent Loop + WebSocket adapter
+    await _bounded("agent_loop", agent_loop.stop())
+    await _bounded("ws_adapter", ws_adapter.stop())
+
+    # Stop the cloud agent pool (best-effort; may not have started if the
+    # enterprise cloud module is not installed).
+    try:
+        from pocketpaw.agents.pool import get_agent_pool
+
+        await _bounded("agent_pool", get_agent_pool().stop())
+    except Exception as exc:
+        logger.warning("Agent pool stop failed: %s", exc)
+
+    # Drain in-flight cloud chat runs. Under ``FastAPI(lifespan=...)`` this
+    # is the only shutdown hook that fires — ``@app.on_event("shutdown")``
+    # handlers in ``mount_cloud`` are silently dropped. ``drain()`` waits for
+    # tasks to finish naturally (no cancellation); ``_bounded`` caps the wait
+    # so a stuck run can't wedge exit.
+    try:
+        from pocketpaw_ee.cloud.chat.runs.executor import InProcessExecutor, get_executor
+
+        executor = get_executor()
+        if isinstance(executor, InProcessExecutor):
+            await _bounded("cloud_run_drain", executor.drain(), timeout=10.0)
+    except Exception as exc:
+        logger.debug("Cloud run drain skipped: %s", exc)
+
+    # Flush the batched request-log queue. Telemetry writes are batched behind
+    # a queue now, so on any restart the queued tail is simply lost unless
+    # something drains it — and a restart is exactly when someone is reading
+    # /audit. Same guarded-import shape and same reason as the run drain above:
+    # this is the only shutdown hook that fires.
+    try:
+        from pocketpaw_ee.cloud._core.request_log import shutdown_request_log
+
+        await _bounded("request_log_flush", shutdown_request_log(), timeout=8.0)
+    except Exception as exc:
+        logger.debug("Request-log flush skipped: %s", exc)
+
+    # Run the enterprise lifecycle shutdown hooks. The mirror of the startup
+    # loop above, which existed on its own for months: ``on_shutdown`` was
+    # declared in the protocol (src/pocketpaw/extensions.py), implemented by
+    # CloudLifecycleHook, and called by nothing. Everything that hook started --
+    # the meeting scheduler, the pocket interval refresh, the temporal sweeps,
+    # the run sweeper -- outlived the process it belonged to.
+    #
+    # Placed after the run drain and the request-log flush so cloud teardown
+    # happens before the channel adapters and the daemon go down under it.
+    try:
+        from pocketpaw._registry import providers as _ext_providers
+
+        for _hook in _ext_providers("pocketpaw.lifecycle"):
+            await _bounded("lifecycle_shutdown", _hook.on_shutdown(), timeout=10.0)
+    except Exception as exc:
+        logger.debug("Lifecycle shutdown hooks skipped: %s", exc)
 
     # Stop all channel adapters
     if _stop_channel_adapter_fn:
         for channel in list(_channel_adapters):
-            try:
-                await _stop_channel_adapter_fn(channel)
-            except Exception as e:
-                logger.warning(f"Error stopping {channel} adapter: {e}")
+            await _bounded(f"channel:{channel}", _stop_channel_adapter_fn(channel))
 
-    # Stop proactive daemon
-    daemon = get_daemon()
-    daemon.stop()
+    # Stop proactive daemon (sync — scheduler.shutdown(wait=False), fast)
+    try:
+        get_daemon().stop()
+    except Exception:
+        logger.warning("Daemon stop failed", exc_info=True)
 
-    # Stop reminder scheduler
-    scheduler = get_scheduler()
-    scheduler.stop()
+    # Stop reminder scheduler (sync — scheduler.shutdown(wait=False), fast)
+    try:
+        get_scheduler().stop()
+    except Exception:
+        logger.warning("Scheduler stop failed", exc_info=True)
 
-    # Stop MCP servers
+    # Stop MCP servers — these own subprocesses, so give them a little longer
+    # but still bound it: an MCP child that ignores SIGTERM must not hang exit.
     try:
         from pocketpaw.mcp.manager import get_mcp_manager
 
-        mcp = get_mcp_manager()
-        await mcp.stop_all()
+        await _bounded("mcp_servers", get_mcp_manager().stop_all(), timeout=8.0)
     except Exception as e:
         logger.warning("Error stopping MCP servers: %s", e)
+
+    # Deliver the last paw-lens check-ins (the final ``ok`` of a job that just
+    # finished). Last, so the schedulers and the ee hooks above have stopped.
+    # Bounded at 1 s; ``flush`` never raises.
+    from pocketpaw.lens_checkins import flush as flush_lens_checkins
+
+    await flush_lens_checkins(timeout=1.0)

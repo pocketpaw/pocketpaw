@@ -3,6 +3,10 @@
 Lightweight FastAPI server that serves the frontend and handles WebSocket communication.
 
 Changes:
+  - 2026-10-03: security_headers_middleware uses setdefault semantics, so a response's
+    own security headers survive. X-Frame-Options is skipped only when the response's
+    own CSP carries frame-ancestors (fails closed otherwise). Unblocks the paw-bar
+    frame (frame-ancestors allowlist + microphone) on self-hosted deploys.
   - 2026-02-17: Health heartbeat — periodic checks every 5 min via APScheduler,
     broadcasts health_update on status transitions.
   - 2026-02-17: Health Engine API (GET /api/health, POST /api/health/check,
@@ -37,7 +41,6 @@ try:
     import qrcode
     import uvicorn
     from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
-    from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import Response
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
@@ -48,6 +51,7 @@ except ImportError as _exc:
     ) from _exc
 
 import pocketpaw.dashboard_state as _state
+from pocketpaw.api.cors import install_cors
 from pocketpaw.api.v1 import mount_v1_routers
 from pocketpaw.bootstrap import DefaultBootstrapProvider
 from pocketpaw.config import Settings, get_access_token, get_config_path
@@ -101,6 +105,7 @@ from pocketpaw.deep_work.api import router as deep_work_router
 from pocketpaw.memory import MemoryType, get_memory_manager
 from pocketpaw.mission_control.api import router as mission_control_router
 from pocketpaw.security import get_audit_logger
+from pocketpaw.security.body_limit import BodySizeLimitMiddleware
 from pocketpaw.security.redact import safe_install_error
 from pocketpaw.skills import get_skill_loader
 from pocketpaw.tunnel import get_tunnel_manager
@@ -146,20 +151,11 @@ app = FastAPI(
     openapi_url="/api/v1/openapi.json",
 )
 
-# CORS — localhost + Cloudflare tunnel + Tauri desktop + custom origins from config
-_BUILTIN_ORIGINS = [
-    "tauri://localhost",
-    "https://tauri.localhost",  # Tauri v2
-    "http://localhost:1420",  # Tauri dev server
-]
-try:
-    _custom_origins = Settings.load().api_cors_allowed_origins
-except Exception as e:
-    logger.debug("Failed to load custom CORS origins: %s", e)
-    _custom_origins = []
-_EXTRA_ORIGINS = list(set(_BUILTIN_ORIGINS + _custom_origins))
-
-# NOTE: CORSMiddleware is registered AFTER AuthMiddleware below so that CORS
+# CORS — localhost + Cloudflare tunnel + Tauri desktop + custom origins from
+# config. The policy (and the CORS-aware 500 handler that goes with it) lives in
+# api/cors.py so this app and `pocketpaw serve` cannot drift apart.
+#
+# NOTE: install_cors() is called AFTER AuthMiddleware below so that CORS
 # is outermost (Starlette processes last-added first) and handles OPTIONS
 # preflight before auth can reject them.  See line ~193.
 
@@ -172,19 +168,29 @@ async def security_headers_middleware(request: Request, call_next):
 
     response = await call_next(request)
 
-    # Allow the file-content endpoint to be embedded in same-origin iframes
-    # (used by the in-app PDF/file viewer modal).
-    is_file_content = request.url.path.startswith("/api/v1/files/content")
-    if is_file_content:
-        response.headers["X-Frame-Options"] = "SAMEORIGIN"
-    else:
-        response.headers["X-Frame-Options"] = "DENY"
+    # setdefault, never assign: a response that wrote its own security header keeps
+    # it. The paw-bar frame documents ship their own CSP (frame-ancestors allowlist
+    # + sandbox) and Permissions-Policy (microphone for dictation); assigning over
+    # them stopped the bar from embedding on any customer site.
+    #
+    # X-Frame-Options is skipped ONLY when the response's own CSP has a
+    # frame-ancestors directive: that directive owns framing, and XFO DENY beside an
+    # allowlist blocks the frame in browsers that honour XFO. A response CSP without
+    # frame-ancestors (say, a script policy) still gets XFO, so framing fails closed.
+    # A route that means to be frameable says so (the paw-bar dead shell sends
+    # ``frame-ancestors *``).
+    if "frame-ancestors" not in response.headers.get("content-security-policy", ""):
+        # The file-content endpoint is embedded in same-origin iframes (the in-app
+        # PDF/file viewer modal).
+        is_file_content = request.url.path.startswith("/api/v1/files/content")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN" if is_file_content else "DENY")
 
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     # CSP: allow self + CDN + strictly nonced scripts (Alpine evaluates allowed via unsafe-eval)
-    response.headers["Content-Security-Policy"] = (
+    response.headers.setdefault(
+        "Content-Security-Policy",
         "default-src 'self'; "
         f"script-src 'self' 'nonce-{nonce}' 'unsafe-eval' "
         "https://cdn.jsdelivr.net https://unpkg.com; "
@@ -193,11 +199,13 @@ async def security_headers_middleware(request: Request, call_next):
         "img-src 'self' data: blob:; "
         "connect-src 'self' ws: wss: https://cdn.jsdelivr.net https://unpkg.com; "
         "frame-src 'self'; "
-        "frame-ancestors 'none'"
+        "frame-ancestors 'none'",
     )
     # HSTS only when accessed via HTTPS (tunnel or reverse proxy)
     if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
     return response
 
 
@@ -211,16 +219,18 @@ app.include_router(mission_control_router, prefix="/api/mission-control")
 
 app.include_router(deep_work_router, prefix="/api/deep-work")
 
-# Mount enterprise cloud module FIRST (takes priority over core v1 routers)
-try:
-    from ee.cloud import mount_cloud
+# Mount enterprise route providers FIRST (priority over core v1 routers)
+from pocketpaw._registry import first as _first_provider  # noqa: E402
 
-    mount_cloud(app)
-    logger.info("Enterprise cloud module mounted successfully")
-except ImportError as exc:
-    logger.debug("Enterprise cloud module not available: %s", exc)
-except Exception:
-    logger.warning("Cloud module mount failed", exc_info=True)
+_route_provider = _first_provider("pocketpaw.routes")
+if _route_provider is not None:
+    try:
+        _route_provider.mount(app)
+        logger.info("Enterprise route provider mounted successfully")
+    except Exception:
+        logger.warning("Route provider mount failed", exc_info=True)
+else:
+    logger.debug("No enterprise route provider registered")
 
 # Mount API v1 routers at /api/v1/ (canonical) — see api/v1/__init__.py
 mount_v1_routers(app)
@@ -247,14 +257,19 @@ app.include_router(auth_router)
 # Auth must be registered BEFORE CORS so CORS is outermost and handles
 # OPTIONS preflight requests before auth can reject them.
 app.add_middleware(AuthMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_EXTRA_ORIGINS,
-    allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Body-size ceiling, registered after AuthMiddleware so it sits OUTSIDE it.
+# That ordering is load-bearing twice over: the upload limits are enforced only
+# after Starlette has spooled the whole multipart body to disk, and
+# AuthMiddleware itself reads the body on the login paths. A ceiling inside
+# either of those cannot stop the buffering it exists to prevent. CORS is
+# installed below and stays outermost, so a 413 still carries its headers — a
+# header-less rejection reads to the browser as a CORS failure. See H5 in the
+# backend-perf audit.
+app.add_middleware(BodySizeLimitMiddleware)
+# Also registers the CORS-aware unhandled-error handler — a 500 is minted by
+# ServerErrorMiddleware, which sits OUTSIDE CORSMiddleware, so without it every
+# crash returns header-less and the browser blames CORS. See api/cors.py.
+install_cors(app)
 
 
 # ==================== MCP Server API ====================
@@ -766,7 +781,7 @@ async def oauth_authorize(service: str = Query("google_gmail")):
                 detail="Google OAuth Client ID not configured. Set it in Settings first.",
             )
 
-    from pocketpaw.integrations.oauth import OAuthManager
+    from pocketpaw.clients.oauth import OAuthManager
 
     manager = OAuthManager()
     redirect_uri = f"http://localhost:{settings.web_port}/oauth/callback"
@@ -798,8 +813,8 @@ async def oauth_callback(
         return HTMLResponse("<h2>Missing authorization code</h2>")
 
     try:
-        from pocketpaw.integrations.oauth import OAuthManager
-        from pocketpaw.integrations.token_store import TokenStore
+        from pocketpaw.clients.oauth import OAuthManager
+        from pocketpaw.clients.token_store import TokenStore
 
         settings = Settings.load()
         manager = OAuthManager(TokenStore())
@@ -1735,6 +1750,15 @@ def run_dashboard(
     """
     global _uvicorn_server, _restart_requested
 
+    # Request tracing, here rather than beside the app object: this module keeps
+    # registering routes with decorators all the way to the bottom of the file, and
+    # the instrumentor reads the route table to name spans by route TEMPLATE. By
+    # the time run_dashboard is called the whole module has been imported and every
+    # decorator has run. No-op unless POCKETPAW_LOGFIRE_ENABLED is set.
+    from pocketpaw.observability import instrument_fastapi_app
+
+    instrument_fastapi_app(app)
+
     _MAX_RESTARTS = 5
     _restart_count = 0
     first_run = True
@@ -1784,6 +1808,8 @@ def run_dashboard(
                 log_level="debug",
                 ws_ping_interval=None,
                 ws_ping_timeout=None,
+                # Bound graceful shutdown — see the non-dev Config below.
+                timeout_graceful_shutdown=5,
             )
             break  # dev mode handles its own reload, no restart loop
         else:
@@ -1797,6 +1823,13 @@ def run_dashboard(
                 # 20s timeout would close the connection mid-stream.
                 ws_ping_interval=None,
                 ws_ping_timeout=None,
+                # Bound graceful shutdown. uvicorn's default is None — it
+                # waits forever for open connections to close. The dashboard
+                # browser tab holds a WebSocket (and ws ping is disabled
+                # above), so on Ctrl+C uvicorn would otherwise hang after
+                # "connection closed" until the tab is closed — leaving the
+                # terminal stuck and the port bound. 5s, then force-close.
+                timeout_graceful_shutdown=5,
             )
             _uvicorn_server = uvicorn.Server(config)
             _uvicorn_server.run()
@@ -1808,21 +1841,6 @@ def run_dashboard(
                 logger.error("Max restart limit (%d) reached, exiting.", _MAX_RESTARTS)
                 break
             logger.info("Restarting server with updated settings...")
-
-
-# ---------------------------------------------------------------------------
-# Wrap FastAPI app with Socket.IO ASGI middleware (enterprise real-time chat)
-# Must be AFTER all routes and middleware are registered.
-# ---------------------------------------------------------------------------
-try:
-    from ee.cloud.socketio_server import wrap_asgi_app
-
-    app = wrap_asgi_app(app)
-    logger.info("Socket.IO ASGI wrapper applied")
-except ImportError:
-    pass
-except Exception as _sio_exc:
-    logger.warning("Socket.IO wrapper failed: %s", _sio_exc)
 
 
 if __name__ == "__main__":

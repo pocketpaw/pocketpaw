@@ -7,14 +7,119 @@ Uses the Deep Agents SDK (pip install deepagents) which provides:
 - Pluggable virtual filesystem backends
 
 Requires: pip install deepagents
+
+Updated 2026-09-02 (feat/proxy-spend-by-workspace): a run on the ``litellm``
+provider now tells the proxy which workspace pays for it, by putting the
+workspace id in the request body's ``user`` field. The API key on the request is
+``settings.litellm_api_key`` — the DEPLOYMENT's key, one for the whole install —
+so the billing cutover's per-tenant spend read, which filters on the tenant's own
+virtual key, matched nothing this backend ever sent. Sibling change in
+``pydantic_ai``; the chain and its proxy-side preconditions are documented once,
+in ``agents/spend_attribution.py``.
+
+Two halves, and the second is the load-bearing one:
+
+  * ``_build_model`` sets ``model_kwargs["user"]``. ChatLiteLLM spreads
+    ``model_kwargs`` into the completion call, so it rides the wire as the
+    OpenAI ``user`` field.
+  * ``_get_or_create_agent`` keys the compiled-graph cache on the same value.
+    ``_build_model`` runs per turn, but ``create_deep_agent`` BAKES the model
+    into the graph and this backend hands back the cached graph whenever the key
+    matches — so without it in the key, one instance serving two workspaces would
+    bill the second one's runs to the first. Both sides read
+    ``_proxy_end_user()``, so they cannot disagree about the value. The sibling
+    backend has no such hazard: it passes the id per run, not per agent.
+
+Updated 2026-09-02 (fix/deep-agents-usage-parity): THE RUNS ON THIS BACKEND
+BILLED ZERO, all of them. The ``token_usage`` event added by MCG-11 below was
+built for the prompt-cache A/B and carried only what that needed, so it reached
+``metering.resolve_cost`` with no ``model``, no ``output_tokens`` and no
+``total_cost_usd`` — exactly the three that function needs — and it was GATED on
+cache activity, so a cold turn emitted nothing and the run persisted
+``usage: {}``. ``pydantic_ai`` carried the identical defect until 2026-08-21;
+the fix was never swept across the siblings. Four changes:
+
+  * ``_accumulate_cache_usage`` now keeps ``output_tokens`` and the INCLUSIVE
+    input total alongside the uncached remainder. The remainder is what
+    ``report_savings`` and the meter read; the inclusive total is what
+    ``price_run`` reads, because it subtracts the cached portion itself and
+    handing it the remainder subtracts that portion twice.
+  * Cache WRITES are summed across ``cache_creation`` and the two ephemeral
+    TTL keys. ``langchain_anthropic`` zeroes the generic key whenever a TTL
+    key carries the value, and this backend marks every prefix 5m or 1h, so
+    reading only the generic key saw 0 writes forever. This one is telemetry,
+    not money: writes were already inside the inclusive total, so the bill was
+    unaffected — the hit rate was not.
+  * ``_build_usage_event`` prices the run and names the model that answered,
+    read off ``response_metadata`` rather than off configuration.
+  * The emit is unconditional, and survives a mid-stream error or a hard
+    cancel via the except handlers rather than ``finally`` — a yield from
+    ``finally`` raises out of the consumer's ``aclose()``.
+
+Updated 2026-08-03 (PA-9, feat/prompt-budget-measurement): ``_ANTHROPIC_CACHE_MIN_CHARS``
+is now measured. The value is unchanged at 4000, but the reasoning attached to it
+was wrong on all three counts — the chars/token ratio, the per-model floors, and
+the claim that a sub-floor marker costs a wasted cache write (it costs nothing).
+The constant's comment carries the numbers and the reason raising it would be a
+regression rather than a fix. Harness: ``scripts/evals/prompt_cache_eval.py``.
+
+Updated 2026-06-26 (integration/model-catalog-v2, MCG-11):
+  * The Anthropic prompt-cache patch sources its ``cache_control`` marker from
+    the universal ``pocketpaw.llm.caching._cache_control`` helper (single source
+    of truth for the 5m/1h ephemeral shape) instead of an inline literal.
+  * It now picks the TTL by content: the pocket/site-GENERATOR prefix (detected
+    by the byte-stable ``<pocket-scope>`` sentinel via ``_cache_ttl_for_system``)
+    gets a **1h** window because it recurs across back-to-back briefs; every
+    other long prompt keeps the 5m default. This is where the live site-gen
+    margin actually lands — the specialist runs on this backend by default and
+    its system prompt is a string the patch wraps + marks.
+  * Added prompt-cache TELEMETRY: the stream accumulates per-turn cache token
+    counts (``_accumulate_cache_usage``) and emits a ``token_usage`` AgentEvent
+    (via ``report_savings``) before ``done``, so the margin is measurable on this
+    backend (mirrors the claude_sdk hook).
+
+Updated 2026-08-01 (fix/agent-system-prompt-per-run): the compiled-graph cache
+key carries a digest of ``instructions``. ``system_prompt`` is baked into the
+graph at compile time, and ``AgentPool`` keeps ONE instance per agent across
+every session and surface, so the key's silence about prompt text meant turn N+1
+ran turn N's system prompt — which is how a brand-new chat greeted the user with
+the site they had just built in a different session. Recompiles cost ~14 ms
+(measured), and prompt caching is unaffected: the marker is applied to the
+request the graph sends, not to the graph. See the same note in
+``pydantic_ai.py`` for why that backend fixes it per-run instead.
+
+Updated 2026-08-03 (PA-7b, feat/prompt-assembler-channel): the ``t:`` fallback's
+justification below named a caller that no longer needs it — ``AgentLoop``'s
+channel path now assembles a digest and ``AgentRouter`` forwards it. The branch
+stays; the reason changed to the two callers that reach ``run`` without going
+through the router at all. No code changed in this module.
+
+Updated 2026-08-03 (PA-6, feat/prompt-assembler-seam): ``run`` takes
+``system_prompt_digest`` and the graph key prefers it over the text hash above.
+The text hash fixed the leak and paid for it with the cache — measured over 8
+ordinary turns on a live soul, ``sha256(instructions)`` produced 8 distinct keys,
+so the graph recompiled on EVERY turn. The assembler's ``stable_digest`` hashes
+the layers that declared themselves cacheable rather than the rendered text, and
+over the same 8 turns produced ONE key. Same correctness, no per-turn recompile.
+
+The text hash SURVIVES as the fallback for a caller that has no digest, and that
+is not tidiness. ``AgentLoop`` (Telegram / Discord / Slack / CLI) was the reason
+when this was written; PA-7b gave that path a digest and the fallback still is
+not dead, because the callers that need it never went through ``AgentRouter``:
+the pocket specialist calls ``backend.run`` directly on an isolated backend, and
+so can any OSS embedder. Dropping the hash would give them a key that cannot see
+the prompt at all, which is #1842 restored for the callers least able to notice.
+The two are prefixed so a digest and a text hash can never collide.
 """
 
+import hashlib
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
+from pocketpaw.agents.spend_attribution import end_user_id_for
 from pocketpaw.config import Settings
 from pocketpaw.tools.policy import ToolPolicy
 
@@ -30,6 +135,348 @@ _LANGCHAIN_PROVIDER_MAP: dict[str, str] = {
 }
 
 
+def _prompt_identity(instructions: str, system_prompt_digest: str) -> str:
+    """The cache-key slot that answers "whose prompt is this".
+
+    Two sources, and the prefix keeps them apart. ``d:`` is the assembler's
+    ``stable_digest`` — a hash over the prompt LAYERS that declared themselves
+    cacheable, so the per-message soul recall (an unkeyed layer) does not move it
+    and a warm graph survives an ordinary turn. ``t:`` is #1842's hash of the
+    rendered text, kept for callers that do not build their prompt through the
+    assembler: the pocket specialist, which builds an isolated backend and calls
+    ``backend.run(user_message, system_prompt=...)`` itself — bypassing the
+    ``AgentRouter`` that does the forwarding — and any OSS embedder doing the
+    same. ``AgentLoop``'s channel path was on that list until PA-7b threaded a
+    digest through the router; the branch did NOT become dead when it left,
+    because the other two callers never went through the router in the first
+    place.
+
+    Prefixed rather than concatenated because the two are different CLAIMS about
+    the same 16-64 hex chars — "these layers are the same" versus "these bytes
+    are the same" — and a caller that switched between them mid-life must be
+    treated as a changed prompt, not silently matched.
+
+    Measured 2026-08-03 over 8 ordinary turns on a live soul: ``t:`` produced 8
+    distinct keys (recompile every turn), ``d:`` produced 1.
+    """
+    if system_prompt_digest:
+        return f"d:{system_prompt_digest}"
+    return "t:" + hashlib.sha256((instructions or "").encode("utf-8", "replace")).hexdigest()
+
+
+_LITELLM_PATCHED = False
+_OPENAI_PATCHED = False
+_ANTHROPIC_PATCHED = False
+
+# Threshold above which we tag the system block with ``cache_control``.
+#
+# MEASURED 2026-08-03 (PA-9, scripts/evals/prompt_cache_eval.py --arm threshold).
+# The value stays 4000, but every number in the comment that used to justify it
+# was wrong, and the conclusion it drew was backwards:
+#
+#   * "one English token ~ 4 chars" — our own prompt text measures 3.48
+#     chars/token, so 4000 chars is ~1,150 tokens, not 1,000.
+#   * "~1024 on Sonnet/Opus and ~2048 on Haiku" — Haiku 4.5's floor is 4096
+#     tokens (measured: 3,304 tokens did not cache, 4,478 did), and Opus runs
+#     512..4096 by generation. 4000 chars clears NO Anthropic floor except
+#     Opus 5's 512. In chars, Haiku 4.5's floor is about 14,300.
+#   * "false positives only cost the cache-write overhead" — they cost nothing.
+#     A marked and an unmarked sub-floor call billed identically ($0.001079 vs
+#     $0.001079). Below the floor the provider declines to cache silently; there
+#     is no write to pay for. Both calls were verifiably COLD, which is what
+#     makes that a marker comparison rather than a warm-vs-cold one: the sweep
+#     reports 0 cached tokens at 4000 chars on BOTH the cold and the warm turn,
+#     so nothing cached at that size for the second call to read.
+#
+# So this threshold is wrong in the harmless direction, and RAISING it to a
+# "correct" ~14,300 would be the actual regression: it would stop marking on
+# Opus 4.8 (floor 1024) and Opus 5 (floor 512), where prompts between 4k and
+# 14k chars cache today. A gate that is too permissive is inert; one that is
+# too strict silently forfeits a ~12x warm-turn saving. It stays at 4000.
+#
+# What this constant genuinely buys is therefore NOT cost avoidance — it is
+# keeping the marker off the small greeting/one-shot prompts, where it would be
+# noise in the request. Judge future edits on that, and on ``CACHE_MIN_TOKENS``.
+_ANTHROPIC_CACHE_MIN_CHARS = 4000
+
+# MCG-11 — byte-stable sentinel that identifies the pocket/site-GENERATOR
+# prefix (``POCKET_SPECIALIST_PROMPT`` and the edit-specialist variants all open
+# with ``_SCOPE_BLOCK``, whose first line is ``<pocket-scope>``). That prefix is
+# huge (~17k tokens) and recurs across BACK-TO-BACK briefs, so it earns the 1h
+# cache window (≥3 reads/hour beats the 5m default and amortises the 2x write).
+# Every OTHER long prompt (chat / home / one-shot) keeps the 5m default — a
+# blanket 1h would 2x the write cost for prompts that never recur within the
+# hour. The gate is a substring test on byte-stable prompt text, so it stays
+# correct regardless of which backend assembled the string.
+_SPECIALIST_PREFIX_SENTINEL = "<pocket-scope>"
+
+
+def _cache_ttl_for_system(text: str) -> str:
+    """Pick the cache TTL for a system prompt by its content.
+
+    Returns ``"1h"`` for the pocket/site-generator prefix (detected by the
+    byte-stable ``<pocket-scope>`` sentinel) — it recurs across briefs so the
+    longer window pays off — and ``"5m"`` for everything else.
+    """
+    return "1h" if _SPECIALIST_PREFIX_SENTINEL in text else "5m"
+
+
+def _patch_openai_message_serializer() -> None:
+    """Make langchain_openai round-trip DeepSeek `reasoning_content` when
+    the direct-DeepSeek (openai-compat) route is in use.
+
+    DeepSeek thinking mode requires ``reasoning_content`` from each prior
+    assistant turn to be echoed back on subsequent multi-turn requests
+    (per https://api-docs.deepseek.com/guides/thinking_mode). Vanilla
+    ``langchain_openai`` ignores the field on the way in AND drops
+    ``additional_kwargs`` on the way out, so every tool-using agent
+    400s on its second API call ("``reasoning_content`` in thinking
+    mode must be passed back to the API").
+
+    Three patches on ``langchain_openai.chat_models.base``:
+      1. ``_convert_dict_to_message`` — non-streaming response: capture
+         ``reasoning_content`` into ``AIMessage.additional_kwargs``.
+      2. ``_convert_delta_to_message_chunk`` — streaming delta: same on
+         ``AIMessageChunk``, accumulating across chunks.
+      3. ``_convert_message_to_dict`` — outbound: re-emit
+         ``reasoning_content`` as a top-level field when an assistant
+         message carries it in ``additional_kwargs``.
+
+    All three are idempotent and a no-op for non-DeepSeek openai-compat
+    endpoints (they only act when the field is actually present), so
+    applying unconditionally is safe.
+    """
+    global _OPENAI_PATCHED
+    if _OPENAI_PATCHED:
+        return
+
+    try:
+        from langchain_openai.chat_models import base as _oa
+    except ImportError:
+        return
+
+    # The three target symbols are private (``_convert_*``) and may be
+    # renamed or moved by a future langchain-openai release. The
+    # try/except above catches a missing module; the ``hasattr`` guards
+    # below catch a missing attribute, log loudly so a langchain upgrade
+    # surfaces in CI logs (not as a silent AttributeError on the first
+    # DeepSeek call in production), and skip the individual patch
+    # without breaking the others.
+    _patched_count = 0
+    _missing: list[str] = []
+
+    # --- 1. inbound: non-streaming response → AIMessage ---
+    if hasattr(_oa, "_convert_dict_to_message"):
+        original_dict_to_message = _oa._convert_dict_to_message
+
+        def patched_dict_to_message(_dict):  # type: ignore[no-untyped-def]
+            msg = original_dict_to_message(_dict)
+            if msg.type == "ai":
+                rc = _dict.get("reasoning_content")
+                if rc:
+                    msg.additional_kwargs["reasoning_content"] = rc
+            return msg
+
+        _oa._convert_dict_to_message = patched_dict_to_message
+        _patched_count += 1
+    else:
+        _missing.append("_convert_dict_to_message")
+
+    # --- 2. inbound: streaming delta → AIMessageChunk ---
+    if hasattr(_oa, "_convert_delta_to_message_chunk"):
+        original_delta_to_chunk = _oa._convert_delta_to_message_chunk
+
+        def patched_delta_to_chunk(_dict, default_class):  # type: ignore[no-untyped-def]
+            chunk = original_delta_to_chunk(_dict, default_class)
+            rc = _dict.get("reasoning_content")
+            if rc and hasattr(chunk, "additional_kwargs"):
+                existing = chunk.additional_kwargs.get("reasoning_content") or ""
+                chunk.additional_kwargs["reasoning_content"] = existing + rc
+            return chunk
+
+        _oa._convert_delta_to_message_chunk = patched_delta_to_chunk
+        _patched_count += 1
+    else:
+        _missing.append("_convert_delta_to_message_chunk")
+
+    # --- 3. outbound: AIMessage → request dict ---
+    if hasattr(_oa, "_convert_message_to_dict"):
+        original_message_to_dict = _oa._convert_message_to_dict
+
+        def patched_message_to_dict(message, api="chat/completions"):  # type: ignore[no-untyped-def]
+            msg_dict = original_message_to_dict(message, api=api)
+            if msg_dict.get("role") == "assistant":
+                rc = getattr(message, "additional_kwargs", {}).get("reasoning_content")
+                if rc and not msg_dict.get("reasoning_content"):
+                    msg_dict["reasoning_content"] = rc
+            return msg_dict
+
+        _oa._convert_message_to_dict = patched_message_to_dict
+        _patched_count += 1
+    else:
+        _missing.append("_convert_message_to_dict")
+
+    _OPENAI_PATCHED = True
+    if _missing:
+        logger.error(
+            "langchain_openai upgrade broke the DeepSeek reasoning_content patch: "
+            "missing %s on langchain_openai.chat_models.base. Multi-turn DeepSeek "
+            "thinking-mode calls will 400. Update the patch in "
+            "src/pocketpaw/agents/deep_agents.py:_patch_openai_message_serializer.",
+            ", ".join(_missing),
+        )
+    if _patched_count:
+        logger.info(
+            "Patched %d/3 langchain_openai message serializers for DeepSeek "
+            "reasoning_content round-trip",
+            _patched_count,
+        )
+
+
+def _patch_litellm_message_serializer() -> None:
+    """Make langchain_litellm round-trip DeepSeek `reasoning_content` properly.
+
+    langchain_litellm wraps DeepSeek's `reasoning_content` as an Anthropic-style
+    `{"type": "thinking", "thinking": "..."}` content block on the AIMessage,
+    but its outbound `_convert_message_to_dict` passes that block through
+    untouched and never re-emits a top-level `reasoning_content` field. DeepSeek
+    rejects both shapes: the block is an unknown variant, and stripping it
+    makes DeepSeek complain that reasoning_content is missing in thinking mode.
+
+    Patch the serializer to:
+      - filter `thinking` / `redacted_thinking` blocks out of `content`
+      - hoist their text back into a top-level `reasoning_content` field
+    """
+    global _LITELLM_PATCHED
+    if _LITELLM_PATCHED:
+        return
+
+    try:
+        from langchain_litellm.chat_models import litellm as _ll
+    except ImportError:
+        return
+
+    original = _ll._convert_message_to_dict
+
+    def patched(message):  # type: ignore[no-untyped-def]
+        msg_dict = original(message)
+        content = msg_dict.get("content")
+        if isinstance(content, list):
+            thinking_parts: list[str] = []
+            kept: list[Any] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in (
+                    "thinking",
+                    "redacted_thinking",
+                ):
+                    text = block.get("thinking") or block.get("data") or ""
+                    if text:
+                        thinking_parts.append(text)
+                    continue
+                kept.append(block)
+            if thinking_parts:
+                if not msg_dict.get("reasoning_content"):
+                    msg_dict["reasoning_content"] = "\n".join(thinking_parts)
+                msg_dict["content"] = kept or ""
+        # Also surface reasoning_content stashed in additional_kwargs by the
+        # response parser, in case content was already a plain string.
+        if not msg_dict.get("reasoning_content"):
+            rc = getattr(message, "additional_kwargs", {}).get("reasoning_content")
+            if rc:
+                msg_dict["reasoning_content"] = rc
+        return msg_dict
+
+    _ll._convert_message_to_dict = patched
+    _LITELLM_PATCHED = True
+    logger.info(
+        "Patched langchain_litellm._convert_message_to_dict for reasoning_content round-trip"
+    )
+
+
+def _patch_anthropic_message_serializer() -> None:
+    """Enable Anthropic prompt caching on long system messages.
+
+    Anthropic's prompt cache is opt-in per content block: a block must
+    carry ``cache_control: {"type": "ephemeral"}`` for the API to cache
+    its tokenized prefix. LangChain's ``_format_messages`` passes a
+    string-typed ``SystemMessage.content`` straight through to the API's
+    ``system`` parameter — no markup, no caching. For the pocket
+    specialist's ~12k-token design-rules prompt that means we re-pay
+    the prefix tokenization on every spec generation.
+
+    This patch wraps ``langchain_anthropic.chat_models._format_messages``:
+    after the upstream conversion runs, we lift a long string-typed
+    system value into a single-block list with ``cache_control``
+    attached, and we annotate the last text block when the system is
+    already a list (typical: the message left the SystemMessage as a
+    structured content object). Short prompts (< ``_ANTHROPIC_CACHE_MIN_CHARS``)
+    are left alone — cache overhead outweighs savings on small prompts.
+
+    Idempotent: re-imports of this module reuse the same patched
+    function via the ``_ANTHROPIC_PATCHED`` sentinel.
+    """
+    global _ANTHROPIC_PATCHED
+    if _ANTHROPIC_PATCHED:
+        return
+
+    try:
+        from langchain_anthropic import chat_models as _ac
+    except ImportError:
+        return
+
+    if not hasattr(_ac, "_format_messages"):
+        logger.error(
+            "langchain_anthropic upgrade broke the prompt-cache patch: "
+            "missing _format_messages on langchain_anthropic.chat_models. "
+            "Anthropic prompt caching is disabled for this run. Update "
+            "src/pocketpaw/agents/deep_agents.py:_patch_anthropic_message_serializer."
+        )
+        return
+
+    original = _ac._format_messages
+
+    # Single source of truth for the ephemeral marker shape (MCG-11) — the
+    # universal caching module owns the 5m/1h ``cache_control`` dict so this
+    # patch and the structured ``build_cacheable`` path can never diverge.
+    from pocketpaw.llm.caching import _cache_control as _cc
+
+    def patched(messages):  # type: ignore[no-untyped-def]
+        system, formatted = original(messages)
+        if isinstance(system, str) and len(system) >= _ANTHROPIC_CACHE_MIN_CHARS:
+            # The pocket/site-generator prefix gets the 1h window (it recurs
+            # across briefs); every other long prompt keeps 5m.
+            system = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": _cc(_cache_ttl_for_system(system)),
+                }
+            ]
+        elif isinstance(system, list) and system:
+            # Already a block list. Tag the last text block whose total
+            # text size pushes the system payload over the threshold —
+            # short text-only systems and pure-image systems are skipped.
+            text_blocks = [b for b in system if isinstance(b, dict) and b.get("type") == "text"]
+            total_chars = sum(len(b.get("text", "")) for b in text_blocks)
+            already_cached = any(isinstance(b, dict) and b.get("cache_control") for b in system)
+            if total_chars >= _ANTHROPIC_CACHE_MIN_CHARS and not already_cached:
+                # TTL keys off the WHOLE system text so the generator prefix is
+                # recognised even when split across blocks.
+                ttl = _cache_ttl_for_system("".join(b.get("text", "") for b in text_blocks))
+                for block in reversed(system):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        block["cache_control"] = _cc(ttl)
+                        break
+        return system, formatted
+
+    _ac._format_messages = patched
+    _ANTHROPIC_PATCHED = True
+    logger.info(
+        "Patched langchain_anthropic._format_messages for prompt caching (threshold=%d chars)",
+        _ANTHROPIC_CACHE_MIN_CHARS,
+    )
+
+
 def _unwrap(value: Any) -> Any:
     """Unwrap LangGraph Overwrite/Send wrapper objects to their inner value.
 
@@ -40,6 +487,196 @@ def _unwrap(value: Any) -> Any:
     if hasattr(value, "value"):
         return value.value
     return value
+
+
+# Every key LangChain can file a cache WRITE under. ``langchain_anthropic``
+# copies Anthropic's per-TTL breakdown across as ``ephemeral_5m_input_tokens`` /
+# ``ephemeral_1h_input_tokens`` and then ZEROES the generic ``cache_creation`` so
+# its own total does not double-count (``_create_usage_metadata``). Reading only
+# the generic key therefore sees 0 for every write this backend actually makes —
+# it marks its prefixes 5m or 1h, never untagged. Summing all three is safe
+# precisely because that zeroing guarantees at most one of them is ever set.
+_CACHE_WRITE_KEYS = (
+    "cache_creation",
+    "ephemeral_5m_input_tokens",
+    "ephemeral_1h_input_tokens",
+)
+
+
+def _accumulate_cache_usage(msg_chunk: Any, acc: dict[str, int]) -> None:
+    """Fold a LangChain ``AIMessageChunk``'s token counts into ``acc``.
+
+    LangChain normalises provider usage onto ``usage_metadata``, where
+    ``input_tokens`` is the INCLUSIVE input — ``UsageMetadata`` documents it as
+    the "sum of all input token types", and ``langchain_anthropic`` adds the
+    cache lines back onto Anthropic's disjoint count to get there. The split
+    lives under ``input_token_details``. A tool loop yields several AI turns,
+    each with its own ``usage_metadata``, so we SUM across chunks.
+
+    Three of the accumulated keys are load-bearing for the invoice and were not
+    here before, which is most of why every run on this backend billed $0:
+
+    * ``input_tokens`` is the UNCACHED REMAINDER, because that is the shape
+      ``report_savings`` reads and the shape ``metering._prompt_tokens`` expects
+      from an Anthropic-shaped payload.
+    * ``inclusive_input_tokens`` keeps the total that remainder came out of, and
+      it is NOT redundant with it. ``price_run`` subtracts the cached portion
+      itself, so pricing off the remainder removes those tokens a second time.
+      The remainder is what the meter wants; the inclusive total is what the
+      price wants; both have to survive the fold.
+    * ``output_tokens`` is simply the half of a conversation that costs the most
+      — Anthropic bills output at roughly 5x input — and this function used to
+      drop it on the floor.
+    """
+    um = getattr(msg_chunk, "usage_metadata", None)
+    if not isinstance(um, dict):
+        return
+    details = um.get("input_token_details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    try:
+        total_input = int(um.get("input_tokens") or 0)
+        output = int(um.get("output_tokens") or 0)
+        read = int(details.get("cache_read") or 0)
+        # A write is filed under whichever key the marker's TTL selected.
+        write = sum(int(details.get(key) or 0) for key in _CACHE_WRITE_KEYS)
+    except (TypeError, ValueError):
+        return
+    total_input, output = max(0, total_input), max(0, output)
+    read, write = max(0, read), max(0, write)
+    acc["cache_read_input_tokens"] += read
+    acc["cache_creation_input_tokens"] += write
+    acc["input_tokens"] += max(0, total_input - read - write)
+    acc["inclusive_input_tokens"] += total_input
+    acc["output_tokens"] += output
+
+
+def _model_name_from_chunk(msg_chunk: Any) -> str | None:
+    """The model that actually answered this turn, off ``response_metadata``.
+
+    ``langchain_anthropic`` stamps ``model_name`` from the provider's own
+    ``message_start`` event onto the first chunk of EVERY AI turn, and that is
+    the only truthful source. The configured setting can be an alias, can carry
+    a ``provider:`` prefix the price library does not know, and can be
+    overridden per run; the tokens being priced belong to whatever the provider
+    actually served. ``claude_sdk`` takes the model off the CLI's own report for
+    the same reason. Other integrations spell it ``model``, so both are read.
+
+    Returns None for most chunks, which is expected rather than a miss: the
+    model rides ``message_start`` and the usage rides ``message_delta``, so the
+    caller keeps the last non-None it saw instead of reading both off one chunk.
+    """
+    meta = getattr(msg_chunk, "response_metadata", None)
+    if not isinstance(meta, dict):
+        return None
+    for key in ("model_name", "model"):
+        value = meta.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _build_usage_event(acc: dict[str, int], model: str | None) -> AgentEvent:
+    """Build the ``token_usage`` event from an accumulated stream.
+
+    THIS EVENT IS THE INVOICE. It was written for the MCG-11 prompt-cache A/B
+    and carried only what that measurement needed, so every deep_agents run
+    reached ``metering.resolve_cost`` with no ``model``, no ``output_tokens``
+    and no ``total_cost_usd`` — precisely the set that function needs — and
+    billed zero. ``pydantic_ai`` carried the identical defect until 2026-08-21,
+    where it cost 37 unbillable runs before anyone noticed; the fix was never
+    swept across the siblings, and this is that sweep.
+
+    It is built UNCONDITIONALLY. The old emit was gated on cache activity, so a
+    cold turn — a first message, a short chat, any prompt under the 4000-char
+    marker threshold — emitted nothing at all and the run persisted
+    ``usage: {}``. A turn with no cache activity is a real, priceable turn, and
+    gating the invoice on a telemetry signal is how it stayed invisible.
+
+    The two input numbers point opposite ways ON PURPOSE:
+
+    * The payload's ``input_tokens`` is the UNCACHED REMAINDER. Any payload
+      carrying ``cache_read_tokens`` / ``cache_write_tokens`` is read as
+      Anthropic-shaped by ``metering._prompt_tokens``, which reconstitutes the
+      inclusive prompt by adding the cache lines back. Sending the inclusive
+      total here would count the cache twice and overbill.
+    * ``price_run`` is handed the INCLUSIVE total, because both pricing rungs
+      subtract the cached portion themselves. Handing it the remainder would
+      subtract that portion a second time.
+
+    Pricing happens here rather than being left to the meter's estimator for the
+    reason ``pydantic_ai`` gives: this runs the instant the run finished, so
+    ``now()`` genuinely IS the run's moment. The meter cannot say that — it
+    bills off a sweeper draining a backlog, which is why ``resolve_cost`` takes
+    the run's own timestamp instead.
+    """
+    from pocketpaw.llm.caching import report_savings
+
+    savings = report_savings(acc)
+    read = acc.get("cache_read_input_tokens", 0)
+    write = acc.get("cache_creation_input_tokens", 0)
+    inclusive = acc.get("inclusive_input_tokens", 0)
+    output = acc.get("output_tokens", 0)
+
+    if read or write:
+        logger.info(
+            "[deep_agents] prompt-cache: read=%d write=%d "
+            "hit_rate=%.1f%% est_saved=%.0f input-tok-equiv",
+            savings.cache_read_tokens,
+            savings.cache_write_tokens,
+            savings.hit_rate * 100,
+            savings.est_tokens_saved,
+        )
+
+    cost = 0.0
+    if model and (inclusive or output):
+        from datetime import UTC, datetime
+
+        from pocketpaw.usage_tracker import price_run
+
+        priced = price_run(
+            model,
+            input_tokens=inclusive,
+            output_tokens=output,
+            cache_read_tokens=read,
+            cache_write_tokens=write,
+            at=datetime.now(tz=UTC),
+        )
+        if priced is not None:
+            cost = float(priced)
+        else:
+            logger.warning(
+                "[deep_agents] no price for model %r — this turn bills $0 "
+                "(in=%d out=%d cache_read=%d cache_write=%d). Add a row to "
+                "usage_tracker._PRICING if genai-prices lacks the id.",
+                model,
+                inclusive,
+                output,
+                read,
+                write,
+            )
+
+    return AgentEvent(
+        type="token_usage",
+        content="",
+        metadata={
+            "input_tokens": acc.get("input_tokens", 0),
+            "output_tokens": output,
+            # Read PLUS write, matching ``claude_sdk``. ``_prompt_tokens``
+            # ignores this key on the Anthropic branch, but ``_total_tokens``
+            # sums input + output + cached_input, and with ``input_tokens``
+            # carrying the remainder only read+write closes that back to the
+            # real total.
+            "cached_input_tokens": read + write,
+            "cache_read_tokens": savings.cache_read_tokens,
+            "cache_write_tokens": savings.cache_write_tokens,
+            "cache_hit_rate": savings.hit_rate,
+            "cache_est_tokens_saved": savings.est_tokens_saved,
+            "total_cost_usd": cost,
+            "model": model,
+            "backend": "deep_agents",
+        },
+    )
 
 
 def _extract_content_text(content: Any) -> str:
@@ -59,6 +696,32 @@ def _extract_content_text(content: Any) -> str:
                 parts.append(block.get("text", ""))
         return "".join(parts)
     return ""
+
+
+def _split_content_text_and_thinking(content: Any) -> tuple[str, str]:
+    """Return ``(text, thinking)`` extracted from an AIMessageChunk
+    content payload. Anthropic emits ``{"type":"thinking","thinking":...}``
+    blocks; ``langchain_litellm`` wraps DeepSeek reasoning_content the
+    same way. Both feed the SSE ``thinking`` event so the UI shows
+    activity instead of silent dead time."""
+    if isinstance(content, str):
+        return content, ""
+    if not isinstance(content, list):
+        return "", ""
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            text_parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            text_parts.append(block.get("text", ""))
+        elif btype in ("thinking", "redacted_thinking"):
+            thinking_parts.append(block.get("thinking") or block.get("data") or "")
+    return "".join(text_parts), "".join(thinking_parts)
 
 
 class DeepAgentsBackend:
@@ -114,7 +777,7 @@ class DeepAgentsBackend:
         )
         self._mcp_client: Any = None
         self._cached_agent: Any = None
-        self._cached_model_key: str = ""
+        self._cached_model_key: Any = None
         self._initialize()
 
     def get_tool_policy(self) -> ToolPolicy:
@@ -135,7 +798,16 @@ class DeepAgentsBackend:
             logger.warning("Deep Agents SDK not installed -- pip install 'pocketpaw[deep-agents]'")
 
     def _build_custom_tools(self) -> list:
-        """Lazily build and cache PocketPaw tools as LangChain StructuredTool wrappers."""
+        """Lazily build and cache PocketPaw tools as LangChain StructuredTool wrappers.
+
+        Note: when this backend is used in an isolated specialist run, the
+        runtime calls ``attach_specialist_tools`` first, which pre-populates
+        ``_custom_tools`` with only the specialist's internal tools. This
+        method then early-returns the cached list, so the
+        ``pocket_specialist__create`` tool (auto-injected by the bridge for
+        every main-agent run) is NOT pulled into the specialist's own
+        backend, which would be a recursion footgun.
+        """
         if self._custom_tools is not None:
             return self._custom_tools
         try:
@@ -235,6 +907,22 @@ class DeepAgentsBackend:
             provider = "anthropic"
         return provider, model_str.strip() or "claude-sonnet-4-6"
 
+    def _proxy_end_user(self) -> str | None:
+        """The workspace id to bill this run's proxy requests to, or None.
+
+        The single source for both users of the value — the model kwarg in
+        ``_build_model`` and the compiled-graph cache key in
+        ``_get_or_create_agent``. They are two expressions of one fact (which
+        tenant this graph's model charges), and a graph cached under a different
+        answer than the model carries is a cross-tenant billing error, so they
+        read the same call rather than each deciding for themselves.
+
+        None off the proxy path and None outside a cloud chat dispatch; see
+        ``spend_attribution`` for both.
+        """
+        provider, _model = self._parse_provider_model()
+        return end_user_id_for(provider)
+
     def _build_model(self) -> Any:
         """Build the LangChain chat model with proper provider configuration.
 
@@ -245,6 +933,12 @@ class DeepAgentsBackend:
 
         provider, model = self._parse_provider_model()
         kwargs: dict[str, Any] = {}
+        # OpenAI-compat endpoints that speak chat-completions but NOT the
+        # OpenAI Responses API (DeepSeek, OpenRouter, LiteLLM proxy, vLLM,
+        # etc.). When provider is mapped to "openai" with a custom base_url,
+        # we must force chat-completions or init_chat_model defaults to the
+        # Responses API in deepagents 0.5.x and the call fails with 404.
+        is_openai_compat_endpoint = False
 
         if provider == "anthropic":
             if self.settings.anthropic_api_key:
@@ -274,6 +968,7 @@ class DeepAgentsBackend:
                 model = self.settings.openrouter_model or ""
             # OpenRouter uses OpenAI-compatible API
             provider = "openai"
+            is_openai_compat_endpoint = True
 
         elif provider == "openai_compatible":
             if self.settings.openai_compatible_base_url:
@@ -284,45 +979,271 @@ class DeepAgentsBackend:
             if not model:
                 model = self.settings.openai_compatible_model or ""
             provider = "openai"
+            is_openai_compat_endpoint = True
 
         elif provider == "litellm":
-            # Route through LiteLLM proxy as OpenAI-compatible endpoint.
-            # The proxy exposes an OpenAI API, so we use the openai provider
-            # pointed at the proxy URL. This avoids needing langchain-litellm.
+            # Route through LiteLLM via the native ChatLiteLLM integration. The
+            # LiteLLM SDK handles provider-specific quirks (DeepSeek
+            # reasoning_content threading, Anthropic thinking blocks,
+            # model-name routing) that our earlier ChatOpenAI-masquerade
+            # dropped on the floor. ChatLiteLLM uses ``api_base`` (not
+            # ``base_url``) and the LiteLLM SDK appends the path itself, so we
+            # must NOT add ``/v1``. We also keep provider="litellm" so
+            # init_chat_model returns ChatLiteLLM, and we leave
+            # ``is_openai_compat_endpoint`` False — ChatLiteLLM does not
+            # accept ``use_responses_api``.
             base = (self.settings.litellm_api_base or "http://localhost:4000").rstrip("/")
-            kwargs["base_url"] = f"{base}/v1"
+            kwargs["api_base"] = base
+            # The DEPLOYMENT's proxy key, shared by every workspace — which is
+            # why the request also has to say who it is FOR. ``model_kwargs`` is
+            # the only way in: ChatLiteLLM drops unknown top-level kwargs
+            # silently (the same trap the thinking flag below documents) but
+            # spreads ``model_kwargs`` into the completion call, so ``user``
+            # reaches the proxy as the standard OpenAI end-user field.
             kwargs["api_key"] = self.settings.litellm_api_key or "not-needed"
+            end_user = self._proxy_end_user()
+            if end_user:
+                model_kwargs = dict(kwargs.get("model_kwargs") or {})
+                model_kwargs["user"] = end_user
+                kwargs["model_kwargs"] = model_kwargs
             if not model:
                 model = self.settings.litellm_model or ""
-            provider = "openai"
+
+        # Force chat-completions for non-OpenAI endpoints. The default
+        # Responses API in deepagents 0.5.x is OpenAI-only.
+        if is_openai_compat_endpoint:
+            kwargs["use_responses_api"] = False
+
+        # Providers diverge on where the disable-thinking flag goes:
+        #
+        # - litellm           — ChatLiteLLM drops unknown top-level
+        #                       kwargs silently. extra_body MUST go
+        #                       through model_kwargs.
+        #                       NOTE: LiteLLM's DeepSeekChatConfig
+        #                       strips thinking={"type":"disabled"}
+        #                       before sending. Disable only actually
+        #                       works if the proxy is in raw passthrough
+        #                       mode or runs a patched LiteLLM. See
+        #                       https://github.com/BerriAI/litellm/issues/27439
+        # - openai / openai_compatible — ChatOpenAI has extra_body as a
+        #                       native top-level field; OpenAI SDK
+        #                       forwards it verbatim in the request body.
+        #                       Hitting DeepSeek's API directly via this
+        #                       path BYPASSES both LiteLLM transformers
+        #                       (ours + any proxy) — the recommended
+        #                       path for reliable disable.
+        # - anthropic         — `thinking={"type":"disabled"}` is a
+        #                       top-level kwarg the SDK honors directly.
+        #
+        # `reasoning_effort` is deliberately NOT passed. It's a thinking-
+        # mode parameter; setting it alongside disable is contradictory.
+        if getattr(self.settings, "deep_agents_disable_thinking", False):
+            if provider == "litellm":
+                model_kwargs = dict(kwargs.get("model_kwargs") or {})
+                extra_body = dict(model_kwargs.get("extra_body") or {})
+                extra_body["thinking"] = {"type": "disabled"}
+                model_kwargs["extra_body"] = extra_body
+                kwargs["model_kwargs"] = model_kwargs
+            elif provider == "openai":
+                # ChatOpenAI accepts extra_body as a native field — set
+                # it top-level. Covers both `openai` and the
+                # `openai_compatible` path which we remap to `openai`
+                # above with a custom base_url.
+                existing = kwargs.get("extra_body") or {}
+                kwargs["extra_body"] = {
+                    **existing,
+                    "thinking": {"type": "disabled"},
+                }
+            else:
+                kwargs["thinking"] = {"type": "disabled"}
 
         # Map to LangChain's expected provider name
         lc_provider = _LANGCHAIN_PROVIDER_MAP.get(provider, provider)
         model_id = f"{lc_provider}:{model}" if model else lc_provider
 
-        logger.info("Deep Agents: init_chat_model(%r) with %d kwargs", model_id, len(kwargs))
+        # Surface the thinking-disable status loudly. Past bug: extra_body
+        # was set at the wrong nesting level and silently dropped. This
+        # log makes any future regression visible on first inspection.
+        mk = kwargs.get("model_kwargs") or {}
+        if isinstance(mk, dict) and "extra_body" in mk:
+            logger.info(
+                "Deep Agents: init_chat_model(%r) with model_kwargs.extra_body=%s",
+                model_id,
+                mk["extra_body"],
+            )
+        else:
+            logger.info(
+                "Deep Agents: init_chat_model(%r) with %d kwargs",
+                model_id,
+                len(kwargs),
+            )
         return init_chat_model(model_id, **kwargs)
 
     def _get_or_create_agent(
-        self, model: Any, instructions: str, mcp_tools: list | None = None
+        self,
+        model: Any,
+        instructions: str,
+        mcp_tools: list | None = None,
+        *,
+        system_prompt_digest: str = "",
     ) -> Any:
         """Cache the compiled LangGraph agent to avoid recompilation on every call."""
         from deepagents import create_deep_agent
 
-        # Invalidate cache if model setting changed
-        model_key = self.settings.deep_agents_model
+        skills = list(self.settings.deep_agents_skills or [])
+        memory = list(self.settings.deep_agents_memory or [])
+
+        # Pocket sessions don't need shell or filesystem access. Same gate
+        # as claude_sdk: <pocket-scope> appears in every pocket prompt.
+        is_pocket_session = "<pocket-scope>" in (instructions or "")
+
+        # Invalidate cache if any input that shapes the compiled graph changed.
+        # is_pocket_session is part of the key so flipping between pocket and
+        # non-pocket sessions in the same backend recompiles the agent.
+        #
+        # The prompt identity is in the key because ``instructions`` is baked into
+        # the compiled graph below (``kwargs["system_prompt"]``) while
+        # ``AgentPool`` keeps ONE instance per agent across every session. Without
+        # it, turn N+1 was served the graph compiled for turn N — carrying turn
+        # N's surface preamble, ``<current-pocket>`` tag and soul-memory recall.
+        # That is how a brand-new chat opened by offering to continue the last
+        # session's work. ``pydantic_ai`` solves this by passing instructions
+        # per-run; ``create_deep_agent`` takes ``str | SystemMessage`` only, so
+        # here the fix is to recompile.
+        #
+        # PA-6 changed WHAT that identity is, not whether there is one — see
+        # ``_prompt_identity``. #1842 hashed the rendered text, which recompiled
+        # on every turn (8 distinct keys over 8 measured turns) because the recall
+        # is keyed on the user's message. ``stable_digest`` hashes the layers that
+        # claimed to be cacheable and held at 1 key over the same 8 turns.
+        #
+        # THE CONSEQUENCE WORTH STATING: a reused graph keeps the prompt it was
+        # compiled with, so a turn that only changed the per-message recall now
+        # runs against the PREVIOUS turn's recall block. That is the trade PA-3
+        # made when it declared retrieval unkeyed, and it is the trade
+        # ``claude_sdk``'s warm client has always made (its volatile markers cut
+        # the same block out of the same decision). What a reused graph can never
+        # carry is a different agent, surface, override or instruction set —
+        # those are keyed layers, and they move the digest.
+        model_key = (
+            self.settings.deep_agents_model,
+            _prompt_identity(instructions, system_prompt_digest),
+            tuple(skills),
+            tuple(memory),
+            is_pocket_session,
+            # In the key because the MODEL is baked into the compiled graph and
+            # the model now carries a tenant id (``_build_model`` sets
+            # ``model_kwargs["user"]`` on the proxy path). Everything else here
+            # shapes behaviour; this one decides who gets billed, so leaving it
+            # out would let a graph compiled for one workspace charge its runs to
+            # another. ``None`` off the proxy path and outside a cloud chat
+            # dispatch, which keys exactly as before.
+            self._proxy_end_user(),
+        )
         if self._cached_agent is not None and self._cached_model_key == model_key:
             return self._cached_agent
 
         all_tools = self._build_custom_tools() + (mcp_tools or [])
-        agent = create_deep_agent(
-            model=model,
-            tools=all_tools if all_tools else [],
-            system_prompt=instructions,
-        )
+
+        # Composio — per-stream integration tools (Gmail, Slack, …) via the
+        # langgraph provider, discovered through the ``pocketpaw.composio_tools``
+        # entry point. Skipped on pocket sessions: the pocket specialist runs
+        # on this backend and we keep its tool surface narrow + Composio-free
+        # (the parent agent fetches Composio data and passes it down in the
+        # brief).
+        if not is_pocket_session:
+            from pocketpaw.agents.tool_bridge import composio_tools_for
+
+            composio_tools = composio_tools_for("deep_agents", self.settings)
+            if composio_tools:
+                all_tools = all_tools + list(composio_tools)
+                logger.info("Composio: appended %d langgraph tools", len(composio_tools))
+
+        if is_pocket_session:
+            # Drop shell + filesystem tools — pocket flow has MCP tools
+            # for everything it needs. Without this filter the agent has
+            # been observed running `env | grep pocket; curl localhost`
+            # to introspect state.
+            _blocked = {
+                "shell",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "list_dir",
+            }
+            before = len(all_tools)
+            all_tools = [t for t in all_tools if getattr(t, "name", "") not in _blocked]
+            if before != len(all_tools):
+                logger.info(
+                    "Pocket session — stripped %d shell/fs tools from agent",
+                    before - len(all_tools),
+                )
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "tools": all_tools if all_tools else [],
+            "system_prompt": instructions,
+        }
+        # Only forward skills/memory when populated — passing empty lists
+        # still wires SkillsMiddleware/MemoryMiddleware with nothing to load.
+        if skills:
+            kwargs["skills"] = skills
+        if memory:
+            kwargs["memory"] = memory
+
+        # Patch the active provider's message serializer so DeepSeek-thinking
+        # `reasoning_content` round-trips correctly across multi-turn / tool-
+        # using conversations. Both patches are idempotent and no-op when the
+        # field is absent (non-DeepSeek endpoints), so apply unconditionally
+        # for the provider that's actually in play.
+        #
+        # We KEEP the patch on regardless of `deep_agents_disable_thinking`.
+        # That flag only suppresses Anthropic thinking — DeepSeek ignores it
+        # and keeps emitting reasoning_content. If we skipped the patch when
+        # the flag is set, DeepSeek-routed conversations would 400 on every
+        # multi-turn ("reasoning_content in thinking mode must be passed
+        # back to the API").
+        provider, _ = self._parse_provider_model()
+        if provider == "litellm":
+            _patch_litellm_message_serializer()
+        elif provider in ("openai", "openai_compatible", "openrouter"):
+            # The openai_compatible / openrouter / direct-DeepSeek route uses
+            # ChatOpenAI under the hood. Patch the langchain_openai
+            # serializers — see _patch_openai_message_serializer docstring.
+            _patch_openai_message_serializer()
+        elif provider == "anthropic":
+            # ChatAnthropic does not tag long system blocks with
+            # cache_control by default, so the pocket specialist's
+            # ~12k-token design-rules prompt re-tokenizes on every call.
+            # The patch wraps _format_messages to add cache_control on
+            # the longest system text block. See the patch docstring.
+            _patch_anthropic_message_serializer()
+
+        agent = create_deep_agent(**kwargs)
         self._cached_agent = agent
         self._cached_model_key = model_key
         return agent
+
+    def attach_specialist_tools(self, tools: list[Any]) -> None:
+        """Merge specialist tools into the custom-tool cache for an isolated run.
+
+        Also short-circuits MCP-server loading by pre-setting ``_mcp_tools = []``.
+        Specialist runs are short-lived and only need the tools passed here;
+        loading the user's full MCP server set (which can include slow stdio
+        servers) wastes startup time and risks hanging the run.
+
+        Each call extends the list; tools are not deduplicated. Use an isolated
+        backend instance (AgentRouter.create_isolated_backend) to avoid
+        accumulation across specialist runs.
+        """
+        if self._custom_tools is None:
+            self._custom_tools = []
+        self._custom_tools.extend(tools)
+        # Skip MCP loading — specialist's tool surface comes entirely from
+        # `tools` above. _build_mcp_tools() short-circuits when _mcp_tools is
+        # not None.
+        self._mcp_tools = []
+        self._cached_agent = None  # force recompile next run
+        self._cached_model_key = None
 
     async def run(
         self,
@@ -331,7 +1252,19 @@ class DeepAgentsBackend:
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        system_prompt_digest: str = "",
     ) -> AsyncIterator[AgentEvent]:
+        """Stream a turn through the compiled Deep Agents graph.
+
+        ``system_prompt_digest`` (PA-6) is the assembler's ``stable_digest``. It
+        is DECLARED rather than swallowed by ``**kwargs`` on purpose:
+        ``AgentPool._accepts_prompt_digest`` inspects this signature to decide
+        whether to pass it, and a backend that accepted it silently would look
+        ported while keying on nothing. Empty means the caller does not build its
+        prompt through the assembler — since PA-7b that is the pocket specialist
+        and out-of-tree embedders, not the channel path — and the graph key falls
+        back to hashing the prompt text; see ``_prompt_identity``.
+        """
         if not self._sdk_available:
             yield AgentEvent(
                 type="error",
@@ -343,6 +1276,29 @@ class DeepAgentsBackend:
             return
 
         self._stop_flag = False
+        # Stream handle captured in the run-level scope so the ``finally``
+        # block can close it on every exit path (normal completion,
+        # except branch, generator-close from caller).
+        _stream: Any = None
+
+        # Usage accumulates in the RUN-level scope rather than inside the try,
+        # because the handlers below emit the invoice on the failure paths too
+        # and a crash before the stream opens would otherwise leave these
+        # unbound — trading a billing bug for a NameError.
+        cache_usage: dict[str, int] = {
+            "input_tokens": 0,
+            "inclusive_input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        }
+        # Seeded from configuration and overwritten by the first AI turn that
+        # names a model, last-seen-wins (see ``_model_name_from_chunk``). The
+        # seed is the weaker source — it can be an alias, and for a
+        # ``provider:model`` setting only the model half is priceable — but a
+        # weak id still prices, and None prices at nothing.
+        _, _answering_model = self._parse_provider_model()
+        _usage_emitted = False
 
         try:
             model = self._build_model()
@@ -350,7 +1306,12 @@ class DeepAgentsBackend:
 
             # Load MCP tools from configured servers (async, cached after first call)
             mcp_tools = await self._build_mcp_tools()
-            agent = self._get_or_create_agent(model, instructions, mcp_tools=mcp_tools)
+            agent = self._get_or_create_agent(
+                model,
+                instructions,
+                mcp_tools=mcp_tools,
+                system_prompt_digest=system_prompt_digest,
+            )
 
             # Build messages list: history + current message
             messages: list[dict[str, str]] = []
@@ -370,13 +1331,27 @@ class DeepAgentsBackend:
                 # Each tool round-trip is ~2-3 steps, so multiply for headroom.
                 config["recursion_limit"] = max_turns * 3
 
-            # Stream using LangGraph's async streaming
-            async for chunk in agent.astream(
+            # Track tool_use emissions so we don't double-announce: the
+            # "messages" path emits as soon as a tool NAME appears in a
+            # tool_call_chunk (early signal for the UI); the "updates"
+            # path emits the final args. Same tool_call_id → emit once.
+            announced_tool_ids: set[str] = set()
+
+            # Stream using LangGraph's async streaming. Hold the stream in
+            # a variable so the ``finally`` block below can call
+            # ``aclose()`` on it. LangGraph's astream is backed by
+            # ``asyncio.Queue`` readers spawned as background tasks;
+            # without an explicit aclose, those readers stay pending and
+            # get destroyed by GC on the next run, surfacing as
+            # ``Task was destroyed but it is pending! Queue.get()`` log
+            # noise around backend transitions.
+            _stream = agent.astream(
                 {"messages": messages},
                 stream_mode=["updates", "messages"],
                 version="v2",
                 config=config if config else None,
-            ):
+            )
+            async for chunk in _stream:
                 if self._stop_flag:
                     break
 
@@ -390,9 +1365,45 @@ class DeepAgentsBackend:
                         continue
                     # v2 format: data is (AIMessageChunk, metadata_dict) tuple
                     msg_chunk = data[0] if isinstance(data, tuple | list) else data
-                    content = _extract_content_text(getattr(msg_chunk, "content", ""))
-                    if content:
-                        yield AgentEvent(type="message", content=content)
+                    # Fold this turn's token counts into the accumulator
+                    # (no-op when the chunk carries no usage_metadata) and
+                    # remember which model answered. The two ride DIFFERENT
+                    # chunks — usage on ``message_delta``, the model on
+                    # ``message_start`` — so both are read off every chunk and
+                    # the model keeps its last non-None value.
+                    _accumulate_cache_usage(msg_chunk, cache_usage)
+                    _answering_model = _model_name_from_chunk(msg_chunk) or _answering_model
+                    text, thinking = _split_content_text_and_thinking(
+                        getattr(msg_chunk, "content", "")
+                    )
+                    if thinking:
+                        yield AgentEvent(type="thinking", content=thinking)
+                    if text:
+                        yield AgentEvent(type="message", content=text)
+
+                    # Early tool_use signal — fire as soon as the first
+                    # tool_call_chunk carries a name. The UI flips from
+                    # "Thinking..." to "Using <tool>..." 1-2s sooner than
+                    # waiting for the full tool_call in the updates path.
+                    tool_call_chunks = getattr(msg_chunk, "tool_call_chunks", None) or []
+                    for tcc in tool_call_chunks:
+                        # ToolCallChunk may be a dict or a Pydantic model.
+                        tcc_name = (
+                            tcc.get("name") if isinstance(tcc, dict) else getattr(tcc, "name", None)
+                        )
+                        tcc_id = (
+                            tcc.get("id") if isinstance(tcc, dict) else getattr(tcc, "id", None)
+                        )
+                        if not tcc_name or not tcc_id:
+                            continue
+                        if tcc_id in announced_tool_ids:
+                            continue
+                        announced_tool_ids.add(tcc_id)
+                        yield AgentEvent(
+                            type="tool_use",
+                            content=f"Using {tcc_name}...",
+                            metadata={"name": tcc_name, "input": {}},
+                        )
 
                 elif chunk_type == "updates":
                     data = _unwrap(chunk.get("data", {}))
@@ -411,6 +1422,16 @@ class DeepAgentsBackend:
                             if tool_calls:
                                 for tc in tool_calls:
                                     name = tc.get("name", "Tool")
+                                    tc_id = tc.get("id")
+                                    # Skip if the messages-path already
+                                    # announced this tool. Still emit
+                                    # when id is missing (some providers
+                                    # omit it) so behavior degrades to
+                                    # the old single-emit path.
+                                    if tc_id and tc_id in announced_tool_ids:
+                                        continue
+                                    if tc_id:
+                                        announced_tool_ids.add(tc_id)
                                     yield AgentEvent(
                                         type="tool_use",
                                         content=f"Using {name}...",
@@ -433,12 +1454,56 @@ class DeepAgentsBackend:
                                     metadata={"name": tool_name},
                                 )
 
+            # The invoice, emitted before "done". UNCONDITIONAL as of
+            # 2026-09-02: it used to be gated on cache activity, so a cold turn
+            # billed nothing at all. See ``_build_usage_event``.
+            _usage_emitted = True
+            yield _build_usage_event(cache_usage, _answering_model)
+
             yield AgentEvent(type="done", content="")
 
+        except GeneratorExit:
+            # The consumer closed the stream — an early ``break``, or GC. A
+            # yield from here raises "async generator ignored GeneratorExit"
+            # OUT OF the caller's ``aclose()``, turning a billing gap into a
+            # crash, so the usage for a half-consumed run is genuinely
+            # unrecoverable on this path. Re-raise untouched.
+            raise
         except Exception as e:
+            # Usage FIRST. The turns that completed before the failure consumed
+            # real tokens and the provider has already billed us for them;
+            # yielding the error without them is how a failed run bills $0.
+            if not _usage_emitted:
+                _usage_emitted = True
+                yield _build_usage_event(cache_usage, _answering_model)
             logger.error("Deep Agents streaming error: %s", e, exc_info=True)
             yield AgentEvent(type="error", content=f"Deep Agents error: {e}")
             yield AgentEvent(type="done", content="")
+        except BaseException:
+            # A hard cancel lands here — ``CancelledError`` is a BaseException
+            # and the handler above never sees it. ``usage_metadata`` rides the
+            # ``message_delta`` chunk at the END of each AI turn, so every turn
+            # that finished before the cancel is already accumulated and is
+            # billable. A yield from an except handler DOES reach the consumer
+            # before the exception resumes propagating; a yield from ``finally``
+            # does not, and breaks ``aclose()`` besides, which is why the
+            # recovery lives here and not down there.
+            if not _usage_emitted:
+                _usage_emitted = True
+                yield _build_usage_event(cache_usage, _answering_model)
+            raise
+        finally:
+            # Close the astream generator so LangGraph's background
+            # Queue readers are cancelled cleanly. Without this, those
+            # readers GC with a pending Queue.get() at the next backend
+            # transition. Idempotent on streams that already exited.
+            if _stream is not None:
+                close = getattr(_stream, "aclose", None)
+                if close is not None:
+                    try:
+                        await close()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("astream aclose error (non-fatal): %s", exc)
 
     async def stop(self) -> None:
         self._stop_flag = True

@@ -1,12 +1,85 @@
 # URL validators for Settings fields — guards against SSRF via config.
 # Added: 2026-04-16 for security cluster E (#703).
+# Updated: 2026-09-11 (feat/byok-custom-gateway, review B1) —
+#   ``assert_egress_allowed`` takes a keyword-only ``allow_internal`` that
+#   overrides the ``POCKETPAW_ALLOW_INTERNAL_URLS`` read. ``None`` (default)
+#   keeps every existing caller byte-identical; ``False`` rejects internal
+#   resolved addresses unconditionally. The BYOK gateway base URL needs that:
+#   it is typed by a signed-out stranger through ``POST /auth/guest``, and an
+#   operator who turned the flag on for localhost connectors must not thereby
+#   reopen an unauthenticated SSRF. ``validate_external_url_strict`` already
+#   had no escape hatch for the same reason — this gives the resolving guard
+#   the same property when a caller asks for it.
+# Updated: 2026-05-21 (RFC 04 alpha) — added validate_external_url_strict():
+#   https-only, unconditionally blocks internal/loopback/RFC1918/link-local
+#   hosts (no POCKETPAW_ALLOW_INTERNAL_URLS escape hatch), rejects empty
+#   input. Used to validate pocket-backend base URLs, which are an SSRF
+#   boundary and must never be relaxed by an operator env flag.
+# Updated: 2026-05-21 (PR #1177 security pass) — exposed a public
+#   ``host_is_internal`` alias and an ``__all__`` so callers no longer
+#   import the private ``_host_is_internal`` symbol.
+# Updated: 2026-06-28 (AW-1 connector egress guard) — added the OSS-side
+#   ``assert_egress_allowed(url, allowed_hosts)`` egress primitive and the
+#   pinned-IP ``PinnedTransport``. ``assert_egress_allowed`` enforces
+#   https-only, rejects userinfo (``@``) and fragments, requires the host to
+#   be in ``allowed_hosts``, DNS-resolves once, and rejects any resolved IP
+#   that is internal (reusing ``host_is_internal`` + the IP-class check the
+#   pocket guard already uses). It returns an ``EgressTarget`` carrying the
+#   resolved/pinned IP. ``PinnedTransport`` connects to that pinned IP while
+#   preserving the original Host header + TLS SNI, so there is no second DNS
+#   lookup between the check and the connect — closing the DNS-rebind TOCTOU.
+#   The EE ``_http_guard`` re-exports these so it stays the canonical entry
+#   point; the OSS connector engine imports them directly (the OSS->EE import
+#   boundary forbids importing ``pocketpaw_ee`` from core). The egress guard is
+#   DEFAULT-CLOSED on internal IPs: it uses ``_egress_allow_internal()`` (not
+#   the permissive ``_allow_internal()`` that legacy config-URL validation
+#   uses), which permits internal resolved IPs ONLY when
+#   ``POCKETPAW_ALLOW_INTERNAL_URLS`` is EXPLICITLY truthy — the dev escape for
+#   localhost connectors. Unset ⇒ reject, matching the EE ``_http_guard``.
+# Updated: 2026-07-02 (AW-3 egress default-close fix) — closed the default-OPEN
+#   SSRF hole: ``assert_egress_allowed`` previously called ``_allow_internal()``,
+#   which returns True when the env var is UNSET (its correct behaviour for
+#   permissive config-URL validation). With the connector guard ON but the env
+#   var unset (the realistic prod state) a resolved internal/metadata IP
+#   (169.254.169.254) slipped through and got pinned. The egress guard now uses
+#   ``_egress_allow_internal()`` which defaults to reject. ``_allow_internal()``
+#   is unchanged — ``validate_external_url`` stays permissive-by-design.
+# Updated: 2026-06-28 (AW-2 cookie-jar fix) — ``PinnedTransport`` now RESTORES
+#   the request's original (hostname) URL after the inner transport returns.
+#   ``httpx.AsyncClient`` runs ``cookies.extract_cookies(response)`` AFTER the
+#   transport, keyed on ``response.request.url.host`` — the same request object
+#   the transport mutated in place. Leaving it pointed at the pinned IP stored
+#   every Set-Cookie against the IP, so the cookie jar never replayed on the
+#   next call (whose pre-transport URL is the hostname) — breaking
+#   session/cookie-auth under the guard. Restoring the hostname keeps cookie
+#   attribution on the real host. The connection still went to the pinned IP;
+#   only the post-hoc bookkeeping URL is reset.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
+import socket
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
+
+# Pre-load .env into os.environ at import time. Without this,
+# POCKETPAW_ALLOW_INTERNAL_URLS set in .env is only read by pydantic-settings
+# into Settings fields — it never reaches os.environ, so the validator below
+# (which uses os.getenv) would miss the opt-in and block every localhost URL
+# even when the operator set the flag. python-dotenv is an indirect dep via
+# pydantic-settings; fall back silently if it's somehow unavailable. Only the
+# working directory's .env (the one Settings reads): a bare call walks up the tree
+# and imports whatever parent project's .env it finds first.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    _load_dotenv(".env", override=False)
+except Exception:  # pragma: no cover — dotenv is optional
+    pass
 
 _ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https"})
 
@@ -61,7 +134,34 @@ def _allow_internal() -> bool:
     return val.strip().lower() in _TRUTHY
 
 
-def _host_is_internal(host: str) -> bool:
+def _egress_allow_internal() -> bool:
+    """Egress-guard variant of :func:`_allow_internal` — DEFAULTS TO REJECT.
+
+    The egress guard (:func:`assert_egress_allowed`) protects outbound
+    connector HTTP against SSRF, so its internal-IP block must be default-ON.
+    Unlike :func:`_allow_internal` (which is permissive-by-design for config
+    URLs and returns True when the flag is unset), this returns True ONLY when
+    ``POCKETPAW_ALLOW_INTERNAL_URLS`` is EXPLICITLY truthy ("true"/"1"/…) — the
+    dev escape that keeps localhost connectors working in development. Unset or
+    any non-truthy value ⇒ False (reject internal IPs), matching the EE
+    ``_http_guard._assert_host_external`` which rejects internal hosts
+    unconditionally.
+    """
+    val = os.getenv("POCKETPAW_ALLOW_INTERNAL_URLS")
+    if val is None:
+        val = _read_dotenv_flag()
+    if val is None:
+        return False
+    return val.strip().lower() in _TRUTHY
+
+
+def host_is_internal(host: str) -> bool:
+    """Return True when ``host`` is loopback / RFC1918 / link-local / CGNAT.
+
+    Public entry point for the host classification used by the SSRF guards.
+    A bare hostname (not an IP literal) returns False — name resolution is
+    the caller's job.
+    """
     host = host.lower().strip("[]")
     if host in _BLOCKED_HOSTS:
         return True
@@ -70,6 +170,10 @@ def _host_is_internal(host: str) -> bool:
     except ValueError:
         return False
     return any(addr in net for net in _BLOCKED_NETWORKS)
+
+
+# Back-compat alias — kept for callers that imported the private name.
+_host_is_internal = host_is_internal
 
 
 def validate_external_url(value: str) -> str:
@@ -91,9 +195,273 @@ def validate_external_url(value: str) -> str:
     if not parts.hostname:
         raise ValueError(f"URL has no host: {value!r}")
 
-    if _host_is_internal(parts.hostname) and not _allow_internal():
+    if host_is_internal(parts.hostname) and not _allow_internal():
         raise ValueError(
             f"URL host '{parts.hostname}' is internal/loopback/private and "
             f"POCKETPAW_ALLOW_INTERNAL_URLS is set to false"
         )
     return value
+
+
+def validate_external_url_strict(value: str) -> str:
+    """Strict external-URL validator for pocket backend base URLs.
+
+    Differs from :func:`validate_external_url` in three ways, because a
+    pocket-backend base URL is an SSRF boundary and must not be relaxed:
+
+    * ``https://`` ONLY — plain ``http://`` is rejected.
+    * Internal / loopback / RFC1918 / link-local / CGNAT hosts are blocked
+      UNCONDITIONALLY — there is no ``POCKETPAW_ALLOW_INTERNAL_URLS`` escape
+      hatch (this function never reads that flag).
+    * Empty / blank input raises ``ValueError`` instead of passing through.
+
+    Returns the URL unchanged when it passes; raises ``ValueError`` otherwise.
+    """
+    if value is None or not isinstance(value, str) or value.strip() == "":
+        raise ValueError("URL must be a non-empty string")
+
+    parts = urlsplit(value)
+    if parts.scheme != "https":
+        raise ValueError(
+            f"URL scheme '{parts.scheme or '(none)'}' not allowed — backend URLs must use https"
+        )
+    if not parts.hostname:
+        raise ValueError(f"URL has no host: {value!r}")
+    if host_is_internal(parts.hostname):
+        raise ValueError(
+            f"URL host '{parts.hostname}' is internal/loopback/private — "
+            f"backend URLs must point to an external host"
+        )
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Egress guard primitive (AW-1) — shared by the OSS connector engine and the
+# EE pocket HTTP guard (which re-exports it). Closes the connector SSRF bypass
+# by enforcing an allow-list + a DNS-rebind-safe pinned-IP transport.
+# ---------------------------------------------------------------------------
+
+
+class EgressError(ValueError):
+    """An egress-guard rejection. Subclasses ``ValueError`` so existing
+    ``except ValueError`` handlers around URL validation keep working."""
+
+
+@dataclass(frozen=True)
+class EgressTarget:
+    """The resolved, allow-listed target of an outbound request.
+
+    ``url`` is the original (validated) URL — unchanged, so the Host header
+    and TLS SNI stay correct. ``host`` is its hostname; ``port`` the resolved
+    port (scheme default applied). ``pinned_ip`` is the single IP the
+    connection MUST go to — :class:`PinnedTransport` dials it directly so no
+    second DNS lookup can race the check (the DNS-rebind TOCTOU).
+    """
+
+    url: str
+    host: str
+    port: int
+    pinned_ip: str
+
+
+def _ip_is_internal(ip: str) -> bool:
+    """True when ``ip`` (a literal) is loopback/private/link-local/reserved.
+
+    Layers the explicit ``host_is_internal`` block-list (RFC1918, CGNAT,
+    metadata link-local, …) with Python's ``ipaddress`` classification so
+    ranges the static list misses (e.g. multicast/reserved) are also caught.
+    """
+    if host_is_internal(ip):
+        return True
+    try:
+        addr = ipaddress.ip_address(ip.split("%", 1)[0])
+    except ValueError:
+        return False
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def _resolve_ips(host: str) -> list[str]:
+    """Resolve ``host`` to its IP literals. Raises ``EgressError`` on failure."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise EgressError(f"host '{host}' could not be resolved") from exc
+    ips: list[str] = []
+    for info in infos:
+        ip = str(info[4][0]).split("%", 1)[0]  # strip a zone id (fe80::1%eth0)
+        if ip not in ips:
+            ips.append(ip)
+    return ips
+
+
+async def assert_egress_allowed(
+    url: str,
+    allowed_hosts: set[str] | frozenset[str],
+    *,
+    allow_internal: bool | None = None,
+) -> EgressTarget:
+    """Validate an outbound URL against the egress policy and pin its IP.
+
+    Enforces, in order:
+
+    * ``https://`` only — plain http is rejected (an attacker who can force
+      http downgrades the channel and any allow-list bypass via redirect).
+    * No userinfo (``user:pass@host``) and no fragment — both are classic
+      allow-list-confusion vectors (the real host can hide after the ``@``).
+    * The hostname MUST be in ``allowed_hosts`` (compared case-insensitively).
+    * DNS resolves the host and EVERY resolved IP is rejected if internal
+      (loopback / RFC1918 / link-local / metadata / reserved) BY DEFAULT.
+      Internal IPs are permitted ONLY when ``POCKETPAW_ALLOW_INTERNAL_URLS`` is
+      EXPLICITLY truthy (the dev escape for localhost connectors); when the flag
+      is unset the guard rejects — default-closed, matching the EE
+      ``_http_guard`` which rejects internal hosts unconditionally.
+
+    ``allow_internal`` overrides that last step. ``None`` (the default) reads
+    the env flag, i.e. every existing caller is unchanged. ``False`` rejects
+    internal addresses UNCONDITIONALLY, for boundaries where a URL arrives from
+    an untrusted caller rather than from an operator-authored connector — the
+    BYOK gateway address is one, and it is reachable from a signed-out stranger
+    through ``POST /auth/guest``, so an operator who set the flag for local
+    connectors must not also reopen that. ``True`` is the explicit dev escape.
+
+    Returns an :class:`EgressTarget` carrying the single pinned IP. The caller
+    MUST dial that IP via :class:`PinnedTransport` so the connection cannot be
+    re-resolved to a different (internal) address between this check and the
+    connect — that gap is the DNS-rebinding TOCTOU this guard exists to close.
+
+    Raises :class:`EgressError` (a ``ValueError``) on any policy violation.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise EgressError("URL must be a non-empty string")
+
+    parts = urlsplit(url)
+    if parts.scheme != "https":
+        raise EgressError(
+            f"URL scheme '{parts.scheme or '(none)'}' not allowed — egress is https-only"
+        )
+    if parts.username is not None or parts.password is not None or "@" in (parts.netloc or ""):
+        raise EgressError("URL must not contain userinfo (user:pass@host)")
+    if parts.fragment:
+        raise EgressError("URL must not contain a fragment")
+    host = parts.hostname
+    if not host:
+        raise EgressError(f"URL has no host: {url!r}")
+
+    normalized = {h.lower() for h in allowed_hosts}
+    if host.lower() not in normalized:
+        raise EgressError(f"host '{host}' is not in the egress allow-list")
+
+    # Resolve off the event loop; getaddrinfo blocks.
+    ips = await asyncio.to_thread(_resolve_ips, host)
+    if not ips:
+        raise EgressError(f"host '{host}' resolved to no addresses")
+
+    permit_internal = _egress_allow_internal() if allow_internal is None else allow_internal
+    for ip in ips:
+        if _ip_is_internal(ip) and not permit_internal:
+            raise EgressError(f"host '{host}' resolves to an internal address")
+
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    # Pin the first resolved address. Every resolved IP already passed the
+    # internal-range check above, so whichever we pin is allow-listed.
+    return EgressTarget(url=url, host=host, port=port, pinned_ip=ips[0])
+
+
+_PINNED_TRANSPORT_CLS: type | None = None
+
+
+def _build_pinned_transport_cls() -> type:
+    """Build (once) the ``httpx.AsyncBaseTransport`` subclass for pinning.
+
+    Defined lazily so importing this module (which ``config.py`` imports at
+    startup) never requires httpx at import time — httpx is a hard dependency
+    but the class is only needed once an egress request is actually made.
+    httpx must subclass ``AsyncBaseTransport`` for ``AsyncClient(transport=...)``
+    to route requests through it.
+    """
+    global _PINNED_TRANSPORT_CLS
+    if _PINNED_TRANSPORT_CLS is not None:
+        return _PINNED_TRANSPORT_CLS
+
+    import httpx
+
+    class _PinnedTransport(httpx.AsyncBaseTransport):
+        """An httpx async transport that dials a pre-resolved (pinned) IP.
+
+        On each request it repoints ONLY the connection target to ``pinned_ip``
+        (by rewriting the request URL's host), while preserving the original
+        ``Host`` header and setting the ``sni_hostname`` extension to the real
+        hostname so TLS SNI + certificate validation run against the name, not
+        the IP. The bytes therefore go to the exact IP
+        :func:`assert_egress_allowed` already vetted — no second DNS lookup that
+        a rebinding attacker could race (the DNS-rebind TOCTOU).
+        """
+
+        def __init__(self, pinned_ip: str, *, verify: bool = True) -> None:
+            self._pinned_ip = pinned_ip
+            self._inner = httpx.AsyncHTTPTransport(verify=verify)
+
+        async def handle_async_request(self, request: Any) -> Any:
+            # httpx fixes the Host header at request-build time from the
+            # original URL host, so capture the original URL before rewriting.
+            original_url = request.url
+            original_host = original_url.host
+            # Repoint the connect target at the pinned IP (httpx brackets an
+            # IPv6 literal automatically). The Host header is left unchanged.
+            request.url = original_url.copy_with(host=self._pinned_ip)
+            request.headers["Host"] = original_host
+            # TLS handshake + cert validation use sni_hostname (read by
+            # httpcore), so the cert is verified against the real hostname,
+            # not the pinned IP.
+            request.extensions = dict(request.extensions or {})
+            request.extensions["sni_hostname"] = original_host
+            try:
+                return await self._inner.handle_async_request(request)
+            finally:
+                # Restore the original (hostname) URL on the request object.
+                # ``AsyncClient`` runs ``cookies.extract_cookies(response)``
+                # AFTER the transport, keyed on ``response.request.url.host`` —
+                # which is THIS request object, mutated in place. If we leave it
+                # pointed at the pinned IP, every Set-Cookie is stored against
+                # the IP, so the cookie jar never replays on the next call (the
+                # next request's pre-transport URL is the hostname). Restoring
+                # the hostname here keeps cookie attribution on the real host,
+                # so session/cookie-auth survives the pin. The bytes already
+                # went to the pinned IP — this only fixes post-hoc bookkeeping.
+                request.url = original_url
+
+        async def aclose(self) -> None:
+            await self._inner.aclose()
+
+    _PINNED_TRANSPORT_CLS = _PinnedTransport
+    return _PinnedTransport
+
+
+def PinnedTransport(pinned_ip: str, *, verify: bool = True) -> Any:  # noqa: N802
+    """Return a pinned-IP ``httpx.AsyncBaseTransport`` for ``pinned_ip``.
+
+    A factory (spelled like a class for call-site readability) that defers the
+    httpx import + subclass construction until first use. Pass the result as
+    ``httpx.AsyncClient(transport=PinnedTransport(ip))`` so every request on
+    that client dials the vetted IP instead of re-resolving the hostname.
+    """
+    cls = _build_pinned_transport_cls()
+    return cls(pinned_ip, verify=verify)
+
+
+__all__ = [
+    "host_is_internal",
+    "validate_external_url",
+    "validate_external_url_strict",
+    "EgressError",
+    "EgressTarget",
+    "assert_egress_allowed",
+    "PinnedTransport",
+]

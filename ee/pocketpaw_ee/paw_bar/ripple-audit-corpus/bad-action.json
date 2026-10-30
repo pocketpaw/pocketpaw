@@ -1,0 +1,42 @@
+{
+  "about": "A handler naming an action the engine does not have. Same item both sides; core reports it once, as badAction, not again as a schema fault.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "Ready?"
+          }
+        },
+        {
+          "type": "button",
+          "props": {
+            "label": "Go"
+          },
+          "on_click": {
+            "action": "explode"
+          }
+        }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "badAction",
+        "path": "/ui/children/1/on_click",
+        "message": "action \"explode\" is not one the engine runs; use one of set, toggle, push, remove, api, run_source, call_binding, invoke_tool, navigate, toast, emit, open, pin, unpin, flow, branch, confirm, validate, delay, invoke, animate"
+      }
+    ],
+    "python": [
+      {
+        "code": "badAction",
+        "path": "/ui/children/1/on_click"
+      }
+    ]
+  }
+}

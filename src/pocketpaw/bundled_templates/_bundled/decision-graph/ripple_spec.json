@@ -1,0 +1,173 @@
+{
+  "_placeholder_note": "Built-in pocket template (decision-graph) for RFC 07. Renders the org's decision graph with three default views (one-decision, time-series, policy) and a narrator chat panel that calls POST /api/v1/decisions/explain via the canonical `api` action verb (the renderer's `EventDispatcher` has no `invoke_endpoint` case — `api` is the right verb per `_KNOWN_ACTION_VERBS` in pocketpaw/ripple/manifest.py and the zod schema in ripple/src/lib/schema/event-handler.ts). The specialist may swap the [bracketed] copy for the org's domain (e.g. 'Renewals' instead of 'Decisions') but should keep the explain action bound to state.explain_question and the response bound to state.explain_response via the `response_key` field. The `decision-graph` widget itself is a Layer-2 SvelteFlow render that paw-enterprise registers in Slice 3b; until that manifest entry lands, the widget passes through ingest validation as an unknown type (its props are not enforced).",
+  "state": {
+    "selected_decision_id": "",
+    "view_mode": "one-decision",
+    "view_options": [
+      { "value": "one-decision", "label": "One decision" },
+      { "value": "time-series", "label": "Time series" },
+      { "value": "policy", "label": "By policy" }
+    ],
+    "filter": {
+      "actor": "",
+      "since": "",
+      "policy": ""
+    },
+    "explain_question": "",
+    "explain_response": {
+      "narrative": "",
+      "decisions_walked": [],
+      "ungrounded_sentences": [],
+      "backend_used": "templated"
+    },
+    "explain_loading": false,
+    "depth": 3
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "16px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "[Decision Graph]",
+          "subtitle": "[Every decision the org has made — ask a question, watch the graph answer.]"
+        }
+      },
+      {
+        "type": "flex",
+        "props": { "direction": "row", "gap": "12px", "align": "center" },
+        "children": [
+          {
+            "type": "segmented",
+            "bind": "view_mode",
+            "props": {
+              "label": "View",
+              "options": "{state.view_options}"
+            }
+          },
+          {
+            "type": "input",
+            "bind": "filter.actor",
+            "props": { "label": "Actor", "placeholder": "[did:soul:renewal_specialist]" }
+          },
+          {
+            "type": "date-picker",
+            "bind": "filter.since",
+            "props": { "label": "Since" }
+          },
+          {
+            "type": "input",
+            "bind": "filter.policy",
+            "props": { "label": "Policy", "placeholder": "[approve_per_row]" }
+          }
+        ]
+      },
+      {
+        "type": "flex",
+        "props": { "direction": "row", "gap": "16px" },
+        "children": [
+          {
+            "type": "decision-graph",
+            "props": {
+              "root_decision_id": "{state.selected_decision_id}",
+              "depth": "{state.depth}",
+              "view_mode": "{state.view_mode}",
+              "filters": "{state.filter}",
+              "show_downstream": true,
+              "on_node_click": [
+                {
+                  "action": "set",
+                  "target": "selected_decision_id",
+                  "value": "{event.node_id}"
+                }
+              ]
+            }
+          },
+          {
+            "type": "flex",
+            "props": { "direction": "column", "gap": "12px" },
+            "children": [
+              {
+                "type": "page-header",
+                "props": {
+                  "title": "[Ask the graph]",
+                  "subtitle": "[Free-form questions; answers cite decision ids.]"
+                }
+              },
+              {
+                "type": "textarea",
+                "bind": "explain_question",
+                "props": {
+                  "label": "Your question",
+                  "placeholder": "[Why was lease LR-2026-117 approved on April 22?]",
+                  "rows": 3
+                }
+              },
+              {
+                "type": "button",
+                "props": { "label": "Explain", "variant": "primary", "loading": "{state.explain_loading}" },
+                "on_click": [
+                  {
+                    "action": "validate",
+                    "condition": "{state.explain_question.length > 0}",
+                    "message": "Type a question first"
+                  },
+                  {
+                    "action": "set",
+                    "target": "explain_loading",
+                    "value": true
+                  },
+                  {
+                    "action": "api",
+                    "method": "POST",
+                    "url": "/api/v1/decisions/explain",
+                    "body": {
+                      "question": "{state.explain_question}",
+                      "scope": { "pocket_id": "{pocket.id}" },
+                      "max_decisions": 5,
+                      "depth": "{state.depth}"
+                    },
+                    "response_key": "explain_response",
+                    "on_success": [
+                      {
+                        "action": "set",
+                        "target": "explain_loading",
+                        "value": false
+                      }
+                    ],
+                    "on_error": [
+                      {
+                        "action": "set",
+                        "target": "explain_loading",
+                        "value": false
+                      },
+                      {
+                        "action": "toast",
+                        "message": "Couldn't load explanation — try again"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "card",
+                "props": {
+                  "title": "[Narrative]",
+                  "description": "{state.explain_response.narrative}"
+                }
+              },
+              {
+                "type": "section",
+                "props": {
+                  "title": "Decisions walked",
+                  "description": "{state.explain_response.decisions_walked}"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,409 @@
+# tests/atlas/test_compile.py — atlas compiler + drift check.
+# Proves:
+#   * byte-determinism: compile twice gives identical bytes;
+#   * the four authored files (primitives, surfaces, capabilities, verbs) validate
+#     and survive the compile field-for-field; the per-kind counts are pinned
+#     (12 primitives, 34 surfaces) so an added or dropped entry is a decision;
+#   * connector, sense, widget and skill extraction reach intent search ("read
+#     my invoices" at limit=10, since ripple invoice widgets take name slots);
+#   * `atlas build --check` passes on a fresh artifact, fails with a diff on a
+#     tampered one, and the checked-in artifact is fresh;
+#   * the startup drift check warns on mismatch and never raises;
+#   * TestFactualClaimGuard: authored prose may not make negative route claims or
+#     hedged numeric counts, and the flag-gated primitives must render
+#     ``mode: off`` with the enable pointer when off (the drift check only proves
+#     fidelity, not truth).
+
+import json
+import logging
+import os
+import re
+from pathlib import Path
+
+import pytest
+
+from pocketpaw.atlas.compile import (
+    AUTHORED_FILES,
+    DEFAULT_CONNECTORS_DIR,
+    check_artifact,
+    compile_atlas,
+    compile_atlas_bytes,
+    load_authored_entries,
+    serialize_atlas,
+    write_artifact,
+)
+from pocketpaw.atlas.model import ATLAS_SCHEMA_V1, AtlasModel
+from pocketpaw.atlas.store import _DATA_PATH, AtlasStore, check_connector_drift
+
+
+class TestDeterminism:
+    def test_compile_twice_yields_identical_bytes(self):
+        first = compile_atlas_bytes()
+        second = compile_atlas_bytes()
+        assert first == second, "compiler must be byte-deterministic"
+
+    def test_serialization_shape(self):
+        """Sorted entry ids, sorted keys, trailing newline, generated flag."""
+        raw = compile_atlas_bytes().decode("utf-8")
+        assert raw.endswith("\n") and not raw.endswith("\n\n")
+        doc = json.loads(raw)
+        assert doc["schema"] == ATLAS_SCHEMA_V1
+        assert doc["generated"] is True
+        ids = [e["id"] for e in doc["entries"]]
+        assert ids == sorted(ids), "entries must be sorted by id"
+
+    def test_checked_in_artifact_is_fresh(self):
+        """The committed data/atlas.json matches a fresh compile — the same
+        gate CI runs via `pocketpaw atlas build --check`."""
+        fresh, summary = check_artifact()
+        assert fresh, summary
+
+
+class TestAuthoredFiles:
+    def test_authored_files_validate_against_schema(self):
+        for path in AUTHORED_FILES:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            model = AtlasModel.model_validate(raw)
+            assert model.schema_ == ATLAS_SCHEMA_V1
+            assert model.generated is False, "authored files are sources, not compiled"
+            assert model.entries
+
+    def test_authored_kinds_are_split_by_file(self):
+        prims = AtlasModel.model_validate(json.loads(AUTHORED_FILES[0].read_text(encoding="utf-8")))
+        surfs = AtlasModel.model_validate(json.loads(AUTHORED_FILES[1].read_text(encoding="utf-8")))
+        assert {e.kind for e in prims.entries} == {"primitive"}
+        assert {e.kind for e in surfs.entries} == {"surface"}
+        assert len(prims.entries) == 12
+        assert len(surfs.entries) == 35
+        verbs = AtlasModel.model_validate(json.loads(AUTHORED_FILES[3].read_text(encoding="utf-8")))
+        assert {e.kind for e in verbs.entries} == {"verb"}
+
+    def test_authored_entries_survive_compile_unchanged(self):
+        """Every authored entry appears in the compiled model identical
+        field-for-field — the compiler never rewrites authored content."""
+        compiled = {e.id: e for e in compile_atlas().entries}
+        for entry in load_authored_entries():
+            assert compiled[entry.id] == entry
+
+
+class TestFactualClaimGuard:
+    """Flag brittle factual / numeric claims in authored prose.
+
+    The fidelity check (`atlas build --check`) only proves the artifact was
+    recompiled from the sources — it cannot tell a TRUE narrative from a
+    FALSE one. Two false-narrative classes shipped and misdirected users
+    (fixed 2026-07-05): a negative existence claim ("there is no dedicated
+    billing route today") that went stale the moment /settings/billing
+    shipped, and a hedged widget count ("~190 widgets") that drifted from
+    the real 151. This guard catches both patterns so a stale factual claim
+    can't silently pass a fidelity-only drift check. It is deliberately
+    narrow — it flags the specific brittle shapes, not all prose — so it
+    stays low-noise.
+    """
+
+    # Negative existence claims about routes / surfaces / pages: these go
+    # stale exactly when the OS gains the thing they deny.
+    _NEGATIVE_EXISTENCE = re.compile(
+        r"\bno\s+(?:dedicated\s+)?[\w\s]{0,20}?(?:route|surface|page)\b", re.IGNORECASE
+    )
+    # Hedged / approximate counts ("~190 widgets", "about 150 widgets",
+    # "roughly 200 widgets"): an approximation invites silent drift. A
+    # verified exact count ("150+ widgets") is allowed.
+    _APPROX_COUNT = re.compile(
+        r"(?:[~≈]\s*|\b(?:about|around|roughly|approx(?:imately)?)\s+)\d{2,}\b",
+        re.IGNORECASE,
+    )
+
+    def test_no_negative_route_existence_claims(self):
+        offenders = []
+        for entry in load_authored_entries():
+            for field in ("summary", "narrative"):
+                text = getattr(entry, field)
+                if self._NEGATIVE_EXISTENCE.search(text):
+                    offenders.append(f"{entry.id}.{field}: {text}")
+        assert not offenders, (
+            "authored prose asserts a route/surface does NOT exist — these go "
+            "stale when the OS gains it (a false narrative misdirects users). "
+            "State what IS, not what is absent:\n" + "\n".join(offenders)
+        )
+
+    def test_no_hedged_numeric_claims(self):
+        offenders = []
+        for entry in load_authored_entries():
+            for field in ("summary", "narrative"):
+                text = getattr(entry, field)
+                if self._APPROX_COUNT.search(text):
+                    offenders.append(f"{entry.id}.{field}: {text}")
+        assert not offenders, (
+            "authored prose carries a hedged/approximate count (e.g. '~190 "
+            "widgets') — approximations drift silently past the fidelity-only "
+            "check. Use a verified exact count or an open-ended '150+':\n" + "\n".join(offenders)
+        )
+
+    def test_source_truth_how_is_hedged_to_where_the_ee_fabric_server_is_bound(self):
+        """AST-5a (V7): ``include_provenance`` exists only on the EE MCP
+        ``fabric_query`` (OSS claude_sdk has no fabric_query and the OSS builtin
+        rejects the kwarg), so the authored ``how`` must hedge like
+        ``primitive:fabric``'s does instead of implying every deployment has
+        the read. Authoring only — availability semantics are untouched."""
+        store = AtlasStore.load()
+        fabric = store.describe("primitive:fabric")
+        source_truth = store.describe("primitive:source-truth")
+        assert fabric is not None and source_truth is not None
+        assert "where a fabric server is bound" in fabric.how
+        assert "include_provenance=true" in source_truth.how
+        assert "where an EE fabric MCP server is bound" in source_truth.how
+
+    # AST-3: the rollout-flagged primitives default OFF. Their authored prose
+    # describes what the subsystem DOES; only the overlay can say whether it is
+    # live for THIS deployment. When the flag is off, the rendered describe must
+    # carry the mode + enable pointer so the payload cannot be read as "live
+    # source-truth / verification is running here" — the same misdirection
+    # class as a false route claim, at the deployment level.
+    _FLAGGED = {
+        "primitive:source-truth": "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE",
+        "primitive:verify-loop": "deep_work_verify_mode",
+    }
+
+    @pytest.mark.asyncio
+    async def test_off_flagged_primitive_describe_declares_mode_and_enable_pointer(
+        self, monkeypatch
+    ):
+        from pocketpaw.agents.sdk_mcp_atlas import _atlas_describe_handler
+        from pocketpaw.atlas.overlay import DefaultEntitlementProvider
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        for name in ("fabric_source_truth_mode", "deep_work_verify_mode", "cloud_plan_verify_mode"):
+            monkeypatch.setattr(settings, name, "off")
+        for name in ("deep_work_verify_loop_enabled", "cloud_plan_verify_loop_enabled"):
+            monkeypatch.setattr(settings, name, False)
+
+        provider = DefaultEntitlementProvider(registry=type("R", (), {"status": lambda *_: []})())
+        for entry_id, pointer in self._FLAGGED.items():
+            out = await _atlas_describe_handler({"id": entry_id}, provider)
+            assert not out.get("is_error"), f"{entry_id} must stay DESCRIBABLE when off"
+            text = out["content"][0]["text"]
+            payload = json.loads(text)
+            assert payload["available"] is False, entry_id
+            assert payload["mode"] == "off", entry_id
+            # Rendered text carries the honesty markers an agent will read.
+            assert '"mode": "off"' in text, f"{entry_id}: describe must declare mode off"
+            assert pointer in text, f"{entry_id}: describe must say how to enable it"
+            assert "docs/atlas.md" in payload["enable_hint"], entry_id
+
+
+class TestConnectorExtraction:
+    def test_stripe_entry_carries_actions_in_narrative(self):
+        entry = AtlasStore.load().describe("connector:stripe")
+        assert entry is not None, "stripe.yaml exists in connectors/ — must be extracted"
+        assert entry.kind == "connector"
+        assert "list_invoices" in entry.narrative
+        assert "list_subscriptions" in entry.narrative
+        assert entry.requires == ["primitive:connector"]
+        assert "stripe" in entry.keywords
+
+    def test_read_my_invoices_reaches_a_connector_that_lists_invoices(self):
+        """The slice this fixes: intent search must surface connector
+        knowledge, not just primitives.
+
+        Since AT-6 the top-5 for invoice vocabulary legitimately includes
+        the ripple invoice widgets (`widget:invoice-layout` /
+        `widget:invoice-lines` hit at name weight — rendering an invoice IS
+        a capability answer), and several connectors tie with stripe on the
+        generic "read" keyword. The connector-knowledge guarantee is kept
+        at limit=10: an invoice-capable connector must still surface.
+        """
+        results = AtlasStore.load().search("read my invoices", limit=10)
+        connector_hits = [
+            e for e in results if e.kind == "connector" and "invoice" in e.narrative.lower()
+        ]
+        assert connector_hits, (
+            f"expected an invoice-capable connector, got {[e.id for e in results]}"
+        )
+
+    def test_stripe_invoices_ranks_stripe_first(self):
+        results = AtlasStore.load().search("stripe invoices")
+        assert results and results[0].id == "connector:stripe", (
+            f"expected connector:stripe first, got {[e.id for e in results]}"
+        )
+
+    def test_every_repo_connector_yaml_has_an_entry(self):
+
+        import yaml
+
+        store = AtlasStore.load()
+        for path in sorted(Path("connectors").glob("*.yaml")):
+            name = yaml.safe_load(path.read_text(encoding="utf-8"))["name"]
+            assert store.describe(f"connector:{name}") is not None, (
+                f"{path} missing from compiled atlas — run `pocketpaw atlas build`"
+            )
+
+
+class TestSenseExtraction:
+    def test_payments_sense_links_stripe(self):
+        entry = AtlasStore.load().describe("sense:paw.payments.v1")
+        assert entry is not None
+        assert entry.kind == "sense"
+        assert "stripe" in entry.narrative
+        assert "connector:stripe" in entry.requires
+
+    def test_all_core_senses_have_entries_with_declaring_connectors(self):
+        from pocketpaw.senses.vocabulary import CORE_SENSES
+
+        store = AtlasStore.load()
+        for sense in CORE_SENSES:
+            entry = store.describe(f"sense:{sense.id}")
+            assert entry is not None, f"sense {sense.id} missing from compiled atlas"
+            assert entry.summary == sense.description
+            # Every core sense is backed by >=1 connector (vocabulary guard
+            # rule), so the entry must cross-link at least one.
+            assert entry.requires, f"{entry.id} must link its declaring connectors"
+
+
+class TestCheckArtifact:
+    def test_check_passes_on_fresh_artifact(self, tmp_path):
+        path, _model = write_artifact(output_path=tmp_path / "atlas.json")
+        fresh, summary = check_artifact(artifact_path=path)
+        assert fresh and summary == ""
+
+    def test_check_fails_on_tampered_artifact(self, tmp_path):
+        path, _model = write_artifact(output_path=tmp_path / "atlas.json")
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc["entries"] = [e for e in doc["entries"] if e["id"] != "connector:stripe"]
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        fresh, summary = check_artifact(artifact_path=path)
+        assert not fresh
+        assert "connector:stripe" in summary
+        assert "pocketpaw atlas build" in summary
+
+    def test_check_fails_on_missing_artifact(self, tmp_path):
+        fresh, summary = check_artifact(artifact_path=tmp_path / "nope.json")
+        assert not fresh and "missing" in summary
+
+
+class TestDriftCheck:
+    def test_warns_on_connector_mismatch(self, caplog):
+        store = AtlasStore.load(_DATA_PATH)
+        atlas_names = {e.id.split(":", 1)[1] for e in store.entries if e.kind == "connector"}
+        with caplog.at_level(logging.WARNING, logger="pocketpaw.atlas.store"):
+            drifted = check_connector_drift(store, live_names=atlas_names | {"brand-new-connector"})
+        assert drifted is True
+        assert any(
+            "atlas is stale" in r.message and "brand-new-connector" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_silent_on_match(self, caplog):
+        store = AtlasStore.load(_DATA_PATH)
+        atlas_names = {e.id.split(":", 1)[1] for e in store.entries if e.kind == "connector"}
+        with caplog.at_level(logging.WARNING, logger="pocketpaw.atlas.store"):
+            drifted = check_connector_drift(store, live_names=atlas_names)
+        assert drifted is False
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_never_raises_even_on_broken_input(self, caplog):
+        """The drift check must never take the store down with it."""
+
+        class _Boom:
+            @property
+            def entries(self):
+                raise RuntimeError("boom")
+
+        with caplog.at_level(logging.WARNING, logger="pocketpaw.atlas.store"):
+            assert check_connector_drift(_Boom()) is False  # type: ignore[arg-type]
+
+    def test_serialize_roundtrip_loads_in_store(self, tmp_path):
+        """A compiled artifact loads through the unchanged store API."""
+        path = tmp_path / "atlas.json"
+        path.write_bytes(serialize_atlas(compile_atlas()))
+        store = AtlasStore.load(path)
+        assert store.describe("primitive:pocket") is not None
+        assert store.describe("connector:stripe") is not None
+
+
+class TestNullDisplayName:
+    """FINDING A — a connector YAML with an explicit ``display_name: null``
+    parses cleanly but must not crash the whole compiler on ``.lower()``.
+
+    The module's own posture ("one bad file can't block the build") is
+    broken if a single well-formed-but-null field aborts the entire build
+    (and the CI drift gate) with AttributeError.
+    """
+
+    def test_connector_with_null_display_name_compiles(self, tmp_path):
+        (tmp_path / "quiet.yaml").write_text(
+            "name: quiet\n"
+            "display_name: null\n"
+            "type: generic\n"
+            "actions:\n"
+            "  - name: ping\n"
+            "    description: check liveness\n",
+            encoding="utf-8",
+        )
+        model = compile_atlas(connectors_dir=tmp_path)
+        entry = next(e for e in model.entries if e.id == "connector:quiet")
+        # Falls back to the connector name — never the string "None".
+        assert entry.name == "quiet"
+        assert "None" not in entry.summary
+        assert "None" not in entry.narrative
+        assert "quiet" in entry.keywords
+
+
+class TestConnectorsDirAnchoring:
+    """FINDING C — the default connectors dir must not be CWD-relative.
+
+    ``compile_atlas`` / ``write_artifact`` / ``check_artifact`` called with
+    defaults from any dir other than the repo root would otherwise read ZERO
+    connector YAMLs and silently drop every connector + sense entry;
+    ``write_artifact`` would then persist a truncated artifact.
+    """
+
+    def test_default_connectors_dir_is_absolute(self):
+        assert DEFAULT_CONNECTORS_DIR.is_absolute(), (
+            "DEFAULT_CONNECTORS_DIR must be anchored to a stable location, not CWD-relative"
+        )
+        assert DEFAULT_CONNECTORS_DIR.is_dir(), "the anchored connectors dir must exist"
+
+    def test_compile_from_other_cwd_still_finds_connectors(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        # A CWD-relative default would find nothing here.
+        assert not (Path(os.getcwd()) / "connectors").exists()
+        model = compile_atlas()
+        connectors = [e for e in model.entries if e.kind == "connector"]
+        senses = [e for e in model.entries if e.kind == "sense"]
+        assert connectors, "connectors must still be extracted from a different CWD"
+        assert senses, "senses must still be extracted from a different CWD"
+        assert any(e.id == "connector:stripe" for e in connectors)
+
+    def test_check_artifact_fresh_from_other_cwd(self, tmp_path, monkeypatch):
+        """The CI drift gate runs from repo root today; anchoring keeps it
+        correct even if invoked elsewhere — no truncated-artifact false
+        'stale' with everything dropped."""
+        monkeypatch.chdir(tmp_path)
+        fresh, summary = check_artifact()
+        assert fresh, summary
+
+
+class TestDuplicateIdDiff:
+    """FINDING E — the drift diff collapses duplicate-id entries.
+
+    ``check_artifact`` built its per-id map with a dict comprehension, so two
+    entries sharing an id silently collapse to one: CI still fails on bytes,
+    but the printed added/removed/changed lists misreport what actually
+    differs. Duplicate ids should be surfaced explicitly.
+    """
+
+    def test_duplicate_ids_reported(self, tmp_path):
+        path, _model = write_artifact(output_path=tmp_path / "atlas.json")
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        # Inject a duplicate of an existing id (authoring collision shape).
+        first = doc["entries"][0]
+        doc["entries"].append(dict(first))
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        fresh, summary = check_artifact(artifact_path=path)
+        assert not fresh
+        assert "duplicate" in summary.lower(), (
+            f"duplicate id must be surfaced in the diff summary, got:\n{summary}"
+        )
+        assert first["id"] in summary

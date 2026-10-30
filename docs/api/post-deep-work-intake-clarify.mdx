@@ -1,0 +1,106 @@
+---
+title: Clarify Goal (Intake)
+description: "Analyze a Deep Work goal and return the clarification questions needed before planning. The first step of the interactive intake mode — an empty question list means the goal is already well-formed."
+api: POST /api/deep-work/intake/clarify
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["goal intake", "clarification", "deep work", "interactive planning"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Inspects a project goal and returns the clarification questions the planner needs answered before it can plan well. This is the first step of [interactive intake mode](/advanced/deep-work#interactive-goal-intake).
+
+If `clarifications` comes back empty, the goal is already well-formed — skip straight to [Start Project](/api/post-deep-work-start), or call [Start with Intake](/api/post-deep-work-start-with-intake) with no answers, which is equivalent.
+
+Once you have the questions, collect answers from the user and submit them to [Start with Intake](/api/post-deep-work-start-with-intake).
+
+## Request Body
+
+<ResponseField name="description" type="string" required>
+  Natural-language description of the goal to analyze. Min 10, max 5000 characters.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the goal was analyzed successfully.
+</ResponseField>
+
+<ResponseField name="clarifications" type="string[]">
+  Clarification questions to ask the user before planning. Up to four. Empty when the goal is well-formed.
+</ResponseField>
+
+<ResponseField name="needs_clarification" type="boolean">
+  Convenience flag — `true` when `clarifications` is non-empty.
+</ResponseField>
+
+<ResponseField name="goal_analysis" type="object">
+  The full structured goal analysis (domain, complexity, AI/human roles, suggested research depth).
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/deep-work/intake/clarify \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Chase down overdue invoices"}'
+```
+  </Tab>
+  <Tab title="JavaScript">
+```javascript
+const res = await fetch('http://localhost:8000/api/deep-work/intake/clarify', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN',
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({ description: 'Chase down overdue invoices' }),
+});
+const data = await res.json();
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+res = httpx.post(
+    "http://localhost:8000/api/deep-work/intake/clarify",
+    headers={"Authorization": "Bearer YOUR_TOKEN"},
+    json={"description": "Chase down overdue invoices"},
+)
+data = res.json()
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "needs_clarification": true,
+  "clarifications": [
+    "How many days overdue before an invoice counts?",
+    "Which channel should reminders go out on?"
+  ],
+  "goal_analysis": {
+    "goal": "Chase down overdue invoices",
+    "domain": "business",
+    "complexity": "M",
+    "suggested_research_depth": "quick",
+    "confidence": 0.5
+  }
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

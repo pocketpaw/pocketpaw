@@ -1,0 +1,151 @@
+---
+title: "Pocket Templates: Curated Starting Points for the Specialist"
+description: "Pocket templates are RFC 03-shaped recipes the chat agent matches against a brief before drafting from scratch. Built-in templates auto-install on boot; an in-flight v2 schema makes Pydantic the single validation chokepoint with a bundled v1→v2 migration."
+section: Core Concepts
+ogType: article
+keywords: ["pocket templates", "rfc 03", "bundled templates", "pocket schema", "template lint", "v1 v2 migration"]
+tags: ["pockets", "templates", "rfc-03"]
+---
+
+# Pocket Templates: Curated Starting Points for the Specialist
+
+A pocket template is a hand-authored RFC 03-shaped recipe — metadata plus a rippleSpec skeleton — that the create specialist instantiates and customizes instead of generating a pocket cold. The chat agent's STEP 0 template-library check keyword-matches the user's brief against an index, and on a hit the specialist short-circuits the draft round-trip and stamps out a usable pocket in one turn.
+
+PocketPaw ships seven built-in templates today. The v2 schema work (in flight) consolidates validation behind a single Pydantic chokepoint with a bundled v1 → v2 migration and a `pocket template` CLI for linting, migration, and diff.
+
+<Callout type="info">
+**Status (2026-05-25):** IN FLIGHT — v1 templates already shipped; v2 schema chokepoint in review.
+
+**Implementation PRs:**
+- **Shipped on dev:** #1180 (Increment 2a — built-in pocket templates).
+- **Open / not on dev yet:** #1228 (RFC 03 v2 integration umbrella, OPEN against `dev`), #1225 (v2 schema chokepoint + bundled migration, MERGED into the integration branch), #1229 (CLI `pocket template lint/migrate/diff`, MERGED into the integration branch), #1239 (template-to-runtime translation seam for `data_sources`, MERGED into the integration branch).
+
+**Workspace RFC:** [docs/rfc/03-pocket-template-schema.md](https://github.com/qbtrix/paw-workspace/blob/main/docs/rfc/03-pocket-template-schema.md) (v2; amendments tracked alongside the integration PR).
+
+**What's live on dev:** built-in pocket templates land at boot via `bundled_templates.installer`; pockets can be created from a named template via the standard create flow; the seven bundled slugs (todo-task-tracker, kanban-board, metrics-dashboard, crm-record-list, calendar-planner, activity-feed, decision-graph) are picked up by STEP 0 keyword match.
+
+**What's planned (on the integration branch, awaiting merge):** `PocketTemplate` Pydantic v2 model as the single validation chokepoint; `_promote_v1_to_v2` translation pass in `loader.py` so v1 templates on disk keep loading forever; `strict: bool = False` on `load_template` (default preserves the log-warn-return-None contract; `strict=True` raises for CLI lint); CEL expressions parsed at validation via `celpy.CELParser`; `pocket template lint/migrate/diff` CLI.
+</Callout>
+
+## What a Template Is, On Disk
+
+Every bundled template lives at `src/pocketpaw/bundled_templates/_bundled/<slug>/` and holds exactly two files:
+
+| File | Format | Purpose |
+|---|---|---|
+| `template.pocket.yaml` | YAML | RFC 03 Pocket Template Schema metadata — `name`, `version`, `vertical`, `shape`, `description`, `state`, `actions`, `connectors`, `skills` |
+| `ripple_spec.json` | JSON | The hand-authored rippleSpec skeleton the specialist instantiates and customizes |
+
+The registry at `src/pocketpaw/bundled_templates/_bundled/index.json` lists every bundled template with the keywords STEP 0 matches against:
+
+```json
+{
+  "slug": "todo-task-tracker",
+  "title": "Task Tracker",
+  "shape": "data-grid",
+  "pattern": "app",
+  "keywords": ["todo", "to-do", "task list", "checklist", ...],
+  "connectors_hint": []
+}
+```
+
+The current seven slugs:
+
+| Slug | Shape | Pattern | Triggers on briefs like |
+|---|---|---|---|
+| `todo-task-tracker` | `data-grid` | `app` | "todo list," "task tracker," "action items" |
+| `kanban-board` | `kanban` | `app` | "kanban," "sprint board," "lanes," "trello" |
+| `metrics-dashboard` | `data-grid` | `dashboard` | "dashboard," "kpis," "scorecard" |
+| `crm-record-list` | `custom` | `browser` | "crm," "contacts," "leads," "pipeline" |
+| `calendar-planner` | `calendar` | `app` | "calendar," "schedule," "agenda" |
+| `activity-feed` | `timeline` | `feed` | "activity feed," "changelog," "audit log" |
+| `decision-graph` | `custom` | `app` | "decision graph," "audit trail," "why did we" (paired with [Decision Graph](/concepts/decision-graph)) |
+
+## How Templates Get to the User
+
+`src/pocketpaw/bundled_templates/installer.py` runs on dashboard boot and mirrors every `_bundled/<slug>/` directory plus `index.json` into `~/.pocketpaw/templates/`. The install is **idempotent via SHA-256 hash comparison** — the same mirror pattern as `bundled_kb.installer` and `bundled_skills.installer`. Behavior:
+
+- **First boot** — every bundled template is copied over.
+- **Subsequent boots, same content** — no-op (hash match per file).
+- **PocketPaw upgrade with new template content** — overwrites the user's copy. Operators who hand-edit a template should opt out.
+- **I/O failures** — logged at WARNING, never raised. Pocket creation still works cold-generated when the install can't run.
+
+Opt out with `POCKETPAW_AUTO_INSTALL_BUNDLED_TEMPLATES=false`.
+
+## How a Template Becomes a Pocket
+
+```
+   user brief
+        │
+        ▼
+   STEP 0: keyword-match brief against index.json
+        │
+        ├── HIT  ──▶ chat agent sets hints.template_id = <slug>
+        │              │
+        │              ▼
+        │     pocket_specialist__create(hints={template_id: ...})
+        │              │
+        │              ▼
+        │     AgentModeAdapter.create short-circuits:
+        │       load_template(slug)
+        │       _validate_and_persist(template["ripple_spec"])
+        │       (skips the _draft_kit LLM round-trip entirely)
+        │
+        └── MISS ──▶ _draft_kit_response  (one-shot)
+                or  _plan_kit_response    (plan-then-build, see Pocket Planner)
+```
+
+`load_template(slug)` is the single read path. It guards against path-traversal slugs, returns `None` on any failure (unknown slug, missing sibling file, parse error, I/O error), and logs at WARNING. The caller treats `None` as "fall back to cold generation" — a template-load failure never blocks pocket creation.
+
+Returned shape: `{"meta": <parsed template.pocket.yaml>, "ripple_spec": <parsed ripple_spec.json>}`.
+
+## The V2 Schema Chokepoint (in flight)
+
+Today every consumer (loader, specialist, future CLI) inspects template dicts directly. RFC 03 v2 collapses validation behind one Pydantic v2 model.
+
+`src/pocketpaw/bundled_templates/schema.py` will host `PocketTemplate` — every top-level v2 field and every sub-schema modeled as a Pydantic class. Every load path (loader, CLI lint, future Registry) goes through this model.
+
+Direction:
+
+- **Single chokepoint.** No consumer parses raw YAML / JSON anymore. They either get a validated `PocketTemplate` or `None`.
+- **Bundled migration.** A `_promote_v1_to_v2` translation pass in `loader.py` runs before validation, so the model only ever sees v2-shaped dicts. v1 templates on disk keep loading forever.
+- **Strict mode.** `load_template(slug, *, strict=False)` keeps the log-warn-return-None contract every EE consumer pattern-matches on. `strict=True` raises `TemplateValidationError` — the CLI lint and tests opt into this.
+- **CEL at validation, evaluation at runtime.** Filter / when expressions on `saved_views[]`, `columns[]`, `triggers[]`, and `instinct_rules.rules[]` are parsed at validation via `celpy.CELParser`. The runtime owns evaluation against a real row / workspace context.
+
+The six existing v1 templates get migrated to v2 in the same PR (per RFC 03 Appendix B) so they double as canonical v2 fixtures.
+
+## The Planned CLI
+
+`pocket template` (in PR #1229, on the integration branch) ships three subcommands:
+
+```bash
+# Validate a template file — exits non-zero on any schema violation
+pocket template lint <path/to/template.pocket.yaml>
+
+# Promote a v1 template on disk to v2 in place
+pocket template migrate <path/to/template.pocket.yaml>
+
+# Show the diff between two template versions or between disk and bundled
+pocket template diff <a> <b>
+```
+
+The CLI opens `load_template(slug, strict=True)` so a schema violation surfaces as a `TemplateValidationError` with the field path, not a silent `None`.
+
+## Composing With the Specialist
+
+Templates compose with three other surfaces:
+
+- **The chat agent's STEP 0 keyword match** — keeps the template path fast (no LLM round-trip needed to pick a template).
+- **The [Pocket Planner](/concepts/pocket-planner) gate** — fires only when STEP 0 misses AND the brief is custom multi-widget. Templates always win when they match.
+- **The [Merge Pocket Spec](/api/post-pocket-spec-merge) endpoint** — the specialist's strict catalog + action-wiring gate runs against the instantiated template's rippleSpec just like it does on any agent-generated spec. A broken template can't slip through.
+
+## Custom Templates
+
+The on-disk format is stable. Drop a `template.pocket.yaml` + `ripple_spec.json` pair into `~/.pocketpaw/templates/<your-slug>/` and the loader will pick it up. Add an entry to `~/.pocketpaw/templates/index.json` if you want STEP 0 keyword match to surface it (the bundled `index.json` is overwritten on every PocketPaw upgrade — customize a copy and opt out of the bundled overwrite, or wait for a planned per-user merge step).
+
+## Related
+
+- [Pocket Planner](/concepts/pocket-planner) — runs only when no template matches.
+- [Merge Pocket Spec](/api/post-pocket-spec-merge) — the endpoint the specialist drives whether the spec came from a template or a fresh draft.
+- [Decision Graph](/concepts/decision-graph) — paired with the bundled `decision-graph` template.
+- [Pocket Execution Router](/concepts/pocket-execution-router) — the edit-side sibling; templates feed the create path only.

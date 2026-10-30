@@ -1,0 +1,693 @@
+# test_listener.py — tests for the FileReady KB-indexing subscriber.
+# Covers the pipeline (path resolution for local and remote adapters, the
+# temp-file stream and its cleanup, extraction, KB ingest, failure containment)
+# and the background scheduler the bus actually calls: publish returns while
+# indexing runs, the kb_article_id status lands on success and stays None on
+# failure, the concurrency bound holds, and drain cancels stragglers.
+"""Tests for ``ee.cloud.uploads.listeners.index_uploaded_file``."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+from pocketpaw_ee.cloud._core.realtime.events import FileReady
+from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
+
+
+class _FakeChain:
+    """Stand-in for ee.cloud.extraction.ExtractionChain.run."""
+
+    def __init__(self, result: ExtractionResult):
+        self._result = result
+        self.calls: list[tuple[Path, str]] = []
+
+    async def run(self, path: Path, mime: str) -> ExtractionResult:
+        self.calls.append((path, mime))
+        return self._result
+
+
+class _FakeAdapter:
+    """Stand-in for the upload StorageAdapter.
+
+    ``local_path_value`` controls what the local-path lookup returns; ``None``
+    simulates a remote adapter (S3, GCS) that has no on-disk surface.
+    ``open_chunks`` is the byte stream the listener will assemble into a
+    temp file; setting ``open_raises`` makes the iterator raise mid-stream
+    so the failure-isolation path is exercised.
+    """
+
+    def __init__(
+        self,
+        *,
+        local_path_value: Path | None = None,
+        open_chunks: list[bytes] | None = None,
+        open_raises: BaseException | None = None,
+    ):
+        self._local = local_path_value
+        self._chunks = open_chunks or []
+        self._raises = open_raises
+
+    def local_path(self, key: str) -> Path | None:
+        return self._local
+
+    async def open(self, key: str):
+        for chunk in self._chunks:
+            yield chunk
+        if self._raises is not None:
+            raise self._raises
+
+
+class _StubUploadDoc:
+    """Minimal FileUpload stand-in for the fail-closed hide gate (FL-11b)."""
+
+    def __init__(self, *, hide_from_ai: bool = False, tags: list[str] | None = None):
+        self.hide_from_ai = hide_from_ai
+        self.tags = tags or []
+
+
+def _patch_listener(
+    monkeypatch,
+    *,
+    chain: _FakeChain | None = None,
+    storage_path: Path | None = None,
+    adapter: _FakeAdapter | None = None,
+    ingest: AsyncMock | None = None,
+    hide_from_ai: bool = False,
+    resolve_doc: bool = True,
+):
+    """Wire the listener's collaborators with test doubles.
+
+    FL-11b: the listener now fails CLOSED — it needs a resolvable, non-hidden
+    FileUpload row or it skips indexing. By default we return a non-hidden stub
+    doc so the collaborator tests exercise the index path. ``hide_from_ai``
+    drives the hidden branch; ``resolve_doc=False`` returns ``None`` to exercise
+    the fail-closed (unresolvable row) branch.
+    """
+    from pocketpaw_ee.cloud.uploads import listeners
+
+    async def _fake_load(_file_id, _workspace_id):
+        if not resolve_doc:
+            return None
+        return _StubUploadDoc(hide_from_ai=hide_from_ai)
+
+    monkeypatch.setattr(listeners, "_load_upload_doc", _fake_load)
+
+    if chain is not None:
+        monkeypatch.setattr(
+            "pocketpaw_ee.cloud.extraction.build_chain",
+            lambda settings: chain,
+        )
+
+    # ``_resolve_adapter`` underpins both the local-path and the temp-file
+    # branches; ``adapter`` lets tests pin both at once.
+    if adapter is not None:
+        monkeypatch.setattr(listeners, "_resolve_adapter", lambda: adapter)
+    elif storage_path is not None:
+        # Back-compat shortcut: tests that only care about the local-path
+        # branch can pass ``storage_path`` and we wire a fake adapter
+        # under the hood.
+        fake = _FakeAdapter(local_path_value=storage_path)
+        monkeypatch.setattr(listeners, "_resolve_adapter", lambda: fake)
+
+    if ingest is not None:
+        from pocketpaw_ee.cloud.agents import knowledge as kn
+
+        monkeypatch.setattr(kn.KnowledgeService, "ingest_text_to_scope", ingest)
+
+
+@pytest.mark.asyncio
+async def test_index_uploaded_file_calls_chain_then_kb(monkeypatch, tmp_path):
+    """Happy path: extraction runs, KB ingest gets the right scope/source."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    fake_path = tmp_path / "doc.pdf"
+    fake_path.write_bytes(b"unused; chain.run is mocked")
+
+    chain = _FakeChain(ExtractionResult(text="hello world", backend="local"))
+    ingest = AsyncMock(return_value={"id": "art-1"})
+    _patch_listener(monkeypatch, chain=chain, storage_path=fake_path, ingest=ingest)
+
+    ev = FileReady(
+        data={
+            "workspace_id": "w1",
+            "file_id": "f1",
+            "filename": "doc.pdf",
+            "mime": "application/pdf",
+            "storage_key": "ws/w1/f1.pdf",
+        }
+    )
+
+    await index_uploaded_file(ev)
+
+    assert chain.calls == [(fake_path, "application/pdf")]
+    ingest.assert_awaited_once_with(
+        scope="workspace:w1",
+        text="hello world",
+        source="doc.pdf",
+    )
+
+
+@pytest.mark.asyncio
+async def test_index_skips_when_workspace_id_missing(monkeypatch, tmp_path):
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
+    ingest = AsyncMock()
+    _patch_listener(monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest)
+
+    await index_uploaded_file(FileReady(data={"file_id": "f1", "storage_key": "k"}))
+
+    assert chain.calls == []
+    ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_index_skips_when_file_id_missing(monkeypatch, tmp_path):
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
+    ingest = AsyncMock()
+    _patch_listener(monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest)
+
+    await index_uploaded_file(FileReady(data={"workspace_id": "w1", "storage_key": "k"}))
+
+    assert chain.calls == []
+    ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_index_skips_when_no_storage_key(monkeypatch):
+    """No storage_key in the event → no path to extract from; bail cleanly."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
+    ingest = AsyncMock()
+    _patch_listener(monkeypatch, chain=chain, ingest=ingest)
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f1",
+                # storage_key intentionally missing
+            }
+        )
+    )
+
+    assert chain.calls == []
+    ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remote_adapter_streams_into_temp_then_extracts(monkeypatch):
+    """S3 / GCS path: local_path=None → listener streams adapter.open() bytes
+    into a NamedTemporaryFile, runs extraction on it, deletes the file."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="caption from gemini", backend="gemini-flash"))
+    adapter = _FakeAdapter(
+        local_path_value=None,
+        open_chunks=[b"chunk-1 ", b"chunk-2"],
+    )
+    ingest = AsyncMock(return_value={"id": "art-1"})
+    _patch_listener(monkeypatch, chain=chain, adapter=adapter, ingest=ingest)
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f1",
+                "filename": "whiteboard.png",
+                "mime": "image/png",
+                "storage_key": "ws/w1/whiteboard.png",
+            }
+        )
+    )
+
+    # Chain was called exactly once with a temp path that ends in .png so
+    # any suffix-routed extractor downstream would still recognize it.
+    assert len(chain.calls) == 1
+    temp_path, mime = chain.calls[0]
+    assert mime == "image/png"
+    assert temp_path.suffix == ".png", temp_path
+    assert temp_path.name.startswith("paw-upload-"), temp_path
+    # File was wiped after the context manager exited.
+    assert not temp_path.exists()
+    # The temp file held both chunks before extraction ran. We can't peek
+    # at the file post-cleanup, so we settle for the chain having been
+    # called — the absence of a half-written empty file would have shown
+    # up as test_kb_failure_does_not_propagate-style failure.
+
+    ingest.assert_awaited_once_with(
+        scope="workspace:w1",
+        text="caption from gemini",
+        source="whiteboard.png",
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_adapter_stream_failure_bails_cleanly(monkeypatch):
+    """If adapter.open() raises mid-stream, listener swallows + skips."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="never reached", backend="local"))
+    adapter = _FakeAdapter(
+        local_path_value=None,
+        open_chunks=[b"partial"],
+        open_raises=ConnectionError("S3 disconnected"),
+    )
+    ingest = AsyncMock()
+    _patch_listener(monkeypatch, chain=chain, adapter=adapter, ingest=ingest)
+
+    # Must not raise — handler-level isolation is the whole point.
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f1",
+                "filename": "doc.pdf",
+                "mime": "application/pdf",
+                "storage_key": "ws/w1/doc.pdf",
+            }
+        )
+    )
+
+    assert chain.calls == []
+    ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_remote_adapter_temp_suffix_falls_back_to_mime(monkeypatch):
+    """Filename has no extension → guess from MIME. Keeps suffix-routed
+    extractors (LocalExtractor's pypdf path, etc.) working in the remote
+    case too."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="extracted", backend="local"))
+    adapter = _FakeAdapter(local_path_value=None, open_chunks=[b"%PDF-1.4 ..."])
+    ingest = AsyncMock()
+    _patch_listener(monkeypatch, chain=chain, adapter=adapter, ingest=ingest)
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f1",
+                "filename": "no-extension-here",
+                "mime": "application/pdf",
+                "storage_key": "ws/w1/blob",
+            }
+        )
+    )
+
+    assert len(chain.calls) == 1
+    temp_path, _mime = chain.calls[0]
+    assert temp_path.suffix == ".pdf", temp_path
+    ingest.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_local_adapter_uses_direct_path_no_temp(monkeypatch, tmp_path):
+    """Local-disk adapter: listener uses the direct path, no temp file is
+    created — the regression case for the S3 fallback not breaking the
+    fast path."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    direct = tmp_path / "doc.pdf"
+    direct.write_bytes(b"%PDF-1.4 ...")
+    chain = _FakeChain(ExtractionResult(text="from direct path", backend="local"))
+    # Adapter exposes a local path AND an open() — the listener should
+    # prefer the local path and never call open().
+    open_calls: list[str] = []
+
+    class _AdapterWithBoth(_FakeAdapter):
+        async def open(self, key: str):  # type: ignore[override]
+            open_calls.append(key)
+            yield b"unexpected"
+
+    adapter = _AdapterWithBoth(local_path_value=direct)
+    ingest = AsyncMock()
+    _patch_listener(monkeypatch, chain=chain, adapter=adapter, ingest=ingest)
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f1",
+                "filename": "doc.pdf",
+                "mime": "application/pdf",
+                "storage_key": "local/w1/doc.pdf",
+            }
+        )
+    )
+
+    assert chain.calls == [(direct, "application/pdf")]
+    assert open_calls == [], "local adapter must not stream when local_path works"
+    ingest.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_index_skips_when_adapter_unavailable(monkeypatch):
+    """Test contexts without the upload router mounted: _resolve_adapter
+    returns None → listener logs and skips, never calls extraction."""
+    from pocketpaw_ee.cloud.uploads import listeners
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
+    ingest = AsyncMock()
+    monkeypatch.setattr(listeners, "_resolve_adapter", lambda: None)
+    monkeypatch.setattr("pocketpaw_ee.cloud.extraction.build_chain", lambda settings: chain)
+    from pocketpaw_ee.cloud.agents import knowledge as kn
+
+    monkeypatch.setattr(kn.KnowledgeService, "ingest_text_to_scope", ingest)
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f1",
+                "filename": "x.pdf",
+                "mime": "application/pdf",
+                "storage_key": "k",
+            }
+        )
+    )
+
+    assert chain.calls == []
+    ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_index_skips_when_extraction_returns_empty(monkeypatch, tmp_path):
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="   ", backend="local"))
+    ingest = AsyncMock()
+    _patch_listener(monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest)
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f1",
+                "storage_key": "k",
+                "filename": "blank.pdf",
+                "mime": "application/pdf",
+            }
+        )
+    )
+
+    ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_extraction_failure_does_not_propagate(monkeypatch, tmp_path):
+    """Chain raises → listener swallows the error and skips ingest."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    class _ExplodingChain:
+        async def run(self, *_args, **_kwargs):
+            raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.extraction.build_chain", lambda settings: _ExplodingChain()
+    )
+    ingest = AsyncMock()
+    _patch_listener(monkeypatch, storage_path=tmp_path / "x", ingest=ingest)
+
+    # Must not raise — the bus catches handler errors but we keep the
+    # listener defensive so the failure surfaces as a log line, not a
+    # missed audit trail.
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f1",
+                "storage_key": "k",
+                "filename": "x.pdf",
+                "mime": "application/pdf",
+            }
+        )
+    )
+
+    ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_kb_failure_does_not_propagate(monkeypatch, tmp_path):
+    """KB ingest raises → listener swallows so the publisher never sees it."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="content", backend="local"))
+    ingest = AsyncMock(side_effect=RuntimeError("kb missing"))
+    _patch_listener(monkeypatch, chain=chain, storage_path=tmp_path / "x", ingest=ingest)
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f1",
+                "storage_key": "k",
+                "filename": "x.pdf",
+                "mime": "application/pdf",
+            }
+        )
+    )
+
+    # The mock was actually called, but its side-effect was contained.
+    ingest.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_register_upload_listeners_subscribes_to_file_ready():
+    """Bootstrap path: register_upload_listeners hooks the bus."""
+    from pocketpaw_ee.cloud._core.realtime import bus as bus_mod
+    from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
+    from pocketpaw_ee.cloud._core.realtime.bus import InProcessBus
+    from pocketpaw_ee.cloud.uploads.listeners import (
+        index_uploaded_file,
+        register_upload_listeners,
+        schedule_index_uploaded_file,
+    )
+
+    real_bus = InProcessBus(resolver=AudienceResolver(), conn_manager=AsyncMock())
+    prev = bus_mod._bus  # type: ignore[attr-defined]
+    bus_mod._bus = real_bus  # type: ignore[attr-defined]
+    try:
+        register_upload_listeners()
+        handlers = real_bus._handlers.get(FileReady.EVENT_TYPE, [])
+        # The bus awaits handlers inline, so the pipeline itself must not be
+        # the subscriber: only the background scheduler is.
+        assert schedule_index_uploaded_file in handlers
+        assert index_uploaded_file not in handlers
+    finally:
+        bus_mod._bus = prev  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_hidden_file_skips_index_and_tags(monkeypatch, tmp_path):
+    """FL-11b: a file with hide_from_ai=True is never extracted or KB-indexed."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="secret", backend="local"))
+    ingest = AsyncMock(return_value={"id": "art-x"})
+    _patch_listener(
+        monkeypatch,
+        chain=chain,
+        storage_path=tmp_path / "hidden.pdf",
+        ingest=ingest,
+        hide_from_ai=True,
+    )
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f-hidden",
+                "filename": "hidden.pdf",
+                "mime": "application/pdf",
+                "storage_key": "ws/w1/f-hidden.pdf",
+            }
+        )
+    )
+
+    # Neither extraction nor KB ingest run for a hidden file.
+    assert chain.calls == []
+    ingest.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_when_row_unresolvable(monkeypatch, tmp_path):
+    """FL-11b: if the library row can't be resolved, indexing is SKIPPED
+    (fail-closed) rather than proceeding — a hidden file must never leak into
+    the KB on a metadata lookup hiccup."""
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
+
+    chain = _FakeChain(ExtractionResult(text="unconfirmed", backend="local"))
+    ingest = AsyncMock(return_value={"id": "art-y"})
+    _patch_listener(
+        monkeypatch,
+        chain=chain,
+        storage_path=tmp_path / "x.pdf",
+        ingest=ingest,
+        resolve_doc=False,
+    )
+
+    await index_uploaded_file(
+        FileReady(
+            data={
+                "workspace_id": "w1",
+                "file_id": "f-unknown",
+                "filename": "x.pdf",
+                "mime": "application/pdf",
+                "storage_key": "ws/w1/f-unknown.pdf",
+            }
+        )
+    )
+
+    assert chain.calls == []
+    ingest.assert_not_awaited()
+
+
+# --- background indexing: the upload request never waits on the pipeline ----
+
+
+@pytest.fixture(autouse=True)
+async def _no_leaked_index_tasks():
+    """A task left running would hold a slot of the module semaphore for good."""
+    yield
+    from pocketpaw_ee.cloud.uploads import listeners
+
+    await listeners.drain_pending_indexing(timeout=0)
+
+
+def _ready(file_id: str = "f-bg") -> FileReady:
+    return FileReady(
+        data={
+            "workspace_id": "w1",
+            "file_id": file_id,
+            "filename": "doc.pdf",
+            "mime": "application/pdf",
+            "storage_key": f"ws/w1/{file_id}.pdf",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_returns_while_indexer_is_still_running(monkeypatch):
+    """bus.publish (what the upload request awaits) returns before indexing ends."""
+    import time
+
+    import pocketpaw_ee.cloud.chat.schemas  # noqa: F401 — publish imports it lazily; not what we time
+    from pocketpaw_ee.cloud._core.realtime import bus as bus_mod
+    from pocketpaw_ee.cloud._core.realtime.bus import InProcessBus
+    from pocketpaw_ee.cloud.uploads import listeners
+
+    finished = asyncio.Event()
+
+    async def _slow_index(_event):
+        await asyncio.sleep(0.5)
+        finished.set()
+
+    monkeypatch.setattr(listeners, "index_uploaded_file", _slow_index)
+    resolver = AsyncMock()
+    resolver.audience.return_value = []
+    real_bus = InProcessBus(resolver=resolver, conn_manager=AsyncMock())
+    monkeypatch.setattr(bus_mod, "_bus", real_bus)
+    listeners.register_upload_listeners()
+
+    started = time.perf_counter()
+    await real_bus.publish(_ready())
+    assert time.perf_counter() - started < 0.2
+    assert not finished.is_set()
+
+    assert await listeners.drain_pending_indexing(timeout=5) == 0
+    assert finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_background_index_records_article_on_success(monkeypatch, tmp_path):
+    """The client-visible index status (kb_article_id) is written once indexing lands."""
+    from pocketpaw_ee.cloud.uploads import listeners
+
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    ingest = AsyncMock(return_value={"article": "art-bg"})
+    _patch_listener(
+        monkeypatch,
+        chain=_FakeChain(ExtractionResult(text="hello", backend="local")),
+        storage_path=path,
+        ingest=ingest,
+    )
+    record = AsyncMock()
+    monkeypatch.setattr(listeners, "_record_kb_article", record)
+
+    await listeners.schedule_index_uploaded_file(_ready())
+    record.assert_not_awaited()  # nothing indexed yet when the request returns
+
+    await listeners.drain_pending_indexing(timeout=5)
+    ingest.assert_awaited_once()
+    record.assert_awaited_once()
+    assert record.await_args.kwargs["article_id"] == "art-bg"
+
+
+@pytest.mark.asyncio
+async def test_background_index_failure_is_logged_and_leaves_file_unindexed(
+    monkeypatch, tmp_path, caplog
+):
+    from pocketpaw_ee.cloud.uploads import listeners
+
+    async def _boom(_event):
+        raise RuntimeError("extractor exploded")
+
+    monkeypatch.setattr(listeners, "index_uploaded_file", _boom)
+    record = AsyncMock()
+    monkeypatch.setattr(listeners, "_record_kb_article", record)
+
+    with caplog.at_level("ERROR", logger=listeners.__name__):
+        await listeners.schedule_index_uploaded_file(_ready("f-fail"))
+        await listeners.drain_pending_indexing(timeout=5)
+
+    record.assert_not_awaited()  # kb_article_id stays None: "not indexed"
+    assert any("f-fail" in r.getMessage() for r in caplog.records)
+    assert not listeners._pending_index_tasks
+
+
+@pytest.mark.asyncio
+async def test_background_index_concurrency_is_bounded(monkeypatch):
+    from pocketpaw_ee.cloud.uploads import listeners
+
+    monkeypatch.setattr(listeners, "_INDEX_SLOTS", asyncio.Semaphore(2))
+    running = 0
+    peak = 0
+
+    async def _index(_event):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+
+    monkeypatch.setattr(listeners, "index_uploaded_file", _index)
+    for i in range(6):
+        await listeners.schedule_index_uploaded_file(_ready(f"f{i}"))
+    await listeners.drain_pending_indexing(timeout=5)
+
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_drain_cancels_what_does_not_finish(monkeypatch):
+    from pocketpaw_ee.cloud.uploads import listeners
+
+    async def _forever(_event):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(listeners, "index_uploaded_file", _forever)
+    await listeners.schedule_index_uploaded_file(_ready())
+
+    assert await listeners.drain_pending_indexing(timeout=0.05) == 1
+    assert not listeners._pending_index_tasks

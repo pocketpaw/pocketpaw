@@ -1,0 +1,212 @@
+# ee/pocketpaw_ee/cloud/growth/propose.py — file a gated /growth outbound send
+# through Instinct (the human approve/reject layer, "sudo for agents").
+#
+# The propose half of the /growth send gate. An outreach draft NEVER goes out
+# from a tool call or an HTTP request: ``POST /growth/drafts/{id}/propose``
+# flips the draft to ``proposed`` and files an Instinct ``Action`` carrying a
+# ``_growth_send`` blob. A human approves in The Tray, and only then does
+# ``growth.executor.execute_approved_growth_send`` flip the draft to
+# ``approved`` and enqueue the ``growth.dispatch`` job.
+#
+# A peer gated proposal kind alongside ``_ship_action`` (the reference this
+# mirrors), ``_external_action``, ``_admin_action`` et al. — same blob
+# discipline: schema version so a stale pending Action fails LOUD, the
+# originating ``workspace_id`` as a top-level field for the router's tenancy
+# gate, an idempotency key so a retry never double-dispatches, and the
+# Decision-Graph chain fields (``correlation_id`` / ``proposed_event_id``).
+#
+# The blob carries the RENDERED PREVIEW (subject + body) so the human approves
+# the exact copy that was staged — plus the prospect's name/company so the
+# Tray card is reviewable without a lookup. No credential ever rides the blob.
+#
+# ``withdraw_growth_proposals`` is the reverse seam: when prospects are deleted
+# it rejects their drafts' still-pending proposals so the Tray stops offering
+# sends for rows that no longer exist.
+#
+# Created 2026-07-27 (feat/growth-g4): new module.
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+from uuid import UUID, uuid4
+
+from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
+logger = logging.getLogger(__name__)
+
+# The key the blob lives under on ``Action.parameters``.
+GROWTH_SEND_PARAM_KEY = "_growth_send"
+# Discriminator + schema version. Bump the schema when the blob shape changes so
+# a stale pending Action approved after a deploy fails LOUD rather than
+# dispatching a misinterpreted send.
+GROWTH_SEND_KIND = "growth_send"
+GROWTH_SEND_SCHEMA = 1
+
+
+async def propose_growth_send(
+    *,
+    workspace_id: str,
+    draft_id: str,
+    prospect_id: str,
+    channel: str,
+    prospect_name: str,
+    prospect_company: str,
+    preview_subject: str | None,
+    preview_body: str,
+    requested_by: str,
+    idempotency_key: str | None = None,
+    correlation_id: str | None = None,
+    assignee: str | None = None,
+) -> str:
+    """Build + store an Instinct ``Action`` for a gated outbound send.
+
+    Returns the proposed Action id — the ``proposal_id`` the propose route
+    hands back to the client. NOTHING is dispatched here.
+
+    Args:
+        workspace_id: the originating tenant. The router's tenancy gate and the
+            executor read it off the blob and refuse an empty one.
+        draft_id / prospect_id: the draft being sent and its prospect.
+        channel: the draft's channel (email / linkedin / whatsapp).
+        prospect_name / prospect_company: for the Tray card — the human sees
+            who this goes to without a lookup.
+        preview_subject / preview_body: the RENDERED copy the human approves.
+        requested_by: the user id that proposed (chain actor + the
+            authorization re-check at execute).
+        idempotency_key: so the executor never double-dispatches. Defaults to
+            a deterministic value keyed on workspace + draft.
+        correlation_id: an optional pre-minted chain id (fresh one when omitted).
+        assignee: who should approve. Defaults to the proposer.
+    """
+    from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
+    from pocketpaw.stores import get_instinct_store
+
+    workspace_id = str(workspace_id or "")
+    if not workspace_id:
+        raise ValueError("propose_growth_send requires a non-empty workspace_id")
+    draft_id = str(draft_id or "")
+    if not draft_id:
+        raise ValueError("propose_growth_send requires a draft_id")
+
+    target_label = f"{prospect_name} ({prospect_company})"
+    idem = idempotency_key or f"{workspace_id}:growth_send:{draft_id}"
+    corr = correlation_id or str(uuid4())
+    human_summary = f"Send {channel} outreach to {target_label}."
+
+    blob: dict[str, Any] = {
+        "kind": GROWTH_SEND_KIND,
+        "schema": GROWTH_SEND_SCHEMA,
+        "workspace_id": workspace_id,
+        "draft_id": draft_id,
+        "prospect_id": prospect_id,
+        "channel": channel,
+        "prospect_name": prospect_name,
+        "prospect_company": prospect_company,
+        "preview": {"subject": preview_subject, "body": preview_body},
+        "idempotency_key": idem,
+        "requested_by": requested_by,
+        "summary": human_summary,
+        "correlation_id": corr,
+        "proposed_event_id": None,
+        # Back-written by the executor: {status, detail, executed_at}.
+        "outcome": None,
+    }
+
+    title = f"Outreach — {channel} to {target_label}"
+    subject_line = f"Subject: {preview_subject}\n\n" if preview_subject else ""
+    recommendation = (
+        f"Approve to send this {channel} message to {target_label}. "
+        f"Nothing goes out without this approval.\n\n{subject_line}{preview_body}"
+    )
+    trigger = ActionTrigger(
+        type="agent",
+        source=requested_by or "growth",
+        reason=f"/growth outbound '{channel}' send to {target_label} requires approval",
+    )
+
+    # Scope the store to the caller's workspace — mirrors ship.propose (no
+    # ``current_workspace`` ContextVar is set on this path).
+    store = get_instinct_store(workspace_id=workspace_id or None)
+    action_obj = await store.propose(
+        # ``pocket_id`` carries the workspace: a growth send is tenant-scoped,
+        # not pocket-bound (same as ship / external actions / belt).
+        pocket_id=workspace_id,
+        title=title,
+        description=human_summary,
+        recommendation=recommendation,
+        trigger=trigger,
+        category=ActionCategory.EXTERNAL,
+        priority=ActionPriority.HIGH,
+        parameters={GROWTH_SEND_PARAM_KEY: blob},
+        assignee=assignee or requested_by or None,
+        workspace_id=workspace_id,
+    )
+
+    action_id = str(getattr(action_obj, "id", "") or "")
+    proposed_event_id = emit_agent_proposed(
+        correlation_id=UUID(corr),
+        action_id=action_id,
+        kind="growth_send",
+        intent=f"send {channel} outreach to {target_label}",
+        proposal={"channel": channel, "target": target_label},
+        workspace_id=workspace_id,
+        user_id=requested_by,
+    )
+    if proposed_event_id is not None:
+        await persist_chain_ids(
+            store=store,
+            action_id=action_id,
+            param_key=GROWTH_SEND_PARAM_KEY,
+            correlation_id=corr,
+            proposed_event_id=str(proposed_event_id),
+            label="growth",
+        )
+
+    logger.info(
+        "growth: proposed '%s' send for draft %s → Instinct action %s (workspace=%s)",
+        channel,
+        draft_id,
+        action_id,
+        workspace_id,
+    )
+    return action_id
+
+
+async def withdraw_growth_proposals(
+    *, workspace_id: str, draft_ids: set[str], rejector: str
+) -> int:
+    """Reject the workspace's PENDING ``_growth_send`` proposals for ``draft_ids``.
+
+    Returns how many were rejected. Best-effort: any store failure is logged
+    and the count so far is returned, because the executor already fails
+    closed on an approval whose draft no longer exists.
+    """
+    withdrawn = 0
+    if not workspace_id or not draft_ids:
+        return withdrawn
+    try:
+        from pocketpaw.instinct.models import ActionStatus
+        from pocketpaw.stores import get_instinct_store
+
+        store = get_instinct_store(workspace_id=workspace_id)
+        actions = await store.list_actions(
+            status=ActionStatus.PENDING, workspace_id=workspace_id, limit=1000
+        )
+        for action in actions:
+            blob = (getattr(action, "parameters", None) or {}).get(GROWTH_SEND_PARAM_KEY)
+            if not isinstance(blob, dict) or str(blob.get("draft_id") or "") not in draft_ids:
+                continue
+            if await store.reject(action.id, reason="prospect deleted", rejector=rejector):
+                withdrawn += 1
+    except Exception:
+        logger.warning(
+            "growth: could not withdraw pending send proposals in workspace %s "
+            "(%d withdrawn before the failure)",
+            workspace_id,
+            withdrawn,
+            exc_info=True,
+        )
+    return withdrawn

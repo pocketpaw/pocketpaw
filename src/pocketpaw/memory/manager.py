@@ -3,6 +3,10 @@
 # Updated: 2026-02-04 - Added Mem0 backend support
 # Updated: 2026-02-07 - Configurable providers, auto-learn, semantic context - Memory System
 # Updated: 2026-02-11 - Sender-scoped memory isolation
+# Updated: 2026-07-11 (ART-OSS) - get_session_history lifts metadata["attachments"]
+#   to a TOP-LEVEL "attachments" key per message (mirrors the EE Mongo history
+#   shape the client reads) so delivered artifact cards and user files survive a
+#   reload; the OSS read path previously returned only {role, content}.
 
 import hashlib
 import logging
@@ -53,6 +57,20 @@ def create_memory_store(
     Returns:
         MemoryStoreProtocol implementation
     """
+    if backend == "mongodb":
+        # MongoDB is an enterprise memory backend, supplied via the
+        # `pocketpaw.memory_backends` entry-point. OSS builds have no
+        # provider and never reach this branch with backend="mongodb".
+        from pocketpaw._registry import providers
+
+        for provider in providers("pocketpaw.memory_backends"):
+            if getattr(provider, "name", None) == "mongodb":
+                logger.info("Using MongoDB memory backend (ee)")
+                return provider.build(None)
+        raise RuntimeError(
+            "memory backend 'mongodb' requested but no provider is registered "
+            "(install pocketpaw_ee for the cloud memory backend)"
+        )
     if backend == "mem0":
         try:
             # Check if mem0 is actually available before creating store
@@ -298,15 +316,81 @@ class MemoryManager:
         self,
         session_key: str,
         limit: int = 50,
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, Any]]:
         """
-        Get session history in LLM message format.
+        Get session history for display / the chat history API.
 
-        Returns:
-            List of {"role": "...", "content": "..."} dicts.
+        Returns a list of ``{"role", "content", "attachments"}`` dicts. Any
+        attachments persisted under ``entry.metadata["attachments"]`` — artifact
+        cards the agent delivered, or files the user sent — are lifted to a
+        TOP-LEVEL ``attachments`` key so the client reads them exactly as it does
+        in cloud mode (the EE Mongo history serializes attachments top-level). The
+        OSS read path used to return only ``{role, content}``, so a delivered
+        artifact card vanished on reload. ``attachments`` is always present (empty
+        list when none) to match the cloud shape. This is a display path, not the
+        LLM-history feed (that is ``get_compacted_history``), so the extra key
+        never reaches a model.
         """
         entries = await self._store.get_session(session_key)
-        return [{"role": e.role or "user", "content": e.content} for e in entries[-limit:]]
+        history: list[dict[str, Any]] = []
+        for e in entries[-limit:]:
+            history.append(
+                {
+                    "role": e.role or "user",
+                    "content": e.content,
+                    "attachments": (e.metadata or {}).get("attachments") or [],
+                }
+            )
+        return history
+
+    async def get_session_history_page(
+        self,
+        session_key: str,
+        limit: int = 50,
+        before: str | None = None,
+    ) -> dict[str, Any]:
+        """Keyset-paginated chat history for the /chat transcript.
+
+        Returns ``{"messages": [...], "has_more": bool}`` where ``messages``
+        is the most recent ``limit`` rows ASCENDING (oldest→newest), matching
+        the cloud history shape plus ``has_more`` so the client can page
+        backward. ``before`` is a ``{createdAt}|{entry_id}`` cursor — pass
+        the oldest loaded message's cursor to fetch the previous (older)
+        page. An invalid cursor yields an empty page (defensive; the client
+        only ever echoes back a cursor it received).
+        """
+        # limit=None on purpose. This pages BACKWARD through older messages
+        # via the `before` cursor, so a bounded read would make the transcript
+        # appear to end at the bound: everything older than the newest N would
+        # be unreachable, and the client would show an empty page rather than
+        # an error. The real fix is to push the cursor into the query as a
+        # keyset filter instead of loading the session and slicing it in
+        # Python — that is a change to three store implementations and is not
+        # folded into a perf pass. Tracked with H4 in the backend-perf audit.
+        entries = await self._store.get_session(session_key, limit=None)
+        try:
+            if before:
+                before_iso, before_id = before.split("|", 1)
+                before_ts = datetime.fromisoformat(before_iso)
+                entries = [e for e in entries if (e.created_at, e.id) < (before_ts, before_id)]
+        except (ValueError, TypeError):
+            return {"messages": [], "has_more": False}
+
+        has_more = len(entries) > limit
+        page = entries[-limit:]
+        return {
+            "messages": [
+                {
+                    "_id": e.id,
+                    "role": e.role or "user",
+                    "content": e.content,
+                    "createdAt": e.created_at.isoformat(),
+                    "attachments": (e.metadata or {}).get("attachments") or [],
+                }
+                for e in page
+            ],
+            "has_more": has_more,
+        }
 
     async def search(
         self,
@@ -388,7 +472,11 @@ class MemoryManager:
         Returns:
             List of {"role": "...", "content": "..."} dicts.
         """
-        entries = await self._store.get_session(session_key)
+        # limit=None on purpose: this feeds summarization, and silently
+        # changing which messages are summarized would change agent behaviour
+        # in a way no test would catch. It has its own `char_budget`, so the
+        # OUTPUT is already bounded — the read is not.
+        entries = await self._store.get_session(session_key, limit=None)
         if not entries:
             return []
 

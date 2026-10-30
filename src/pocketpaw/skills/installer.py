@@ -1,6 +1,11 @@
 """Shared skill installer -- clone GitHub repos and install SKILL.md directories.
 
-Created: 2026-03-22
+``clone_github_repo`` is the async shallow-clone + tempdir context manager,
+shared with the plugin installer. ``install_skills_from_github`` and
+``install_skill_from_source`` copy validated skill directories (symlinks
+skipped via ``ignore_symlinks``) into the user skill dir, audit the install,
+and reload the skill loader on this process and, through
+``pocketpaw.cache_invalidation``, on the other web processes.
 """
 
 from __future__ import annotations
@@ -11,19 +16,25 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+from pocketpaw.cache_invalidation import reload_skills
 from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
-from pocketpaw.skills.loader import get_skill_loader
 
 logger = logging.getLogger(__name__)
 
 INSTALL_DIR = Path.home() / ".agents" / "skills"
 
 
-def _ignore_symlinks(src: str, names: list[str]) -> set[str]:
+def ignore_symlinks(src: str, names: list[str]) -> set[str]:
     """Return names that are symlinks so ``shutil.copytree`` skips them."""
     return {n for n in names if os.path.islink(os.path.join(src, n))}
+
+
+# Backwards-compatible alias for the now-public name.
+_ignore_symlinks = ignore_symlinks
 
 
 class SkillInstallError(Exception):
@@ -32,6 +43,48 @@ class SkillInstallError(Exception):
     def __init__(self, message: str, status_code: int = 400):
         super().__init__(message)
         self.status_code = status_code
+
+
+@asynccontextmanager
+async def clone_github_repo(
+    owner: str,
+    repo: str,
+    timeout: float = 60,
+) -> AsyncIterator[Path]:
+    """Shallow-clone a GitHub repo into a temp dir and yield its path.
+
+    Shared clone primitive for skill and plugin installers. The temp
+    directory is removed when the context exits, so callers must finish
+    reading/copying files before leaving the ``async with`` block.
+
+    Args:
+        owner: GitHub owner (e.g. "googleworkspace").
+        repo: GitHub repo name (e.g. "cli").
+        timeout: Git clone timeout in seconds.
+
+    Yields:
+        Path to the cloned working tree (the temp dir root).
+
+    Raises:
+        RuntimeError: If the clone fails.
+        TimeoutError: If the clone exceeds *timeout* seconds.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "clone",
+            "--depth=1",
+            f"https://github.com/{owner}/{repo}.git",
+            tmpdir,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode != 0:
+            err = stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"Clone failed: {err}")
+        yield Path(tmpdir)
 
 
 async def install_skills_from_github(
@@ -59,23 +112,7 @@ async def install_skills_from_github(
     """
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        proc = await asyncio.create_subprocess_exec(
-            "git",
-            "clone",
-            "--depth=1",
-            f"https://github.com/{owner}/{repo}.git",
-            tmpdir,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        if proc.returncode != 0:
-            err = stderr.decode(errors="replace").strip()
-            raise RuntimeError(f"Clone failed: {err}")
-
-        tmp = Path(tmpdir)
+    async with clone_github_repo(owner, repo, timeout=timeout) as tmp:
         skill_dirs: list[tuple[str, Path]] = []
 
         if skill_name:
@@ -109,7 +146,7 @@ async def install_skills_from_github(
             dest = INSTALL_DIR / name
             if dest.exists():
                 shutil.rmtree(dest)
-            shutil.copytree(src_dir, dest, ignore=_ignore_symlinks)
+            shutil.copytree(src_dir, dest, ignore=ignore_symlinks)
             installed.append(name)
 
         logger.info("Installed %d skills from %s/%s", len(installed), owner, repo)
@@ -175,8 +212,8 @@ async def install_skill_from_source(source: str) -> list[str]:
             )
         )
 
-        loader = get_skill_loader()
-        loader.reload()
+        # Reload here and on every other web process (cache_invalidation).
+        reload_skills()
         return installed
 
     except TimeoutError:

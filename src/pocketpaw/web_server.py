@@ -442,7 +442,11 @@ async def run_pairing_server(settings: Settings) -> int:
     if port != settings.web_port:
         logger.info(f"Port {settings.web_port} busy, using port {port} instead")
 
-    config = uvicorn.Config(app, host=settings.web_host, port=port, log_level="warning")
+    # timeout_graceful_shutdown bounds uvicorn's connection wait (default
+    # None = forever), so Ctrl+C can't hang with the port still bound.
+    config = uvicorn.Config(
+        app, host=settings.web_host, port=port, log_level="warning", timeout_graceful_shutdown=5
+    )
     server = uvicorn.Server(config)
 
     # Run server in background

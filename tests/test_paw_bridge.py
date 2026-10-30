@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pocketpaw.bootstrap.protocol import BootstrapContext
-from pocketpaw.paw.soul_bridge import SoulBootstrapProvider, SoulBridge
+from pocketpaw.soul import SoulBootstrapProvider, SoulBridge
 
 # ---------------------------------------------------------------------------
 # Shared soul fixture
@@ -153,7 +153,7 @@ class TestSoulBridgeObserve:
         mock_interaction_instance = MagicMock()
         mock_interaction_cls.return_value = mock_interaction_instance
 
-        with patch("pocketpaw.paw.soul_bridge.Interaction", mock_interaction_cls, create=True):
+        with patch("pocketpaw.soul._bridge.Interaction", mock_interaction_cls, create=True):
             with patch.dict(
                 "sys.modules", {"soul_protocol": MagicMock(Interaction=mock_interaction_cls)}
             ):

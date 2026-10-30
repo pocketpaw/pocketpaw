@@ -1,5 +1,12 @@
 # Deep Work Session — project lifecycle orchestrator.
 # Created: 2026-02-12
+# Updated: 2026-05-21 (feat/deep-work-intake) — issue #1161: added the
+#   optional interactive intake mode. start_with_intake() runs GoalIntake's
+#   clarification loop before planning so a vague goal becomes well-formed.
+#   The one-shot start() path is untouched — a good goal still skips
+#   straight to GoalParser. _materialize_tasks now carries success_criteria
+#   and preconditions from TaskSpec onto each MC Task's metadata so the
+#   outcome-verification sibling (issue #1162) can check them later.
 # Updated: 2026-02-26 — Deep Work v2: Added cancel() method for project cancellation.
 #   _materialize_tasks now copies max_retries and timeout_minutes from TaskSpec to Task.
 #   New broadcast: dw_project_cancelled. Cancel stops all running tasks and skips pending.
@@ -7,13 +14,15 @@
 # Updated: 2026-02-17 — Record planning errors to health engine ErrorStore.
 # Updated: 2026-02-12 — Added executor integration for pause/stop.
 #
-# Ties together GoalParser, Planner, DependencyScheduler, MCTaskExecutor,
-# and HumanTaskRouter into a single class that manages a Deep Work project
-# from user input through goal analysis, planning, approval, execution,
-# and completion.
+# Ties together GoalParser, GoalIntake, Planner, DependencyScheduler,
+# MCTaskExecutor, and HumanTaskRouter into a single class that manages a
+# Deep Work project from user input through goal analysis, optional
+# clarification intake, planning, approval, execution, and completion.
 #
 # Public API:
 #   session.start(user_input) -> Project   (create + plan + await approval)
+#   session.start_with_intake(user_input, answer_provider) -> Project
+#       (run clarification loop, then plan with the enriched goal)
 #   session.approve(project_id) -> Project (kick off ready tasks)
 #   session.pause(project_id) -> Project   (stop running tasks)
 #   session.resume(project_id) -> Project  (resume dispatching)
@@ -182,6 +191,71 @@ class DeepWorkSession:
         # 2. Run planning on the new project
         return await self.plan_existing_project(
             project.id, user_input, research_depth=research_depth
+        )
+
+    async def start_with_intake(
+        self,
+        user_input: str,
+        answer_provider,
+        research_depth: str = "auto",
+    ) -> Project:
+        """Create a project, run interactive intake, then plan (issue #1161).
+
+        This is the optional intake front-end for a vague goal. It runs
+        :class:`GoalIntake`'s clarification loop first — asking questions
+        through ``answer_provider`` and folding the answers back into the
+        goal — and only then hands the *enriched* goal to the planner.
+
+        A well-formed goal still costs nothing extra: GoalIntake parses it,
+        sees no ``clarifications_needed``, and returns immediately, so this
+        path collapses to the same behaviour as :meth:`start`.
+
+        The full intake transcript is stored in ``project.metadata`` under
+        ``"intake"`` so the dashboard can render the conversation that
+        shaped the plan.
+
+        Args:
+            user_input: Natural language project description (may be vague).
+            answer_provider: Async callable ``(question: str) -> str`` that
+                supplies an answer for each clarification question. The
+                dashboard wires this to a chat turn.
+            research_depth: How thorough to research — "auto" (use the goal
+                parser's suggestion), "none", "quick", "standard", or "deep".
+
+        Returns:
+            The created Project (status=AWAITING_APPROVAL on success).
+        """
+        from pocketpaw.deep_work.goal_parser import GoalIntake
+
+        # Phase -1: interactive clarification. GoalIntake re-parses the
+        # enriched goal internally, so its result.analysis is already the
+        # post-clarification analysis — pass it to planning to avoid a
+        # redundant parse.
+        intake = GoalIntake()
+        result = await intake.run(user_input, answer_provider)
+
+        if result.clarified:
+            logger.info(
+                "Deep Work intake clarified goal with %d Q&A pair(s)",
+                len(result.transcript),
+            )
+
+        # Create the project from the enriched goal — the description the
+        # user (and the planner) should see is the clarified one.
+        project = await self.manager.create_project(
+            title=result.enriched_goal[:80],
+            description=result.enriched_goal,
+            creator_id="human",
+        )
+        # Stash the intake transcript so the UI can show what was asked.
+        project.metadata["intake"] = result.to_dict()
+        await self.manager.update_project(project)
+
+        return await self.plan_existing_project(
+            project.id,
+            result.enriched_goal,
+            research_depth=research_depth,
+            goal_analysis=result.analysis.to_dict(),
         )
 
     async def plan_existing_project(
@@ -645,6 +719,16 @@ class DeepWorkSession:
             task.max_retries = spec.max_retries
             task.timeout_minutes = spec.timeout_minutes
             task.blocked_by = [key_to_id[k] for k in spec.blocked_by_keys if k in key_to_id]
+
+            # Carry the intake-captured verifiable end state and "when not
+            # to act" guardrails onto the MC Task. They live in metadata
+            # rather than as first-class Task columns so this PR stays
+            # scoped to deep_work — the outcome-verification sibling
+            # (issue #1162) reads task.metadata["success_criteria"].
+            if spec.success_criteria:
+                task.metadata["success_criteria"] = list(spec.success_criteria)
+            if spec.preconditions:
+                task.metadata["preconditions"] = list(spec.preconditions)
 
             # Set inverse blocks on upstream tasks
             for dep_key in spec.blocked_by_keys:

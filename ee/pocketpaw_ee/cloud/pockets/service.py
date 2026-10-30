@@ -1,0 +1,6889 @@
+"""Pockets domain — business logic service.
+
+SOLE OWNER OF WRITES to the ``Pocket`` Beanie document, and of the
+``PocketBackendCredential`` collection beside it. Module-level ``async def`` API
+returning wire dicts (legacy router compatibility); the doc → domain mapping
+helpers live here as private helpers.
+
+The import-linter pins that boundary: sites, kb, connectors, reconcile, the
+schedulers and the jobs worker reach pockets THROUGH this module, so a new
+caller that needs a field adds a function here rather than a second reader.
+
+Public API: ``create`` / ``get`` / ``get_for_wire`` / ``can_read`` /
+``list_pockets`` / ``update`` / ``delete``; ``ensure_home_pocket``;
+``duplicate_pocket`` and the ``copy_site_snapshot`` it writes through; the
+share-link, collaborator, team and agent mutators; the per-pocket backend +
+write/tool allowlist setters; ``merge_spec``; ``site_render_inputs``; the
+``set_{svelte,react,html}_source_file`` edit lane, ``set_project_source`` and the
+html-to-project upgrade pair (``convert_html_to_project`` / ``restore_upgraded_html``),
+and
+``set_site_dependency_manifest`` (the only writer of ``paw.dependencies.json``);
+``scan_source_site_pockets`` + ``migrate_legacy_build_shell``; and the
+``agent_*`` granular ``rippleSpec.ui`` ops the pocket-specialist drives over MCP.
+
+INVARIANTS a reader must not break:
+
+* THE SOURCE GATE SPLITS BY AUDIENCE, NOT BY FUNCTION. ``_resolved_wire_dict``
+  redacts ``source`` and is what every wire-facing read is built from — the list,
+  the create/update/merge responses, the WebSocket broadcast. ``get`` does NOT
+  redact, because it is the PIPELINE's reader (publish, the generator, the dev
+  server, the preview, every source-file edit tool): gating it would stop sites
+  being built rather than hide them. The one route that returns this dict to a
+  browser calls ``get_for_wire``, and a new such route must too. Both share
+  ``_fetch_readable``, so they can never drift on WHO may read a pocket.
+* SOURCE IS A PER-SITE CAPABILITY. Whether code shows is the pocket's own Site
+  tier (``site`` / ``staff``, active) through ``entitlements.service.
+  site_code_entitled``, or the operator's workspace override when one is set. The
+  workspace plan never grants it. See ``_source_entitled_by_pocket``.
+* SHARE LINKS NEVER SERVE SOURCE, on any tier. The token is a forwardable bearer
+  credential with no user behind it, so there is no entitlement to resolve and
+  the owner's is the wrong question. ``share_link_access`` is NOT consulted — it
+  is enforced nowhere, and reading it would imply a guarantee that does not exist.
+* THE POCKET CAP IS CREATE-TIME ONLY and gated on ``billing_enforced``, so a
+  self-hosted deployment never pays for the extra read. It blocks the create that
+  WOULD cross the limit and never removes an existing pocket.
+* A PARTIAL ``ripple_spec`` UPDATE MUST NOT WIPE INSTANCE-OWNED REGIONS. ``update``
+  overlays per key through ``_layer_safe_update_spec`` unless ``reset_state`` is
+  set or a ``template_slug`` recompile is in play. The typed ``RippleSpec`` is an
+  INTERNAL representation only: every reader, and both stored shapes, stay dicts.
+* DRAFT ``ArtifactVersion`` SNAPSHOTS ARE BEST-EFFORT. A version-store failure
+  logs and never breaks the write it was recording.
+* ``resolve_webhook_pocket`` COMPARES IN CONSTANT TIME and returns ``None`` for
+  every failure mode alike, so the endpoint is not a pocket-existence oracle. The
+  secret lives on the credential row and never in a spec.
+* ``get_pocket_backend_for_executor`` GROWS BY APPENDING to its tuple. Existing
+  positional destructures end in ``*_`` and must keep working.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import logging
+import secrets
+from collections import OrderedDict
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from beanie import PydanticObjectId
+from bson.errors import InvalidId
+from pydantic import ValidationError as PydanticValidationError
+
+from pocketpaw.bundled_templates.schema import RippleSpec
+from pocketpaw_ee.cloud._core.errors import ConflictError, PocketLimitError
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    PocketCreated,
+    PocketDeleted,
+    PocketUpdated,
+)
+from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+from pocketpaw_ee.cloud.models.pocket import Widget as _WidgetDoc
+from pocketpaw_ee.cloud.models.pocket_backend import AllowedWrite as _AllowedWriteDoc
+from pocketpaw_ee.cloud.models.pocket_backend import ApprovalRoute as _ApprovalRouteDoc
+from pocketpaw_ee.cloud.models.pocket_backend import (
+    PocketBackendCredential as _BackendCredentialDoc,
+)
+from pocketpaw_ee.cloud.models.pocket_backend import ToolGrant as _ToolGrantDoc
+from pocketpaw_ee.cloud.pockets import (
+    actions_ops,
+    backend_crypto,
+    prop_arrays,
+    sources_ops,
+    spec_ops,
+    state_ops,
+)
+from pocketpaw_ee.cloud.pockets._merge import merge_ripple_spec
+from pocketpaw_ee.cloud.pockets.domain import Pocket, Widget, WidgetPosition
+from pocketpaw_ee.cloud.pockets.dto import (
+    AddCollaboratorRequest,
+    AddWidgetRequest,
+    CreatePocketRequest,
+    DuplicatePocketRequest,
+    MergeSpecRequest,
+    UpdatePocketRequest,
+    UpdateWidgetRequest,
+    pocket_to_wire_dict,
+)
+from pocketpaw_ee.cloud.pockets.id_resolve import AmbiguousId, resolve_id
+from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
+from pocketpaw_ee.cloud.ripple_validator import (
+    ActionWiringViolationError,
+    CatalogUnavailableError,
+    CatalogViolationError,
+    MissingRequiredPropError,
+    find_unreferenced_state_keys,
+    format_action_violations_for_agent,
+    format_required_prop_violations_for_agent,
+    format_violations_for_agent,
+    validate_action_wiring_logged,
+    validate_action_wiring_strict,
+    validate_against_catalog_logged,
+    validate_against_catalog_strict,
+    validate_required_props_logged,
+    validate_required_props_strict,
+    validate_ripple_spec_logged,
+)
+from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud.shared.events import event_bus
+from pocketpaw_ee.cloud.surface.domain import PocketSurfaceProfile
+
+logger = logging.getLogger(__name__)
+
+# Pocket ``type`` for the per-user pocket that backs the home page. Behaves
+# like an ordinary private pocket — the type is a marker the home route and
+# the frontend key on, not a behavioural switch.
+HOME_POCKET_TYPE = "home"
+
+# Widget ``type`` for "native" widgets — widgets the frontend renders as a
+# built-in Svelte component (looked up by ``name``) rather than from a
+# ``rippleSpec``. Native widgets have no spec, so manifest validation —
+# which only walks ``rippleSpec`` trees — never touches them.
+NATIVE_WIDGET_TYPE = "native"
+
+
+# ---------------------------------------------------------------------------
+# Private mapping + access helpers
+# ---------------------------------------------------------------------------
+
+
+def _widget_to_domain(w: _WidgetDoc) -> Widget:
+    return Widget(
+        id=w.id,
+        name=w.name,
+        type=w.type,
+        icon=w.icon,
+        color=w.color,
+        span=w.span,
+        data_source_type=w.dataSourceType,
+        config=tuple(w.config.items()),
+        props=tuple(w.props.items()),
+        data=w.data,
+        assigned_agent=w.assignedAgent,
+        position=WidgetPosition(row=w.position.row, col=w.position.col),
+        spec=getattr(w, "spec", None),
+    )
+
+
+def _surface_profile_to_dict(sp: Any) -> dict[str, Any] | None:
+    """Normalize a pocket's ``surface_profile`` to the JSON wire shape.
+
+    Accepts the Beanie ``PocketSurfaceProfile`` sub-model, a plain dict (an
+    already-JSON value), or ``None`` (legacy pockets / no override). Returns a
+    plain dict (or ``None``) so the domain + wire layers never carry the
+    Pydantic sub-model. Entity-rooms chunk ②.
+    """
+    if sp is None:
+        return None
+    if hasattr(sp, "model_dump"):
+        return sp.model_dump()
+    if isinstance(sp, dict):
+        return dict(sp)
+    return None
+
+
+async def apply_derived_surface_profile(
+    workspace_id: str,
+    pocket_id: str,
+    profile: PocketSurfaceProfile | None,
+) -> None:
+    """Persist a CONNECTOR-DERIVED surface profile onto a pocket.
+
+    M3 connector→skill auto-authoring. This is the SOLE Beanie-write path for a
+    connector-derived ``PocketSurfaceProfile`` — the connectors service derives
+    the profile (pure) and calls this so the connectors package never imports the
+    ``Pocket`` Beanie document (cloud Beanie-write boundary, enforced by
+    import-linter).
+
+    Tenancy (cloud rule §7): the doc is loaded by id then verified to belong to
+    ``workspace_id``; a mismatch raises ``NotFound`` rather than writing across
+    tenants.
+
+    Coexistence rule: the derivation OWNS the connector-contributed dims
+    (``skill_names`` / ``allowed_sdk_tools`` / ``deny_mcp_tool_ids``) — it sets
+    them to the union from the pocket's enabled connectors, OVERWRITING any prior
+    connector-derived (or hand-set) values for those dims. It PRESERVES the
+    user-owned ``ripple_mode`` and ``system_message_override`` already on the
+    pocket. ``profile=None`` (no connector contributes anything) clears the
+    connector dims back to empty while still preserving the user-owned dims.
+
+    No event is emitted: this is an internal re-derive triggered by a
+    connector enable/disable that already emitted ``connector.enabled`` /
+    ``connector.disabled``. # no-event — covered by the connector lifecycle event.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    if doc.workspace != workspace_id:
+        raise NotFound("pocket", pocket_id)
+
+    existing = getattr(doc, "surface_profile", None)
+    # Preserve the user-owned dims regardless of whether a connector contributes.
+    ripple_mode = getattr(existing, "ripple_mode", None)
+    sys_override = getattr(existing, "system_message_override", None)
+
+    if profile is None:
+        skill_names: list[str] = []
+        allowed_sdk_tools: list[str] | None = None
+        deny_mcp_tool_ids: list[str] = []
+    else:
+        skill_names = list(profile.skill_names)
+        allowed_sdk_tools = (
+            list(profile.allowed_sdk_tools) if profile.allowed_sdk_tools is not None else None
+        )
+        deny_mcp_tool_ids = list(profile.deny_mcp_tool_ids)
+
+    # If nothing remains set on any dim, drop the override entirely (legacy
+    # ``None`` shape) so a pocket that never had connector skills stays clean.
+    if (
+        ripple_mode is None
+        and sys_override is None
+        and not skill_names
+        and allowed_sdk_tools is None
+        and not deny_mcp_tool_ids
+    ):
+        doc.surface_profile = None
+    else:
+        doc.surface_profile = PocketSurfaceProfile(
+            ripple_mode=ripple_mode,
+            allowed_sdk_tools=allowed_sdk_tools,
+            deny_mcp_tool_ids=deny_mcp_tool_ids,
+            skill_names=skill_names,
+            system_message_override=sys_override,
+        )
+    await doc.save()
+
+
+def _promote_ripple_spec(raw: Any) -> RippleSpec | dict[str, Any] | None:
+    """Promote a stored flat ``rippleSpec`` dict to a typed ``RippleSpec``.
+
+    Phase-2 domain-boundary promotion. The Beanie field stays a raw dict;
+    promotion happens here on read. The byte-equivalence invariant is
+    preserved at the edges:
+
+    * A falsy spec (``None`` or ``{}``) is returned VERBATIM — an empty dict
+      must stay ``{}`` and ``None`` must stay ``None``, so the wire serializer
+      (``pocket_to_wire_dict``) produces the same shape it did before Phase 2.
+    * A non-empty dict is promoted via ``from_flat_dict`` (which NEVER raises).
+    * A corrupt / unpromotable spec — ``from_flat_dict`` returns ``None`` —
+      falls back to the raw stored value, so a bad doc never breaks pocket
+      load. Every downstream reader is dual-path and accepts either shape.
+    """
+    if not raw:
+        return raw
+    return RippleSpec.from_flat_dict(raw) or raw
+
+
+def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
+    return Pocket(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        name=doc.name,
+        description=doc.description,
+        type=doc.type,
+        icon=doc.icon,
+        color=doc.color,
+        owner=doc.owner,
+        visibility=doc.visibility,
+        team=tuple(str(t) for t in doc.team),
+        agents=tuple(str(a) for a in doc.agents),
+        widgets=tuple(_widget_to_domain(w) for w in doc.widgets),
+        # Phase-2 (feat/typed-ripplespec-phase2) — PROMOTE-ON-READ at the
+        # domain boundary (see ``_promote_ripple_spec``). The Beanie
+        # ``Pocket.rippleSpec`` field stays a raw ``dict`` (no migration); a
+        # NON-EMPTY spec becomes a typed ``RippleSpec`` so every downstream
+        # reader can use the typed fields. A falsy spec (``None`` / ``{}``) and
+        # a corrupt/unpromotable spec are carried through verbatim so the wire
+        # stays byte-equivalent and a bad doc never breaks pocket load.
+        ripple_spec=_promote_ripple_spec(doc.rippleSpec),
+        share_link_token=doc.share_link_token,
+        share_link_access=doc.share_link_access,
+        shared_with=tuple(doc.shared_with),
+        tool_specs=tuple(doc.tool_specs),
+        project_id=getattr(doc, "project_id", None),
+        # Wave 3e — optional. ``getattr`` for legacy docs that pre-date the field.
+        template_slug=getattr(doc, "template_slug", None),
+        # Sites landing brain — optional layout pattern. ``getattr`` for
+        # legacy docs that pre-date the field.
+        pattern=getattr(doc, "pattern", None),
+        # Sites svelte track — generation engine + svelte source map.
+        # ``getattr`` for legacy docs that pre-date the fields (read back
+        # as ``engine="ripple"``, ``source=None``).
+        engine=getattr(doc, "engine", "ripple"),
+        source=getattr(doc, "source", None),
+        # MT-1 — the authored "my client JS is load-bearing" declaration.
+        # ``getattr`` for legacy docs that pre-date the field, which read back
+        # ``None`` = undeclared. NOT coerced to a bool: that would flatten
+        # undeclared into an explicit ``False`` here, before publish gets the
+        # chance to apply ``sites_keep_client_bundle_default``.
+        keeps_client_bundle=getattr(doc, "keeps_client_bundle", None),
+        site_meta=getattr(doc, "site_meta", None),
+        # Entity-rooms chunk ② — optional per-entity surface-profile override.
+        # ``getattr`` for legacy docs that pre-date the field. Dumped to a plain
+        # JSON dict so the domain layer carries the wire shape, not the Beanie
+        # sub-model. ``None`` for legacy pockets.
+        surface_profile=_surface_profile_to_dict(getattr(doc, "surface_profile", None)),
+        created_at=getattr(doc, "createdAt", None),
+        updated_at=getattr(doc, "updatedAt", None),
+    )
+
+
+async def _fetch_pocket(pocket_id: str) -> _PocketDoc:
+    """Fetch a pocket doc by id; raise NotFound if missing."""
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:
+        doc = None
+    if doc is None:
+        raise NotFound("pocket", pocket_id)
+    return doc
+
+
+def _check_domain_owner(domain_pocket: Pocket, user_id: str) -> None:
+    if domain_pocket.owner != user_id:
+        from pocketpaw_ee.guards.audit import log_denial
+
+        log_denial(
+            actor=user_id,
+            action="pocket.share",
+            code="pocket.not_owner",
+            resource_id=domain_pocket.id,
+        )
+        raise Forbidden("pocket.not_owner", "Only the pocket owner can perform this action")
+
+
+def _check_domain_edit_access(domain_pocket: Pocket, user_id: str) -> None:
+    # Workspace jobs (pp#1459) — the trusted, hardcoded ``system:workspace_job``
+    # writer is allowed to merge its result back regardless of the pocket's
+    # owner / shared_with / visibility. The authorization decision already
+    # happened at DISPATCH time (the triggering user passed
+    # ``require_pocket_action_run``, owner/shared_with-only); the worker
+    # writeback is a downstream system effect of that authorized dispatch.
+    # The identity is synthetic and not user-assignable, so this cannot be
+    # forged from a request. Without this, a job on a private (non-workspace-
+    # visible) pocket would 403 at writeback and the button would hang.
+    from pocketpaw_ee.cloud.jobs.domain import WORKSPACE_JOB_IDENTITY
+
+    if user_id == WORKSPACE_JOB_IDENTITY:
+        return
+    if domain_pocket.owner == user_id:
+        return
+    if user_id in domain_pocket.team:
+        return
+    if user_id in domain_pocket.shared_with:
+        return
+    if domain_pocket.visibility == "workspace":
+        return
+    from pocketpaw_ee.guards.audit import log_denial
+
+    log_denial(
+        actor=user_id,
+        action="pocket.edit",
+        code="pocket.access_denied",
+        resource_id=domain_pocket.id,
+    )
+    raise Forbidden("pocket.access_denied", "You do not have edit access to this pocket")
+
+
+def _build_widget_doc(payload: dict) -> _WidgetDoc:
+    return _WidgetDoc(
+        name=payload.get("name", "Widget"),
+        type=payload.get("type", "custom"),
+        icon=payload.get("icon", ""),
+        color=payload.get("color", ""),
+        span=payload.get("span", "col-span-1"),
+        dataSourceType=payload.get("dataSourceType", payload.get("data_source_type", "static")),
+        config=payload.get("config", {}),
+        props=payload.get("props", {}),
+        data=payload.get("data"),
+        # ``spec`` is the per-tile rippleSpec subtree the home grid renders.
+        # Optional — native widgets and legacy widget entries omit it.
+        spec=payload.get("spec"),
+        assignedAgent=payload.get("assignedAgent", payload.get("assigned_agent")),
+    )
+
+
+async def _resolve_user_ids(user_ids: list[str]) -> dict[str, dict]:
+    """Batch-resolve user IDs to wire-format ``{_id, fullName, email}``
+    dicts. Returns a ``{user_id: resolved_dict}`` map. Unknown IDs are
+    omitted so callers can key on presence."""
+    if not user_ids:
+        return {}
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    oids: list[PydanticObjectId] = []
+    for uid in user_ids:
+        try:
+            oids.append(PydanticObjectId(uid))
+        except Exception:
+            continue
+    if not oids:
+        return {}
+    users = await _UserDoc.find({"_id": {"$in": oids}}).to_list()
+    return {
+        str(u.id): {
+            "_id": str(u.id),
+            "fullName": getattr(u, "full_name", "") or "",
+            "email": getattr(u, "email", "") or "",
+        }
+        for u in users
+    }
+
+
+async def _source_entitled_by_pocket(workspace_id: str, pocket_ids: list[str]) -> dict[str, bool]:
+    """May each pocket's code be shown? ``{pocket_id: bool}`` for every id asked. (SF-2)
+
+    Two inputs, in this order:
+
+    1. **The operator override.** ``WorkspaceOverrides.site_source_visible``,
+       surfaced as ``Entitlements.site_source_visible``: ``False`` revokes source on
+       every site in the workspace (an abuse response), ``True`` grants it on every
+       site, ``None`` has no opinion. No workspace PLAN answers it, so for an
+       ordinary workspace this is always ``None``.
+    2. **The site's own tier.** ``entitlements.service.site_code_entitled`` over the
+       pocket's canonical Site row: ``site`` or ``staff`` with an active
+       subscription, plan-carried sites included. The same predicate gates the
+       project download, so the Code tab and the download cannot disagree.
+
+    A pocket with no Site row, a draft (no tier, no subscription), a free site and
+    a lapsed one all resolve ``False``. Hiding source on drafts is intended: code is
+    a paid per-site capability, and a draft has not been bought yet.
+
+    One resolve and ONE Site query for any number of pockets, which is what keeps
+    the gallery free of an N+1. The Site rows are read through ``sites.service``,
+    the sole owner of that collection. Fails closed on a missing workspace id.
+    """
+    if not workspace_id:
+        return dict.fromkeys(pocket_ids, False)
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    if ent.site_source_visible is not None:
+        return dict.fromkeys(pocket_ids, ent.site_source_visible)
+
+    # Function-local import: sites.service reads pockets (cycle).
+    from pocketpaw_ee.sites import service as sites_service
+
+    billing = await sites_service.site_billing_for_pockets(workspace_id, pocket_ids)
+    return {
+        pid: pid in billing
+        and entitlements_service.site_code_entitled(
+            plan_tier=billing[pid][0], subscription_status=billing[pid][1]
+        )
+        for pid in pocket_ids
+    }
+
+
+async def _source_visible_for_doc(doc: _PocketDoc, *, entitled: bool | None = None) -> bool:
+    """May this pocket's authored ``source`` go out over the wire? (SF-2)
+
+    Conditions ANDed, cheapest first, and none of them touches the database until
+    the last:
+
+    1. **The gate is on.** ``sites_source_gate_enabled``, read live. It ships off,
+       so by default this returns immediately and nothing below runs.
+    2. **The pocket is in scope.** Either it was born gated (``doc.source_gated``,
+       stamped at create time from the same setting) OR
+       ``sites_source_gate_retroactive`` is on.
+
+       The cohort stamp is D3: flipping the gate on never re-classifies a pocket
+       that already exists. The gate shipped disabled, so every pocket that
+       predates it was born outside the cohort; the retroactive flag is the
+       deliberate second switch that reaches them. It is ANDed UNDER the master
+       flag, so with the gate off it does nothing. Neither flag writes to the
+       document, so turning either off restores source immediately, with no
+       migration and no stored state to unwind.
+    3. **The site is entitled.** ``_source_entitled_by_pocket``: the operator's
+       workspace override when one is set, otherwise the pocket's own Site on
+       ``site`` / ``staff`` with an active subscription. The workspace plan grants
+       nothing, so a paid site in a Free workspace shows its code and a free site
+       in a Pro Max workspace does not.
+
+    IT DOES NOT SHORT-CIRCUIT ON ``doc.source`` BEING ABSENT, and that is not an
+    oversight to optimize away. The answer is PUBLISHED as ``sourceVisible`` on the
+    wire dict, so it has to mean "may this caller see this pocket's source" rather
+    than "did anything get redacted just now". ``list_pockets`` projects ``source``
+    out of its Mongo query for weight reasons, so a presence check would report
+    every gallery row visible — including the gated ones a single-pocket read
+    reports withheld. ``entitled`` is how the gallery stays cheap instead:
+    ``list_pockets`` resolves its whole page in one batch and passes each pocket's
+    answer down.
+    """
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+
+    if not settings.sites_source_gate_enabled:
+        return True
+
+    if not getattr(doc, "source_gated", False) and not settings.sites_source_gate_retroactive:
+        return True
+
+    if entitled is not None:
+        return entitled
+    pocket_id = str(getattr(doc, "id", "") or "")
+    answers = await _source_entitled_by_pocket(getattr(doc, "workspace", "") or "", [pocket_id])
+    return answers[pocket_id]
+
+
+async def _resolved_wire_dict(
+    doc: _PocketDoc,
+    viewer_user_id: str,
+    *,
+    source_entitled: bool | None = None,
+    resolve_memo: dict | None = None,
+    team_users: dict[str, dict] | None = None,
+) -> dict:
+    """The wire dict as it goes OVER THE WIRE — ``source`` withheld when the
+    pocket's site may not show it (SF-2). The default entry point, and the one every
+    user-facing read funnels through; use ``_unredacted_wire_dict`` only where the
+    caller is the build / edit pipeline and needs the real file map.
+
+    ``source_entitled`` lets a caller that is already serializing N pockets resolve
+    every pocket's entitlement in one batch and hand each answer down. Only
+    ``list_pockets`` needs it; everything else resolves per pocket, which is one
+    workspace resolve and one Site read on a single-pocket read. ``resolve_memo`` and ``team_users``
+    are the same idea for the ``$source`` reads and the team lookup (see
+    ``_wire_dict``).
+    """
+    return await _wire_dict(
+        doc,
+        viewer_user_id,
+        source_visible=await _source_visible_for_doc(doc, entitled=source_entitled),
+        resolve_memo=resolve_memo,
+        team_users=team_users,
+    )
+
+
+async def _unredacted_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
+    """The wire dict with ``source`` ALWAYS present, whatever the gate says.
+
+    For the build / publish / edit pipeline, which reads a pocket's source map
+    through the same serializer the REST reads use. Withholding source from the
+    generator would not hide a site — it would stop the site being built at all,
+    for exactly the cohort the gate targets. Never return this dict from a route.
+    """
+    return await _wire_dict(doc, viewer_user_id, source_visible=True)
+
+
+async def _wire_dict(
+    doc: _PocketDoc,
+    viewer_user_id: str,
+    *,
+    source_visible: bool,
+    resolve_memo: dict | None = None,
+    team_users: dict[str, dict] | None = None,
+) -> dict:
+    """Build the wire dict with rippleSpec ``$source`` markers resolved
+    against ``viewer_user_id``'s workspace context.
+
+    Used by every boundary that hands a spec to a renderer:
+    ``service.get`` (REST), ``service.create``/``update`` return values,
+    and ``_pocket_event_payload`` (WebSocket broadcast). Falls back to
+    the raw wire dict on resolver failure — never raises.
+
+    Resolution requires a viewer because sources like ``workspace.pockets``
+    apply per-user visibility filters. For multi-recipient broadcasts,
+    pass the doc's owner; this can over-share owner's private pockets to
+    other recipients (metadata only). Tracked for v2: per-recipient
+    resolution or frontend refetch on event receipt.
+
+    Also resolves the ``team`` field from raw user IDs to user objects
+    so the frontend can display member names/avatars without a second
+    lookup.
+
+    A caller serializing many pockets for one viewer passes ``resolve_memo``
+    (one dict for the whole page, so identical ``$source`` markers across
+    pockets resolve once) and ``team_users`` (every page's team ids resolved in
+    one query). Both default to per-pocket behaviour.
+    """
+    import dataclasses
+
+    pocket = _pocket_to_domain(doc)
+    if pocket.ripple_spec:
+        from pocketpaw_ee.cloud import ripple_sources  # noqa: F401  — register sources
+        from pocketpaw_ee.cloud.ripple_resolver import ResolveCtx, resolve_ripple_spec
+
+        # Phase-2: ``pocket.ripple_spec`` is now a promoted ``RippleSpec`` (or a
+        # raw dict for an unpromotable doc). ``resolve_ripple_spec`` walks the
+        # flat ``$source``-marker tree, so flatten a typed spec back to its
+        # BSON-equivalent dict before resolving. ``resolved`` (a dict) is then
+        # stored on the domain object — the resolved view goes straight to the
+        # wire, so a dict here keeps the wire shape unchanged.
+        spec_for_resolve = (
+            pocket.ripple_spec.to_flat_dict()
+            if isinstance(pocket.ripple_spec, RippleSpec)
+            else pocket.ripple_spec
+        )
+        try:
+            resolved = await resolve_ripple_spec(
+                spec_for_resolve,
+                ResolveCtx(
+                    workspace_id=doc.workspace,
+                    user_id=viewer_user_id,
+                    pocket_id=str(doc.id),
+                    memo=resolve_memo,
+                ),
+            )
+            pocket = dataclasses.replace(pocket, ripple_spec=resolved)
+        except Exception:
+            logger.warning(
+                "ripple_resolver: resolve failed for pocket %s; returning raw spec",
+                str(doc.id),
+                exc_info=True,
+            )
+    wire = pocket_to_wire_dict(pocket, source_visible=source_visible)
+
+    # Resolve team member IDs to user objects for the frontend.
+    raw_team: list = wire.get("team", [])
+    if raw_team:
+        # Only resolve if team contains raw string IDs (not already objects).
+        if raw_team and isinstance(raw_team[0], str):
+            resolved_map = (
+                team_users if team_users is not None else await _resolve_user_ids(raw_team)
+            )
+            wire["team"] = [
+                resolved_map.get(uid, {"_id": uid, "fullName": "Unknown", "email": ""})
+                for uid in raw_team
+            ]
+
+    return wire
+
+
+async def _pocket_event_payload(
+    doc: _PocketDoc, *, missing_senses: list[str] | None = None
+) -> dict:
+    """Build the realtime event payload for a pocket mutation.
+
+    Always includes ``recipient_ids`` (owner + shared_with). For
+    workspace-visible pockets, also includes ``workspace_id`` so the
+    audience resolver fans out to every workspace member. Mirrors the
+    visibility rules used by ``list_pockets`` so a member only ever sees
+    a ``pocket.*`` event for a pocket they could read via REST.
+
+    ``shareLinkToken`` and ``sharedWith`` are stripped from the broadcast
+    pocket — workspace-visible pockets fan out to every member, and the
+    share token is owner-only state. Owners receive the token directly in
+    the REST response from ``generate_share_link``.
+
+    rippleSpec ``$source`` markers are resolved using ``doc.owner`` as
+    the viewer. See ``_resolved_wire_dict`` for the v2 follow-up note.
+    """
+    pocket_dict = await _resolved_wire_dict(doc, doc.owner)
+    pocket_dict.pop("shareLinkToken", None)
+    pocket_dict.pop("sharedWith", None)
+    payload: dict = {
+        "pocket_id": str(doc.id),
+        "pocket": pocket_dict,
+        "recipient_ids": [doc.owner, *list(doc.shared_with or [])],
+    }
+    if doc.visibility == "workspace":
+        payload["workspace_id"] = doc.workspace
+    # Sense tier chunk 6a — when a template declared ``needs:`` Senses that no
+    # enabled connector fills for this tenant, surface them so the UX can
+    # prompt-to-connect. Only present on the create path when non-empty; the
+    # absence of the key means "nothing missing".
+    if missing_senses:
+        payload["missing_senses"] = list(missing_senses)
+    return payload
+
+
+async def _mutate_list_field(pocket_id: str, field: str, value: str, action: str) -> Pocket:
+    """Append/remove a string value on shared_with / team / agents.
+    Idempotent in both directions. Emits ``PocketUpdated`` when the doc
+    actually changes (no-op mutations stay silent)."""
+    doc = await _fetch_pocket(pocket_id)
+    current: list[str] = list(getattr(doc, field))
+    changed = False
+    if action == "add":
+        if value not in current:
+            current.append(value)
+            setattr(doc, field, current)
+            await doc.save()
+            changed = True
+    else:
+        if value in current:
+            current.remove(value)
+            setattr(doc, field, current)
+            await doc.save()
+            changed = True
+    if changed:
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return _pocket_to_domain(doc)
+
+
+# ---------------------------------------------------------------------------
+# Catalog-as-allowlist ingest gate (Increment 5)
+# ---------------------------------------------------------------------------
+
+
+async def _catalog_allowed_types() -> list[str] | None:
+    """Resolve the widget-catalog allow-list from the Ripple manifest.
+
+    The manifest's ``widgets`` array is the renderer's closed registry.
+    Returns the type list, or ``None`` when the manifest is unavailable
+    (network failure, dev server down) — the caller skips the catalog
+    gate in that case, best-effort like the manifest-drift validator.
+    """
+    try:
+        from pocketpaw.config import get_settings
+        from pocketpaw.ripple.manifest import allowed_types_from_manifest, get_manifest
+
+        settings = get_settings()
+        manifest = await get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+        if manifest is None:
+            return None
+        types = allowed_types_from_manifest(manifest)
+        return types or None
+    except Exception:
+        logger.debug("ripple catalog allow-list lookup skipped (non-fatal)", exc_info=True)
+        return None
+
+
+async def _catalog_required_props() -> dict[str, list[str]] | None:
+    """Resolve the per-widget required-prop map from the Ripple manifest.
+
+    Returns ``{type: [required_prop, ...]}`` for the constraint-zone HARD
+    required-prop gate, or ``None`` when the manifest is unavailable or no
+    widget declares a required prop — the caller skips the gate in that case,
+    best-effort like :func:`_catalog_allowed_types`.
+
+    ``get_manifest`` is in-process TTL-cached, so this resolves from the same
+    cache entry the allow-list lookup populated — no extra network fetch.
+    """
+    try:
+        from pocketpaw.config import get_settings
+        from pocketpaw.ripple.manifest import get_manifest, required_props_from_manifest
+
+        settings = get_settings()
+        manifest = await get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+        if manifest is None:
+            return None
+        required = required_props_from_manifest(manifest)
+        return required or None
+    except Exception:
+        logger.debug("ripple required-prop map lookup skipped (non-fatal)", exc_info=True)
+        return None
+
+
+def _embed_allowed_hosts() -> list[str]:
+    """Return the configured ``embed`` host allow-list."""
+    try:
+        from pocketpaw.config import get_settings
+
+        return list(get_settings().ripple_embed_allowed_hosts or [])
+    except Exception:
+        logger.debug("ripple embed allow-list lookup skipped (non-fatal)", exc_info=True)
+        return []
+
+
+def _audit_embed_ingest(
+    spec: dict[str, Any] | None,
+    *,
+    actor: str,
+    workspace_id: str | None,
+    pocket_id: str | None,
+) -> None:
+    """Write an audit-log entry when an ingested spec contains an ``embed``
+    node.
+
+    The ``embed`` widget points an iframe at third-party content; an
+    audit trail of every embed-bearing spec that is published lets a
+    security review reconstruct what external surfaces a pocket exposed.
+    Audit failures must never break the ingest flow — the call is wrapped.
+    """
+    try:
+        from pocketpaw.ripple.manifest import find_embed_nodes
+
+        embeds = find_embed_nodes(spec)
+        if not embeds:
+            return
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        urls: list[str] = []
+        for node in embeds:
+            props = node.get("props")
+            if isinstance(props, dict):
+                url = props.get("url")
+                if isinstance(url, str) and url:
+                    urls.append(url)
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action="pocket.embed_ingest",
+                target=pocket_id or "(new)",
+                status="success",
+                category="pocket_embed",
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                embed_count=len(embeds),
+                embed_urls=urls,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the ingest
+        logger.warning("pocket embed-ingest audit-log write failed", exc_info=True)
+
+
+async def _gate_catalog(
+    spec: dict[str, Any] | None,
+    *,
+    strict: bool,
+    actor: str,
+    workspace_id: str | None = None,
+    pocket_id: str | None = None,
+) -> None:
+    """Run the catalog-as-allowlist gate over a normalized rippleSpec.
+
+    ``strict=True`` (agent-generation path) raises ``CatalogViolationError``
+    on the first violation so the caller can retry the LLM. ``strict=False``
+    (human / import path) logs a structured warning per violation and does
+    not block. Either way, an embed-bearing spec is audit-logged.
+
+    When the widget manifest can't be fetched the gate can't verify the spec.
+    Posture is controlled by ``ripple_catalog_gate_require_manifest``:
+
+    * default (``False``) — best-effort skip, same as the manifest-drift
+      validator (preserves current behavior; the manifest URL defaults to the
+      local ripple dev server, often down in dev).
+    * ``True`` — the strict (agent) path FAILS CLOSED, raising
+      :class:`CatalogUnavailableError` rather than persisting an unverifiable
+      spec. The logged (human/import) path still skips — it never blocks.
+    """
+    if not isinstance(spec, dict):
+        return
+    _audit_embed_ingest(spec, actor=actor, workspace_id=workspace_id, pocket_id=pocket_id)
+    allowed_types = await _catalog_allowed_types()
+    if allowed_types is None:
+        if strict:
+            from pocketpaw.config import get_settings
+
+            if get_settings().ripple_catalog_gate_require_manifest:
+                raise CatalogUnavailableError()
+        return
+    embed_hosts = _embed_allowed_hosts()
+    if strict:
+        validate_against_catalog_strict(
+            spec,
+            allowed_types,
+            embed_allowed_hosts=embed_hosts,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+        # Action-handler wiring runs as a sibling gate — same strict
+        # posture as the catalog walk so the agent-generation path
+        # gets a single corrective signal per failed attempt rather
+        # than chained-and-shadowed errors. Manifest-driven catalog
+        # already passed; this catches the verb-level / Refresh-button
+        # failure modes the catalog can't see.
+        validate_action_wiring_strict(
+            spec,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+        # Required-prop "HARD constraint" gate — same strict posture. Runs
+        # after the catalog walk so an unknown ``type`` surfaces as the
+        # fundamental "no such widget" error first; this catches the
+        # known-widget-but-missing-required-prop case (a ``chart`` with no
+        # ``data``) the catalog can't see. Best-effort: skipped when the
+        # required-prop map can't be resolved.
+        required_props = await _catalog_required_props()
+        if required_props:
+            validate_required_props_strict(
+                spec,
+                required_props,
+                pocket_id=pocket_id,
+                workspace_id=workspace_id,
+            )
+    else:
+        validate_against_catalog_logged(
+            spec,
+            allowed_types,
+            embed_allowed_hosts=embed_hosts,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+        validate_action_wiring_logged(
+            spec,
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+        )
+        required_props = await _catalog_required_props()
+        if required_props:
+            validate_required_props_logged(
+                spec,
+                required_props,
+                pocket_id=pocket_id,
+                workspace_id=workspace_id,
+            )
+
+
+# Widget ``type`` whose tiles carry no rippleSpec — the frontend renders them
+# as a built-in Svelte component keyed on ``name``. Mirrors the
+# ``_NATIVE_WIDGET_TYPE`` constant in the MCP server; duplicated here so the
+# service layer can short-circuit the gate without importing from the agent
+# package (which would invert the cloud → agent dependency direction).
+_NATIVE_WIDGET_TYPE = "native"
+
+
+async def _gate_widget_spec_for_agent(
+    spec: dict[str, Any] | None,
+    *,
+    widget_type: str | None,
+    actor: str,
+    workspace_id: str | None,
+    pocket_id: str | None,
+) -> str | None:
+    """Run the catalog + action-wiring gates over a single widget's ``spec``
+    subtree on the agent-generation path. Returns an agent-readable error
+    string on rejection, or ``None`` when the spec passes (or there's nothing
+    to gate).
+
+    Mirrors the strict half of :func:`_gate_catalog` — the same posture used
+    by the pocket-level granular ops (``agent_replace_node`` etc.) — but
+    scoped to a single ``widgets[].spec`` subtree rather than the
+    ``rippleSpec.ui`` tree. ``type="native"`` widgets and missing specs are
+    a no-op; the manifest-unavailable best-effort posture is inherited
+    from :func:`_gate_catalog`.
+
+    The catalog walker tolerates an unwrapped subtree (its first line is
+    ``root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec``)
+    so we hand the widget spec in directly, no synthetic ``ui`` wrapping.
+    """
+    if widget_type == _NATIVE_WIDGET_TYPE:
+        return None
+    if not isinstance(spec, dict):
+        return None
+    try:
+        await _gate_catalog(
+            spec,
+            strict=True,
+            actor=actor,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+        )
+    except CatalogViolationError as exc:
+        return format_violations_for_agent(exc.violations)
+    except ActionWiringViolationError as exc:
+        return format_action_violations_for_agent(exc.violations)
+    except MissingRequiredPropError as exc:
+        return format_required_prop_violations_for_agent(exc.violations)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Template compile-on-install + resolver (RFC 03 v2 / Wave 3e)
+# ---------------------------------------------------------------------------
+#
+# A pocket created or updated with a ``template_slug`` is "instantiated"
+# from one of the bundled RFC 03 v2 templates: the OSS loader reads the
+# template off disk, the OSS compile pass translates it into a runtime-
+# shaped dict, and the EE service MERGES that dict into the pocket's
+# ``rippleSpec`` (option B — keep user-customized fields, replace the
+# compile-output keys).
+#
+# Canvas ownership rule (extends option B; fix for the empty-canvas bug
+# found when templates were deployed to a live instance): the compile
+# pass translates the template's YAML metadata only — the render tree
+# lives in the hand-authored sibling ``ripple_spec.json``. The merge
+# decides who owns the canvas by looking at the pocket's EXISTING ``ui``:
+#
+#   * empty/absent ``ui``  → template-owned. The template's ``ui`` is
+#     adopted, and its seed ``state`` / placeholder ``sources`` merge
+#     UNDER the compiled values so the canvas renders non-empty.
+#   * non-empty ``ui``     → user-owned. A recompile (template upgraded
+#     out-of-band) refreshes the machinery only and never touches the
+#     canvas — a user can tweak ``rippleSpec.ui`` after instantiation
+#     and a re-apply won't blow those tweaks away.
+#
+# Tolerance posture: ``load_template(slug, strict=False)`` never raises;
+# a stale / missing / malformed template returns ``None``. The pocket
+# keeps its slug (so a later resolver attempt can retry) and its
+# rippleSpec is left unmodified — the create/update never fails just
+# because the template went away. A WARNING is logged so an operator can
+# see the drift.
+
+
+def _compile_template_to_runtime_dict(loaded: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Translate an OSS ``load_template`` result into the runtime rippleSpec dict.
+
+    Returns the compile output dict on success, or ``None`` if the
+    loader returned ``None`` (unknown / stale slug — see the section
+    docstring for the tolerance posture). Validation failures inside
+    the loader already became ``None`` under ``strict=False``; this
+    function only re-runs ``PocketTemplate.model_validate`` to obtain
+    the typed model the OSS ``compile_template`` consumes.
+    """
+    if loaded is None:
+        return None
+    meta = loaded.get("meta")
+    if not isinstance(meta, dict):
+        return None
+
+    # Lazy imports — OSS bundled_templates is the only place that owns the
+    # ``PocketTemplate`` schema + ``compile_template`` pure function.
+    from pocketpaw.bundled_templates import PocketTemplate, compile_template
+
+    try:
+        template = PocketTemplate.model_validate(meta)
+    except Exception as exc:  # noqa: BLE001 — the loader already deferred validation
+        logger.warning("template compile: schema validation failed: %s", exc)
+        return None
+    try:
+        return compile_template(template)
+    except Exception as exc:  # noqa: BLE001 — compile is pure; bug in OSS if it raises
+        logger.warning("template compile: compile_template raised: %s", exc)
+        return None
+
+
+def _ui_is_empty(ui: Any) -> bool:
+    """True when a rippleSpec ``ui`` value counts as "no authored canvas".
+
+    Absent, ``None``, a non-dict, or an empty dict are all empty. A dict
+    with ANY content (even just ``{"type": "stack"}``) is a real canvas —
+    we never second-guess a node the user (or an agent) authored.
+    """
+    return not isinstance(ui, dict) or not ui
+
+
+def _merge_compile_into_ripple_spec(
+    existing: dict[str, Any] | None,
+    compiled: dict[str, Any],
+    *,
+    template_ripple_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge a ``compile_template`` result into an existing rippleSpec.
+
+    Merge strategy (option B in the Wave 3e brief): keys produced by
+    the compile pass (``sources``, ``state``, ``actions``, ``agents``,
+    ``triggers``, ``outcomes``, etc.) REPLACE matching keys in the
+    existing spec. The result is a NEW dict; no input is mutated.
+
+    The ``ui`` tree follows an ownership rule keyed on the EXISTING
+    spec's canvas (fix for the empty-canvas bug found on a live deploy —
+    pockets created from a template rendered ``ui.children: 0``):
+
+    * **Existing ``ui`` empty/absent → template-owned.** The pocket has
+      no authored canvas, so the template's hand-authored sibling
+      ``ripple_spec.json`` supplies it: its ``ui`` tree is adopted, and
+      its seed ``state`` / placeholder ``sources`` are merged UNDER the
+      compiled values (compiled wins per key) so the adopted canvas has
+      the bindings it references and renders non-empty on first install.
+    * **Existing ``ui`` non-empty → user-owned.** A re-apply (template
+      upgraded out-of-band, recompile-on-update) refreshes the machinery
+      without touching the canvas — exactly the pre-fix behaviour.
+
+    ``template_ripple_spec`` is the loader's ``loaded["ripple_spec"]``
+    sibling dict; pass ``None`` to skip canvas adoption entirely (the
+    pre-fix machinery-only merge). The authoring-only
+    ``_placeholder_note`` key is never copied — only ``ui`` / ``state``
+    / ``sources`` participate in adoption. Adopted blocks are
+    deep-copied so the merged spec never aliases the loader's dicts.
+    """
+    out: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    canvas_is_template_owned = _ui_is_empty(out.get("ui"))
+
+    for key, value in compiled.items():
+        out[key] = value
+
+    if canvas_is_template_owned and isinstance(template_ripple_spec, dict):
+        template_ui = template_ripple_spec.get("ui")
+        if isinstance(template_ui, dict) and template_ui:
+            out["ui"] = copy.deepcopy(template_ui)
+            # The adopted canvas binds against the template's seed state
+            # ({state.records}, {state.draft}, ...) and its placeholder
+            # sources. Merge them under the compiled values: compiled
+            # keys (the validated schema output) win every collision.
+            template_state = template_ripple_spec.get("state")
+            if isinstance(template_state, dict):
+                compiled_state = out.get("state")
+                out["state"] = {
+                    **copy.deepcopy(template_state),
+                    **(compiled_state if isinstance(compiled_state, dict) else {}),
+                }
+            template_sources = template_ripple_spec.get("sources")
+            if isinstance(template_sources, dict):
+                compiled_sources = out.get("sources")
+                out["sources"] = {
+                    **copy.deepcopy(template_sources),
+                    **(compiled_sources if isinstance(compiled_sources, dict) else {}),
+                }
+    return out
+
+
+def _layer_safe_update_spec(
+    existing_raw: dict[str, Any] | None,
+    incoming_raw: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge an incoming (partial) rippleSpec onto the existing one WITHOUT
+    clobbering instance-owned regions the incoming spec omits.
+
+    This is the fix for the 2026-06-13 clobber bug. The bug: ``update()`` did a
+    wholesale ``doc.rippleSpec = normalized_spec``, so a frontend ``PATCH`` that
+    sent only the template canvas (``ui`` / ``actions`` / ``sources``) WIPED the
+    instance's ``state`` / ``selections`` — and, symmetrically, a state-only
+    write would have wiped the canvas.
+
+    The merge is a per-key overlay expressed through the typed layer split:
+    the result is the EXISTING spec with every key the INCOMING spec actually
+    SET overlaid on top. A key the incoming spec omits is preserved from the
+    existing spec — whichever layer it belongs to. Concretely:
+
+      * incoming carries ``ui`` but no ``state`` (the clobber case) →
+        new ``ui``, existing ``state`` preserved.
+      * incoming carries ``state`` but no ``ui`` (a state-only edit, e.g.
+        reconcile's instance-preserve path) → new ``state``, existing ``ui``
+        preserved.
+
+    Implementation uses ``RippleSpec`` for the type boundary: we promote both
+    sides, overlay the incoming TEMPLATE layer and the incoming INSTANCE layer
+    onto the existing spec (each carries only the keys that side set, via
+    ``exclude_unset``), then overlay any remaining incoming keys (the
+    compile_template passthrough envelope — ``name`` / ``version`` / ``lifecycle``
+    / ``metadata`` / etc. the normalizer stamps) so a partial write still
+    refreshes those. ``to_flat_dict`` returns the same BSON-shaped flat dict the
+    DB already stores — no migration.
+
+    Falls back to the legacy wholesale-incoming behaviour only if the incoming
+    spec cannot be promoted (corrupt) — never silently drops the write.
+    """
+    from pocketpaw.bundled_templates import InstanceLayer, RippleSpec, TemplateLayer
+
+    existing = RippleSpec.from_flat_dict(existing_raw)
+    incoming = RippleSpec.from_flat_dict(incoming_raw)
+    if incoming is None:
+        # Incoming is unpromotable (should not happen post-normalize) — keep the
+        # historical behaviour rather than drop the caller's write.
+        return incoming_raw
+    if existing is None:
+        # No existing spec to protect (fresh pocket / unpromotable existing) —
+        # the incoming spec is authoritative.
+        return incoming.to_flat_dict()
+
+    # Overlay the incoming layers onto the existing spec. ``with_*_layer`` only
+    # applies the keys the incoming side actually set, so an omitted region is
+    # preserved from ``existing`` verbatim.
+    merged = existing.with_template_layer(incoming.template_layer)
+    merged = merged.with_instance_layer(incoming.instance_layer)
+
+    # Overlay the remaining incoming keys (passthrough + envelope the normalizer
+    # stamps: name/version/lifecycle/title/color/metadata/...). The layer fields
+    # are already handled above, so skip them to avoid re-applying.
+    layer_fields = set(TemplateLayer.model_fields) | set(InstanceLayer.model_fields)
+    flat = merged.to_flat_dict()
+    for key, value in incoming.to_flat_dict().items():
+        if key not in layer_fields:
+            flat[key] = value
+    return flat
+
+
+async def _check_template_needs(loaded: dict[str, Any] | None, workspace_id: str) -> list[str]:
+    """Return the template's declared Sense ids that NO enabled connector fills.
+
+    A vertical template may declare ``needs: ["paw.payments.v1", ...]`` — the
+    provider-agnostic capabilities it expects the tenant to have wired up. For
+    each need, ask the EE Sense resolver whether an enabled connector fills it
+    for ``workspace_id``; ids that resolve to ``None`` are returned as the
+    ``missing`` set so the caller can surface a prompt-to-connect.
+
+    Tolerance: this never raises and never blocks. A ``None`` loaded result, a
+    missing/empty ``needs``, or a resolver error all yield ``[]`` (or skip the
+    offending id) — mirrors the ``strict=False`` posture used elsewhere here.
+    """
+    if not isinstance(loaded, dict):
+        return []
+    meta = loaded.get("meta")
+    if not isinstance(meta, dict):
+        return []
+    needs = meta.get("needs")
+    if not needs:
+        return []
+
+    # Lazy import — keep the EE Sense resolver off the eager import path.
+    from pocketpaw_ee.cloud.senses.resolver import resolve_many
+
+    # One enabled-connector read for ALL needs (was one query per need).
+    try:
+        resolved = await resolve_many(list(needs), workspace_id)
+    except Exception as exc:  # noqa: BLE001 — never block create on a resolver hiccup
+        logger.warning(
+            "template needs: resolve_many raised for workspace=%s: %s",
+            workspace_id,
+            exc,
+        )
+        return []
+
+    return [sense_id for sense_id in needs if resolved.get(sense_id) is None]
+
+
+async def resolve_pocket_template(
+    workspace_id: str,
+    pocket_id: str,
+    *,
+    templates_dir: Path | None = None,
+) -> Any | None:
+    """Return the resolved :class:`PocketTemplate` for a pocket, or ``None``.
+
+    Tenant-filtered: a pocket in a different workspace, a missing
+    pocket, an unset ``template_slug``, or a template the loader can't
+    read all return ``None``. Callers (``bulk_dispatch``,
+    ``temporal_scheduler``) treat ``None`` as "no-op for this pocket"
+    — never an error.
+
+    Args:
+        workspace_id: Tenancy. Required.
+        pocket_id: The pocket to resolve. Required.
+        templates_dir: Optional override of the OSS loader's templates
+            root — used by tests to point at a tmp install. Defaults to
+            ``~/.pocketpaw/templates/`` via the OSS default.
+
+    Returns:
+        A validated ``PocketTemplate`` instance, or ``None`` for any
+        of the failure modes above.
+    """
+    if not workspace_id or not pocket_id:
+        return None
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:  # noqa: BLE001 — malformed id surfaces as "not found"
+        return None
+    # Rule 7 — tenant filter on every read.
+    if doc is None or doc.workspace != workspace_id:
+        return None
+    slug = getattr(doc, "template_slug", None)
+    if not slug:
+        return None
+
+    # Lazy import — keep the OSS schema off the eager import path.
+    from pocketpaw.bundled_templates import PocketTemplate, load_template
+
+    loaded = load_template(slug, templates_dir=templates_dir, strict=False)
+    if loaded is None:
+        logger.warning(
+            "resolve_pocket_template: pocket=%s slug=%r could not be loaded — returning None",
+            pocket_id,
+            slug,
+        )
+        return None
+    meta = loaded.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    try:
+        return PocketTemplate.model_validate(meta)
+    except Exception as exc:  # noqa: BLE001 — strict=False already swallowed validation
+        logger.warning(
+            "resolve_pocket_template: pocket=%s slug=%r post-load validation failed: %s",
+            pocket_id,
+            slug,
+            exc,
+        )
+        return None
+
+
+async def resolve_workspace_approval_level(workspace_id: str) -> str:
+    """Return the effective layered-gate triager level for a workspace (T6).
+
+    Resolution order (design MF-9):
+      1. The workspace document's ``instinct_approval_level`` field, when set
+         to a non-empty value — the PER-WORKSPACE opt-in.
+      2. Otherwise the GLOBAL config default
+         (``Settings.instinct_approval_level``, itself "ASK").
+
+    A global env var therefore changes the default for workspaces that have
+    NOT set their own field — it can never silently upgrade a workspace that
+    relies on the default away from "ASK" once that workspace sets its own
+    value. Any read failure falls back to the global default (and ultimately
+    "ASK"), so a DB hiccup can never accidentally activate the triager.
+
+    Returns a bare string ("ASK" | "TRIAGE" | "TRUSTED"); ``gate_action``
+    coerces it onto the enum and treats an unknown value as ASK.
+    """
+    from pocketpaw.config import get_settings
+
+    try:
+        global_default = str(get_settings().instinct_approval_level or "ASK")
+    except Exception:  # noqa: BLE001 — config read failure → dormant
+        global_default = "ASK"
+
+    if not workspace_id:
+        return global_default
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 — malformed id / read failure → global default
+        return global_default
+    if ws is None:
+        return global_default
+    field = getattr(ws, "instinct_approval_level", None)
+    if isinstance(field, str) and field:
+        return field
+    return global_default
+
+
+async def resolve_workspace_template_default_deny(workspace_id: str) -> bool:
+    """Return the effective TEMPLATE-level deny-by-default for a workspace (AW-7).
+
+    Resolution order (mirrors ``resolve_workspace_approval_level``):
+      1. The workspace document's ``instinct_template_default_deny`` field, when
+         set to a non-null bool — the PER-WORKSPACE opt-in.
+      2. Otherwise the GLOBAL config default
+         (``Settings.instinct_template_default_deny``, itself ``False``).
+
+    A global env var therefore changes the default only for workspaces that have
+    NOT set their own field; it can never silently flip a workspace that relies
+    on the default once that workspace pins its own value. Any read failure
+    falls back to the global default (and ultimately ``False``), so a DB hiccup
+    can never accidentally start parking a workspace's writes.
+
+    Returns a bare bool; ``gate_action`` reads it directly.
+    """
+    from pocketpaw.config import get_settings
+
+    try:
+        global_default = bool(get_settings().instinct_template_default_deny)
+    except Exception:  # noqa: BLE001 — config read failure → dormant (False)
+        global_default = False
+
+    if not workspace_id:
+        return global_default
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 — malformed id / read failure → global default
+        return global_default
+    if ws is None:
+        return global_default
+    field = getattr(ws, "instinct_template_default_deny", None)
+    if isinstance(field, bool):
+        return field
+    return global_default
+
+
+# ---------------------------------------------------------------------------
+# CRUD
+# ---------------------------------------------------------------------------
+
+
+async def _pocket_cap_exceeded(workspace_id: str) -> tuple[bool, int, int | None]:
+    """Would a new pocket exceed this workspace's plan cap? -> (exceeded, count, limit).
+
+    feat/billing-smb-caps. GATED on ``billing_enforced``: OSS / self-host tenants
+    (billing off) always get ``(False, 0, None)`` — no cap, no extra DB read — so a
+    self-hosted deployment behaves exactly as before. When enforced, resolves the
+    workspace's plan ``max_pockets`` and counts its live pockets. An uncapped plan
+    (Enterprise, ``max_pockets=None``) never trips. ``exceeded`` is ``count >=
+    limit`` — checked BEFORE the insert, so it blocks the create that WOULD push the
+    workspace over, never an existing pocket (create-time only, never retroactive).
+
+    Returns the tuple rather than raising so each caller responds in its native
+    shape: the HTTP ``create`` path raises ``PocketLimitError`` (402); the agent
+    auto-create path returns ``None``. Imports are lazy to keep this module off the
+    config / entitlements import graph at load.
+    """
+    from pocketpaw.config import get_settings
+
+    if not get_settings().billing_enforced:
+        return (False, 0, None)
+
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    limit = ent.max_pockets
+    if limit is None:
+        return (False, 0, None)
+    count = await _PocketDoc.find(_PocketDoc.workspace == workspace_id).count()
+    return (count >= limit, count, limit)
+
+
+def _source_gated_at_create() -> bool:
+    """Should a pocket created RIGHT NOW be stamped into the source-gate cohort?
+
+    Reads ``sites_source_gate_enabled`` once, at insert, and the answer is frozen
+    onto the document. That freeze is D3: a pocket that existed before the gate
+    was switched on is never re-classified by switching it on, so turning the
+    feature on cannot take source away from anybody who already had it.
+
+    Stamped by EVERY constructor, including the ones that cannot carry a source
+    today (the home pocket, the ripple auto-create). The flag records which side
+    of the flip the pocket was born on, which is a fact about the pocket and not
+    about its engine — stamping only the constructors that happen to pass
+    ``source=`` is how the next constructor to grow one ships outside the cohort
+    without anybody noticing.
+    """
+    from pocketpaw.config import get_settings
+
+    return get_settings().sites_source_gate_enabled
+
+
+async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> dict:
+    """Create a pocket with optional agents, widgets, and rippleSpec.
+
+    ``project_id`` is optional — when supplied, the service validates it
+    points at a real project in the same workspace and rejects with
+    ``project.not_found`` otherwise. Pockets without a ``project_id``
+    surface as "unassigned" in the Mission Control project picker, which
+    is exactly the pre-projects-rollout shape.
+
+    feat/billing-smb-caps: raises ``PocketLimitError`` (402) BEFORE any write when
+    the workspace is at/over its plan's ``max_pockets`` — a no-op unless
+    ``billing_enforced``. Also covers ``create_pocket_and_session``, which funnels
+    through here.
+    """
+    exceeded, count, limit = await _pocket_cap_exceeded(workspace_id)
+    if exceeded:
+        logger.info(
+            "pocket create blocked by plan cap: workspace=%s has %d pockets (limit %s)",
+            workspace_id,
+            count,
+            limit,
+        )
+        raise PocketLimitError(limit)  # type: ignore[arg-type]  # limit is int when exceeded
+
+    from pocketpaw_ee.cloud.sessions import service as sessions_service
+
+    normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
+    # Wave 3e — compile-on-install. When ``template_slug`` is set, load
+    # the bundled template, compile it, and merge the runtime dict into
+    # the caller-supplied rippleSpec (option B merge — see the section
+    # docstring above ``_merge_compile_into_ripple_spec``). A stale /
+    # missing slug logs a warning and leaves the rippleSpec unchanged —
+    # the pocket still gets created and keeps the slug for retry.
+    loaded: dict[str, Any] | None = None
+    if body.template_slug:
+        from pocketpaw.bundled_templates import load_template
+
+        loaded = load_template(body.template_slug, strict=False)
+        compiled = _compile_template_to_runtime_dict(loaded)
+        if compiled is not None:
+            normalized_spec = _merge_compile_into_ripple_spec(
+                normalized_spec,
+                compiled,
+                template_ripple_spec=loaded.get("ripple_spec") if loaded else None,
+            )
+
+    if normalized_spec:
+        validate_ripple_spec_logged(normalized_spec, workspace_id=workspace_id)
+        # Human/import path — catalog drift is logged for triage, not blocked.
+        await _gate_catalog(normalized_spec, strict=False, actor=user_id, workspace_id=workspace_id)
+    widget_docs = [_build_widget_doc(w) for w in (body.widgets or [])]
+
+    if body.project_id:
+        await _ensure_project_in_workspace(workspace_id, body.project_id)
+
+    doc = _PocketDoc(
+        workspace=workspace_id,
+        project_id=body.project_id,
+        name=body.name,
+        description=body.description,
+        type=body.type,
+        icon=body.icon,
+        color=body.color,
+        owner=user_id,
+        visibility=body.visibility,
+        agents=list(body.agents or []),
+        widgets=widget_docs,
+        rippleSpec=normalized_spec,
+        template_slug=body.template_slug,
+        pattern=body.pattern,
+        engine=body.engine,
+        source=body.source,
+        # SF-2 — which side of the source-gate flip this pocket is born on.
+        source_gated=_source_gated_at_create(),
+        surface_profile=body.surface_profile,
+        # New pockets start with NO connectors allowed — the owner must
+        # explicitly grant each connector via the permission UI.
+        allowed_connectors=[],
+    )
+    await doc.insert()
+    pocket = _pocket_to_domain(doc)
+
+    if body.session_id:
+        await sessions_service.link_pocket(workspace_id, body.session_id, pocket.id)
+
+    # Sense tier chunk 6a — a template can declare the Senses it needs. For each,
+    # check the tenant has an enabled provider; collect the ids with none. This
+    # NEVER blocks creation (the pocket is already inserted) — it logs a warning
+    # and rides out on the pocket.created event so the UX can prompt-to-connect.
+    missing_senses = await _check_template_needs(loaded, workspace_id)
+    if missing_senses:
+        logger.warning(
+            "template needs: pocket=%s slug=%r workspace=%s has no enabled "
+            "provider for senses %s — pocket created, prompt-to-connect surfaced",
+            str(doc.id),
+            body.template_slug,
+            workspace_id,
+            missing_senses,
+        )
+
+    await emit(PocketCreated(data=await _pocket_event_payload(doc, missing_senses=missing_senses)))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+#: The BuiltInWidget collection this process has already seeded (see
+#: ``_ensure_builtin_widgets_seeded``). None until the first seed.
+_builtin_seeded_collection: Any = None
+
+
+async def _ensure_builtin_widgets_seeded() -> list[dict[str, Any]]:
+    """Idempotently insert the canonical built-in widget definitions.
+
+    Returns the populated widget entry dicts ready to embed into a new
+    home pocket's ``widgets[]``. This is a pure system-level seed — it
+    reads/writes the ``BuiltInWidget`` collection, never a Pocket doc.
+
+    Each entry matches the shape HomeWidgetGrid's NATIVE_WIDGETS registry
+    keys on: ``type="native"`` + ``name`` exactly matching the Svelte
+    component lookup key. The frontend's BUILT_IN_WIDGETS / DEFAULT_MISSION
+    constants were the prior (hardcoded) source of these rows.
+    """
+    from pocketpaw_ee.cloud.models.builtin_widget import (
+        BuiltInWidget as _BuiltInDoc,
+    )
+    from pocketpaw_ee.cloud.models.builtin_widget import (
+        BuiltInWidgetPosition as _BuiltInPos,
+    )
+
+    CANONICAL: list[dict[str, Any]] = [
+        {
+            "slug": "intent-of-the-day",
+            "name": "Intent of the Day",
+            "type": "native",
+            "icon": "sparkles",
+            "color": "#A78BFA",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=0, w=2, h=1),
+            "sort_order": 0,
+            "auto_seed": True,  # pre-pinned on every new home pocket
+        },
+        {
+            "slug": "mission-tray",
+            "name": "Mission · Tray",
+            "type": "native",
+            "icon": "list-todo",
+            "color": "#FCD34D",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=1, w=1, h=1),
+            "sort_order": 1,
+        },
+        {
+            "slug": "mission-agents-in-flight",
+            "name": "Mission · Agents in flight",
+            "type": "native",
+            "icon": "cpu",
+            "color": "#7DD3FC",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=2, w=1, h=1),
+            "sort_order": 2,
+        },
+        {
+            "slug": "mission-pawprints-today",
+            "name": "Mission · Pawprints today",
+            "type": "native",
+            "icon": "activity",
+            "color": "#6EE7B7",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=3, w=1, h=1),
+            "sort_order": 3,
+        },
+        {
+            "slug": "mission-active-cycle",
+            "name": "Mission · Active cycle",
+            "type": "native",
+            "icon": "target",
+            "color": "#C4B5FD",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=4, w=1, h=1),
+            "sort_order": 4,
+        },
+        {
+            "slug": "mission-team-load",
+            "name": "Mission · Team load",
+            "type": "native",
+            "icon": "users",
+            "color": "#6EE7B7",
+            "pocket_name": "Mission Control",
+            "position": _BuiltInPos(row=0, col=5, w=1, h=1),
+            "sort_order": 5,
+        },
+    ]
+
+    # Seed once per process per collection. ``GET /pockets/builtin-widgets``
+    # calls this on every request, and it used to cost 6 reads and 6 writes each
+    # time. Keyed on the collection object rather than a bare bool so a
+    # re-initialised database (a fresh test DB, a reconnect) seeds again. Holding
+    # the reference keeps its id() from being reused by a later collection.
+    global _builtin_seeded_collection
+    collection = _BuiltInDoc.get_pymongo_collection()
+    if collection is _builtin_seeded_collection:
+        return list(CANONICAL)
+
+    existing_by_slug = {
+        d.slug: d
+        for d in await _BuiltInDoc.find({"slug": {"$in": [e["slug"] for e in CANONICAL]}}).to_list()
+    }
+    for entry in CANONICAL:
+        existing = existing_by_slug.get(entry["slug"])
+        if existing is None:
+            await _BuiltInDoc(**entry).insert()
+            continue
+        # Refresh the core identity fields from the canonical source (an
+        # operator may change enabled/sort_order/position at runtime). Written
+        # only when something differs, so a seeded collection costs no write.
+        wanted = {
+            "name": entry["name"],
+            "widget_type": entry["type"],
+            "icon": entry["icon"],
+            "color": entry["color"],
+            "pocket_name": entry["pocket_name"],
+            "position": entry["position"],
+            "sort_order": entry["sort_order"],
+            "auto_seed": entry.get("auto_seed", False),
+        }
+        if any(getattr(existing, k) != v for k, v in wanted.items()):
+            for k, v in wanted.items():
+                setattr(existing, k, v)
+            await existing.save()
+
+    _builtin_seeded_collection = collection
+    return list(CANONICAL)
+
+
+async def _seed_home_pocket_widgets(doc: _PocketDoc) -> None:
+    """Attach the canonical built-in widgets to a brand-new home pocket.
+
+    Called AFTER the home pocket doc is inserted but BEFORE the event is
+    emitted, so the first `pocket.created` event broadcast includes the
+    seeded widgets. The built-in widget defs live in the `BuiltInWidget`
+    system collection; this reads them from the DB and embeds them as
+    `Widget` sub-documents.
+
+    A failed seed does NOT break pocket creation — the home pocket exists
+    with an empty widgets list, and the client's ensureIntentWidget
+    guarantee handles the render-time fallback."""
+    try:
+        defs = await _ensure_builtin_widgets_seeded()
+    except Exception:
+        logger.warning(
+            "home pocket seed: failed to resolve built-in widgets; "
+            "pocket=%s will be provisioned empty",
+            str(doc.id),
+            exc_info=True,
+        )
+        return
+
+    widget_docs: list[_WidgetDoc] = []
+    # Only pre-pin widgets marked auto_seed=True (currently just
+    # Intent of the Day). The rest are discoverable in the
+    # AddWidgetPicker "Built-in" section.
+    from pocketpaw_ee.cloud.models.pocket import WidgetPosition as _WPos
+
+    auto_seeds = [e for e in defs if e.get("auto_seed", False)]
+    for i, entry in enumerate(auto_seeds):
+        pos = entry.get("position")
+        row = pos.row if pos is not None else 0
+        col = pos.col if pos is not None else i
+        widget_docs.append(
+            _WidgetDoc(
+                name=entry["name"],
+                type=entry["type"],
+                icon=entry["icon"],
+                color=entry["color"],
+                span=f"col-span-{pos.w if pos is not None else 1} "
+                f"row-span-{pos.h if pos is not None else 1}",
+                props={"pocketName": entry.get("pocket_name", "Mission Control")},
+                position=_WPos(row=row, col=col),
+            )
+        )
+
+    if widget_docs:
+        doc.widgets = widget_docs
+        await doc.save()
+
+
+async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, bool]:
+    """Resolve-or-provision the caller's home pocket.
+
+    Returns ``(pocket_wire_dict, created)``. ``created`` is ``True`` only
+    when this call provisioned a brand-new home pocket, ``False`` when it
+    returned an existing one. The home route surfaces ``created`` so the
+    client can gate one-time work — seeding default widgets, migrating
+    legacy ``localStorage`` widgets — on a genuinely fresh pocket and
+    never re-seed a returning user who deliberately cleared their grid.
+
+    Idempotent. If the user's ``home_pocket_id`` setting points at a pocket
+    that still exists and is owned by the user, that pocket is returned
+    unchanged with ``created=False``. Otherwise a fresh ``type="home"``
+    pocket is created (``name="Home"``, ``visibility="private"``), seeded
+    with the canonical built-in widgets from the ``BuiltInWidget`` system
+    collection, its id is persisted back onto the user setting, and it is
+    returned with ``created=True``.
+
+    A stale ``home_pocket_id`` — the pocket was deleted, or it now belongs
+    to someone else — falls through to re-provisioning rather than raising.
+
+    **Concurrency.** Provisioning persists the new id with an atomic
+    compare-and-swap (``auth_service.claim_home_pocket_id``), not a plain
+    write. If two concurrent first-login calls both insert a pocket, only
+    one wins the swap; the loser deletes its own orphan pocket, adopts the
+    winner's, and returns it with ``created=False``. The home page is
+    therefore single-pocket even under a provision race.
+
+    Built-in widgets are now seeded from the DB (the ``BuiltInWidget``
+    collection), not hardcoded in the frontend. The frontend's
+    ``DEFAULT_MISSION_WIDGETS`` constant is deprecated — the server is the
+    canonical source of which built-in widgets a new home pocket seeds.
+    """
+    from pocketpaw_ee.cloud.auth import service as auth_service
+
+    existing_id = await auth_service.get_home_pocket_id(user_id)
+    if existing_id:
+        try:
+            doc = await _fetch_pocket(existing_id)
+        except NotFound:
+            doc = None
+        if doc is not None and doc.owner == user_id:
+            return await _resolved_wire_dict(doc, user_id), False
+
+    doc = _PocketDoc(
+        workspace=workspace_id,
+        name="Home",
+        description="",
+        type=HOME_POCKET_TYPE,
+        owner=user_id,
+        visibility="private",
+        widgets=[],
+        # SF-2 — which side of the source-gate flip this pocket is born on.
+        source_gated=_source_gated_at_create(),
+    )
+    await doc.insert()
+
+    # Seed the canonical built-in widgets from the DB. A failed seed does
+    # NOT break pocket creation — the home pocket exists with an empty
+    # widgets list, and the client's ensureIntentWidget guarantee handles
+    # the render-time fallback. Seed BEFORE the CAS so the error path is
+    # identical — the pocket is already inserted either way.
+    await _seed_home_pocket_widgets(doc)
+
+    # Compare-and-swap the new id onto the user. ``expected`` is whatever we
+    # read above — None for a genuine first provision, the stale id when
+    # re-provisioning. If the swap fails another writer beat us here.
+    claimed = await auth_service.claim_home_pocket_id(user_id, str(doc.id), expected=existing_id)
+    if not claimed:
+        winner_id = await auth_service.get_home_pocket_id(user_id)
+        if winner_id and winner_id != str(doc.id):
+            try:
+                winner = await _fetch_pocket(winner_id)
+            except NotFound:
+                winner = None
+            if winner is not None and winner.owner == user_id:
+                # Adopt the winner's pocket and drop our orphan.
+                await doc.delete()
+                return await _resolved_wire_dict(winner, user_id), False
+        # The winner's pocket couldn't be resolved (deleted in the race
+        # window). Keep our own pocket rather than orphan the user — but it
+        # is not the id of record, so report created=True and move on.
+
+    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    # Re-fetch the doc after CAS + seed so the wire dict reflects the
+    # seeded widgets.
+    doc = await _fetch_pocket(str(doc.id))
+    return await _resolved_wire_dict(doc, user_id), True
+
+
+async def list_builtin_widgets() -> list[dict[str, Any]]:
+    """Return every ENABLED built-in widget definition as a flat dict list.
+
+    The frontend's AddWidgetPicker "Built-in" section calls
+    ``GET /pockets/builtin-widgets`` to populate its rail; this service
+    function backs that endpoint. Returns only enabled widgets sorted by
+    ``sort_order`` ascending, then by name.
+
+    Also used by ``ensure_home_pocket`` as the seed list for a brand-new
+    home pocket. Every reader receives the same canonical shape so the
+    wire stays consistent.
+
+    Seeds the canonical built-in widget rows on first call — for existing
+    users whose home pocket was provisioned before this feature landed,
+    the ``BuiltInWidget`` collection is empty until this endpoint (or the
+    next ``ensure_home_pocket``) touches it.
+
+    A failed read (network / collection missing) returns an empty list
+    so the frontend's picker degrades to an empty "Built-in" section
+    rather than erroring — the user can still pin from their pockets.
+    """
+    try:
+        # Ensure the canonical rows exist before querying. Idempotent —
+        # a no-op when the collection is already seeded. This covers the
+        # gap for existing users whose home pocket was provisioned before
+        # this feature landed (their `ensure_home_pocket` returned
+        # `created=False` and never ran the seed).
+        await _ensure_builtin_widgets_seeded()
+
+        from pocketpaw_ee.cloud.models.builtin_widget import BuiltInWidget as _BuiltInDoc
+
+        docs = (
+            await _BuiltInDoc.find(
+                {"enabled": True},
+            )
+            .sort(("sort_order", 1), ("name", 1))
+            .to_list()
+        )
+
+        return [
+            {
+                "slug": d.slug,
+                "name": d.name,
+                "type": d.widget_type,
+                "icon": d.icon,
+                "color": d.color,
+                "pocketName": d.pocket_name,
+                "position": {
+                    "row": d.position.row,
+                    "col": d.position.col,
+                    "w": d.position.w,
+                    "h": d.position.h,
+                },
+                "sortOrder": d.sort_order,
+            }
+            for d in docs
+        ]
+    except Exception:
+        logger.warning(
+            "list_builtin_widgets: failed to read built-in widget defs; returning empty list",
+            exc_info=True,
+        )
+        return []
+
+
+async def list_pockets(
+    workspace_id: str,
+    user_id: str,
+    *,
+    project_id: str | None = None,
+    exclude_pocket_ids: set[str] | None = None,
+) -> list[dict]:
+    """List pockets visible to the user (owned, team member, shared_with,
+    or workspace-visible).
+
+    Each returned pocket has its rippleSpec ``$source`` markers resolved
+    against ``user_id``'s context — the desktop client renders the canvas
+    directly from this list response, so unresolved markers would surface
+    as empty widgets. Resolution per pocket is independent; sources that
+    fail fall back to raw markers individually (see ``_resolved_wire_dict``).
+
+    ``project_id`` filter: when provided, narrows the result to pockets
+    whose ``project_id`` matches. Pass an empty string to filter for
+    "no project assigned" — that's the Mission Control "Unassigned"
+    bucket. Kept as a kwarg so existing callers don't change.
+
+    ``exclude_pocket_ids`` filter: when provided, drops pockets whose id is
+    in the set via ``{"_id": {"$nin": [...]}}``. The /pockets gallery passes
+    the ids of pockets already published as Sites (they show under /sites,
+    not in the pocket gallery). The ids arrive as STRINGS (the wire form), but
+    Beanie persists ``_id`` as an ``ObjectId`` (the ``Pocket.id: str`` annotation
+    is overridden by the Document base), so each id is cast to ``PydanticObjectId``
+    before the ``$nin`` — a string ``$nin`` would silently match nothing and
+    leak every site back into the gallery. Malformed ids are skipped (they can't
+    match any stored ``_id`` anyway). A ``None`` / empty set is a no-op so every
+    other caller (mission control, planners, kb, surface) is unchanged.
+
+    Callers that need only ids and names use ``visible_pocket_refs``, which
+    applies the same filter without the spec resolution this function pays.
+    """
+    query = _visible_pockets_query(workspace_id, user_id, project_id=project_id)
+    if exclude_pocket_ids:
+        # _id is stored as an ObjectId — cast the wire-string ids. Skip any
+        # malformed id rather than raise: it can't match a stored _id anyway.
+        oids: list[PydanticObjectId] = []
+        for pid in exclude_pocket_ids:
+            try:
+                oids.append(PydanticObjectId(pid))
+            except (InvalidId, TypeError, ValueError):
+                continue
+        if oids:
+            query["_id"] = {"$nin": oids}
+    # ``source`` is EXCLUDED from the read. It is the svelte track's content
+    # envelope: the full text of every file in the site, which for a real
+    # generated site runs to hundreds of kilobytes on a single pocket. A
+    # gallery of a hundred pockets was pulling all of it across the wire and
+    # through pydantic on one event loop, to render cards showing a name and
+    # an icon.
+    #
+    # Nothing reads it from THIS response. Every in-tree caller of
+    # ``list_pockets`` uses ``_id``, ``name`` and the widget count
+    # (mission_control, kb, the pockets surface handler), and the desktop
+    # gallery renders cards plus the canvas from ``rippleSpec`` - which is why
+    # rippleSpec and widgets are NOT dropped, despite being the same kind of
+    # weight. The single-pocket ``get`` is unprojected and is where the site
+    # generator and every other source consumer reads it.
+    #
+    # The key stays on the wire as ``None`` (the model default), so a consumer
+    # that looks for it sees a pocket with no source rather than a KeyError.
+    # If one ever needs the real value in a LIST, that is a paginated endpoint,
+    # not a wider projection here.
+    #
+    # ``get_pymongo_collection``, NOT ``get_motor_collection`` - the latter is
+    # beanie 1.x and this is on 2.1.0. Same trap documented at
+    # _resolve_pocket_id_tail below and in ripple_sources.
+    #
+    # Re-validating through the Beanie model (rather than reading raw BSON as
+    # the projected helpers do) is what keeps every OTHER field's default
+    # applying: a document written before ``engine`` existed still reads back
+    # ``"ripple"``, exactly as an unprojected find gives it.
+    cursor = _PocketDoc.get_pymongo_collection().find(query, {"source": 0})
+    docs = [_PocketDoc.model_validate(row) async for row in cursor]
+    # Resolve concurrently. Each _resolved_wire_dict awaits its own spec
+    # resolution and a team-id lookup, so the old list comprehension paid
+    # every pocket's round trips end to end, one after another — N sequential
+    # awaits for a list that renders all at once. gather keeps the ordering
+    # (results come back positionally) while overlapping the waits.
+    # SF-2 — resolve the source entitlement for the whole page in ONE batch: one
+    # workspace resolve and one Site query, never one per card. Only pockets the
+    # gate can reach are asked about (born gated, or every pocket once the
+    # retroactive switch is on), and nothing is asked while the gate is off.
+    from pocketpaw.config import get_settings
+
+    gate = get_settings()
+    in_scope = (
+        [
+            str(d.id)
+            for d in docs
+            if getattr(d, "source_gated", False) or gate.sites_source_gate_retroactive
+        ]
+        if gate.sites_source_gate_enabled
+        else []
+    )
+    source_entitled = await _source_entitled_by_pocket(workspace_id, in_scope) if in_scope else {}
+    # One ``$source`` memo for the whole page: a ``workspace.pockets`` or
+    # ``workspace.members`` marker repeated across N specs is one read, not N
+    # (each of those reads scans the workspace, so per-pocket it was O(N^2)).
+    # And every pocket's team ids resolve in ONE user query instead of one each.
+    resolve_memo: dict = {}
+    team_ids = sorted(
+        {
+            uid
+            for d in docs
+            if d.team and isinstance(d.team[0], str)
+            for uid in d.team
+            if isinstance(uid, str)
+        }
+    )
+    team_users = await _resolve_user_ids(team_ids)
+    return list(
+        await asyncio.gather(
+            *(
+                _resolved_wire_dict(
+                    d,
+                    user_id,
+                    source_entitled=source_entitled.get(str(d.id)),
+                    resolve_memo=resolve_memo,
+                    team_users=team_users,
+                )
+                for d in docs
+            )
+        )
+    )
+
+
+def _visible_pockets_query(
+    workspace_id: str, user_id: str, *, project_id: str | None = None
+) -> dict:
+    """The read-visibility filter for pocket LISTS: owner, team member,
+    ``shared_with``, or workspace-visible, anchored on ``workspace``.
+
+    This is the tenancy boundary for every list read, so ``list_pockets`` and
+    ``visible_pocket_refs`` both build their query here rather than each keeping
+    a copy. ``project_id`` narrows it; an empty string means "no project
+    assigned".
+    """
+    query: dict = {
+        "workspace": workspace_id,
+        "$or": [
+            {"owner": user_id},
+            {"team": user_id},
+            {"shared_with": user_id},
+            {"visibility": "workspace"},
+        ],
+    }
+    if project_id is not None:
+        # Empty string is intentional → "no project assigned".
+        query["project_id"] = project_id or None
+    return query
+
+
+async def visible_pocket_refs(
+    workspace_id: str, user_id: str, *, project_id: str | None = None
+) -> list[dict]:
+    """The pockets ``list_pockets`` would return, as small refs.
+
+    ``{_id, name, type, widget_count, agent_count}`` per pocket, in the same
+    order, from ONE projected query and no ``$source`` resolution. For callers
+    that need ids and names (mission control's visibility set and name map, the
+    kb scope list, the pockets surface preamble) and were paying for a fully
+    resolved gallery to read them.
+
+    Visibility is exactly ``list_pockets``' filter (``_visible_pockets_query``).
+    Keys mirror the wire dict (``_id``, not ``id``) so callers swap in without
+    re-keying. Raw BSON, so the model defaults are substituted by hand
+    (models/pocket.py: type="custom").
+    """
+    cursor = _PocketDoc.get_pymongo_collection().find(
+        _visible_pockets_query(workspace_id, user_id, project_id=project_id),
+        # ``widgets._id`` keeps one tiny entry per widget, enough to count them
+        # without pulling each widget's spec.
+        {"_id": 1, "name": 1, "type": 1, "widgets._id": 1, "agents": 1},
+    )
+    return [
+        {
+            "_id": str(row["_id"]),
+            "name": row.get("name", ""),
+            "type": row.get("type") or "custom",
+            "widget_count": len(row.get("widgets") or []),
+            "agent_count": len(row.get("agents") or []),
+        }
+        async for row in cursor
+    ]
+
+
+async def patterns_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[str, str | None]:
+    """Map each given ``pocket_id`` to its ``Pocket.pattern`` in ONE query.
+
+    The sites service surfaces a published site's authoring ``pattern``
+    ("dynamic" | "landing" | ...) on its list/status responses (DS-1a), but the
+    pattern lives on the source Pocket, not the Site. This is the cross-entity
+    read sites uses WITHOUT importing the Pocket Beanie model — the Pocket read
+    stays here (the sole owner of Pocket reads, entity isolation), the same way
+    ``sites.service.site_pocket_ids`` keeps the Site read on the sites side.
+
+    ONE ``$in`` query (no N+1) projected to ``_id`` + ``pattern`` only, so a
+    long gallery resolves all its patterns in a single round-trip. Tenant-scoped
+    on ``workspace``: a pocket in another workspace is not returned even if its
+    id is passed. The result is keyed by the wire-string ``pocket_id``; a pocket
+    whose ``pattern`` is unset reads ``None`` (the caller defaults it to ""),
+    and an id with no matching pocket (deleted / cross-tenant / malformed) is
+    simply absent from the map (the caller treats absent as "" too).
+
+    Malformed ids that cannot cast to an ObjectId are skipped — they can't match
+    a stored ``_id`` anyway. An empty list is a no-op (empty map)."""
+    if not pocket_ids:
+        return {}
+    oids: list[PydanticObjectId] = []
+    for pid in pocket_ids:
+        try:
+            oids.append(PydanticObjectId(pid))
+        except (InvalidId, TypeError, ValueError):
+            continue
+    if not oids:
+        return {}
+    # Project to only the two fields we need — a pattern lookup must not pull each
+    # full (potentially large rippleSpec-carrying) doc into memory. Raw pymongo
+    # projection avoids constructing a full Beanie model per pocket; ``find`` over
+    # ``get_pymongo_collection`` is the same accessor the other reads here use.
+    collection = _PocketDoc.get_pymongo_collection()
+    rows = await collection.find(
+        {"workspace": workspace_id, "_id": {"$in": oids}},
+        {"_id": 1, "pattern": 1},
+    ).to_list(length=None)
+    return {str(row["_id"]): row.get("pattern") for row in rows}
+
+
+async def engines_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[str, str | None]:
+    """Map each given ``pocket_id`` to its ``Pocket.engine`` in ONE query.
+
+    The sibling of ``patterns_for_pockets`` (DS-1a): the sites service surfaces a
+    published site's authoring ``engine`` ("svelte" | "ripple") on its list/status
+    responses (SR-9) so the gallery can badge each card's engine WITHOUT a second
+    per-site fetch. The engine lives on the source Pocket, not the Site, so this is
+    the cross-entity read — the Pocket read stays here (the sole owner of Pocket
+    reads, entity isolation), exactly like the pattern resolution.
+
+    ONE ``$in`` query projected to ``_id`` + ``engine`` only, tenant-scoped on
+    ``workspace`` (a pocket in another workspace is not returned even if its id is
+    passed). Keyed by the wire-string ``pocket_id``; a doc that predates the
+    ``engine`` field is absent from its projection and reads ``None`` (the caller
+    defaults it to ""), and an id with no matching pocket (deleted / cross-tenant /
+    malformed) is simply absent from the map. Malformed ids that cannot cast to an
+    ObjectId are skipped; an empty list is a no-op (empty map)."""
+    if not pocket_ids:
+        return {}
+    oids: list[PydanticObjectId] = []
+    for pid in pocket_ids:
+        try:
+            oids.append(PydanticObjectId(pid))
+        except (InvalidId, TypeError, ValueError):
+            continue
+    if not oids:
+        return {}
+    collection = _PocketDoc.get_pymongo_collection()
+    rows = await collection.find(
+        {"workspace": workspace_id, "_id": {"$in": oids}},
+        {"_id": 1, "engine": 1},
+    ).to_list(length=None)
+    return {str(row["_id"]): row.get("engine") for row in rows}
+
+
+async def site_database_inputs_for_pockets(
+    workspace_id: str, pocket_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Map each given ``pocket_id`` to the pocket fields that say whether its site owns
+    a D1 database, in ONE query: ``{pattern, ripple_spec, site_meta}``, the keyword
+    inputs of ``sites.engines.site_has_database``.
+
+    The sibling of ``engines_for_pockets`` for the sites list/status capabilities.
+    Projected to ``pattern``, the three rippleSpec keys that make a spec dynamic
+    (``sources`` / ``actions`` / ``auth``) and ``site_meta.project.recipes``, so a
+    gallery never pulls a full rippleSpec or source map. Tenant-scoped on
+    ``workspace``; malformed and missing ids are absent from the map."""
+    if not pocket_ids:
+        return {}
+    oids: list[PydanticObjectId] = []
+    for pid in pocket_ids:
+        try:
+            oids.append(PydanticObjectId(pid))
+        except (InvalidId, TypeError, ValueError):
+            continue
+    if not oids:
+        return {}
+    collection = _PocketDoc.get_pymongo_collection()
+    rows = await collection.find(
+        {"workspace": workspace_id, "_id": {"$in": oids}},
+        {
+            "_id": 1,
+            "pattern": 1,
+            "rippleSpec.sources": 1,
+            "rippleSpec.actions": 1,
+            "rippleSpec.auth": 1,
+            "site_meta.project.recipes": 1,
+        },
+    ).to_list(length=None)
+    return {
+        str(row["_id"]): {
+            "pattern": row.get("pattern"),
+            "ripple_spec": row.get("rippleSpec"),
+            "site_meta": row.get("site_meta"),
+        }
+        for row in rows
+    }
+
+
+async def site_render_inputs(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
+    """The fields that decide a site pocket's render, tenant-scoped, in wire spelling.
+
+    PP-2: ``/sites/by-pocket/{id}/status`` reports whether the CURRENT source has been
+    verified, which means hashing the current render inputs the same way the verify
+    pipeline does — without a user id (the status read has only the workspace). ONE
+    projected ``find_one`` scoped on ``workspace`` (a pocket in another workspace reads
+    as absent), returning ``{engine, source, rippleSpec, name, keepsClientBundle}`` —
+    the keys ``get`` puts on the wire — or ``None``. The Pocket read stays here, the
+    sole owner of Pocket reads.
+    """
+    try:
+        oid = PydanticObjectId(pocket_id)
+    except (InvalidId, TypeError, ValueError):
+        return None
+    collection = _PocketDoc.get_pymongo_collection()
+    row = await collection.find_one(
+        {"workspace": workspace_id, "_id": oid},
+        {"engine": 1, "source": 1, "rippleSpec": 1, "name": 1, "keeps_client_bundle": 1},
+    )
+    if row is None:
+        return None
+    return {
+        "engine": row.get("engine"),
+        "source": row.get("source"),
+        "rippleSpec": row.get("rippleSpec"),
+        "name": row.get("name") or "",
+        "keepsClientBundle": row.get("keeps_client_bundle"),
+    }
+
+
+async def _fetch_readable(pocket_id: str, user_id: str) -> _PocketDoc:
+    """Fetch a pocket and assert the caller may READ it: owner, team member,
+    shared_with, or workspace-visible. Raises NotFound / Forbidden.
+
+    Shared by ``get`` and ``get_for_wire`` so the two can never drift into
+    disagreeing about who may read a pocket — the only thing that separates them
+    is whether ``source`` survives serialization.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_read_access(doc, user_id)
+    return doc
+
+
+def _check_read_access(doc: _PocketDoc, user_id: str) -> None:
+    """The read rule behind ``_fetch_readable`` and ``duplicate_pocket``: owner,
+    team member, ``shared_with``, or any non-private visibility. Raises Forbidden."""
+    pocket = _pocket_to_domain(doc)
+    if (
+        pocket.owner != user_id
+        and user_id not in pocket.team
+        and user_id not in pocket.shared_with
+        and pocket.visibility == "private"
+    ):
+        raise Forbidden("pocket.access_denied", "You do not have access to this pocket")
+
+
+async def can_read(pocket_id: str, user_id: str) -> bool:
+    """Boolean form of ``_fetch_readable``: may ``user_id`` read the pocket?
+
+    Same rule, not a copy of it: owner, team member, ``shared_with``, or any
+    non-private visibility. An unknown or malformed pocket id is ``False``
+    rather than a raise, so a caller gating a secondary read (the pocket's
+    session list and transcripts) can fall back quietly.
+
+    Visibility alone does not scope by tenant. A caller must also check that the
+    user belongs to the pocket's workspace, as the sessions service does.
+    """
+    try:
+        await _fetch_readable(pocket_id, user_id)
+    except (NotFound, Forbidden):
+        return False
+    return True
+
+
+async def get(pocket_id: str, user_id: str) -> dict:
+    """Get a single pocket — the INTERNAL read, with ``source`` always present.
+
+    rippleSpec $source markers are resolved on read against the calling user's
+    workspace context.
+
+    SF-2 DELIBERATELY DOES NOT REDACT HERE, and that is the design decision worth
+    understanding before moving the gate. This function is the pipeline's reader:
+    publish, the generator, the dev server, the draft-markup renderer, the kb
+    ingester, the Preview tab and every ``set_*_source_file`` edit tool reach a
+    pocket's source map through it — 33 callers, of which one is a route that
+    returns the dict. Gating it would not hide a site from anyone; it would stop
+    the site being BUILT, for precisely the cohort the gate exists to cover.
+
+    So the split is by AUDIENCE, not by function: the one route that hands this
+    dict to a browser calls ``get_for_wire`` instead, and every OTHER wire-facing
+    read (the list, the write responses, the WebSocket broadcast) is built by
+    ``_resolved_wire_dict``, which gates by default. If you are adding a route
+    that returns a pocket, you want ``get_for_wire``.
+    """
+    doc = await _fetch_readable(pocket_id, user_id)
+    return await _unredacted_wire_dict(doc, user_id)
+
+
+async def get_for_wire(pocket_id: str, user_id: str) -> dict:
+    """``get``, but ``source`` is withheld when SF-2's gate applies.
+
+    Identical tenancy — same ``_fetch_readable``, same NotFound / Forbidden, so
+    the two can never drift on WHO may read a pocket. The only difference is
+    whether the site's authored source survives serialization.
+
+    FOR A ROUTE. ``GET /pockets/{pocket_id}`` is its caller; any new endpoint
+    that returns a pocket wire dict to a client belongs here too. Reach for
+    ``get`` only when the caller is the build / publish / edit pipeline and the
+    real file map is the point.
+    """
+    doc = await _fetch_readable(pocket_id, user_id)
+    return await _resolved_wire_dict(doc, user_id)
+
+
+#: The authored fields that make up a site. A duplicate, and later a template
+#: "use", copies exactly these; everything else (sharing, team, agents, tools,
+#: connectors, the Site deployment row) belongs to the original. ``site_meta`` is
+#: carried only through :func:`site_meta_snapshot`.
+SITE_SNAPSHOT_FIELDS = (
+    "engine",
+    "pattern",
+    "rippleSpec",
+    "source",
+    "keeps_client_bundle",
+    "site_meta",
+)
+
+
+def site_meta_snapshot(site_meta: Any) -> dict[str, Any] | None:
+    """The part of a pocket's ``site_meta`` a copy may carry: ``project.template``,
+    ``project.framework`` and ``project.recipes`` (what the repo was started from and
+    which recipes are applied). Nothing else crosses, so a future site-specific id or
+    secret stored under ``site_meta`` never leaks into a duplicate or a template.
+    ``None`` when there is no project part (every non-project pocket)."""
+    project = site_meta.get("project") if isinstance(site_meta, dict) else None
+    if not isinstance(project, dict):
+        return None
+    template = project.get("template")
+    framework = project.get("framework")
+    recipes = project.get("recipes")
+    return {
+        "project": {
+            "template": template if isinstance(template, str) else None,
+            "framework": framework if isinstance(framework, str) else None,
+            "recipes": [r for r in recipes if isinstance(r, str)]
+            if isinstance(recipes, list)
+            else [],
+        }
+    }
+
+
+async def copy_site_snapshot(
+    snapshot: dict,
+    *,
+    workspace_id: str,
+    owner: str,
+    name: str,
+    template_id: str | None = None,
+    template_version: int | None = None,
+    source_gated: bool | None = None,
+    visibility: str = "private",
+) -> dict:
+    """Create a new site pocket owned by ``owner`` from a ``SITE_SNAPSHOT_FIELDS`` dict.
+
+    No authorization happens here: the caller has already decided ``owner`` may
+    have this content, and picks ``visibility`` (default ``"private"``, the safe
+    choice for a caller that forgets).
+
+    The snapshot is deep-copied, so the new pocket shares no mutable state with
+    whatever it came from. It is written as-is: no ripple normalization or catalog
+    gate, because it is a copy of content that was already accepted once. A fresh
+    DRAFT Site doc is minted so the copy lists in the gallery; nothing of the
+    source's Site (slug, domains, D1, deploy) is copied, and nothing is published.
+
+    ``source_gated`` defaults to the create-time stamp; a caller may pass its own
+    value (``duplicate_pocket`` passes the source's stamp OR the create-time one).
+
+    Gated first on the Sites plan (``require_sites_plan``, Forbidden
+    ``plan.feature_denied``, like every other site-create path), then the pocket
+    cap (``PocketLimitError``, like ``create``); both refuse before any write.
+    The pocket and its draft Site land together or not at all: if the Site mint
+    fails the new pocket is deleted and the error re-raised, and
+    ``PocketCreated`` is emitted only once both exist.
+    """
+    # Function-local import: sites.service reads pockets (cycle).
+    from pocketpaw_ee.sites import service as sites_service
+
+    await sites_service.require_sites_plan(workspace_id)
+    exceeded, _count, limit = await _pocket_cap_exceeded(workspace_id)
+    if exceeded:
+        raise PocketLimitError(limit)  # type: ignore[arg-type]  # limit is int when exceeded
+
+    snap = copy.deepcopy({key: snapshot.get(key) for key in SITE_SNAPSHOT_FIELDS})
+    doc = _PocketDoc(
+        workspace=workspace_id,
+        name=name,
+        type="site",
+        owner=owner,
+        visibility=visibility,
+        engine=snap["engine"] or "ripple",
+        pattern=snap["pattern"],
+        rippleSpec=snap["rippleSpec"],
+        source=snap["source"],
+        keeps_client_bundle=snap["keeps_client_bundle"],
+        # Re-filtered on write too: a template saved before ``site_meta`` was a
+        # snapshot field reads None here, and a stored snapshot is never trusted to
+        # hold only the project part.
+        site_meta=site_meta_snapshot(snap["site_meta"]),
+        template_id=template_id,
+        template_version=template_version,
+        # SF-2 — the caller's cohort when given, else the create-time stamp.
+        source_gated=_source_gated_at_create() if source_gated is None else source_gated,
+        # Same as ``create``: a new pocket starts with no connectors allowed.
+        allowed_connectors=[],
+    )
+    await doc.insert()
+    # The /sites gallery lists Site docs, not pockets, so the copy needs its own
+    # DRAFT Site (no build, no deploy) to be visible, the same as every other
+    # create path. A copy with no Site would be an orphan nobody can find, so the
+    # cleanup catches BaseException: a cancelled request must not leave one either.
+    try:
+        await sites_service.create_draft_site(
+            workspace_id=workspace_id, user_id=owner, pocket_id=str(doc.id), name=name
+        )
+    except BaseException:
+        await doc.delete()
+        raise
+    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, owner)
+
+
+async def read_site_snapshot(workspace_id: str, user_id: str, pocket_id: str) -> dict:
+    """Read a site pocket's ``SITE_SNAPSHOT_FIELDS`` for a copy, after authorizing it.
+
+    The one read path behind ``duplicate_pocket`` and saving a site as a template.
+    Returns the snapshot fields (``site_meta`` reduced to its project part by
+    ``site_meta_snapshot``) plus the source's raw ``source_gated`` stamp,
+    ``name``, ``visibility`` and ``template_id`` (the site template the pocket
+    was made from, or ``None``; saving a template records it as provenance).
+    The values are the document's own, not copies; ``copy_site_snapshot``
+    deep-copies on write.
+
+    A pocket outside ``workspace_id`` (or a malformed id) is NotFound, never
+    Forbidden, so this is not an existence oracle across tenants; a private pocket
+    the caller cannot read is Forbidden, as on ``get``; a non-site pocket is a
+    ValidationError (``pocket.not_a_site``).
+    """
+    try:
+        oid = PydanticObjectId(pocket_id)
+    except (InvalidId, TypeError, ValueError):
+        raise NotFound("pocket", pocket_id) from None
+    source = await _PocketDoc.find_one(_PocketDoc.id == oid, _PocketDoc.workspace == workspace_id)
+    if source is None:
+        raise NotFound("pocket", pocket_id)
+    _check_read_access(source, user_id)
+    if source.type != "site":
+        raise ValidationError("pocket.not_a_site", "Only site pockets can be copied")
+
+    return {
+        "engine": source.engine,
+        "pattern": source.pattern,
+        "rippleSpec": source.rippleSpec,
+        "source": source.source,
+        "keeps_client_bundle": source.keeps_client_bundle,
+        "site_meta": site_meta_snapshot(source.site_meta),
+        "source_gated": source.source_gated,
+        "name": source.name,
+        "visibility": source.visibility,
+        "template_id": source.template_id,
+    }
+
+
+async def duplicate_pocket(
+    workspace_id: str, user_id: str, pocket_id: str, body: DuplicatePocketRequest
+) -> dict:
+    """Copy a site pocket the caller can read into a new site pocket they own.
+
+    Copies only ``SITE_SNAPSHOT_FIELDS``; the original is untouched. The copy is
+    never less source-gated than a brand-new pocket: a gated source gives a gated
+    copy, and an SF-2-exempt source (``source_gated=False``, kept so old pockets
+    don't lose source they already had) gives a copy stamped like any new pocket.
+
+    Reads and authorizes the source through ``read_site_snapshot``: another
+    tenant's pocket is NotFound, an unreadable private one Forbidden, a non-site
+    one a ValidationError.
+
+    A successful copy writes one ``pocket.duplicated`` workspace audit row (actor,
+    new pocket id, source pocket id and visibility). ``audit_service.record`` is
+    best-effort and never raises, so an audit outage cannot fail the duplicate; a
+    refused duplicate writes nothing.
+    """
+    body = DuplicatePocketRequest.model_validate(body)
+    source = await read_site_snapshot(workspace_id, user_id, pocket_id)
+    wire = await copy_site_snapshot(
+        source,
+        workspace_id=workspace_id,
+        owner=user_id,
+        # ``name`` is capped at 100 like the request body; trim the source name to fit.
+        name=body.name or f"{source['name'][:93]} (copy)",
+        source_gated=source["source_gated"] or _source_gated_at_create(),
+        # A private site stays private; anything else lands workspace-visible,
+        # so duplicating a public site never publishes a second one.
+        visibility="private" if source["visibility"] == "private" else "workspace",
+    )
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    await audit_service.record(
+        workspace_id=workspace_id,
+        actor_id=user_id,
+        action="pocket.duplicated",
+        target_type="pocket",
+        target_id=wire["_id"],
+        metadata={"source_pocket_id": pocket_id, "source_visibility": source["visibility"]},
+    )
+    return wire
+
+
+async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dict:
+    """Update pocket fields. Edit-access required; visibility changes require ownership."""
+    doc = await _fetch_pocket(pocket_id)
+    pocket = _pocket_to_domain(doc)
+
+    _check_domain_edit_access(pocket, user_id)
+    if body.visibility is not None:
+        _check_domain_owner(pocket, user_id)
+
+    normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
+    # Wave 3e — recompile-on-update when ``template_slug`` is supplied in
+    # the body (different OR same slug — same body slug forces a
+    # refresh against the on-disk template). The compile output merges
+    # into either the caller-supplied rippleSpec or the existing one.
+    # Same tolerance posture as ``create``: a stale slug leaves the
+    # rippleSpec untouched and logs a warning.
+    if body.template_slug is not None:
+        from pocketpaw.bundled_templates import load_template
+
+        loaded = load_template(body.template_slug, strict=False)
+        compiled = _compile_template_to_runtime_dict(loaded)
+        if compiled is not None:
+            merge_base = normalized_spec if normalized_spec is not None else doc.rippleSpec
+            normalized_spec = _merge_compile_into_ripple_spec(
+                merge_base,
+                compiled,
+                template_ripple_spec=loaded.get("ripple_spec") if loaded else None,
+            )
+
+    if normalized_spec:
+        validate_ripple_spec_logged(
+            normalized_spec, pocket_id=str(doc.id), workspace_id=doc.workspace
+        )
+        # Human/import path — catalog drift is logged for triage, not blocked.
+        await _gate_catalog(
+            normalized_spec,
+            strict=False,
+            actor=user_id,
+            workspace_id=doc.workspace,
+            pocket_id=str(doc.id),
+        )
+
+    if body.name is not None:
+        doc.name = body.name
+    if body.description is not None:
+        doc.description = body.description
+    if body.type is not None:
+        doc.type = body.type
+    if body.icon is not None:
+        doc.icon = body.icon
+    if body.color is not None:
+        doc.color = body.color
+    if body.visibility is not None:
+        doc.visibility = body.visibility
+    if normalized_spec is not None:
+        # Clobber-fix (2026-06-13 bug): a partial ``ripple_spec`` body that
+        # OMITS instance-owned regions (state / selections) must NOT wipe them.
+        # Three branches, in priority order:
+        #   1. ``reset_state`` — explicit caller intent to clear instance state.
+        #      Wholesale write (the legacy behaviour, now opt-in).
+        #   2. ``template_slug`` — the recompile path already ran ownership-aware
+        #      ``_merge_compile_into_ripple_spec`` against ``doc.rippleSpec``,
+        #      so the merged result is authoritative — write it wholesale.
+        #   3. default (user / frontend partial PATCH) — layer-safe merge that
+        #      preserves the existing instance layer for any region the incoming
+        #      spec omits (and, symmetrically, the template layer on a
+        #      state-only write).
+        if body.reset_state or body.template_slug is not None:
+            doc.rippleSpec = normalized_spec
+        else:
+            doc.rippleSpec = _layer_safe_update_spec(doc.rippleSpec, normalized_spec)
+    if body.template_slug is not None:
+        doc.template_slug = body.template_slug
+    if body.project_id is not None:
+        # Empty string is the "unassign" signal; non-empty must point at a
+        # real project in the same workspace.
+        if body.project_id:
+            await _ensure_project_in_workspace(doc.workspace, body.project_id)
+            doc.project_id = body.project_id
+        else:
+            doc.project_id = None
+    # Per-entity surface-profile override (the auto-authoring write path).
+    # ``None`` is BOTH the field default and the "clear" signal, so the
+    # absent-vs-explicit-null distinction rides on ``model_fields_set``
+    # (the ``exclude_unset`` convention) — NOT on ``is not None``:
+    #   present + non-null → set/replace; explicit null → clear; absent →
+    #   leave unchanged (no clobber on an unrelated edit). Assigns the
+    #   ``PocketSurfaceProfile`` sub-model (or ``None``) onto the doc field
+    #   exactly as the create path does — same shape, same normalization.
+    if "surface_profile" in body.model_fields_set:
+        doc.surface_profile = body.surface_profile
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def set_svelte_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    component_path: str,
+    new_source: str,
+    create: bool = False,
+) -> tuple[dict, str | None]:
+    """Write ONE file in a svelte-engine pocket's ``source`` map and persist it.
+
+    The svelte analog of editing a single component of a Paw Site: ``source`` is
+    a ``{relative_path: file_contents}`` map (the hand-written SvelteKit files),
+    and this replaces the contents at ``component_path`` with ``new_source``. The
+    Pocket Beanie write stays inside the pockets service (entity isolation — the
+    sites service orchestrates the republish but never touches the Pocket model).
+
+    Access mirrors ``update``: explicit ``(pocket_id, user_id)`` with
+    ``_check_domain_edit_access`` (owner / shared_with / workspace-visible). A
+    missing pocket raises ``NotFound``; a non-svelte pocket raises
+    ``ValidationError`` (422) rather than a write against the wrong content model.
+
+    ``create`` mirrors the react peer ``set_react_source_file``, and arrived for the
+    same reason: "add an about page" needs a NEW file (two, on this track — a
+    SvelteKit route is ``+page.svelte`` plus the ``+page.ts`` carrying its prerender
+    flag) plus an edit to a nav component, and with an existence-only contract the
+    agent could not add a page at all. It FLIPS the path check rather than relaxing
+    it, so exactly one of the two mistakes is impossible in each mode:
+
+      * ``create=False`` (default) — ``component_path`` MUST already exist, else
+        ``NotFound`` (404). A typo'd path is never a silent create.
+      * ``create=True`` — ``component_path`` must NOT already exist, else
+        ``ValidationError`` (422). Silently overwriting a real component the agent
+        thought it was adding is worse than a rejected call it can retry.
+
+    Returns ``(resolved_wire_dict, previous_source)`` — the wire dict every other
+    write returns, plus the file's PRIOR contents so the caller can roll the edit
+    back if the downstream republish fails its smoke gate (the sites service does
+    exactly this so a broken edit never leaves stale source on the pocket).
+    ``previous_source`` is ``None`` on a create, where there is no prior version to
+    restore: the caller rolls THAT back by removing the key outright
+    (:func:`remove_svelte_source_file`), because writing an empty string instead
+    would leave a blank route the build still has to serve.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "svelte" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    if create and component_path in doc.source:
+        raise ValidationError(
+            "pocket.svelte_component_exists",
+            f"`{component_path}` already exists in this site's source map. Edit it "
+            "without `create`, or choose a path that does not exist yet.",
+        )
+    if not create and component_path not in doc.source:
+        raise NotFound("site_component", component_path)
+
+    previous_source = doc.source[component_path] if not create else None
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM).
+    updated = dict(doc.source)
+    updated[component_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-3): a svelte source edit ALSO writes a draft
+    # ArtifactVersion. BP-1 only hooked the rippleSpec write (merge_spec →
+    # _record_pocket_draft_version); svelte edits go through THIS function and
+    # were not versioned. The snapshot is the full svelte ``source`` map (the
+    # version model's ``content`` accepts either a rippleSpec dict OR a svelte
+    # source map). Same best-effort try/except as the rippleSpec hook —
+    # versioning is an additive history layer, never a gate on the edit.
+    await _record_pocket_svelte_draft_version(
+        doc, author=user_id, label=_edit_label(component_path)
+    )
+    return await _resolved_wire_dict(doc, user_id), previous_source
+
+
+async def remove_svelte_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    component_path: str,
+) -> dict:
+    """Drop ONE file from a svelte-engine pocket's ``source`` map and persist it.
+
+    Exists for exactly one caller: the sites service's smoke-gate rollback on a
+    CREATE. An ordinary edit rolls back by writing the prior contents, but a create
+    has no prior contents, and restoring ``""`` would leave the pocket carrying an
+    empty file at a real route — a blank page the next publish still has to serve,
+    which is the failure the rollback exists to prevent rather than a recovery from
+    it. Removing the key returns the map to precisely its pre-create state.
+
+    Access and engine checks mirror :func:`set_svelte_source_file`. A path that is
+    already absent is NOT an error: the rollback must be safe to run against a write
+    that never landed, and raising there would replace a recoverable smoke failure
+    with an unrecoverable one.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "svelte" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    if component_path not in doc.source:
+        return await _resolved_wire_dict(doc, user_id)
+
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM) — same reason the
+    # sibling writer rebuilds the map rather than popping in place.
+    updated = dict(doc.source)
+    del updated[component_path]
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(
+        doc, author=user_id, label=_edit_label(component_path)
+    )
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def set_react_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    component_path: str,
+    new_source: str,
+    create: bool = False,
+) -> dict:
+    """Write ONE file in a react-engine pocket's ``source`` map and persist it.
+
+    The react peer of ``set_svelte_source_file``, and the only place a react
+    ``source`` map is written after create — the Pocket Beanie write stays inside
+    the pockets service (entity isolation: the sites service resolves the edit and
+    orchestrates, but never touches the Pocket model).
+
+    Access mirrors ``update`` / ``set_svelte_source_file``: explicit
+    ``(pocket_id, user_id)`` with ``_check_domain_edit_access`` (owner /
+    shared_with / workspace-visible). A missing pocket raises ``NotFound``.
+
+    ``create`` is the one place this DIVERGES from the svelte peer, and it exists
+    because "add a testimonials section" needs a new component FILE plus an edit to
+    ``src/App.tsx`` — with an existence-only contract the agent could not add a
+    section at all. It flips the path check rather than relaxing it, so exactly one
+    of the two mistakes is impossible in each mode:
+
+      * ``create=False`` (default) — ``component_path`` MUST already exist, else
+        ``NotFound`` (404) on the component. A typo'd path is never a silent create.
+      * ``create=True`` — ``component_path`` must NOT already exist, else
+        ``ValidationError`` (422). Silently overwriting a real component the agent
+        thought it was adding is worse than a rejected call it can retry.
+
+    A non-react pocket (``engine != "react"`` or no ``source`` map) is a
+    ``ValidationError`` (422, ``pocket.not_react_site``) rather than a write against
+    the wrong content model.
+
+    Returns the resolved wire dict every other write returns. Unlike the svelte peer
+    it does NOT also return the file's prior contents: that value exists there only
+    so the caller can roll back a failed republish, and the react edit lane has no
+    republish to fail (``build_runs_async("react")`` is True — a react publish
+    enqueues a Daytona build and returns before any outcome exists). Persisting the
+    draft IS the whole job.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "react" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_react_site",
+            "This pocket is not a react Paw Site — it has no component source map to edit.",
+        )
+    exists = component_path in doc.source
+    if create and exists:
+        raise ValidationError(
+            "pocket.react_component_exists",
+            f"`{component_path}` already exists in this site's source map. Edit it "
+            "without `create` instead of overwriting it.",
+        )
+    if not create and not exists:
+        raise NotFound("site_component", component_path)
+
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM) — same note as
+    # ``set_svelte_source_file``.
+    updated = dict(doc.source)
+    updated[component_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-3): a source-map edit ALSO writes a draft
+    # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
+    # a later publish promotes. The helper is engine-agnostic (it snapshots
+    # ``doc.source`` whatever engine wrote it); same best-effort contract — an
+    # additive history layer, never a gate on the edit.
+    await _record_pocket_svelte_draft_version(
+        doc, author=user_id, label=_edit_label(component_path)
+    )
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def set_html_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    file_path: str,
+    new_source: str,
+    create: bool = False,
+) -> dict:
+    """Write ONE file in an html-engine pocket's ``source`` map and persist it.
+
+    The html peer of ``set_react_source_file``. Until HE-10 the html track had no
+    per-file writer at all: ``set_imported_source`` (below) replaces the WHOLE map
+    and is the crawler's, taking an explicit ``workspace_id`` with no viewer check
+    because it runs in the background off a request. Pointing an agent edit at it
+    would have swapped a site's entire contents to change one headline, and done so
+    without the ``_check_domain_edit_access`` every other authored write runs.
+
+    Access mirrors ``update`` / ``set_react_source_file``: explicit
+    ``(pocket_id, user_id)`` with ``_check_domain_edit_access`` (owner /
+    shared_with / workspace-visible). A missing pocket raises ``NotFound``.
+
+    ``create`` carries the same inverted contract as the react peer, for the same
+    reason — "add an about page" needs a new FILE plus a link from ``index.html``:
+
+      * ``create=False`` (default) — ``file_path`` MUST already exist, else
+        ``NotFound`` (404). A typo'd path is never a silent create.
+      * ``create=True`` — ``file_path`` must NOT already exist, else
+        ``ValidationError`` (422). Silently overwriting a real page is worse than
+        a rejected call the agent can retry.
+
+    A non-html pocket (``engine != "html"`` or no ``source`` map) is a
+    ``ValidationError`` (422, ``pocket.not_html_site``) rather than a write against
+    the wrong content model.
+
+    Returns the resolved wire dict every other write returns. Like the react peer
+    and unlike the svelte one it does NOT return the file's prior contents: that
+    value exists there only so the caller can roll back a failed republish, and
+    this lane has no republish to fail — an html publish runs no build and no
+    smoke gate, so there is no gate to be rejected by. Persisting the draft IS
+    the whole job.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "html" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_html_site",
+            "This pocket is not an html Paw Site — it has no raw source map to edit.",
+        )
+    exists = file_path in doc.source
+    if create and exists:
+        raise ValidationError(
+            "pocket.html_file_exists",
+            f"`{file_path}` already exists in this site's source map. Edit it "
+            "without `create` instead of overwriting it.",
+        )
+    if not create and not exists:
+        raise NotFound("site_component", file_path)
+
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM) — same note as
+    # ``set_svelte_source_file``.
+    updated = dict(doc.source)
+    updated[file_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-3): a source-map edit ALSO writes a draft
+    # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
+    # a later publish promotes. The helper is engine-agnostic despite its name (it
+    # snapshots ``doc.source`` whatever engine wrote it) — the same reuse
+    # ``set_react_source_file`` makes.
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(file_path))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def set_project_source(
+    pocket_id: str,
+    user_id: str,
+    *,
+    writes: dict[str, str] | None = None,
+    deletes: list[str] | None = None,
+    add_recipe: str | None = None,
+    label: str | None = None,
+    guard: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Write and delete files of a ``project`` pocket's source map in ONE save.
+
+    The project engine's only source writer. A project is a whole repo, so one
+    agent step (a recipe, a multi-file edit) touches many files at once and must
+    land as one version, not one per file. Paths arrive already normalized by
+    ``sites.project_tools``; this layer owns access, the engine check, the persist,
+    the event and the draft version, mirroring ``set_html_source_file``.
+
+    ``add_recipe`` appends a recipe id to ``site_meta.project.recipes`` in the same
+    save. A delete of a path that is not there is a ``NotFound`` (nothing saved).
+    ``guard`` sees the source map just read, before anything changes, and refuses
+    the save by raising (``sites.project_tools.check_bases``: a file that moved
+    since the caller read it is a 409). Returns ``{files, bytes, changed}`` for the
+    saved map; a call that changes nothing saves nothing and records no version.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "project" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_project_site",
+            "This pocket is not a project site, so it has no project files to edit.",
+        )
+    if guard is not None:
+        guard(dict(doc.source))
+    updated = dict(doc.source)
+    missing = [path for path in deletes or [] if path not in updated]
+    if missing:
+        raise NotFound("site_file", ", ".join(missing[:10]))
+    for path in deletes or []:
+        del updated[path]
+    for path, contents in (writes or {}).items():
+        updated[path] = contents
+    meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
+    project = dict(meta.get("project") or {})
+    recipes = [r for r in project.get("recipes") or [] if isinstance(r, str)]
+    meta_changed = False
+    if add_recipe and add_recipe not in recipes:
+        project.setdefault("template", None)
+        project.setdefault("framework", None)
+        project["recipes"] = [*recipes, add_recipe]
+        meta["project"] = project
+        meta_changed = True
+    changed = updated != doc.source
+    if changed or meta_changed:
+        # Reassign fresh dicts so Beanie tracks the change (same note as the peers).
+        doc.source = updated
+        if meta_changed:
+            doc.site_meta = meta
+        await doc.save()
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    if changed:
+        await _record_pocket_svelte_draft_version(
+            doc, author=user_id, label=label or "Edited project files"
+        )
+    return {
+        "files": len(updated),
+        "bytes": sum(len(str(v).encode("utf-8")) for v in updated.values()),
+        "changed": changed,
+    }
+
+
+_UPGRADE_LABEL_BEFORE = "Before the upgrade to a static project"
+_UPGRADE_LABEL_AFTER = "Upgraded to a static project"
+_UPGRADE_LABEL_UNDONE = "Undid the upgrade to a static project"
+
+
+async def convert_html_to_project(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+    project: dict[str, Any],
+    upgraded_from: dict[str, Any],
+) -> dict[str, Any]:
+    """Turn an html pocket into a ``project`` pocket in place (the opt-in "Upgrade
+    this site"). ``sites.site_upgrade`` builds the new map and checks it; this layer
+    owns access, the compare-and-set, the undo snapshot, the persist and the event.
+
+    The pocket must still be ``html`` with exactly ``expected_source``, else a 409
+    ``sites.upgrade_conflict`` (an edit landed while the caller was reading). Before
+    anything changes, the old source map is written as its own draft version, and
+    that write is NOT swallowed: an upgrade that cannot be undone does not happen.
+    ``site_meta.upgraded_from`` gets ``upgraded_from`` plus that version's id and
+    number and the old ``site_meta`` (minus any earlier ``upgraded_from``).
+    Returns ``{version_id, version_no}`` of the snapshot."""
+    from pocketpaw_ee.versions import service as versions_service
+
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "html" or doc.source != expected_source:
+        raise ConflictError(
+            "sites.upgrade_conflict",
+            "This site changed while it was being upgraded. Reload it and try again.",
+        )
+    snapshot = await versions_service.write_draft(
+        scope_type="pocket",
+        scope_id=str(doc.id),
+        workspace_id=doc.workspace,
+        content=dict(doc.source),
+        author=user_id,
+        label=_UPGRADE_LABEL_BEFORE,
+    )
+    prior_meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
+    prior_meta.pop("upgraded_from", None)
+    doc.engine = "project"
+    doc.source = dict(source)
+    doc.site_meta = {
+        **prior_meta,
+        "project": dict(project),
+        "upgraded_from": {
+            **upgraded_from,
+            "version_id": str(snapshot.id),
+            "version_no": snapshot.version_no,
+            "site_meta": prior_meta,
+        },
+    }
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_UPGRADE_LABEL_AFTER)
+    return {"version_id": str(snapshot.id), "version_no": snapshot.version_no}
+
+
+async def restore_upgraded_html(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+    site_meta: dict[str, Any],
+) -> None:
+    """Undo :func:`convert_html_to_project`: engine back to ``html``, ``source`` and
+    ``site_meta`` back to what the caller read from the snapshot. The pocket must
+    still be the ``project`` with exactly ``expected_source`` (409
+    ``sites.upgrade_conflict`` otherwise). The restored map is recorded as a draft
+    version like any other edit."""
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "project" or doc.source != expected_source:
+        raise ConflictError(
+            "sites.upgrade_conflict",
+            "This site changed while the upgrade was being undone. Reload it and try again.",
+        )
+    doc.engine = "html"
+    doc.source = dict(source)
+    doc.site_meta = dict(site_meta) or None
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_UPGRADE_LABEL_UNDONE)
+
+
+_RETHEME_LABEL = "Pointed the site's CSS at its theme tokens"
+
+
+async def retheme_project_source(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+    upgraded_source_hash: str | None = None,
+) -> None:
+    """Save the source ``sites.site_upgrade.retheme_site`` built (the site's CSS pointed
+    at its theme tokens). The pocket must still be the ``project`` with exactly
+    ``expected_source`` (409 ``sites.upgrade_conflict`` otherwise).
+    ``upgraded_source_hash``, when given, replaces ``site_meta.upgraded_from.source_hash``
+    in the same save, so a site untouched since its upgrade can still be undone. The
+    saved map is recorded as a draft version like any other edit."""
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if getattr(doc, "engine", "ripple") != "project" or doc.source != expected_source:
+        raise ConflictError(
+            "sites.upgrade_conflict",
+            "This site changed while its CSS was being updated. Reload it and try again.",
+        )
+    doc.source = dict(source)
+    meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
+    record = meta.get("upgraded_from")
+    if upgraded_source_hash is not None and isinstance(record, dict):
+        meta["upgraded_from"] = {**record, "source_hash": upgraded_source_hash}
+        doc.site_meta = meta
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_RETHEME_LABEL)
+
+
+#: Engines whose source map may carry an author dependency manifest.
+_DEPENDENCY_MANIFEST_ENGINES = ("svelte", "react", "html")
+
+
+async def set_site_dependency_manifest(
+    pocket_id: str,
+    user_id: str,
+    *,
+    manifest_path: str,
+    contents: str | None,
+) -> dict:
+    """Write (or, with ``contents=None``, remove) a site's dependency manifest.
+
+    Added 2026-09-24 (feat/sites-author-dependencies, PP-1). The per-file writers
+    above are reached through the sites path policies, which refuse this path —
+    deliberately, because ``paw.dependencies.json`` must only ever hold entries the
+    resolver vetted. This is the one writer for it, called only by
+    ``sites.service.set_site_dependencies`` after resolution, so it takes the whole
+    file rather than a create/exists flag: a dependency change is an upsert or a
+    removal, never "add a new file".
+
+    Access, engine check, persist, event and draft version mirror
+    ``set_react_source_file``. A non-source engine (ripple) is a ``ValidationError``
+    (422, ``pocket.not_source_site``): it has no authored code to import a package.
+    A write that changes nothing persists nothing and records no version.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") not in _DEPENDENCY_MANIFEST_ENGINES or not isinstance(
+        doc.source, dict
+    ):
+        raise ValidationError(
+            "pocket.not_source_site",
+            "This pocket is not a svelte, react or html Paw Site — it has no source "
+            "map to declare packages on.",
+        )
+    updated = dict(doc.source)
+    if contents is None:
+        if manifest_path not in updated:
+            return await _resolved_wire_dict(doc, user_id)
+        del updated[manifest_path]
+    else:
+        if updated.get(manifest_path) == contents:
+            return await _resolved_wire_dict(doc, user_id)
+        updated[manifest_path] = contents
+    # Reassign a fresh dict so Beanie tracks the change (same note as the peers).
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(manifest_path))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def scan_source_site_pockets(
+    *,
+    engines: tuple[str, ...],
+    after_id: str | None = None,
+    limit: int = 100,
+    workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """One page of site pockets on the source-map engines, oldest id first (PP-4).
+
+    The read side of the legacy build-shell migration. An operator scan, not a user
+    read: it takes no ``user_id`` and returns raw rows (no wire redaction), so only a
+    maintenance script may call it. Paged by ``_id`` so a run can resume from the last
+    id it reported. Each row is ``{id, workspace, owner, engine, pattern,
+    keepsClientBundle, source}``.
+    """
+    query: dict[str, Any] = {"type": "site", "engine": {"$in": list(engines)}}
+    if workspace_id:
+        query["workspace"] = workspace_id
+    if after_id:
+        query["_id"] = {"$gt": PydanticObjectId(after_id)}
+    docs = await _PocketDoc.find(query).sort("+_id").limit(max(1, limit)).to_list()
+    return [
+        {
+            "id": str(doc.id),
+            "workspace": doc.workspace,
+            "owner": doc.owner,
+            "engine": getattr(doc, "engine", "ripple"),
+            "pattern": getattr(doc, "pattern", None),
+            "keepsClientBundle": getattr(doc, "keeps_client_bundle", None),
+            "source": dict(doc.source) if isinstance(doc.source, dict) else None,
+        }
+        for doc in docs
+    ]
+
+
+async def migrate_legacy_build_shell(
+    pocket_id: str,
+    *,
+    workspace_id: str,
+    remove: dict[str, Any],
+    manifest: str | None,
+    author: str,
+    manifest_path: str = "paw.dependencies.json",
+) -> bool:
+    """Drop generator-owned files from a site's source map in ONE draft-versioned write.
+
+    Added 2026-09-24 (PP-4). paw-sites PS-1 made the build shell (package.json,
+    vite.config.*, svelte.config.js, +layout.ts, install config) generator-owned, so a
+    site that authored one fails its next build. The migration
+    (``sites.legacy_build_shell``) decides which files are safe to drop and hands
+    them here with the contents it classified. Background-safe like
+    ``set_imported_source``: an explicit ``workspace_id`` that must match (a mismatch
+    is the same ``NotFound`` a missing pocket raises).
+
+    ``remove`` maps each key to the contents the caller saw. If any key has changed
+    or vanished since, NOTHING is written and a ``ConflictError`` names it, so a
+    migration never drops a file a user edited after the dry run. ``manifest``, when
+    given, becomes the canonical ``paw.dependencies.json`` (packages converted from an
+    authored package.json). The change is recorded as a draft version, so it is
+    revertible and reaches the live site only on the next publish.
+
+    Returns True when something was written, False for a no-op.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    if doc.workspace != workspace_id:
+        raise NotFound("pocket", pocket_id)
+    if getattr(doc, "engine", "ripple") not in _DEPENDENCY_MANIFEST_ENGINES or not isinstance(
+        doc.source, dict
+    ):
+        raise ValidationError(
+            "pocket.not_source_site",
+            "This pocket is not a svelte, react or html Paw Site.",
+        )
+    for key, expected in remove.items():
+        if key not in doc.source or doc.source[key] != expected:
+            raise ConflictError(
+                "pocket.build_shell_changed",
+                f"`{key}` changed since it was classified. Re-run the dry run.",
+            )
+    updated = {k: v for k, v in doc.source.items() if k not in remove}
+    if manifest is not None:
+        updated[manifest_path] = manifest
+    if updated == doc.source:
+        return False
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    await _record_pocket_svelte_draft_version(
+        doc, author=author, label="Moved build-shell files to the generator"
+    )
+    return True
+
+
+async def set_imported_source(
+    pocket_id: str,
+    *,
+    workspace_id: str,
+    source: dict[str, str],
+) -> None:
+    """Replace an IMPORTED pocket's whole ``source`` map (SI-5).
+
+    Called by the sites import paths once the files are rewired, so the pocket (the
+    durable source of truth every re-publish reads) carries them. Background-safe:
+    takes an explicit ``workspace_id`` and fails CLOSED on a mismatch with the same
+    NotFound a missing pocket raises (no cross-tenant existence signal). Only an
+    html pocket, or a ``project`` pocket stamped ``pattern="imported"`` (an import
+    copied onto the static starter): a spec, svelte or authored project pocket must
+    never have its content swapped by the import path.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    if doc.workspace != workspace_id:
+        raise NotFound("pocket", pocket_id)
+    engine = getattr(doc, "engine", "ripple")
+    imported_project = engine == "project" and getattr(doc, "pattern", None) == "imported"
+    if engine != "html" and not imported_project:
+        raise ValidationError(
+            "pocket.not_html_site",
+            "Only an imported site's pocket can receive imported source.",
+        )
+    # Reassign a fresh dict so Beanie tracks the change (mirrors
+    # set_svelte_source_file's dirty-tracking note).
+    doc.source = dict(source)
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+
+
+async def merge_spec(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    body: MergeSpecRequest | dict[str, Any],
+) -> dict:
+    """One-shot rippleSpec write — full replace OR partial merge.
+
+    MVP entry point for the new ``POST /spec/merge`` endpoint. Replaces
+    the 17-tool LangChain edit surface with a single server-side merge
+    that the agent invokes via ``curl`` after the ``pocketpaw-pocket-
+    specialist`` skill teaches it the rippleSpec shape + conventions.
+
+    Body must carry EXACTLY ONE of ``replace`` (whole new spec wholesale
+    replaces the existing one) or ``merge`` (partial spec — top-level
+    keys overwrite, ``state`` is shallow-merged, ``ui`` nodes are
+    replaced by id via ``merge_ripple_spec``).
+
+    Accepts either the typed ``MergeSpecRequest`` model the router
+    constructs from the HTTP body OR a plain dict (for internal
+    callers — CLI / bus handlers / tests). The first line below
+    re-validates via ``model_validate`` so the exactly-one rule is
+    enforced regardless of which path the caller came in through —
+    per cloud convention #6 (validate at entry).
+
+    Validation runs the STRICT catalog + action-wiring gates (mirrors
+    the agent-generation path in ``create_from_ripple_spec``). A
+    catalog or action-wiring violation BLOCKS the persist and returns
+    ``{ok: false, warnings: [...]}``. Expression-grammar warnings
+    (``validate_ripple_spec_logged``) are non-blocking — they are
+    surfaced in the warnings list but the merge persists anyway.
+
+    Edit-access is required; ``visibility`` changes via this endpoint
+    are NOT supported (use the existing PATCH ``/{pocket_id}``). The
+    response mirrors the existing wire shape so the desktop client can
+    re-render directly from the result.
+    """
+    # Validate at entry (cloud rule #6) — accept either the typed
+    # model or a raw dict and normalize to the model. ``model_validate``
+    # re-runs the exactly-one ``model_validator``, so a dict caller
+    # carrying both / neither raises here instead of later.
+    if isinstance(body, MergeSpecRequest):
+        parsed = body
+    else:
+        try:
+            parsed = MergeSpecRequest.model_validate(body)
+        except Exception as exc:  # noqa: BLE001 — pydantic validation
+            raise ValidationError(
+                "spec_merge.invalid_body",
+                str(exc),
+            ) from exc
+
+    doc = await _fetch_pocket(pocket_id)
+    pocket = _pocket_to_domain(doc)
+    _check_domain_edit_access(pocket, user_id)
+
+    # Compute the new spec.
+    orphans: list[str] = []
+    base_spec = doc.rippleSpec or {}
+    # Top-level state keys present BEFORE this edit — so the orphan-state
+    # warning below names only keys this edit ADDED, not pre-existing
+    # orphans the agent didn't touch (avoids re-warning noise on replace).
+    base_state_keys: set[str] = set(
+        base_spec.get("state", {}) if isinstance(base_spec.get("state"), dict) else {}
+    )
+    if parsed.replace is not None:
+        new_spec_raw = parsed.replace
+    else:
+        assert parsed.merge is not None  # narrowing for type checkers
+        new_spec_raw, orphans = merge_ripple_spec(base_spec, parsed.merge)
+
+    # Normalize + validate (mirror the create_from_ripple_spec gate
+    # sequence at line 794+ — strict on catalog + action-wiring, logged
+    # on expression grammar).
+    normalized = normalize_ripple_spec(new_spec_raw) if new_spec_raw else None
+    warnings: list[str] = []
+    if orphans:
+        warnings.append(
+            "Patch referenced node ids not present in the base tree — "
+            f"dropped: {', '.join(orphans)}. To add a new node, re-state "
+            "its parent with the new child appended to children."
+        )
+
+    # Orphan-state warning (issue #1301) — NON-BLOCKING. A state-only
+    # merge patch (an add-widget intent that never carried a ui node)
+    # adds a state key no widget reads, so it renders nothing. Mirror the
+    # orphan-node warning above: name the newly-added unreferenced keys so
+    # the specialist self-correction loop can wire a widget. Limit to keys
+    # this edit ADDED — a pre-existing orphan or a legitimate ``sources``
+    # bind target must not re-warn (the collector already excludes the
+    # latter).
+    if normalized:
+        added_orphan_state = [
+            k for k in find_unreferenced_state_keys(normalized) if k not in base_state_keys
+        ]
+        if added_orphan_state:
+            warnings.append(
+                "Added state key(s) with no ui widget reading them — "
+                f"{', '.join(added_orphan_state)}. A new state key with no "
+                "binding widget renders nothing. Add the ui node that reads "
+                "it (a `{state.<key>}` expression or a `bind`), or declare a "
+                "`sources` entry that binds it."
+            )
+
+    if normalized:
+        # Expression-grammar — never blocks; collect for the caller.
+        grammar_warnings = validate_ripple_spec_logged(
+            normalized, pocket_id=str(doc.id), workspace_id=doc.workspace
+        )
+        for w in grammar_warnings:
+            warnings.append(f"[expr] {w.path}: {w.detail} (expr: {w.expression})")
+
+        # Strict catalog + action-wiring — these BLOCK. Convert the
+        # raised error into an agent-readable warnings payload and bail
+        # without persisting.
+        try:
+            await _gate_catalog(
+                normalized,
+                strict=True,
+                actor=user_id,
+                workspace_id=doc.workspace,
+                pocket_id=str(doc.id),
+            )
+        except CatalogViolationError as exc:
+            return {
+                "ok": False,
+                "pocket_id": str(doc.id),
+                "rippleSpec": doc.rippleSpec,
+                "warnings": warnings + [format_violations_for_agent(exc.violations)],
+            }
+        except ActionWiringViolationError as exc:
+            return {
+                "ok": False,
+                "pocket_id": str(doc.id),
+                "rippleSpec": doc.rippleSpec,
+                "warnings": warnings + [format_action_violations_for_agent(exc.violations)],
+            }
+        except MissingRequiredPropError as exc:
+            return {
+                "ok": False,
+                "pocket_id": str(doc.id),
+                "rippleSpec": doc.rippleSpec,
+                "warnings": warnings + [format_required_prop_violations_for_agent(exc.violations)],
+            }
+
+    # Persist + emit.
+    doc.rippleSpec = normalized
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-1): record a draft ArtifactVersion snapshot of the
+    # mutated rippleSpec. ADDITIVE — the destructive overwrite above already
+    # happened and stays the source of truth for rendering; this captures a
+    # draft/history snapshot so the artifact can later have draft/published/
+    # rollback (BP-3/BP-4). Best-effort: a version-store failure must NOT break
+    # the merge, so it is wrapped and only logged.
+    await _record_pocket_draft_version(doc, author=user_id, label="Edited the page")
+    resolved = await _resolved_wire_dict(doc, user_id)
+    return {
+        "ok": True,
+        "pocket_id": str(doc.id),
+        "rippleSpec": resolved.get("rippleSpec"),
+        "pocket": resolved,
+        "warnings": warnings,
+    }
+
+
+def _edit_label(path: str) -> str:
+    """The version-timeline line for an edit to one source file.
+
+    A version history that reads "v4, v5, v6" tells its owner nothing about
+    which one to roll back to; the file name is the cheapest true thing we can
+    say, and every source-edit callsite already has it. Only the basename — the
+    timeline row is narrow and the directory is noise at this width.
+    """
+    return f"Edited {path.rsplit('/', 1)[-1]}"
+
+
+async def _record_pocket_draft_version(
+    doc: _PocketDoc, *, author: str | None, label: str | None = None
+) -> None:
+    """Snapshot a pocket's current rippleSpec as a draft ArtifactVersion.
+
+    Branch-primitive hook (BP-1). Lazy-imports the versions service so the
+    pockets entity does not take a hard import on the versions package and so
+    a fork without the versions module degrades gracefully. The snapshot is
+    the full ``rippleSpec`` dict (empty dict when None). Failures are logged
+    and swallowed — versioning is an additive audit/history layer over the
+    existing merge, never a gate on it.
+
+    TODO(BP-3): a merge gate may branch this draft for human review before it
+    becomes the published pointer.
+    """
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        await versions_service.write_draft(
+            scope_type="pocket",
+            scope_id=str(doc.id),
+            workspace_id=doc.workspace,
+            content=doc.rippleSpec or {},
+            author=author,
+            label=label,
+        )
+    except Exception:  # noqa: BLE001 — versioning must not break the merge
+        logger.warning(
+            "versions: failed to record draft version for pocket %s — "
+            "merge persisted, version skipped",
+            doc.id,
+            exc_info=True,
+        )
+
+
+async def _record_pocket_svelte_draft_version(
+    doc: _PocketDoc, *, author: str | None, label: str | None = None
+) -> None:
+    """Snapshot a svelte pocket's current ``source`` map as a draft ArtifactVersion.
+
+    Branch-primitive hook (BP-3). The svelte analog of
+    ``_record_pocket_draft_version``: BP-1 versioned the rippleSpec write
+    (merge_spec); svelte source edits go through ``set_svelte_source_file`` and
+    were not versioned, so a published svelte site had no draft version to
+    promote. This captures the full ``source`` map (``{path: contents}``) as the
+    version ``content`` — the version model accepts either shape — with
+    ``scope_type="pocket"`` (BP-2 keys site versions on the source pocket).
+
+    Lazy-imports the versions service so the pockets entity takes no hard import
+    on it; failures are logged and swallowed — versioning is an additive
+    history/Branch layer over the edit, never a gate on it.
+    """
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        await versions_service.write_draft(
+            scope_type="pocket",
+            scope_id=str(doc.id),
+            workspace_id=doc.workspace,
+            content=dict(doc.source) if isinstance(doc.source, dict) else {},
+            author=author,
+            label=label,
+        )
+    except Exception:  # noqa: BLE001 — versioning must not break the edit
+        logger.warning(
+            "versions: failed to record svelte draft version for pocket %s — "
+            "edit persisted, version skipped",
+            doc.id,
+            exc_info=True,
+        )
+
+
+async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> None:
+    """Validate that ``project_id`` exists in the workspace. Lazy-imports
+    the projects service to avoid a circular import at module load and
+    to degrade silently if the projects entity is missing on a fork.
+    """
+    try:
+        from pocketpaw_ee.cloud.projects import service as projects_service
+    except Exception:
+        # Projects entity unavailable on this branch — accept the id as-is
+        # for forward-compat; the rollout PR has the entity present.
+        return
+    ok = await projects_service.exists_in_workspace(workspace_id, project_id)
+    if not ok:
+        raise NotFound("project", project_id)
+
+
+async def unassign_project_on_pockets(workspace_id: str, project_id: str) -> int:
+    """Soft-unassign every pocket in ``workspace_id`` whose ``project_id``
+    matches. Called by ``projects.service.agent_delete`` when a project
+    is removed — pockets keep their data, only the project reference
+    clears. Returns the number of rows updated.
+
+    Stays inside the pockets service so the 4-file rule holds (only
+    ``pockets/service.py`` may write to the Pocket Beanie collection).
+    """
+    if not workspace_id or not project_id:
+        return 0
+    collection = _PocketDoc.get_pymongo_collection()
+    result = await collection.update_many(
+        {"workspace": workspace_id, "project_id": project_id},
+        {"$set": {"project_id": None}},
+    )
+    return getattr(result, "modified_count", 0) or 0
+
+
+async def delete(pocket_id: str, user_id: str) -> None:
+    """Hard-delete a pocket. Owner only."""
+    doc = await _fetch_pocket(pocket_id)
+    if doc.owner != user_id:
+        from pocketpaw_ee.guards.audit import log_denial
+
+        log_denial(
+            actor=user_id,
+            action="pocket.share",
+            code="pocket.not_owner",
+            resource_id=str(doc.id),
+        )
+        raise Forbidden("pocket.not_owner", "Only the pocket owner can perform this action")
+    # A pocket may not be deleted out from under a published site.
+    #
+    # Deleting the pocket does not stop the site: architecture-sites Invariant 1 says
+    # a site worker never depends on the box, so the Worker, its D1, the custom
+    # hostname, the R2 assets and the live signed key all keep working with nothing
+    # in the product able to reach them. That is an unreachable site still serving and
+    # still accepting lead ingest against a valid key, and — if it is on a paid plan —
+    # still billing.
+    #
+    # This REFUSES rather than cascading, which is the deliberate half. A cascade from
+    # here would bypass the data export that the sites delete flow takes first, so the
+    # one path that can destroy a site stays the one path that preserves its data
+    # first. Deleting the site is a prerequisite, not an alternative.
+    #
+    # The Site read goes through the sites SERVICE, not the Site model, to respect
+    # entity isolation — and the import is function-local because sites.service reads
+    # pockets, so a module-level import would be a cycle.
+    #
+    # The guard lives in the SERVICE rather than the router on purpose: the router is
+    # not the only caller (bus handlers, MCP tools, CLI and jobs reach this directly),
+    # and a guard they can walk past is not a guard.
+    from pocketpaw_ee.sites import service as sites_service
+
+    live_site = await sites_service.live_site_for_pocket(
+        workspace_id=doc.workspace, pocket_id=pocket_id
+    )
+    if live_site is not None:
+        site_id, site_name = live_site
+        raise ConflictError(
+            "pocket.has_site",
+            (
+                f"This pocket is published as the site {site_name or site_id!r}. "
+                "Delete the site first — deleting the pocket would leave it running "
+                "with no way to reach it."
+            ),
+        )
+
+    # Capture audience before delete so receivers can drop the pocket from
+    # their list. The wire dict isn't useful here — only the id is.
+    delete_payload = {
+        "pocket_id": str(doc.id),
+        "recipient_ids": [doc.owner, *list(doc.shared_with or [])],
+    }
+    if doc.visibility == "workspace":
+        delete_payload["workspace_id"] = doc.workspace
+    await doc.delete()
+    await emit(PocketDeleted(data=delete_payload))
+    # Its drafts (draft Worker, draft data, preview tokens) go with it. Best effort:
+    # the draft sweeper retries whatever this cannot finish.
+    try:
+        from pocketpaw_ee.sites import draft_worker
+
+        if draft_worker.enabled():
+            draft_worker.schedule_purge(
+                pocket_id, workspace_id=doc.workspace, reason="pocket_deleted", forget=True
+            )
+    except Exception:  # noqa: BLE001 - never fail a delete that already happened
+        logger.warning("pocket %s: could not schedule draft cleanup", pocket_id, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Agent-generated pockets
+# ---------------------------------------------------------------------------
+
+
+async def create_from_ripple_spec(
+    workspace_id: str,
+    owner_id: str,
+    ripple_spec: dict,
+    description: str = "",
+    pattern: str | None = None,
+) -> str | None:
+    """Auto-create a pocket from an agent-generated ripple spec.
+    Returns the pocket id on success, None on failure.
+
+    This is the agent-generation path, so the catalog gate runs in
+    STRICT mode — a spec with a node outside the widget catalog (or an
+    ``embed`` URL violating the host policy) is BLOCKED: the function
+    returns ``None`` rather than persist a pocket the renderer would
+    draw as a red "Unknown widget type" box. The inline chat path has
+    no LLM-retry loop, so blocking + logging is the strict behavior here
+    (the specialist edit tools, which can retry, surface the corrective
+    message instead).
+
+    ``pattern`` records the create-pocket layout pattern (``"landing"``
+    for a marketing site). Optional; defaults to ``None`` so the
+    pre-existing inline auto-create path is unchanged.
+
+    feat/billing-smb-caps: this path does NOT funnel through ``create``, so it
+    carries its OWN pocket-cap check. It returns ``None`` (not a 402) when at/over
+    the cap — consistent with the function's "return None on failure" contract, so
+    the agent turn degrades gracefully (no pocket attached) instead of surfacing a
+    raw 402 through the agent loop. A no-op unless ``billing_enforced``.
+    """
+    try:
+        exceeded, count, limit = await _pocket_cap_exceeded(workspace_id)
+        if exceeded:
+            logger.warning(
+                "Auto-create blocked by pocket cap: workspace=%s has %d pockets "
+                "(limit %s) — no pocket created",
+                workspace_id,
+                count,
+                limit,
+            )
+            return None
+
+        normalized = normalize_ripple_spec(ripple_spec)
+        if not normalized:
+            return None
+        validate_ripple_spec_logged(normalized, workspace_id=workspace_id)
+        # Strict catalog gate — CatalogViolationError is caught by the
+        # catch-all below, blocking the create and logging the reason.
+        await _gate_catalog(normalized, strict=True, actor=owner_id, workspace_id=workspace_id)
+
+        name = (
+            normalized.get("lifecycle", {}).get("name")
+            or normalized.get("name")
+            or normalized.get("title")
+            or "Agent-generated Pocket"
+        )
+
+        doc = _PocketDoc(
+            workspace=workspace_id,
+            name=name,
+            description=description,
+            type="ai-generated",
+            owner=owner_id,
+            visibility="workspace",
+            rippleSpec=normalized,
+            pattern=pattern,
+            # SF-2 — which side of the source-gate flip this pocket is born on.
+            source_gated=_source_gated_at_create(),
+            # New agent-generated pockets start with no connectors allowed.
+            allowed_connectors=[],
+        )
+        await doc.insert()
+        pocket_id = str(doc.id)
+        logger.info("Auto-created pocket %s from ripple spec", pocket_id)
+        await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+        return pocket_id
+    except CatalogViolationError as exc:
+        # Strict catalog gate blocked the auto-create; surface the field
+        # paths explicitly instead of letting them disappear into the
+        # catch-all stack trace below.
+        logger.warning(
+            "Auto-create blocked by catalog gate: %d violation(s); paths=%s",
+            len(exc.violations),
+            [v.get("path") for v in exc.violations],
+        )
+        return None
+    except ActionWiringViolationError as exc:
+        # Strict action-wiring gate blocked the auto-create (PR #1196).
+        logger.warning(
+            "Auto-create blocked by action-wiring gate: %d violation(s); paths=%s",
+            len(exc.violations),
+            [v.get("path") for v in exc.violations],
+        )
+        return None
+    except MissingRequiredPropError as exc:
+        # Strict required-prop gate blocked the auto-create (constraint-zone).
+        logger.warning(
+            "Auto-create blocked by required-prop gate: %d violation(s); paths=%s",
+            len(exc.violations),
+            [v.get("path") for v in exc.violations],
+        )
+        return None
+    except Exception:
+        logger.warning("Failed to auto-create pocket from ripple spec", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Widgets
+# ---------------------------------------------------------------------------
+
+
+async def add_widget(pocket_id: str, user_id: str, body: AddWidgetRequest) -> dict:
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    widget = _build_widget_doc(
+        {
+            "name": body.name,
+            "type": body.type,
+            "icon": body.icon,
+            "color": body.color,
+            "span": body.span,
+            "dataSourceType": body.data_source_type,
+            "config": body.config,
+            "props": body.props,
+            "spec": body.spec,
+            "assignedAgent": body.assigned_agent,
+        }
+    )
+    doc.widgets.append(widget)
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def update_widget(
+    pocket_id: str, widget_id: str, user_id: str, body: UpdateWidgetRequest
+) -> dict:
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    widget = next((w for w in doc.widgets if w.id == widget_id), None)
+    if widget is None:
+        raise NotFound("widget", widget_id)
+    if body.name is not None:
+        widget.name = body.name
+    if body.type is not None:
+        widget.type = body.type
+    if body.icon is not None:
+        widget.icon = body.icon
+    if body.config is not None:
+        widget.config = body.config
+    if body.props is not None:
+        widget.props = body.props
+    if body.data is not None:
+        widget.data = body.data
+    if body.assigned_agent is not None:
+        widget.assignedAgent = body.assigned_agent
+    if body.span is not None:
+        widget.span = body.span
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def remove_widget(pocket_id: str, widget_id: str, user_id: str) -> dict:
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    before = len(doc.widgets)
+    doc.widgets = [w for w in doc.widgets if w.id != widget_id]
+    if len(doc.widgets) == before:
+        raise NotFound("widget", widget_id)
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def reorder_widgets(pocket_id: str, user_id: str, widget_ids: list[str]) -> dict:
+    """Reorder widgets. Tolerates legacy callers that may omit ids
+    (missing ids appended at the end) or include unknown ids (dropped)."""
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    existing_ids = {w.id for w in doc.widgets}
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for wid in widget_ids:
+        if wid in existing_ids and wid not in seen:
+            ordered.append(wid)
+            seen.add(wid)
+    for w in doc.widgets:
+        if w.id not in seen:
+            ordered.append(w.id)
+            seen.add(w.id)
+
+    if set(ordered) != existing_ids:
+        # Defensive: should be impossible after the fill above
+        raise ValidationError(
+            "widget.reorder_mismatch",
+            "widget_ids must match the current set exactly",
+        )
+    widgets_by_id = {w.id: w for w in doc.widgets}
+    doc.widgets = [widgets_by_id[wid] for wid in ordered]
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id)
+
+
+# ---------------------------------------------------------------------------
+# Sharing — Share links
+# ---------------------------------------------------------------------------
+
+
+async def generate_share_link(pocket_id: str, user_id: str, access: str) -> dict:
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_owner(_pocket_to_domain(doc), user_id)
+
+    token = secrets.token_urlsafe(32)
+    doc.share_link_token = token
+    doc.share_link_access = access
+    await doc.save()
+    # no-event: share-link state is owner-only; the token comes back inline
+    # in this REST response. Broadcasting would leak the token.
+    return {"token": token, "access": access, "url": f"/shared/{token}"}
+
+
+async def revoke_share_link(pocket_id: str, user_id: str) -> None:
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_owner(_pocket_to_domain(doc), user_id)
+
+    doc.share_link_token = None
+    doc.share_link_access = "view"
+    await doc.save()
+    # no-event: see ``generate_share_link``.
+
+
+async def update_share_link(pocket_id: str, user_id: str, access: str) -> dict:
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_owner(_pocket_to_domain(doc), user_id)
+
+    if not doc.share_link_token:
+        raise NotFound("share_link", pocket_id)
+
+    doc.share_link_access = access
+    await doc.save()
+    # no-event: see ``generate_share_link``.
+    return {
+        "token": doc.share_link_token,
+        "access": access,
+        "url": f"/shared/{doc.share_link_token}",
+    }
+
+
+async def access_via_share_link(token: str) -> dict:
+    doc = await _PocketDoc.find_one(_PocketDoc.share_link_token == token)
+    if doc is None:
+        raise NotFound("pocket", "shared link")
+    # no-resolve: share-link viewers have no auth context to build a ResolveCtx;
+    # $source markers surface raw. v2: resolve with a guest-scoped context.
+    #
+    # SF-2 / D4 — source is stripped UNCONDITIONALLY here: every tier, every
+    # cohort, no plan lookup and no setting. This endpoint has no authenticated
+    # user and therefore no workspace entitlement to resolve — the token IS the
+    # authorization, and it is a bearer credential that can be forwarded to anyone.
+    # Asking "is the OWNER entitled?" would hand the owner's source to whoever
+    # holds the link, which is the opposite of the question worth asking.
+    #
+    # ACCEPTED COST: someone using a share link today to show a collaborator the
+    # code loses that, with no error to explain it. ``share_link_access``
+    # (view/comment/edit) is NOT consulted, because it is enforced nowhere — a
+    # separate flagged follow-up, and reading it here would imply a guarantee that
+    # does not exist.
+    return pocket_to_wire_dict(_pocket_to_domain(doc), source_visible=False)
+
+
+# ---------------------------------------------------------------------------
+# Collaborators
+# ---------------------------------------------------------------------------
+
+
+async def add_collaborator(pocket_id: str, user_id: str, body: AddCollaboratorRequest) -> None:
+    doc = await _fetch_pocket(pocket_id)
+    pocket = _pocket_to_domain(doc)
+    _check_domain_owner(pocket, user_id)
+
+    await _mutate_list_field(pocket_id, "shared_with", body.user_id, "add")
+
+    await event_bus.emit(
+        "pocket.shared",
+        {
+            "pocket_id": pocket.id,
+            "owner_id": user_id,
+            "collaborator_id": body.user_id,
+            "access": body.access,
+        },
+    )
+
+
+async def remove_collaborator(pocket_id: str, user_id: str, target_user_id: str) -> None:
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_owner(_pocket_to_domain(doc), user_id)
+    await _mutate_list_field(pocket_id, "shared_with", target_user_id, "remove")
+
+
+# ---------------------------------------------------------------------------
+# Team
+# ---------------------------------------------------------------------------
+
+
+async def _is_workspace_admin_or_owner(workspace_id: str, user_id: str) -> bool:
+    """Return ``True`` if the user has ``owner`` or ``admin`` role in the
+    given workspace. Does NOT raise on missing membership — returns ``False``
+    so callers can chain this with other checks."""
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    try:
+        oid = PydanticObjectId(user_id)
+    except Exception:
+        return False
+    user = await _UserDoc.get(oid)
+    if user is None or not getattr(user, "workspaces", None):
+        return False
+    for m in user.workspaces:
+        if m.workspace == workspace_id and m.role in ("owner", "admin"):
+            return True
+    return False
+
+
+async def add_team_member(
+    pocket_id: str,
+    user_id: str,
+    member_id: str,
+    actor_workspace_id: str | None = None,
+) -> dict:
+    doc = await _fetch_pocket(pocket_id)
+    pocket = _pocket_to_domain(doc)
+    # Only the pocket owner or a workspace admin/owner may manage team
+    # membership. Team members cannot grant permissions to others.
+    if pocket.owner != user_id:
+        if not actor_workspace_id or not await _is_workspace_admin_or_owner(
+            actor_workspace_id,
+            user_id,
+        ):
+            raise Forbidden(
+                "pocket.admin_required",
+                "Only the pocket owner or a workspace admin can manage membership",
+            )
+    await _mutate_list_field(pocket_id, "team", member_id, "add")
+    doc = await _fetch_pocket(pocket_id)
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def remove_team_member(
+    pocket_id: str,
+    user_id: str,
+    member_id: str,
+    actor_workspace_id: str | None = None,
+) -> dict:
+    doc = await _fetch_pocket(pocket_id)
+    pocket = _pocket_to_domain(doc)
+    # Only the pocket owner or a workspace admin/owner may manage team
+    # membership. Team members cannot remove others.
+    if pocket.owner != user_id:
+        if not actor_workspace_id or not await _is_workspace_admin_or_owner(
+            actor_workspace_id,
+            user_id,
+        ):
+            raise Forbidden(
+                "pocket.admin_required",
+                "Only the pocket owner or a workspace admin can manage membership",
+            )
+    await _mutate_list_field(pocket_id, "team", member_id, "remove")
+    doc = await _fetch_pocket(pocket_id)
+    return await _resolved_wire_dict(doc, user_id)
+
+
+# ---------------------------------------------------------------------------
+# Agents
+# ---------------------------------------------------------------------------
+
+
+async def add_agent(pocket_id: str, user_id: str, agent_id: str) -> dict:
+    # Visibility gate (ASG-7): pocket edit-access alone does not authorize
+    # attaching ANY agent. The editor must also be able to USE the agent, or a
+    # pocket editor could wire in another user's PRIVATE agent. ``ensure_can_use``
+    # applies the canonical predicate (owner always; else same-workspace +
+    # ``workspace`` visibility; else ``public``) against the pocket's workspace —
+    # a foreign private agent surfaces as ``NotFound``.
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
+    doc = await _fetch_pocket(pocket_id)
+    pocket = _pocket_to_domain(doc)
+    _check_domain_edit_access(pocket, user_id)
+    await agents_service.ensure_can_use(agent_id, pocket.workspace_id, user_id)
+    await _mutate_list_field(pocket_id, "agents", agent_id, "add")
+    doc = await _fetch_pocket(pocket_id)
+    return await _resolved_wire_dict(doc, user_id)
+
+
+async def remove_agent(pocket_id: str, user_id: str, agent_id: str) -> dict:
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    await _mutate_list_field(pocket_id, "agents", agent_id, "remove")
+    doc = await _fetch_pocket(pocket_id)
+    return await _resolved_wire_dict(doc, user_id)
+
+
+# ---------------------------------------------------------------------------
+# Agent-facing helpers — back the in-process MCP write tools the cloud
+# SSE chat agent uses to edit the pocket it lives inside. The MCP shape
+# wrapper (``{ok, error}`` returns + SSE event push) lives in
+# ``pockets/agent_context.py``; the Beanie ops live here.
+# ---------------------------------------------------------------------------
+
+
+_AGENT_INVISIBLE_FIELDS = (
+    "share_link_token",
+    "shared_with",
+    "team",
+    "agents",
+)
+
+
+def _agent_view_dict(doc: _PocketDoc) -> dict:
+    """Json-safe pocket dict with secrets/relationship fields stripped.
+
+    Used by the in-process MCP tool channel — same shape every
+    ``agent_*`` helper returns on success.
+
+    LEADS with a ``_summary`` field (``spec_ops.summarize_ripple_spec``)
+    so the agent reads the truth first: the dump's legacy top-level
+    ``widgets[]`` array is empty on template-instantiated pockets, and
+    agents that read it before ``rippleSpec`` concluded a fully composed
+    pocket was "an empty shell". ``widgets`` itself stays in the view —
+    other consumers may rely on it — but the summary names it legacy.
+    """
+    import json
+
+    raw = doc.model_dump(mode="json", by_alias=True, exclude_none=True)
+    for k in _AGENT_INVISIBLE_FIELDS:
+        raw.pop(k, None)
+    summary = spec_ops.summarize_ripple_spec(doc.rippleSpec, widgets_count=len(doc.widgets or []))
+    if summary["has_ripple_spec"]:
+        summary["note"] = (
+            "The authoritative layout lives in rippleSpec.ui — the top-level "
+            "widgets[] array is a legacy field"
+            + (" and is empty for this pocket." if not summary["widgets_count"] else ".")
+        )
+    view: dict = {"_summary": summary}
+    view.update(raw)
+    return json.loads(json.dumps(view, default=str))
+
+
+def _is_whole_object_id(value: str) -> bool:
+    """True for a full 24-hex-char ObjectId, the form every pre-existing caller sends."""
+    return len(value) == 24 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
+async def _resolve_pocket_id_tail(given: str, workspace_id: str) -> tuple[str, str | None]:
+    """Turn a shortened pocket id back into a whole one, WITHIN one workspace.
+
+    The workspace filter is the tenancy boundary and is not optional: an
+    unscoped tail resolve could land on another tenant's pocket, which is a
+    worse bug than the prompt bloat the shortening was introduced to fix. The
+    projection keeps this to ids only — a workspace's pocket count is small, but
+    there is no reason to drag every rippleSpec across the wire to compare 8
+    characters.
+
+    An ambiguous tail returns its error message rather than picking a winner.
+    """
+    # ``get_pymongo_collection``, NOT ``get_motor_collection`` — the latter is
+    # beanie 1.x and this is on 2.1.0, where it does not exist. The first version
+    # of this used the old name; every isolated resolver and handler test still
+    # passed, because the broad ``except`` below turned a missing attribute into
+    # a tidy "could not resolve" string and no test called this function.
+    # ``tests/cloud/pockets/test_short_id_tool_wiring.py`` is what caught it.
+    try:
+        cursor = _PocketDoc.get_pymongo_collection().find({"workspace": workspace_id}, {"_id": 1})
+        candidates = [{"_id": str(row["_id"])} async for row in cursor]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pocket id tail resolve failed for %s: %s", given, exc, exc_info=True)
+        return "", f"could not resolve pocket {given}: {exc}"
+    try:
+        return resolve_id(given, candidates), None
+    except AmbiguousId as exc:
+        return "", str(exc)
+    except KeyError:
+        return "", f"pocket {given} not found"
+
+
+async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None]:
+    """Load a pocket for an agent-initiated mutation, with workspace +
+    access-control checks.
+
+    Pulls ``workspace_id`` and ``user_id`` from the per-stream
+    ContextVars set by ``agent_router._run_agent_stream``. Rejects when
+    no stream is active, when the pocket belongs to a different
+    workspace, or when the caller lacks edit access — mirroring the
+    REST path's ``_check_domain_edit_access`` (owner OR shared_with OR
+    workspace-visible). Cross-workspace mismatches return the same
+    "not found" message as a genuinely missing pocket so the agent can't
+    enumerate the existence of pockets in other tenants.
+    """
+    from pocketpaw_ee.cloud.chat.agent_service import current_user_id, current_workspace_id
+
+    if not pocket_id or not isinstance(pocket_id, str):
+        return None, "pocket_id is required (string)"
+    workspace_id = current_workspace_id()
+    user_id = current_user_id()
+    if not workspace_id or not user_id:
+        return None, (
+            "no active workspace/user — agent pocket mutations require a cloud SSE chat stream"
+        )
+    # The prompt renders a SHORTENED id (last 8 chars — see
+    # ``pocketpaw.prompt.entity``), so the agent can hand one back. A whole id
+    # takes the direct path it always took; only a short one pays for a lookup,
+    # so no existing caller changes behaviour.
+    if not _is_whole_object_id(pocket_id):
+        resolved, resolve_err = await _resolve_pocket_id_tail(pocket_id, workspace_id)
+        if resolve_err is not None:
+            return None, resolve_err
+        pocket_id = resolved
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception as exc:  # noqa: BLE001
+        return None, f"could not load pocket {pocket_id}: {exc}"
+    if doc is None or doc.workspace != workspace_id:
+        return None, f"pocket {pocket_id} not found"
+    if (
+        doc.owner != user_id
+        and user_id not in (doc.shared_with or [])
+        and doc.visibility != "workspace"
+    ):
+        return None, f"pocket {pocket_id} not found"
+    return doc, None
+
+
+async def has_edit_access(pocket_id: str, user_id: str) -> bool:
+    """Return ``True`` if ``user_id`` may edit the pocket — owner, team
+    member, explicit shared_with, or workspace-visible. Raises ``NotFound`` if
+    the pocket doesn't exist.
+
+    Used by the ``require_pocket_edit`` FastAPI guard so the Pocket
+    Beanie load stays inside the service.
+    """
+    try:
+        pocket_oid = PydanticObjectId(pocket_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("pocket", pocket_id) from exc
+
+    doc = await _PocketDoc.get(pocket_oid)
+    if doc is None:
+        raise NotFound("pocket", pocket_id)
+
+    if doc.owner == user_id:
+        return True
+    if user_id in (doc.team or []):
+        return True
+    if user_id in (doc.shared_with or []):
+        return True
+    return doc.visibility == "workspace"
+
+
+async def is_owner(pocket_id: str, user_id: str) -> bool:
+    """Return ``True`` only if ``user_id`` owns the pocket. Raises
+    ``NotFound`` if the pocket doesn't exist. Used by the
+    ``require_pocket_owner`` FastAPI guard."""
+    try:
+        pocket_oid = PydanticObjectId(pocket_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("pocket", pocket_id) from exc
+
+    doc = await _PocketDoc.get(pocket_oid)
+    if doc is None:
+        raise NotFound("pocket", pocket_id)
+    return doc.owner == user_id
+
+
+async def has_action_run_access(pocket_id: str, user_id: str) -> bool:
+    """Return ``True`` if ``user_id`` may RUN a write action on the pocket.
+
+    The gate is OWNER or explicit ``shared_with`` ONLY — deliberately
+    NARROWER than ``has_edit_access`` (which also allows any caller on a
+    workspace-visible pocket). A write has blast radius: it hits a real
+    backend with a real ``DELETE``. M2a keeps the run surface to people
+    the owner explicitly invited; M2b widens this once Instinct gating is
+    wired. Raises ``NotFound`` if the pocket doesn't exist — the
+    ``require_pocket_action_run`` guard converts that to a 404.
+    """
+    try:
+        pocket_oid = PydanticObjectId(pocket_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("pocket", pocket_id) from exc
+
+    doc = await _PocketDoc.get(pocket_oid)
+    if doc is None:
+        raise NotFound("pocket", pocket_id)
+
+    if doc.owner == user_id:
+        return True
+    return user_id in (doc.shared_with or [])
+
+
+async def get_pocket_workspace(pocket_id: str) -> str | None:
+    """Return the workspace a pocket belongs to, or ``None`` if it doesn't exist.
+
+    A workspace-free tenancy read for callers that hold a pocket id but no
+    user session — notably the workspace-jobs worker, which re-asserts that
+    the pocket the job's doc names actually lives in the doc's workspace
+    BEFORE writing anything back (defense-in-depth: ``merge_spec`` fetches by
+    id only and trusts the passed workspace). A malformed / unknown id returns
+    ``None`` so the caller fails closed rather than raising. Keeps the Beanie
+    ``WorkspaceJobDoc``-adjacent ``_PocketDoc`` load inside this service module.
+    """
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:  # noqa: BLE001 — malformed id surfaces as "not found"
+        return None
+    if doc is None:
+        return None
+    return doc.workspace
+
+
+async def is_member(pocket_id: str, user_id: str) -> bool:
+    """Return ``True`` if ``user_id`` may read the pocket — owner, team
+    member, explicit shared_with, or any caller when visibility is
+    ``workspace`` / public.
+
+    Mirrors the read-side rule in ``agent_service._resolve_pocket`` so
+    the Files panel filter and the chat scope-resolver agree on who
+    sees a pocket's files. Raises ``NotFound`` if the pocket doesn't
+    exist — callers convert to a 403 / 404 as appropriate.
+
+    Stage 3.E: used by ``files/router.py`` to gate ``GET /files?pocket_id=X``
+    for non-members and by the upload router for the read-side ABAC
+    check (writes go through ``has_edit_access``).
+    """
+    try:
+        pocket_oid = PydanticObjectId(pocket_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("pocket", pocket_id) from exc
+
+    doc = await _PocketDoc.get(pocket_oid)
+    if doc is None:
+        raise NotFound("pocket", pocket_id)
+
+    if doc.owner == user_id:
+        return True
+    if user_id in (doc.team or []):
+        return True
+    if user_id in (doc.shared_with or []):
+        return True
+    # Workspace-visible pockets: any workspace caller can read. The
+    # route-level ``current_workspace_id`` dependency already enforced
+    # workspace membership before we got here, so this branch implicitly
+    # requires the caller be in this pocket's workspace.
+    return getattr(doc, "visibility", "workspace") == "workspace"
+
+
+async def _heal_node_ids(doc: _PocketDoc) -> None:
+    """Defense-in-depth: stamp ``n_xxxxxxxx`` ids on a pocket's UISpec
+    tree(s) if any node lacks one, persisting the heal.
+
+    Pockets created or persisted after #1172 always carry node ids
+    (``normalize_ripple_spec`` stamps them). This heals pockets written
+    before the fix so they become editable on first agent read without
+    a separate DB migration. Idempotent — a no-op when ids are already
+    present.
+    """
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        return
+    changed = False
+    ui = spec.get("ui")
+    if isinstance(ui, dict) and spec_ops.ensure_ids(ui):
+        changed = True
+    panes = spec.get("panes")
+    if isinstance(panes, dict):
+        for pane in panes.values():
+            if isinstance(pane, dict) and spec_ops.ensure_ids(pane):
+                changed = True
+    if changed:
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pocket %s node-id heal save failed: %s", doc.id, exc)
+
+
+async def _agent_backend_summary(doc: _PocketDoc) -> dict[str, Any]:
+    """Return the NON-SECRET backend summary for a pocket, agent-safe.
+
+    Shape: ``{base_url, auth_type, configured}`` — the same shape
+    ``get_pocket_backend`` returns, never the token. When the pocket
+    has no backend configured, returns ``{"configured": False}``.
+
+    The backend credential lives in a separate collection (security
+    design D1), so nothing surfaces it to the edit specialist by
+    default. This makes ``get_pocket`` / ``agent_view`` carry the
+    summary so the specialist knows whether a backend exists and what
+    its base URL is — without ever seeing the token.
+    """
+    try:
+        summary = await get_pocket_backend(doc.workspace, str(doc.id))
+    except Exception:  # noqa: BLE001 — a backend-read failure must not break the view
+        logger.warning(
+            "agent_view: backend summary fetch failed for pocket %s", str(doc.id), exc_info=True
+        )
+        return {"configured": False}
+    if summary is None:
+        return {"configured": False}
+    # get_pocket_backend already excludes the token — assert the shape
+    # and never pass anything else through. ``allowed_writes`` is carried
+    # so the edit specialist can see which write methods+paths the owner
+    # has authorized before it authors a write action; ``approval_route``
+    # so it knows who approves a `requires_instinct` write.
+    # ``backend_type`` / ``connector_name`` so the specialist knows whether to
+    # author http-path sources or connector-action sources.
+    return {
+        "backend_type": summary.get("backend_type", "http"),
+        "connector_name": summary.get("connector_name"),
+        "base_url": summary.get("base_url"),
+        "auth_type": summary.get("auth_type"),
+        "configured": True,
+        "allowed_writes": summary.get("allowed_writes") or [],
+        "approval_route": summary.get("approval_route"),
+    }
+
+
+async def agent_view(pocket_id: str) -> tuple[dict | None, str | None]:
+    """Read-only fetch — returns ``(view_dict, None)`` on success or
+    ``(None, error)`` on failure.
+
+    Self-heals node ids: a legacy pocket persisted before #1172 has an
+    id-less ``ui`` tree, so the chat agent would have no ``n_xxxxxxxx``
+    id to address with granular edit ops. ``_heal_node_ids`` stamps and
+    persists them on first read.
+
+    The returned view carries a non-secret ``backend`` summary
+    (``{base_url, auth_type, configured}``) so the edit specialist can
+    see whether the pocket already has a backend configured before it
+    authors a ``sources`` block. The token is NEVER included.
+
+    Note: $source markers in rippleSpec are intentionally NOT resolved
+    here. The agent must see raw markers so that on edit it preserves
+    them; resolving would let the agent bake a snapshot of live data
+    into the spec, defeating the marker mechanism. Resolution happens
+    only in ``service.get`` (the user-facing read path)."""
+    doc, err = await _agent_load_doc(pocket_id)
+    if err or doc is None:
+        return None, err
+    await _heal_node_ids(doc)
+    view = _agent_view_dict(doc)
+    view["backend"] = await _agent_backend_summary(doc)
+    return view, None
+
+
+async def agent_list(workspace_id: str, user_id: str) -> list[dict]:
+    """Compact list of pockets the user can see in this workspace.
+
+    Returned shape per pocket: ``{id, name, description, type, icon,
+    color, owner}``. The full ``rippleSpec`` is intentionally excluded —
+    callers (the in-process MCP ``list_pockets`` tool, the
+    ``cloud_list_pockets`` CLI) hit this on every creation flow as the
+    "have we already got one of these?" check, so the payload stays
+    cheap. Visibility rules mirror ``list_pockets``: owned by the user,
+    explicitly shared, or workspace-visible.
+
+    "Cheap" used to describe the RESPONSE only. The read behind it hydrated
+    every whole document to keep seven small fields, so a workspace with a few
+    generated sites paid megabytes off the wire on every creation flow to
+    answer a question about names. The query is projected now, which is what
+    the docstring above always claimed.
+    """
+    if not workspace_id or not user_id:
+        return []
+    # Projected to exactly the fields returned below. Safe to read as raw BSON
+    # because this response is hand-built rather than serialized from the
+    # model - but the model's defaults do not apply to raw BSON, so each
+    # fallback below has to stand in for one (models/pocket.py: type="custom",
+    # icon="", color="", description=""). A document written before a field
+    # existed must come back as its default, not as None: callers put these
+    # straight into prompt rows and call string methods on them.
+    cursor = _PocketDoc.get_pymongo_collection().find(
+        {
+            "workspace": workspace_id,
+            "$or": [
+                {"owner": user_id},
+                {"shared_with": user_id},
+                {"visibility": "workspace"},
+            ],
+        },
+        {"_id": 1, "name": 1, "description": 1, "type": 1, "icon": 1, "color": 1, "owner": 1},
+    )
+    return [
+        {
+            "id": str(row["_id"]),
+            "name": row.get("name") or "",
+            "description": row.get("description") or "",
+            "type": row.get("type") or "",
+            "icon": row.get("icon") or "",
+            "color": row.get("color") or "",
+            "owner": row.get("owner") or "",
+        }
+        async for row in cursor
+    ]
+
+
+async def agent_update(
+    pocket_id: str,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    icon: str | None = None,
+    color: str | None = None,
+    ripple_spec: dict | None = None,
+) -> tuple[dict | None, str | None]:
+    """Patch top-level pocket fields. Only fields the caller explicitly
+    provides are touched. ``ripple_spec`` is normalized."""
+    doc, err = await _agent_load_doc(pocket_id)
+    if err:
+        return None, err
+    if name is not None:
+        doc.name = name
+    if description is not None:
+        doc.description = description
+    if icon is not None:
+        doc.icon = icon
+    if color is not None:
+        doc.color = color
+    if ripple_spec is not None:
+        doc.rippleSpec = normalize_ripple_spec(ripple_spec)
+        if doc.rippleSpec:
+            validate_ripple_spec_logged(
+                doc.rippleSpec, pocket_id=str(doc.id), workspace_id=doc.workspace
+            )
+            # Agent-generation path — strict catalog gate. Surface a
+            # violation as the error string so the specialist can retry.
+            try:
+                await _gate_catalog(
+                    doc.rippleSpec,
+                    strict=True,
+                    actor="agent",
+                    workspace_id=doc.workspace,
+                    pocket_id=str(doc.id),
+                )
+            except CatalogViolationError as exc:
+                return None, format_violations_for_agent(exc.violations)
+            except ActionWiringViolationError as exc:
+                return None, format_action_violations_for_agent(exc.violations)
+            except MissingRequiredPropError as exc:
+                return None, format_required_prop_violations_for_agent(exc.violations)
+    try:
+        await doc.save()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"save failed: {exc}"
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return _agent_view_dict(doc), None
+
+
+def _merge_authored_sources_logged(
+    doc: _PocketDoc, sources: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """Merge agent-authored RFC-04 sources into ``doc.rippleSpec.sources``.
+
+    This is the LOGGED (drift-allowed) sibling of ``agent_set_source``'s
+    strict per-source validation — it mirrors how the create / human-import
+    paths treat catalog drift (``validate_against_catalog_logged``) and how
+    the source executor's own ``_parse_bindings`` treats a malformed entry:
+    a bad binding is logged and SKIPPED, never raised, so one hallucinated
+    source can't block the whole ``add_widget``. Each surviving entry is
+    normalized through the ``SourceBinding`` model (the same schema the
+    executor parses), so the binding the executor later runs is identical to
+    a binding authored via ``set_source``.
+
+    Mutates ``doc.rippleSpec`` in place via the pure ``sources_ops`` helper.
+    A non-dict ``sources`` arg, or one with no valid entry, is a no-op — the
+    ``sources`` key is only materialised when at least one binding validates.
+
+    Returns ``(authored_keys, skipped_keys)`` so the caller can build an
+    HONEST tool result: the agent can confirm only the sources that actually
+    persisted and learn which it must NOT report as written. This closes the
+    smoke-test gap where the agent claimed "source authored" for a binding
+    that was silently dropped.
+    """
+    from pocketpaw_ee.cloud.pockets.source_executor import SourceBinding
+
+    authored: list[str] = []
+    skipped: list[str] = []
+    if not isinstance(sources, dict) or not sources:
+        return authored, skipped
+    spec = _sources_root(doc)
+    for key, entry in sources.items():
+        if not key or not isinstance(entry, dict):
+            logger.warning(
+                "add_widget: skipping authored source %r — entry must be a non-empty "
+                "keyed object (pocket %s)",
+                key,
+                str(doc.id),
+            )
+            skipped.append(key)
+            continue
+        try:
+            normalized = SourceBinding.model_validate(entry).model_dump(mode="json")
+        except PydanticValidationError as exc:
+            logger.warning(
+                "add_widget: skipping invalid authored source %r on pocket %s: %s",
+                key,
+                str(doc.id),
+                exc.errors()[0].get("msg", exc) if exc.errors() else exc,
+            )
+            skipped.append(key)
+            continue
+        try:
+            sources_ops.set_source(spec, key, normalized)
+            authored.append(key)
+        except ValueError as exc:
+            logger.warning(
+                "add_widget: could not merge authored source %r on pocket %s: %s",
+                key,
+                str(doc.id),
+                exc,
+            )
+            skipped.append(key)
+    return authored, skipped
+
+
+async def agent_add_widget(
+    pocket_id: str,
+    widget: dict,
+    *,
+    sources: dict[str, Any] | None = None,
+) -> tuple[dict | None, str | None]:
+    """Append one widget tile to the pocket's embedded widget list, and —
+    when ``sources`` is supplied — author the RFC-04 data sources that feed
+    it onto the pocket's top-level ``rippleSpec.sources`` in the same write.
+
+    ``sources`` is a dict keyed by source name; each value is an RFC-04
+    ``SourceBinding`` (``method`` / ``path`` / ``bind`` / ``refresh`` / …).
+    It is merged in LOGGED (drift-allowed) mode — see
+    :func:`_merge_authored_sources_logged` — so a single bad binding is
+    skipped rather than blocking the tile. The tile's own spec carries the
+    ``{state.<path>}`` bind that references the source's ``bind`` target; no
+    special handling beyond persisting it.
+    """
+    if not isinstance(widget, dict):
+        return None, "widget must be a JSON object"
+    doc, err = await _agent_load_doc(pocket_id)
+    if err:
+        return None, err
+    # Agent-generation path — strict catalog + action-wiring gate on the
+    # widget's own ``spec`` subtree (#1208). Mirrors the pocket-level gate
+    # in ``agent_replace_node`` so the home-pocket widget-add surface gets
+    # the same protection against hallucinated dispatcher verbs and unwired
+    # "Refresh" buttons. Validate BEFORE constructing the doc so a violating
+    # spec never reaches the save path.
+    gate_error = await _gate_widget_spec_for_agent(
+        widget.get("spec") if isinstance(widget.get("spec"), dict) else None,
+        widget_type=widget.get("type") if isinstance(widget.get("type"), str) else None,
+        actor="agent",
+        workspace_id=doc.workspace,
+        pocket_id=str(doc.id),
+    )
+    if gate_error is not None:
+        return None, gate_error
+    try:
+        new_widget = _build_widget_doc(widget)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"invalid widget spec: {exc}"
+    doc.widgets.append(new_widget)
+    # Author the tile's data sources onto the pocket's top-level
+    # rippleSpec.sources in the SAME save (RFC-04). Logged/drift-allowed so
+    # a hallucinated binding never blocks the tile. The authored/skipped keys
+    # ride back on the view dict (under ``_source_merge``) so the agent_context
+    # wrapper can build an HONEST tool result without us widening the 2-tuple
+    # signature that the widget-gate callers depend on.
+    authored: list[str] = []
+    skipped: list[str] = []
+    if sources is not None:
+        authored, skipped = _merge_authored_sources_logged(doc, sources)
+    try:
+        await doc.save()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"save failed: {exc}"
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    view = _agent_view_dict(doc)
+    if sources is not None:
+        view["_source_merge"] = {"authored": authored, "skipped": skipped}
+    return view, None
+
+
+async def agent_update_widget(
+    pocket_id: str,
+    widget_id: str,
+    fields: dict,
+    *,
+    sources: dict[str, Any] | None = None,
+) -> tuple[dict | None, str | None]:
+    """Patch fields on one embedded widget, and — when ``sources`` is supplied
+    — author the RFC-04 data sources that feed it onto the pocket's top-level
+    ``rippleSpec.sources`` in the same write. Mirrors ``agent_add_widget``:
+    refining a static tile into a live one is one call (patch the bind + author
+    the source). The sources merge is LOGGED (drift-allowed); the authored /
+    skipped keys ride back on the view under ``_source_merge`` for an honest
+    tool result."""
+    if not isinstance(fields, dict):
+        return None, "fields must be a JSON object"
+    doc, err = await _agent_load_doc(pocket_id)
+    if err:
+        return None, err
+    # The prompt shows a shortened widget id, so accept one back. Widgets are
+    # already loaded and already scoped to this pocket, so the resolve is free
+    # and cannot reach another tenant's data. An ambiguous tail raises rather
+    # than patching whichever widget sorted first.
+    try:
+        widget_id = resolve_id(widget_id, list(doc.widgets))
+    except AmbiguousId as exc:
+        return None, str(exc)
+    except KeyError:
+        return None, f"widget {widget_id} not found in pocket {pocket_id}"
+    widget = next((w for w in doc.widgets if w.id == widget_id), None)
+    if widget is None:
+        return None, f"widget {widget_id} not found in pocket {pocket_id}"
+    # Agent-generation path — strict catalog + action-wiring gate when the
+    # update overwrites ``spec`` (#1208). Only fires when a new spec is
+    # supplied; a name-only / colour-only patch skips the gate the same way
+    # the MCP-layer manifest check does. ``type`` resolution mirrors the
+    # post-update widget state: take ``fields.type`` when provided, else
+    # fall back to the existing widget's type so a native widget that
+    # accidentally received a non-empty spec dict still short-circuits.
+    if "spec" in fields:
+        new_spec = fields["spec"] if isinstance(fields["spec"], dict) else None
+        effective_type = (
+            fields["type"] if "type" in fields and isinstance(fields["type"], str) else widget.type
+        )
+        gate_error = await _gate_widget_spec_for_agent(
+            new_spec,
+            widget_type=effective_type,
+            actor="agent",
+            workspace_id=doc.workspace,
+            pocket_id=str(doc.id),
+        )
+        if gate_error is not None:
+            return None, gate_error
+    for k in ("name", "type", "icon", "color", "span", "data", "spec", "assignedAgent"):
+        if k in fields:
+            setattr(widget, k, fields[k])
+    if "config" in fields and isinstance(fields["config"], dict):
+        widget.config = fields["config"]
+    if "props" in fields and isinstance(fields["props"], dict):
+        widget.props = fields["props"]
+    if "dataSourceType" in fields:
+        widget.dataSourceType = fields["dataSourceType"]
+    # Author/refine the tile's data sources in the SAME save (RFC-04), logged.
+    authored: list[str] = []
+    skipped: list[str] = []
+    if sources is not None:
+        authored, skipped = _merge_authored_sources_logged(doc, sources)
+    try:
+        await doc.save()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"save failed: {exc}"
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    view = _agent_view_dict(doc)
+    if sources is not None:
+        view["_source_merge"] = {"authored": authored, "skipped": skipped}
+    return view, None
+
+
+async def agent_remove_widget(pocket_id: str, widget_id: str) -> tuple[dict | None, str | None]:
+    doc, err = await _agent_load_doc(pocket_id)
+    if err:
+        return None, err
+    before = len(doc.widgets)
+    doc.widgets = [w for w in doc.widgets if w.id != widget_id]
+    if len(doc.widgets) == before:
+        return None, f"widget {widget_id} not found in pocket {pocket_id}"
+    try:
+        await doc.save()
+    except Exception as exc:  # noqa: BLE001
+        return None, f"save failed: {exc}"
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return _agent_view_dict(doc), None
+
+
+# ---------------------------------------------------------------------------
+# Granular rippleSpec.ui mutations — agent-facing
+# ---------------------------------------------------------------------------
+
+# Per-pocket asyncio.Lock cache. Granular ops on the same pocket
+# serialize so a flurry of specialist calls can't race on doc.save().
+# Bounded LRU so the cache doesn't grow unboundedly with pocket churn.
+_POCKET_LOCK_CACHE_MAX = 256
+_pocket_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
+
+
+def _pocket_lock(pocket_id: str) -> asyncio.Lock:
+    """Return (creating if needed) the per-pocket lock. LRU-evicted."""
+    lock = _pocket_locks.get(pocket_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _pocket_locks[pocket_id] = lock
+        if len(_pocket_locks) > _POCKET_LOCK_CACHE_MAX:
+            _pocket_locks.popitem(last=False)
+    else:
+        _pocket_locks.move_to_end(pocket_id)
+    return lock
+
+
+def _spec_root(doc: _PocketDoc) -> tuple[dict[str, Any] | None, str | None]:
+    """Return the mutable ``rippleSpec.ui`` root for a doc, or
+    ``(None, error)`` if the pocket has no spec or no root node.
+
+    Mutating the returned dict mutates ``doc.rippleSpec['ui']`` in place
+    — the caller follows up with ``doc.save()`` to persist.
+    """
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        return None, "pocket has no rippleSpec to mutate"
+    ui = spec.get("ui")
+    if not isinstance(ui, dict):
+        return None, "pocket rippleSpec has no 'ui' root"
+    return ui, None
+
+
+async def _load_and_ensure_ids(
+    pocket_id: str,
+) -> tuple[_PocketDoc | None, dict[str, Any] | None, str | None]:
+    """Load the pocket doc, get its UI root, and ensure every node has
+    an id (persisting if newly assigned). Returns
+    ``(doc, ui_root, None)`` on success.
+    """
+    doc, err = await _agent_load_doc(pocket_id)
+    if err or doc is None:
+        return None, None, err
+    ui, err = _spec_root(doc)
+    if err or ui is None:
+        return None, None, err
+    if spec_ops.ensure_ids(ui):
+        # Persist newly-assigned ids so subsequent ops can target them.
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, None, f"id-assignment save failed: {exc}"
+    return doc, ui, None
+
+
+async def agent_add_node(
+    pocket_id: str,
+    *,
+    parent_id: str,
+    spec: dict[str, Any],
+    after_id: str | None = None,
+    index: int | None = None,
+) -> tuple[dict | None, str | None]:
+    """Insert ``spec`` as a child of ``parent_id`` (after ``after_id`` or
+    appended). The new node's id is assigned if absent.
+
+    Returns ``({"subtree": <new-node>, "pocket": <view>}, None)`` on
+    success.
+    """
+    if not isinstance(spec, dict):
+        return None, "spec must be a JSON object"
+    if not parent_id:
+        return None, "parent_id is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        parent = spec_ops.find_by_id(ui, parent_id)
+        if parent is None:
+            return None, f"no node with id {parent_id!r}"
+        new_node = dict(spec)
+        if not spec_ops.is_valid_id(new_node.get("id")):
+            new_node["id"] = spec_ops.new_node_id()
+        # Make sure any nested children also have ids.
+        spec_ops.ensure_ids(new_node)
+        try:
+            spec_ops.insert_child(parent, new_node, after_id=after_id, index=index)
+        except ValueError as exc:
+            return None, str(exc)
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"subtree": new_node, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
+async def agent_replace_node(
+    pocket_id: str,
+    *,
+    node_id: str,
+    spec: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Replace the subtree rooted at ``node_id`` with ``spec``. The
+    target's id is preserved if ``spec['id']`` is absent.
+
+    Returns ``({"subtree": <new>, "old": <prev>, "pocket": <view>}, None)``.
+    """
+    if not isinstance(spec, dict):
+        return None, "spec must be a JSON object"
+    if not node_id:
+        return None, "node_id is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        new_node = dict(spec)
+        try:
+            old = spec_ops.replace_node(ui, node_id, new_node)
+        except ValueError as exc:
+            return None, str(exc)
+        spec_ops.ensure_ids(new_node)
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"subtree": new_node, "old": old, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
+async def agent_set_node_prop(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    value: Any,
+) -> tuple[dict | None, str | None]:
+    """Set a single prop on ``node_id``. ``prop`` writes into ``props``
+    by default; top-level node keys (``show``, ``bind``, ``on_click``,
+    etc.) are addressable by their bare name. Dotted paths
+    (``data.rows``) walk inside ``props``.
+
+    Returns ``({"subtree": <node>, "old_value": <prev>, "pocket": <view>},
+    None)``.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+        try:
+            old = spec_ops.set_prop(node, prop, value)
+        except ValueError as exc:
+            return None, str(exc)
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "subtree": node,
+                "old_value": old,
+                "prop": prop,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_set_prop_array_item(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    match: dict[str, Any],
+    partial: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Merge ``partial`` into the first item of ``node.props[prop]`` that
+    matches ``match``. Surgical alternative to ``set_node_prop`` when the
+    agent only wants to change one row/slice in a chart/table/etc.
+
+    Merge is SHALLOW: top-level keys in ``partial`` overwrite the matched
+    item's keys, but nested dicts/lists are replaced wholesale rather
+    than deep-merged. Matches ``patch_state`` semantics; if the agent
+    needs to preserve nested structure, fetch the item first and pass a
+    fully-built nested dict in ``partial``. Non-dict matched items are
+    replaced wholesale by ``partial`` (rare — most prop-array items are
+    dicts).
+
+    Returns ``({"item_index": int, "item": <new item>, "old_item": <prev>,
+    "pocket": <view>}, None)``.
+
+    Error codes (returned as the error string):
+      * ``"unsupported_prop_array: <type>.<prop>"``
+      * ``"no node with id 'n_xxx'"``
+      * ``"prop {prop!r} is not an array on node {node_id!r}"``
+      * ``"not_found: no item matched"``
+      * ``"ambiguous: N items matched; candidates=[idx, ...]"``
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+    if not isinstance(partial, dict):
+        return None, "partial must be a dict"
+
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+
+        wtype = node.get("type")
+        if not isinstance(wtype, str) or not prop_arrays.is_allowed(wtype, prop):
+            return None, f"unsupported_prop_array: {wtype}.{prop}"
+
+        props = node.get("props")
+        if props is None:
+            return None, f"node {node_id!r} has no props"
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has non-dict props"
+        arr = props.get(prop)
+        if not isinstance(arr, list):
+            return None, f"prop {prop!r} is not an array on node {node_id!r}"
+
+        try:
+            candidates = spec_ops.match_array_item_candidates(arr, match)
+        except ValueError as exc:
+            return None, str(exc)
+        if len(candidates) == 0:
+            return None, "not_found: no item matched"
+        if len(candidates) > 1:
+            preview = candidates[:5]
+            return None, f"ambiguous: {len(candidates)} items matched; candidates={preview}"
+
+        idx = candidates[0]
+        old_item = copy.deepcopy(arr[idx])
+        if isinstance(arr[idx], dict):
+            arr[idx] = {**arr[idx], **partial}
+        else:
+            arr[idx] = partial  # non-dict element: replace wholesale
+
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "item_index": idx,
+                "item": arr[idx],
+                "old_item": old_item,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_append_prop_array_item(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    value: Any,
+    after: dict[str, Any] | None = None,
+) -> tuple[dict | None, str | None]:
+    """Append ``value`` to ``node.props[prop]``. If ``after`` is given,
+    insert immediately AFTER the first item matching that ItemMatch.
+
+    Returns ``({"item_index": int, "item": <inserted>, "pocket": <view>}, None)``.
+
+    Errors: see ``agent_set_prop_array_item``. ``after`` resolution uses
+    the same match grammar; ``not_found`` / ``ambiguous`` propagate.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+
+        wtype = node.get("type")
+        if not isinstance(wtype, str) or not prop_arrays.is_allowed(wtype, prop):
+            return None, f"unsupported_prop_array: {wtype}.{prop}"
+
+        # Append intentionally creates props and the array on demand —
+        # set/remove bail when either is missing because there is no
+        # item to address, but append's whole job is to add the first
+        # one. Asymmetry is by design.
+        props = node.setdefault("props", {})
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has non-dict props"
+        arr = props.get(prop)
+        if arr is None:
+            arr = []
+            props[prop] = arr
+        if not isinstance(arr, list):
+            return None, f"prop {prop!r} is not an array on node {node_id!r}"
+
+        if after is None:
+            arr.append(value)
+            idx = len(arr) - 1
+        else:
+            try:
+                candidates = spec_ops.match_array_item_candidates(arr, after)
+            except ValueError as exc:
+                return None, str(exc)
+            if len(candidates) == 0:
+                return None, "not_found: after target did not match"
+            if len(candidates) > 1:
+                return (
+                    None,
+                    f"ambiguous: after matched {len(candidates)} items; "
+                    f"candidates={candidates[:5]}",
+                )
+            arr.insert(candidates[0] + 1, value)
+            idx = candidates[0] + 1
+
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "item_index": idx,
+                "item": value,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_prop_array_item(
+    pocket_id: str,
+    *,
+    node_id: str,
+    prop: str,
+    match: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Remove the first item in ``node.props[prop]`` matching ``match``.
+
+    Returns ``({"removed_index": int, "removed_item": Any, "pocket": <view>},
+    None)``.
+
+    Errors: see ``agent_set_prop_array_item``. Refuses ambiguous matches —
+    the agent must disambiguate.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not prop:
+        return None, "prop is required"
+
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        node = spec_ops.find_by_id(ui, node_id)
+        if node is None:
+            return None, f"no node with id {node_id!r}"
+
+        wtype = node.get("type")
+        if not isinstance(wtype, str) or not prop_arrays.is_allowed(wtype, prop):
+            return None, f"unsupported_prop_array: {wtype}.{prop}"
+
+        props = node.get("props")
+        if props is None:
+            return None, f"node {node_id!r} has no props"
+        if not isinstance(props, dict):
+            return None, f"node {node_id!r} has non-dict props"
+        arr = props.get(prop)
+        if not isinstance(arr, list):
+            return None, f"prop {prop!r} is not an array on node {node_id!r}"
+
+        try:
+            candidates = spec_ops.match_array_item_candidates(arr, match)
+        except ValueError as exc:
+            return None, str(exc)
+        if len(candidates) == 0:
+            return None, "not_found: no item matched"
+        if len(candidates) > 1:
+            return None, f"ambiguous: {len(candidates)} items matched; candidates={candidates[:5]}"
+
+        idx = candidates[0]
+        removed = arr.pop(idx)
+
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "removed_index": idx,
+                "removed_item": removed,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_move_node(
+    pocket_id: str,
+    *,
+    node_id: str,
+    new_parent_id: str,
+    after_id: str | None = None,
+) -> tuple[dict | None, str | None]:
+    """Move ``node_id`` under ``new_parent_id`` (after ``after_id`` or
+    appended). Refuses to move the root or to move into a descendant.
+
+    Returns ``({"subtree": <moved>, "old_parent_id": ..., "old_index": ...,
+    "pocket": <view>}, None)``.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    if not new_parent_id:
+        return None, "new_parent_id is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        try:
+            old_parent_id, old_idx = spec_ops.move_node(
+                ui, node_id, new_parent_id, after_id=after_id
+            )
+        except ValueError as exc:
+            return None, str(exc)
+        moved = spec_ops.find_by_id(ui, node_id) or {}
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "subtree": moved,
+                "old_parent_id": old_parent_id,
+                "old_index": old_idx,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_node(
+    pocket_id: str,
+    *,
+    node_id: str,
+) -> tuple[dict | None, str | None]:
+    """Remove the subtree at ``node_id``. Returns the removed subtree
+    plus enough position info to rebuild the inverse.
+
+    Returns ``({"removed_id": ..., "removed": <subtree>, "parent_id": ...,
+    "index": ..., "pocket": <view>}, None)``.
+    """
+    if not node_id:
+        return None, "node_id is required"
+    async with _pocket_lock(pocket_id):
+        doc, ui, err = await _load_and_ensure_ids(pocket_id)
+        if err or doc is None or ui is None:
+            return None, err
+        try:
+            parent, _key, idx, removed = spec_ops.remove_node(ui, node_id)
+        except ValueError as exc:
+            return None, str(exc)
+        if doc.rippleSpec is not None:
+            doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "removed_id": node_id,
+                "removed": removed,
+                "parent_id": str(parent.get("id", "")),
+                "index": idx,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Granular rippleSpec.state mutations — agent-facing
+# ---------------------------------------------------------------------------
+#
+# The "data" half of the 3-layer mutation rule:
+# - data the user sees   → set_state / append_state / remove_state / patch_state
+# - widget appearance    → set_node_prop
+# - widget structure     → add_node / move_node / remove_node
+#
+# Reuses the per-pocket asyncio.Lock cache from the node ops above so
+# concurrent state + node mutations on the same pocket serialize.
+
+
+def _state_root(doc: _PocketDoc) -> tuple[dict[str, Any], str | None]:
+    """Return the mutable ``rippleSpec.state`` dict for a doc, creating
+    it (and the parent ``rippleSpec``) if absent.
+
+    Unlike ``_spec_root`` (which requires a ``ui`` root), state is
+    legitimately empty for new pockets, so we materialise it on demand.
+    """
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        spec = {}
+        doc.rippleSpec = spec
+    state = spec.get("state")
+    if not isinstance(state, dict):
+        state = {}
+        spec["state"] = state
+    return state, None
+
+
+async def agent_set_state(
+    pocket_id: str,
+    *,
+    path: str,
+    value: Any,
+) -> tuple[dict | None, str | None]:
+    """Write ``value`` at ``path`` in the pocket's state. Returns
+    ``({"path": ..., "value": ..., "old_value": ..., "pocket": <view>},
+    None)`` on success.
+
+    See ``state_ops`` for path syntax (dotted with bracket indexing).
+    """
+    if not path:
+        return None, "path is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        state, err = _state_root(doc)
+        if err:
+            return None, err
+        try:
+            old = state_ops.set_path(state, path, value)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "path": path,
+                "value": value,
+                "old_value": old,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_append_state(
+    pocket_id: str,
+    *,
+    path: str,
+    item: Any,
+) -> tuple[dict | None, str | None]:
+    """Append ``item`` to the array at ``path``. Creates an empty list
+    if the path is absent. Returns the new length plus the appended item.
+    """
+    if not path:
+        return None, "path is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        state, err = _state_root(doc)
+        if err:
+            return None, err
+        try:
+            new_len = state_ops.append_path(state, path, item)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "path": path,
+                "item": item,
+                "new_length": new_len,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_state(
+    pocket_id: str,
+    *,
+    path: str,
+) -> tuple[dict | None, str | None]:
+    """Remove the value at ``path``. Returns the removed value (used as
+    the inverse for undo)."""
+    if not path:
+        return None, "path is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        state, err = _state_root(doc)
+        if err:
+            return None, err
+        try:
+            removed = state_ops.remove_path(state, path)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"path": path, "removed": removed, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
+async def agent_patch_state(
+    pocket_id: str,
+    *,
+    partial: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Shallow-merge ``partial`` into state at the top level. For
+    batched independent-key writes. Returns the previous values of
+    overwritten keys."""
+    if not isinstance(partial, dict):
+        return None, "partial must be a dict"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        state, err = _state_root(doc)
+        if err:
+            return None, err
+        try:
+            prev = state_ops.patch(state, partial)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"partial": partial, "previous": prev, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Granular rippleSpec.sources mutations — agent-facing (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+#
+# The third top-level rippleSpec key, alongside ``ui`` (node ops) and
+# ``state`` (state ops). ``sources`` declares read-only GET data bindings
+# the ``source_executor`` runs against the pocket's configured backend.
+#
+# Unlike hydrated state — which is response-body only and never persisted —
+# a ``sources`` declaration IS part of the pocket document, so these ops
+# call ``doc.save()``. The create flow already accepts ``sources`` in the
+# rippleSpec it persists; these ops give the EDIT specialist the same
+# reach on an existing pocket.
+#
+# Each binding is validated through ``SourceBinding`` (source_executor.py)
+# before it is written — an invalid binding is rejected, never stored.
+
+
+def _sources_root(doc: _PocketDoc) -> dict[str, Any]:
+    """Return the mutable ``rippleSpec`` dict for a doc, creating it if
+    absent. ``sources_ops`` materialises the ``sources`` key on demand."""
+    spec = doc.rippleSpec
+    if not isinstance(spec, dict):
+        spec = {}
+        doc.rippleSpec = spec
+    return spec
+
+
+async def agent_set_source(
+    pocket_id: str,
+    *,
+    source_key: str,
+    binding: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Declare (or replace) a read-only data source on the pocket.
+
+    ``binding`` is validated through the ``SourceBinding`` model — an
+    entry missing ``path`` / ``bind``, or carrying a write verb, is
+    rejected before any write. The validated, normalized binding (with
+    ``refresh`` defaulted) is what gets persisted.
+
+    Returns ``({"source_key": ..., "binding": ..., "pocket": <view>},
+    None)`` on success.
+    """
+    from pocketpaw_ee.cloud.pockets.source_executor import SourceBinding
+
+    if not source_key:
+        return None, "source_key is required"
+    if not isinstance(binding, dict):
+        return None, "binding must be an object"
+    try:
+        validated = SourceBinding.model_validate(binding)
+    except PydanticValidationError as exc:
+        return None, f"invalid source binding: {exc.errors()[0].get('msg', exc)}"
+
+    normalized = validated.model_dump(mode="json")
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        try:
+            sources_ops.set_source(spec, source_key, normalized)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "source_key": source_key,
+                "binding": normalized,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_source(
+    pocket_id: str,
+    *,
+    source_key: str,
+) -> tuple[dict | None, str | None]:
+    """Remove a read-only data source declaration from the pocket.
+
+    Idempotent — removing a source that was never declared still
+    succeeds. Returns ``({"source_key": ..., "pocket": <view>}, None)``.
+    """
+    if not source_key:
+        return None, "source_key is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        sources_ops.remove_source(spec, source_key)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"source_key": source_key, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Granular rippleSpec.actions mutations — agent-facing (RFC 05 M2a)
+# ---------------------------------------------------------------------------
+#
+# The write-action sibling of the ``sources`` ops above. ``actions`` is a
+# fourth top-level rippleSpec key declaring write bindings (POST/PUT/PATCH/
+# DELETE). Like ``sources`` it is part of the persisted pocket document, so
+# these ops call ``doc.save()``. Each binding is validated through
+# ``ActionBinding`` (action_executor.py) before it is written — an invalid
+# binding is rejected, never stored. Authoring a binding does NOT authorize
+# the write: the human-set ``allowed_writes`` allowlist on the backend
+# config decides whether the write may actually fire.
+
+
+async def agent_set_action(
+    pocket_id: str,
+    *,
+    action_key: str,
+    binding: dict[str, Any],
+) -> tuple[dict | None, str | None]:
+    """Declare (or replace) a write action on the pocket.
+
+    ``binding`` is validated through the ``ActionBinding`` model — an
+    entry missing ``method`` / ``path``, or carrying a non-write verb, is
+    rejected before any write. M2b governance/metering fields
+    (``requires_instinct``, ``outcome``, …) are CARRIED THROUGH unchanged:
+    ``ActionBinding`` ignores them on parse, so they are taken from the
+    raw ``binding`` dict and re-merged onto the validated core. The write
+    only fires at run time if the human owner has allow-listed the
+    method+path in backend settings.
+
+    Returns ``({"action_key": ..., "binding": ..., "pocket": <view>},
+    None)`` on success.
+    """
+    from pocketpaw_ee.cloud.pockets.action_executor import ActionBinding
+
+    if not action_key:
+        return None, "action_key is required"
+    if not isinstance(binding, dict):
+        return None, "binding must be an object"
+    try:
+        validated = ActionBinding.model_validate(binding)
+    except PydanticValidationError as exc:
+        return None, f"invalid action binding: {exc.errors()[0].get('msg', exc)}"
+
+    # The validated model drops M2b governance fields (extra: ignore). Carry
+    # them through verbatim so an M2b-aware client can author them now and
+    # they survive a round-trip through an M2a runtime.
+    normalized = {**binding, **validated.model_dump(mode="json")}
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        try:
+            actions_ops.set_action(spec, action_key, normalized)
+        except ValueError as exc:
+            return None, str(exc)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {
+                "action_key": action_key,
+                "binding": normalized,
+                "pocket": _agent_view_dict(doc),
+            },
+            None,
+        )
+
+
+async def agent_remove_action(
+    pocket_id: str,
+    *,
+    action_key: str,
+) -> tuple[dict | None, str | None]:
+    """Remove a write-action declaration from the pocket.
+
+    Idempotent — removing an action that was never declared still
+    succeeds. Returns ``({"action_key": ..., "pocket": <view>}, None)``.
+    """
+    if not action_key:
+        return None, "action_key is required"
+    async with _pocket_lock(pocket_id):
+        doc, err = await _agent_load_doc(pocket_id)
+        if err or doc is None:
+            return None, err
+        spec = _sources_root(doc)
+        actions_ops.remove_action(spec, action_key)
+        try:
+            await doc.save()
+        except Exception as exc:  # noqa: BLE001
+            return None, f"save failed: {exc}"
+        await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+        return (
+            {"action_key": action_key, "pocket": _agent_view_dict(doc)},
+            None,
+        )
+
+
+async def agent_create(
+    *,
+    workspace_id: str,
+    owner_id: str,
+    name: str,
+    description: str = "",
+    type_: str = "custom",
+    pattern: str | None = None,
+    icon: str = "",
+    color: str = "",
+    ripple_spec: dict | None = None,
+    engine: str = "ripple",
+    source: dict[str, Any] | None = None,
+    keeps_client_bundle: bool | None = None,
+    trusted: bool = False,
+    site_meta: dict[str, Any] | None = None,
+) -> tuple[dict | None, str | None, str | None]:
+    """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
+
+    Returns ``(view_dict, pocket_id, None)`` on success or
+    ``(None, None, error)`` on failure. Returning the id alongside the
+    view lets the caller link sessions / push SSE events without
+    re-parsing the dict.
+
+    ``type_`` / ``pattern`` carry the create intent. The marketing-site
+    brain (``pocketpaw-create-paw-site``) passes ``type_="site"`` +
+    ``pattern="landing"`` via the specialist create path so the published
+    page renders as a landing page rather than a dashboard. Both keep
+    today's defaults (``type_="custom"``, ``pattern=None``) for callers
+    that pass neither, so the change is additive — no Mongo migration.
+
+    ``engine`` / ``source`` select the Paw Sites generation track. The
+    default ``engine="ripple"`` compiles ``ripple_spec`` into the site;
+    ``engine="svelte"`` materializes ``source`` (a hand-written SvelteKit
+    source envelope ``{relative_path: file_contents}``) instead — the svelte
+    analog of ``ripple_spec``. The svelte-site create flow
+    (``create_svelte_site`` / ``pocketpaw-create-svelte-site``) passes
+    ``engine="svelte"`` + ``source=<map>`` with ``ripple_spec=None`` and
+    ``trusted=True`` (the source is author-controlled component files, not
+    LLM-drafted ripple JSON, so there is no catalog gate to run). For a
+    DYNAMIC svelte site (DSV-5) the ``source`` envelope ALSO carries the
+    live-data bindings (``objects``/``sources``/``actions``/``auth``) as
+    SIBLING keys alongside the file entries — hence ``dict[str, Any]``; they
+    ride the versioned content and the generator extracts them at publish.
+    Both keep today's defaults (``engine="ripple"``, ``source=None``) for
+    ripple callers — additive, no Mongo migration.
+
+    ``keeps_client_bundle`` (MT-1) declares that the site's hand-written client
+    JavaScript is load-bearing — an ``onMount``, a ``use:`` action, an
+    IntersectionObserver scroll-reveal, a raw-WebGL canvas. A published site is
+    otherwise generated with ``csr = false`` (and, on ripple, has its emitted
+    hydration bundle pruned after the build), so that code never runs in the
+    browser. It sits beside ``engine`` because it describes the AUTHORED artifact
+    rather than the deploy, and it rides ``siteConfig.keepsClientBundle`` to the
+    generator at publish. TRI-STATE: it defaults to ``None`` — "the author
+    declared nothing" — and publish then resolves that from the
+    ``sites_keep_client_bundle_default`` setting (``True`` by default since
+    feat/sites-js-by-default). Pass an explicit ``True``/``False`` only to record
+    a real authorial decision; both override the setting, so ``False`` is how a
+    pure-static page opts out of shipping a bundle.
+
+    ``site_meta`` carries site facts that are not file content; a ``project`` site
+    created from a base template stamps ``{"project": {template, framework,
+    recipes}}`` here.
+
+    ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
+    code-assembled spec the caller fully controls (the deterministic Paw Site
+    fast-path's ``assemble_landing_spec``), never for raw LLM output. The strict
+    gate's allow-list is the PUBLISHED widget manifest, which lags the renderer:
+    the real marketing widgets (navbar/feature-grid/testimonial/logo-cloud/cta/
+    footer) ship in the renderer but are absent from the current published
+    manifest, so the gate false-rejects a perfectly valid landing page and its
+    "suggestion" pushes the caller toward generic widgets (avatar/data-grid/…) —
+    the exact downgrade the deterministic fast-path exists to prevent. The spec
+    is still normalized + structurally validated (``validate_ripple_spec_logged``)
+    and the embed audit still runs; only the manifest-type allow-list (which is
+    the stale part) is bypassed. The normal agent path keeps ``trusted=False``
+    and the strict gate unchanged.
+    """
+    if not name:
+        return None, None, "name is required"
+    normalized = normalize_ripple_spec(ripple_spec) if ripple_spec else None
+    if normalized:
+        validate_ripple_spec_logged(normalized, workspace_id=workspace_id)
+        # Agent-generation path — strict catalog gate. A violation is
+        # returned as the error string so the specialist sees the
+        # corrective detail and can retry, instead of persisting a spec
+        # the renderer would draw as a red "Unknown widget type" box.
+        # Trusted code-assembled specs skip the STRICT gate (the published
+        # manifest is stale for marketing widgets — see the docstring) but
+        # still get the LOGGED catalog walk so the embed audit runs and any
+        # genuine drift is recorded, just not blocked.
+        if trusted:
+            await _gate_catalog(normalized, strict=False, actor=owner_id, workspace_id=workspace_id)
+        else:
+            try:
+                await _gate_catalog(
+                    normalized, strict=True, actor=owner_id, workspace_id=workspace_id
+                )
+            except CatalogViolationError as exc:
+                return None, None, format_violations_for_agent(exc.violations)
+            except ActionWiringViolationError as exc:
+                return None, None, format_action_violations_for_agent(exc.violations)
+            except MissingRequiredPropError as exc:
+                return None, None, format_required_prop_violations_for_agent(exc.violations)
+    try:
+        doc = _PocketDoc(
+            workspace=workspace_id,
+            name=name,
+            description=description,
+            type=type_,
+            pattern=pattern,
+            icon=icon,
+            color=color,
+            owner=owner_id,
+            rippleSpec=normalized,
+            engine=engine,
+            source=source,
+            keeps_client_bundle=keeps_client_bundle,
+            site_meta=site_meta,
+            # SF-2 — which side of the source-gate flip this pocket is born on.
+            source_gated=_source_gated_at_create(),
+            visibility="workspace",
+        )
+        await doc.insert()
+    except Exception as exc:  # noqa: BLE001
+        return None, None, f"insert failed: {exc}"
+    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    return _agent_view_dict(doc), str(doc.id), None
+
+
+async def create_pocket_and_session(
+    spec: dict[str, Any],
+    session_key: str,
+    user_id: str | None = None,
+    workspace_id: str | None = None,
+) -> str | None:
+    """Create a pocket + linked chat session in MongoDB. Returns the pocket
+    id, or ``None`` on failure.
+
+    Backs the core ``pocketpaw.pockets`` PocketWriter extension point:
+    ``pocketpaw.agents.loop`` calls this when a local-mode CreatePocketTool
+    emits a ``pocket_event: created``. Identity arrives as explicit args
+    (threaded from ``InboundMessage.metadata``) rather than per-stream
+    ContextVars, because the agent loop has no SSE request scope. When
+    ``user_id`` / ``workspace_id`` are missing it falls back to legacy
+    heuristics — ``user.active_workspace`` first, then first-owned
+    workspace, then any workspace — so self-hosted single-user deployments
+    (CLI, Telegram) without JWT auth still work.
+    """
+    try:
+        from datetime import UTC, datetime
+
+        from pocketpaw_ee.cloud.models.session import Session
+        from pocketpaw_ee.cloud.models.user import User
+        from pocketpaw_ee.cloud.models.workspace import Workspace
+
+        # ── User selection ──────────────────────────────────────────────
+        # Prefer an explicitly-threaded user id so agent-created pockets
+        # land under the caller, not whichever user comes first out of Mongo.
+        user = None
+        if user_id:
+            try:
+                user = await User.get(PydanticObjectId(user_id))
+            except Exception:  # noqa: BLE001
+                logger.warning("Invalid cloud_user_id %r; falling back to first user", user_id)
+                user = None
+        if not user:
+            user = await User.find_one()
+        if not user:
+            logger.warning("Cannot create pocket — no user in DB")
+            return None
+        user_id = str(user.id)
+
+        # ── Workspace selection ─────────────────────────────────────────
+        # Priority: explicit workspace_id → user.active_workspace → first
+        # owned workspace → any workspace.
+        workspace = None
+        target_ws = workspace_id or getattr(user, "active_workspace", None)
+        if target_ws:
+            try:
+                workspace = await Workspace.get(PydanticObjectId(target_ws))
+            except Exception:  # noqa: BLE001
+                workspace = None
+        if not workspace:
+            workspace = await Workspace.find_one(Workspace.owner == user_id)
+        if not workspace:
+            workspace = await Workspace.find_one()
+        if not workspace:
+            logger.warning("Cannot create pocket — no workspace in DB")
+            return None
+        workspace_id = str(workspace.id)
+
+        # Create the pocket through the standard service entry point.
+        meta = spec.get("metadata", {})
+        pocket = await create(
+            workspace_id,
+            user_id,
+            CreatePocketRequest(
+                name=spec.get("title") or spec.get("name") or "Untitled",
+                description=spec.get("description", ""),
+                type=meta.get("category", "custom"),
+                icon="sparkles",
+                color=meta.get("color", "#0A84FF"),
+                rippleSpec=spec,
+            ),
+        )
+        pocket_id = str(pocket["_id"])
+
+        # Link (find-or-create) the chat session to the new pocket.
+        safe_key = session_key.replace(":", "_") if session_key else ""
+        if safe_key:
+            existing = await Session.find_one(Session.sessionId == safe_key)
+            if existing:
+                existing.pocket = pocket_id
+                await existing.save()
+            else:
+                session = Session(
+                    sessionId=safe_key,
+                    workspace=workspace_id,
+                    owner=user_id,
+                    title=spec.get("title") or "New Chat",
+                    pocket=pocket_id,
+                    lastActivity=datetime.now(UTC),
+                )
+                await session.insert()
+
+        logger.info("Created pocket %s + session %s in MongoDB", pocket_id, safe_key)
+        return pocket_id
+    except Exception:
+        logger.warning("Failed to create pocket/session in MongoDB", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Pocket backend binding (RFC 04 alpha)
+#
+# A pocket is bound to ONE external backend (base URL + auth credential).
+# The credential lives in the separate ``PocketBackendCredential``
+# collection — never on the Pocket document, never in ``rippleSpec``. This
+# service is the sole Beanie writer for that collection.
+# ---------------------------------------------------------------------------
+
+
+def _audit_backend_config(
+    *, actor: str, action: str, workspace_id: str, pocket_id: str, base_url: str, auth_type: str
+) -> None:
+    """Write an audit-log entry for a backend-config mutation.
+
+    Logs ``base_url`` / ``auth_type`` / ``pocket_id`` only — the token is
+    NEVER passed here. Category ``pocket_backend_config``, severity WARNING.
+    Audit failures must not break the config flow, so the call is wrapped.
+    """
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action=action,
+                target=pocket_id,
+                status="success",
+                category="pocket_backend_config",
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                base_url=base_url,
+                auth_type=auth_type,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the mutation
+        logger.warning("pocket backend config audit-log write failed", exc_info=True)
+
+
+async def set_pocket_backend(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    base_url: str,
+    auth_type: str,
+    auth_token: str,
+    auth_header: str | None = None,
+    *,
+    backend_type: str = "http",
+    connector_name: str | None = None,
+) -> dict:
+    """Bind a pocket to one backend — upsert its credential row.
+
+    Two backend shapes:
+
+    * ``backend_type="http"`` (the default) — ``base_url`` is validated
+      strictly (https-only, no internal hosts), the token is encrypted via
+      ``backend_crypto`` before it touches the DB, and the plaintext is never
+      persisted or logged.
+    * ``backend_type="connector"`` — ``connector_name`` names a
+      workspace-bound connector. ``base_url``/``auth_*`` are ignored (and NOT
+      required); the connector is validated to actually exist + be enabled for
+      this workspace via ``connectors.service.is_connector_enabled_for_workspace``
+      (rejected with ``pocket_backend.unknown_connector`` otherwise).
+
+    Returns the non-secret summary (carries ``backend_type`` +
+    ``connector_name``, never the token).
+    """
+    if backend_type not in ("http", "connector"):
+        raise ValidationError(
+            "pocket_backend.invalid_backend_type",
+            f"backend_type must be 'http' or 'connector', got {backend_type!r}",
+        )
+
+    if backend_type == "connector":
+        if not connector_name:
+            raise ValidationError(
+                "pocket_backend.missing_connector",
+                "backend_type 'connector' requires a connector_name",
+            )
+        # The connector must be a real registry connector AND enabled for this
+        # workspace. The Beanie read lives in the connectors service (the owner
+        # of the connector docs) — imported lazily to keep the static import
+        # graph free of a cycle (the connectors service imports this service).
+        from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+        if not await connectors_service.is_connector_enabled_for_workspace(
+            workspace_id, connector_name
+        ):
+            raise ValidationError(
+                "pocket_backend.unknown_connector",
+                f"connector {connector_name!r} is not enabled for this workspace — "
+                "enable it before binding it as a pocket backend",
+            )
+        # A connector backend carries no base_url / auth — clear them so a
+        # row that switched http -> connector never keeps a stale credential.
+        base_url = ""
+        auth_type = "none"
+        auth_header = None
+        encrypted_token = nonce = salt = None
+    else:
+        from pocketpaw.security.url_validators import validate_external_url_strict
+
+        # Raises ValueError on a bad URL — surfaces as a 400 via the router.
+        try:
+            base_url = validate_external_url_strict(base_url)
+        except ValueError as exc:
+            raise ValidationError("pocket_backend.invalid_url", str(exc)) from exc
+
+        if auth_type != "none" and not auth_token:
+            raise ValidationError(
+                "pocket_backend.missing_token",
+                f"auth_type '{auth_type}' requires a non-empty auth_token",
+            )
+
+        encrypted_token = nonce = salt = None
+        if auth_type != "none":
+            encrypted_token, nonce, salt = backend_crypto.encrypt_token(auth_token)
+        connector_name = None
+
+    existing = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    # T12 (layered/learning gate, design M-5) — detect a backend IDENTITY
+    # change so the trust ledger can be invalidated below. The identity is
+    # (backend_type, base_url, connector_name): a pocket that swaps which
+    # backend it points at must NOT inherit the prior backend's earned
+    # auto-approve trust (anti-gaming — a low-trust backend can't borrow a
+    # trusted one's score by re-pointing the URL). Compared on the EXISTING
+    # row BEFORE the overwrite. A first-time config (no existing row) earned
+    # nothing, so it never resets. A token rotation that keeps the same URL
+    # is NOT an identity change and does not reset.
+    backend_changed = False
+    if existing is not None:
+        old_identity = (
+            getattr(existing, "backend_type", "http"),
+            existing.base_url,
+            getattr(existing, "connector_name", None),
+        )
+        new_identity = (backend_type, base_url, connector_name)
+        backend_changed = old_identity != new_identity
+
+        existing.backend_type = backend_type
+        existing.connector_name = connector_name
+        existing.base_url = base_url
+        existing.auth_type = auth_type
+        existing.auth_header = auth_header
+        existing.encrypted_token = encrypted_token
+        existing.nonce = nonce
+        existing.salt = salt
+        await existing.save()
+    else:
+        await _BackendCredentialDoc(
+            pocket_id=pocket_id,
+            workspace_id=workspace_id,
+            backend_type=backend_type,
+            connector_name=connector_name,
+            base_url=base_url,
+            auth_type=auth_type,
+            auth_header=auth_header,
+            encrypted_token=encrypted_token,
+            nonce=nonce,
+            salt=salt,
+        ).insert()
+
+    # T12 — invalidate earned trust when the backend identity changed. Done
+    # AFTER the credential save so a save failure never leaves a reset marker
+    # for a backend that did not actually change. Best-effort: a trust-ledger
+    # write failure must not fail backend configuration (the more important
+    # operation succeeded). The lazy import keeps this module's static import
+    # graph free of the pure ledger helper.
+    if backend_changed:
+        try:
+            from pocketpaw_ee.cloud.pockets import trust_ledger
+
+            await trust_ledger.reset_pocket_trust(workspace_id, pocket_id)
+        except Exception:  # noqa: BLE001 — trust reset is best-effort
+            logger.warning(
+                "trust reset failed after backend change for pocket %s", pocket_id, exc_info=True
+            )
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.configure",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=base_url,
+        auth_type=auth_type,
+    )
+    # no-event: backend credentials are a separate collection, not pocket
+    # state — no downstream handler keys off a PocketUpdated for them.
+    return {
+        "backend_type": backend_type,
+        "connector_name": connector_name,
+        "base_url": base_url,
+        "auth_type": auth_type,
+        "configured": True,
+    }
+
+
+def _allowed_writes_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
+    """Render a backend doc's ``allowed_writes`` as plain wire dicts.
+
+    Each rule is ``{method, path_pattern}``. An older row written before
+    RFC 05 has no ``allowed_writes`` attribute — ``getattr`` defaults it
+    to an empty list (fail-closed: no write fires).
+    """
+    rules = getattr(doc, "allowed_writes", None) or []
+    out: list[dict[str, str]] = []
+    for rule in rules:
+        out.append({"method": rule.method, "path_pattern": rule.path_pattern})
+    return out
+
+
+def _allowed_tools_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
+    """Render a backend doc's ``allowed_tools`` as plain wire dicts.
+
+    Each grant is ``{tool}``. A row written before feat/invoke-tool-v1 has no
+    ``allowed_tools`` attribute — ``getattr`` defaults it to an empty list
+    (fail-closed: no ``invoke_tool`` fires). Parallel to ``_allowed_writes_wire``.
+    """
+    grants = getattr(doc, "allowed_tools", None) or []
+    return [{"tool": g.tool} for g in grants]
+
+
+def _approval_route_wire(doc: _BackendCredentialDoc) -> dict[str, str | None] | None:
+    """Render a backend doc's ``approval_route`` as a plain wire dict.
+
+    Returns ``{"mode": ..., "user_id": ...}`` or ``None`` when no route is
+    set (the default — gated writes go to the pocket owner). A row written
+    before RFC 05 M2b.1 has no attribute — ``getattr`` defaults it to
+    ``None``.
+    """
+    route = getattr(doc, "approval_route", None)
+    if route is None:
+        return None
+    return {"mode": route.mode, "user_id": route.user_id}
+
+
+def _backend_summary_wire(doc: _BackendCredentialDoc) -> dict:
+    """Render the full NON-SECRET backend summary for a credential row.
+
+    The ONE place the wire summary is shaped so ``get_pocket_backend`` and the
+    write-policy / tool-policy / approval-route setters never drift. NEVER
+    includes the token. ``backend_type`` / ``connector_name`` / ``allowed_tools``
+    come via ``getattr`` defaults so a legacy row reads as an http backend with
+    no tool grants — back-compatible.
+    """
+    return {
+        "backend_type": getattr(doc, "backend_type", "http"),
+        "connector_name": getattr(doc, "connector_name", None),
+        "base_url": doc.base_url,
+        "auth_type": doc.auth_type,
+        "configured": True,
+        "allowed_writes": _allowed_writes_wire(doc),
+        "allowed_tools": _allowed_tools_wire(doc),
+        "approval_route": _approval_route_wire(doc),
+    }
+
+
+async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
+    """Return the pocket's backend binding summary, or ``None`` if unset.
+
+    NEVER returns the token — only ``backend_type`` / ``connector_name`` /
+    ``base_url`` / ``auth_type`` / ``configured`` / ``allowed_writes`` (the
+    write allowlist) / ``allowed_tools`` (the tool allowlist) /
+    ``approval_route`` (the gated-write approver routing; ``None`` when unset).
+    All owner/editor-facing non-secrets.
+
+    ``backend_type`` / ``connector_name`` come via ``getattr`` defaults so a
+    row written before this feature reads as ``backend_type="http"`` /
+    ``connector_name=None`` — back-compatible.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return None
+    return _backend_summary_wire(doc)
+
+
+async def get_pocket_backend_for_executor(
+    workspace_id: str, pocket_id: str
+) -> (
+    tuple[
+        str,
+        str,
+        str | None,
+        str,
+        list[dict[str, str]],
+        dict[str, str | None] | None,
+        str,
+        str | None,
+        list[dict[str, str]],
+    ]
+    | None
+):
+    """Internal — return ``(base_url, auth_type, auth_header, token,
+    allowed_writes, approval_route, backend_type, connector_name,
+    allowed_tools)``.
+
+    Decrypts the stored token (http backends only; a connector backend has no
+    token). Used by the run-sources route handler (which reads
+    ``backend_type`` / ``connector_name`` to route the run), the run-action
+    route handler (it needs ``allowed_writes`` / ``approval_route``), the
+    run-tool route handler (it needs ``allowed_tools`` / ``backend_type`` /
+    ``connector_name``), and ``instinct_bridge`` / ``temporal_dispatcher`` /
+    ``bulk_dispatch`` (which ignore the trailing elements via ``*_``). Returns
+    ``None`` when the pocket has no backend configured. The plaintext token
+    must never be logged or returned to a client.
+
+    ``allowed_tools`` is appended LAST (the 9th element, feat/invoke-tool-v1)
+    so every existing positional destructure that uses ``*_`` / fixed slices
+    is byte-identical — appending a trailing element is back-compatible.
+    ``backend_type`` / ``connector_name`` / ``allowed_tools`` come via
+    ``getattr`` defaults so a legacy row reads as ``"http"`` / ``None`` / ``[]``.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return None
+
+    token = ""
+    if doc.auth_type != "none" and doc.encrypted_token and doc.nonce and doc.salt:
+        token = backend_crypto.decrypt_token(doc.encrypted_token, doc.nonce, doc.salt)
+    return (
+        doc.base_url,
+        doc.auth_type,
+        doc.auth_header,
+        token,
+        _allowed_writes_wire(doc),
+        _approval_route_wire(doc),
+        getattr(doc, "backend_type", "http"),
+        getattr(doc, "connector_name", None),
+        _allowed_tools_wire(doc),
+    )
+
+
+async def set_pocket_write_policy(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    allowed_writes: list[dict[str, str]],
+) -> dict:
+    """Replace the pocket's write allowlist. Owner-only.
+
+    ``allowed_writes`` is a list of ``{method, path_pattern}`` rules. The
+    list lives on the backend-credential row — OUTSIDE the spec — so the
+    agent (which authors the spec) cannot widen its own write blast
+    radius. An empty list is valid and revokes every write.
+
+    Rejects with ``pocket_backend.not_configured`` if the pocket has no
+    backend configured: a write policy with no backend to apply it to is
+    meaningless, and silently storing one would mask the misconfiguration.
+    The mutation is audit-logged via the ``_audit_backend_config`` path.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before a write policy",
+        )
+
+    # `model_validate` re-checks the method Literal at runtime — the router
+    # already validated each rule through `AllowedWriteDTO`, but internal
+    # callers (bus handlers, jobs) re-parse here, matching the entry-point
+    # validation rule.
+    doc.allowed_writes = [_AllowedWriteDoc.model_validate(rule) for rule in allowed_writes]
+    await doc.save()
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.write_policy",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=doc.base_url,
+        auth_type=doc.auth_type,
+    )
+    # no-event: backend credentials (and the write policy on them) are a
+    # separate collection, not pocket state — no downstream handler keys
+    # off a PocketUpdated for them.
+    return _backend_summary_wire(doc)
+
+
+async def set_pocket_tool_policy(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    allowed_tools: list[dict[str, str]],
+) -> dict:
+    """Replace the pocket's tool allowlist (feat/invoke-tool-v1). Owner-only.
+
+    ``allowed_tools`` is a list of ``{tool}`` grants — each ``tool`` is a
+    built-in tool name or a connector action ``connector:<name>:<action>``.
+    The list lives on the backend-credential row — OUTSIDE the spec — so the
+    agent (which authors the spec) cannot grant itself a tool. An empty list
+    is valid and revokes every tool (fail-closed). Mirrors
+    ``set_pocket_write_policy`` exactly.
+
+    Rejects with ``pocket_backend.not_configured`` if the pocket has no
+    backend configured: a tool policy with no backend to apply it to is
+    meaningless, and silently storing one would mask the misconfiguration.
+    The mutation is audit-logged via the ``_audit_backend_config`` path.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before a tool policy",
+        )
+
+    # `model_validate` re-checks each grant at runtime — the router already
+    # validated through `ToolGrantDTO`, but internal callers (bus handlers,
+    # jobs) re-parse here, matching the entry-point validation rule.
+    doc.allowed_tools = [_ToolGrantDoc.model_validate(grant) for grant in allowed_tools]
+    await doc.save()
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.tool_policy",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=doc.base_url,
+        auth_type=doc.auth_type,
+    )
+    # no-event: backend credentials (and the tool policy on them) are a
+    # separate collection, not pocket state — no downstream handler keys
+    # off a PocketUpdated for them.
+    return _backend_summary_wire(doc)
+
+
+async def set_pocket_approval_route(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    route: dict[str, str | None] | None,
+) -> dict:
+    """Set (or clear) the pocket's gated-write approval route. Owner-only.
+
+    ``route`` is ``{"mode": "owner"|"user", "user_id": ...}`` or ``None``.
+    ``None`` (or ``mode="owner"``) clears the route — ``requires_instinct``
+    writes then route to the pocket owner. ``mode="user"`` routes to the
+    named member; the ``user_id`` is validated as a CURRENT workspace
+    member here, at set-time, so the bridge can trust a stored route
+    without re-checking on every parked write.
+
+    Lives on the backend-credential row alongside the write allowlist —
+    owner-set, outside the spec. Rejects with ``pocket_backend.not_configured``
+    when the pocket has no backend (a route with no backend to gate is
+    meaningless), and ``pocket_backend.invalid_approver`` when a
+    ``mode="user"`` route names a non-member. Audit-logged.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before an approval route",
+        )
+
+    new_route: _ApprovalRouteDoc | None = None
+    if route is not None:
+        parsed = _ApprovalRouteDoc.model_validate(route)
+        if parsed.mode == "user":
+            if not parsed.user_id:
+                raise ValidationError(
+                    "pocket_backend.invalid_approver",
+                    "approval route mode 'user' requires a user_id",
+                )
+            from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+            members = await workspace_service.list_member_ids(workspace_id)
+            if parsed.user_id not in members:
+                raise ValidationError(
+                    "pocket_backend.invalid_approver",
+                    "the routed approver is not a member of this workspace",
+                )
+            new_route = parsed
+        # mode == "owner" → store None (the explicit default).
+
+    doc.approval_route = new_route
+    await doc.save()
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.approval_route",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=doc.base_url,
+        auth_type=doc.auth_type,
+    )
+    # no-event: see set_pocket_write_policy — credential rows aren't pocket state.
+    return _backend_summary_wire(doc)
+
+
+async def remove_pocket_backend(workspace_id: str, user_id: str, pocket_id: str) -> None:
+    """Delete a pocket's backend credential row. Idempotent.
+
+    Audit-logs the removal. A no-op (no row) still returns cleanly so the
+    route is idempotent.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return
+    base_url, auth_type = doc.base_url, doc.auth_type
+    await doc.delete()
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.remove",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=base_url,
+        auth_type=auth_type,
+    )
+    # no-event: see set_pocket_backend — credential rows aren't pocket state.
+
+
+# ---------------------------------------------------------------------------
+# Pocket data-source refresh — interval scan + webhook secret (RFC 04 M3)
+#
+# Interval refresh: the in-process scheduler (``pockets/refresh_scheduler.py``)
+# needs the set of pockets that carry at least one ``"interval"``-refresh
+# source. ``list_interval_source_pockets`` is the scan helper — it stays in
+# the service so the Pocket Beanie read obeys the 4-file rule.
+#
+# Webhook refresh: a ``"webhook"``-refresh source is re-run by an inbound
+# authenticated POST. The shared secret lives on the backend-credential row
+# (NEVER in the spec). The helpers below generate / rotate / resolve it.
+# ---------------------------------------------------------------------------
+
+
+async def list_interval_source_pockets() -> list[dict]:
+    """Return every pocket that declares at least one interval-refresh source.
+
+    Shape per row: ``{pocket_id, workspace_id, sources}`` where ``sources``
+    is the raw ``rippleSpec.sources`` dict. The interval scheduler iterates
+    this set, picks the ``"interval"`` sources, and re-runs each when due.
+
+    Global read (no workspace filter) — the scheduler is a process-wide
+    background loop with no tenant context; it serves every workspace. The
+    Mongo ``$elemMatch`` narrows to sources whose ``refresh`` array contains
+    ``"interval"`` so the loop only loads pockets it can act on.
+    """
+    # global-read: the interval scheduler is a process-wide background loop
+    # with no per-tenant request context; it scans across all workspaces.
+    query: dict[str, Any] = {
+        "rippleSpec.sources": {"$exists": True},
+    }
+    docs = await _PocketDoc.find(query).to_list()
+    out: list[dict] = []
+    for d in docs:
+        spec = d.rippleSpec
+        if not isinstance(spec, dict):
+            continue
+        sources = spec.get("sources")
+        if not isinstance(sources, dict) or not sources:
+            continue
+        has_interval = any(
+            isinstance(b, dict) and "interval" in (b.get("refresh") or []) for b in sources.values()
+        )
+        if not has_interval:
+            continue
+        out.append(
+            {
+                "pocket_id": str(d.id),
+                "workspace_id": d.workspace,
+                "sources": sources,
+            }
+        )
+    return out
+
+
+async def get_pocket_ripple_spec(workspace_id: str, pocket_id: str) -> dict | None:
+    """Return a pocket's raw ``rippleSpec`` for an internal refresh caller.
+
+    Used by the webhook-refresh route — it has already authenticated via
+    the per-pocket webhook secret, so this skips the user-facing access
+    checks in ``get``. Returns ``None`` when the pocket is missing or
+    belongs to a different workspace. ``$source`` markers are NOT resolved
+    — the source executor only reads ``rippleSpec.sources``.
+    """
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:  # noqa: BLE001
+        return None
+    if doc is None or doc.workspace != workspace_id:
+        return None
+    spec = doc.rippleSpec
+    return spec if isinstance(spec, dict) else {}
+
+
+async def get_pocket_spec_and_slug(
+    workspace_id: str, pocket_id: str
+) -> tuple[dict | None, str | None] | None:
+    """Return ``(rippleSpec, template_slug)`` for a pocket, or ``None``.
+
+    Tenant-scoped, single doc read. ``None`` (the outer value) means the
+    pocket is missing OR belongs to another workspace — the same
+    not-an-oracle posture as :func:`get_pocket_ripple_spec`. On success the
+    spec is a dict (``{}`` when unset) and the slug is the stored
+    ``template_slug`` or ``None``.
+
+    Added for the Template Reconcile service (P2.4) so reconcile resolves
+    everything it needs through THIS service in one read and never imports
+    the ``Pocket`` Beanie model itself — the "Beanie writes (and reads)
+    funnel through service.py" boundary the import-linter pins.
+    """
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:  # noqa: BLE001
+        return None
+    if doc is None or doc.workspace != workspace_id:
+        return None
+    spec = doc.rippleSpec
+    slug = getattr(doc, "template_slug", None)
+    return (spec if isinstance(spec, dict) else {}), (slug or None)
+
+
+async def resolve_webhook_pocket(pocket_id: str, presented_secret: str) -> tuple | None:
+    """Authenticate an inbound webhook-refresh request by its secret.
+
+    Returns the executor-creds tuple ``(base_url, auth_type, auth_header,
+    token, allowed_writes, approval_route, workspace_id)`` ONLY when the
+    pocket has a backend with a webhook secret AND ``presented_secret``
+    matches it (constant-time compare). Returns ``None`` for EVERY failure
+    — wrong secret, no secret set, no backend, missing pocket — so the
+    caller raises one identical error and the endpoint is not a
+    pocket-existence oracle.
+
+    The comparison uses ``secrets.compare_digest`` so a timing side channel
+    cannot leak the secret. An empty presented secret short-circuits to
+    ``None`` without a DB read.
+    """
+    if not pocket_id or not presented_secret:
+        return None
+    # No workspace filter: the inbound webhook carries no tenant context.
+    # The pocket_id + secret pair IS the credential; the secret compare
+    # below is the gate. The credential row carries its own workspace_id.
+    # global-read: webhook callers present no tenant context — the secret is the gate.
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+    )
+    if doc is None:
+        return None
+    stored = getattr(doc, "webhook_secret", None)
+    if not stored:
+        return None
+    if not secrets.compare_digest(stored, presented_secret):
+        return None
+
+    token = ""
+    if doc.auth_type != "none" and doc.encrypted_token and doc.nonce and doc.salt:
+        token = backend_crypto.decrypt_token(doc.encrypted_token, doc.nonce, doc.salt)
+    return (
+        doc.base_url,
+        doc.auth_type,
+        doc.auth_header,
+        token,
+        _allowed_writes_wire(doc),
+        _approval_route_wire(doc),
+        doc.workspace_id,
+    )
+
+
+def _new_webhook_secret() -> str:
+    """Mint a fresh URL-safe webhook secret (32 bytes of entropy)."""
+    return secrets.token_urlsafe(32)
+
+
+async def get_webhook_secret(workspace_id: str, pocket_id: str) -> str | None:
+    """Return the pocket's webhook secret, or ``None`` if none is set.
+
+    Owner-only at the route layer. The secret is the credential a webhook
+    caller echoes back, so the owner must be able to read it once to
+    configure the upstream. Raises ``pocket_backend.not_configured`` when
+    the pocket has no backend — a webhook secret with no backend to refresh
+    against is meaningless.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before a webhook secret",
+        )
+    return getattr(doc, "webhook_secret", None)
+
+
+async def rotate_webhook_secret(workspace_id: str, user_id: str, pocket_id: str) -> str:
+    """Generate a fresh webhook secret for the pocket, replacing any prior.
+
+    Owner-only. Rotating invalidates the previous secret immediately — any
+    upstream still using the old value gets a 403 until reconfigured.
+    Returns the new secret (the ONLY time it is handed back outside the
+    owner-only GET). Audit-logged. Rejects with
+    ``pocket_backend.not_configured`` when no backend is set.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before a webhook secret",
+        )
+    doc.webhook_secret = _new_webhook_secret()
+    await doc.save()
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.webhook_rotate",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=doc.base_url,
+        auth_type=doc.auth_type,
+    )
+    # no-event: see set_pocket_backend — credential rows aren't pocket state.
+    return doc.webhook_secret
+
+
+# ---------------------------------------------------------------------------
+# Bulk action dispatch (RFC 03 v2 / Wave 3b)
+# ---------------------------------------------------------------------------
+
+
+async def dispatch_bulk_action(
+    workspace_id: str,
+    user_id: str,
+    body: dict | Any,
+    *,
+    template: Any | None = None,
+    now: Any | None = None,
+) -> dict:
+    """Fan out a ``kind: bulk`` action across the rows in ``body.rows``.
+
+    Service-level entry point that:
+
+    1. Re-validates the body via ``DispatchBulkRequest.model_validate``
+       (rule 6 — internal callers re-parse the schema).
+    2. Delegates the orchestration to ``bulk_dispatch.dispatch_bulk``,
+       which calls the pure OSS planner, persists ONE batch approval
+       if any row escalated, and fires each ready-to-run row through
+       ``action_executor.run_action``.
+    3. Emits a ``BulkActionDispatched`` event with the dispatch
+       summary (counts + optional batch approval id) — rule 9.
+
+    ``template`` is threaded through for internal callers (the future
+    paw-enterprise UI fetches the template from its pocket and passes
+    it here). Library tests pass it explicitly. A missing template
+    raises ``ValidationError`` — we cannot fan out a bulk action
+    without the template-level rules to evaluate.
+
+    Returns a wire dict (rule 5) so the router can construct
+    ``BulkDispatchResponse`` directly.
+    """
+    from pocketpaw_ee.cloud._core.realtime.events import BulkActionDispatched
+    from pocketpaw_ee.cloud.pockets import bulk_dispatch
+    from pocketpaw_ee.cloud.pockets.dto import DispatchBulkRequest
+
+    body = DispatchBulkRequest.model_validate(body)
+
+    if template is None:
+        raise ValidationError(
+            "bulk_action.template_required",
+            "dispatch_bulk_action requires the resolved PocketTemplate",
+        )
+
+    result = await bulk_dispatch.dispatch_bulk(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=body.pocket_id,
+        template=template,
+        action_name=body.action_name,
+        selected_rows=body.rows,
+        now=now,
+    )
+
+    # Wire-friendly dict — frozen Pydantic models serialize cleanly.
+    wire = result.model_dump()
+    # Emit ONE event per dispatch call. Per EE rule 9, every state-
+    # mutating service function emits its event on the way out. The
+    # batch approval write inside ``dispatch_bulk`` already fired its
+    # own ``InstinctApprovalCreated``; this event summarises the bulk
+    # call so downstream audit / analytics listeners can key off a
+    # single event per dispatch.
+    approval_needed = len(result.approval_row_ids)
+    await emit(
+        BulkActionDispatched(
+            data={
+                "workspace_id": workspace_id,
+                "pocket_id": body.pocket_id,
+                "action_name": body.action_name,
+                "total_rows": result.total_rows,
+                "executed": len(result.executions),
+                "blocked": len(result.blocked),
+                "approval_needed": approval_needed,
+                "batch_approval_id": result.batch_approval_id,
+                "actor": user_id,
+            }
+        )
+    )
+    return wire
+
+
+# ── Per-Pocket Connector Permissions ──────────────────────────────────
+
+
+async def get_pocket_connector_permissions(
+    pocket_id: str,
+) -> list[str] | None:
+    """Return the allowed connectors for a pocket.
+
+    Returns ``None`` when the pocket inherits all workspace connectors
+    (default). Returns a list (possibly empty) of connector names when
+    the pocket has explicit restrictions.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    return doc.allowed_connectors
+
+
+async def _auto_enable_pocket_connectors(
+    workspace_id: str,
+    pocket_id: str,
+    connector_names: list[str],
+) -> None:
+    """Ensure each named connector has a WorkspaceConnector row at pocket scope.
+
+    When a connector is granted to a pocket via ``allowed_connectors``, it must
+    also be enabled in the workspace's connector store (``_WCDoc``) so the MCP
+    tool ``list_pocket_connectors`` can find it. For any connector that is NOT
+    already enabled at workspace scope, we create a pocket-scoped row so the
+    connector is usable from this pocket's chat.
+
+    Imported lazily to keep the OSS-EE boundary (this service never imports the
+    connector model at module level).
+    """
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    for name in connector_names:
+        await connectors_service.ensure_connector_enabled_for_pocket(
+            workspace_id,
+            name,
+            pocket_id,
+        )
+
+
+async def set_pocket_connector_permissions(
+    pocket_id: str,
+    allowed_connectors: list[str] | None,
+) -> None:
+    """Set the allowed connectors for a pocket.
+
+    Pass ``None`` to inherit all workspace connectors.
+    Pass ``[]`` to revoke all (pocket sees nothing).
+
+    When non-None, each connector in the list is auto-enabled at pocket scope
+    if not already enabled, so the MCP tool ``list_pocket_connectors`` can
+    find it.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    if allowed_connectors is not None:
+        doc.allowed_connectors = allowed_connectors
+    else:
+        doc.allowed_connectors = None
+    await doc.save()
+    logger.info(
+        "pocket.connector_permissions.set",
+        extra={
+            "pocket_id": pocket_id,
+            "workspace_id": doc.workspace,
+            "allowed_connectors": allowed_connectors,
+        },
+    )
+    # Auto-enable each newly granted connector at pocket scope.
+    if allowed_connectors is not None and allowed_connectors:
+        await _auto_enable_pocket_connectors(doc.workspace, pocket_id, allowed_connectors)
+
+
+async def grant_pocket_connector(
+    pocket_id: str,
+    connector_name: str,
+) -> None:
+    """Grant a connector to a pocket (additive).
+
+    Also auto-enables the connector at pocket scope if not already enabled,
+    so the MCP tool ``list_pocket_connectors`` can find it.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    current = doc.allowed_connectors
+    if current is None:
+        # Currently inheriting all — switch to explicit allowlist with just this connector.
+        doc.allowed_connectors = [connector_name]
+    elif connector_name not in current:
+        doc.allowed_connectors = [*current, connector_name]
+    else:
+        return  # already granted
+    await doc.save()
+    logger.info(
+        "pocket.connector_permissions.grant",
+        extra={
+            "pocket_id": pocket_id,
+            "workspace_id": doc.workspace,
+            "connector_name": connector_name,
+        },
+    )
+    # Auto-enable the connector at pocket scope so it's usable in chat.
+    await _auto_enable_pocket_connectors(doc.workspace, pocket_id, [connector_name])
+
+
+async def revoke_pocket_connector(
+    pocket_id: str,
+    connector_name: str,
+) -> None:
+    """Revoke a connector from a pocket (removes from allowlist)."""
+    doc = await _fetch_pocket(pocket_id)
+    current = doc.allowed_connectors
+    if current is None:
+        return  # no restrictions, nothing to revoke
+    next_list = [c for c in current if c != connector_name]
+    # Keep the list (even empty) to distinguish "no restrictions" from "nothing allowed"
+    doc.allowed_connectors = next_list
+    await doc.save()
+    logger.info(
+        "pocket.connector_permissions.revoke",
+        extra={
+            "pocket_id": pocket_id,
+            "workspace_id": doc.workspace,
+            "connector_name": connector_name,
+        },
+    )
+
+
+async def list_workspace_pocket_connector_permissions(
+    workspace_id: str,
+    user_id: str | None = None,
+) -> dict[str, list[str] | None]:
+    """Return the connector-permissions map for pockets the user can access.
+
+    Returns a dict of pocket_id → allowed_connectors (list or None).
+    ``None`` means the pocket inherits all workspace connectors.
+    This is the bulk endpoint for the frontend's permission-store loader.
+
+    When ``user_id`` is provided, only pockets visible to that user are
+    returned (owner, team member, shared_with, or workspace-visible).
+    """
+    query: dict = {"workspace": workspace_id}
+    if user_id is not None:
+        query["$or"] = [
+            {"owner": user_id},
+            {"team": user_id},
+            {"shared_with": user_id},
+            {"visibility": "workspace"},
+        ]
+    docs = await _PocketDoc.find(query).to_list()
+    result: dict[str, list[str] | None] = {}
+    for doc in docs:
+        result[str(doc.id)] = doc.allowed_connectors
+    return result
+
+
+__all__ = [
+    "access_via_share_link",
+    "add_agent",
+    "add_collaborator",
+    "add_team_member",
+    "add_widget",
+    "agent_add_node",
+    "agent_add_widget",
+    "agent_append_state",
+    "agent_create",
+    "agent_list",
+    "agent_move_node",
+    "agent_patch_state",
+    "agent_remove_action",
+    "agent_remove_node",
+    "agent_remove_source",
+    "agent_remove_state",
+    "agent_remove_widget",
+    "agent_replace_node",
+    "agent_set_action",
+    "agent_set_node_prop",
+    "agent_set_source",
+    "agent_set_state",
+    "agent_update",
+    "agent_update_widget",
+    "agent_view",
+    "can_read",
+    "create",
+    "create_from_ripple_spec",
+    "create_pocket_and_session",
+    "delete",
+    "dispatch_bulk_action",
+    "generate_share_link",
+    "get",
+    "get_pocket_backend",
+    "get_pocket_backend_for_executor",
+    "get_pocket_connector_permissions",
+    "get_pocket_ripple_spec",
+    "get_webhook_secret",
+    "grant_pocket_connector",
+    "has_action_run_access",
+    "has_edit_access",
+    "is_member",
+    "is_owner",
+    "list_interval_source_pockets",
+    "list_pockets",
+    "visible_pocket_refs",
+    "list_workspace_pocket_connector_permissions",
+    "remove_agent",
+    "remove_collaborator",
+    "remove_pocket_backend",
+    "remove_team_member",
+    "remove_widget",
+    "reorder_widgets",
+    "resolve_pocket_template",
+    "resolve_webhook_pocket",
+    "revoke_pocket_connector",
+    "revoke_share_link",
+    "rotate_webhook_secret",
+    "set_pocket_approval_route",
+    "set_pocket_backend",
+    "set_pocket_connector_permissions",
+    "set_pocket_write_policy",
+    "set_react_source_file",
+    "set_svelte_source_file",
+    "unassign_project_on_pockets",
+    "update",
+    "update_share_link",
+    "update_widget",
+]

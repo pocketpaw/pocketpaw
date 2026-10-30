@@ -1,0 +1,14 @@
+{
+  "name": "paw-sites-dispatch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Workers-for-Platforms dynamic dispatch worker for Paw Sites — routes *.<PAW_CF_SITES_DOMAIN> requests to the published user worker in the paw-sites namespace.",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "4.100.0"
+  }
+}

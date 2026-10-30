@@ -1,0 +1,81 @@
+---
+title: "Agent Lifecycle: Disable, Enable, and Delete"
+description: "How a cloud agent moves through its lifecycle — disable to revoke it everywhere at once while keeping its soul and identity, re-enable to restore it, or delete to remove it permanently."
+section: Core Concepts
+ogType: article
+keywords: ["agent lifecycle", "disable agent", "revoke agent", "delete agent", "soft disable"]
+tags: ["agent", "security", "architecture"]
+---
+
+{/*
+  docs/concepts/agent-lifecycle.mdx
+  Created 2026-06-28 (feat/aiam-agent-revoke, AW-5) — documents the agent
+  disable/enable/delete lifecycle, the revoke-everywhere semantics via the
+  single AgentPool chokepoint, and the disable/enable endpoints. Pairs with the
+  AW-4 soft-disable implementation in ee/pocketpaw_ee/cloud/agents and
+  src/pocketpaw/agents/pool.py.
+*/}
+
+# Agent Lifecycle: Disable, Enable, and Delete
+
+A workspace agent has three lifecycle controls: **disable**, **enable**, and **delete**. Disable and delete look similar from a chat window — the agent stops answering — but they are not the same operation. Pick the wrong one and you either lose work you wanted to keep, or leave a "revoked" agent quietly answering on a path you forgot about.
+
+## Disable vs. delete
+
+| | **Disable** | **Delete** |
+|---|---|---|
+| Reversible | Yes — re-enable restores it | No — permanent |
+| Soul / identity | Preserved (memory, persona, DID kept on disk) | Removed |
+| Config & knowledge | Preserved | Removed |
+| Shows in the roster | Yes, marked `disabled: true` | Gone |
+| Answers in chat | No | No |
+| Use when | Pausing, suspending, or revoking an agent you may want back | Retiring an agent for good |
+
+**Disable is the safe default.** It is a soft, reversible suspend: the agent's `.soul` file, configuration, scope assignment, and knowledge base all stay intact. The only thing that changes is a single `disabled` flag on the agent document. Re-enabling flips it back and the agent resumes exactly where it left off — same memory, same persona, no re-onboarding.
+
+**Delete is permanent.** It removes the agent document. Use it only when you are certain the agent will not come back.
+
+If you are unsure, disable. You can always delete a disabled agent later; you cannot un-delete one.
+
+## Revoke everywhere — the AgentPool chokepoint
+
+The reason disable is trustworthy is that there is exactly one place an agent gets resolved before it can run: the **AgentPool** (`src/pocketpaw/agents/pool.py`). Every run path — the SSE chat endpoint, the group/DM bridge, channel dispatch — calls `AgentPool.get(agent_id)` to obtain a live agent instance before it can produce a reply. There is no second resolution path that bypasses it.
+
+That single chokepoint is what makes "revoke everywhere at once" a real guarantee rather than a best effort:
+
+- **`AgentPool.get()` checks the `disabled` flag first.** On both the cached-instance path and the cold-build path it raises `AgentDisabled` before any other work. The check runs ahead of the staleness check and is re-raised past the broad database-error guard, so it **fails closed** — a disabled agent is never resolvable, even if something else goes wrong during the build.
+- **Disable invalidates the cache immediately.** Flipping the flag also calls `AgentPool.invalidate(agent_id)`, which evicts any cached instance on the spot. There is no stale-instance window where a just-disabled agent keeps replying from a warm cache. The next `get()` rebuilds and raises `AgentDisabled`.
+- **In-flight runs finish.** A run that already resolved its instance before the flag flipped completes normally. Disable stops *new* resolutions; it does not kill a reply that is already streaming.
+- **Dispatch skips cleanly.** On the group/DM bridge, a disabled agent's `AgentDisabled` is caught and the agent is simply skipped — no error to the channel, no `500`. The other agents in the group still respond. On the SSE chat path the caller gets a clean `agent.unavailable` error instead of a stack trace.
+
+Because the flag is read at resolution time on the one shared path, disabling an agent revokes it across every channel and session at once — without having to hunt down individual caches or sessions.
+
+## Roster surfacing
+
+A disabled agent is **not** filtered out of the agent list. `list_agents` keeps it in the roster with `disabled: true` on the wire (the same flag rides `GET /agents` and `GET /agents/{id}`). This is deliberate: owners need to *see* a suspended agent in order to re-enable it. The client renders a disabled agent greyed out / inactive rather than letting it silently disappear — "where did my agent go?" is a worse experience than "your agent is paused."
+
+## Endpoints
+
+Both lifecycle toggles are `PATCH` routes under the agents router and carry the **same owner/admin guard as `DELETE`** (`require_agent_owner_or_admin`) — symmetric tenant-scope protection, so a non-owner or cross-workspace caller cannot revoke or restore an agent it does not own.
+
+| Method | Path | Effect |
+|---|---|---|
+| `PATCH` | `/agents/{id}/disable` | Soft-disable — revoke everywhere, keep the soul |
+| `PATCH` | `/agents/{id}/enable` | Restore a disabled agent |
+| `DELETE` | `/agents/{id}` | Permanently remove the agent |
+
+Both `PATCH` routes return the updated agent (with the new `disabled` value) and emit a realtime event — `AgentDisabled` or `AgentEnabled` — mirroring the `AgentDeleted` payload shape so connected clients update the roster live.
+
+## At a glance
+
+```text
+              disable                    enable
+   ACTIVE  ───────────▶  DISABLED  ───────────▶  ACTIVE
+   resolves              skipped /               resolves
+   in pool               AgentDisabled           in pool
+      │                  (soul kept)
+      │ delete                                  delete
+      ▼                                            ▼
+   GONE  ◀───────────────────────────────────────┘
+   (permanent — soul + config removed)
+```

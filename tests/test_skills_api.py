@@ -248,7 +248,7 @@ class TestSkillsRESTEndpoints:
 
         with (
             patch("pocketpaw.skills.installer.asyncio") as mock_asyncio,
-            patch("pocketpaw.skills.installer.get_skill_loader", return_value=mock_loader),
+            patch("pocketpaw.skills.get_skill_loader", return_value=mock_loader),
             patch("pocketpaw.skills.installer.get_audit_logger"),
             tempfile.TemporaryDirectory() as fake_home,
         ):

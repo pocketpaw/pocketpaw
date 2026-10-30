@@ -227,13 +227,15 @@ else:
 **Pattern: Finding Active Invitations**
 ```python
 # Pseudo-code: find invitations a user can still act upon
-active = await Invite.find({
-    "workspace": workspace_id,
-    "email": user_email,
-    "revoked": False,
-    "accepted": False,
-    # expires_at > now is handled in-app via the expired property
-}).to_list()
+active = await Invite.find(
+    {
+        "workspace": workspace_id,
+        "email": user_email,
+        "revoked": False,
+        "accepted": False,
+        # expires_at > now is handled in-app via the expired property
+    }
+).to_list()
 # Filter further in-app: active = [i for i in active if not i.expired]
 ```
 

@@ -1,0 +1,37 @@
+# src/pocketpaw/bundled_templates/_bundled/landing-page/template.pocket.yaml
+# Created: 2026-06-04 (feat/sites-landing-template-fastpath) — RFC 03 v2
+# Pocket Template Schema metadata for the built-in landing-page fast-path.
+# This is the marketing-landing skeleton the create-paw-site brain
+# splices instead of cold-drafting the ~260-line conversion tree every
+# time. ``shape: custom`` because a Paw Site renders by conversion role
+# (navbar / hero / feature-grid / testimonial / pricing-table / cta /
+# footer + a flat lead form), NOT as a column projection of a row entity;
+# custom shape is the only shape the v2 schema permits to declare an empty
+# ``state.columns`` (see schema.py:_columns_required_unless_custom) and it
+# also accepts the no-default_view case (schema.py:_shape_default_view_matrix
+# treats custom as "any"). ``pattern: landing`` matches the sibling
+# index.json row and the type="site" + pattern="landing" stamp the brain
+# persists, so the published page renders as a landing page.
+schema_version: "2"
+name: landing-page
+version: 1.0.0
+vertical: marketing
+pattern: landing
+display_name: Landing Page
+shape: custom
+description: |
+  A marketing landing page rendered as a Paw Site — a real, standalone
+  website composed by conversion role and rendered statically to the
+  edge. Reads top to bottom as a funnel: navbar, hero, services
+  (feature-grid), social proof (testimonials), pricing, a call-to-action
+  band, a flat lead-capture form, and a footer. Every section is its
+  purpose-built Ripple marketing widget; the lead form is flat native
+  inputs so it POSTs with zero JavaScript. Pick this when the brief asks
+  for a landing page, a marketing site, a sales page, or "a website for"
+  a business.
+state:
+  entity_type: LandingPage
+  columns: []
+actions: []
+connectors: []
+skill_refs: []

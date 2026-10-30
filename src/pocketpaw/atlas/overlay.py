@@ -1,0 +1,472 @@
+# atlas/overlay.py — live workspace overlay + fail-closed entitlement filter
+# for the atlas OS self-model (AT-5). Created: 2026-07-02 (feat/atlas-overlay).
+#
+# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3 — role-aware atlas
+# entitlement). Admin ``kind:"capability"`` entries carry a ``role:<tier>``
+# marker in ``requires`` (role:member / role:admin / role:owner). Two changes
+# land here:
+#   * ROLE_REQUIRE_PREFIX + role helpers (``entry_role_requirement``) — the
+#     one place that reads a role marker off an entry's ``requires``.
+#   * ``DefaultEntitlementProvider.is_granted`` now HIDES any entry carrying a
+#     ``role:*`` requirement (returns False): the default provider has no role
+#     context, so it must never expose an admin capability. Non-role entries
+#     stay granted (unchanged OSS behavior). This keeps admin entries hidden
+#     EVERYWHERE except when the EE role-aware provider explicitly grants them
+#     — OSS never leaks admin capabilities even though the compiled artifact is
+#     global. The EE provider lives in ``pocketpaw_ee.agent.atlas_provider`` and
+#     is wired via the ``build_role_aware_provider`` bridge below (mirrors
+#     ``atlas.fabric.build_workspace_fabric_introspector``).
+#
+# The compiled artifact is GLOBAL — the same entries in every workspace.
+# This module makes atlas answers reflect the CALLING workspace's reality:
+#
+# * ``EntitlementProvider`` — a small structural protocol (like the repo's
+#   other protocols) that answers two per-context questions: which connectors
+#   are CONNECTED in this context, and whether a given entry is GRANTED.
+# * ``AtlasOverlay`` — applies a provider to store results at the RESULT
+#   layer (never mutating the shared ``AtlasStore`` singleton's entries):
+#   connector entries gain an ``available: bool`` annotation; entries whose
+#   grant check fails are REMOVED (absent from search, describe, and the
+#   known-ids listing — no "upgrade to see this" leakage). Search re-ranks
+#   available connectors above unavailable ones at EQUAL relevance via a
+#   stable re-sort on top of the store's unchanged base scoring.
+# * FAIL-CLOSED: a provider that raises (or answers anything other than a
+#   literal ``True``) on ``is_granted`` filters that entry; a provider that
+#   raises on ``connected_connector_names`` marks every connector
+#   unavailable. Grant decisions key off the provider instance built for
+#   THIS run/workspace — never a module-level "is cloud mode" flag (repo
+#   lesson #1570/#1574).
+# * ``DefaultEntitlementProvider`` — the OSS default, built on the real
+#   connector seam: ``ConnectorRegistry.status(scope_key)`` (the same
+#   durable-state view ``connector_list`` reports), with the same
+#   ``"default"`` scope the connector tools use; a cloud run passes its
+#   ``ws:<workspace_id>`` scope instead. Nothing is entitlement-gated in
+#   OSS — ``is_granted`` is always True, so OS-level entries (primitives,
+#   surfaces, senses) are never filtered by default.
+#
+# Updated: 2026-08-17 (feat/ast-3-atlas-flag-aware, AST-3) — flag-aware
+# ``available`` for the two rollout-flagged primitives. ``primitive:source-truth``
+# and ``primitive:verify-loop`` ship behind flags that default OFF; atlas must
+# stay DISCOVERABLE (always describe them — hiding them recreates the known
+# misdirection bug) and HONEST (say whether they are live for THIS deployment).
+# ``_overlay_one`` now stamps ``available = (mode != "off")`` plus an additive
+# tri-state ``OverlaidEntry.mode`` ("off" | "shadow" | "enforce") on exactly
+# those two ids, read from live settings once per overlay pass (``_flag_modes``,
+# never cached at import): source-truth reads ``fabric_source_truth_mode``;
+# verify-loop reads the HIGHER of ``effective_deep_work_verify_mode()`` /
+# ``effective_cloud_plan_verify_mode()`` (enforce > shadow > off). Because it is
+# stamped in ``_overlay_one`` (provider-independent), every provider — the OSS
+# default and the EE role-aware one — gets identical mode/availability for free.
+# ``available`` stays a bool so the EXISTING equal-score demotion re-sort in
+# ``search`` applies unchanged. ``FLAG_ENABLE_HINTS`` carries the "how to enable"
+# pointer describe renders when off. DISCOVERY HINTS ONLY — never an
+# enforcement gate (``is_granted`` is untouched by the flags).
+#
+# Updated: 2026-08-17 (AST-5a — review fix V9) — the two member-level
+# ``capability:fabric.*`` cards derive from the same ``fabric_source_truth_mode``
+# as ``primitive:source-truth`` but were never flag-marked, so with the flag off
+# an un-marked card (available None) outranked the demoted primitive in search
+# and its describe had no enable hint. ``FLAGGED_CAPABILITY_MODES`` maps each
+# derived card to its primitive; ``_flag_modes`` copies the primitive's mode onto
+# the card, so ``_overlay_one`` (unchanged) stamps identical ``mode`` /
+# ``available`` and describe renders the same ``enable_hint``. Sort logic and
+# ``is_granted`` are untouched — the cards keep their ``role:member`` gate.
+#
+# Updated: 2026-10-01 (feat/atlas-canonical) — ``build_role_aware_provider`` takes
+# an optional ``user_id`` so the atlas read API can bind the request's verified
+# user (it has no chat-run ContextVars). Agent runs are unchanged.
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from pocketpaw.atlas.model import AtlasEntry
+
+if TYPE_CHECKING:
+    from pocketpaw.atlas.store import AtlasStore
+
+logger = logging.getLogger(__name__)
+
+# Default connector scope in a single-user OSS install — the same literal
+# the builtin connector tools default their ``pocket_id`` argument to.
+DEFAULT_SCOPE_KEY = "default"
+
+# Marker prefix carried in an entry's ``requires`` list to gate it behind a
+# minimum workspace role (WA-3). ``role:member`` / ``role:admin`` / ``role:owner``
+# are additive ``requires`` values — NOT a schema change (``requires`` already
+# exists). An entry carrying ANY ``role:*`` marker is a role-gated entry: the
+# only provider that may grant it is the EE role-aware one; every role-blind
+# provider (the OSS default, a fail-closed fallback) hides it.
+ROLE_REQUIRE_PREFIX = "role:"
+
+# Role tier ordering for the ``role:*`` markers. Mirrors
+# ``pocketpaw_ee.guards.rbac._ROLE_LEVELS`` (owner > admin > member) so the EE
+# provider and this core module agree without an EE import at core scope.
+ROLE_LEVELS: dict[str, int] = {"member": 1, "admin": 2, "owner": 3}
+
+# Rollout-flagged primitives (AST-3): always DESCRIBED (discoverable), but
+# their ``available`` + tri-state ``mode`` come from the deployment's rollout
+# flags, read from live settings once per overlay pass (see ``_flag_modes``).
+FLAGGED_PRIMITIVE_IDS: tuple[str, ...] = ("primitive:source-truth", "primitive:verify-loop")
+
+# Capability cards that DERIVE from a flagged primitive (AST-5a): each maps to
+# the primitive whose live mode it inherits, so ``_flag_modes`` stamps the same
+# tri-state ``mode`` / ``available`` on the card as on the primitive. Without
+# this, a member-level ``capability:fabric.*`` card sat un-marked (available
+# None) ABOVE the demoted primitive in search when source-truth was off, and its
+# describe carried no enable hint. Kept SEPARATE from ``FLAGGED_PRIMITIVE_IDS``
+# because these cards are role-gated (``role:member``): the role-blind default
+# provider filters them, so they can never be part of the provider-parity set.
+FLAGGED_CAPABILITY_MODES: dict[str, str] = {
+    "capability:fabric.provenance_read": "primitive:source-truth",
+    "capability:fabric.conflict_steward": "primitive:source-truth",
+}
+
+# Every id ``_flag_modes`` stamps — the primitives plus their derived cards.
+FLAGGED_IDS: tuple[str, ...] = (*FLAGGED_PRIMITIVE_IDS, *FLAGGED_CAPABILITY_MODES)
+
+# The one-line "how to enable" pointer describe renders when a flagged
+# primitive is off — same shape as the unavailable-connector ``connect_hint``,
+# different pointer (env flag instead of the integrations surface).
+_SOURCE_TRUTH_ENABLE_HINT = (
+    "Source-truth is off in this deployment — set "
+    "POCKETPAW_FABRIC_SOURCE_TRUTH_MODE=shadow|enforce to enable it "
+    "(see docs/atlas.md)."
+)
+FLAG_ENABLE_HINTS: dict[str, str] = {
+    "primitive:source-truth": _SOURCE_TRUTH_ENABLE_HINT,
+    "capability:fabric.provenance_read": _SOURCE_TRUTH_ENABLE_HINT,
+    "capability:fabric.conflict_steward": _SOURCE_TRUTH_ENABLE_HINT,
+    "primitive:verify-loop": (
+        "The verify loop is off in this deployment — set deep_work_verify_mode "
+        "and/or cloud_plan_verify_mode (POCKETPAW_DEEP_WORK_VERIFY_MODE / "
+        "POCKETPAW_CLOUD_PLAN_VERIFY_MODE) to shadow|enforce to enable it "
+        "(see docs/atlas.md)."
+    ),
+}
+
+# Tri-state ordering for the verify-loop mode fold (enforce > shadow > off).
+_MODE_RANK: dict[str, int] = {"off": 0, "shadow": 1, "enforce": 2}
+
+
+def entry_role_requirement(entry: AtlasEntry) -> str | None:
+    """The role tier an entry requires (``'member'`` / ``'admin'`` / ``'owner'``),
+    or ``None`` when the entry carries no ``role:*`` marker.
+
+    Reads the FIRST ``role:<tier>`` value in ``requires``. An unrecognized tier
+    (not in ``ROLE_LEVELS``) still counts as "role-gated" — it returns the raw
+    tier string so a role-blind provider hides it (fail-closed: an unknown
+    marker is treated as gated, never as ungated)."""
+    for req in entry.requires:
+        if isinstance(req, str) and req.startswith(ROLE_REQUIRE_PREFIX):
+            return req[len(ROLE_REQUIRE_PREFIX) :] or req
+    return None
+
+
+@runtime_checkable
+class EntitlementProvider(Protocol):
+    """Per-run context answering what THIS workspace can see and use.
+
+    Structural (duck-typed) like the repo's other protocols — any object
+    with these two methods works, including EE providers that consult a
+    tenant's plan. Implementations should be cheap: both methods are called
+    on every atlas tool invocation.
+    """
+
+    def connected_connector_names(self) -> set[str]:
+        """Names of connectors CONNECTED in this context (e.g. {'stripe'})."""
+        ...
+
+    def is_granted(self, entry: AtlasEntry) -> bool:
+        """Whether this context is entitled to see *entry* at all.
+
+        Return a literal ``True`` to grant. Anything else — ``False``,
+        ``None``, a raise — is treated as NOT granted by the overlay
+        (fail-closed) and the entry is filtered from every answer.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class OverlaidEntry:
+    """A store entry viewed through one context's overlay.
+
+    ``available`` is True/False for ``kind="connector"`` entries (connected
+    in this context or not) and for the rollout-flagged primitives in
+    ``FLAGGED_PRIMITIVE_IDS`` (flag not ``"off"`` for this deployment), None
+    for everything else. ``mode`` is the flagged primitives' tri-state
+    rollout mode (``"off"`` | ``"shadow"`` | ``"enforce"``), None for every
+    other entry.
+
+    Both are DISCOVERY HINTS ONLY (ranking + describe wording) — never an
+    enforcement gate. Nothing may authorize on them; grants come from
+    ``EntitlementProvider.is_granted`` alone. The wrapped ``entry`` is the
+    shared store's object — treat it as read-only.
+    """
+
+    entry: AtlasEntry
+    available: bool | None = None
+    mode: str | None = None
+
+
+def _connector_name(entry: AtlasEntry) -> str:
+    """The registry-facing name for a connector entry (id minus the kind)."""
+    return entry.id.split(":", 1)[1] if ":" in entry.id else entry.id
+
+
+def _connected_names(provider: EntitlementProvider) -> set[str] | None:
+    """Resolve the connected set once per overlay pass, fail-closed.
+
+    ``None`` means resolution failed — every connector is then annotated
+    ``available=False`` (unavailable, NOT filtered: availability is a live
+    fact, not an entitlement).
+    """
+    try:
+        names = provider.connected_connector_names()
+        return {n for n in names if isinstance(n, str)}
+    except Exception as exc:  # noqa: BLE001 — fail closed, never break the tool
+        logger.warning("atlas overlay: connected-connector resolution failed: %s", exc)
+        return None
+
+
+def _is_granted(provider: EntitlementProvider, entry: AtlasEntry) -> bool:
+    """Grant check, fail-closed: only a literal ``True`` grants."""
+    try:
+        return provider.is_granted(entry) is True
+    except Exception as exc:  # noqa: BLE001 — a raising provider must filter, not leak
+        logger.warning("atlas overlay: grant check failed for %s: %s", entry.id, exc)
+        return False
+
+
+def _flag_modes() -> dict[str, str]:
+    """Resolve the rollout mode of each flagged primitive from LIVE settings.
+
+    Called once per overlay pass (never at import) so a mid-session flag flip
+    — or a monkeypatched setting — is reflected on the next atlas call.
+    ``primitive:verify-loop`` folds its two flags to the HIGHER one
+    (enforce > shadow > off): the loop is live if EITHER terminal runs it, and
+    the strongest position is the honest headline. The derived
+    ``FLAGGED_CAPABILITY_MODES`` cards (AST-5a) copy their primitive's mode.
+    Fail-closed: a settings failure reports ``"off"`` for every flagged id —
+    the entry is still described, just marked not live.
+    """
+    try:
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        verify_modes = (
+            settings.effective_deep_work_verify_mode(),
+            settings.effective_cloud_plan_verify_mode(),
+        )
+        modes = {
+            "primitive:source-truth": settings.fabric_source_truth_mode,
+            "primitive:verify-loop": max(verify_modes, key=lambda m: _MODE_RANK.get(m, 0)),
+        }
+        # AST-5a: derived capability cards inherit their primitive's mode.
+        for card_id, primitive_id in FLAGGED_CAPABILITY_MODES.items():
+            modes[card_id] = modes[primitive_id]
+        return modes
+    except Exception as exc:  # noqa: BLE001 — fail closed to "off", never break the tool
+        logger.warning("atlas overlay: rollout-flag resolution failed: %s", exc)
+        return dict.fromkeys(FLAGGED_IDS, "off")
+
+
+def _overlay_one(
+    entry: AtlasEntry, connected: set[str] | None, modes: dict[str, str]
+) -> OverlaidEntry:
+    if entry.kind == "connector":
+        available = connected is not None and _connector_name(entry) in connected
+        return OverlaidEntry(entry=entry, available=available)
+    mode = modes.get(entry.id)
+    if mode is not None:
+        # Flag-aware primitive (AST-3): a discovery hint, never a grant —
+        # the entry is always returned, only marked live or not.
+        return OverlaidEntry(entry=entry, available=mode != "off", mode=mode)
+    return OverlaidEntry(entry=entry, available=None)
+
+
+class AtlasOverlay:
+    """Applies an :class:`EntitlementProvider` to atlas store results.
+
+    Stateless — every method takes the provider explicitly, so one shared
+    store singleton serves any number of concurrent contexts without
+    cross-talk. Nothing here mutates ``AtlasStore`` or its entries.
+    """
+
+    @staticmethod
+    def apply(entries: list[AtlasEntry], provider: EntitlementProvider) -> list[OverlaidEntry]:
+        """Filter non-granted entries and annotate connector availability.
+
+        Order-preserving; use :meth:`search` when availability re-ranking
+        is wanted on scored results.
+        """
+        connected = _connected_names(provider)
+        modes = _flag_modes()
+        return [
+            _overlay_one(entry, connected, modes)
+            for entry in entries
+            if _is_granted(provider, entry)
+        ]
+
+    @staticmethod
+    def search(
+        store: AtlasStore,
+        query: str,
+        provider: EntitlementProvider,
+        limit: int = 5,
+    ) -> list[OverlaidEntry]:
+        """Context-aware search: score, filter, re-rank, then truncate.
+
+        Base relevance scoring is the store's (unchanged); the overlay only
+        applies a STABLE re-sort so an available connector ranks above an
+        unavailable one at equal score. Filtering happens BEFORE the limit,
+        so non-granted entries never eat result slots.
+        """
+        if limit <= 0:
+            return []
+        connected = _connected_names(provider)
+        modes = _flag_modes()
+        ranked: list[tuple[float, int, OverlaidEntry]] = []
+        for score, entry in store.search_scored(query):
+            if not _is_granted(provider, entry):
+                continue
+            overlaid = _overlay_one(entry, connected, modes)
+            demoted = 1 if overlaid.available is False else 0
+            ranked.append((score, demoted, overlaid))
+        # Stable sort: score desc, then available-before-unavailable; ties
+        # keep the store's seed order (list.sort is stable).
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return [overlaid for _, _, overlaid in ranked[:limit]]
+
+    @staticmethod
+    def describe(
+        store: AtlasStore, entry_id: str, provider: EntitlementProvider
+    ) -> OverlaidEntry | None:
+        """Describe one entry through the overlay.
+
+        A non-granted entry returns ``None`` — indistinguishable from an
+        unknown id, so describe can never confirm a filtered entry exists.
+        """
+        entry = store.describe(entry_id)
+        if entry is None or not _is_granted(provider, entry):
+            return None
+        return _overlay_one(entry, _connected_names(provider), _flag_modes())
+
+    @staticmethod
+    def visible_ids(store: AtlasStore, provider: EntitlementProvider) -> list[str]:
+        """Sorted ids this context may see — for known-ids error listings.
+
+        Enumerations shown to the agent must come from here, never from
+        ``store.entries``, or filtered ids leak through error messages.
+        """
+        return sorted(e.id for e in store.entries if _is_granted(provider, e))
+
+
+class DefaultEntitlementProvider:
+    """OSS default provider on the real connector seam.
+
+    Availability comes from ``ConnectorRegistry.status(scope_key)`` — the
+    same durable-state answer (definition present + config persisted)
+    that the ``connector_list`` builtin reports, resolved lazily per call
+    so mid-session connects/disconnects are reflected. ``scope_key`` is
+    the connector state scope: the tools' ``"default"`` pocket scope in a
+    single-user install, or a cloud run's ``ws:<workspace_id>``.
+
+    Nothing is entitlement-gated in OSS EXCEPT role-gated entries: an entry
+    carrying a ``role:*`` marker in ``requires`` (admin capabilities, WA-3) is
+    HIDDEN — the default provider has no workspace-role context, so it must
+    never expose an admin capability. Every non-role entry (primitives,
+    surfaces, senses, connectors) stays visible, connectors merely carrying
+    their live availability annotation. Only the EE role-aware provider
+    (``pocketpaw_ee.agent.atlas_provider``) can grant a role-gated entry, so
+    admin capabilities are absent from atlas everywhere except a cloud run where
+    the caller's resolved role clears the bar.
+    """
+
+    def __init__(self, scope_key: str = DEFAULT_SCOPE_KEY, registry: Any | None = None) -> None:
+        self._scope_key = scope_key
+        self._registry = registry
+
+    def _resolve_registry(self) -> Any:
+        if self._registry is None:
+            # The builtin connector tools' shared registry — the exact
+            # instance connector_list answers from, so atlas availability
+            # can never disagree with connector_list in the same process.
+            from pocketpaw.tools.builtin.connector_tools import _get_registry
+
+            self._registry = _get_registry()
+        return self._registry
+
+    def connected_connector_names(self) -> set[str]:
+        from pocketpaw.connectors.protocol import ConnectorStatus
+
+        rows = self._resolve_registry().status(self._scope_key)
+        return {row["name"] for row in rows if row.get("status") == ConnectorStatus.CONNECTED}
+
+    def is_granted(self, entry: AtlasEntry) -> bool:
+        # Role-gated entries (WA-3) require a workspace-role context this
+        # role-blind default provider does not have — hide them (fail-closed).
+        # Everything else is ungated in OSS.
+        return entry_role_requirement(entry) is None
+
+
+def build_role_aware_provider(
+    scope_key: str, user_id: str | None = None
+) -> EntitlementProvider | None:
+    """EE wiring hook: a role-aware entitlement provider for *scope_key*, or None.
+
+    Mirrors ``atlas.fabric.build_workspace_fabric_introspector`` — the seam that
+    lets a cloud run swap the role-blind ``DefaultEntitlementProvider`` for the
+    EE provider that resolves the CALLER's workspace role and grants ``role:*``
+    entries only when the role clears the bar. Returns ``None`` (caller falls
+    back to the fail-closed default) on: a non-``ws:<id>`` scope (OSS / sentinel),
+    ``pocketpaw_ee.agent.atlas_provider`` not importable (OSS install), or
+    construction failure — all DEBUG-logged, all degrading to "no role-aware
+    provider" so admin entries stay hidden rather than leaking.
+
+    ``user_id`` binds an explicit caller (the HTTP read API, which has no
+    chat-run identity ContextVars); agent runs omit it.
+
+    A ``None`` return is SAFE: the default provider hides every ``role:*`` entry,
+    so admin capabilities never surface without the EE provider explicitly
+    granting them."""
+    if not isinstance(scope_key, str) or not scope_key.startswith("ws:"):
+        return None
+    # Reject the fail-closed sentinel and an empty workspace id in the helper
+    # itself (not only at the call site) so a role-aware provider is never built
+    # for a scope that can't resolve a real tenant — honors this docstring's
+    # "sentinel -> None" contract regardless of caller.
+    _ws_id = scope_key[len("ws:") :]
+    if not _ws_id or _ws_id == "__missing-workspace-id__":
+        return None
+    try:
+        from pocketpaw_ee.agent.atlas_provider import RoleAwareEntitlementProvider
+    except ImportError:
+        logger.debug("pocketpaw_ee.agent.atlas_provider not importable; role-aware atlas off")
+        return None
+    try:
+        if user_id is not None:
+            return RoleAwareEntitlementProvider(scope_key=scope_key, user_id=user_id)
+        return RoleAwareEntitlementProvider(scope_key=scope_key)
+    except Exception as exc:  # noqa: BLE001 — construction failure degrades, never crashes
+        logger.debug("atlas role-aware provider construction failed: %s", exc)
+        return None
+
+
+__all__ = [
+    "DEFAULT_SCOPE_KEY",
+    "FLAG_ENABLE_HINTS",
+    "FLAGGED_CAPABILITY_MODES",
+    "FLAGGED_IDS",
+    "FLAGGED_PRIMITIVE_IDS",
+    "ROLE_LEVELS",
+    "ROLE_REQUIRE_PREFIX",
+    "AtlasOverlay",
+    "DefaultEntitlementProvider",
+    "EntitlementProvider",
+    "OverlaidEntry",
+    "build_role_aware_provider",
+    "entry_role_requirement",
+]

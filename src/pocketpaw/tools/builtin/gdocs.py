@@ -56,7 +56,7 @@ class DocsReadTool(BaseTool):
     async def execute(self, document_id: str) -> str:
         doc_id = _parse_doc_id(document_id)
         try:
-            from pocketpaw.integrations.gdocs import DocsClient
+            from pocketpaw.clients.gdocs import DocsClient
 
             client = DocsClient()
             result = await client.get_document(doc_id)
@@ -111,7 +111,7 @@ class DocsCreateTool(BaseTool):
 
     async def execute(self, title: str, content: str = "") -> str:
         try:
-            from pocketpaw.integrations.gdocs import DocsClient
+            from pocketpaw.clients.gdocs import DocsClient
 
             client = DocsClient()
             result = await client.create_document(title, content)
@@ -162,7 +162,7 @@ class DocsSearchTool(BaseTool):
 
     async def execute(self, query: str, max_results: int = 10) -> str:
         try:
-            from pocketpaw.integrations.gdocs import DocsClient
+            from pocketpaw.clients.gdocs import DocsClient
 
             client = DocsClient()
             docs = await client.search_docs(query, max_results)

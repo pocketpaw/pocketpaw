@@ -1,0 +1,57 @@
+# src/pocketpaw/bundled_templates/_bundled/member-360/template.pocket.yaml
+# Created: 2026-06-11 (feat/triage-member-templates) — RFC 03 v2 Pocket
+# Template Schema metadata for the generic member-360 view.
+# Modified 2026-06-11 (feat/triage-redesign): DEMO-GRADE redesign of the
+# ripple_spec. The focal widget is now the catalog's ``entity-detail``
+# (the 'view one record' layout) — a hero header with a colored avatar
+# block, a tier eyebrow + status pill, a KPI strip (sessions / spend /
+# standing / last visit), and a right rail of key facts — wrapping a
+# balanced two-column body: profile + membership key-value tables side by
+# side, then the tickets / orders record grids and a notes timeline, so
+# nothing floats and there is no dead space below the fold. Every binding
+# is a flat ``{state.member.X}`` / ``{state.<list>}`` path. ``shape:
+# custom`` because the canvas is a composite — RFC 03's shape enum has no
+# single value for it, so the pattern is recorded in the sibling
+# index.json (``pattern: viewer``) and the shape stays ``custom``. The
+# view is READ-ONLY: no actions, no mutation. ``needs: [paw.db.v1]``
+# declares the generic data-source capability a tenant wires so the
+# profile hydrates from a real member record; without one the seeded
+# sample member renders.
+schema_version: "2"
+name: member-360
+version: 1.0.0
+pattern: viewer
+vertical: operations
+display_name: Member 360
+shape: custom
+description: |
+  A single-pane profile of one member. A hero header carries the member's
+  name, a colored avatar block, the tier and status, a KPI strip with the
+  headline numbers — sessions attended, total spend, standing, last visit —
+  and a right rail of key facts. Below it, a balanced two-column body: the
+  profile and membership details as side-by-side key-value tables, then the
+  recent tickets and orders as record grids, and the account notes as a
+  timeline. Read-only by design: it shows the full picture of a member
+  without offering any action. Ships a placeholder live-data source so a
+  connected backend hydrates the record from a real member endpoint; with no
+  backend it renders the seeded sample member.
+icon: user
+color: "#6b8e6b"
+state:
+  entity_type: Member
+  id_field: id
+  columns:
+    - { field: name, label: Name, widget: text }
+    - { field: tier, label: Tier, widget: badge }
+    - { field: status, label: Status, widget: badge }
+data_sources:
+  - name: member
+    method: GET
+    path: /members/current
+    bind: state.member
+    refresh: [pocket_open, manual]
+needs:
+  - paw.db.v1
+actions: []
+connectors: []
+skill_refs: []

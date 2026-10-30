@@ -1,0 +1,6 @@
+# transcript: `dokku storage:create demo-data` — creates a named storage entry.
+EXIT: 0
+--- stdout ---
+-----> Ensuring /var/lib/dokku/data/storage/demo-data exists
+       Directory /var/lib/dokku/data/storage/demo-data created
+--- stderr ---

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pocketpaw.xyz/schemas/belt/c4-flows.json",
+  "$comment": "docs/c4/flows.json in a repo: named, linear walks through its C4 model for the Belt architecture viewer's flow playback. Ids are model.json element ids (people, systems, containers, components). Read and checked against the model by architecture_flows.py. Alternate and parallel paths are out of scope.",
+  "title": "C4 flows",
+  "type": "object",
+  "required": ["flows"],
+  "properties": {
+    "flows": { "type": "array", "items": { "$ref": "#/$defs/flow" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "flow": {
+      "type": "object",
+      "required": ["id", "name", "steps"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "name": { "$ref": "#/$defs/text" },
+        "description": { "type": "string", "maxLength": 2000 },
+        "steps": { "type": "array", "minItems": 1, "maxItems": 200, "items": { "$ref": "#/$defs/step" } }
+      }
+    },
+    "step": { "oneOf": [{ "$ref": "#/$defs/message" }, { "$ref": "#/$defs/process" }, { "$ref": "#/$defs/note" }] },
+    "message": {
+      "$comment": "A hop from one element to another. reverse: a reply along the to -> from relationship, drawn from -> to.",
+      "type": "object",
+      "required": ["from", "to", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "from": { "$ref": "#/$defs/id" }, "to": { "$ref": "#/$defs/id" }, "label": { "$ref": "#/$defs/text" },
+        "technology": { "type": "string", "maxLength": 200 }, "reverse": { "type": "boolean" }
+      }
+    },
+    "process": {
+      "$comment": "Work done inside one element.",
+      "type": "object",
+      "required": ["at", "label"],
+      "additionalProperties": false,
+      "properties": { "at": { "$ref": "#/$defs/id" }, "label": { "$ref": "#/$defs/text" } }
+    },
+    "note": {
+      "type": "object",
+      "required": ["note"],
+      "additionalProperties": false,
+      "properties": { "note": { "$ref": "#/$defs/text" } }
+    }
+  }
+}

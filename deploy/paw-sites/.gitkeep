@@ -1,0 +1,3 @@
+# Keep this dir present in every checkout so Dockerfile.enterprise can COPY it
+# even on the clone source path (Coolify). Vendored artifacts live here but are
+# gitignored — see scripts/vendor-paw-sites.sh + .gitignore.

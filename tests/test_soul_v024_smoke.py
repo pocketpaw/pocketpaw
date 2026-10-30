@@ -25,7 +25,7 @@ pytestmark = pytest.mark.skipif(not _has_soul_protocol(), reason="soul-protocol 
 
 @pytest.fixture(autouse=True)
 def _reset_soul():
-    from pocketpaw.soul.manager import _reset_manager
+    from pocketpaw.soul._manager import _reset_manager
 
     _reset_manager()
     yield
@@ -53,7 +53,7 @@ def soul_settings(tmp_path):
 
 @pytest.fixture
 async def manager(soul_settings):
-    from pocketpaw.soul.manager import SoulManager
+    from pocketpaw.soul import SoulManager
 
     mgr = SoulManager(soul_settings)
     await mgr.initialize()
@@ -103,7 +103,7 @@ class TestEvaluate:
         assert result is None or isinstance(result, dict)
 
     async def test_evaluate_returns_none_without_soul(self, soul_settings):
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         # Don't initialize -- soul is None
@@ -225,7 +225,7 @@ class TestAutoSync:
 class TestFatigueHint:
     async def test_fatigue_hint_when_energy_low(self):
         """Bootstrap context includes fatigue hint when energy <= tired_threshold."""
-        from pocketpaw.paw.soul_bridge import SoulBootstrapProvider
+        from pocketpaw.soul import SoulBootstrapProvider
 
         soul = MagicMock()
         soul.name = "TiredSoul"
@@ -240,7 +240,7 @@ class TestFatigueHint:
 
     async def test_no_fatigue_hint_when_energy_high(self):
         """Bootstrap context does not include fatigue hint when energy is fine."""
-        from pocketpaw.paw.soul_bridge import SoulBootstrapProvider
+        from pocketpaw.soul import SoulBootstrapProvider
 
         soul = MagicMock()
         soul.name = "EnergySoul"

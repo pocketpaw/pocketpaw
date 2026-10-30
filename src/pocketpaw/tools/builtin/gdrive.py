@@ -53,7 +53,7 @@ class DriveListTool(BaseTool):
 
     async def execute(self, query: str | None = None, max_results: int = 20) -> str:
         try:
-            from pocketpaw.integrations.gdrive import DriveClient
+            from pocketpaw.clients.gdrive import DriveClient
 
             client = DriveClient()
             files = await client.list_files(query=query, max_results=max_results)
@@ -112,7 +112,7 @@ class DriveDownloadTool(BaseTool):
 
     async def execute(self, file_id: str) -> str:
         try:
-            from pocketpaw.integrations.gdrive import DriveClient
+            from pocketpaw.clients.gdrive import DriveClient
 
             client = DriveClient()
             result = await client.download(file_id)
@@ -172,7 +172,7 @@ class DriveUploadTool(BaseTool):
         folder_id: str | None = None,
     ) -> str:
         try:
-            from pocketpaw.integrations.gdrive import DriveClient
+            from pocketpaw.clients.gdrive import DriveClient
 
             client = DriveClient()
             result = await client.upload(file_path, name=name, folder_id=folder_id)
@@ -240,7 +240,7 @@ class DriveShareTool(BaseTool):
             return self._error(f"Invalid role '{role}'. Use reader, writer, or commenter.")
 
         try:
-            from pocketpaw.integrations.gdrive import DriveClient
+            from pocketpaw.clients.gdrive import DriveClient
 
             client = DriveClient()
             await client.share(file_id, email, role)

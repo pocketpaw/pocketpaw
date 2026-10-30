@@ -6,13 +6,12 @@
 from __future__ import annotations
 
 import pytest
-
-from pocketpaw.ee.guards.actions import (
+from pocketpaw_ee.guards.actions import (
     ACTIONS,
     GroupRole,
     check_action,
 )
-from pocketpaw.ee.guards.rbac import Forbidden, PocketAccess, WorkspaceRole
+from pocketpaw_ee.guards.rbac import Forbidden, PocketAccess, WorkspaceRole
 
 # ---------------------------------------------------------------------------
 # Enumerate every role in each family, ranked by level.
@@ -62,7 +61,7 @@ def test_mismatched_role_family_raises_type_error() -> None:
 
 
 def test_unknown_action_raises_key_error() -> None:
-    from pocketpaw.ee.guards.actions import get_rule
+    from pocketpaw_ee.guards.actions import get_rule
 
     with pytest.raises(KeyError):
         get_rule("nonexistent.action")
