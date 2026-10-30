@@ -18,11 +18,13 @@ Every ask ends with exactly one ``idle``: after the answer, after ``error``, on
 ``stop`` (the route emits it), on a missed or abandoned spoken question, and when
 the lock is lost mid-answer.
 
-Grounding is the live call, the workspace knowledge base and workspace-shared
-memory facts. The room has several members, so nothing member-private is read:
-KB uses only the ``workspace:{id}`` scope (never ``user:``), and memory facts
-attributed to one member are skipped. Every state change is emitted as
-``call.assistant_state`` to the group's members.
+Grounding is the live call, the group's recent chat, the workspace knowledge base
+and workspace-shared memory facts. A question too short to search on is looked up
+with the latest call lines instead. The room has several members, so nothing
+member-private is read: KB uses only the ``workspace:{id}`` scope (never
+``user:``), memory facts attributed to one member are skipped, and the group chat
+is left out while a guest is in the call or the room cannot be checked. Every
+state change is emitted as ``call.assistant_state`` to the group's members.
 """
 
 from __future__ import annotations
@@ -40,6 +42,8 @@ from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import CallAssistantState
 from pocketpaw_ee.cloud.livekit.agent import (
     _REDIS_PROGRESSIVE_KEY,
+    BOT_IDENTITY,
+    PAW_SPEAKER,
     REDIS_ASK_DONE_KEY,
     REDIS_ASK_QUESTION_KEY,
     REDIS_BOT_CMD_CHANNEL,
@@ -60,6 +64,8 @@ ASK_STOPPED_TTL_SECONDS = 120
 ASK_RATE_KEY = "livekit:ask:rate:{user_id}"
 ASK_RATE_LIMIT = 10
 ASK_RATE_WINDOW_SECONDS = 60
+ASK_PREVIOUS_KEY = "livekit:ask:previous:{group_id}"
+ASK_PREVIOUS_TTL_SECONDS = 6 * 3600
 
 _GATHER_TIMEOUT_SECONDS = 1.5
 # kb-go is a subprocess per search; spawn plus search often runs past 1.5s.
@@ -68,6 +74,12 @@ _TRANSCRIPT_TAIL_SEGMENTS = 2000
 _KB_MAX_CHARS = 4000
 _MEMORY_FETCH_LIMIT = 200
 _MEMORY_TOP_K = 8
+_MIN_QUERY_TERMS = 2
+_CHAT_MESSAGES = 40
+_CHAT_MAX_CHARS = 3000
+_CHAT_MESSAGE_MAX_CHARS = 400
+_INVISIBLE = re.compile("[\u200b-\u200f\u2060\ufeff]")
+_FALLBACK_QUERY_LINES = 3
 _SHARED_MEMORY_USER_IDS = (None, "", "default")
 
 _PLAYBACK_BASE_SECONDS = 4.0
@@ -366,9 +378,10 @@ async def read_live_transcript(group_id: str, max_chars: int = 12000) -> str:
         except ValueError:
             continue
         text = str(seg.get("text") or "").strip()
-        if not text:
+        if not text or seg.get("identity") == BOT_IDENTITY or seg.get("speaker") == PAW_SPEAKER:
             continue
-        line = f"{seg.get('speaker') or 'Someone'}: {text}"
+        speaker = seg.get("speaker") or "Someone"
+        line = f"{speaker}: {text}"
         if len(line) + 1 > budget:
             break
         budget -= len(line) + 1
@@ -396,6 +409,18 @@ def _terms(text: str) -> set[str]:
     return {w for w in _WORD.findall(text.lower()) if len(w) > 2 and w not in _STOPWORDS}
 
 
+def _lookup_query(question: str, call: str) -> str:
+    """The question, plus the latest call lines when it has too few words to search on."""
+    if len(_terms(question)) >= _MIN_QUERY_TERMS:
+        return question
+    recent = [
+        line.removeprefix("- ").split(": ", 1)[-1]
+        for line in call.splitlines()
+        if line.strip() and not line.endswith(":")
+    ][-_FALLBACK_QUERY_LINES:]
+    return " ".join([question.strip(), *recent]).strip()
+
+
 async def _memory_facts(workspace_id: str, question: str) -> list[str]:
     from pocketpaw_ee.cloud.memory.mongo_store import MongoMemoryStore
 
@@ -414,6 +439,48 @@ async def _memory_facts(workspace_id: str, question: str) -> list[str]:
             scored.append((score, entry.content.strip()))
     scored.sort(key=lambda item: item[0], reverse=True)
     return [content for _, content in scored[:_MEMORY_TOP_K]]
+
+
+async def _group_chat(group_id: str) -> str:
+    """People's recent group chat, newest last, or nothing while a guest is in the call.
+
+    The call bot's own posts (Paw's Q&A records and meeting notes) are left out.
+    """
+    from pocketpaw_ee.cloud.auth.service import resolve_display_names
+    from pocketpaw_ee.cloud.chat import message_service
+    from pocketpaw_ee.cloud.livekit.service import CALL_BOT_USER_ID, get_room_info
+
+    room = await get_room_info(group_id)
+    if room is None or any(
+        str(p.get("identity") or "").startswith("guest-") for p in room.get("participants") or []
+    ):
+        return ""
+
+    messages = await message_service.list_recent_for_group(group_id, limit=_CHAT_MESSAGES)
+    human_ids = {m.sender for m in messages if m.sender_type != "agent" and m.sender}
+    names = await resolve_display_names(human_ids) if human_ids else {}
+
+    lines: list[str] = []
+    budget = _CHAT_MAX_CHARS
+    for m in reversed(messages):
+        text = _one_line(_INVISIBLE.sub("", m.content or ""))[:_CHAT_MESSAGE_MAX_CHARS]
+        if not text:
+            continue
+        if m.sender == CALL_BOT_USER_ID:
+            continue
+        if m.sender_type == "agent":
+            name = m.sender_name or m.agent or "An agent"
+        else:
+            name = m.sender_name or names.get(m.sender or "") or "A member"
+        line = f"{_one_line(name)}: {text}"
+        if len(line) + 1 > budget:
+            break
+        budget -= len(line) + 1
+        lines.append(line)
+    lines.reverse()
+    if lines:
+        lines[-1] += " (newest message)"
+    return "\n".join(lines)
 
 
 async def _bounded(
@@ -440,18 +507,45 @@ def _who(group_id: str, ask_id: str, user_id: str, asked_by_name: str) -> dict[s
     }
 
 
-def _build_user_prompt(
-    *, question: str, asked_by_name: str, call: str, kb: str, facts: list[str]
-) -> str:
+async def _previous_question(group_id: str) -> str:
+    return str(await _redis().get(ASK_PREVIOUS_KEY.format(group_id=group_id)) or "")
+
+
+async def _remember_question(group_id: str, asked_by_name: str, question: str) -> None:
+    await _redis().set(
+        ASK_PREVIOUS_KEY.format(group_id=group_id),
+        f"{_one_line(asked_by_name)}: {_one_line(question)}",
+        ex=ASK_PREVIOUS_TTL_SECONDS,
+    )
+
+
+def _build_prompts(
+    *,
+    question: str,
+    asked_by_name: str,
+    call: str,
+    chat: str,
+    kb: str,
+    facts: list[str],
+    previous: str = "",
+) -> tuple[str, str]:
+    """(system, user): the context rides in the system prompt, the user turn is the question.
+
+    The managed Deepgram agent loses a user turn past a few thousand characters but
+    keeps a system prompt up to 25,000, so a long context in the user turn read as
+    no context at all.
+    """
     sections = [
+        ASK_PAW_PROMPT.rstrip(),
+        f"<previous-question>\n{previous or '(none)'}\n</previous-question>",
         f"<call-context>\n{call or '(nothing transcribed yet)'}\n</call-context>",
+        f"<group-chat>\n{chat or '(none)'}\n</group-chat>",
         f"<workspace-knowledge>\n{kb or '(none found)'}\n</workspace-knowledge>",
         "<workspace-memory>\n"
         + ("\n".join(f"- {f}" for f in facts) if facts else "(none found)")
         + "\n</workspace-memory>",
-        f"{asked_by_name} asks: {question}",
     ]
-    return "\n\n".join(sections)
+    return "\n\n".join(sections), f"{asked_by_name} says to you: {question}"
 
 
 # ---------------------------------------------------------------------------
@@ -480,20 +574,29 @@ async def answer_call_question(
             raise _AskStopped
         await emit_assistant_state(state="thinking", question=question, **who)
 
-        call, kb, facts = await asyncio.gather(
+        call, previous = await asyncio.gather(
             _bounded("live transcript", read_live_transcript(group_id), ""),
-            _bounded(
-                "knowledge base", _kb_context(workspace_id, question), "", _KB_TIMEOUT_SECONDS
-            ),
-            _bounded("memory facts", _memory_facts(workspace_id, question), []),
+            _bounded("previous question", _previous_question(group_id), ""),
+        )
+        query = _lookup_query(question, call)
+        kb, facts, chat = await asyncio.gather(
+            _bounded("knowledge base", _kb_context(workspace_id, query), "", _KB_TIMEOUT_SECONDS),
+            _bounded("memory facts", _memory_facts(workspace_id, query), []),
+            _bounded("group chat", _group_chat(group_id), ""),
         )
         gathered = time.monotonic()
 
-        prompt = _build_user_prompt(
-            question=question, asked_by_name=asked_by_name, call=call, kb=kb, facts=facts
+        system, prompt = _build_prompts(
+            question=question,
+            asked_by_name=asked_by_name,
+            call=call,
+            previous=previous,
+            chat=chat,
+            kb=kb,
+            facts=facts,
         )
         first_sentence_at: float | None = None
-        async for sentence in split_sentences(stream_text(ASK_PAW_PROMPT, prompt)):
+        async for sentence in split_sentences(stream_text(system, prompt)):
             if await ask_lock_holder(group_id) != ask_id:
                 raise _AskStopped
             if not spoken:
@@ -506,6 +609,9 @@ async def answer_call_question(
         answer = " ".join(spoken).strip()
         if not answer:
             raise RuntimeError("empty answer")
+        await _bounded(
+            "remember question", _remember_question(group_id, asked_by_name, question), None
+        )
         logger.info(
             "Ask Paw: answered %s in group %s (gather %.0fms, first sentence %.0fms, total %.0fms)",
             ask_id,

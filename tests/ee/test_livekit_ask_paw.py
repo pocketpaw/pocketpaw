@@ -201,12 +201,18 @@ def grounding():
     store = MagicMock()
     store.list_facts_in_workspace = AsyncMock(return_value=facts)
     post = AsyncMock(return_value="m1")
+    room = AsyncMock(return_value={"participants": [{"identity": "u1"}, {"identity": "call-bot"}]})
+    chat = AsyncMock(return_value=[])
+    names = AsyncMock(return_value={})
     with (
         patch("pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope", kb),
         patch("pocketpaw_ee.cloud.memory.mongo_store.MongoMemoryStore", return_value=store),
         patch("pocketpaw_ee.cloud.livekit.service.post_call_bot_message", post),
+        patch("pocketpaw_ee.cloud.livekit.service.get_room_info", room),
+        patch("pocketpaw_ee.cloud.chat.message_service.list_recent_for_group", chat),
+        patch("pocketpaw_ee.cloud.auth.service.resolve_display_names", names),
     ):
-        yield SimpleNamespace(kb=kb, store=store, post=post)
+        yield SimpleNamespace(kb=kb, store=store, post=post, room=room, chat=chat, names=names)
 
 
 async def _commands(pubsub) -> list[dict]:
@@ -232,7 +238,7 @@ async def test_answer_speaks_sentences_in_order_and_records_the_qa(
     prompts: list[str] = []
 
     async def fake_stream(system, user):
-        prompts.append(user)
+        prompts.append(system)
         for d in ("We launch on March", " 3. Priya owns it", "."):
             yield d
 
@@ -1049,4 +1055,251 @@ async def test_kb_gets_a_longer_budget_than_the_other_sources(redis, grounding) 
             question="?",
             ask_id="a1",
         )
-    assert budgets == {"live transcript": 1.5, "knowledge base": 3.0, "memory facts": 1.5}
+    assert budgets == {
+        "live transcript": 1.5,
+        "knowledge base": 3.0,
+        "memory facts": 1.5,
+        "group chat": 1.5,
+        "previous question": 1.5,
+        "remember question": 1.5,
+    }
+
+
+async def _ask(redis, question: str) -> tuple[str, str]:
+    """Run one answer and return the (system, user) prompts the LLM was given."""
+    assert await assistant.acquire_ask_lock(GROUP, "a1")
+    await _played(redis)
+    seen: dict[str, str] = {}
+
+    async def stream(system, user):
+        seen["system"], seen["user"] = system, user
+        yield "Hi Ann."
+
+    with patch.object(assistant, "stream_text", stream):
+        await assistant.answer_call_question(
+            group_id=GROUP,
+            workspace_id=WS,
+            user_id="u1",
+            asked_by_name="Ann",
+            question=question,
+            ask_id="a1",
+        )
+    return seen["system"], seen["user"]
+
+
+async def test_a_greeting_gets_a_recap_rule_not_a_request_for_the_question(
+    redis, grounding
+) -> None:
+    system, user = await _ask(redis, "hi")
+
+    assert "Ann says to you: hi" in user
+    flat = " ".join(system.split()).lower()
+    assert "greeting" in flat and "recap" in flat
+    assert "never ask them to repeat" in flat
+
+
+async def test_a_question_with_no_search_terms_looks_up_the_latest_call_lines(
+    redis, grounding
+) -> None:
+    await redis.rpush(
+        f"livekit:transcript:{GROUP}",
+        json.dumps(
+            {"speaker": "Sam", "text": "We still need to finalise the pricing page.", "ts": 1}
+        ),
+    )
+    grounding.store.list_facts_in_workspace.return_value = [
+        _fact("The pricing page owner is Priya.", "default")
+    ]
+
+    system, _ = await _ask(redis, "hi")
+
+    query = grounding.kb.await_args.args[1]
+    assert "hi" in query and "pricing page" in query
+    assert "The pricing page owner is Priya." in system
+
+
+async def test_a_real_question_is_looked_up_as_asked(redis, grounding) -> None:
+    await redis.rpush(
+        f"livekit:transcript:{GROUP}",
+        json.dumps({"speaker": "Sam", "text": "Unrelated chatter about lunch.", "ts": 1}),
+    )
+
+    await _ask(redis, "When is the launch date?")
+
+    assert grounding.kb.await_args.args[1] == "When is the launch date?"
+
+
+def _msg(content: str, sender: str = "u2", sender_type: str = "user", **extra) -> SimpleNamespace:
+    base = {"sender_name": None, "agent": None}
+    base.update(extra)
+    return SimpleNamespace(content=content, sender=sender, sender_type=sender_type, **base)
+
+
+async def test_recent_group_chat_reaches_the_prompt_with_names(redis, grounding) -> None:
+    grounding.chat.return_value = [
+        _msg("Can we move the demo to Thursday?", sender="u2"),
+        _msg(
+            "Thursday works, I'll update the deck.",
+            sender="a9",
+            sender_type="agent",
+            sender_name="Scout",
+        ),
+        _msg("   "),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    system, _ = await _ask(redis, "hi")
+
+    assert grounding.chat.await_args.args[0] == GROUP
+    assert "<group-chat>" in system
+    assert "Sam: Can we move the demo to Thursday?" in system
+    assert "Scout: Thursday works, I'll update the deck." in system
+    assert "recent group chat" in " ".join(system.split()).lower()
+
+
+async def test_group_chat_is_left_out_while_a_guest_is_in_the_call(redis, grounding) -> None:
+    grounding.room.return_value = {
+        "participants": [{"identity": "u1"}, {"identity": "guest-4f2a"}, {"identity": "call-bot"}]
+    }
+    grounding.chat.return_value = [_msg("Members-only pricing: 40% off for Acme.")]
+
+    system, _ = await _ask(redis, "hi")
+
+    grounding.chat.assert_not_awaited()
+    assert "Acme" not in system
+    assert "<group-chat>\n(none)\n</group-chat>" in system
+
+
+async def test_group_chat_is_left_out_when_the_room_cannot_be_checked(redis, grounding) -> None:
+    grounding.room.side_effect = RuntimeError("livekit down")
+    grounding.chat.return_value = [_msg("Members-only note.")]
+
+    system, _ = await _ask(redis, "hi")
+
+    grounding.chat.assert_not_awaited()
+    assert "Members-only note." not in system
+
+
+async def test_one_long_chat_message_does_not_push_out_the_older_ones(redis, grounding) -> None:
+    grounding.chat.return_value = [
+        _msg("Older decision: demo moves to Thursday.", sender="u2"),
+        _msg("README " + "x" * 5000, sender="u2"),
+        _msg("Newest: thanks all.", sender="u2"),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    system, _ = await _ask(redis, "what did we decide")
+
+    assert "Older decision: demo moves to Thursday." in system
+    assert "Newest: thanks all." in system
+    assert "x" * 1000 not in system
+
+
+async def test_the_prompt_greets_only_a_bare_greeting(redis, grounding) -> None:
+    system, _ = await _ask(redis, "what deadline are we discussing")
+    flat = " ".join(system.split()).lower()
+
+    assert "only when the whole message is a greeting" in flat
+    assert "do not open with a greeting" in flat
+
+
+async def test_the_prompt_says_the_chat_is_oldest_first(redis, grounding) -> None:
+    system, _ = await _ask(redis, "what was the last message")
+    flat = " ".join(system.split()).lower()
+
+    assert "oldest first" in flat and "last line is the newest message" in flat
+
+
+async def test_context_rides_in_the_system_prompt_and_the_user_turn_is_the_question(
+    redis, grounding
+) -> None:
+    await redis.rpush(
+        f"livekit:transcript:{GROUP}",
+        json.dumps({"speaker": "Sam", "text": "Pricing ships Friday.", "ts": 1}),
+    )
+
+    system, user = await _ask(redis, "what did Sam say")
+
+    assert user == "Ann says to you: what did Sam say"
+    assert system.startswith(assistant.ASK_PAW_PROMPT)
+    assert "<call-context>" in system and "Sam: Pricing ships Friday." in system
+    assert "<group-chat>" in system and "<workspace-knowledge>" in system
+
+
+async def test_paws_own_lines_never_reach_the_call_context(redis) -> None:
+    key = f"livekit:transcript:{GROUP}"
+    for seg in [
+        {"identity": "call-bot", "speaker": "Paw", "text": "I don't have that.", "ts": 1},
+        {"identity": "u2", "speaker": "Ann", "text": "Pricing ships Friday.", "ts": 2},
+        {"identity": "call-bot", "speaker": "Paw", "text": "Got it, Friday.", "ts": 3},
+    ]:
+        await redis.rpush(key, json.dumps(seg))
+
+    text = await assistant.read_live_transcript(GROUP)
+
+    assert "Ann: Pricing ships Friday." in text
+    assert "I don't have that." not in text and "Got it, Friday." not in text
+
+
+async def test_a_typed_only_call_has_no_call_lines_at_all(redis) -> None:
+    await redis.rpush(
+        f"livekit:transcript:{GROUP}",
+        json.dumps({"identity": "call-bot", "speaker": "Paw", "text": "Sorry.", "ts": 1}),
+    )
+
+    assert await assistant.read_live_transcript(GROUP) == ""
+
+
+async def test_group_chat_keeps_people_and_none_of_the_call_bots_posts(redis, grounding) -> None:
+    bot = "__livekit_call_bot__"
+    grounding.chat.return_value = [
+        _msg("**Q (Admin):** hi\n**Paw:** I don't have that.", sender=bot, sender_name="Paw"),
+        _msg("Ship the Hunts README today.", sender="u2"),
+        _msg("📋 **Meeting Notes** [Paw]: Sorry.", sender=bot, sender_name="Meeting Notes"),
+        _msg("\u200b", sender="u2"),
+        _msg("**Q (Admin):** status?\n**Paw:** README ships today.", sender=bot, sender_name="Paw"),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    system, _ = await _ask(redis, "what was the last message")
+
+    assert grounding.chat.await_args.kwargs["limit"] == 40
+    assert "Sam: Ship the Hunts README today." in system
+    assert "Meeting Notes" not in system
+    assert "I don't have that." not in system and "README ships today." not in system
+    assert "Sam: \u200b" not in system
+
+
+async def test_the_newest_chat_line_is_marked(redis, grounding) -> None:
+    grounding.chat.return_value = [
+        _msg("Both Pulse PRs are open.", sender="u2"),
+        _msg("Hunts README attached.", sender="u2"),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    system, _ = await _ask(redis, "what was the last message")
+
+    assert "Sam: Both Pulse PRs are open.\nSam: Hunts README attached. (newest message)" in system
+    assert "(newest message)" in " ".join(assistant.ASK_PAW_PROMPT.split())
+
+
+async def test_a_follow_up_sees_the_previous_question(redis, grounding) -> None:
+    await _ask(redis, "what are we doing on growth social pulse")
+    key = f"livekit:ask:previous:{GROUP}"
+    assert await redis.get(key) == "Ann: what are we doing on growth social pulse"
+    assert 0 < await redis.ttl(key) <= 6 * 3600
+
+    system, _ = await _ask(redis, "can you go in some detail")
+
+    assert (
+        "<previous-question>\nAnn: what are we doing on growth social pulse\n</previous-question>"
+        in system
+    )
+    flat = " ".join(assistant.ASK_PAW_PROMPT.split()).lower()
+    assert "previous-question" in flat and "follow-up" in flat
+
+
+async def test_the_first_question_has_no_previous_question(redis, grounding) -> None:
+    system, _ = await _ask(redis, "hi")
+
+    assert "<previous-question>\n(none)\n</previous-question>" in system
