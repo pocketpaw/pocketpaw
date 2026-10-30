@@ -75,6 +75,7 @@ _MEMORY_TOP_K = 8
 _MIN_QUERY_TERMS = 2
 _CHAT_MESSAGES = 20
 _CHAT_MAX_CHARS = 3000
+_CHAT_MESSAGE_MAX_CHARS = 400
 _PAW_EARLIER = "Paw (you, earlier)"
 _FALLBACK_QUERY_LINES = 3
 _SHARED_MEMORY_USER_IDS = (None, "", "default")
@@ -459,7 +460,7 @@ async def _group_chat(group_id: str) -> str:
     lines: list[str] = []
     budget = _CHAT_MAX_CHARS
     for m in reversed(messages):
-        text = _one_line(m.content or "")
+        text = _one_line(m.content or "")[:_CHAT_MESSAGE_MAX_CHARS]
         if not text:
             continue
         if m.sender == CALL_BOT_USER_ID and m.sender_name == PAW_SPEAKER:

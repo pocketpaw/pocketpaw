@@ -1209,6 +1209,21 @@ async def test_paws_chat_replies_are_labelled_as_its_own(redis, grounding) -> No
     assert "Paw (you, earlier): **Q (Admin):** hi **Paw:** Hi there!" in user
 
 
+async def test_one_long_chat_message_does_not_push_out_the_older_ones(redis, grounding) -> None:
+    grounding.chat.return_value = [
+        _msg("Older decision: demo moves to Thursday.", sender="u2"),
+        _msg("README " + "x" * 5000, sender="u2"),
+        _msg("Newest: thanks all.", sender="u2"),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    _, user = await _ask(redis, "what did we decide")
+
+    assert "Older decision: demo moves to Thursday." in user
+    assert "Newest: thanks all." in user
+    assert "x" * 1000 not in user
+
+
 async def test_the_prompt_says_paws_own_lines_are_not_evidence(redis, grounding) -> None:
     system, _ = await _ask(redis, "what deadline are we discussing")
     flat = " ".join(system.split()).lower()
