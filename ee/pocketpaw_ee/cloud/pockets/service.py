@@ -2414,8 +2414,10 @@ async def read_site_snapshot(workspace_id: str, user_id: str, pocket_id: str) ->
     The one read path behind ``duplicate_pocket`` and saving a site as a template.
     Returns the snapshot fields (``site_meta`` reduced to its project part by
     ``site_meta_snapshot``) plus the source's raw ``source_gated`` stamp,
-    ``name`` and ``visibility``. The values are the document's own, not copies;
-    ``copy_site_snapshot`` deep-copies on write.
+    ``name``, ``visibility`` and ``template_id`` (the site template the pocket
+    was made from, or ``None``; saving a template records it as provenance).
+    The values are the document's own, not copies; ``copy_site_snapshot``
+    deep-copies on write.
 
     A pocket outside ``workspace_id`` (or a malformed id) is NotFound, never
     Forbidden, so this is not an existence oracle across tenants; a private pocket
@@ -2443,6 +2445,7 @@ async def read_site_snapshot(workspace_id: str, user_id: str, pocket_id: str) ->
         "source_gated": source.source_gated,
         "name": source.name,
         "visibility": source.visibility,
+        "template_id": source.template_id,
     }
 
 

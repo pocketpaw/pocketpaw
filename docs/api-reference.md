@@ -1562,6 +1562,8 @@ the owner:
   "kind": "site",
   "audiences": ["shop"],
   "live_url": "https://bakery.pawsites.workers.dev",
+  "tags": ["bakery", "shop"],
+  "show_creator": false,
   "created_at": "2026-10-01T09:00:00Z",
   "updated_at": "2026-10-01T09:00:00Z"
 }
@@ -1578,12 +1580,21 @@ still succeeds. Deleting the template removes the image.
 
 `kind` (`site`, the default, `tool` or `game`) and `audiences` (any of `shop`,
 `design`, `everyone`, `fun`; default `[]`) describe the template for the
-Discover index. `live_url` is the source site's live URL when that site is
+Discover index, and so do `tags` and `show_creator`. `tags` holds at most 8
+tags, each 1 to 32 characters of `a-z`, `0-9` and `-`; they are normalised on
+save and PATCH (trimmed, lowercased, spaces and underscores become `-`,
+duplicates dropped), and anything still outside that set is a `422`.
+`show_creator` (default `false`) puts the owner's display name on the public
+Discover card; with it off the card names no one. A template saved from a site
+that was itself made with `use` remembers which template that was, and its
+Discover listing links back to it (`remixed_from`). `live_url` is the source site's live URL when that site is
 deployed, else `null`; it is re-read on save, on every `PATCH` and on every
 Discover reindex (once at startup, then every 30 minutes when the cloud
 scheduler is on), so a renamed
 or unpublished site's URL catches up within one reindex. A public template is
-listed in Discover; making it private or deleting it removes the listing. A
+listed in Discover; making it private or deleting it takes the listing down
+(it keeps its slug, so making the template public again brings the same link
+back). A
 hidden template (reported here or on Discover) keeps a hidden listing, and a
 hide from either side hides both: the template leaves the public list and `use`,
 and changing its visibility back to `public` keeps it hidden.
@@ -1601,7 +1612,7 @@ workspace; `site_template.used` and `.reported` in the acting user's workspace
 Save a site pocket as a template the caller owns.
 
 ```json
-{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private", "kind": "site", "audiences": [] }
+{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private", "kind": "site", "audiences": [], "tags": ["bakery"], "show_creator": false }
 ```
 
 `name` is 1 to 100 characters; `visibility` defaults to `private`. The caller
@@ -1635,7 +1646,8 @@ One template's metadata, if you can see it; otherwise `404`.
 
 ### `PATCH /site-templates/{template_id}`
 
-Change any of `name`, `description`, `visibility`, `kind`, `audiences`. Owner only (`404` for anyone
+Change any of `name`, `description`, `visibility`, `kind`, `audiences`, `tags`,
+`show_creator`. Owner only (`404` for anyone
 else). Setting `visibility` to `public` runs the publish checks. `version` does
 not change. Response `200`: the metadata.
 
@@ -1764,8 +1776,8 @@ return `429` with `discover.rate_limited`. Behind the paw-web Worker the IP come
 from `X-Paw-Client-IP` when `X-Paw-Web-Key` matches (see `GET /pros/directory`). `use` and `report` need a signed-in
 user and act in the caller's active workspace.
 
-A listing on the wire is exactly these fields (never the owner, workspace,
-reports or the source item's id):
+A listing on the wire is exactly these fields (never the owner's id or email,
+the workspace, reports or the source item's id):
 
 ```json
 {
@@ -1781,15 +1793,32 @@ reports or the source item's id):
   "live_url": "https://bakery.pawsites.workers.dev",
   "remix_count": 3,
   "created_at": "2026-10-01T09:00:00Z",
+  "updated_at": "2026-10-03T14:20:00Z",
   "media_kind": null,
-  "media_url": null
+  "media_url": null,
+  "tags": ["bakery", "shop"],
+  "creator": { "name": "Ada Baker" },
+  "remixed_from": { "slug": "corner-bakery", "title": "Corner bakery" }
 }
 ```
+
+`updated_at` is when the listing's content last changed (a re-sync that
+changes nothing leaves it; featuring or hiding moves it). `tags` are the
+source's tags, lowercase `a-z0-9-`, at most 8. `creator` is `{"name": ...}`
+only when the owner opted in (`show_creator` on the site template) and has a
+display name; otherwise `null`. It is never an email or an id. `remixed_from`
+is the listing this item was made from (a site created with `use`, then saved
+as a public template), or `null` for an original, or when that listing is
+hidden or no longer public. Studio template listings always have `tags: []`,
+`creator: null` and `remixed_from: null` for now.
 
 `slug` is the listing's URL handle: the title lowercased and folded to
 `a-z0-9` with `-` between words (`Café Crème & Co!` is `cafe-creme-co`), cut
 to 40 characters, set when the listing is first indexed and never changed
-afterwards, so a renamed template keeps its link. A title that leaves no ASCII behind (CJK, Devanagari)
+afterwards, so a renamed template keeps its link. Making the source private or
+deleting it takes the listing down but keeps the row and its slug: nobody else
+can take that slug, and if the item is made public again it comes back with
+the same `id` and `slug`, even after a rename. A title that leaves no ASCII behind (CJK, Devanagari)
 falls back to the source item's id. Slugs are unique across every source; a
 second `Bakery`, whichever source lists it, gets `bakery-2`, then `bakery-3`. A
 listing indexed before slugs existed reports its `id` as `slug` until the next
@@ -1806,7 +1835,9 @@ and `live_url` is always `null`.
 
 Query params, all optional: `source`, `kind` (`site`, `tool`, `game`, `image`,
 `video`, `music`),
-`audience` (matches one of a listing's `audiences`), `q` (case-insensitive
+`audience` (matches one of a listing's `audiences`), `tag` (one tag,
+matched after the same normalising as on save, so `?tag=Bakery` finds `bakery`;
+a tag that can't exist matches nothing), `q` (case-insensitive
 substring of title or description, up to 100 chars), `featured` (`true` /
 `false`), `cursor`, `limit` (1-50, default 24).
 
@@ -1818,7 +1849,8 @@ page. A cursor that isn't one we issued returns `422` (`discover.bad_cursor`);
 ### `GET /discover/{id_or_slug}` (public)
 
 Takes a listing id or its slug. The id is tried first, then the slug among
-unhidden listings; slugs are unique across sources, so a bare slug is enough.
+listed (unhidden, public) listings; slugs are unique across sources and never
+change, so a bare slug is enough and no redirect is needed.
 
 Response `200`: one listing. `404` when it doesn't exist or has been hidden.
 

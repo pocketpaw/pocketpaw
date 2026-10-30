@@ -1,24 +1,30 @@
 # Discover — request / response schemas.
 #
 # ``PublicListingResponse`` is an allow-list served to anonymous viewers: exactly
-# ``id, slug, source, kind, title, description, audiences, featured,
-# preview_image_url, live_url, remix_count, created_at, media_kind, media_url``.
-# Never ``workspace``, ``owner``, ``reports``, ``hidden`` or ``source_id``;
-# ``extra="forbid"`` makes adding one by accident a construction error rather
-# than a leak. ``slug`` is the stable URL handle (see the listing model); the
-# public item route takes it in place of the id.
+# ``id, slug, source, kind, title, description, audiences, tags, featured,
+# preview_image_url, live_url, remix_count, created_at, updated_at, media_kind,
+# media_url, creator, remixed_from``. Never ``workspace``, ``owner``, ``reports``,
+# ``hidden``, ``source_id`` or any user id or email; ``extra="forbid"`` (here and
+# on ``PublicCreator`` / ``RemixedFrom``) makes adding one by accident a
+# construction error rather than a leak. ``slug`` is the stable URL handle (see
+# the listing model); the public item route takes it in place of the id.
+# ``creator`` is the owner's display name only, and only when the source set
+# ``show_creator``; ``remixed_from`` names the listing this item was made from.
 #
 # ``UpsertListingRequest`` is what a source sync writes; ``extra="forbid"`` so a
-# source can't smuggle a Discover-owned field. The staff-only
-# ``ListStaffListingsRequest`` / ``StaffListingResponse`` / ``StaffListingPage``
-# serve the platform moderation routes and are never served on a public route.
+# source can't smuggle a Discover-owned field. Tags are normalised on write by
+# ``_core.tags.normalize_tags``. The staff-only ``ListStaffListingsRequest`` /
+# ``StaffListingResponse`` / ``StaffListingPage`` serve the platform moderation
+# routes and are never served on a public route.
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from pocketpaw_ee.cloud._core.tags import MAX_TAG_LENGTH, normalize_tag, normalize_tags
 
 # ---------------------------------------------------------------------------
 # Requests
@@ -27,18 +33,32 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ListPublicListingsRequest(BaseModel):
     """Query for the public index. ``audience`` matches one of a listing's
-    audiences; ``q`` is a case-insensitive substring of title or description.
-    Newest first; pass ``next_cursor`` back as ``cursor``."""
+    audiences, ``tag`` one of its tags (normalised like a stored tag); ``q`` is a
+    case-insensitive substring of title or description. Newest first; pass
+    ``next_cursor`` back as ``cursor``."""
 
     model_config = ConfigDict(extra="forbid")
 
     source: str | None = Field(default=None, max_length=64)
     kind: str | None = Field(default=None, max_length=32)
     audience: str | None = Field(default=None, max_length=32)
+    tag: str | None = Field(default=None, max_length=MAX_TAG_LENGTH + 8)
     q: str | None = Field(default=None, max_length=100)
     featured: bool | None = None
     cursor: str | None = None
     limit: int = Field(default=24, ge=1, le=50)
+
+    @field_validator("tag")
+    @classmethod
+    def _tag(cls, value: str | None) -> str | None:
+        # Never raises (this model is a FastAPI query dependency, where a raise
+        # would be a 500): a tag outside the dialect simply matches nothing.
+        if value is None:
+            return None
+        try:
+            return normalize_tag(value) or None
+        except ValueError:
+            return value.strip().lower()
 
 
 class ListStaffListingsRequest(BaseModel):
@@ -87,9 +107,20 @@ class UpsertListingRequest(BaseModel):
     live_url: str | None = None
     media_kind: Literal["image", "video", "audio"] | None = None
     media_url: str | None = None
+    #: At most 8, each 1-32 of ``[a-z0-9-]``; normalised (see ``_core.tags``).
+    tags: list[str] = Field(default_factory=list)
+    #: The owner opted in to their display name on the public card.
+    show_creator: bool = False
+    #: The id, in this same source, of the item this one was made from.
+    remixed_from_source_id: str | None = Field(default=None, min_length=1, max_length=64)
     #: Optional handle the source proposes; slugified like ``title`` and only
     #: used when the listing has no slug yet (slugs never change afterwards).
     slug: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _tags(cls, value: list[str] | None) -> list[str]:
+        return normalize_tags(value)
 
 
 # ---------------------------------------------------------------------------
@@ -97,8 +128,27 @@ class UpsertListingRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class PublicCreator(BaseModel):
+    """Who made a listing, as the public sees it: a display name, nothing else."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class RemixedFrom(BaseModel):
+    """The public listing this one was made from."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str
+    title: str
+
+
 class PublicListingResponse(BaseModel):
-    """One public Discover card (an allow-list; see the module header)."""
+    """One public Discover card (an allow-list; see the module header).
+    ``updated_at`` is when the listing's public content (or its featured /
+    hidden state) last changed; a re-sync that changes nothing leaves it."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -109,13 +159,17 @@ class PublicListingResponse(BaseModel):
     title: str
     description: str
     audiences: list[str]
+    tags: list[str] = Field(default_factory=list)
     featured: bool
     preview_image_url: str | None
     live_url: str | None
     remix_count: int
     created_at: datetime | None
+    updated_at: datetime | None = None
     media_kind: str | None = None
     media_url: str | None = None
+    creator: PublicCreator | None = None
+    remixed_from: RemixedFrom | None = None
 
 
 class PublicListingPage(BaseModel):
@@ -175,8 +229,10 @@ class UseListingResponse(BaseModel):
 __all__ = [
     "ListPublicListingsRequest",
     "ListStaffListingsRequest",
+    "PublicCreator",
     "PublicListingPage",
     "PublicListingResponse",
+    "RemixedFrom",
     "ReportListingRequest",
     "StaffListingPage",
     "StaffListingResponse",

@@ -71,7 +71,10 @@ async def _sync(bus) -> None:
 
 
 async def _listing(template_id: str) -> DiscoverListing | None:
-    return await DiscoverListing.find_one({"source": "studio_template", "source_id": template_id})
+    """The template's listing while it is listed (a withdrawn row reads None)."""
+    return await DiscoverListing.find_one(
+        {"source": "studio_template", "source_id": template_id, "withdrawn": {"$ne": True}}
+    )
 
 
 # ---------------------------------------------------------------------------
