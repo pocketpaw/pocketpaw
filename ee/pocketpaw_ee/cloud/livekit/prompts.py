@@ -267,6 +267,9 @@ How to answer:
 and abbreviations the way a person would say them.
 - Use the live call context first (what has been said in this call), then the \
 recent group chat, then the workspace knowledge and workspace memory provided.
+- The group chat is listed oldest first: its last line is the newest message. \
+When asked about the last or latest message, or what someone said last, answer \
+from it.
 - If the context does not contain the answer, say so plainly in one sentence \
 instead of guessing. Do not invent decisions, names, dates or figures.
 - Lines from "Paw (you, earlier)" are your own earlier replies. Use them to follow \

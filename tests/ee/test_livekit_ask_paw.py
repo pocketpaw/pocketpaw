@@ -1238,3 +1238,71 @@ async def test_the_prompt_greets_only_a_bare_greeting(redis, grounding) -> None:
 
     assert "only when the whole message is a greeting" in flat
     assert "do not open with a greeting" in flat
+
+
+async def test_only_paws_latest_answer_stays_in_the_call_context(redis) -> None:
+    key = f"livekit:transcript:{GROUP}"
+    for speaker, text in [
+        ("Paw", "I don't have that information."),
+        ("Paw", "Sorry."),
+        ("Ann", "Pricing ships Friday."),
+        ("Paw", "Got it, Friday."),
+        ("Paw", "Anything else?"),
+    ]:
+        await redis.rpush(key, json.dumps({"speaker": speaker, "text": text, "ts": 1}))
+
+    text = await assistant.read_live_transcript(GROUP)
+
+    assert "I don't have that information." not in text and "Sorry." not in text
+    assert "Ann: Pricing ships Friday." in text
+    assert "Paw (you, earlier): Got it, Friday." in text
+    assert "Paw (you, earlier): Anything else?" in text
+
+
+async def test_group_chat_keeps_people_and_only_paws_latest_reply(redis, grounding) -> None:
+    bot = "__livekit_call_bot__"
+    grounding.chat.return_value = [
+        _msg("**Q (Admin):** hi\n**Paw:** I don't have that.", sender=bot, sender_name="Paw"),
+        _msg("Ship the Hunts README today.", sender="u2"),
+        _msg("📋 **Meeting Notes** [Paw]: Sorry.", sender=bot, sender_name="Meeting Notes"),
+        _msg("​", sender="u2"),
+        _msg("**Q (Admin):** status?\n**Paw:** README ships today.", sender=bot, sender_name="Paw"),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    _, user = await _ask(redis, "what was the last message")
+
+    assert grounding.chat.await_args.kwargs["limit"] == 40
+    assert "Sam: Ship the Hunts README today." in user
+    assert "Meeting Notes" not in user
+    assert "I don't have that." not in user
+    assert "**Paw:** README ships today." in user
+    assert "Sam: ​" not in user
+
+
+async def test_the_prompt_says_the_chat_is_oldest_first(redis, grounding) -> None:
+    system, _ = await _ask(redis, "what was the last message")
+    flat = " ".join(system.split()).lower()
+
+    assert "oldest first" in flat and "last line is the newest message" in flat
+
+
+async def test_in_a_typed_only_call_only_paws_newest_answer_is_kept(redis) -> None:
+    key = f"livekit:transcript:{GROUP}"
+    for ts, text in [
+        (100.0, "I don't have that information."),
+        (130.0, "I can't answer that."),
+        (131.5, "Sorry."),
+        (160.0, "The README ships today."),
+        (163.0, "Sam owns it."),
+    ]:
+        await redis.rpush(
+            key, json.dumps({"identity": "call-bot", "speaker": "Paw", "text": text, "ts": ts})
+        )
+
+    text = await assistant.read_live_transcript(GROUP)
+
+    assert "I don't have that information." not in text
+    assert "I can't answer that." not in text and "Sorry." not in text
+    assert "Paw (you, earlier): The README ships today." in text
+    assert "Paw (you, earlier): Sam owns it." in text
