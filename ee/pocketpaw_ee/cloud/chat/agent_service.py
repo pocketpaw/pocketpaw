@@ -1,273 +1,57 @@
 """Cloud agent chat service — scope resolution, toolset assembly, context.
 
-Keeps the router thin: the router handles HTTP + SSE plumbing; this module
-handles *what the agent sees*:
+The router does HTTP + SSE; this module decides *what the agent sees*:
 
 * ``resolve_scope_context`` turns (scope, scope_id, user_id) into a
-  ``ScopeContext`` including the target agent id, members, and
-  pocket-scoped tool specs where applicable.
-* ``load_history_for_scope`` rehydrates prior chat turns from Mongo so the
-  agent carries context across backend restarts and pool evictions.
-
-Changes: 2026-08-07 (fix/code-delegate-pooled-context) — added the session-keyed
-stream registry (``register_stream_sink`` / ``unregister_stream_sink`` /
-``stream_sink_for_session``) alongside the ``_sse_event_sink`` ContextVar. The
-ContextVar answers "is there a sink in MY context", which is right for an
-observability frame and wrong for a caller that WAITS on one: Code Mode's file
-tools run in a pooled SDK client's task created during prewarm, so they see
-identity and never the sink. The registry lets such a caller find the stream by
-session id instead. ``push_sse_event`` is unchanged and still a deliberate
-no-op outside a stream.
-
-Changes: 2026-07-14 (Paw Bar concierge seam, T2) — added ``ScopeKind.CONCIERGE``
-and ``_resolve_concierge``: a PUBLIC, anonymous Paw Bar concierge run resolves
-its ``ScopeContext`` from the server-authoritative spec (Site pocket + widget
-agent) WITHOUT the member-auth path — the caller authed at the HTTP edge with an
-origin-bound Site key. ``_kb_scopes_for_context`` locks a concierge run to
-``[pocket:<pocket_id>]`` alone (never ``agent:`` / ``workspace:`` / ``user:``) so
-a public caller can't reach a sibling pocket or the whole tenant KB (finding #2);
-``session_key_for`` folds the anonymous ``customer_ref`` into the key so visitors
-don't collide on the shared Site pocket; ``load_history_for_scope`` treats
-CONCIERGE like pocket/session (customer-isolated). ``_resolve_concierge``
-reconciles the pocket's workspace against the key's (cross-tenant guard) and
-verifies the widget's agent belongs to that workspace (``_agent_in_workspace``).
-
-Changes: 2026-05-22 — ``ScopeContext`` carries the anchored pocket's
-``pocket_type``; ``build_behavior_instructions`` appends ``HOME_POCKET_PROMPT``
-when that type is ``"home"`` so the agent behaves correctly on the home page
-(call ``add_widget`` for an explicit widget request, answer directly
-otherwise). ``_resolve_pocket`` / ``_resolve_session`` populate the field.
-Changes: 2026-05-22 (#1174) — ``build_behavior_instructions`` no longer emits
-``POCKET_DELEGATION_RULE`` (nor the heavy interaction prompt) for a
-``type="home"`` scope. The delegation rule ("never call add_widget, delegate
-to the specialist") contradicts ``HOME_POCKET_PROMPT`` ("call add_widget");
-the home agent now gets exactly one consistent widget-creation instruction.
-Changes: 2026-05-22 (RFC 04 alpha follow-up 2) — ``build_behavior_instructions``
-fills the interaction prompt's current-pocket block via ``fill_current_pocket``
-(both the pocket-id and backend-summary tokens) instead of a bare
-``POCKET_ID_TOKEN`` replace, so the new ``__BACKEND_SUMMARY__`` token never
-leaks as literal text.
-Changes: 2026-05-22 (Increment 3) — added ``push_pocket_execution``, the
-SSE-sink push for the execution router's per-request ``pocket_execution``
-observability frame.
-Changes: 2026-05-24 — ``ScopeContext`` carries an optional
-``surface_context`` (the resolved {surface_kind, meta, preamble} tuple
-from ``surface_context.resolve_surface_context``). ``build_dynamic_context``
-prepends its preamble before the legacy scope/participants/current-pocket
-tags so the chat agent sees the surface snapshot first. Clients that
-don't stamp a surface hint keep the old three-line shape unchanged —
-``surface_context is None`` is the legacy path.
-Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — that prepend is GONE.
-The preamble is a prompt layer now (``pocketpaw.prompt.surface``), assembled
-under the agent's identity and above the per-turn material instead of inside
-the "Your Knowledge Base" wrapper this block lands in, and it carries the
-handler's cache key so the assembled prompt's digest moves when the user
-navigates or the pocket they are looking at is edited. ``run_core`` threads
-both halves into ``pool.run``; leaving the prepend here would double the text.
-``build_dynamic_context`` is back to exactly its three legacy tags, for every
-client, surface-stamping or not.
-Changes: 2026-05-31 (feat/home-agent-source-authoring) — ``ScopeContext``
-carries an optional ``backend_summary`` (the non-secret {base_url,
-auth_type, configured} dict from ``pockets.service.get_pocket_backend``,
-never the token). The resolvers populate it ONLY for a ``type="home"``
-pocket (via the new ``_home_backend_summary`` helper);
-``build_behavior_instructions`` fills it into ``HOME_POCKET_PROMPT``'s
-``__BACKEND_SUMMARY__`` token via ``fill_current_pocket`` so the home agent
-SEES whether a backend is configured (and its base_url) before authoring a
-``sources`` block — fixing the smoke-test finding where the agent claimed
-"no integration wired up" despite a configured backend. Non-home scopes
-keep ``backend_summary=None`` and pay no extra read.
-Changes: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①)
-— ``ScopeContext`` carries an optional ``resolved_profile`` (the ENTITY-AWARE
-``SurfaceProfile`` resolved ONCE per run by ``run_core.execute_run``, which
-folds a pocket-entity's ``surface_profile`` override over the surface base).
-``build_behavior_instructions`` now gates the ripple block on
-``ctx.resolved_profile.ripple_mode`` (pre-resolved, stays sync) instead of
-calling ``resolve_profile`` itself — so a pocket bound to a room can flip
-ripple off/on for that room. ``resolved_profile is None`` is the legacy /
-non-entity path → ripple ON, byte-identical to today.
-Changes: 2026-06-08 (feat/connector-mcp-execution / keystone) — the per-stream
-identity now carries the room's ``pocket_id`` too. ``attach_agent_identity``
-gained a ``pocket_id`` kwarg and ``current_pocket_id()`` was added beside
-``current_workspace_id`` / ``current_user_id``; both are set in
-``run_core`` and read by the connector-execution MCP server
-(``mcp_servers/connectors.py``) so its tools scope to the current pocket.
-The identity-token tuple grew from 3 to 4 entries; existing 3-arg callers are
-unaffected (``pocket_id`` defaults to ``None``).
-
-Changes: 2026-08-03 (feat/about-member-id) — the ``<about-member>`` block
-carries the member's ``user_id``. It described people by ``name · role · team``
-and nothing else, so two members called the same thing rendered byte-identical
-blocks and the agent had no way to tell which one it was addressing. That is not
-an edge case here: ``_resolve_about_member`` runs from every scope resolver and
-is NOT gated on room type, unlike the member-private ``user:`` KB scope, so it
-is live in shared rooms. The id is ``person.user_id`` — the same opaque cloud id
-the KB scope keys on — and not ``person.id``, which is
-``person-{workspace}-{user}`` and would put a tenant id in the prompt for no
-gain. An id-less Person still renders its block, minus the line.
-
-Changes: 2026-06-08 (feat/vip-agent-block, pp#1367) — ``ScopeContext`` carries
-an optional ``about_member_block``: a concise, token-capped "about this member"
-string (name · role · team · one-line focus) rendered from the member's Fabric
-``Person`` (``people.service.get_person``). The resolvers pre-resolve it (async)
-via ``_resolve_about_member`` and stash it; ``build_behavior_instructions``
-APPENDS it to the base system message (additive — NOT a persona override) so the
-agent greets the member by name from the first turn. A member with no Person
-(pre-existing / non-invited user) → ``None`` → no block, behavior unchanged. The
-render is HARD-capped (``_ABOUT_MEMBER_CHAR_CAP``) to kill the prompt-bloat
-failure mode. Stays sync in ``build_behavior_instructions`` — the async read
-happens once in the resolver, mirroring ``backend_summary``.
-
-Changes: 2026-06-08 (VIP Onboarding Phase B — session-user isolation gate) —
-``_kb_scopes_for_context`` now prepends a member-private ``user:{member_id}``
-KB scope, GATED by the new ``_member_private_user_scope`` helper. The gate
-emits the scope ONLY when ``ctx.members == [ctx.user_id]`` (the member's own
-solo session) and suppresses it in every shared / multi-member room, so one
-member's private Gmail/calendar KB is never injected into another member's
-agent context. ``ctx.user_id`` (an opaque cloud user id) is the scope id —
-no email, so kb-go's on-disk ``:``→``_`` sanitize can't alias two members.
-Mirrors the OSS ``KbContext.user_id`` / ``_resolve_kb_scopes`` priority.
-Changes: 2026-06-08 (VIP Onboarding Phase B chunk 5 — the "your day" briefing)
-— ``_member_briefing_block`` builds a concise, capped (``_BRIEFING_MAX_CHARS``
-≈ 400 tokens) "your day" block from the structured ``MemberDayDigest`` (the
-per-member live mail/calendar pull) and ``build_knowledge_context`` PREPENDS
-it. It is GATED by the SAME ``_member_private_user_scope`` decision as the
-private ``user:`` KB scope — present ONLY in the member's solo session,
-ABSENT (and the digest never even pulled) in every shared / multi-member
-room. Graceful: an empty digest (no connected accounts) or a digest that
-raises → ``""``, so unconnected and non-solo sessions are byte-identical to
-before.
-Changes: 2026-06-12 (fix/pocket-anchored-chat-context) — ``ScopeContext``
-carries an optional ``pocket_summary``: the anchored pocket's orientation
-data ({name, description, type, template_slug, pattern, ripple}) where
-``ripple`` is ``spec_ops.summarize_ripple_spec`` over the pocket's
-rippleSpec (top-level ui node count/types, capped state keys, source
-summaries, action keys, legacy widgets count). Populated by
-``_pocket_summary_data`` in ``_resolve_pocket`` AND ``_resolve_session``
-(when the session is pocket-anchored) for ALL pocket types, from the
-Pocket doc those resolvers already fetched — zero extra DB reads.
-``build_behavior_instructions`` renders it as a ``<pocket-summary>``
-block (description clamped, whole block hard-capped — the about-member
-precedent) appended after the per-scope pocket prompts and gated off for
-``intent="pocket_create"`` (mirrors the ``<current-pocket>`` tag gate).
-Fixes the context-starvation bug where a chat anchored to a fully
-composed template pocket had NO pocket content in its prompt, so the
-agent read the empty legacy ``widgets[]`` via get_pocket and answered
-"an empty shell". HOME pockets keep HOME_POCKET_PROMPT + backend_summary
-byte-identical — the new block is purely additive.
-Changes: 2026-06-12 (fix/pocket-anchored-chat-context, review pass) —
-``<pocket-summary>`` hardening. EVERY field the renderer interpolates —
-not just name/description — now passes through
-``_sanitize_pocket_summary_field`` (whitespace collapse, angle brackets
-swapped for lookalikes, per-item clamp), killing the prompt-injection
-where a member-authored state key / node type / template slug containing
-``"</pocket-summary>\\nIGNORE PREVIOUS INSTRUCTIONS"`` forged the block's
-closing tag and escaped into instruction space. Numeric counts are
-type-gated. The renderer re-sanitizes even though ``summarize_ripple_spec``
-now sanitizes at the source (the get_pocket ``_summary`` path) — it never
-trusts a hand-built dict. Capped lists render honest "+N more" markers
-from the summarizer's new ``*_omitted`` counters.
-Changes: 2026-06-18 (fix/session-history-workspace-scope) —
-``load_history_for_scope``'s pocket/session query now also filters by
-``workspace_id`` (from ``ctx.workspace_id``). Defense-in-depth: pocket/session
-ObjectIds are globally unique so ``session_key`` alone never collides today,
-but the query no longer RELIES on id-uniqueness for tenant isolation — the
-workspace boundary is now an explicit predicate, and the query lands on the
-``(workspace_id, session_key, createdAt)`` compound index. Mirrors the
-existing ``MongoMemoryStore.get_session_in_workspace`` pattern. Normal-path
-behavior (ordering, limit, ``session_key_for`` formula) is unchanged.
-
-Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``resolve_scope_context``
-and the three resolvers gained ``expected_workspace_id``: the authenticated,
-route-validated workspace the run worker threads from ``spec.workspace_id``.
-The new ``_reconcile_workspace_id`` helper makes it tenant-safe: a NON-EMPTY
-doc ``workspace`` stays authoritative AND a disagreeing ``expected_workspace_id``
-raises ``Forbidden`` (the cross-tenant guard — the ``_get_pocket`` / ``_get_session``
-finders look up by ``_id`` alone, not tenant-scoped, so a spec for workspace B
-can load workspace A's doc); an EMPTY/missing doc workspace FALLS BACK to the
-trusted ``expected_workspace_id``. This fixes the worker throwing away the
-authenticated ``spec.workspace_id`` and re-deriving tenancy from a doc that can
-be empty — which blanked the identity contextvar and made the sites-create MCP
-tool raise "requires workspace and user context (call from a cloud chat
-session)". ``expected_workspace_id is None`` (legacy / non-worker callers)
-preserves today's doc-only behavior. Defense-in-depth: ``attach_agent_identity``
-now REJECTS an empty ``workspace_id`` / ``user_id`` (raises ``ValueError``)
-instead of binding ``""``, so any future caller that loses tenancy fails loudly
-at the seam, not deep inside an MCP tool.
-
-Changes: 2026-07-11 (ART-1) — added the per-run ``_delivered_artifacts``
-collector ContextVar beside the identity ContextVars (+ ``record_delivered_artifact``
-and the ``attach_/detach_delivered_artifacts_collector`` primitives and the
-``collect_delivered_artifacts`` context manager). The ``deliver_artifact`` MCP
-tool appends one meta dict per SUCCESSFUL delivery; ``run_core`` binds a fresh
-list at run start and drains it at persist time into ``{type:"artifact", meta}``
-attachments plus one ``artifact`` SSE event apiece (in delivery order). It holds
-a MUTABLE list so the tool's append (never a rebind) is visible to the run task
-that bound it across the SDK task boundary — the same shared-object propagation
-``_sse_event_sink`` relies on.
-Changes: 2026-06-27 (fix/cloud-artifacts-reland) — added the per-run
-``_active_cloud_chat_run`` marker ContextVar (+ ``current_cloud_chat_run`` and
-the ``mark_cloud_chat_run`` context manager) beside the identity ContextVars.
-It distinguishes an actual cloud CHAT dispatch (the path that MUST bind
-workspace identity) from any other workspace-less run in a cloud-connected
-process. The agent cwd jail's fail-closed (``agent_jail.resolve_agent_cwd``) was
-gated on ``is_multi_tenant_cloud()`` alone — a PROCESS-GLOBAL, true whenever the
-cloud Mongo client is connected — so it hard-failed EVERY workspace-less run
-(direct backend tests, CLI, background jobs), not just a mis-tenanted chat run.
-``run_core.execute_run`` now wraps the run lifecycle in ``mark_cloud_chat_run``
-and the jail fails closed only when this marker is set; otherwise it falls back
-to ``settings.file_jail_path`` (pre-ART-2 behavior).
-
-Changes: 2026-07-30 (Paw Bar inbox D5) — ``_kb_scopes_for_context`` now grants a
-CONCIERGE run ``agent:<target_agent_id>`` ALONGSIDE ``pocket:<pocket_id>``.
-Before this, an owner who opened their site's concierge in ``/agents`` and
-attached knowledge to the AGENT got nothing on the site — only the site→pocket
-page sync reached the visitor, and the failure was silent. Each site concierge is
-a dedicated, bijective agent (``paw_bar.agent_provisioning.ensure_site_agent``),
-so its ``agent:`` scope is that one site's knowledge, not a cross-tenant pool.
-``workspace:`` and ``user:`` stay DROPPED — those are the tenant-wide and
-member-private tiers a public, anonymous visitor must never reach.
-
-Changes: 2026-07-22 (CD-1, feat/code-delegate-channel) — added
-``has_sse_event_sink()`` beside ``push_sse_event``. Read-only introspection of
-the same ContextVar, added for Code Mode's browser-delegate channel: that caller
-pushes a frame and then PARKS waiting for the browser's reply, so a push into no
-stream has to be a fast, distinct failure rather than a silent no-op followed by
-a full-length timeout. No behaviour change to any existing push path.
-
-Changes: 2026-07-24 (CX-3, feat/code-agent-exclusive-tools) —
-``resolve_scope_context`` (and ``_resolve_session`` / ``_resolve_pocket``)
-gained a ``surface`` param, and ``_get_code_agent_id`` was added. On the CODE
-surface, an unhinted turn resolves to the dedicated ``code`` agent (slug
-``code``), lazy-seeded via ``agents.service.seed_code_agent`` on miss, instead
-of the default ``pocketpaw`` agent — so the exclusive file-tool policy is
-applied backend-authoritatively (the frontend need not pass the id). Guarded
-narrowly on CODE + no explicit ``agent_id_hint``; every other surface's
-resolution is byte-identical.
+  ``ScopeContext``: target agent (the dedicated ``code`` agent on /code), members,
+  pocket summary, surface context, resolved profile, about-member block. A doc's
+  workspace is authoritative; a disagreeing ``expected_workspace_id`` raises
+  ``Forbidden`` and an empty one falls back to it (cross-tenant guard).
+* ``load_history_for_scope`` replays prior turns from Mongo, workspace-filtered,
+  folding in replies of runs that died mid-stream with a "was cut off" note.
+* ``build_behavior_instructions`` / ``build_knowledge_context`` assemble the
+  per-scope prompt blocks; every interpolated pocket-summary field is sanitised.
+  KB scopes: a member-private ``user:`` scope only in a solo session; a public
+  concierge run sees only its ``pocket:`` and ``agent:`` scopes.
+* ``resolve_user_content`` / ``resolve_turn_images`` build the model's copy of a
+  turn: attachment-only turns, images shrunk (never dropped) to the provider's
+  caps, HEIC/TIFF/BMP transcoded.
+* Per-stream resolvers (``current_user_id``, ``current_pocket_id``,
+  ``current_timeline``, ``current_craft``, ``push_sse_event``,
+  ``record_delivered_artifact``, ...) read the active TURN SLOT's binding first
+  (``bind_turn``) and their ContextVar second, so a warm Claude SDK client's
+  in-process MCP tools see the turn now running. ``attach_agent_identity``
+  refuses an empty workspace or user. ``mark_cloud_chat_run`` marks a real cloud
+  chat dispatch (the agent jail fails closed only inside one), and the
+  session-keyed stream registry lets a pooled tool find its stream by session id.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
-from collections.abc import Awaitable, Callable, Iterator
+import weakref
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     # Type-only — the runtime read imports ``get_person`` lazily inside
     # ``_resolve_about_member`` so importing this module never drags in the
     # people service (and its journal accessor) for chat paths that never
     # render an about-block.
+    from pocketpaw_ee.cloud.byok.service import TurnCredentials
     from pocketpaw_ee.cloud.people.domain import Person
 
+from pocketpaw.agents.backend import ImageAttachment
 from pocketpaw.ripple import (
     HOME_POCKET_PROMPT,
-    INLINE_RIPPLE_SYSTEM_PROMPT,
     POCKET_DELEGATION_RULE,
     fill_current_pocket,
     get_pocket_prompts,
@@ -393,19 +177,23 @@ def detach_agent_identity(tokens: tuple[Token, Token, Token, Token, Token]) -> N
 
 
 def current_workspace_id() -> str | None:
-    return _active_workspace_id.get()
+    binding = _current_turn_binding()
+    return binding.workspace_id if binding is not None else _active_workspace_id.get()
 
 
 def current_user_id() -> str | None:
-    return _active_user_id.get()
+    binding = _current_turn_binding()
+    return binding.user_id if binding is not None else _active_user_id.get()
 
 
 def current_session_mongo_id() -> str | None:
-    return _active_session_mongo_id.get()
+    binding = _current_turn_binding()
+    return binding.session_mongo_id if binding is not None else _active_session_mongo_id.get()
 
 
 def current_pocket_id() -> str | None:
-    return _active_pocket_id.get()
+    binding = _current_turn_binding()
+    return binding.pocket_id if binding is not None else _active_pocket_id.get()
 
 
 # Per-stream Paw Bar action context (C1). Set by ``run_core`` for a CONCIERGE run
@@ -428,7 +216,54 @@ def unbind_pawbar_run(token: Token) -> None:
 
 
 def current_pawbar_run() -> dict[str, Any] | None:
-    return _active_pawbar_run.get()
+    binding = _current_turn_binding()
+    return binding.pawbar_run if binding is not None else _active_pawbar_run.get()
+
+
+# Per-stream /studio/editor timeline context. Set by ``run_core`` from
+# ``surface_meta.timeline``; read by the ``pocketpaw_timeline`` MCP server so
+# ``edit_timeline`` can check every clip/asset/track id against the SAME
+# projection the preamble showed the agent. ``None`` (every non-editor run)
+# means no timeline is open and the tools refuse.
+_active_timeline: ContextVar[dict[str, Any] | None] = ContextVar("agent_timeline", default=None)
+
+
+def bind_timeline(timeline: dict[str, Any] | None) -> Token:
+    """Bind (or clear) the active stream's timeline. Returns a reset token —
+    the caller resets it in a finally so it never leaks past a run."""
+    return _active_timeline.set(timeline)
+
+
+def unbind_timeline(token: Token) -> None:
+    _active_timeline.reset(token)
+
+
+def current_timeline() -> dict[str, Any] | None:
+    binding = _current_turn_binding()
+    return binding.timeline if binding is not None else _active_timeline.get()
+
+
+# Per-stream craft studio document projections ({app: projection}), the craft
+# twin of the timeline context above. Set by ``run_core`` from
+# ``surface_meta.vector`` / ``.photo`` / ``.design``; read by the
+# ``pocketpaw_craft`` MCP server so ``edit_<app>`` checks ids against the
+# projection the preamble showed. An absent app means no such editor is open.
+_active_craft: ContextVar[dict[str, Any] | None] = ContextVar("agent_craft", default=None)
+
+
+def bind_craft(craft: dict[str, Any] | None) -> Token:
+    """Bind (or clear) the active stream's craft projections; reset in a finally."""
+    return _active_craft.set(craft)
+
+
+def unbind_craft(token: Token) -> None:
+    _active_craft.reset(token)
+
+
+def current_craft(app: str) -> dict[str, Any] | None:
+    binding = _current_turn_binding()
+    craft = binding.craft if binding is not None else _active_craft.get()
+    return (craft or {}).get(app)
 
 
 def current_cloud_chat_run() -> bool:
@@ -501,9 +336,10 @@ def push_sse_event(name: str, data: dict[str, Any]) -> None:
     run that isn't part of an SSE stream). An observability frame nobody is obliged
     to see must never become an exception inside a tool handler.
     """
-    sink = _sse_event_sink.get()
+    binding = _current_turn_binding()
+    sink = binding.sse_sink if binding is not None else _sse_event_sink.get()
     if sink is None:
-        sink = stream_sink_for_session(_active_session_mongo_id.get(), _active_workspace_id.get())
+        sink = stream_sink_for_session(current_session_mongo_id(), current_workspace_id())
     if sink is None:
         return
     try:
@@ -524,6 +360,9 @@ def has_sse_event_sink() -> bool:
     say which problem it hit — "no browser attached" rather than "the browser
     was slow".
     """
+    binding = _current_turn_binding()
+    if binding is not None:
+        return binding.sse_sink is not None
     return _sse_event_sink.get() is not None
 
 
@@ -717,15 +556,138 @@ def collect_delivered_artifacts() -> Iterator[list[dict[str, Any]]]:
         detach_delivered_artifacts_collector(token)
 
 
-def record_delivered_artifact(meta: dict[str, Any]) -> None:
+def record_delivered_artifact(meta: dict[str, Any], *, replace: bool = False) -> None:
     """Append one successful delivery's ``meta`` (file_id/name/mime/size) to the
     active run's collector. No-op when unbound (a deliver call outside a chat
     run). Never raises — a collector hiccup must not fail an otherwise-successful
-    delivery."""
-    collector = _delivered_artifacts.get()
+    delivery.
+
+    ``replace=True`` is for an artifact that tracks a file the run keeps editing
+    (a project site's PLAN.md): an entry with the same ``file_id`` is overwritten in
+    place, so the run persists ONE artifact carrying the latest meta."""
+    binding = _current_turn_binding()
+    collector = binding.artifacts if binding is not None else _delivered_artifacts.get()
     if collector is None:
         return
+    if replace:
+        for i, existing in enumerate(collector):
+            if existing.get("file_id") == meta.get("file_id"):
+                collector[i] = meta
+                return
     collector.append(meta)
+
+
+def current_delivered_artifacts() -> list[dict[str, Any]] | None:
+    """The collector bound in THIS context (read by ``run_core`` to put it on
+    the turn binding). Tools go through ``record_delivered_artifact``."""
+    return _delivered_artifacts.get()
+
+
+# ---------------------------------------------------------------------------
+# Per-session turn binding
+#
+# The ContextVars above are right for code that runs in the turn's own task and
+# wrong for the in-process MCP tools of a WARM Claude SDK client. The SDK starts
+# those tools' handler tasks at ``connect()``, and a task copies the context as
+# it stood then, so every later turn on that client ran its tools under the
+# connecting task's values: the prewarm's (or turn 1's) user, pocket, Paw Bar
+# run, timeline, SSE sink and artifact collector. From turn 2 ``deliver_artifact``
+# appended to a list nobody drained, and in a shared scope a member's turn could
+# run tools as whoever connected the client.
+#
+# So the connecting task carries a SLOT (``_active_turn_slot``), one per warm
+# session key, and each run fills it with THIS turn's ``TurnBinding`` right
+# before it queries the client (``bind_turn``) and empties it in its finally.
+# The resolvers above read the slot's binding first and fall back to their own
+# ContextVar when there is none, so every non-SDK path is unchanged.
+#
+# Concurrency: nothing serializes runs per session. A run that finds the shared
+# slot already bound gets a PRIVATE slot instead of overwriting it. The warm
+# client is leased to the first run, so the second is served by a separate
+# client (stateless fallback or a fresh build) that captures ITS context, and
+# with it the private slot. Slots are held weakly: one lives exactly as long as
+# some context (a warm client's, a running turn's) still refers to it.
+#
+# ``warm_session_key_for`` folds the user into the key for every scope, so two
+# members of one pocket, group or session never share a warm CLI process at all.
+# Isolation is structural; the slot only has to keep one user's turns apart.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TurnBinding:
+    """What the in-process tools of the turn now running should resolve to."""
+
+    workspace_id: str | None = None
+    user_id: str | None = None
+    session_mongo_id: str | None = None
+    pocket_id: str | None = None
+    pawbar_run: dict[str, Any] | None = None
+    timeline: dict[str, Any] | None = None
+    craft: dict[str, Any] | None = None
+    sse_sink: asyncio.Queue[tuple[str, dict[str, Any]]] | None = None
+    artifacts: list[dict[str, Any]] | None = None
+
+
+class _TurnSlot:
+    def __init__(self, key: str) -> None:
+        self.key = key
+        self.binding: TurnBinding | None = None
+
+
+@dataclass(frozen=True)
+class TurnHandle:
+    slot: _TurnSlot
+    binding: TurnBinding
+    token: Token
+
+
+_turn_slots: weakref.WeakValueDictionary[str, _TurnSlot] = weakref.WeakValueDictionary()
+_active_turn_slot: ContextVar[_TurnSlot | None] = ContextVar("agent_turn_slot", default=None)
+
+
+def _shared_turn_slot(key: str) -> _TurnSlot:
+    slot = _turn_slots.get(key)
+    if slot is None:
+        slot = _TurnSlot(key)
+        _turn_slots[key] = slot
+    return slot
+
+
+def _current_turn_binding() -> TurnBinding | None:
+    slot = _active_turn_slot.get()
+    return slot.binding if slot is not None else None
+
+
+def enter_turn_slot(key: str) -> Token:
+    """Carry ``key``'s shared slot in this context, unbound. Called by the
+    prewarm before it connects, so the warm client's tools read the slot."""
+    return _active_turn_slot.set(_shared_turn_slot(key))
+
+
+def exit_turn_slot(token: Token) -> None:
+    _active_turn_slot.reset(token)
+
+
+def bind_turn(key: str, binding: TurnBinding) -> TurnHandle:
+    """Make ``binding`` what ``key``'s tools resolve to for this turn, and carry
+    the slot in this context so a client connected by this turn captures it."""
+    slot = _shared_turn_slot(key)
+    if slot.binding is not None:
+        slot = _TurnSlot(key)  # a concurrent run holds the shared slot
+    slot.binding = binding
+    return TurnHandle(slot=slot, binding=binding, token=_active_turn_slot.set(slot))
+
+
+def unbind_turn(handle: TurnHandle) -> None:
+    """Undo ``bind_turn``. Identity-checked, so it never clears a later run's
+    binding, and safe to call from a finally."""
+    if handle.slot.binding is handle.binding:
+        handle.slot.binding = None
+    try:
+        _active_turn_slot.reset(handle.token)
+    except ValueError:  # reset from another context; the slot is cleared anyway
+        pass
 
 
 class ScopeKind(StrEnum):
@@ -815,6 +777,16 @@ class ScopeContext:
     # agent then behaves exactly as before, no block. Stays a pre-rendered
     # string so the sync ``build_behavior_instructions`` never has to await.
     about_member_block: str | None = None
+    # The raw text of a backend error whose chat frame was rewritten into a plain
+    # sentence. Set by ``run_core._drive_agent_loop`` so the run doc's ``error``
+    # field keeps the provider's own words for operators.
+    backend_error_detail: str | None = None
+    # The model this turn ran on (the per-send pick, else the agent's own) and
+    # whether the workspace's own key paid. Stamped by ``_drive_agent_loop`` just
+    # before ``AgentPool.run``; ``execute_run`` keys the out-of-credit mark and
+    # its clear on them (``catalog.availability``). Best effort, never a gate.
+    turn_model: str | None = None
+    turn_byok: bool = False
     # The anchored pocket's orientation data: {name, description, type,
     # template_slug, pattern, ripple} where ``ripple`` is
     # ``spec_ops.summarize_ripple_spec`` over the pocket's rippleSpec
@@ -828,6 +800,14 @@ class ScopeContext:
     # array as "this pocket is an empty shell"). ``None`` when the chat
     # isn't anchored to a pocket — no block, behavior unchanged.
     pocket_summary: dict[str, Any] | None = None
+    # A public concierge run's <owner-settings> block: the site owner's guided
+    # fields (the concierge's name, tone, languages, topics to avoid, escalation),
+    # rendered by ``paw_bar.concierge_prompt.render_owner_block`` with every owner
+    # value quoted. ``_resolve_concierge`` fills it from the site;
+    # ``build_behavior_instructions`` appends it, so the legacy runtime hears the
+    # same settings as v2, including a name set after the agent's soul was born.
+    # ``None`` (every other scope, or a site with no guided field set) adds nothing.
+    concierge_owner_block: str | None = None
     # CS-13 — the per-send model override the client's composer picker chose for
     # THIS turn. ``execute_run`` copies it off ``RunSpec.model_override`` onto the
     # ctx it rebuilds; ``_drive_agent_loop`` forwards it into ``AgentPool.run`` only
@@ -835,6 +815,26 @@ class ScopeContext:
     # ``claude_sdk_model``. ``None`` (older clients / no picker) leaves the backend's
     # own selection untouched — byte-identical to today.
     model_override: str | None = None
+    #: Per-send tool switch (2026-09-11). ``False`` runs with no tool surface;
+    #: ``None`` is the legacy path. Copied onto ``ctx`` by ``execute_run``
+    #: exactly like ``model_override`` beside it.
+    tools_enabled: bool | None = None
+    #: Who pays for this turn, resolved by ``execute_run`` BEFORE its credit
+    #: gate (``credits.guards.resolve_payer``) so the gate and the loop act on
+    #: one answer. ``_drive_agent_loop`` spends it instead of resolving again;
+    #: ``None`` (every other caller) makes the loop resolve for itself. Can
+    #: carry a plaintext provider key: never log or serialize it.
+    turn_credentials: TurnCredentials | None = None
+    #: Who the credit gate and ``bill_run`` treat as paying: ``byok`` only when
+    #: ``turn_credentials`` is BYOK and the agent's backend spends the key
+    #: (``credits.guards.billing_source``). Set by ``execute_run``; ``None``
+    #: elsewhere, where readers fall back to ``turn_credentials``.
+    credential_source: Literal["platform", "byok"] | None = None
+    #: ``credits.guards.FreeRunBounds`` for a platform-funded free run (an
+    #: unpaid early-access workspace while credits are enforced), set by
+    #: ``execute_run`` after the gates; ``_drive_agent_loop`` forces such a run
+    #: onto pydantic_ai within them. None for every other run.
+    free_run_bounds: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -1488,7 +1488,29 @@ async def _resolve_concierge(
         pocket_id=scope_id,
         pocket_type=getattr(pocket, "type", None),
         pocket_summary=pocket_summary,
+        concierge_owner_block=await _concierge_owner_block(scope_id, workspace_id),
     )
+
+
+async def _concierge_owner_block(pocket_id: str, workspace_id: str) -> str | None:
+    """The <owner-settings> block for the site whose pocket is ``pocket_id``.
+
+    The site is looked up in ``workspace_id`` only (the workspace the resolver
+    just reconciled), so another tenant's settings can never reach this run.
+    ``None`` when there is no such site, it sets no guided field, or the read
+    fails: the run then goes ahead exactly as before.
+    """
+    try:
+        from pocketpaw_ee.cloud.models.site import Site
+        from pocketpaw_ee.paw_bar.concierge_prompt import render_owner_block
+
+        site = await Site.find_one({"pocket_id": pocket_id, "workspace": workspace_id})
+        if site is None:
+            return None
+        return render_owner_block(site) or None
+    except Exception:  # noqa: BLE001 — the owner's settings never block a reply
+        logger.warning("concierge owner settings read failed for %s", pocket_id, exc_info=True)
+        return None
 
 
 async def _agent_in_workspace(agent_id: str, workspace_id: str) -> bool:
@@ -1950,13 +1972,13 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
         # "delegate, don't call add_widget" framing. Just the base ripple
         # conventions, then HOME_POCKET_PROMPT. (No /sites home pocket exists,
         # so the surface gate doesn't apply here.)
-        parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+        parts.append(chat_ripple_prompt())
     elif backend_name in _MCP_POCKET_BACKENDS:
         # Surface gate: omit the ripple LAW + delegation rule on a
         # ripple-off surface (/sites). The agent there hand-authors Svelte —
         # the "default to ui-spec" LAW would bias it away from that.
         if not ripple_off:
-            parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+            parts.append(chat_ripple_prompt())
             parts.append(POCKET_DELEGATION_RULE)
     else:
         creation_prompt, interaction_prompt = get_pocket_prompts(backend_name=backend_name)
@@ -1973,7 +1995,7 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
             # and get_pocket now carries the real backend summary.
             parts.append(fill_current_pocket(interaction_prompt, ctx.pocket_id, None))
         elif not ripple_off:
-            parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+            parts.append(chat_ripple_prompt())
     # Home surface: append the home-surface prompt so the agent calls
     # add_widget for an explicit widget request and answers directly
     # otherwise. Backend-agnostic — the discriminator is the pocket type.
@@ -2004,6 +2026,10 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # it is elsewhere.
     if ctx.pocket_summary and ctx.intent != "pocket_create" and override is None:
         parts.append(_render_pocket_summary_block(ctx.pocket_summary))
+    # A public concierge's owner settings (its name first). Only ever set by the
+    # concierge resolver; owner values arrive quoted, never as instructions.
+    if ctx.kind is ScopeKind.CONCIERGE and ctx.concierge_owner_block:
+        parts.append(ctx.concierge_owner_block)
     # ADDITIVE member orientation (pp#1367): append the pre-rendered, capped
     # "about this member" block LAST so the agent greets the caller by name and
     # tailors to their role/focus from turn one. It is pre-resolved on the
@@ -2171,6 +2197,76 @@ def build_dynamic_context(ctx: ScopeContext) -> str:
     if ctx.pocket_id and ctx.intent != "pocket_create":
         parts.append(f'<current-pocket id="{ctx.pocket_id}" />')
     return "\n".join(parts)
+
+
+# Chat-only: the order a card's main widget is chosen in. The "Match the card to
+# the answer" rule already maps intents to widgets; this makes checking it come
+# before composing, which the model skipped without it.
+PURPOSE_BUILT_FIRST_RULE = (
+    "   - Purpose-built first. Before you compose anything, check the Match the card "
+    "rule and the widgets listed for this message (under Widgets for this message in "
+    "your context). When one fits the request, it is the card's main widget, filled "
+    "with the user's own numbers and items, alone or under one heading; call "
+    "get_widget_spec for its props when they are not listed. How a thing in the figure "
+    "list works is a figure with its params and labels; a thing to spin, explore or "
+    "label in 3D is a model-viewer. Compose from flex, grid, slider, each and inputs "
+    "only when no purpose-built widget fits."
+)
+
+
+@functools.cache
+def chat_ripple_prompt() -> str:
+    """The chat-inline Ripple prompt: core's chat-only head and tail around the
+    widget block the Paw Bar concierge uses, generated from the vendored manifest
+    (always-on widgets with props, the figure and 3D model ids, every widget by
+    category), the authoring rules for the chat card profile and
+    ``PURPOSE_BUILT_FIRST_RULE``. Static per process, so it stays cacheable; the
+    per-turn part is ``chat_turn_widgets``."""
+    from pocketpaw.ripple._inline import INLINE_RIPPLE_PROMPT_HEAD, INLINE_RIPPLE_PROMPT_TAIL
+    from pocketpaw_ee.paw_bar import widget_relevance
+    from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
+    from pocketpaw_ee.paw_bar.concierge_runtime import ripple_rules
+
+    cards = "\n".join(
+        [
+            "# WIDGETS (from the Ripple manifest)",
+            "",
+            "These widgets are listed with their props; copy the prop names exactly:",
+            *widget_relevance.core_lines(),
+            widget_relevance.full_line("figure"),
+            widget_relevance.full_line("model-viewer"),
+            "Every widget by category (call `get_widget_spec` for the props of one "
+            "not listed above):",
+            *widget_relevance.index_lines(),
+            *ripple_rules(CHAT_PROFILE),
+            PURPOSE_BUILT_FIRST_RULE,
+        ]
+    )
+    return INLINE_RIPPLE_PROMPT_HEAD + "\n" + cards + "\n\n" + INLINE_RIPPLE_PROMPT_TAIL
+
+
+def chat_turn_widgets(behavior: str, message: str, history: Sequence[dict[str, Any]] = ()) -> str:
+    """The chat card prompt's per-turn part: the full prop lines of the widgets
+    ``message`` (and the last turns of ``history``) likely need, from Paw Bar's
+    ``pick_widgets`` and ``full_line``, so a named figure carries its sliders and
+    anchors. Empty unless ``behavior`` carries ``chat_ripple_prompt()``. run_core
+    adds it to knowledge_context, below the cache cut, so the instructions layer
+    stays byte-stable across turns."""
+    from pocketpaw_ee.paw_bar import widget_relevance
+
+    if not message or chat_ripple_prompt() not in behavior:
+        return ""
+    picked = widget_relevance.pick_widgets(message, history)
+    if not picked:
+        return ""
+    return "\n".join(
+        [
+            "## Widgets for this message",
+            "These purpose-built widgets fit this message, best first, with their props. "
+            "When one fits, it is the card's main widget (Purpose-built first):",
+            *(widget_relevance.full_line(name, message, history) for name in picked),
+        ]
+    )
 
 
 def build_context_block(ctx: ScopeContext, *, backend_name: str | None = None) -> str:
@@ -2605,9 +2701,70 @@ async def _build_kb_snippets_block(ctx: ScopeContext, query: str) -> str:
 # from eating the budget; total cap keeps a batch of files from blowing the
 # context window. Image/binary attachments typically yield empty text and
 # get a stub entry so the agent at least knows they exist.
+#
+# THE SIZES ARE SET BY WHAT PEOPLE PASTE, not by what a document can weigh.
+# The composer turns any bulky paste into a ``pasted-*.txt`` attachment, so
+# "I pasted my brief into the chat" and "I uploaded a file" are one code path.
+# At the old 8000 (~1200 words) a real landing-page brief was cut in half and
+# the agent reported the paste as truncated and reconstructed the rest from
+# what was left — the user had truncated nothing, we had. 40k chars is roughly
+# 10k tokens: comfortably above any brief someone types, still far below the
+# window. The total cap matters more than ever now that one file may be this
+# large, and it is what keeps five of them from becoming the whole prompt.
 _ATTACHMENT_MAX_FILES = 5
-_ATTACHMENT_PER_FILE_CHARS = 8000
-_ATTACHMENT_TOTAL_CHARS = 30000
+_ATTACHMENT_PER_FILE_CHARS = 40000
+_ATTACHMENT_TOTAL_CHARS = 100000
+
+
+# The composer sends a zero-width space as the message body when the user
+# attaches files and types nothing. That is deliberate on both ends it was
+# written for: the row has to be non-empty or the backend drops the message,
+# and every renderer strips the character so no placeholder text shows in the
+# transcript. The model is the end nobody wrote it for.
+_INVISIBLE_BODY_CHARS = "\u200b\u200c\u200d\ufeff"
+_INVISIBLE_BODY_TABLE = {ord(c): None for c in _INVISIBLE_BODY_CHARS}
+
+# What the model is told instead. It names ``<uploaded-files>`` on purpose: the
+# instruction is only actionable if it points at the block the text landed in.
+_ATTACHMENT_ONLY_MESSAGE = (
+    "The user sent this turn with no typed message. The attached file(s) ARE "
+    "the message: their contents are inlined in the <uploaded-files> block of "
+    "your context. Read that block and act on it as the user's request. Do not "
+    "ask them what they want when the file already says, and do not treat it "
+    "as background reference for some other question."
+)
+
+
+def visible_message_text(content: str | None) -> str:
+    """``content`` with the composer's invisible sentinel removed, trimmed."""
+    return (content or "").translate(_INVISIBLE_BODY_TABLE).strip()
+
+
+def resolve_user_content(
+    content: str | None,
+    attachments: list[dict[str, Any]] | None,
+) -> str:
+    """The user's turn as the MODEL should receive it.
+
+    A files-only send reaches us as the invisible sentinel above, and handing
+    that to the model is handing it an empty turn: the attachment's text is
+    inlined into the knowledge/system channel, which reads as reference
+    material, so the model sees a system block it was given no reason to act on
+    and a user who said nothing. Its most reasonable move is to ask what they
+    wanted — which is what a user who pasted a full brief and pressed send got
+    back, with the brief already in the prompt. Typing one character alongside
+    the attachment made it work, and that asymmetry is the bug.
+
+    So substitute a real message for the empty one. Only for the empty one:
+    anything with visible text is returned BYTE-IDENTICALLY, sentinel included,
+    because rewriting what someone actually wrote is not this function's job.
+    With no attachments there is nothing to point at, so nothing is invented.
+    """
+    if visible_message_text(content):
+        return content or ""
+    if attachments:
+        return _ATTACHMENT_ONLY_MESSAGE
+    return content or ""
 
 
 # Surfaces whose attachments may be republished to the WORLD-READABLE bucket.
@@ -2684,14 +2841,278 @@ async def _publish_media_attachment(
         if asset.kind == "video"
         else f'<img src="{asset.url}" alt="…">'
     )
+    embed = (
+        f"the URL above is permanent and world-readable — use it VERBATIM as "
+        f"{element}. Do not copy the file into the source map, do not rewrite the "
+        f"URL, and do not substitute a stock asset for it."
+    )
+    if asset.kind != "image":
+        return (
+            f"### {rec.filename} ({asset.mime}, {asset.size} bytes)\n"
+            f"PUBLIC URL: {asset.url}\n"
+            f"The user attached this so the site can show it: {embed}"
+        )
+    # Not every attached picture is page content. A shop owner photographs their
+    # visiting card so the site can be built FROM it, and embedding that photo
+    # puts the card on the website. Only the pixels say which kind this is, so
+    # the model decides; the embed branch keeps the verbatim-URL rule. A video is
+    # never a card, so it keeps the plain embed text above.
     return (
         f"### {rec.filename} ({asset.mime}, {asset.size} bytes)\n"
         f"PUBLIC URL: {asset.url}\n"
-        f"The user attached this so the site can show it. The URL above is "
-        f"permanent and world-readable — use it VERBATIM as {element}. "
-        f"Do not copy the file into the source map, do not rewrite the URL, and "
-        f"do not substitute a stock asset for it."
+        "Look at it first and decide what it is. If it is a DOCUMENT — a visiting "
+        "card, a menu, a flyer, a signboard, a price list — it is a SOURCE, not page "
+        "content: copy the business name, phone, WhatsApp number, address, hours and "
+        "services from it into the page exactly as written (ask about anything you "
+        "cannot read rather than guessing), and do NOT embed the photo unless the "
+        "user asks for it. Otherwise (a logo, a product or a shop photo) it is there "
+        "for the site to show. A storefront photo can be both — copy its facts, and "
+        f"you may also show it. To show it: {embed}"
     )
+
+
+# Image mimes a model can be shown directly. This is the intersection of what the
+# Claude Messages API accepts as an image block and what pydantic-ai will hand a
+# provider — png, jpeg, gif, webp. Anything outside it either has to be converted
+# first (below) or is not an image at all.
+_MODEL_IMAGE_MIMES: frozenset[str] = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+
+# Image mimes worth converting rather than refusing. HEIC is the one that
+# matters: it is what an iPhone shoots by default, so "images work now" would be
+# false for a large share of the photos people actually attach. Sending one
+# through unconverted is not an option — it is not on the API's list, and the
+# failure is a rejected request rather than a degraded answer.
+#
+# AVIF is here for the same reason and was found the same way: it is what
+# Chrome's "Copy image" and a growing number of sites hand you, the uploads
+# config already records it as ``image/avif`` (``uploads/config.py``), and it is
+# NOT on the API's list. Left out of both sets it fell through to the extraction
+# path, where an image-only AVIF has no text to give — so the model was handed
+# the container's own boxes and answered by describing them: "I can see the file
+# container metadata (AVIF, single still frame, roughly 246x56 based on the ispe
+# box), but the actual pixel content is AV1-compressed and I can't decode it."
+# That is a correct report of what it was given, which is what makes it the
+# clearest possible statement of the bug.
+_TRANSCODE_TO_PNG_MIMES: frozenset[str] = frozenset(
+    {"image/avif", "image/heic", "image/heif", "image/tiff", "image/bmp"}
+)
+
+
+def _to_png(raw: bytes, *, mime: str) -> bytes:
+    """Decode ``raw`` and re-encode it as PNG. Raises if it cannot be read.
+
+    Runs in a worker thread at the call site: Pillow's decode is CPU-bound and
+    would otherwise stall the event loop for the whole turn on a large photo.
+    """
+    import io as _io
+
+    from PIL import Image
+
+    if mime == "image/avif":
+        # Pillow decodes AVIF natively from 11.3 on (``features.check("avif")``
+        # is True on the locked 12.2), so there is no opener to register here.
+        # The declared floor is still ``pillow>=10.0.0``, which predates that
+        # support: a from-source install resolving an older Pillow raises
+        # UnidentifiedImageError and the caller drops this one file quietly, the
+        # same shape as every other unreadable attachment. Raising the floor is
+        # a lockfile change and is left to its own PR rather than smuggled in
+        # here.
+        pass
+    elif mime in {"image/heic", "image/heif"}:
+        # Pillow has no native HEIF decoder (PIL.features.check("heif") is False
+        # on Pillow 12.2); without the opener this raises UnidentifiedImageError.
+        # Same registration ``extraction/local.py`` does, for the same reason.
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+
+    buf = _io.BytesIO()
+    with Image.open(_io.BytesIO(raw)) as img:
+        # PNG carries no CMYK and no 16-bit palette; RGB(A) survives every source
+        # format here, and dropping an alpha channel a photo never had costs
+        # nothing.
+        img.convert("RGBA" if "A" in img.getbands() else "RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# Anthropic's documented per-image ceiling, and the safe floor across providers
+# (OpenAI and Gemini allow more). The surface-snapshot channel already answers to
+# it as ``run_core._MAX_IMAGE_BYTES``; both channels feed the same request, so
+# the number is not conditional on which one a picture arrived through.
+_MODEL_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+# What ONE turn may put on the wire across all of its attachments. Sits above the
+# per-image ceiling for the same reason ``run_core`` keeps both: the budget caps
+# the turn, the ceiling caps a single file, and either alone lets the other
+# through.
+_MODEL_IMAGE_TURN_BUDGET = 6 * 1024 * 1024
+# The long edge worth sending. The API rejects an edge over 8000px outright and
+# downscales anything past roughly this before the model sees it — while billing
+# the tokens for the size we sent. So shrinking here is not a degradation, it is
+# the same picture for fewer tokens.
+_MODEL_IMAGE_MAX_EDGE = 1568
+# A source we will not even read into memory. Well above the per-image ceiling on
+# purpose: a big PNG that shrinks to fit is the case this whole function exists
+# for, and only an absurd file is refused outright.
+_MODEL_IMAGE_MAX_SOURCE_BYTES = 40 * 1024 * 1024
+
+
+def _fit_for_model(raw: bytes, *, mime: str) -> tuple[bytes, str] | None:
+    """Shrink ``raw`` until a model will accept it, or return ``None``.
+
+    Returns the bytes UNCHANGED when they already fit, which is the common case
+    and keeps an ordinary attachment byte-identical to what was uploaded.
+
+    Why shrink instead of skip: a screenshot is the single most common thing a
+    user attaches, and a 4K PNG one routinely clears 5MB — as does any HEIC or
+    AVIF we transcode, because PNG is lossless and a 2MB photo can come out
+    several times larger. Dropping those would mean the feature works for small
+    pictures and silently fails for the ones people actually paste, which is the
+    shape of the bug this change set exists to remove.
+
+    Animated GIFs are never resized: Pillow would flatten the animation to one
+    frame, and a still frame of an animation is not what was attached. An
+    oversized one is refused instead.
+
+    Runs in a worker thread at the call site — decode and re-encode are
+    CPU-bound and would otherwise stall the event loop for the whole turn.
+    """
+    import io as _io
+
+    from PIL import Image
+
+    if len(raw) <= _MODEL_IMAGE_MAX_BYTES:
+        try:
+            with Image.open(_io.BytesIO(raw)) as probe:
+                if max(probe.size) <= _MODEL_IMAGE_MAX_EDGE:
+                    return raw, mime
+        except Exception:
+            # Unreadable here means unreadable to the provider too.
+            return None
+
+    with Image.open(_io.BytesIO(raw)) as img:
+        if getattr(img, "is_animated", False):
+            return None if len(raw) > _MODEL_IMAGE_MAX_BYTES else (raw, mime)
+
+        # JPEG stays JPEG (re-encoding a photo as PNG inflates it); everything
+        # else becomes PNG, which is lossless and keeps screenshot text crisp.
+        keep_jpeg = mime == "image/jpeg"
+        out_mime = "image/jpeg" if keep_jpeg else "image/png"
+        img = img.convert("RGB" if keep_jpeg else "RGBA" if img.mode == "RGBA" else "RGB")
+
+        edge = _MODEL_IMAGE_MAX_EDGE
+        for _ in range(6):
+            frame = img.copy()
+            if max(frame.size) > edge:
+                frame.thumbnail((edge, edge), Image.LANCZOS)
+            buf = _io.BytesIO()
+            if keep_jpeg:
+                frame.save(buf, format="JPEG", quality=85, optimize=True)
+            else:
+                frame.save(buf, format="PNG", optimize=True)
+            data = buf.getvalue()
+            if len(data) <= _MODEL_IMAGE_MAX_BYTES:
+                return data, out_mime
+            edge //= 2
+    return None
+
+
+async def resolve_turn_images(
+    ctx: ScopeContext,
+    attachments: list[dict[str, Any]] | None,
+) -> tuple[ImageAttachment, ...]:
+    """Resolve the turn's image attachments into bytes the model can be shown.
+
+    THIS IS THE FIX FOR "the agent cannot see my image". Every attachment used to
+    become TEXT — the block was built from ``chain.run``, the default extraction
+    chain is ``["local"]``, and ``LocalExtractor`` answers an image by running
+    OCR. A photo of a person or a place OCRs to nothing, so the model was handed
+    "(no text extracted)" and reported the file was empty. Both SDKs beneath us
+    take images natively; nothing was translating for them.
+
+    Failures are per-file and quiet: an image that cannot be resolved, read or
+    converted is simply not in the returned tuple, and
+    ``_build_attachments_block`` still names it to the model so the turn says a
+    file arrived rather than pretending none did.
+
+    Never raises — a broken upload must not cost the user their turn.
+    """
+    if not attachments or not ctx.workspace_id:
+        return ()
+
+    try:
+        from pocketpaw_ee.cloud.uploads.resolver import default_resolver
+
+        resolver = default_resolver()
+    except Exception:
+        logger.debug("resolver unavailable; no images this turn", exc_info=True)
+        return ()
+
+    out: list[ImageAttachment] = []
+    budget = _MODEL_IMAGE_TURN_BUDGET
+    for att in attachments:
+        if len(out) >= _ATTACHMENT_MAX_FILES:
+            break
+        if not isinstance(att, dict):
+            continue
+        url = att.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        try:
+            async with resolver.open_local_for_url(url, workspace=ctx.workspace_id) as resolved:
+                if resolved is None:
+                    continue
+                rec, path = resolved
+                mime = getattr(rec, "mime", "") or ""
+                if mime not in _MODEL_IMAGE_MIMES and mime not in _TRANSCODE_TO_PNG_MIMES:
+                    continue
+                # Checked before the read, so an absurd file costs a stat and
+                # not its own size in memory.
+                declared = getattr(rec, "size", 0) or 0
+                if declared > _MODEL_IMAGE_MAX_SOURCE_BYTES:
+                    logger.warning(
+                        "attachment %s is %d bytes, past the %d-byte source limit; "
+                        "not sending it as an image",
+                        url,
+                        declared,
+                        _MODEL_IMAGE_MAX_SOURCE_BYTES,
+                    )
+                    continue
+                raw = await asyncio.to_thread(Path(path).read_bytes)
+                if not raw:
+                    continue
+                if mime in _TRANSCODE_TO_PNG_MIMES:
+                    raw = await asyncio.to_thread(_to_png, raw, mime=mime)
+                    mime = "image/png"
+                fitted = await asyncio.to_thread(_fit_for_model, raw, mime=mime)
+                if fitted is None:
+                    logger.warning(
+                        "attachment %s could not be fitted under the %d-byte "
+                        "per-image limit; not sending it as an image",
+                        url,
+                        _MODEL_IMAGE_MAX_BYTES,
+                    )
+                    continue
+                raw, mime = fitted
+                if len(raw) > budget:
+                    logger.warning(
+                        "attachment %s does not fit the remaining turn budget; skipping it",
+                        url,
+                    )
+                    continue
+                budget -= len(raw)
+                out.append(
+                    ImageAttachment(
+                        data=raw,
+                        media_type=mime,
+                        filename=getattr(rec, "filename", "") or "attachment",
+                    )
+                )
+        except Exception:
+            logger.warning("could not prepare attachment %s as an image", url, exc_info=True)
+            continue
+    return tuple(out)
 
 
 async def _build_attachments_block(
@@ -2769,6 +3190,21 @@ async def _build_attachments_block(
                     processed += 1
                     continue
 
+                # An image the model is being SHOWN does not also get OCR'd.
+                # Running tesseract over a photo to paste its (empty) output
+                # beside the real thing is the behaviour this change exists to
+                # remove; the entry below just names the file so the model can
+                # refer to it the way the user does.
+                _mime = getattr(rec, "mime", "") or ""
+                if _mime in _MODEL_IMAGE_MIMES or _mime in _TRANSCODE_TO_PNG_MIMES:
+                    entries.append(
+                        f"### {rec.filename} ({_mime}, {rec.size} bytes)\n"
+                        "(attached to this turn as an image — it is in your input, "
+                        "look at it rather than guessing from the filename)"
+                    )
+                    processed += 1
+                    continue
+
                 if chain is None:
                     try:
                         chain = build_chain(get_settings())
@@ -2813,6 +3249,18 @@ async def _build_attachments_block(
         "The user attached the following file(s) to this turn. "
         "Their extracted contents are inlined below — treat them as part "
         "of the user's message, not as external reference.",
+        # THE BACKEND WITH FILE TOOLS NEEDS THE OTHER HALF OF THE CONTRACT.
+        # The line above settles how to WEIGH this text; it never said the
+        # files have no path. ``pydantic_ai`` is dispatch-only and cannot go
+        # looking, so it reads what is here. ``claude_sdk`` grants Read/Glob/
+        # Grep/Bash and runs in a real ``cwd`` jail, so asked about "the file
+        # I uploaded" it globbed an empty directory and told the user no file
+        # existed — with the extracted text in its own system prompt.
+        "The text above is the whole of what was uploaded. These files are "
+        "not on the filesystem and have no path in your working directory, "
+        "so do not use Read, Glob, Grep or Bash to look for them and do not "
+        "say that no file was provided. A file uploaded on an earlier turn is "
+        "not inlined here — reach those with list_uploads / read_upload.",
     ]
     lines.extend(entries)
     lines.append("</uploaded-files>")
@@ -2822,6 +3270,123 @@ async def _build_attachments_block(
 # ---------------------------------------------------------------------------
 # History rehydration
 # ---------------------------------------------------------------------------
+
+# The read-time annotation on a reply that never finished. It is NOT stored:
+# ``ChatRunDoc.partial_text`` keeps the verbatim text the model produced and this
+# sentence is applied on the way into the prompt, so the UI can still render the
+# reply truthfully and this wording can be reworded without touching a document.
+#
+# It rides as its own ``system`` entry rather than being prepended to the
+# assistant content for the same reason: the assistant turn the model sees must
+# be exactly what the model said. Folding an editorial note into it teaches the
+# agent that its own turns contain bracketed stage directions.
+_STRANDED_REPLY_NOTE = (
+    "[System note: the assistant reply above was cut off mid-stream and is "
+    "incomplete (run status: {status}). Treat it as an unfinished fragment, not "
+    "as a completed answer — it may stop mid-sentence, and any action it says it "
+    "took may never have run. Do not build on it without re-checking.]"
+)
+
+
+def _sort_ordinal(value: Any) -> float:
+    """One comparable number for a row's ``createdAt``, whatever it actually is.
+
+    Merging two collections means sorting their timestamps against each other,
+    and the raw values are not reliably of one type. Mongo stores BSON datetimes
+    with no zone, so whether they arrive naive or tz-aware is a property of the
+    CLIENT, and sorting a list that mixes the two raises ``TypeError``. Reducing
+    to epoch seconds removes the question instead of betting that both reads
+    happen to have come back the same way — the cost of losing that bet is an
+    exception on the chat hot path, not a mis-ordered reply.
+
+    Non-datetimes fall through ``float()`` rather than being rejected: the
+    history tests stand fake Message classes up with a plain integer ordinal in
+    that field, and an ordinal is exactly what this function wants. Anything that
+    converts to neither — including a row with no such field at all — answers 0.0,
+    which is deliberately not an error: the caller's sort is STABLE, so a set of
+    rows that all answer 0.0 keeps the newest-first order the query already gave
+    them. A read whose documents carry no usable timestamp degrades to exactly
+    the behaviour this function replaced, rather than breaking.
+    """
+    if isinstance(value, datetime):
+        stamped = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+        return stamped.timestamp()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _message_entries(m: Any) -> list[dict[str, str]]:
+    """One persisted ``Message`` as history entries — exactly one, or none.
+
+    Lifted verbatim out of ``load_history_for_scope`` (the role fallback and the
+    empty-content skip are unchanged) so that a row from the ``Message``
+    collection and a row from the run collection can be windowed against each
+    other as peers before either is flattened into the output list.
+
+    The one exception to "exactly one": an assistant row carrying ``run_status``
+    is the partial reply of a run that did not complete, and gets the same
+    "was cut off" system note a run-doc partial gets, in the same row so the
+    window can never keep the fragment and drop the warning.
+    """
+    role = getattr(m, "role", None)
+    if role not in ("user", "assistant", "system"):
+        role = "assistant" if getattr(m, "sender_type", "") == "agent" else "user"
+    content = getattr(m, "content", "") or ""
+    if not content:
+        return []
+    entries = [{"role": role, "content": content}]
+    run_status = getattr(m, "run_status", None)
+    if role == "assistant" and isinstance(run_status, str) and run_status:
+        entries.append(
+            {"role": "system", "content": _STRANDED_REPLY_NOTE.format(status=run_status)}
+        )
+    return entries
+
+
+async def _stranded_reply_rows(
+    ctx: ScopeContext, *, limit: int
+) -> list[tuple[float, int, list[dict[str, str]]]]:
+    """The replies this scope stored on a run document and nowhere else.
+
+    Two entries per run, never one: the assistant's VERBATIM partial, then a
+    ``system`` line saying it was cut off. One entry would be strictly worse than
+    dropping the reply — "I've updated the config to" replayed as a completed
+    assistant turn is a claim the agent never made, and the model will build on
+    it. Two entries give it the text AND the fact that the text stops early.
+
+    The pair is one row so the window below can never separate them.
+
+    The ``1`` in each tuple is the tie-break rank. A run document is created
+    after the ``Message`` for the user turn that provoked it, but the two
+    timestamps can land in the same millisecond; ranking the run second means a
+    partial reply can never sort ahead of the question it was answering.
+    """
+    from pocketpaw_ee.cloud.chat.runs import service as run_service
+
+    replies = await run_service.find_stranded_replies(
+        workspace_id=ctx.workspace_id,
+        context_type=ctx.kind.value,
+        scope_id=ctx.scope_id,
+        agent_id=ctx.target_agent_id,
+        limit=limit,
+    )
+    return [
+        (
+            _sort_ordinal(reply.created_at),
+            1,
+            [
+                {"role": "assistant", "content": reply.text},
+                {
+                    "role": "system",
+                    "content": _STRANDED_REPLY_NOTE.format(status=reply.status),
+                },
+            ],
+        )
+        for reply in replies
+        if reply.text.strip()
+    ]
 
 
 def session_key_for(ctx: ScopeContext) -> str:
@@ -2842,6 +3407,21 @@ def session_key_for(ctx: ScopeContext) -> str:
     return f"cloud:{ctx.kind.value}:{ctx.scope_id}:{ctx.target_agent_id}"
 
 
+def warm_session_key_for(ctx: ScopeContext) -> str:
+    """The key an agent run's WARM CLI process is cached under.
+
+    ``session_key_for`` names the conversation and is shared by every member of
+    a pocket, group or session; that is right for history and wrong for a warm
+    process, whose tools act as the user who is asking. So the user is folded in
+    and each member gets their own process (concierge keys already carry the
+    visitor). Also the key of the per-session turn slot (``bind_turn``).
+    """
+    base = session_key_for(ctx)
+    if ctx.kind is ScopeKind.CONCIERGE:
+        return base
+    return f"{base}:u:{ctx.user_id}"
+
+
 async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[dict[str, str]]:
     """Return the most recent ``limit`` turns as ``[{"role", "content"}]``,
     ordered oldest first.
@@ -2858,8 +3438,17 @@ async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[
     would otherwise forget every prior message in the thread. Reading
     from the persisted ``Message`` collection restores context.
 
+    Two sources, one window. Most turns are ``Message`` rows; a turn that failed
+    or was cancelled mid-stream left its reply on the run document instead (see
+    ``_stranded_reply_rows``), and the two are merged by timestamp BEFORE the
+    window is taken, so a stranded reply lands between the turns it actually
+    happened between rather than being appended at one end.
+
     Swallows errors (empty list) so a transient Mongo hiccup degrades
-    the reply rather than killing the stream.
+    the reply rather than killing the stream. The second read has its OWN
+    failure boundary: losing a partial costs one answer's worth of context,
+    losing the ``Message`` read costs the whole conversation, so the two must
+    not fail together.
     """
     try:
         from pocketpaw_ee.cloud.models.message import Message
@@ -2900,18 +3489,34 @@ async def load_history_for_scope(ctx: ScopeContext, *, limit: int = 50) -> list[
         #
         # Same shape as memory/mongo_store.py:372-374, which had it right.
         recent = await Message.find(query).sort("-createdAt").limit(limit).to_list()
-        msgs = list(reversed(recent))
     except Exception:
         logger.exception("load_history_for_scope failed for %s/%s", ctx.kind.value, ctx.scope_id)
         return []
 
+    # One row per SOURCE document, not per output entry. Windowing on rows is
+    # what keeps a stranded reply and its "was cut off" note together, and what
+    # keeps the Message half byte-identical to before: a row whose content is
+    # empty still spends a slot and still contributes nothing.
+    rows: list[tuple[float, int, list[dict[str, str]]]] = [
+        (_sort_ordinal(getattr(m, "createdAt", None)), 0, _message_entries(m)) for m in recent
+    ]
+    try:
+        rows.extend(await _stranded_reply_rows(ctx, limit=limit))
+    except Exception:  # noqa: BLE001 — a missing partial degrades one answer
+        logger.warning(
+            "stranded-reply rehydration failed for %s/%s; answering without it",
+            ctx.kind.value,
+            ctx.scope_id,
+            exc_info=True,
+        )
+
+    # Newest-first to take the window, then back to oldest-first for the caller.
+    # Both halves matter and one of them has been wrong before: sorting ascending
+    # and then limiting returns the OLDEST ``limit``, which froze an agent's
+    # memory at turn 50 while the visible transcript kept growing.
+    rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
+
     out: list[dict[str, str]] = []
-    for m in msgs:
-        role = getattr(m, "role", None)
-        if role not in ("user", "assistant", "system"):
-            role = "assistant" if getattr(m, "sender_type", "") == "agent" else "user"
-        content = getattr(m, "content", "") or ""
-        if not content:
-            continue
-        out.append({"role": role, "content": content})
+    for _instant, _rank, entries in reversed(rows[:limit]):
+        out.extend(entries)
     return out

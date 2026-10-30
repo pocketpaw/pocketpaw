@@ -301,7 +301,8 @@ def _check_h1(docs: list[tuple[str, str]], counter: dict[str, int]) -> list[Find
 
 
 # ── Deterministic link checks ───────────────────────────────────────────────────
-_PLACEHOLDER_HREFS = {"", "#", "javascript:void(0)", "javascript:;"}
+#: Hrefs that go nowhere. Also read by ``verify_checks`` (SC-LINK-02).
+PLACEHOLDER_HREFS = frozenset({"", "#", "javascript:void(0)", "javascript:;"})
 
 
 def _check_links(file: str, html: str, counter: dict[str, int]) -> list[Finding]:
@@ -312,7 +313,7 @@ def _check_links(file: str, html: str, counter: dict[str, int]) -> list[Finding]
         # resolved at render time, not placeholders.
         if href.startswith("{") or _RE_TITLE_PLACEHOLDER.search(href):
             continue
-        bad = href in _PLACEHOLDER_HREFS
+        bad = href in PLACEHOLDER_HREFS
         # Obviously-malformed: a scheme-looking prefix with nothing after it, or a
         # stray space inside a non-anchor URL.
         malformed = bool(re.match(r"^[a-z]+:$", href, re.IGNORECASE)) or (

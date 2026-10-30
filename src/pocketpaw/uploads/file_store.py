@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
@@ -22,6 +22,23 @@ class FileRecord:
     owner_id: str
     chat_id: str | None
     created: datetime
+    # Library metadata (FL-1 tags, FC-1 comprehension, BA-1 book agents).
+    # Optional with safe defaults: the OSS JSONL store never writes them, and
+    # every row created before those features shipped reads back the default.
+    # They live HERE and not only on the ee FileEntry because the flat
+    # ``GET /files`` listing — the one the Files panel actually calls — is
+    # built from FileRecord, not from FileEntry. Adding a field to only one of
+    # the two shapes stores it correctly and then never shows it.
+    tags: list[str] = field(default_factory=list)
+    collections: list[str] = field(default_factory=list)
+    summary: str | None = None
+    agent_id: str | None = None
+    # Where the file LIVES. Absent until now, so the flat listing could not
+    # tell a client which folder a row was in — and a "move" UI that guards
+    # on `folder_path ?? "/"` therefore concluded every file was already at
+    # the root and quietly did nothing. Defaults to "/" so a legacy row reads
+    # as root rather than unknown.
+    folder_path: str = "/"
 
 
 class JSONLFileStore:

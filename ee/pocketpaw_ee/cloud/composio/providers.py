@@ -99,6 +99,9 @@ class _CachedTools:
 # Composio sessions are user-scoped and the tools change only when the
 # user (un)connects an integration upstream — so caching for the TTL
 # duration is safe in practice.
+# Bounded: one entry per (user, backend) that ever chatted, so without a cap a
+# long-lived process holds every user's tool list forever.
+_TOOLS_CACHE_MAX = 1024
 _tools_cache: dict[tuple[str, str], _CachedTools] = {}
 _tools_cache_lock = threading.Lock()
 
@@ -162,6 +165,11 @@ def build_tools_for_backend(
         return []
 
     with _tools_cache_lock:
+        if len(_tools_cache) >= _TOOLS_CACHE_MAX:
+            for key in [k for k, v in _tools_cache.items() if v.expires_at <= now]:
+                del _tools_cache[key]
+            while len(_tools_cache) >= _TOOLS_CACHE_MAX:
+                del _tools_cache[next(iter(_tools_cache))]  # oldest insert
         _tools_cache[cache_key] = _CachedTools(
             tools=tools,
             expires_at=now + s.composio_mcp_url_ttl_seconds,

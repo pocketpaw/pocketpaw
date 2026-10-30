@@ -39,6 +39,18 @@ class AuthUser:
     is_verified: bool
     is_superuser: bool
     mfa_enabled: bool = False
+    # BYOK-first onboarding (2026-09-01): the frontend renders signup nudges
+    # and upload blocks off this flag; it must survive a reload via /auth/me.
+    is_guest: bool = False
+    # Platform authority axis (2026-09-14) — the cross-tenant operator rung, or
+    # None for the overwhelming majority of users. Carried on the domain object
+    # because /auth/me is the only channel by which a client can learn it, and
+    # it must not be inferred from is_superuser (a different, narrower thing).
+    platform_role: str | None = None
+    # Early access: when the one-time credit grant landed, and when the user
+    # asked to hear about plans. None until each happens.
+    early_access_granted_at: datetime | None = None
+    notify_plans_at: datetime | None = None
 
 
 @dataclass(frozen=True)

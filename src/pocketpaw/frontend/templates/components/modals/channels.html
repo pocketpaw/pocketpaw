@@ -325,6 +325,11 @@
                             <input type="text" x-model="channelForms.whatsapp.verify_token" placeholder="Webhook verification token..."
                                 class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
                         </div>
+                        <div class="flex flex-col gap-2">
+                            <label class="text-[13px] font-medium text-[var(--text-secondary)]">App Secret</label>
+                            <input type="password" x-model="channelForms.whatsapp.app_secret" placeholder="Meta app secret (inbound messages are rejected without it)..."
+                                class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3.5 text-[13px] text-white focus:outline-none focus:border-[var(--accent-color)] focus:bg-black/40 transition-all placeholder-white/40" />
+                        </div>
                         <button class="w-full bg-[var(--accent-color)] hover:bg-[var(--accent-hover)] text-white py-2.5 rounded-[10px] text-[13px] font-medium transition-all active:scale-95 disabled:opacity-50"
                             @click="saveChannelConfig('whatsapp')" :disabled="channelLoading || (!channelForms.whatsapp.access_token && !channelForms.whatsapp.phone_number_id)">Save WhatsApp Config</button>
                     </div>

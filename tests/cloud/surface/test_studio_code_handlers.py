@@ -447,7 +447,6 @@ async def test_code_profile_grants_no_filesystem_tool_in_the_effective_allowlist
     built = await backend._build_options(
         "refactor this",
         system_prompt="you are on the code surface",
-        history=None,
         session_key=None,
         deny_mcp_tool_ids=profile.deny_mcp_tool_ids,
         allow_sdk_tools=profile.allowed_sdk_tools or frozenset(),

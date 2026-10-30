@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -25,7 +26,7 @@ async def meetings_client(monkeypatch, mongo_db):  # noqa: ARG001 — mongo_db f
     # Pass RBAC checks.
     from pocketpaw_ee.guards import deps as guards_deps
 
-    monkeypatch.setattr(guards_deps, "check_workspace_action", lambda *a, **k: None)
+    monkeypatch.setattr(guards_deps, "check_workspace_action", AsyncMock(return_value=None))
 
     fake_user = SimpleNamespace(
         id="user-1",

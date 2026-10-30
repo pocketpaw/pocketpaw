@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 from pocketpaw_ee.cloud.daytona.image import (
+    IMAGE_REV,
     build_paw_dev_image,
     resolve_sandbox_image,
     sandbox_image_override,
@@ -51,6 +52,16 @@ class TestToolchainIsPresent:
         ``node`` directly (``vite build && node scripts/prune-client.mjs``), and the
         vendored paw-sites CLI runs under node."""
         assert "nodesource.com" in dockerfile
+
+    def test_node_is_at_least_22(self, dockerfile: str) -> None:
+        # Wrangler 4.14x (run by every worker-target base template's dry-run bundle),
+        # Astro 7, Next 16 and SvelteKit 3 all refuse Node 20. A Node 20 image made
+        # every project build fail at the packaging step after a clean compile.
+        import re
+
+        majors = [int(m) for m in re.findall(r"nodesource\.com/setup_(\d+)\.x", dockerfile)]
+        assert majors, "the image no longer installs node from nodesource"
+        assert min(majors) >= 22
 
     def test_python_base_is_retained(self, dockerfile: str) -> None:
         """The in-sandbox build wrapper serializes its result sentinel with python3
@@ -92,3 +103,21 @@ class TestOverrideContract:
     ) -> None:
         monkeypatch.setenv("DAYTONA_SANDBOX_IMAGE", "python:3.12-slim")
         assert resolve_sandbox_image() == "python:3.12-slim"
+
+
+class TestImageRevision:
+    """Daytona caches a cancelled build of this dockerfile as BUILD_FAILED; the rev
+    layer is how a new deploy (or an env bump) gets a fresh build."""
+
+    def test_default_rev_is_the_last_layer(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("PAW_DAYTONA_IMAGE_REV", raising=False)
+        last = build_paw_dev_image().dockerfile().strip().splitlines()[-1]
+        assert "PAW_IMAGE_REV" in last and IMAGE_REV in last
+
+    def test_env_bump_changes_the_dockerfile(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("PAW_DAYTONA_IMAGE_REV", raising=False)
+        before = build_paw_dev_image().dockerfile()
+        monkeypatch.setenv("PAW_DAYTONA_IMAGE_REV", "rev-bump")
+        after = build_paw_dev_image().dockerfile()
+        assert before != after
+        assert "rev-bump" in after

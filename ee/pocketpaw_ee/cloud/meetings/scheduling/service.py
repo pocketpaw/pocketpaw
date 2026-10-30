@@ -8,6 +8,11 @@ endpoints (when they land). Each function:
   4. Updates status
   5. Emits the corresponding bus event so bridges (notifications, calendar)
      can react.
+
+2026-09-30 (fix/livekit-call-security): a start refused by the plan's daily
+call budget (``CallLimitError``) marks the meeting ``failed`` with
+``raw_provider_payload["start_error"] = "billing.call_limit"`` instead of
+leaving it ``scheduled`` forever. The scheduler job does not raise.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import logging
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+from pocketpaw_ee.cloud._core.errors import CallLimitError
 from pocketpaw_ee.cloud._core.realtime.emit import emit as emit_realtime
 from pocketpaw_ee.cloud.meetings.domain import Meeting as MeetingDomain
 from pocketpaw_ee.cloud.meetings.events import MeetingEnded, MeetingStarted
@@ -47,6 +53,15 @@ async def start_meeting(workspace_id: str, meeting_id: str) -> MeetingDomain | N
     ctx = SimpleNamespace(workspace_id=workspace_id, user_id=doc.created_by_user_id or "")
     try:
         result = await provider_impl.start(ctx, doc)
+    except CallLimitError as exc:
+        # The plan has no call time left today. Mark it failed with the reason
+        # so it doesn't sit at "scheduled" forever; the UI reads the status.
+        logger.info("Meeting %s not started: daily call budget exhausted", meeting_id)
+        doc.status = "failed"
+        doc.raw_provider_payload = {**(doc.raw_provider_payload or {}), "start_error": exc.code}
+        await doc.save()
+        # no-event: no bridge or client handles a failed auto-start yet
+        return None
     except Exception:
         logger.exception("Provider start() failed for meeting %s", meeting_id)
         return None

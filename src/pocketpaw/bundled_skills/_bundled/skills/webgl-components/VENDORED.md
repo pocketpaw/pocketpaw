@@ -8,6 +8,9 @@
   its client bundle (so nothing in this skill runs there), and a Paw Site cannot
   npm-import three/ogl/gsap. It defers to `pocketpaw-design-taste` §2.C as the
   authority on the canvas guardrail. Everything below the note is unmodified.
+  (2026-09-24: constraint 2 now says the opposite for svelte/react. Packages are
+  declared through `set_site_dependencies` and imported client-side; only a
+  dynamic svelte site stays dependency-free.)
 - **What it does:** production discipline for shader-driven UI rendered many
   times per page — one shared GL context blitted into per-instance 2D canvases
   (browsers cap a document at ~8-16 live contexts and evict the oldest

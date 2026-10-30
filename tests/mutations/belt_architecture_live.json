@@ -1,0 +1,119 @@
+[
+  {
+    "label": "a red PR check does not fail the component",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "(\"failed\", any(p.get(\"checks\") == \"red\" for p in row[\"prs\"])),",
+    "replace": "(\"failed\", False),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "an in-flight run does not read changing",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "(\"changing\", bool(row[\"runs\"])),",
+    "replace": "(\"changing\", False),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a trunk commit in the last 24 h does not read changed",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "(\"changed\", age is not None and age < CHANGED_H),",
+    "replace": "(\"changed\", False),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "any commit in the 7-day window reads changed",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "(\"changed\", age is not None and age < CHANGED_H),",
+    "replace": "(\"changed\", row[\"merges\"][\"count_7d\"] > 0),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "changed outranks changing",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "        (\"changing\", bool(row[\"runs\"])),\n        (\"changed\", age is not None and age < CHANGED_H),",
+    "replace": "        (\"changed\", age is not None and age < CHANGED_H),\n        (\"changing\", bool(row[\"runs\"])),",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "an unfinished check rolls up green",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "for s in (\"red\", \"pending\", \"green\")",
+    "replace": "for s in (\"red\", \"green\", \"pending\")",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "an empty rollup reads green",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "if s in seen), None), gate",
+    "replace": "if s in seen), \"green\"), gate",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a settled run joins",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "if run.get(\"status\") in ab._SETTLED or not run.get(\"repo\"):",
+    "replace": "if not run.get(\"repo\"):",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a signal that joins no component is dropped, not put on the repo row",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "return [rows[i] for i in ids] or [repo]",
+    "replace": "return [rows[i] for i in ids]",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a signal with an unjoined file also lands on the repo row",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "return [rows[i] for i in ids] or [repo]",
+    "replace": "return [rows[i] for i in ids] + ([repo] if None in {component_for(f, index) for f in files} else [])",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a run does not join the components its Belt-Lead PRs touch",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "for row in homes([*files, *led.get(str(run.get(\"action_id\")), [])]):",
+    "replace": "for row in homes(files):",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "a Belt-Lead PR joins every run, not only the one it names",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "for row in homes([*files, *led.get(str(run.get(\"action_id\")), [])]):",
+    "replace": "for row in homes([*files, *(x for v in led.values() for x in v)]):",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  },
+  {
+    "label": "the PR read drops the body that names a PR's lead",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_live.py",
+    "find": "_PR_JSON = \"number,title,body,headRefName,",
+    "replace": "_PR_JSON = \"number,title,headRefName,",
+    "tests": [
+      "tests/cloud/test_belt_architecture_live.py"
+    ]
+  }
+]

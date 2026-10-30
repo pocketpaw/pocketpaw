@@ -18,6 +18,9 @@
 #     missing key and for a result with no output images.
 #
 # Created 2026-08-18 (studio-fal-edit): direct fal edit dispatch tests.
+# Updated 2026-09-24: the root conftest sets PYTHON_DOTENV_DISABLED for the whole run,
+#   so the .env-loading regression test lifts it for its own body; it is the one test
+#   here that needs the REAL loader to read its tmp file.
 
 from __future__ import annotations
 
@@ -72,6 +75,8 @@ def test_fal_api_key_loads_dotenv_when_not_exported(monkeypatch, tmp_path) -> No
     no-override merge), but a .env-only key is now found."""
     monkeypatch.delenv("FAL_AI_API_KEY", raising=False)
     monkeypatch.delenv("FAL_KEY", raising=False)
+    # The root conftest disables dotenv run-wide; this test is about the real loader.
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text("FAL_AI_API_KEY=env-file-key\n")
 

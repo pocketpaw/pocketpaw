@@ -53,6 +53,12 @@
 # ``atlas.fabric.build_workspace_fabric_introspector``) and constructs one per
 # run bound to the run's ``ws:<id>`` scope. claude_sdk.py selects it over the
 # role-blind default when a real ``ws:<id>`` scope exists.
+# Updated: 2026-10-01 (feat/atlas-canonical) — optional ``user_id`` binding. The
+#   atlas read API (GET /api/v1/atlas/*) has the request's verified user and
+#   workspace but no chat-run ContextVars, so it passes the user here; prime()
+#   then resolves that user's role in the scope's workspace through the same
+#   User load + resolve_workspace_role path. Agent runs pass nothing and keep
+#   reading the per-stream identity. Fail-closed either way.
 
 from __future__ import annotations
 
@@ -84,7 +90,9 @@ class RoleAwareEntitlementProvider:
     warm client shared across users.
     """
 
-    def __init__(self, scope_key: str, registry: Any | None = None) -> None:
+    def __init__(
+        self, scope_key: str, registry: Any | None = None, user_id: str | None = None
+    ) -> None:
         if not isinstance(scope_key, str) or not scope_key.startswith("ws:"):
             # A role-aware provider only makes sense under a real workspace scope.
             # Refuse anything else so the core bridge falls back to the default.
@@ -102,6 +110,10 @@ class RoleAwareEntitlementProvider:
         # role and leaked their admin/owner cards to later callers. There is no
         # ``_primed`` flag any more — prime() always reflects the CURRENT identity.
         self._role_level: int | None = None
+        # An HTTP caller (the atlas read API) has no chat-run ContextVars; it
+        # binds the request's verified user here instead. The workspace is the
+        # one in ``scope_key``. None = read the per-stream identity (agent runs).
+        self._bound_user_id = user_id
 
     # -- connector delegation ------------------------------------------------
 
@@ -139,8 +151,12 @@ class RoleAwareEntitlementProvider:
                 current_workspace_id,
             )
 
-            user_id = current_user_id()
-            workspace_id = current_workspace_id()
+            if self._bound_user_id is not None:
+                user_id = self._bound_user_id
+                workspace_id = self._scope_key[len("ws:") :]
+            else:
+                user_id = current_user_id()
+                workspace_id = current_workspace_id()
             if not user_id or not workspace_id:
                 logger.debug("atlas role-aware provider: no identity on stream — role unresolved")
                 return

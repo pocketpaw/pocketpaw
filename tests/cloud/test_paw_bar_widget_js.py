@@ -16,6 +16,17 @@
 # The vendored default is also syntax-relevant: it is served raw to a foreign page,
 # so the last test asserts it stays wrapped in one IIFE and keeps its globals to
 # window.PawBar.
+# Updated 2026-10-02 (CN-8, fix/canon-cross-repo-pins): the vendored loader is now
+#   hash-pinned to a paw-bar build (paw-bar-loader.pin.json), so drift from
+#   paw-bar fails here; the re-vendor picked up the microphone iframe permission.
+#   The pin test reads the package copy directly (not via PAW_BAR_WIDGET_JS) and
+#   relies on the sha alone, with no hardcoded loader strings.
+# Updated 2026-09-27 (new Paw Bar): the vendored loader must speak the two
+#   additions the rebuilt bar relies on, pawbar:viewport and a corner `side` on
+#   pawbar:resize.
+# Updated 2026-09-26 (frame sandbox): the vendored loader must put the SAME
+#   sandbox flags on its iframe that the router sends as a CSP sandbox header,
+#   set before the iframe's src so the first load is already sandboxed.
 
 from __future__ import annotations
 
@@ -240,6 +251,43 @@ def test_the_vendored_loader_speaks_the_frame_protocol_the_app_expects():
     assert "pawbar:host-close" in code
 
 
+def test_the_vendored_loader_speaks_the_new_bar_additions():
+    """The rebuilt Paw Bar (paw-bar #19) docks as a content-sized box and sizes
+    itself against the HOST page, which only the loader can see. Two additions
+    carry that, and a copy without them fails the same silent way as the ones
+    above: the app keeps working, just subtly wrong.
+
+      * ``pawbar:viewport`` tells the frame the host viewport on load and on every
+        resize. Without it the app falls back to the screen size, so a desktop
+        window narrower than the screen gets a card sized for the screen.
+      * ``side`` on ``pawbar:resize`` docks the icon launcher in its corner.
+        Without it the corner launcher sits centred at the bottom of the page.
+    """
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    assert "pawbar:viewport" in code, "the app sizes against the host viewport the loader reports"
+    assert "data.side" in code, "the icon launcher's corner rides on pawbar:resize"
+
+
+def test_the_vendored_loader_follows_spa_navigation():
+    """The concierge answers about the visitor's page from ``pawbar:page``. On a
+    client-routed store the frame never reloads, so a loader that posts the page
+    only on load leaves the concierge on the first page forever: a visitor on a
+    product asks "should I buy it?" and is asked which product (paw-bar #32).
+    The loader re-posts on back/forward and polls for path or title changes."""
+    from pocketpaw_ee.paw_bar.router import paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    code = chr(10).join(ln for ln in source.splitlines() if not ln.lstrip().startswith("//"))
+
+    assert "pawbar:page" in code
+    assert '"popstate"' in code, "back/forward re-sends the page"
+    assert "setInterval" in code, "a pushState navigation is caught by the poll"
+
+
 def test_the_vendored_loader_is_generated_not_hand_edited():
     """A header that says where it came from is the only thing standing between
     this file and the silent drift above. If someone hand-edits it again, the
@@ -252,6 +300,33 @@ def test_the_vendored_loader_is_generated_not_hand_edited():
     assert "loader/src/loader.ts" in header
 
 
+def test_the_vendored_loader_matches_its_pinned_paw_bar_build():
+    """The header names the source; this proves the body IS that build. The pin
+    records the paw-bar commit and the sha256 of loader/dist/loader.readable.js
+    built there, so a hand edit or a stale copy fails here instead of shipping
+    (the copy missed paw-bar e50b593's microphone permission for exactly that
+    reason). Refresh with scripts/vendor-paw-bar-loader.sh."""
+    import hashlib
+    import json
+    from pathlib import Path
+
+    import pocketpaw_ee.paw_bar as paw_bar
+
+    # The package's own copy, not paw_bar_widget_file(): that follows
+    # PAW_BAR_WIDGET_JS, and the pin is about what we commit.
+    package = Path(paw_bar.__file__).parent
+    path = package / "static" / "paw-bar.js"
+    pin = json.loads((package / "paw-bar-loader.pin.json").read_text("utf-8"))
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+    body = text[text.index('"use strict";') :]
+
+    assert hashlib.sha256(body.encode()).hexdigest() == pin["sha256"], (
+        "static/paw-bar.js drifted from paw-bar-loader.pin.json; "
+        "run scripts/vendor-paw-bar-loader.sh"
+    )
+    assert pin["source_repo"] == "qbtrix/paw-bar" and len(pin["source_commit"]) == 40
+
+
 # --------------------------------------------------------------------------- #
 # frame-ancestors port matching
 #
@@ -259,6 +334,29 @@ def test_the_vendored_loader_is_generated_not_hand_edited():
 # grey box because a CSP host-source with no port matches only the scheme's
 # DEFAULT port, so a site served on any other port could not be framed at all.
 # --------------------------------------------------------------------------- #
+
+
+def test_the_vendored_loader_sandboxes_the_frame_with_the_server_flags():
+    """The loader's ``sandbox`` attribute and the router's CSP ``sandbox`` header
+    are two copies of one flag list, shipped by two different paths (this file is
+    hand-vendored from paw-bar). If they drift, the browser enforces the stricter
+    one, so a flag added on one side only silently does nothing, and a flag the
+    widget needs removed on one side only breaks it. Pin them equal, and pin the
+    attribute ahead of ``src``: sandbox flags apply on navigation, so setting them
+    afterwards would leave the first load unsandboxed."""
+    import re
+
+    from pocketpaw_ee.paw_bar.router import PAWBAR_FRAME_SANDBOX, paw_bar_widget_file
+
+    source = paw_bar_widget_file().read_text(encoding="utf-8")
+    match = re.search(r'var FRAME_SANDBOX = "([^"]*)";', source)
+    assert match, "vendored loader no longer declares FRAME_SANDBOX; re-vendor it"
+    assert match.group(1) == PAWBAR_FRAME_SANDBOX
+    assert "allow-top-navigation" not in match.group(1)
+
+    set_sandbox = source.index('iframe.setAttribute("sandbox", FRAME_SANDBOX)')
+    set_src = source.index("iframe.src = src")
+    assert set_sandbox < set_src
 
 
 def test_portless_allowlist_entry_permits_any_port():

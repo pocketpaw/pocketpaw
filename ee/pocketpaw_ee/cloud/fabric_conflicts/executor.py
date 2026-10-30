@@ -44,6 +44,9 @@
 #
 # Never raises — a failure here must not break the approve response. The
 # router wraps the call too; this is belt-and-braces.
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -82,15 +85,12 @@ async def _persist_outcome(
 ) -> None:
     """Back-write the pin outcome onto the persisted ``_fabric_conflict`` blob.
 
-    Direct SQL update — the same pattern the instinct-rule executor uses. The
+    Store-API write — the same pattern the instinct-rule executor uses. The
     blob's ``outcome`` carries the pinned statement id + value so a reader
     (audit, the idempotency guard, a "disputed facts" view) sees the result
     structurally. Best-effort: a write failure leaves the free-text
     ``mark_executed`` / ``mark_failed`` outcome as the record.
     """
-    import json as _json
-
-    import aiosqlite
 
     try:
         action = await store.get_action(action_id)
@@ -104,13 +104,7 @@ async def _persist_outcome(
         blob["outcome"] = {"status": status, "executed_at": executed_at, **summary}
         params[FABRIC_CONFLICT_PARAM_KEY] = blob
 
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — back-write is best-effort
         logger.warning(
             "fabric_conflict: failed to persist outcome onto action %s — the "

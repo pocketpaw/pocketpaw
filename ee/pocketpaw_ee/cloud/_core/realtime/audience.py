@@ -1,4 +1,8 @@
 # audience.py — resolves an Event into the user_ids that should receive it.
+# Updated 2026-10-02 (feat/studio-templates): studio_template.saved / updated /
+# deleted go to the one ``user_id`` recipient, like site templates.
+# Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — meeting.knock and
+# meeting.knock_resolved fan out to the meeting room's members, like meeting.*.
 # Updated: 2026-09-04 — the member cache is now an LRU with single-flight.
 #   It was a plain dict whose 2-second TTL was only a freshness check on read,
 #   so nothing was ever removed and one entry per group/workspace/user ever
@@ -235,6 +239,14 @@ class AudienceResolver:
             return []
 
         # --- Files --------------------------------------------------------------
+        # A file's metadata changed after the fact (tags, links, summary from
+        # the ingest listener; content from the versioned editor). The Library
+        # is per-workspace, so every member's /files refetches the row.
+        if t == "file.updated":
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         if t in {"file.ready", "file.deleted"}:
             # Chat-scoped uploads broadcast to the chat group's members so the
             # timeline updates live. Workspace-only uploads (no chat_id) don't
@@ -290,6 +302,8 @@ class AudienceResolver:
         # panel needs to light up for the receiver and clear for everyone on
         # end. Notes posting also fans out so peer tabs can scroll to the
         # newly-created meeting-notes message without a manual refetch.
+        # assistant_state is Ask Paw's per-question state; every member sees
+        # who asked and what Paw is doing, since the answer is spoken to all.
         # participant_joined / participant_left keep the pre-join roster chip
         # ("who's already in the call") honest for members who haven't joined
         # yet. The joiner is NOT excluded: their own tab needs the roster too,
@@ -298,6 +312,7 @@ class AudienceResolver:
         if t in {
             "call.started",
             "call.ended",
+            "call.assistant_state",
             "call.notes_posted",
             "call.participant_joined",
             "call.participant_left",
@@ -381,12 +396,13 @@ class AudienceResolver:
                 return await self._workspace(wid)
             return []
 
-        # --- Belt mandates (shift plan proposals) --------------------------------
+        # --- Belt mandates (plan proposed / resolved, shift state) --------------
         # Workspace-scoped, same rationale as belt_run_updated: a plan lands at
-        # the gate asynchronously and must reach every member with the mandates
-        # page open. The UI subscribes to the ``belt_plan`` topic and reads
-        # {mandate_id, proposal} off the payload.
-        if t == "belt_plan":
+        # the gate, is resolved (by a human or the auto plan gate) and a shift
+        # moves state asynchronously, and each must reach every member with the
+        # mandates page open. The UI subscribes to ``belt_plan`` ({mandate_id,
+        # proposal}), ``belt_plan_resolved`` and ``belt_mandate_updated``.
+        if t in {"belt_plan", "belt_plan_resolved", "belt_mandate_updated"}:
             if wid := d.get("workspace_id"):
                 return await self._workspace(wid)
             return []
@@ -402,8 +418,17 @@ class AudienceResolver:
             return await self._peers(d["user_id"])
 
         # --- Meetings ----------------------------------------------------------
-        if t in {"meeting.scheduled", "meeting.updated", "meeting.cancelled", "meeting.started"}:
-            # Fan out to all group members so they see meeting schedule/updates
+        if t in {
+            "meeting.scheduled",
+            "meeting.updated",
+            "meeting.cancelled",
+            "meeting.started",
+            "meeting.knock",
+            "meeting.knock_resolved",
+        }:
+            # Fan out to all group members so they see meeting schedule/updates.
+            # Lobby knocks go to the meeting room's members (the people who can
+            # admit); guests have no socket and poll instead.
             gid = d.get("group_id")
             if not gid:
                 return []
@@ -423,6 +448,30 @@ class AudienceResolver:
         if t in {"site.created", "site.published"}:
             if wid := d.get("workspace_id"):
                 return await self._workspace(wid)
+            return []
+
+        # --- Site secrets (request / set / delete; names only) -----------------
+        # The pocket owner fills secrets in, and the acting user (whose agent asked,
+        # or who set it) needs to see the card change. Nobody else: a secret's name
+        # and purpose are the owner's business, not workspace news.
+        if t in {"site.secret_requested", "site.secret_updated", "site.integration_changed"}:
+            return list(dict.fromkeys(u for u in (d.get("owner"), d.get("user_id")) if u))
+
+        # --- Site templates (user-saved; private, workspace or public) ----------
+        # One recipient, named by the service in ``user_id`` (the owner, or the
+        # caller for ``used``). Never fans out on ``workspace_id``: a public
+        # template must not broadcast, and a private one's name must not leak.
+        if t in {
+            "site_template.saved",
+            "site_template.deleted",
+            "site_template.used",
+            "site_template.updated",
+            "studio_template.saved",
+            "studio_template.updated",
+            "studio_template.deleted",
+        }:
+            if recipient := d.get("user_id"):
+                return [recipient]
             return []
 
         # --- Workspace jobs (durable ARQ job lifecycle) -------------------------

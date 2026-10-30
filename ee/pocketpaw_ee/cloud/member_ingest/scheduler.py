@@ -24,6 +24,8 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from pocketpaw_ee.cloud._core.periodic import sweep_tick
+
 logger = logging.getLogger(__name__)
 
 _TASK_KEY = "_member_ingest_scheduler"
@@ -108,7 +110,8 @@ class MemberIngestScheduler:
             except asyncio.CancelledError:
                 logger.info("member_ingest.scheduler: loop cancelled — exiting")
                 raise
-            await self.tick()
+            async with sweep_tick("member_ingest", self._interval):
+                await self.tick()
 
     async def start(self) -> None:
         """Spawn the background loop. Idempotent."""

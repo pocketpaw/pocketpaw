@@ -102,7 +102,7 @@ Returns a `LicenseInfo` object for the settings UI showing license status, plan 
 
 ## Known Gaps
 
-- `load_license()` tries to import `dotenv` and call `load_dotenv()` — this has a side effect of loading ALL env vars from `.env`, not just the license key. Could cause unexpected behavior if `.env` has conflicting values.
+- `load_license()` calls `load_dotenv(".env")`, which loads ALL env vars from the working directory's `.env`, not just the license key (never overriding one already set). It reads only that file: a bare `load_dotenv()` would walk up parent directories and import another project's `.env`.
 - Seat count is stored but never enforced — no code checks current user count against `seats`.
 - No license refresh mechanism — changing the key requires a server restart.
 - The HMAC fallback means a self-hosted deployment operator who knows the secret could forge licenses.

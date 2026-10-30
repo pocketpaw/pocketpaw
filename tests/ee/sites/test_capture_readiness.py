@@ -299,6 +299,57 @@ async def test_a_redirect_to_the_live_page_reads_ready():
     assert len(hops) == 2
 
 
+# A connected site's origin is a CUSTOMER'S hostname, so its probe goes through the
+# SSRF-hardened fetch: DNS checked and the socket pinned to that public address.
+def _resolver(table: dict[str, list[str]]):
+    async def resolve(host: str) -> list[str]:
+        return table[host]
+
+    return resolve
+
+
+@pytest.mark.asyncio
+async def test_a_connected_sites_probe_is_pinned_to_the_address_it_validated():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, html="<h1>Brew and Co</h1>")
+
+    ready = await _probe(
+        "https://brew.example/",
+        transport=_probe_transport(handler),
+        foreign=True,
+        resolver=_resolver({"brew.example": ["93.184.216.34"]}),
+    )
+
+    assert ready is True
+    assert len(seen) == 1
+    assert seen[0].url.host == "93.184.216.34"
+    assert seen[0].headers["host"] == "brew.example"
+
+
+@pytest.mark.asyncio
+async def test_a_connected_origin_that_resolves_private_is_not_ready_and_never_requested():
+    """Verification proves who controls a name, not where it points. A verified
+    domain re-pointed at an internal address must not get a request from us."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, html="<h1>internal</h1>")
+
+    ready = await _probe(
+        "https://brew.example/",
+        transport=_probe_transport(handler),
+        foreign=True,
+        resolver=_resolver({"brew.example": ["10.0.0.5"]}),
+    )
+
+    assert ready is False
+    assert seen == []
+
+
 # --------------------------------------------------------------------------- #
 # THE FOUNDING RULE — the gate may not cost anybody a publish
 # --------------------------------------------------------------------------- #

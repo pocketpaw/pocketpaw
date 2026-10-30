@@ -141,21 +141,19 @@ async def test_add_domain_unset_tier_passes_no_features(mongo_db):
 
 
 @pytest.mark.parametrize("org_key", ["studio", "agency"])
-async def test_add_domain_provisions_nothing_for_an_org_flat_stored_on_a_site(mongo_db, org_key):
+async def test_add_domain_provisions_nothing_for_a_retired_org_key_on_a_site(mongo_db, org_key):
     """An ORG key on a site's ``plan_tier`` provisions no Cloudflare features.
 
-    ``studio`` and ``agency`` are real catalog rows and they DO resell the full
-    Cloudflare set — that is the point of the test. A plain ``get_site_plan``
-    here resolves one and provisions the WAF and edge-cache controls an org buys
-    across its whole estate onto a single site nobody billed for them, and
-    Cloudflare charges us for it. ``site_scoped_tier`` returns None, which is the
-    same answer an absent tier gets: nothing premium.
+    ``studio`` and ``agency`` were org flats that resold the full Cloudflare set,
+    retired on 2026-09-06. A Site document written before then can still hold one,
+    and provisioning off it would hand a single site the WAF and edge-cache
+    controls an org used to buy across its whole estate — which Cloudflare bills
+    us for. Both the scope check that used to refuse them and the unknown-key path
+    that refuses them now give the same answer: nothing premium.
 
     Breaks on: ``add_domain`` going back to ``site_plans.get_site_plan``.
     """
-    assert site_plans.get_site_plan(org_key).cloudflare_features, (
-        "if the org tiers stopped reselling anything this test would pass for the wrong reason"
-    )
+    assert site_plans.get_site_plan(org_key) is None, "the key must stay unresolvable"
 
     ws = f"ws_{org_key}"
     site_id = await _seed_site(workspace_id=ws, plan_tier=org_key)
@@ -291,14 +289,14 @@ def test_get_billing_site_plans_returns_catalog_with_cf_features(site_plans_clie
     assert resp.status_code == 200
     body = resp.json()
     rows = {row["key"]: row for row in body["site_plans"]}
-    # The whole catalog, both scopes — the storefront renders the org flats beside
-    # the per-site rungs, so this endpoint must not filter them out.
-    assert set(rows.keys()) == {"free", "site", "staff", "studio", "agency"}
-    # ...and each row says WHICH it is, because an org flat's key is not a legal
-    # ``site_plan_key`` on a publish and the client needs to know that from the
-    # payload rather than from a hardcoded list of two names.
+    # The whole catalog, which is three per-site rungs since the org flats were
+    # retired on 2026-09-06.
+    assert set(rows.keys()) == {"free", "site", "staff"}
+    # Each row still says which scope it is. Every shipped tier is per-site now,
+    # so the field is the client's guard against a future tier it must not offer
+    # rather than a live distinction.
     assert rows["site"]["scope"] == "site"
-    assert rows["studio"]["scope"] == "org"
+    assert all(row["scope"] == "site" for row in rows.values())
 
     # Each tier carries its monthly price + sorted cloudflare_features.
     assert rows["free"]["monthly_price_usd"] == 0

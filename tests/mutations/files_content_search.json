@@ -1,0 +1,111 @@
+[
+  {
+    "label": "drop the workspace pin from the kb-article join",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "        query: dict = {\n            \"workspace\": workspace,\n            \"deleted_at\": None,\n            \"kb_article_id\": {\"$in\": ids},\n            \"hide_from_ai\": {\"$ne\": True},\n        }",
+    "replace": "        query: dict = {\n            \"deleted_at\": None,\n            \"kb_article_id\": {\"$in\": ids},\n            \"hide_from_ai\": {\"$ne\": True},\n        }",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_the_join_is_pinned_to_the_callers_workspace"
+    ]
+  },
+  {
+    "label": "let a hidden-from-AI file back into content search",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "            \"kb_article_id\": {\"$in\": ids},\n            \"hide_from_ai\": {\"$ne\": True},",
+    "replace": "            \"kb_article_id\": {\"$in\": ids},",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_a_file_hidden_from_ai_never_surfaces_in_content_search"
+    ]
+  },
+  {
+    "label": "write the hide filter as == False, which skips every legacy row",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "            \"hide_from_ai\": {\"$ne\": True},",
+    "replace": "            \"hide_from_ai\": False,",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_a_legacy_row_with_no_hide_from_ai_key_still_matches"
+    ]
+  },
+  {
+    "label": "let a soft-deleted file stay searchable",
+    "file": "ee/pocketpaw_ee/cloud/uploads/mongo_store.py",
+    "find": "        query: dict = {\n            \"workspace\": workspace,\n            \"deleted_at\": None,\n            \"kb_article_id\": {\"$in\": ids},",
+    "replace": "        query: dict = {\n            \"workspace\": workspace,\n            \"kb_article_id\": {\"$in\": ids},",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_a_deleted_file_is_gone_from_search_too"
+    ]
+  },
+  {
+    "label": "search the whole workspace instead of workspace-only rows (pocket bleed)",
+    "file": "ee/pocketpaw_ee/cloud/files/content_search.py",
+    "find": "        pocket_id=pocket_id if pocket_id else LIST_WORKSPACE_ONLY,",
+    "replace": "        pocket_id=pocket_id,",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_the_workspace_search_asks_for_workspace_only_rows"
+    ]
+  },
+  {
+    "label": "swallow a kb failure as an empty result instead of reporting it",
+    "file": "ee/pocketpaw_ee/cloud/files/content_search.py",
+    "find": "        return ContentSearchResult(matches=[], scopes=scopes, degraded=DEGRADED_KB_UNAVAILABLE)",
+    "replace": "        return ContentSearchResult(matches=[], scopes=scopes, degraded=None)",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_an_unreachable_kb_says_so_instead_of_returning_no_matches"
+    ]
+  },
+  {
+    "label": "never flag a verbatim article",
+    "file": "ee/pocketpaw_ee/cloud/files/content_search.py",
+    "find": "                verbatim=compiled_with == _FALLBACK_COMPILED_WITH,",
+    "replace": "                verbatim=False,",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_a_verbatim_article_is_reported_as_degraded_matching"
+    ]
+  },
+  {
+    "label": "flag every article as verbatim",
+    "file": "ee/pocketpaw_ee/cloud/files/content_search.py",
+    "find": "                verbatim=compiled_with == _FALLBACK_COMPILED_WITH,",
+    "replace": "                verbatim=True,",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_a_compiled_article_is_not_reported_as_degraded"
+    ]
+  },
+  {
+    "label": "drop the kb.read guard from the search route",
+    "file": "ee/pocketpaw_ee/cloud/files/router.py",
+    "find": "@router.post(\n    CONTENT_SEARCH_ROUTE,\n    dependencies=[Depends(require_action_any_workspace(\"kb.read\"))],\n)",
+    "replace": "@router.post(\n    CONTENT_SEARCH_ROUTE,\n)",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_the_endpoint_is_behind_the_kb_read_guard"
+    ]
+  },
+  {
+    "label": "move the search route off the pinned path",
+    "file": "ee/pocketpaw_ee/cloud/files/content_search.py",
+    "find": "CONTENT_SEARCH_ROUTE = \"/search\"",
+    "replace": "CONTENT_SEARCH_ROUTE = \"/content-search\"",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_the_search_route_exists_at_the_literal_path",
+      "tests/cloud/files/test_content_search.py::test_a_post_to_the_literal_path_reaches_the_content_search_handler"
+    ]
+  },
+  {
+    "label": "drop the pocket gate from the search endpoint",
+    "file": "ee/pocketpaw_ee/cloud/files/router.py",
+    "find": "    if body.pocket_id and not await _pocket_readable(body.pocket_id, user_id):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_a_non_member_cannot_search_a_pocket"
+    ]
+  },
+  {
+    "label": "narrow the projection so the listing metadata is dropped again",
+    "file": "ee/pocketpaw_ee/cloud/files/service.py",
+    "find": "        summary=rec.summary,\n        agent_id=rec.agent_id,\n    )",
+    "replace": "        summary=None,\n        agent_id=rec.agent_id,\n    )",
+    "tests": [
+      "tests/cloud/files/test_content_search.py::test_hits_come_back_as_file_rows_in_the_search_ranking"
+    ]
+  }
+]

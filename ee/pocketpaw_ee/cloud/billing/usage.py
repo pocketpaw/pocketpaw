@@ -15,8 +15,8 @@
 #     off->live cutover the spend-ingest (``llm_provisioning:ingest_tenant_spend``)
 #     debits under ``cause="litellm_spend"``. Only ONE cause is ever active for a
 #     given run, so reading BOTH is safe (no double-count) and the chart matches
-#     the wallet IN EVERY MODE — by construction, since it is literally the
-#     wallet's own decomposition. (The prior version read the proxy's
+#     the wallet IN EVERY MODE — provided nothing rounds on the way out, which is
+#     the whole of the MICRO note below. (The prior version read the proxy's
 #     /user/daily/activity, which a Free/keyless workspace never populates — so a
 #     workspace deep in the negative showed "No usage to chart yet". This is the
 #     fix for that bug.)
@@ -25,6 +25,15 @@
 #     movement), so this read does NO ``to_credits`` and touches NO rate card — it
 #     just surfaces the integers the wallet already holds. That is what makes the
 #     graph and the wallet agree exactly.
+#   * MICRO IS THE UNIT OF THE FOLD. The wallet stores micro-credits (1_000_000
+#     micro == 1 credit == $0.01) and a chat run costs about 375_000 of them, so a
+#     (day, model) group of ordinary light usage is worth 0 whole credits. This
+#     module therefore folds ``row.credits_micro`` and converts to whole credits
+#     exactly ONCE per figure, at the end. Truncating per group and summing the
+#     results compounds the shortfall over every model and every day instead of
+#     cancelling — that is how a day the wallet was charged 1.5 credits for
+#     rendered as a row of zeros. The whole-credit fields stay on the wire for the
+#     existing clients; ``*_micro`` is what anything reasoning about money reads.
 #   * ENTITY ISOLATION. Billing must NOT query ``CreditLedgerEntry`` directly — the
 #     credits entity owns reads of its own ledger doc. The (day, model) breakdown
 #     comes through ``credits.service.spend_by_model`` (a sibling of the existing
@@ -76,6 +85,14 @@
 # hardcoded 0. Sourced from the wallet's own ledger (NOT the blocked LiteLLM path);
 # legacy debits without the ref field contribute 0. The response contract is
 # unchanged (the ``tokens`` field already existed) — only its value became real.
+# Changed 2026-09-11 (fix/billing-usage-chart-micro): the fold now runs in
+# MICRO-CREDITS. ``spend_by_model`` truncated each (day, model) group to whole
+# credits before it reached here, and this module summed the truncations, so light
+# usage charted as zeros and the error compounded across groups rather than
+# cancelling. Per-model, per-day and grand totals now carry a ``*_micro`` figure
+# and every whole-credit figure is derived from its micro total with a single
+# ``micro_to_credits`` at the end. Additive on the wire — the pre-existing fields
+# keep their names, so the frontend is not broken by this, only unblocked.
 
 from __future__ import annotations
 
@@ -90,6 +107,7 @@ from pocketpaw_ee.cloud.billing.dto import (
     WorkspaceUsageResponse,
 )
 from pocketpaw_ee.cloud.credits import service as credits_service
+from pocketpaw_ee.cloud.credits.domain import micro_to_credits
 
 logger = logging.getLogger(__name__)
 
@@ -150,11 +168,16 @@ async def get_workspace_usage(
 
     Reads the workspace's spend straight from its CREDIT LEDGER (via
     ``credits.service.spend_by_model``) and folds it into a ``UsageBucket`` per day
-    with a ``{credits, tokens, requests}`` block per model. Credits are the
-    integers the wallet already holds (markup applied at debit time — NO conversion
-    here), so the graph and the wallet agree by construction in every metering mode
+    with a ``{credits, credits_micro, tokens, requests}`` block per model. The
+    figures are the integers the wallet already holds (markup applied at debit time
+    — NO conversion here), so the graph and the wallet agree in every metering mode
     (the ledger reads both ``compute_spend`` and ``litellm_spend``). Returns a
     ``WorkspaceUsageResponse``.
+
+    The fold is in MICRO-CREDITS and each whole-credit figure is truncated from its
+    own micro total exactly once. A chat run is about 375_000 micro (0 whole
+    credits), so folding the whole-credit field instead would lose a day of light
+    usage entirely and compound the loss across models and days.
 
     ``start_date`` / ``end_date`` are ``YYYY-MM-DD``; when BOTH are omitted the
     window defaults to the trailing 30 days. ``spend_reader`` is injectable for
@@ -162,9 +185,10 @@ async def get_workspace_usage(
 
     ``tokens`` per model is the real volume the ledger now carries (the metering
     path stamps ``total_tokens`` on each debit ref; a legacy debit without it reads
-    0). Credits are integer CREDITS (1 credit == $0.01 — NOT USD). A workspace with
-    no spend in the window returns an empty contract (no models, no buckets, total
-    0) at HTTP 200 — never an error.
+    0). ``credits_micro`` is micro-credits (1_000_000 == 1 credit == $0.01 — NOT
+    USD) and ``credits`` is that truncated for display; a caller rendering money
+    reads the micro field. A workspace with no spend in the window returns an empty
+    contract (no models, no buckets, totals 0) at HTTP 200 — never an error.
     """
     # Rule 6 — validate at entry.
     if not workspace_id:
@@ -193,44 +217,65 @@ async def get_workspace_usage(
     # Fold the (day, model) rows into per-day buckets. ``spend_by_model`` already
     # aggregates one row per (day, model), so we assign directly; a duplicate
     # (day, model) would still accumulate defensively.
-    buckets: dict[str, dict[str, UsageModelStats]] = {}
+    #
+    # The accumulator is MICRO-CREDITS. Accumulating ``row.credits`` would add up
+    # figures that were each truncated to a unit coarser than the thing they charge
+    # for, and the residues never cancel — they are all thrown away in the same
+    # direction. Whole credits are derived once, below, from the micro totals.
+    buckets: dict[str, dict[str, tuple[int, int, int]]] = {}
     models_seen: set[str] = set()
     for row in rows:
         models_seen.add(row.model)
         per_model = buckets.setdefault(row.day, {})
-        existing = per_model.get(row.model)
         # ``tokens`` is the real per-(day, model) volume the ledger now carries
         # (summed from each debit's ``ref.total_tokens`` in ``spend_by_model``); a
-        # legacy row without it reads 0. Credits + requests come off the ledger too.
-        if existing is None:
-            per_model[row.model] = UsageModelStats(
-                credits=row.credits, tokens=row.tokens, requests=row.requests
-            )
-        else:
-            per_model[row.model] = UsageModelStats(
-                credits=existing.credits + row.credits,
-                tokens=existing.tokens + row.tokens,
-                requests=existing.requests + row.requests,
-            )
+        # legacy row without it reads 0. Micro + requests come off the ledger too.
+        micro, tokens, requests = per_model.get(row.model, (0, 0, 0))
+        per_model[row.model] = (
+            micro + row.credits_micro,
+            tokens + row.tokens,
+            requests + row.requests,
+        )
 
-    # Assemble the response: buckets OLDEST-FIRST, each with its credit total; the
-    # grand total over every bucket; the sorted distinct model list (a stable
-    # legend). The "unknown" bucket (debits with no ``ref.model``) is kept so the
-    # total reconciles with the wallet.
+    # Assemble the response: buckets OLDEST-FIRST, each with its exact total and the
+    # whole-credit figure derived from it; the grand total over every bucket; the
+    # sorted distinct model list (a stable legend). The "unknown" bucket (debits
+    # with no ``ref.model``) is kept so the total reconciles with the wallet.
     out_buckets: list[UsageBucket] = []
-    total_credits = 0
+    total_micro = 0
     for day in sorted(buckets):
-        per_model = buckets[day]
-        day_credits = sum(stats.credits for stats in per_model.values())
-        total_credits += day_credits
-        out_buckets.append(UsageBucket(date=day, by_model=per_model, total_credits=day_credits))
+        stats_by_model = {
+            model: UsageModelStats(
+                credits=micro_to_credits(micro),
+                credits_micro=micro,
+                tokens=tokens,
+                requests=requests,
+            )
+            for model, (micro, tokens, requests) in buckets[day].items()
+        }
+        day_micro = sum(stats.credits_micro for stats in stats_by_model.values())
+        total_micro += day_micro
+        out_buckets.append(
+            UsageBucket(
+                date=day,
+                by_model=stats_by_model,
+                # Truncate the DAY's micro total, not the sum of per-model
+                # truncations: three models at 750_000 micro is two credits charged
+                # and would otherwise report 0.
+                total_credits=micro_to_credits(day_micro),
+                total_credits_micro=day_micro,
+            )
+        )
 
     return WorkspaceUsageResponse(
         start_date=resolved_start,
         end_date=resolved_end,
         models=sorted(models_seen),
         buckets=out_buckets,
-        total_credits=total_credits,
+        # Same rule one level up: truncate the grand micro total, never sum the
+        # per-day whole-credit figures.
+        total_credits=micro_to_credits(total_micro),
+        total_credits_micro=total_micro,
     )
 
 

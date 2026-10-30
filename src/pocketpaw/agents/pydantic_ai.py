@@ -7,6 +7,66 @@ self-hosted LiteLLM proxy.
 
 Design source: ``docs/design/drafts/2026-07-29-pydantic-ai-agent-backend-prd.md``.
 
+Changed 2026-09-27 (fix/concierge-web-tool-deny): a surface's deny of
+``WebSearch`` / ``WebFetch`` now reaches this backend. ``_SURFACE_TOOL_EQUIVALENTS``
+maps them to ``web_search`` / ``url_extract``, and both to ``research``, which
+chains the two. Before this the public Paw Bar concierge denied web access in
+the SDK's vocabulary and this backend's agent still had all three. Also:
+``_build_web_capabilities`` takes the expanded deny set, so a denied web tool is
+no longer registered provider-side when ``pydantic_ai_native_web_tools`` is on.
+
+Then: ``run`` takes ``exclusive_tools`` (deny-by-default, sent for the public
+concierge). The MCP gate already capped toolsets to ``allow_mcp_tool_ids``, but
+the bridged builtins reached every run whatever the allow set said, so the
+concierge was offered the owner's connectors, memory writes, media APIs and
+flows. With the flag, only bridged tools the allow set names survive, skills are
+not loaded, and a native web capability is denied unless its local tool
+survived. The flag is in the agent cache key.
+
+Changed 2026-09-27 (fix/pydantic-ai-tool-images): the ``tool_result`` event
+built from ``FunctionToolResultEvent`` handles a LIST tool result. In-process
+MCP tools that return images now come back as ``[text, BinaryContent, ...]``,
+and ``str()`` on that put the raw image bytes' repr into the UI event. The
+event now carries the list's text items plus a short ``[+N images]`` note.
+
+Also: the harness ``OverflowingToolOutput`` is wrapped by
+``_image_safe_overflow``. It measured a list return by JSON-encoding it, base64
+images included, so a few screenshots crossed the char cap on their own and the
+whole result was replaced by one truncated JSON string: the images were lost a
+second time. The wrapper reduces only the text of a result holding
+``BinaryContent`` and passes the images through.
+
+Changed 2026-09-24 (feat/inspo-backend-parity): the per-run ``instructions``
+now pass through ``_localize_tool_ids``, which rewrites ``mcp__srv__tool`` to
+the ``srv_tool`` names this backend bridges in-process servers under. Surface
+preambles (the /sites create step above all) are written for the SDK backend,
+so they named tools this agent knew by another name.
+
+Also: ``inspo_research_page_design``
+and ``inspo_reference_design_system`` join ``_TENANT_SAFE_TOOLS`` next to the
+Refero tools. Same class: a text brief out to a public archive, public design
+references back, no tenant data on the wire, nothing persisted.
+
+Changed 2026-09-15 (feat/chat-image-wiring): ``run`` grows
+``image_attachments`` and the turn's prompt is now built from BOTH picture
+channels — ``images`` (the surface's snapshot, already ``(bytes, media_type)``)
+and ``image_attachments`` (the user's attached files). They are flattened to the
+one shape ``_user_prompt`` takes rather than built by two helpers, so its
+empty-bytes drop covers a user's upload too; a zero-byte part comes back from
+some providers as an opaque 400 that reads as the model being broken.
+
+Changed 2026-09-11 (feat/byok-custom-gateway, review B2/N1): the shared HTTP
+client in ``_get_http_client`` pins ``follow_redirects=False``. It is httpx's
+default, so nothing changes today — but the OpenAI SDK's own client sets it
+True, and this is the client a BYOK gateway turn uses to dial a base URL the
+user supplied. A redirect there would carry the request, and the key in its
+header, to a host no egress guard vetted.
+
+Changed 2026-09-05: this file no longer calls ``logfire.configure`` itself. That
+call is process-global and this file is not — see
+``_build_instrumentation_capability``. It now delegates to
+``pocketpaw.observability.configure_observability``, which startup calls first.
+
 Why this exists: ``claude_agent_sdk`` spawns a Claude Code CLI Node subprocess
 per concurrent run (~300-500 MB RSS). At the 300-400 concurrent-user target
 that is ~75 GB of agent RSS before any other cost. This backend runs the agent
@@ -378,6 +438,56 @@ are now the same object the parser consults, so the three cannot drift.
 ``deep_agents`` has the identical split and is deliberately NOT touched here.
 The claim in ``_parse_provider_model`` that the two mirror each other no longer
 holds, and fixing it there is its own change.
+
+Updated 2026-09-10 (feat/pydantic-ai-model-override) — **the per-send model was
+accepted and thrown away.** ``run`` declared ``model_override`` with a
+``noqa: ARG002`` and a comment saying only the Claude SDK backend consumed it.
+The cloud's default backend is this one, so a model picker in the composer was
+a dead control: the user chose a model, the turn ran on the configured one, and
+nothing said so. ``model_override`` is now the spec ``_build_model`` parses. A
+bare name keeps the configured provider, which is what makes it safe on a BYOK
+gateway — ``build_settings_override`` pins ``pydantic_ai_model`` to the STORED
+gateway model, and the per-send choice beats that name while the gateway's base
+URL and key stay put. It also rides the agent cache key and the per-run model
+settings: the cache is ONE slot, so a key that still read the setting would
+hand turn two the agent built for turn one, model and output cap included.
+
+The override names a MODEL, never a provider, and ``run`` refuses a
+provider-prefixed one. A spec like ``litellm:anything`` would otherwise resolve
+the deployment's proxy key on a turn that is supposed to run on the tenant's —
+a credential switch wearing a model id, which ``provider_allows_model`` cannot
+catch because a gateway's model ids are its own namespace.
+
+Updated 2026-09-11 (feat/other-hand-page-vision) — **an attached page rode every
+later turn of the session.** Images go on the prompt, which was the whole claim,
+but ``_retain_session`` keeps pydantic-ai's OWN message objects and
+``_session_history`` prefers that transcript over the cloud's stored text. So a
+turn's ``UserPromptPart`` — now ``[text, BinaryContent]`` — came back on turn 2,
+turn 3 and turn 60: N snapshots by turn N, on the one surface that attaches a
+picture to EVERY turn. Cost, real RSS in a process-global map, and a model shown
+every past version of one page with nothing marking the current one.
+``_without_attachments`` rewrites those parts down to their words on the way
+INTO retention, so the guarantee holds for every caller instead of for whichever
+read path someone remembered.
+
+Updated 2026-09-15 (fix/surface-external-mcp-grant) — **a surface could grant an
+external MCP server and this backend would drop every one of its tools.** An
+external server's tool names are unknown until the client connects, so
+``claude_sdk._collect_mcp_tool_ids`` allow-lists one wholesale with a BARE
+``mcp__<server>`` id. ``_gate_mcp_toolsets`` ran that id through
+``_expand_tool_ids``, which turned ``mcp__refero`` into ``refero`` and matched
+no tool the server exposes — so the SDK backend admitted the whole server while
+this one refused it, and the asymmetry landed exactly where external servers
+live: per that method's docstring, its toolsets ARE "the user's EXTERNAL
+configured servers". ``_bare_mcp_server`` now reads a bare id as a server-level
+grant and keeps tools by their ``<server>_`` prefix, the shape
+``PrefixedToolset`` gives them.
+
+The same change fixes a second divergence found by its test: the method's early
+return fired on ``exclusive_mcp_tools`` with no allow set and no deny set,
+returning every toolset UNTOUCHED — the opposite of the documented CX-1 rule
+that an exclusive turn with no allow set strips all MCP tools, and the opposite
+of what the SDK backend does.
 """
 
 from __future__ import annotations
@@ -388,13 +498,19 @@ import logging
 import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from typing import Any
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    Capability,
+    ImageAttachment,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.agents.spend_attribution import end_user_id_for
 from pocketpaw.config import Settings
-from pocketpaw.tools.policy import ToolPolicy
+from pocketpaw.tools.policy import ToolPolicy, surface_scoped_tool_deny
 
 logger = logging.getLogger(__name__)
 
@@ -450,10 +566,6 @@ _POCKET_SCOPE_SENTINEL = "<pocket-scope>"
 _SKILLS_CAPABILITY_ID = "pocketpaw-skills"
 
 # Bounds on the per-session transcript cache (see ``_session_messages``).
-# ``logfire.configure`` is process-global and one backend instance exists per
-# agent, so the capability builder would otherwise reconfigure it per agent.
-_LOGFIRE_CONFIGURED = False
-
 _MAX_TRACKED_SESSIONS = 200
 _MAX_SESSION_MESSAGES = 60
 
@@ -526,6 +638,10 @@ _WITHHELD_TOOLS = _LOCAL_MACHINE_TOOLS | _HOST_STATE_TOOLS
 # until someone decides which side it belongs on.
 _TENANT_SAFE_TOOLS = frozenset(
     {
+        # Otherhand's illustration tool. Tenant-scoped by construction: it draws
+        # onto the caller's own page over their own SSE stream, and its spend is
+        # bounded by a per-workspace daily budget.
+        "illustrate",
         # pockets / widgets — tenant-scoped
         "add_widget",
         "remove_widget",
@@ -561,6 +677,18 @@ _TENANT_SAFE_TOOLS = frozenset(
         "delegate_to_a2a_agent",
         "image_generate",
         "ocr",
+        # design research — a text query out, public design references back.
+        # Same class as ``search_stock_images`` and ``web_search``: an external
+        # API called with OUR key, no tenant data on the wire, nothing
+        # persisted, no host state. The only shared resource is the Refero call
+        # quota, which is a COST question rather than a tenancy one and is
+        # bounded upstream by the plan.
+        "refero_design_screens",
+        "refero_design_styles",
+        # Inspo: the same class as Refero above, over a FREE archive of real
+        # shipped pages (no key; the shared resource is its per-IP rate limit).
+        "inspo_reference_design_system",
+        "inspo_research_page_design",
         "research",
         "search_stock_images",
         "speech_to_text",
@@ -629,11 +757,147 @@ _TENANT_SAFE_TOOLS = frozenset(
 # that removed shell access would run with the full tool set and report success.
 
 
+def _user_prompt(message: str, images: tuple[tuple[bytes, str], ...]) -> Any:
+    """The turn's user prompt: a bare string, or parts when images ride along.
+
+    Returning the STRING when there is nothing to attach is the contract every
+    other surface depends on — a parts list of one text element is not what
+    those runs have been sending, and this file has been bitten before by a
+    change that was "equivalent" on paper.
+
+    An image whose bytes are empty is dropped rather than sent: some providers
+    answer a zero-byte part with an opaque 400, which reads as the model being
+    broken rather than the attachment being empty.
+    """
+    usable = [(data, media_type) for data, media_type in images if data]
+    if not usable:
+        return message
+    from pydantic_ai import BinaryContent
+
+    parts: list[Any] = [message]
+    parts.extend(BinaryContent(data=data, media_type=media_type) for data, media_type in usable)
+    return parts
+
+
+_IMAGE_SAFE_OVERFLOW: Any = None
+
+
+def _image_safe_overflow(base: Any) -> Any:
+    """``OverflowingToolOutput`` that truncates a multimodal result's TEXT only.
+
+    The harness measures a plain list return by JSON-encoding it, base64 image
+    bytes included, so a tool returning ``[caption, BinaryContent, ...]``
+    crossed the char cap on its pictures alone and came back as one truncated
+    JSON string: the images the bridge now delivers were destroyed again on
+    the way to the model. Here a list holding ``BinaryContent`` has only its
+    ``str`` items measured and reduced; every non-text item passes through.
+
+    Built lazily and cached: the harness is an optional dependency, imported
+    only inside ``_build_capabilities``.
+    """
+    global _IMAGE_SAFE_OVERFLOW
+    if _IMAGE_SAFE_OVERFLOW is not None:
+        return _IMAGE_SAFE_OVERFLOW
+    from pydantic_ai import BinaryContent
+
+    class ImageSafeOverflowingToolOutput(base):
+        async def after_tool_execute(self, ctx, *, call, tool_def, args, result):
+            reduce = super().after_tool_execute
+            if not (isinstance(result, list) and any(isinstance(i, BinaryContent) for i in result)):
+                return await reduce(ctx, call=call, tool_def=tool_def, args=args, result=result)
+            text = "\n".join(item for item in result if isinstance(item, str))
+            if not text:
+                return result
+            reduced = await reduce(ctx, call=call, tool_def=tool_def, args=args, result=text)
+            if not isinstance(reduced, str) or reduced == text:
+                return result
+            return [reduced, *(item for item in result if not isinstance(item, str))]
+
+    _IMAGE_SAFE_OVERFLOW = ImageSafeOverflowingToolOutput
+    return _IMAGE_SAFE_OVERFLOW
+
+
+def _without_attachments(message: Any) -> Any:
+    """A retained message with its attached bytes dropped and its words kept.
+
+    A turn that carried images leaves a ``UserPromptPart`` whose content is
+    ``[text, BinaryContent, ...]``. Retaining that verbatim makes turn N replay
+    every earlier turn's picture: tokens against a feature whose whole point is
+    a per-turn byte budget, raw bytes pinned in a process-global map for the
+    life of the session, and a model shown every past version of one page with
+    nothing to say which is current. The fresh snapshot on THIS turn's prompt is
+    the one the agent is meant to answer about.
+
+    Stripping on the way INTO retention, not on the way out, is what makes the
+    guarantee hold for every caller of ``_retain_session`` rather than for the
+    one read path someone remembered.
+
+    Narrow on purpose. Only ``UserPromptPart`` is rewritten: a ``ToolReturnPart``
+    may legitimately hold a non-string sequence, and filtering that down to its
+    ``str`` elements would destroy tool results — which is the very thing
+    retention exists to preserve.
+    """
+    parts = getattr(message, "parts", None)
+    if not parts:
+        return message
+    from pydantic_ai.messages import UserPromptPart
+
+    rewritten: list[Any] = []
+    stripped = False
+    for part in parts:
+        content = getattr(part, "content", None)
+        if not isinstance(part, UserPromptPart) or isinstance(content, str):
+            rewritten.append(part)
+            continue
+        words = [item for item in content if isinstance(item, str)]
+        if len(words) == len(content):
+            rewritten.append(part)
+            continue
+        stripped = True
+        rewritten.append(replace(part, content="\n".join(words)))
+    if not stripped:
+        return message
+    return replace(message, parts=rewritten)
+
+
 def _normalize_tool_id(tool_id: str) -> str:
     """``mcp__srv__do_thing`` -> ``srv_do_thing``. Other spellings pass through."""
     if tool_id.startswith("mcp__"):
         return tool_id.removeprefix("mcp__").replace("__", "_")
     return tool_id
+
+
+# A fully-qualified MCP tool id as a prompt names it. Server names never contain
+# a double underscore, so the lazy server group stops at the first ``__``.
+_MCP_TOOL_ID_RE = re.compile(r"\bmcp__[A-Za-z0-9_-]+?__[A-Za-z0-9_]+")
+
+
+def _localize_tool_ids(text: str) -> str:
+    """Rewrite every ``mcp__srv__do_thing`` in prompt text to ``srv_do_thing``.
+
+    Surface preambles are written for the claude_agent_sdk backend and name
+    tools by their SDK ids. This backend bridges the same in-process servers
+    under ``<server>_<tool>`` (``tool_bridge.build_inprocess_mcp_toolsets``), so
+    without this the /sites preamble told the model to call tools it knew by
+    another name. Same translation ``_normalize_tool_id`` applies to the
+    allow-list; a bare ``mcp__server`` grant has no tool segment and is left.
+    """
+    return _MCP_TOOL_ID_RE.sub(lambda m: _normalize_tool_id(m.group(0)), text)
+
+
+def _bare_mcp_server(tool_id: str) -> str:
+    """``mcp__refero`` -> ``refero``; anything with a tool segment -> ``""``.
+
+    A bare server id is a SERVER-LEVEL grant ("all tools of this server"), and
+    is the only spelling available for an external MCP server, whose tool names
+    are not known until the client connects. Distinguished from a
+    fully-qualified id purely by segment count, so ``mcp__refero__search`` and a
+    non-MCP name both return ``""``.
+    """
+    parts = tool_id.split("__")
+    if len(parts) == 2 and parts[0] == "mcp" and parts[1]:
+        return parts[1]
+    return ""
 
 
 # A surface's tool id -> the bridged PocketPaw tool that is the SAME CAPABILITY
@@ -654,6 +918,13 @@ _SURFACE_TOOL_EQUIVALENTS: dict[str, frozenset[str]] = {
     # Local delegation is already gone with the rest of the local-machine
     # family; this is the REMOTE one, a network call to an external agent.
     "Agent": frozenset({"delegate_to_a2a_agent"}),
+    # The web. Without these rows a surface that denies web access in the SDK's
+    # vocabulary (the public Paw Bar concierge) still handed this backend's
+    # agent a web search and an arbitrary-URL fetch. ``research`` is on both
+    # rows because it IS both: tools/builtin/research.py chains the search tool
+    # and the URL extractor, so denying either one has to deny it too.
+    "WebSearch": frozenset({"web_search", "research"}),
+    "WebFetch": frozenset({"url_extract", "research"}),
 }
 
 
@@ -872,6 +1143,32 @@ class _RunHandle:
         self.stopped = False
 
 
+def build_multimodal_prompt(message: str, images: tuple[ImageAttachment, ...]) -> str | list[Any]:
+    """Build the pydantic-ai prompt carrying ``images`` alongside the text.
+
+    pydantic-ai takes multimodal input as a LIST prompt mixing strings with
+    content objects — ``agent.run(["what is this?", BinaryContent(...)])``. With
+    no images the prompt stays the bare string, so every existing run is
+    byte-identical and the multimodal path cannot regress a text turn.
+
+    ``BinaryContent``, never ``ImageUrl``. pydantic-ai's own docs warn not to
+    build URL parts from untrusted input: providers fetch cloud-storage URLs
+    (``s3://``, ``gs://``) using OUR credentials, and an attachment URL is
+    user-controlled. We already hold the resolved bytes, so handing over a URL
+    would trade a safe path for an SSRF-shaped one to save a read.
+
+    The import is local: ``pydantic_ai`` is an optional extra, and this module
+    imports on installs that do not have it.
+    """
+    if not images:
+        return message
+    from pydantic_ai import BinaryContent
+
+    parts: list[Any] = [message]
+    parts.extend(BinaryContent(data=img.data, media_type=img.media_type) for img in images)
+    return parts
+
+
 class PydanticAIBackend:
     """Pydantic AI backend — in-process agent loop, dispatch-only tools."""
 
@@ -1009,7 +1306,7 @@ class PydanticAIBackend:
             provider = "litellm"
         return provider, model_str
 
-    def _resolve_max_output_tokens(self) -> int | None:
+    def _resolve_max_output_tokens(self, model_spec: str | None = None) -> int | None:
         """The ``max_tokens`` this run should send, or None to send none.
 
         Resolved from the SAME ``_parse_provider_model`` output that built the
@@ -1020,13 +1317,13 @@ class PydanticAIBackend:
         try:
             from pocketpaw.agents.model_limits import resolve_max_output_tokens
 
-            provider, model = self._parse_provider_model()
+            provider, model = self._parse_provider_model(model_spec)
             return resolve_max_output_tokens(provider, model, self.settings)
         except Exception:  # noqa: BLE001 — a token cap must never break a run
             logger.debug("Could not resolve a max output token cap", exc_info=True)
             return None
 
-    def _run_model_settings(self) -> Any:
+    def _run_model_settings(self, model_spec: str | None = None) -> Any:
         """The ``model_settings`` for THIS run, or None to send none.
 
         Two per-run values live here, both of which the cached agent must not
@@ -1046,14 +1343,14 @@ class PydanticAIBackend:
         """
         settings: dict[str, Any] = {}
 
-        max_output = self._resolve_max_output_tokens()
+        max_output = self._resolve_max_output_tokens(model_spec)
         if max_output:
             settings["max_tokens"] = max_output
 
         # The provider is re-parsed rather than threaded down because
         # ``_resolve_max_output_tokens`` already parses it the same way; the two
         # cannot disagree about which model this run resolved.
-        provider, _model = self._parse_provider_model()
+        provider, _model = self._parse_provider_model(model_spec)
         end_user = end_user_id_for(provider)
         if end_user:
             settings["openai_user"] = end_user
@@ -1161,6 +1458,20 @@ class PydanticAIBackend:
         if self._http_client is not None:
             return self._http_client
         seconds = float(getattr(self.settings, "pydantic_ai_timeout", 0) or 0)
+        # BYOK (2026-08-28): the end user's OWN upstream key rides as x-api-key
+        # alongside the proxy's own Authorization bearer. LiteLLM forwards
+        # x-api-key upstream when ``forward_llm_provider_auth_headers`` is on, so
+        # the turn bills the user's provider account while still passing through
+        # our routing, logging and guardrails — one pipeline, two payers.
+        #
+        # It lives on the CLIENT rather than in the request because that is the
+        # only place pydantic-ai lets us reach the transport. That makes the
+        # client tenant-specific, and this client is cached for the backend
+        # INSTANCE's life — which is safe for exactly one reason: a BYOK run gets
+        # a fresh isolated backend (see AgentPool.run). Never set
+        # ``byok_provider_api_key`` on a pooled backend.
+        byok_key = (getattr(self.settings, "byok_provider_api_key", None) or "").strip()
+        headers = {"x-api-key": byok_key} if byok_key else None
         try:
             import httpx
 
@@ -1168,7 +1479,17 @@ class PydanticAIBackend:
                 timeout=httpx.Timeout(
                     None if seconds <= 0 else seconds,
                     connect=15.0,
-                )
+                ),
+                headers=headers,
+                # Pinned, not inherited (2026-09-11, review B2/N1). httpx already
+                # defaults to False, so this changes nothing today — but the
+                # OpenAI SDK's own client sets it True, and this client is what a
+                # BYOK gateway turn dials a user-supplied base URL with. Following
+                # a redirect there would let a cooperating gateway bounce the
+                # request (and the key in its header) onto a host no guard saw.
+                # A security property is worth a line; a default is not worth
+                # trusting.
+                follow_redirects=False,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not build HTTP client, using library defaults: %s", exc)
@@ -1450,6 +1771,29 @@ class PydanticAIBackend:
         self._cached_agent = None
         self._cached_agent_key = None
 
+    def _credential_fingerprint(self) -> str:
+        """A stable, non-reversible id for the provider credential in use.
+
+        Feeds the agent cache key so two tenants with different keys can never
+        share a cached agent. Hashed because the key would otherwise sit in a
+        long-lived tuple and in cache-miss log lines; the empty string is
+        reported as ``"none"`` so "no key configured" is its own bucket rather
+        than colliding with a hash.
+        """
+        import hashlib
+
+        # BOTH credential routes: the direct-provider key, and the BYOK key that
+        # rides to the proxy as a header. Either one makes two tenants' agents
+        # different, and the BYOK one is the case that actually ships.
+        raw = (
+            (self.settings.anthropic_api_key or "").strip()
+            + "|"
+            + (getattr(self.settings, "byok_provider_api_key", None) or "").strip()
+        )
+        if raw == "|":
+            return "none"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
     def attach_subprocess_env(self, env: dict[str, str]) -> None:  # noqa: ARG002
         """No-op — this backend spawns no subprocess.
 
@@ -1459,7 +1803,14 @@ class PydanticAIBackend:
         """
         return None
 
-    def _build_capabilities(self, skill_names: frozenset[str] = frozenset()) -> list:
+    def _build_capabilities(
+        self,
+        skill_names: frozenset[str] = frozenset(),
+        *,
+        tools_enabled: bool = True,
+        deny: frozenset[str] = frozenset(),
+        skills_enabled: bool = True,
+    ) -> list:
         """Build the ``pydantic-ai-harness`` capabilities for this backend.
 
         Four of the PRD's six are wired. The other two are dropped, with the
@@ -1492,12 +1843,27 @@ class PydanticAIBackend:
           ``agents`` FOLDER on disk, and we have no in-code subagents to
           register. Wiring it with an empty list would add a capability that
           can never fire. Revisit when there is a real subagent to declare.
+
+        **``tools_enabled=False`` drops every capability that puts a tool on
+        the wire** — ``ToolSearch`` (``search_tools``), the native web tools,
+        ``Planning`` (``write_plan``), ``OverflowingToolOutput``
+        (``read_tool_result``) and skills (``load_capability``). Gating
+        ``tools=``/``toolsets=`` alone is NOT enough: a capability registers its
+        own toolset, so the four above kept a ``tools`` field on the request and
+        a gateway profile that rejects the field still answered 400
+        ``unsupported_capability``. Measured with ``FunctionModel``; see
+        ``test_tools_off_puts_no_tool_on_the_wire``. The context-management
+        capabilities (``SlidingWindow``, ``ClearToolResults``,
+        ``StepPersistence``) carry no tools and stay on.
         """
         # Built first and outside the harness gate: tool search belongs to
         # pydantic-ai core, so turning the harness off must not silently drop
         # our ranking function back to the built-in one.
         capabilities: list = []
         for build in (
+            # ``ToolSearch`` is NOT gated on ``tools_enabled``: it ranks a
+            # corpus, and with tools off the corpus is empty, so it puts
+            # nothing on the wire. Measured — gating it changed no request.
             self._build_tool_search_capability,
             self._build_thinking_capability,
             self._build_select_model_capability,
@@ -1506,7 +1872,12 @@ class PydanticAIBackend:
             cap = build()
             if cap is not None:
                 capabilities.append(cap)
-        capabilities += self._build_web_capabilities()
+        if tools_enabled:
+            # These DO need the gate: the builder reads ``_build_custom_tools``
+            # itself, so without it a tools-off run still registers a native
+            # web tool on the request. ``deny`` for the same reason: the
+            # builder never sees the surface-filtered tool list.
+            capabilities += self._build_web_capabilities(deny)
 
         if not getattr(self.settings, "pydantic_ai_harness_enabled", True):
             return capabilities
@@ -1527,15 +1898,23 @@ class PydanticAIBackend:
         capabilities += [
             SlidingWindow(max_messages=self.settings.pydantic_ai_compaction_max_messages),
             ClearToolResults(max_messages=self.settings.pydantic_ai_compaction_max_messages),
-            Planning(),
             StepPersistence(store=InMemoryStepStore(), agent_name="pocketpaw"),
         ]
-        if limit:
-            capabilities.append(
-                OverflowingToolOutput(bands=[Band(over=limit, action=Truncate(max_chars=limit))])
-            )
+        if tools_enabled:
+            capabilities.append(Planning())
+            if limit:
+                capabilities.append(
+                    _image_safe_overflow(OverflowingToolOutput)(
+                        bands=[Band(over=limit, action=Truncate(max_chars=limit))]
+                    )
+                )
 
-        skills = self._build_skills_capability(skill_names)
+        # ``skills_enabled`` is separate from ``skill_names`` on purpose: an EMPTY
+        # ``skill_names`` means "every bundled skill", so a deny-by-default run
+        # cannot turn skills off by passing no names.
+        skills = (
+            self._build_skills_capability(skill_names) if tools_enabled and skills_enabled else None
+        )
         if skills is not None:
             capabilities.append(skills)
         return capabilities
@@ -1703,8 +2082,24 @@ class PydanticAIBackend:
         tools — which is exactly the group the SDK's grant unions back in
         (``POCKET_CREATION_GRANT`` / widget / atlas ids). Restricting them here
         would be stricter than the surface asks for and would break /sites.
+
+        Correction (2026-09-27): since the in-process bridge joined
+        ``_build_mcp_tools``, PocketPaw's own servers (sites, pocket, pawbar,
+        connectors) ARE MCP toolsets here too, so this gate caps them to the
+        allow set with no universal grant. What it cannot reach is the bridged
+        builtins in ``tools``; ``exclusive_tools`` in ``_get_or_create_agent``
+        is the lever for those.
         """
-        if not mcp_toolsets or (not deny and allow_mcp_tool_ids is None):
+        # ``exclusive_mcp_tools`` must reach the gate even with nothing to
+        # allow and nothing to deny: an EXCLUSIVE turn with no allow set is an
+        # EMPTY permitted set, i.e. "strip every MCP tool", which is how a
+        # dedicated agent wins over a broad surface (claude_sdk CX-1). Without
+        # it in this guard the whole call short-circuits and returns every
+        # toolset untouched — the exact opposite, and a divergence from the SDK
+        # backend, which strips them all.
+        if not mcp_toolsets or (
+            not deny and allow_mcp_tool_ids is None and not exclusive_mcp_tools
+        ):
             return mcp_toolsets
 
         # An exclusive turn CAPS the surface to the allow set alone — with no
@@ -1714,12 +2109,35 @@ class PydanticAIBackend:
             (allow_mcp_tool_ids or frozenset()) if exclusive_mcp_tools else allow_mcp_tool_ids
         )
         allowed = None if permitted is None else _expand_tool_ids(permitted)
+        # A BARE ``mcp__<server>`` id — no tool segment — is a SERVER-LEVEL
+        # grant, the Claude Code permission convention for "all of this
+        # server's tools". It is the only spelling available for an EXTERNAL
+        # server, whose tool names are unknown until the client connects, so
+        # ``claude_sdk._collect_mcp_tool_ids`` allow-lists external servers with
+        # exactly this token.
+        #
+        # Without this branch the grant silently means nothing HERE, which is
+        # the worst place for it to mean nothing: per this method's own
+        # docstring, our MCP toolsets ARE "the user's EXTERNAL configured
+        # servers". ``_expand_tool_ids`` maps ``mcp__refero`` to ``refero``,
+        # which matches no tool the server exposes, so every tool was dropped
+        # while the SDK backend admitted them all.
+        #
+        # Matching is by prefix because external servers are wrapped in
+        # ``PrefixedToolset(MCPToolset(client), cfg.name)`` — a tool arrives
+        # named ``<server>_<tool>``, the same shape ``_normalize_tool_id``
+        # produces for a fully-qualified id.
+        server_grants = frozenset(
+            server for server in map(_bare_mcp_server, permitted or ()) if server
+        )
 
         def _keep(_ctx: Any, tool_def: Any) -> bool:
             name = getattr(tool_def, "name", "")
             if name in deny:
                 return False
-            return allowed is None or name in allowed
+            if allowed is None or name in allowed:
+                return True
+            return any(name.startswith(f"{server}_") for server in server_grants)
 
         return [ts.filtered(_keep) for ts in mcp_toolsets]
 
@@ -1803,11 +2221,13 @@ class PydanticAIBackend:
         is still unrun. Spans are what make that measurable from the inside
         rather than by wrapping a stopwatch around the whole request.
 
-        ``logfire.configure`` is called with ``send_to_logfire='if-token-present'``
-        so this is safe to enable on a deployment with no Logfire account: the
-        spans go to whatever OTel exporter is already configured, or nowhere.
-        Configuration is process-global and guarded by a module flag, because
-        one instance per agent means this method runs many times.
+        Logfire is configured at STARTUP now, by ``setup_logging``, because
+        ``logfire.configure`` is process-global and this method is not: it runs
+        once per agent, and only in a process that actually builds a pydantic-ai
+        agent — which with ``POCKETPAW_CLOUD_RUN_EXECUTOR=arq`` is the worker and
+        never the web process. The call kept here is the fallback for a process
+        that never ran ``setup_logging`` at all (tests, library use, anything
+        embedding the backend), and it is a no-op when startup already did it.
         """
         if not getattr(self.settings, "pydantic_ai_instrumentation", False):
             return None
@@ -1816,24 +2236,14 @@ class PydanticAIBackend:
         except ImportError:  # pragma: no cover - pydantic-ai too old
             return None
 
-        global _LOGFIRE_CONFIGURED
-        if not _LOGFIRE_CONFIGURED:
-            _LOGFIRE_CONFIGURED = True
-            try:
-                import logfire
+        # Never load-bearing: configure_observability swallows its own failures,
+        # so a misconfigured exporter cannot stop a tenant's run.
+        from pocketpaw.observability import configure_observability
 
-                logfire.configure(
-                    send_to_logfire="if-token-present",
-                    service_name="pocketpaw-pydantic-ai",
-                    console=False,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # Instrumentation is observability, never load-bearing: a
-                # misconfigured exporter must not stop a tenant's run.
-                logger.warning("Could not configure logfire, spans stay local: %s", exc)
+        configure_observability()
         return Instrumentation()
 
-    def _build_web_capabilities(self) -> list:
+    def _build_web_capabilities(self, deny: frozenset[str] = frozenset()) -> list:
         """Move web search and fetch provider-side, keeping ours as the fallback.
 
         The win is specific to this backend. A bridged web tool makes its HTTP
@@ -1847,6 +2257,11 @@ class PydanticAIBackend:
         fallback on purpose: a second search implementation would drift from the
         one the other backends use, and the charter's one-canonical-module rule
         is the reason the in-process MCP bridge exists at all.
+
+        ``deny`` is the surface's deny set, already expanded to this backend's
+        names. It has to be checked here because ``_build_custom_tools`` is the
+        tenant allowlist only, not the per-surface filter: without it a surface
+        that denied web access got WebSearch and WebFetch back provider-side.
         """
         if not getattr(self.settings, "pydantic_ai_native_web_tools", False):
             return []
@@ -1858,6 +2273,9 @@ class PydanticAIBackend:
         by_name = {getattr(t, "name", ""): t for t in self._build_custom_tools()}
         out: list = []
         for tool_name, cap_name in self._NATIVE_WEB_EQUIVALENTS.items():
+            if tool_name in deny:
+                logger.info("Native %s not wired: the surface denies %r", cap_name, tool_name)
+                continue
             local = by_name.get(tool_name)
             if local is None:
                 # The surface withheld it, so there is nothing to fall back to.
@@ -1954,6 +2372,9 @@ class PydanticAIBackend:
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
         system_prompt_digest: str = "",
+        model_spec: str | None = None,
+        tools_enabled: bool = True,
+        exclusive_tools: bool = False,
     ) -> Any:
         """Build (and cache) the pydantic-ai ``Agent``.
 
@@ -1988,10 +2409,16 @@ class PydanticAIBackend:
         # cache NEVER hits — every run re-instantiates the whole tool set. That
         # is not a slow path, it is a per-run cost on the thing whose entire
         # purpose is a low per-run cost, and it is invisible except as latency.
-        tools = list(self._build_custom_tools())
+        # Skipped entirely when the caller turned tools off — not built and
+        # then filtered, because the point is that none reach the wire.
+        tools = list(self._build_custom_tools()) if tools_enabled else []
 
         agent_key = (
-            self.settings.pydantic_ai_model,
+            # The spec that BUILT ``model``, not the configured default: a
+            # per-send ``model_override`` builds a different model object, and a
+            # key that still read the setting would serve the cached agent —
+            # holding the previous model — to a turn that asked for another one.
+            model_spec or self.settings.pydantic_ai_model,
             is_pocket_session,
             len(mcp_toolsets),
             self._tools_version,
@@ -2013,6 +2440,23 @@ class PydanticAIBackend:
             # serves every session and surface, so an agent cached under one
             # identity must not answer for another.
             system_prompt_digest,
+            # WHOSE CREDENTIAL paid for it (2026-08-28, BYOK). The model object
+            # is built with a provider key baked in, and every other component
+            # of this key can match across two tenants who bring their own keys
+            # — same model, same tools, same prompt. Without this the second
+            # tenant is served the first tenant's cached agent and their turns
+            # bill to a stranger's Anthropic account.
+            #
+            # A DIGEST, never the key: this tuple is held in memory for the
+            # process's life and lands in cache-miss logs.
+            self._credential_fingerprint(),
+            # WHETHER there are tools at all. ``len(tools)`` above happens to
+            # move with it today, but it is a count and two different surfaces
+            # can share one — this says the thing itself.
+            tools_enabled,
+            # Deny-by-default, for the same reason as ``tools_enabled``: a count
+            # of tools can match between a locked-down surface and an open one.
+            exclusive_tools,
         )
         if self._cached_agent is not None and self._cached_agent_key == agent_key:
             return self._cached_agent
@@ -2026,6 +2470,27 @@ class PydanticAIBackend:
                     before - len(tools),
                     sorted(deny_mcp_tool_ids),
                 )
+
+        # Deny-by-default (the public concierge). The MCP gate below already
+        # caps toolsets to the allow set; this is the half it cannot see — the
+        # bridged builtins, which reach every run whatever the allow set says.
+        # Kept only when the allow set names them. Skills are dropped too: a
+        # skill loads capabilities the surface never listed. And a native web
+        # capability is denied unless its local tool survived, since
+        # ``_build_web_capabilities`` reads the unfiltered tool list.
+        cap_deny = deny
+        if exclusive_tools:
+            permitted = _expand_tool_ids(allow_mcp_tool_ids or frozenset())
+            before = len(tools)
+            tools = [t for t in tools if getattr(t, "name", "") in permitted]
+            cap_deny = deny | frozenset(
+                n for n in self._NATIVE_WEB_EQUIVALENTS if n not in permitted
+            )
+            logger.info(
+                "Exclusive surface: withheld %d bridged tool(s); only %s offered",
+                before - len(tools),
+                sorted(allow_mcp_tool_ids or ()),
+            )
 
         mcp_toolsets = self._gate_mcp_toolsets(
             mcp_toolsets, deny, allow_mcp_tool_ids, exclusive_mcp_tools
@@ -2067,7 +2532,13 @@ class PydanticAIBackend:
             # appends to the (now empty) agent-level set per run.
             tools=tools,
             toolsets=list(mcp_toolsets) or None,
-            capabilities=self._build_capabilities(skill_names) or None,
+            capabilities=self._build_capabilities(
+                skill_names,
+                tools_enabled=tools_enabled,
+                deny=cap_deny,
+                skills_enabled=not exclusive_tools,
+            )
+            or None,
             # The agent is shared across concurrent runs; conversation state
             # rides in ``message_history`` per run, never on the agent.
             retries=2,
@@ -2119,7 +2590,13 @@ class PydanticAIBackend:
         # Trailing window: the head of a conversation is the least useful part
         # to carry and the most expensive, and compaction capabilities already
         # operate inside a run.
-        self._session_messages[session_key] = list(messages)[-_MAX_SESSION_MESSAGES:]
+        #
+        # Attachments are dropped here rather than at the read: a turn's images
+        # belong to that turn only, and keeping them would replay every past
+        # picture on every later turn of the session.
+        self._session_messages[session_key] = [
+            _without_attachments(message) for message in list(messages)[-_MAX_SESSION_MESSAGES:]
+        ]
         self._session_messages.move_to_end(session_key)
         while len(self._session_messages) > _MAX_TRACKED_SESSIONS:
             self._session_messages.popitem(last=False)
@@ -2157,6 +2634,22 @@ class PydanticAIBackend:
         # ``AgentPool.run`` forwards it only when non-empty, so an empty set
         # means "no per-entity narrowing" and every bundled skill is offered.
         skill_names: frozenset[str] = frozenset(),
+        # Images the caller wants THIS turn to look at, already read into
+        # memory: (bytes, media_type) pairs. Same withhold-when-empty contract
+        # as the kwargs below, so a turn that sends none takes the byte-
+        # identical string path every other surface has always taken.
+        #
+        # Bytes rather than paths, deliberately. The caller is the cloud, which
+        # is the layer that knows a tenant's jail and can prove a path sits
+        # inside it; this backend is OSS and reads no path it was handed. It
+        # also cannot import the cloud to ask.
+        #
+        # pydantic-ai has taken image input for a long time — ``user_prompt``
+        # is ``str | Sequence[UserContent]``. What was missing was anything
+        # here ever passing one, so on the Otherhand surface the page image
+        # never reached the model and the agent fell back to an OCR tool call
+        # that flattens a drawing to bad text.
+        images: tuple[tuple[bytes, str], ...] = (),
         # -- per-surface tool gating (see ``_gate_mcp_toolsets``) ------------
         # These ride the same withhold-when-empty contract, which is why their
         # absence was invisible: the pool forwards them ONLY when a surface
@@ -2168,28 +2661,66 @@ class PydanticAIBackend:
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         exclusive_mcp_tools: bool = False,
+        # Images the user attached to this turn. Consumed, not ignored: pydantic-ai
+        # takes multimodal input as a LIST prompt mixing strings with
+        # ``BinaryContent``, so ``build_multimodal_prompt`` below turns these into
+        # the prompt the agent actually runs on. Empty leaves the prompt a bare
+        # string, which is what every text turn has always sent.
+        image_attachments: tuple[ImageAttachment, ...] = (),
         # The assembled prompt's stable digest (PA-1). Unlike the kwargs above
         # this is NOT withhold-when-empty — it is set on every run — so the pool
         # gates it on this signature instead: declaring the parameter is how a
         # backend opts in. Folded into the agent cache key so an agent built
         # under one identity is never handed to another.
         system_prompt_digest: str = "",
+        # Per-send TOOL SWITCH (2026-09-11). ``False`` builds the agent with no
+        # custom tools and no MCP toolsets at all.
+        #
+        # Two reasons a caller asks for it, both observed live: a gateway
+        # profile that refuses the ``tools`` field outright and 400s the whole
+        # turn, and a weaker model that fixates on a tool instead of answering.
+        # It is also the surface's biggest token lever — the upstream prompt
+        # cache does not cover tool schemas, so a run carrying a tool surface
+        # reads zero cached tokens every turn (measured, see the header).
+        #
+        # In the agent cache key, necessarily: the cache is ONE slot, so without
+        # it a tools-off turn would be served the agent built WITH tools.
+        tools_enabled: bool = True,
+        # Deny-by-default surface (the public Paw Bar concierge). The run is
+        # offered ONLY what ``allow_mcp_tool_ids`` names: the bridged PocketPaw
+        # builtins below the MCP layer are dropped too, because no MCP allow set
+        # reaches them and a deny list cannot enumerate them. In the cache key.
+        exclusive_tools: bool = False,
         # Accepted and deliberately unused — each is Claude-SDK plumbing with no
         # analogue here, and each is safe to drop:
-        #   ``allow_sdk_tools``   ADDITIVE grant of SDK built-ins. There are no
-        #                         SDK built-ins on this backend, so there is
-        #                         nothing to grant; ignoring it removes tools,
-        #                         never adds them.
-        #   ``model_override``    per-send model choice, consumed only by the
-        #                         Claude SDK backend (as on the other six).
         #   ``session_handle`` /  native CLI-session resume and warm-client
         #   ``warm_client`` /     reuse — this backend has no subprocess to
         #   ``on_client_built``   resume or lease.
-        allow_sdk_tools: frozenset[str] = frozenset(),  # noqa: ARG002
-        model_override: str | None = None,  # noqa: ARG002
+        # ADDITIVE grant. There are no SDK built-ins here, so it grants nothing
+        # directly; it is read only as the surface's grant of a surface-scoped
+        # MCP server (``SURFACE_SCOPED_MCP_SERVERS``). Ungranted scoped servers'
+        # tools join the deny set, which is in the agent cache key.
+        allow_sdk_tools: frozenset[str] = frozenset(),
+        # The per-send model choice. HONOURED here since 2026-09-10: it is the
+        # spec ``_build_model`` parses, so a bare name keeps the configured
+        # provider (and, on a BYOK gateway, its base URL and key) and only the
+        # model changes. It also keys the agent cache — see
+        # ``_get_or_create_agent``.
+        model_override: str | None = None,
         session_handle: Any = None,  # noqa: ARG002
         warm_client: Any = None,  # noqa: ARG002
         on_client_built: Any = None,  # noqa: ARG002
+        # Per-run usage limits (the cloud's platform-funded free run).
+        # ``max_requests`` can only lower ``pydantic_ai_max_turns``;
+        # ``total_tokens_limit`` stops the run once its tokens pass it. The pool
+        # refuses a limited run on a backend that does not declare these.
+        max_requests: int | None = None,
+        total_tokens_limit: int | None = None,
+        # A surface's turn-cap override (a Sites app build): None keeps
+        # ``pydantic_ai_max_turns``, 0 lifts the request limit, N > 0 can only
+        # RAISE it (never limit an unlimited 0). ``max_requests`` is applied
+        # after it, so a free run keeps its bound either way.
+        max_turns: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
         if not self._sdk_available:
             yield AgentEvent(
@@ -2262,7 +2793,31 @@ class PydanticAIBackend:
             return self._usage_event_from(run_usage, model_name=getattr(model, "model_name", None))
 
         try:
-            model = self._build_model()
+            # A per-send model picks a model WITHIN the configured provider,
+            # never a provider. ``_parse_provider_model`` splits on a colon when
+            # the prefix names a known provider, so an unguarded override is a
+            # CREDENTIAL switch wearing a model id: a BYOK gateway turn runs on
+            # an isolated backend holding the tenant's key but still carrying
+            # the deployment's ``litellm_api_key``, and ``litellm:anything``
+            # from the composer's free-text field would resolve the proxy's own
+            # credential. ``provider_allows_model`` cannot catch it — on a
+            # gateway it passes every name, because a gateway's ids are its own
+            # namespace. The PREFIX is what is checked, not the colon: a model
+            # name may legitimately carry one (``minimax/minimax-m3:free``,
+            # ``llama3.2:latest``).
+            if (model_override or "").partition(":")[0].strip() in _KNOWN_PROVIDERS:
+                yield AgentEvent(
+                    type="error",
+                    content=(
+                        f"Model {model_override!r} names a provider. A per-send "
+                        "model can only pick a model on the provider this agent "
+                        "is already configured for — drop the prefix."
+                    ),
+                )
+                yield AgentEvent(type="done", content="")
+                return
+
+            model = self._build_model(model_override)
 
             # A gated surface is one where WHICH tools the agent has is part of
             # the contract. The agentapi model cannot be part of that contract —
@@ -2280,17 +2835,25 @@ class PydanticAIBackend:
                 yield AgentEvent(type="done", content="")
                 return
 
-            instructions = system_prompt or _DEFAULT_IDENTITY
-            mcp_toolsets = await self._build_mcp_tools()
+            # Tool names in the prompt are rewritten to this backend's names,
+            # so a surface preamble written for the SDK still points at tools
+            # this agent actually has. See ``_localize_tool_ids``.
+            instructions = _localize_tool_ids(system_prompt or _DEFAULT_IDENTITY)
+            mcp_toolsets = await self._build_mcp_tools() if tools_enabled else []
             agent = self._get_or_create_agent(
                 model,
                 instructions,
                 mcp_toolsets,
                 skill_names,
-                deny_mcp_tool_ids=deny_mcp_tool_ids,
+                # After the agentapi gate on purpose: a scoped-server deny on a
+                # plain chat is not a gated surface.
+                deny_mcp_tool_ids=deny_mcp_tool_ids | surface_scoped_tool_deny(allow_sdk_tools),
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 exclusive_mcp_tools=exclusive_mcp_tools,
                 system_prompt_digest=system_prompt_digest,
+                model_spec=model_override,
+                tools_enabled=tools_enabled,
+                exclusive_tools=exclusive_tools,
             )
 
             kwargs: dict[str, Any] = {
@@ -2300,18 +2863,29 @@ class PydanticAIBackend:
                 # instructions at all, so this is the only system prompt on the
                 # wire — and it is THIS turn's. See ``_get_or_create_agent``.
             }
-            max_turns = self.settings.pydantic_ai_max_turns
-            if max_turns and max_turns > 0:
+            request_cap = self.settings.pydantic_ai_max_turns
+            if max_turns == 0:
+                request_cap = 0
+            elif max_turns and request_cap > 0 and max_turns > request_cap:
+                request_cap = max_turns
+            if max_requests is not None and max_requests > 0:
+                request_cap = min(request_cap, max_requests) if request_cap > 0 else max_requests
+            limits: dict[str, int] = {}
+            if request_cap and request_cap > 0:
+                limits["request_limit"] = request_cap
+            if total_tokens_limit is not None:
+                limits["total_tokens_limit"] = max(total_tokens_limit, 0)
+            if limits:
                 from pydantic_ai.usage import UsageLimits
 
-                kwargs["usage_limits"] = UsageLimits(request_limit=max_turns)
+                kwargs["usage_limits"] = UsageLimits(**limits)
 
             # Per-RUN like ``usage_limits`` above, and for the same reason: the
             # cached agent is shared across runs, while these are properties of
             # the model and the tenant THIS run resolved. The fast-model path
             # swaps the model but reuses these settings, which is what keeps a
             # run that downshifts mid-flight attributed to the same workspace.
-            run_settings = self._run_model_settings()
+            run_settings = self._run_model_settings(model_override)
             if run_settings:
                 kwargs["model_settings"] = run_settings
 
@@ -2320,7 +2894,35 @@ class PydanticAIBackend:
             # a run's accounting cannot live on it.
             kwargs["usage"] = run_usage
 
-            async with agent.run_stream_events(message, **kwargs) as stream:
+            # The user prompt is a plain string unless this turn carries
+            # images, in which case it becomes the parts list pydantic-ai wants.
+            # The images ride the PROMPT, and ONE turn's prompt only: this run's
+            # transcript is retained for the next turn, so ``_retain_session``
+            # strips the attached bytes back out on the way in (see
+            # ``_without_attachments``). Without that, turn N would carry N
+            # snapshots of the same page. A fresh snapshot every turn is also
+            # the right semantics — the agent should see the page as it is now,
+            # not as it was.
+            #
+            # TWO sources meet here and both are pictures for the model to look
+            # at: ``images`` is the snapshot the surface chose to show, already
+            # (bytes, media_type); ``image_attachments`` is what the USER
+            # attached, an ``ImageAttachment`` carrying the same two fields plus
+            # the filename. They are flattened to the one shape ``_user_prompt``
+            # takes rather than built by two different helpers, so the
+            # empty-bytes drop below applies to a user's upload as much as to a
+            # snapshot — a zero-byte part comes back from some providers as an
+            # opaque 400, which reads as the model being broken.
+            #
+            # Surface snapshot first, attachments after: the snapshot is the
+            # context the preamble is already talking about, and the user's own
+            # files should land nearest their words.
+            prompt = _user_prompt(
+                message,
+                tuple(images) + tuple((img.data, img.media_type) for img in image_attachments),
+            )
+
+            async with agent.run_stream_events(prompt, **kwargs) as stream:
                 async for event in stream:
                     if handle.stopped:
                         break
@@ -2376,7 +2978,10 @@ class PydanticAIBackend:
             snapshot = _usage_snapshot()
             if snapshot is not None:
                 yield snapshot
-            yield AgentEvent(type="error", content=self._explain_error(exc))
+            per_run_limit = max_requests is not None or total_tokens_limit is not None
+            yield AgentEvent(
+                type="error", content=self._explain_error(exc, per_run_limit=per_run_limit)
+            )
             yield AgentEvent(type="done", content="")
             return
         finally:
@@ -2389,7 +2994,7 @@ class PydanticAIBackend:
             yield snapshot
         yield AgentEvent(type="done", content="")
 
-    def _explain_error(self, exc: Exception) -> str:
+    def _explain_error(self, exc: Exception, *, per_run_limit: bool = False) -> str:
         """Turn a provider error into something that names the actual problem.
 
         A proxy auth failure is the single most confusing error on this path,
@@ -2400,7 +3005,16 @@ class PydanticAIBackend:
         "my key is wrong", which sends you to change the one thing that works.
 
         This cost real time to diagnose by hand, so the backend says it now.
+
+        A run the caller limited (``per_run_limit``, the cloud's free run) that
+        hits a usage limit gets a plain sentence. Any other run keeps the raw
+        text, which names the setting to raise (``request_limit of N``).
         """
+        from pydantic_ai.exceptions import UsageLimitExceeded
+
+        if per_run_limit and isinstance(exc, UsageLimitExceeded):
+            # A run limit, not a fault: say so plainly, without token counts.
+            return "This reply reached its usage limit for one run and stopped."
         text = str(exc)
         raw = f"Pydantic AI error: {text}"
 
@@ -2478,7 +3092,18 @@ class PydanticAIBackend:
         elif isinstance(event, FunctionToolResultEvent):
             part = event.part
             content = getattr(part, "content", "")
-            text = content if isinstance(content, str) else str(content)
+            if isinstance(content, list):
+                # A multimodal tool result (text + BinaryContent images, see
+                # _make_inprocess_caller). ``str()`` on it would put the image
+                # bytes' repr into the UI event; show the text and a count.
+                from pydantic_ai import BinaryContent
+
+                text = "\n".join(item for item in content if isinstance(item, str))
+                images = sum(isinstance(item, BinaryContent) for item in content)
+                if images:
+                    text += f" [+{images} image{'s' if images != 1 else ''}]"
+            else:
+                text = content if isinstance(content, str) else str(content)
             out.append(
                 AgentEvent(
                     type="tool_result",

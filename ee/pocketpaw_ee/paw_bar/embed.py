@@ -1,5 +1,11 @@
 # ee/pocketpaw_ee/paw_bar/embed.py — grow the concierge onto a published Paw Site.
 #
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): ``concierge_snippet``
+# gate 4 asks whether the owner CREATED a concierge (a required
+# ``concierge_exists`` flag, read off ``Site.concierge_created_at``) instead of
+# whether the widget has an agent. Existence is a stored marker now; v2 needs no
+# agent, and a bound agent is not an owner's decision to publish a bar.
+#
 # Created 2026-07-30 (feat/paw-bar-autoembed): a site we generate, with a
 # concierge we auto-provisioned, still shipped with NO concierge on it. The bar
 # was embedded ONLY by a snippet the dashboard showed for a human to copy-paste,
@@ -31,6 +37,11 @@
 # the API base the site's own capture endpoint already uses, never a CDN host — a
 # locally served site gets a working localhost URL, and there is no second place
 # to keep in sync when the deploy moves.
+#
+# ``build_actions_snippet`` is the owner's copy-paste tag for the opt-in
+# page-actions script (``GET /paw-bar/actions.js``). It is never injected at
+# publish; the settings response shows it only where ``concierge_snippet`` would
+# give the site a bar, on the same API base.
 
 from __future__ import annotations
 
@@ -47,6 +58,8 @@ EMBED_MARKER = "data-paw-bar-embed"
 # mounted under /api/v1, and ``_capture_base()`` already carries that mount, so
 # joining the two yields the real URL wherever the API is hosted).
 WIDGET_JS_PATH = "/paw-bar/widget.js"
+# The page-actions host script, relative to the same API base.
+ACTIONS_JS_PATH = "/paw-bar/actions.js"
 
 # Page suffixes the injection walks. Deliberately just HTML: the snippet is a
 # ``<script>`` tag and belongs in a document, not in a JSON/asset file.
@@ -77,6 +90,21 @@ def build_embed_snippet(*, api_base: str, site_key: str, widget_id: str) -> str:
         f'data-widget-id="{escape(widget_id, quote=True)}" '
         f'data-endpoint="{escape(api_base.rstrip("/"), quote=True)}" '
         "async></script>"
+    )
+
+
+def build_actions_snippet(*, api_base: str) -> str:
+    """The tag an owner pastes to let the concierge act on their pages.
+
+    The script reads only ``data-endpoint`` (falling back to its own ``src``) and
+    obeys frames from that origin alone, so the base is passed explicitly for the
+    same reason ``build_embed_snippet`` passes it. ``defer`` so it never blocks
+    the owner's page wherever they paste it.
+    """
+    base = api_base.rstrip("/")
+    return (
+        f'<script src="{escape(base + ACTIONS_JS_PATH, quote=True)}" defer '
+        f'data-endpoint="{escape(base, quote=True)}"></script>'
     )
 
 
@@ -143,6 +171,7 @@ async def concierge_snippet(
     api_base: str,
     concierge_enabled: bool,
     concierge_entitled: bool,
+    concierge_exists: bool,
 ) -> str:
     """The snippet this site has earned, or ``""`` when it has not.
 
@@ -166,10 +195,15 @@ async def concierge_snippet(
          presents; without one the frame endpoint would 401 every visitor.
       3. A paw-bar widget for the site's pocket, resolved through
          ``agent_provisioning.site_widget`` (the provisioner's own lookup).
-      4. A non-empty ``agent_id`` on that widget — an unbound widget's chat 409s, so
-         a bar for it would render and then refuse to answer, which is worse than no
-         bar at all.
+      4. ``concierge_exists`` — the owner CREATED this concierge
+         (``Site.concierge_created_at``, CR-12). REQUIRED for the same reason as
+         gate 0: a default here would let a caller that forgets it embed a bar on a
+         site whose owner never asked for one. It replaced a check on the widget's
+         ``agent_id``: v2 answers without an agent, and an agent bound by some other
+         path is not the owner's decision to put a concierge on their page.
     """
+    if not concierge_exists:
+        return ""
     if not concierge_enabled or not concierge_entitled or not site_key or not pocket_id:
         return ""
 
@@ -179,7 +213,7 @@ async def concierge_snippet(
     if widget is None:
         return ""
     widget_id = str(getattr(widget, "id", "") or "")
-    if not widget_id or not (getattr(widget, "agent_id", "") or ""):
+    if not widget_id:
         return ""
 
     return build_embed_snippet(api_base=api_base, site_key=site_key, widget_id=widget_id)
@@ -201,8 +235,10 @@ def deployed_host(url: str) -> str:
 
 
 __all__ = [
+    "ACTIONS_JS_PATH",
     "EMBED_MARKER",
     "WIDGET_JS_PATH",
+    "build_actions_snippet",
     "build_embed_snippet",
     "concierge_snippet",
     "deployed_host",

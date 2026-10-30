@@ -556,7 +556,7 @@ async def test_capability_instructions_are_still_contributed_at_run_time():
         yield "ok"
 
     backend = PydanticAIBackend(Settings(pydantic_ai_skills_enabled=True))
-    backend._build_model = lambda: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
     backend._mcp_tools = []
 
     async for _ in backend.run("hi", system_prompt="You are Paw.", session_key="s1"):

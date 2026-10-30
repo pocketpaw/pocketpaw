@@ -1,34 +1,29 @@
-# tests/cloud/test_paw_bar_frame.py — Paw Bar glass FRAME endpoint + CSP origin
-# model (A1).
-# Created 2026-07-15: covers GET /paw-bar/frame (the iframe document + the CSP
-# frame-ancestors embedder gate) and the CSP/parent-origin helper functions.
-# Three layers:
-# Updated 2026-08-21 (dashboard preview ancestor): the builder frames a site's real
-#   published page, so the bar's iframe sits TWO deep — dashboard → site page → bar —
-#   and frame-ancestors is matched against EVERY ancestor. No Site allowlist named the
-#   dashboard, so the bar was refused in every preview with
-#   "Framing '<backend>' violates ... frame-ancestors". New coverage: the dashboard
-#   origin is admitted alongside the allowlist, sourced from PAWBAR_DASHBOARD_ORIGIN or
-#   (unset — the shipped state) the declared CORS origins; it is sanitized like any
-#   allowlist entry; it never revives an empty allowlist; and with neither source set
-#   the header is byte-identical to before. An autouse fixture clears both vars so the
-#   exact-header assertions stay hermetic.
-# Updated 2026-07-30 (frame-ancestors port fix): the expected header now carries a
-#   ``:*`` port on every portless entry. A CSP host-source with no port matches only
-#   the scheme's DEFAULT port, so a site served on any other port could not be framed
-#   and the bar rendered as an empty grey box. These assertions pinned that. The
-#   header-injection guard is unchanged and still covered.
-#   * Pure-function proofs (no I/O): the frame-ancestors builder emits EXACTLY the
-#     Site's allowed_origins, fails closed (None) on an empty/unusable allowlist,
-#     sanitizes header-injection attempts, and the parent-origin validator only
-#     echoes an allowlisted origin.
-#   * Endpoint (httpx): valid key → 200 + CSP frame-ancestors header + a body that
-#     seeds window.__PAWBAR__; empty allowed_origins → 403 (fail-closed refuse); a
-#     blank / unknown / revoked key → 401; NO X-Frame-Options; and the world-visible
-#     key + attacker-influenceable params can't break out of the inline <script>.
-#   * Dual-mode chat: an iframe-mode request (Origin == our frame origin) passes the
-#     origin gate that would reject it inline; a non-frame disallowed origin is still
-#     403; the frozen inline path (Origin in allowed_origins) still works.
+# tests/cloud/test_paw_bar_frame.py — the Paw Bar glass FRAME endpoint and its CSP.
+#
+# Covers GET /paw-bar/frame (the iframe document plus its embedder gate) and the
+# CSP / parent-origin helpers, in four layers:
+#   * Pure functions: the frame-ancestors builder emits exactly the Site's
+#     allowed_origins with a ``:*`` port on every portless entry (a portless
+#     host-source matches only the default port), fails closed (None) on an
+#     empty or unusable allowlist, and refuses header injection. The dashboard
+#     origin (PAWBAR_DASHBOARD_ORIGIN, else the declared CORS origins) is admitted
+#     beside the allowlist, because the builder preview frames the site's page and
+#     every ancestor is matched; it never revives an empty allowlist. The
+#     parent-origin validator only echoes an allowlisted origin.
+#   * Endpoint (httpx): a valid key is 200 with the full frame CSP (frame-ancestors,
+#     style-src / font-src for the host site's Google Fonts, then the ``sandbox``
+#     directive the loader's <iframe sandbox> must equal; no top navigation) and a
+#     body that seeds window.__PAWBAR__; an empty allowlist or a switched-off
+#     concierge is the sandboxed dead shell (``frame-ancestors *``); a blank,
+#     unknown or revoked key is 401; no X-Frame-Options; the world-visible key and
+#     attacker-influenceable params cannot break out of the inline <script>. The
+#     Site fixture is a concierge its owner created and switched on (CR-12).
+#   * Dual-mode chat: an iframe request (Origin == our frame origin) passes the
+#     origin gate that would reject it inline; customer_ref is 8-128 chars.
+#   * Behind the dashboard's ``security_headers_middleware``: both the live frame
+#     and the dead shell keep their own CSP and Permissions-Policy and get no XFO.
+# An autouse fixture clears the dashboard-origin env so exact-header assertions
+# stay hermetic.
 
 from __future__ import annotations
 
@@ -44,6 +39,29 @@ from pocketpaw.paw_bar.store import PawBarStore
 
 _VALID_KEY = "site_key_" + "a" * 24
 _FRAME_ORIGIN = "https://frame.pocketpaw.test"
+# Written out literally, NOT imported from the router: the paw-bar loader puts the
+# same flags on its <iframe sandbox>, and this is the string the two must agree on.
+_SANDBOX_DIRECTIVE = (
+    "sandbox allow-scripts allow-same-origin allow-forms allow-popups "
+    "allow-popups-to-escape-sandbox allow-downloads"
+)
+
+
+# Written out literally too: the bar loads the host site's Google Fonts sheet, and
+# nothing broader than these two hosts may be added.
+_STYLE_FONT_DIRECTIVES = (
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com"
+)
+
+
+def _csp(frame_ancestors: str) -> str:
+    """The full frame CSP: the embedder gate, styles and fonts, then the sandbox."""
+    return f"{frame_ancestors}; {_STYLE_FONT_DIRECTIVES}; {_SANDBOX_DIRECTIVE}"
+
+
+def _directives(csp: str) -> list[str]:
+    return [d.strip() for d in csp.split(";") if d.strip()]
 
 
 @pytest.fixture(autouse=True)
@@ -203,6 +221,12 @@ async def _site(**ov):
         allowed_origins=["brewco.com"],
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s
@@ -231,8 +255,8 @@ async def test_frame_valid_key_renders_with_csp(frame_client):
     assert res.status_code == 200
     assert res.headers["content-type"].startswith("text/html")
     # The embedder gate: frame-ancestors with EXACTLY the Site's allowed_origins.
-    assert (
-        res.headers["content-security-policy"] == "frame-ancestors brewco.com:* shop.example.com:*"
+    assert res.headers["content-security-policy"] == _csp(
+        "frame-ancestors brewco.com:* shop.example.com:*"
     )
     body = res.text
     # The document seeds window.__PAWBAR__ before loading the app.
@@ -256,9 +280,8 @@ async def test_frame_admits_the_dashboard_as_an_ancestor(frame_client, monkeypat
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
     assert res.status_code == 200
-    assert (
-        res.headers["content-security-policy"]
-        == "frame-ancestors brewco.com:* https://app.example.com:*"
+    assert res.headers["content-security-policy"] == _csp(
+        "frame-ancestors brewco.com:* https://app.example.com:*"
     )
 
 
@@ -273,7 +296,7 @@ async def test_frame_admits_an_http_dashboard_against_an_https_frame(frame_clien
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
     assert res.status_code == 200
-    assert res.headers["content-security-policy"] == (
+    assert res.headers["content-security-policy"] == _csp(
         "frame-ancestors localhost:* 127.0.0.1:* site.pawsites.workers.dev:* http://localhost:5173"
     )
 
@@ -287,9 +310,8 @@ async def test_frame_falls_back_to_the_declared_cors_origins(frame_client, monke
     await _site(allowed_origins=["brewco.com"])
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
-    assert (
-        res.headers["content-security-policy"]
-        == "frame-ancestors brewco.com:* https://app.example.com:*"
+    assert res.headers["content-security-policy"] == _csp(
+        "frame-ancestors brewco.com:* https://app.example.com:*"
     )
 
 
@@ -303,7 +325,7 @@ async def test_frame_ancestors_unchanged_when_no_dashboard_is_configured(frame_c
     await _site(allowed_origins=["brewco.com"])
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
-    assert res.headers["content-security-policy"] == "frame-ancestors brewco.com:*"
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors brewco.com:*")
 
 
 @pytest.mark.asyncio
@@ -316,7 +338,7 @@ async def test_frame_sanitizes_the_dashboard_origin(frame_client, monkeypatch):
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
 
     assert res.status_code == 200
-    assert res.headers["content-security-policy"] == "frame-ancestors brewco.com:*"
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors brewco.com:*")
 
 
 @pytest.mark.asyncio
@@ -333,16 +355,16 @@ async def test_frame_dashboard_origin_does_not_revive_an_empty_allowlist(frame_c
 
 @pytest.mark.asyncio
 async def test_frame_assets_carry_cache_busting_version(frame_client, tmp_path, monkeypatch):
-    """The asset URLs must carry ?v=<newest bundle mtime> so a deploy busts every
-    embedder's browser cache (StaticFiles sends no Cache-Control; heuristic
-    caching pinned the first live demo to a stale bundle)."""
+    """The asset URLs must carry ?v=<content hash of the bundle> so a deploy busts
+    every embedder's browser cache, and so the year-long immutable header the asset
+    mount sends for the current v can never cover different bytes."""
+    from pocketpaw_ee.paw_bar.router import _asset_version
+
     (tmp_path / "pawbar.js").write_text("// bundle")
     (tmp_path / "pawbar.css").write_text("/* styles */")
     monkeypatch.setenv("PAWBAR_APP_DIR", str(tmp_path))
-    expected = max(
-        int((tmp_path / "pawbar.js").stat().st_mtime),
-        int((tmp_path / "pawbar.css").stat().st_mtime),
-    )
+    expected = _asset_version()
+    assert expected != "0"
 
     await _site()
     res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
@@ -499,7 +521,7 @@ def _payload(widget_id: str, **ov) -> dict:
     p = dict(
         widget_id=widget_id,
         signed_key=_VALID_KEY,
-        customer_ref="cust-1",
+        customer_ref="cust-0001",
         message="What time do you open?",
     )
     p.update(ov)
@@ -598,3 +620,106 @@ class TestDeadFrameShell:
         # An unlisted parent gets NO script — nothing is posted anywhere.
         stranger = _dead_frame_response("https://evil.example", ["brewco.com"]).body.decode()
         assert "postMessage" not in stranger
+
+
+# --------------------------------------------------------------------------- #
+# The CSP sandbox — every frame document the server returns is sandboxed by the
+# BROWSER, whoever embeds it (our loader, a direct embed, or a top-level open).
+# --------------------------------------------------------------------------- #
+
+
+def _assert_sandboxed(res, frame_ancestors: str) -> None:
+    csp = res.headers["content-security-policy"]
+    directives = _directives(csp)
+    assert _SANDBOX_DIRECTIVE in directives
+    assert frame_ancestors in directives
+    # The one thing the sandbox exists to stop: the frame steering the top page.
+    assert "allow-top-navigation" not in csp
+
+
+@pytest.mark.asyncio
+async def test_live_frame_is_sandboxed(frame_client):
+    await _site(allowed_origins=["brewco.com"])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert res.status_code == 200
+    _assert_sandboxed(res, "frame-ancestors brewco.com:*")
+
+
+@pytest.mark.asyncio
+async def test_dead_frame_for_disabled_concierge_is_sandboxed(frame_client):
+    await _site(concierge_enabled=False)
+    res = await frame_client.get(
+        "/paw-bar/frame", params={"key": _VALID_KEY, "po": "https://brewco.com"}
+    )
+    assert res.status_code == 403
+    assert "pawbar:dead" in res.text
+    # The dead shell never had an embedder gate; it says so (frame-ancestors *).
+    _assert_sandboxed(res, "frame-ancestors *")
+
+
+@pytest.mark.asyncio
+async def test_dead_frame_for_empty_allowlist_is_sandboxed(frame_client):
+    await _site(allowed_origins=[])
+    res = await frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert res.status_code == 403
+    _assert_sandboxed(res, "frame-ancestors *")
+
+
+def test_dead_frame_shell_is_sandboxed() -> None:
+    from pocketpaw_ee.paw_bar.router import _dead_frame_response
+
+    res = _dead_frame_response("https://brewco.com", ["brewco.com"])
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors *")
+
+
+# --------------------------------------------------------------------------- #
+# Layer 4 — behind the dashboard's security_headers_middleware (self-hosted)
+# --------------------------------------------------------------------------- #
+# The self-hosted dashboard app runs every response through
+# ``security_headers_middleware``. It used to assign its strict headers over the
+# frame's own: ``frame-ancestors 'none'`` replaced the allowlist (and the sandbox),
+# ``X-Frame-Options: DENY`` was added, and ``microphone=()`` killed dictation. The
+# bar could not embed on any customer site. These run the real frame endpoint
+# through the real middleware.
+
+
+@pytest_asyncio.fixture
+async def dashboard_frame_client(mongo_db):
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.paw_bar.router import router
+
+    from pocketpaw.dashboard import security_headers_middleware
+
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(router)
+    app.middleware("http")(security_headers_middleware)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client
+
+
+@pytest.mark.asyncio
+async def test_dashboard_middleware_keeps_the_frame_headers(dashboard_frame_client):
+    await _site(allowed_origins=["brewco.com"])
+    res = await dashboard_frame_client.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert res.status_code == 200
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors brewco.com:*")
+    assert "x-frame-options" not in {k.lower() for k in res.headers}
+    perms = res.headers["permissions-policy"]
+    assert "microphone=(self)" in perms
+    assert "microphone=()" not in perms
+    # Headers the frame does not set itself still get the dashboard defaults.
+    assert res.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_middleware_keeps_the_dead_frame_headers(dashboard_frame_client):
+    await _site(concierge_enabled=False)
+    res = await dashboard_frame_client.get(
+        "/paw-bar/frame", params={"key": _VALID_KEY, "po": "https://brewco.com"}
+    )
+    assert res.status_code == 403
+    assert "pawbar:dead" in res.text
+    assert res.headers["content-security-policy"] == _csp("frame-ancestors *")
+    assert "x-frame-options" not in {k.lower() for k in res.headers}

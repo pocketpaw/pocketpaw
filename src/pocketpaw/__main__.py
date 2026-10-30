@@ -92,8 +92,10 @@ def _run_async(coro):
         return ex.submit(asyncio.run, coro).result()
 
 
-# Setup beautiful logging with Rich
-setup_logging(level="INFO")
+# Setup beautiful logging with Rich. The level is read from the environment so an
+# operator can raise verbosity on a running deployment without a code change; it
+# was hardcoded, which meant DEBUG diagnostics were unreachable in production.
+setup_logging(level=os.environ.get("POCKETPAW_LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 

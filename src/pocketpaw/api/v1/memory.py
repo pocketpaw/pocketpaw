@@ -84,7 +84,7 @@ async def get_memory_settings():
 @router.post("/memory/settings", response_model=StatusResponse)
 async def save_memory_settings(request: Request):
     """Save memory backend configuration."""
-    from pocketpaw.config import Settings, get_settings
+    from pocketpaw.config import Settings
     from pocketpaw.memory import get_memory_manager
 
     data = await request.json()
@@ -96,7 +96,9 @@ async def save_memory_settings(request: Request):
             setattr(settings, settings_field, value)
 
     settings.save()
-    get_settings.cache_clear()
+    from pocketpaw.cache_invalidation import clear_settings_cache
+
+    clear_settings_cache()
     get_memory_manager(force_reload=True)
     return StatusResponse()
 

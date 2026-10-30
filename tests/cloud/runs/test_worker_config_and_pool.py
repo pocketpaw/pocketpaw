@@ -18,6 +18,9 @@ descriptor magic.
 
 #10: ``arq_executor._pool`` had no aclose hook — a web process that ever
      enqueued a job leaked the connection through shutdown.
+
+Changes (2026-10-01, CN-4): the arq pool moved to ``_core.redis_client``
+(``get_arq_pool`` / ``close_arq_pool``); the #10 tests follow it there.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from arq.connections import RedisSettings
-from pocketpaw_ee.cloud.chat.runs import arq_executor
+from pocketpaw_ee.cloud._core import redis_client
 from pocketpaw_ee.cloud.chat.runs import worker as worker_mod
 
 pytestmark = pytest.mark.asyncio
@@ -79,28 +82,28 @@ async def test_redis_settings_helper_parses_env(monkeypatch):
 
 
 async def test_close_pool_aclose_called_when_pool_exists(monkeypatch):
-    """close_pool must actually invoke aclose() on the cached pool, then
-    null the reference so subsequent _get_pool builds a fresh one."""
-    arq_executor._reset_for_tests()
+    """close_arq_pool must actually invoke aclose() on the cached pool, then
+    null the reference so subsequent get_arq_pool builds a fresh one."""
+    redis_client._reset_for_tests()
 
     fake_pool = AsyncMock()
     fake_pool.aclose = AsyncMock()
-    monkeypatch.setattr(arq_executor, "_pool", fake_pool)
+    monkeypatch.setattr(redis_client, "_arq_pool", fake_pool)
 
-    await arq_executor.close_pool()
+    await redis_client.close_arq_pool()
 
     fake_pool.aclose.assert_awaited_once()
-    assert arq_executor._pool is None
+    assert redis_client._arq_pool is None
 
 
 async def test_close_pool_is_safe_when_no_pool_exists():
-    """Web processes that never enqueued a Tier 2 job will call close_pool
+    """Web processes that never enqueued a Tier 2 job will call close_arq_pool
     on shutdown — it must be a no-op, not raise AttributeError."""
-    arq_executor._reset_for_tests()
+    redis_client._reset_for_tests()
 
     # Should not raise.
-    await arq_executor.close_pool()
-    assert arq_executor._pool is None
+    await redis_client.close_arq_pool()
+    assert redis_client._arq_pool is None
 
 
 async def test_close_pool_swallows_aclose_failure(monkeypatch, caplog):
@@ -108,16 +111,16 @@ async def test_close_pool_swallows_aclose_failure(monkeypatch, caplog):
     paths can't afford to raise."""
     import logging
 
-    arq_executor._reset_for_tests()
+    redis_client._reset_for_tests()
 
     fake_pool = AsyncMock()
     fake_pool.aclose = AsyncMock(side_effect=RuntimeError("redis lost"))
-    monkeypatch.setattr(arq_executor, "_pool", fake_pool)
+    monkeypatch.setattr(redis_client, "_arq_pool", fake_pool)
 
-    with caplog.at_level(logging.DEBUG, logger="pocketpaw_ee.cloud.chat.runs.arq_executor"):
-        await arq_executor.close_pool()  # must not raise
+    with caplog.at_level(logging.DEBUG, logger="pocketpaw_ee.cloud._core.redis_client"):
+        await redis_client.close_arq_pool()  # must not raise
 
-    assert arq_executor._pool is None  # ref cleared even on failure
+    assert redis_client._arq_pool is None  # ref cleared even on failure
 
 
 # --- run job_timeout: arq's 300s default cancelled long agent runs ----------

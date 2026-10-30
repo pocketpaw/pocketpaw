@@ -1,10 +1,23 @@
 # html_paths.py — the ONE place the html-track source-map path policy lives.
 #
+# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — ``paw.dependencies.json``
+# is reserved in any spelling, case included, and the ``_paw/`` namespace is now
+# matched case-insensitively too, as the generator (paw-sites PS-1) matches it.
+# An html site's root is authorable, so without this the edit lane could hand-write
+# the dependency manifest the generator turns into an importmap — skipping the
+# resolver that pins each package and computes its SRI hash. Only
+# ``set_site_dependencies`` writes it.
+#
+# Updated: 2026-09-06 (feat/fx-mcp-server) — ``_html_references`` also scans ES
+# ``import ... from '...'`` / ``import '...'`` / ``import('...')`` so a file reached
+# only through a module import (an ``_fx/`` effect's vendor dep) is not flagged
+# ``unreferenced``.
+#
 # Updated: 2026-09-01 (fix/sites-html-orphan-create) — added
 # ``html_path_is_referenced``, the first question in this module about REACHABILITY
 # rather than policy: does anything in the site point at that file. It lives here
 # because the answer is html's alone. The react peer resolves import specifiers; an
-# html site imports nothing, so this resolves URL references (href / src / srcset /
+# html site has no module graph to walk, so this resolves URL references (href / src / srcset /
 # poster, CSS url() and @import) against the referring file's directory, and honours
 # the directory-index rule the preview resolver uses. See the section comment above
 # the function for the incident and the three rules that follow from it.
@@ -64,6 +77,8 @@ import posixpath
 import re
 from collections.abc import Mapping
 
+from pocketpaw_ee.sites.dependency_manifest import is_dependency_manifest_path
+
 # The namespace the html generator owns. Mirrors ``RESERVED_NAMESPACE`` in
 # paw-sites' html-scaffold.ts, which throws on a collision. Stored WITH the
 # trailing slash so the guard matches the directory and not a sibling that merely
@@ -89,8 +104,12 @@ def is_reserved_html_path(path: str) -> bool:
     Matches the directory itself as well as anything under it, so neither
     ``_paw`` nor ``_paw/edit-manifest.json`` is writable.
     """
-    norm = normalize_html_path(path)
-    return norm == HTML_RESERVED_PREFIX.rstrip("/") or norm.startswith(HTML_RESERVED_PREFIX)
+    folded = normalize_html_path(path).casefold()
+    return (
+        is_dependency_manifest_path(folded)
+        or folded == HTML_RESERVED_PREFIX.rstrip("/")
+        or folded.startswith(HTML_RESERVED_PREFIX)
+    )
 
 
 def escapes_project_root(path: str) -> bool:
@@ -124,6 +143,12 @@ def html_path_rejection(path: str) -> str | None:
             "An html site's files are project-relative — `index.html`, "
             "`styles.css`, `about/index.html`. A path that climbs out of the "
             "project with `..`, or an absolute path, is not writable."
+        )
+    if is_dependency_manifest_path(norm):
+        return (
+            f"`{path}` is the site's dependency manifest. Only "
+            "`set_site_dependencies` writes it, because each entry is vetted against "
+            "the npm registry and pinned with an integrity hash before it lands."
         )
     if is_reserved_html_path(path):
         return (
@@ -193,6 +218,11 @@ _HTML_SRCSET_RE = re.compile(r"""\bsrcset\s*=\s*['"]([^'"]+)['"]""", re.IGNORECA
 # ``<img src>``. Quotes inside ``url()`` are optional, hence the optional group.
 _CSS_URL_RE = re.compile(r"""url\(\s*['"]?([^'")]+)['"]?\s*\)""", re.IGNORECASE)
 _CSS_IMPORT_RE = re.compile(r"""@import\s+['"]([^'"]+)['"]""", re.IGNORECASE)
+# ES module imports reach files too: a page's <script type="module"> or an
+# ``_fx/`` effect's index.js pulling in a vendor file. Static ``import x from '…'``
+# / bare ``import '…'`` and dynamic ``import('…')`` both count.
+_JS_IMPORT_RE = re.compile(r"""\bimport\s+(?:[^'";]*?\bfrom\s+)?['"]([^'"]+)['"]""")
+_JS_DYNAMIC_IMPORT_RE = re.compile(r"""\bimport\(\s*['"]([^'"]+)['"]\s*\)""")
 
 # Schemes that name something outside this site. ``//`` is protocol-relative (still
 # off-site) and a leading ``#`` is a fragment on the current page.
@@ -218,6 +248,8 @@ def _html_references(text: str) -> list[str]:
                 refs.append(parts[0])
     refs.extend(_CSS_URL_RE.findall(text))
     refs.extend(_CSS_IMPORT_RE.findall(text))
+    refs.extend(_JS_IMPORT_RE.findall(text))
+    refs.extend(_JS_DYNAMIC_IMPORT_RE.findall(text))
     return refs
 
 

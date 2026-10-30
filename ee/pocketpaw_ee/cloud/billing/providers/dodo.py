@@ -69,6 +69,20 @@
 #     ``plan_key``), the recurring product at ``data.product_id`` (the reverse-map
 #     fallback for the tier), and the subscription id at ``data.subscription_id``.
 #
+# INR TOP-UPS (PH-4, feat/partners-inr-topup): ``create_one_time(currency="INR")``
+#   puts the amount (PAISE) on a SEPARATE INR-priced credits product
+#   (``dodo_credit_product_id_inr``) — a pay-what-you-want ``amount`` is in the
+#   PRODUCT's currency, so the USD product cannot carry an exact rupee figure —
+#   and pins ``billing_currency="INR"`` so Dodo refuses (a legible 4xx via
+#   ``_gateway_failure``) rather than silently converting. The webhook parse also
+#   lifts ``data.settlement_amount`` / ``data.settlement_currency`` onto the
+#   ``GatewayEvent`` so the service can grant an INR charge from Dodo's own USD
+#   settlement figure, and lifts ``data.product_cart`` product ids onto
+#   ``GatewayEvent.product_ids`` — Dodo's own record of what was bought, which is
+#   what the INR path routes on. ``topup_currency`` is stamped on checkout
+#   metadata as an informational tag only: a static payment link lets a buyer set
+#   ``metadata_*`` params, so metadata never gates or sizes a grant.
+#
 # SECURITY: the signature is verified before the payload is parsed. The webhook
 # secret and the API key are NEVER logged.
 #
@@ -91,6 +105,10 @@
 #   return a ``SubscriptionEvent`` for a verified ``subscription.*`` delivery
 #   (plan_key from metadata, with a product_id reverse-map fallback off the
 #   configured plan->product mapping).
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 review): ``create_one_time``
+# takes ``pin_currency`` — a partner client pay link pins its charge currency
+# (``billing_currency``) so the payment matches the link exactly. Top-ups unchanged.
+#
 # Updated 2026-06-24 (BC-9): ``verify_and_parse_webhook`` now also reads
 #   ``data.metadata.site_id`` onto the ``SubscriptionEvent`` — the discriminator
 #   that tells a PER-SITE annual sub (each published site has its own plan) from a
@@ -224,6 +242,24 @@ def _reversal_amount(raw: Any, *, event_type: str, event_id: str) -> int:
     return max(value, 0)
 
 
+def _cart_product_ids(cart: Any) -> tuple[str, ...]:
+    """Product ids from a verified payment's ``product_cart``, strictly.
+
+    Anything malformed — not a list, a non-dict line, a non-string id — yields
+    an empty tuple rather than an exception, so a strange body is a no-grant
+    ack, never a 500 that Dodo retries forever.
+    """
+    if not isinstance(cart, list):
+        return ()
+    ids: list[str] = []
+    for line in cart:
+        pid = line.get("product_id") if isinstance(line, dict) else None
+        if not isinstance(pid, str) or not pid:
+            return ()
+        ids.append(pid)
+    return tuple(ids)
+
+
 class DodoProvider:
     """Dodo Payments gateway adapter. Implements ``IPaymentsProvider``."""
 
@@ -236,6 +272,7 @@ class DodoProvider:
         credit_product_id: str | None,
         plan_products: dict[str, str] | None = None,
         billing_country: str = _DEFAULT_BILLING_COUNTRY,
+        credit_product_id_inr: str | None = None,
     ) -> None:
         # Stored, not validated here — a deployment may construct the provider
         # with billing disabled. Each call validates the inputs IT needs, so a
@@ -244,6 +281,9 @@ class DodoProvider:
         self._environment = environment or "test_mode"
         self._webhook_secret = webhook_secret
         self._credit_product_id = credit_product_id
+        # The INR-priced credits product (PH-4). Separate because a
+        # pay-what-you-want amount is denominated in the product's own currency.
+        self._credit_product_id_inr = credit_product_id_inr
         # plan_key -> recurring product_id (BC-7). Used only for the REVERSE map
         # at webhook-parse time (product_id -> plan_key) when a subscription
         # delivery's metadata lacks plan_key; the forward direction (picking a
@@ -264,6 +304,7 @@ class DodoProvider:
             credit_product_id=getattr(settings, "dodo_credit_product_id", None),
             plan_products=plan_products if isinstance(plan_products, dict) else None,
             billing_country=getattr(settings, "dodo_billing_country", _DEFAULT_BILLING_COUNTRY),
+            credit_product_id_inr=getattr(settings, "dodo_credit_product_id_inr", None),
         )
 
     def _plan_key_for_product(self, product_id: str) -> str:
@@ -363,6 +404,8 @@ class DodoProvider:
         workspace_id: str,
         customer_email: str | None,
         metadata: dict,
+        currency: str = "USD",
+        pin_currency: bool = False,
     ) -> OneTimeCheckout:
         if (
             not isinstance(amount_credits, int)
@@ -374,20 +417,40 @@ class DodoProvider:
             )
         if not workspace_id:
             raise ValidationError("billing.invalid_workspace", "workspace_id is required")
-        if not self._credit_product_id:
+        currency = (currency or "USD").upper()
+        env_name = "POCKETPAW_DODO_CREDIT_PRODUCT_ID"
+        if currency == "INR":
+            product_id, env_name = self._credit_product_id_inr, f"{env_name}_INR"
+        elif currency == "USD":
+            product_id = self._credit_product_id
+        else:
+            raise ValidationError("billing.invalid_currency", "currency must be USD or INR")
+        if not product_id:
             raise ValidationError(
                 "billing.product_unconfigured",
-                "Dodo credit product id is not configured (POCKETPAW_DODO_CREDIT_PRODUCT_ID).",
+                f"Dodo credit product id is not configured ({env_name}).",
             )
 
-        # 1 credit == $0.01 == 1 cent == the currency's lowest denomination, so
-        # amount_credits maps 1:1 onto Dodo's amount field — no division.
+        # The cart amount is in the product currency's lowest denomination: for
+        # USD 1 credit == 1 cent so amount_credits maps 1:1 (no division); for
+        # INR the caller already passed paise.
         cart_amount_cents = amount_credits
 
         # workspace_id MUST ride on metadata so the webhook can route the grant.
         # The provider stamps it authoritatively, overriding any caller value.
         meta = {k: str(v) for k, v in dict(metadata or {}).items()}
         meta["workspace_id"] = str(workspace_id)
+        # Informational tag only. It NEVER gates or sizes a grant: a static
+        # payment link accepts ``metadata_*`` query params, so a buyer can write
+        # any value here. The webhook routes on Dodo's ``product_cart`` instead.
+        meta["topup_currency"] = currency
+
+        # INR only: pin the charge currency so Dodo refuses rather than converting.
+        # The USD path sends nothing here, exactly as before — pinning it would
+        # switch off Dodo's adaptive local-currency display for existing buyers.
+        # ``pin_currency`` (PH-13 partner pay links) pins USD too: the payment must
+        # be charged in exactly the currency and amount the link was made for.
+        extra = {"billing_currency": currency} if currency == "INR" or pin_currency else {}
 
         client = self._client()
         try:
@@ -396,13 +459,14 @@ class DodoProvider:
                 customer=_customer_param(customer_email),
                 product_cart=[
                     {
-                        "product_id": self._credit_product_id,
+                        "product_id": product_id,
                         "quantity": 1,
                         "amount": cart_amount_cents,
                     }
                 ],
                 payment_link=True,
                 metadata=meta,
+                **extra,
             )
         except CloudError:
             raise
@@ -685,6 +749,14 @@ class DodoProvider:
             workspace_id=workspace_id,
             currency=currency,
             raw=verified,
+            settlement_amount=(
+                int(data["settlement_amount"])
+                if isinstance(data.get("settlement_amount"), int)
+                and not isinstance(data.get("settlement_amount"), bool)
+                else 0
+            ),
+            settlement_currency=str(data.get("settlement_currency") or ""),
+            product_ids=_cart_product_ids(data.get("product_cart")),
         )
 
 

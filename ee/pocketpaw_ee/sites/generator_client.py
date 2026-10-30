@@ -6,6 +6,31 @@
 # fail-gates on the workerd SSR render markers. If the gate fails the site does
 # NOT proceed to deploy (Contract clause 4). The subprocess calls are isolated
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
+#
+# Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline): paw-sites now prints a
+# structured ``{"error","code"}`` line on stdout for every failed ``build`` (contract §3),
+# parsed by PP-4's ``parse_generator_refusal`` into ``GeneratorRefused``; ``run_static_check``
+# reuses the same parser. NEW
+# ``run_static_check`` drives ``paw-sites-gen check`` — the static verification layer,
+# which installs nothing and is therefore safe on the API host for any source.
+#
+# Updated 2026-09-24 (PP-1, feat/sites-author-dependencies): this client builds on
+# the HOST it runs in — the API process, the dev server, draft markup, the native
+# pre-warm — and its install step is a real ``bun install``. Author-declared npm
+# packages (``paw.dependencies.json`` in the source map) must install only in the
+# Daytona sandbox, so ``_build_one`` now REFUSES a node build of such a source with
+# ``HostInstallRefused`` before generate even runs. It is the last line: the service
+# routes those pockets to the sandbox lane first. The manifest itself passes through
+# ``build_generator_input`` untouched as an ordinary source-map file (the generator
+# parses it). ``_ripple_motion_dep`` now reads motion's pin from ``vetted_pins``
+# (the vendored ``paw-sites-gen allowlist`` output) instead of a hard-coded copy.
+#
+# Updated 2026-09-24 (PP-4, fix/sites-legacy-build-shell-migration): paw-sites PS-1
+# prints a structured ``{"error", "code"}`` line on stdout when ``build`` refuses on
+# purpose. ``_SubprocessRunner.generate`` now reads it and raises ``GeneratorRefused``
+# (a ``RuntimeError`` subclass, so every existing catch still holds) carrying the code
+# and, for ``reserved_path``, the offending source-map key. The sites service maps a
+# reserved_path refusal to a 422 that names the file instead of generator_failed.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
 # Updated 2026-08-10 (SL-3 — the async publish needs the payload without the build):
@@ -308,7 +333,15 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote
 
+from pocketpaw_ee.sites import vetted_pins
+from pocketpaw_ee.sites.bun_supply_chain import (
+    BUILD_BUNFIG_REL,
+    host_build_env,
+    write_host_bunfig,
+)
+from pocketpaw_ee.sites.dependency_manifest import requires_sandbox
 from pocketpaw_ee.sites.engines import (
+    build_requires_sandbox,
     candidate_static_output_rels,
     is_source_engine,
     needs_node_build,
@@ -450,10 +483,52 @@ async def _communicate_bounded(
 # current fingerprint matches this; mismatch forces a reinstall (PERF-3).
 _INSTALL_HASH_FILE = ".paw-install-hash"
 
+#: Written into a pocket's persistent build dir after a successful static build: the
+#: hash of the content that build rendered (:func:`draft_source_hash`). ``draft_markup``
+#: serves an on-disk build only when this matches the pocket's CURRENT content, so an
+#: edit since the last build is never photographed as the old page.
+DRAFT_SOURCE_STAMP_FILE = ".paw-draft-source-hash"
+
+
+def draft_source_hash(
+    *, engine: str | None, source: dict[str, Any] | None, ripple_spec: dict[str, Any] | None
+) -> str:
+    """Hash of the content a build renders: the ``source`` map on a source engine, the
+    ``rippleSpec`` (which carries the theme) on ripple. Order-independent."""
+    from pocketpaw_ee.sites.engines import is_source_engine, normalize_engine
+
+    eng = normalize_engine(engine)
+    content = (source or {}) if is_source_engine(eng) else (ripple_spec or {})
+    payload = json.dumps({"engine": eng, "content": content}, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def read_draft_source_stamp(project_dir: Path) -> str:
+    try:
+        return (project_dir / DRAFT_SOURCE_STAMP_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 # Files whose contents define the dependency set. If any change, node_modules is
 # stale and must be reinstalled. The lockfile names cover bun's text + binary
 # lockfiles and the npm fallback.
-_INSTALL_INPUT_FILES = ("package.json", "bun.lock", "bun.lockb", "package-lock.json")
+#
+# bunfig.toml is in this list even though it declares no dependency, because it
+# decides HOW they resolve: the release-age floor and ignoreScripts. A node_modules
+# installed without the floor is exactly as stale as one installed from a different
+# package.json, and leaving it out is how introducing the floor would have silently
+# skipped every already-built site — the hash would not move, so install() (which
+# writes it) would never be reached. Including it costs one reinstall per cached
+# build dir, once.
+_INSTALL_INPUT_FILES = (
+    "package.json",
+    "bun.lock",
+    "bun.lockb",
+    "package-lock.json",
+    BUILD_BUNFIG_REL,
+    ".npmrc",
+)
 
 # Known workerd SSR-render failure markers (mirrors paw-sites/src/smoke.ts). A
 # LIVE publish fail-gates on these; a preview build tolerates them (the live
@@ -707,6 +782,142 @@ class SmokeGateFailed(RuntimeError):
     """Raised when the workerd smoke render fails — the site is not deployed."""
 
 
+class GeneratorRefused(RuntimeError):
+    """The generator refused the input on purpose (paw-sites ``failStructured``, PP-4).
+
+    ``code`` is the generator's stable wire code (``reserved_path``,
+    ``dependency_policy``, ``engine_unsupported``, ``invalid_input``). ``path`` is the
+    source-map key a ``reserved_path`` refusal names, when the message carries one.
+    A ``RuntimeError`` subclass so callers that caught a failed generate still do.
+    """
+
+    def __init__(self, code: str, message: str, path: str | None = None) -> None:
+        super().__init__(f"generator refused ({code}): {message}")
+        self.code = code
+        self.message = message
+        self.path = path
+
+
+_RESERVED_PATH_RE = re.compile(r'generator-owned path "([^"]+)"')
+
+
+def parse_generator_refusal(stdout: str) -> GeneratorRefused | None:
+    """The structured refusal on the generator's last stdout line, or ``None``.
+
+    ``internal_error`` is not a refusal (it is a crash the CLI still reports as a
+    line), so it returns ``None`` and the caller keeps its generic failure.
+    """
+    lines = [ln for ln in (stdout or "").strip().splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code, message = payload.get("code"), payload.get("error")
+    if not isinstance(code, str) or not isinstance(message, str) or code == "internal_error":
+        return None
+    path = None
+    if code == "reserved_path" and (m := _RESERVED_PATH_RE.search(message)):
+        path = m.group(1)
+    return GeneratorRefused(code, message, path)
+
+
+class HostInstallRefused(RuntimeError):
+    """A host build was asked to install author-declared npm packages (PP-1).
+
+    Deliberately NOT a ``SmokeGateFailed``: nothing about the site failed. The build
+    was routed to the wrong place, and the edit lane's rollback-on-smoke-failure must
+    not treat it as a bad edit. The sites service maps it to a 422.
+    """
+
+
+#: The paw-sites structured-error codes that are DELIBERATE refusals of the author's
+#: input (contract §3) — the author can fix these. ``internal_error`` is not one.
+AUTHOR_FIXABLE_GENERATOR_CODES: frozenset[str] = frozenset(
+    {"dependency_policy", "reserved_path", "engine_unsupported", "invalid_input"}
+)
+
+
+class StaticCheckUnavailable(RuntimeError):
+    """``paw-sites-gen check`` could not run: no generator on PATH, a generator that
+    predates the subcommand, a crash, or a timeout. ``reason`` is a fixed identifier."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+#: Budget for the static check. It parses TS and compiles svelte in-process and runs in
+#: about a second; anything near this is a wedged process.
+STATIC_CHECK_TIMEOUT_SEC = 60
+
+
+async def run_static_check(
+    input_json: dict[str, Any], *, _exec: Any = None, timeout_s: int | None = None
+) -> dict[str, Any]:
+    """Run ``paw-sites-gen check`` (the STATIC verification layer, contract §3).
+
+    Installs nothing and builds nothing — safe on the API host for any source,
+    including one with author packages. Returns the parsed ``{ok, errors, warnings}``
+    report. A structured refusal (exit 1 with an author-fixable code) is returned AS a
+    failed report with one static error, because it is the author's to fix. Everything
+    else that stops the check from running raises :class:`StaticCheckUnavailable`.
+    """
+    input_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            input_path = fh.name
+            json.dump(input_json, fh)
+        try:
+            proc = await (_exec or asyncio.create_subprocess_exec)(
+                *_gen_cmd_argv(),
+                "check",
+                "--input",
+                input_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            raise StaticCheckUnavailable("checker_unavailable") from exc
+        try:
+            stdout, _stderr = await _communicate_bounded(
+                proc, timeout_s or STATIC_CHECK_TIMEOUT_SEC, "check"
+            )
+        except _BuildTimeout as exc:
+            raise StaticCheckUnavailable("timeout") from exc
+        if proc.returncode == 0:
+            try:
+                report = json.loads(stdout.decode().strip().splitlines()[-1])
+            except (ValueError, IndexError) as exc:
+                raise StaticCheckUnavailable("check_output_unreadable") from exc
+            if not isinstance(report, dict) or not isinstance(report.get("errors"), list):
+                raise StaticCheckUnavailable("check_output_unreadable")
+            return report
+        refusal = parse_generator_refusal(stdout.decode(errors="replace"))
+        if proc.returncode == 1 and refusal is not None:
+            if refusal.code in AUTHOR_FIXABLE_GENERATOR_CODES:
+                return {
+                    "ok": False,
+                    "errors": [
+                        {"layer": "static", "code": refusal.code, "message": refusal.message}
+                    ],
+                    "warnings": [],
+                }
+            raise StaticCheckUnavailable("check_crashed")
+        if proc.returncode == 1:
+            # A structured ``internal_error`` line, or none at all: a crash.
+            raise StaticCheckUnavailable("check_crashed")
+        # Exit 2 is usage — a generator that predates ``check`` lands here too.
+        raise StaticCheckUnavailable("checker_unavailable")
+    finally:
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
+
+
 # --------------------------------------------------------------------------- #
 # HE-3 — the html static smoke check (the html-path replacement for the workerd
 # SSR gate). ripple/svelte fail-gate a LIVE publish on a workerd SSR render (see
@@ -935,11 +1146,17 @@ def artifact_home() -> Path:
 _ARTIFACT_FORMAT_EPOCH = "v1"
 
 
-def _generator_build_id() -> str:
-    """Identity of the paw-sites BUILD currently on disk — ``mtime_ns:size`` of the
-    resolved generator entry file, or ``"unresolved"`` when it cannot be located.
+# Single-slot memo for :func:`_generator_build_id`: the last entry file's stat key
+# ``(resolved path, st_mtime_ns, st_size)`` and the content digest computed for it.
+_BUILD_ID_MEMO: dict[str, Any] = {}
 
-    Added 2026-08-25. :func:`generator_version` claimed to identify "the paw-sites
+
+def _generator_build_id() -> str:
+    """Identity of the paw-sites BUILD currently on disk — a SHA-256 content digest
+    prefix of the resolved generator entry file, or ``"unresolved"`` when it cannot be
+    located or read.
+
+    :func:`generator_version` once claimed to identify "the paw-sites
     GENERATOR", but every term of it was a hand-maintained constant or a dep version
     string: rebuilding ``paw-sites/dist/cli.js`` did not move the cache key at all.
     So a generator change that alters the built HTML — exactly what RX-2's react
@@ -950,15 +1167,17 @@ def _generator_build_id() -> str:
     is coarse and stays armed in Browse mode", nowhere near the cache that caused it,
     and no amount of rebuilding the generator clears it.
 
-    Stat, not hash: the bundled ``cli.js`` is ~10MB and this rides a per-view code
-    path, so a content hash would cost more than the rebuild it guards against.
-    ``mtime_ns`` moves on every rebuild, which is precisely the event that must
-    invalidate.
+    Content, not mtime: a redeploy, image rebuild or fresh checkout writes the SAME
+    bytes with a NEW mtime. The built HTML cannot differ, so the key must not either;
+    keying on mtime made every routine deploy re-build every site's preview in a
+    sandbox the next time it was opened, with nothing about the site changed.
 
-    NOT memoised, deliberately. A module-level cache would pin the value at import
-    and reintroduce the bug for the case that matters most — a generator rebuilt
-    while the server is running, which is the normal inner loop when someone is
-    iterating on the generator itself.
+    Memoised on stat, not at import. The bundled ``cli.js`` is ~10MB and this rides
+    a per-view code path, so the digest is cached against ``(resolved path,
+    st_mtime_ns, st_size)``: an unchanged file costs one ``stat()``, and any stat
+    change forces a re-hash. That still picks up a generator rebuilt while the
+    server is running (the normal inner loop when iterating on the generator
+    itself), which a value pinned at import would miss.
 
     ``"unresolved"`` (a CONSTANT, never a changing value) is the honest degrade: it
     restores exactly today's behaviour rather than making the key unstable, which
@@ -967,7 +1186,7 @@ def _generator_build_id() -> str:
     # LAST existing-file token wins, and the direction is load-bearing. The documented
     # local override is an INTERPRETER plus a script — the shipped one on this box is
     # "C:/PROGRA~1/nodejs/node.exe D:/…/paw-sites/dist/cli.js" — so both tokens are
-    # real files and taking the FIRST fingerprints node.exe, whose mtime never moves
+    # real files and taking the FIRST fingerprints node.exe, whose bytes never change
     # on a generator rebuild. That would leave this function returning a constant and
     # the bug entirely unfixed, while looking like it worked.
     entry: str | None = next((tok for tok in reversed(argv) if Path(tok).is_file()), None)
@@ -976,10 +1195,21 @@ def _generator_build_id() -> str:
     if not entry:
         return "unresolved"
     try:
-        st = Path(entry).stat()
+        path = Path(entry).resolve()
+        st = path.stat()
+        stat_key = (str(path), st.st_mtime_ns, st.st_size)
+        if _BUILD_ID_MEMO.get("stat") == stat_key:
+            return _BUILD_ID_MEMO["digest"]
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
     except OSError:
         return "unresolved"
-    return f"{st.st_mtime_ns}:{st.st_size}"
+    digest = h.hexdigest()[:20]
+    _BUILD_ID_MEMO["stat"] = stat_key
+    _BUILD_ID_MEMO["digest"] = digest
+    return digest
 
 
 def generator_version() -> str:
@@ -1021,8 +1251,10 @@ def _ripple_motion_dep() -> str:
     declare it as a direct dep or `bun run build` can't resolve the dynamic
     import. Matters most on the local ``file:`` ripple path: a ``file:`` dep
     isn't hoisted, so ripple's own motion never reaches the consumer. Override
-    with PAW_SITES_MOTION_DEP; keep it in lockstep with ripple's motion pin."""
-    return os.environ.get("PAW_SITES_MOTION_DEP", "^12.40.0")
+    with PAW_SITES_MOTION_DEP; otherwise the pin comes from ``vetted_pins`` (the
+    vendored generator allowlist, with a fallback constant), so it moves when
+    paw-sites moves it rather than when someone remembers to edit this line."""
+    return os.environ.get("PAW_SITES_MOTION_DEP") or vetted_pins.pin_for("motion")
 
 
 def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
@@ -1140,6 +1372,7 @@ def build_generator_input(
     builder_origin: str | None = None,
     d1_database_id: str = "",
     keeps_client_bundle: bool = False,
+    turnstile_site_key: str = "",
 ) -> dict[str, Any]:
     """The generator's STAGE-1/2 input payload — the exact dict handed to ``generate``.
 
@@ -1178,6 +1411,11 @@ def build_generator_input(
     # False so a plain static site's payload is byte-identical to before.
     if keeps_client_bundle:
         site_config["keepsClientBundle"] = True
+    # The site's own Turnstile widget (the ``turnstile`` integration). The generator
+    # puts it on paw.js as ``data-turnstile-sitekey`` so a write the gateway answers
+    # with ``turnstile_required`` can be retried with a token. Omitted when unset.
+    if turnstile_site_key:
+        site_config["turnstileSiteKey"] = turnstile_site_key
     # 2026-08-13 — resolve the capture tokens in AUTHORED source, public deploys only.
     #
     # The react and html tracks have no server route: there is no ``/api/submit`` to
@@ -1311,6 +1549,12 @@ class _SubprocessRunner:
                 # generator is a failed generate.
                 raise RuntimeError(f"generator timed out after {exc.timeout_s}s") from exc
             if proc.returncode != 0:
+                # PP-4 / PP-2: paw-sites prints a structured ``{"error","code"}`` line on
+                # stdout for a deliberate refusal; stderr carries a stack only for an
+                # internal error.
+                refusal = parse_generator_refusal(stdout.decode(errors="replace"))
+                if refusal is not None:
+                    raise refusal
                 raise RuntimeError(f"generator failed: {stderr.decode()}")
             return json.loads(stdout.decode().strip().splitlines()[-1])
         finally:
@@ -1326,6 +1570,16 @@ class _SubprocessRunner:
         # The deps are already made resolvable by build() (_rewrite_ripple_dep runs
         # before the install decision so the dep-hash reflects the final inputs).
         # This just runs `bun install` on the prepared dir.
+        #
+        # ...behind the HOST supply-chain floor (7-day release age, no lifecycle
+        # scripts). This runner is the API host — dev_server, draft_markup, service
+        # and the deployed Coolify image all use it — and it only installs our own
+        # toolchain (author packages are refused before this, HostInstallRefused);
+        # the open sandbox bunfig is the Daytona lane's alone. Written here rather
+        # than in build() because this is the method that spawns the install: a
+        # floor applied anywhere else is one a future caller can route around by
+        # calling install() directly.
+        write_host_bunfig(project_dir)  # the floor, laid at the spawn
         timeout_s = _build_timeout_sec()
         # start_new_session=True: own process group so a wedged install is killable
         # as a group on timeout.
@@ -1334,6 +1588,7 @@ class _SubprocessRunner:
             "install",
             "--no-save",
             cwd=project_dir,
+            env=host_build_env(),  # no API secrets reach the package manager
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -1380,6 +1635,7 @@ class _SubprocessRunner:
             "run",
             "build",
             cwd=project_dir,
+            env=host_build_env(),  # the build runs site code: no API secrets
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -1488,6 +1744,7 @@ async def apply_leaf_edits(
     source: dict[str, str],
     edits: list[dict[str, Any]],
     *,
+    lane: str | None = None,
     _exec: Any = None,
 ) -> dict[str, Any]:
     """Splice native-editor leaf edits into a svelte source map via the paw-sites
@@ -1523,17 +1780,81 @@ async def apply_leaf_edits(
     # need its path to clean it up. ONE outer try/finally covers creation + write +
     # exec, and the finally is guarded (only unlink a path that was assigned AND still
     # exists) so it never NameErrors on an early failure and never leaks the tempfile.
+    payload: dict[str, Any] = {"source": source, "edits": edits}
+    # HE-9: only send `lane` when the caller asked for one. The CLI treats an absent
+    # lane as svelte, so omitting it keeps an old payload byte-identical rather than
+    # relying on both sides agreeing on a default they both spell out.
+    if lane is not None:
+        payload["lane"] = lane
+    return await _run_gen_json("apply-leaf-edit", payload, _exec=_exec)
+
+
+async def arm_html(
+    source: dict[str, str],
+    *,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Stamp ``data-uid`` on an html source map's editable leaves and return the
+    stamped files plus the leaf manifest (HE-9).
+
+    The READ half of the html edit lane, and the reason it exists is an identity
+    mismatch the builder cannot paper over. An html pocket previews by assembling its
+    RAW ``source`` into a sandboxed srcdoc, so nothing in that document carries a uid:
+    the in-frame select agent resolves a click to a DOM-walk guess
+    (``<section>:<tag>:<ordinal>``) while the write path resolves by manifest uid
+    (``<page>:<role>:<ordinal>``). Two schemes over two documents — a pick could never
+    address a leaf. Arming emits the document the preview should actually render, so
+    both sides key off the SAME derived uids.
+
+    Returns ``{"source": {<relpath>: <stamped contents>}, "manifest": [leaf, ...]}``.
+    The stamping is an offset splice, so the returned files are byte-identical to the
+    input except the inserted attributes.
+
+    Like ``apply_leaf_edits`` this is a PURE transform — a parse and a splice, no
+    ``bun install``, no build — so it is safe to call inline when the operator opens
+    Design mode.
+
+    uids are DERIVED, never stored, so the caller must RE-ARM after a write rather than
+    cache: spans shift under a splice, which is exactly what makes a stale manifest
+    fail loudly instead of mis-targeting.
+
+    Failure surfaces as ``RuntimeError`` (non-zero exit or timeout), same contract as
+    ``apply_leaf_edits`` — the caller maps it to a structured CloudError.
+    """
+    return await _run_gen_json("arm-html", {"source": source}, _exec=_exec)
+
+
+async def _run_gen_json(
+    command: str,
+    payload: dict[str, Any],
+    *,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Run a PURE generator subcommand that takes ``--input <json>`` and emits exactly
+    one JSON line, and return the parsed line.
+
+    Extracted (HE-9) when ``arm-html`` became the second caller of this plumbing. The
+    tempfile handling below is subtle enough that two copies would be two chances to
+    get it wrong, and the copy is what rots.
+
+    ``input_path`` is assigned BEFORE ``json.dump`` so a serialization failure cannot
+    leave the created temp file un-tracked: ``NamedTemporaryFile(delete=False)``
+    materializes the file immediately, so if ``json.dump`` raises mid-write we still
+    need its path to clean up. ONE outer try/finally covers creation + write + exec,
+    and the finally is guarded (only unlink a path that was assigned AND still exists)
+    so it never NameErrors on an early failure and never leaks the tempfile.
+    """
     input_path = ""
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             input_path = fh.name
-            json.dump({"source": source, "edits": edits}, fh)
+            json.dump(payload, fh)
         timeout_s = _build_timeout_sec()
-        # start_new_session=True: own process group so a wedged splice (and any
-        # children it leaked) can be killed as a group on timeout — same as generate().
+        # start_new_session=True: own process group so a wedged run (and any children
+        # it leaked) can be killed as a group on timeout — same as generate().
         proc = await (_exec or asyncio.create_subprocess_exec)(
             *_gen_cmd_argv(),
-            "apply-leaf-edit",
+            command,
             "--input",
             input_path,
             stdout=asyncio.subprocess.PIPE,
@@ -1541,12 +1862,12 @@ async def apply_leaf_edits(
             start_new_session=True,
         )
         try:
-            stdout, stderr = await _communicate_bounded(proc, timeout_s, "apply-leaf-edit")
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, command)
         except _BuildTimeout as exc:
-            # A timed-out splice is a failed splice (mirror generate()'s raise-on-timeout).
-            raise RuntimeError(f"apply-leaf-edit timed out after {exc.timeout_s}s") from exc
+            # A timed-out run is a failed run (mirror generate()'s raise-on-timeout).
+            raise RuntimeError(f"{command} timed out after {exc.timeout_s}s") from exc
         if proc.returncode != 0:
-            raise RuntimeError(f"apply-leaf-edit failed: {stderr.decode()}")
+            raise RuntimeError(f"{command} failed: {stderr.decode()}")
         return json.loads(stdout.decode().strip().splitlines()[-1])
     finally:
         if input_path and os.path.exists(input_path):
@@ -1590,6 +1911,7 @@ class GeneratorClient:
         pocket_id: str | None = None,
         smoke: bool = True,
         static_build: bool = True,
+        turnstile_site_key: str = "",
     ) -> BuildResult:
         """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
 
@@ -1687,9 +2009,16 @@ class GeneratorClient:
                 pocket_id=None,
                 smoke=smoke,
                 static_build=static_build,
+                turnstile_site_key=turnstile_site_key,
             )
         async with self._lock_for(pocket_id):
-            return await self._build_one(
+            # The stamp says which content the on-disk build rendered. Drop it before
+            # the dir is rewritten (a failed build leaves stale output and NO stamp),
+            # and write it only after a static build succeeded.
+            stamp = build_home() / pocket_id / DRAFT_SOURCE_STAMP_FILE
+            with contextlib.suppress(OSError):
+                stamp.unlink()
+            result = await self._build_one(
                 ripple_spec=ripple_spec,
                 theme=theme,
                 site_id=site_id,
@@ -1705,7 +2034,15 @@ class GeneratorClient:
                 pocket_id=pocket_id,
                 smoke=smoke,
                 static_build=static_build,
+                turnstile_site_key=turnstile_site_key,
             )
+            if static_build and stamp.parent.is_dir():
+                with contextlib.suppress(OSError):
+                    stamp.write_text(
+                        draft_source_hash(engine=engine, source=source, ripple_spec=ripple_spec),
+                        encoding="utf-8",
+                    )
+            return result
 
     async def _build_one(
         self,
@@ -1725,7 +2062,24 @@ class GeneratorClient:
         smoke: bool,
         static_build: bool = True,
         assets: dict[str, str] | None = None,
+        turnstile_site_key: str = "",
     ) -> BuildResult:
+        # PP-1: author packages AND authored build-shell files (package.json,
+        # vite.config.*, svelte.config.*, bunfig.toml, .npmrc) build ONLY in the
+        # Daytona sandbox. This client installs on whatever host it runs on, so a
+        # node build of such a source is refused here, before generate — nothing is
+        # written and nothing installs. html is exempt: it never installs (its
+        # packages load from the CDN through an importmap). Fails closed
+        # (``requires_sandbox``).
+        if build_requires_sandbox(engine) or (
+            needs_node_build(engine) and requires_sandbox(source)
+        ):
+            raise HostInstallRefused(
+                "this site declares npm packages or carries its own build config "
+                "(package.json, vite/svelte config, bunfig.toml, .npmrc), and those "
+                "build only in the isolated build sandbox — never on the API host. "
+                "Publish it through the build lane instead."
+            )
         # PERF-3: stable per-pocket working dir (overwrite the source each build)
         # so node_modules persists; fall back to a throwaway tempfile dir when no
         # pocket_id is given (legacy callers — no caching).
@@ -1750,6 +2104,7 @@ class GeneratorClient:
             builder_origin=builder_origin,
             d1_database_id=d1_database_id,
             keeps_client_bundle=keeps_client_bundle,
+            turnstile_site_key=turnstile_site_key,
         )
         gen = await self._runner.generate(input_json, out_dir)
         project_dir = gen["projectDir"]
@@ -1784,6 +2139,22 @@ class GeneratorClient:
         # is not a real dir) don't fail on a missing package.json.
         if Path(project_dir, "package.json").is_file():
             _rewrite_ripple_dep(project_dir, _ripple_dep_source())
+            # Lay the supply-chain floor down BEFORE the fingerprint is taken, not
+            # just inside install(). bunfig.toml is one of the fingerprinted install
+            # inputs (it decides how the deps RESOLVE), and the fingerprint is what
+            # decides whether install() runs at all — so a floor written only inside
+            # install() would never reach a build dir whose deps had not changed.
+            # That is the whole cached fleet. Writing it here moves the hash once,
+            # which forces exactly one reinstall per existing dir and nothing after.
+            # install() writes it again at spawn time; the two are idempotent and
+            # guard different things — this one guards the cache decision, that one
+            # guards a caller who reaches install() without coming through build().
+            #
+            # Inside the package.json guard for two reasons that agree: a dir with no
+            # manifest has no install to put a floor under, and the fake-runner tests
+            # hand this a projectDir that was never created on disk (the same reason
+            # _rewrite_ripple_dep is guarded).
+            write_host_bunfig(project_dir)
         # PERF-3 install cache: run `bun install` ONLY when the dependency set
         # changed. Fingerprint the install inputs and compare to the sentinel from
         # the last successful install in this dir. Match → skip (reuse the cached

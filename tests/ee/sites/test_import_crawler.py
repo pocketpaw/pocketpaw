@@ -16,14 +16,14 @@
 #     never fetched), URL-path traversal sanitized through the shared
 #     safe-rel-path rule, total byte budget aborts the crawl.
 #   * The wired import: crawl_site_from_url end to end over a 2-page fixture
-#     site (css + img) → the SAME import pipeline as zip (publish faked) with
-#     the right FileMap split, absolute same-origin URLs rewritten
-#     root-relative, crawl stats + status on the persisted import_report, the
-#     harvested source persisted on the pocket, and failure modes (unreachable
-#     seed) landing as a safe ``status:"failed"`` report — never a traceback.
+#     site (css + img) → the SAME import pipeline as zip (publish faked): a static
+#     starter project published through the no-build lane, absolute same-origin
+#     URLs rewritten root-relative, the image pointed back at the source site when
+#     there is no public asset rail, crawl stats + status on the persisted
+#     import_report, the source persisted on the pocket, and failure modes
+#     (unreachable seed) landing as a safe ``status:"failed"`` report.
 from __future__ import annotations
 
-import base64
 from typing import Any
 
 import httpx
@@ -35,6 +35,8 @@ from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.url_crawler import CrawlBudgetExceeded, CrawlError
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+pytestmark = pytest.mark.usefixtures("_fake_static_starter")
 
 _PUBLIC_IPS = {
     "example.com": ["93.184.216.34"],
@@ -367,8 +369,13 @@ async def _queue_import(monkeypatch, url: str = "https://example.com/") -> dict[
 @pytest.mark.asyncio
 async def test_from_url_import_happy_path(_fake_publish, _fake_run_import, monkeypatch):
     """2-page fixture site with css + img: the crawl runs the SAME pipeline as
-    the zip path — text/binary split, publish with the assets sideband, report
-    persisted with crawl stats — and the harvested source lands on the pocket."""
+    the zip path — text/binary split, a static project published through the
+    no-build lane, report persisted with crawl stats — and the harvested source
+    lands on the pocket. With no public asset rail the image points back at the
+    source site, since a project source map holds text only."""
+    from pocketpaw_ee.sites import public_assets
+
+    monkeypatch.setattr(public_assets, "public_asset_store", lambda: None)
     queued = await _queue_import(monkeypatch)
     seen: list[httpx.Request] = []
     doc = await import_service.crawl_site_from_url(
@@ -381,14 +388,20 @@ async def test_from_url_import_happy_path(_fake_publish, _fake_run_import, monke
         _politeness_delay=0,
     )
 
-    # The publish rode the html engine with the harvested source + assets.
-    assert _fake_publish["engine"] == "html"
+    # The publish rode the project engine with the harvested source on the starter.
+    assert _fake_publish["engine"] == "project"
     assert _fake_publish["pattern"] == "imported"
-    assert set(_fake_publish["source"]) == {"index.html", "about/index.html", "css/site.css"}
-    assert _fake_publish["assets"] == {"img/logo.png": base64.b64encode(_PNG_BYTES).decode("ascii")}
+    harvested = {"index.html", "about/index.html", "css/site.css"}
+    starter = {"paw.template.json", "AGENTS.md", "styles/tokens.css"}
+    assert set(_fake_publish["source"]) == harvested | starter
+    assert not _fake_publish.get("assets")
     # Absolute same-origin links were rewritten root-relative.
-    assert 'href="/about"' in _fake_publish["source"]["index.html"]
-    assert "https://example.com" not in _fake_publish["source"]["index.html"]
+    index = _fake_publish["source"]["index.html"]
+    assert 'href="/about"' in index
+    assert "https://example.com/about" not in index
+    assert '<img src="https://example.com/img/logo.png">' in index
+    # The tokens file took the site's own text colour.
+    assert "--foreground: #111;" in _fake_publish["source"]["styles/tokens.css"]
 
     # The report persisted with crawl stats + the derived page/form scan.
     report = doc.import_report
@@ -409,7 +422,9 @@ async def test_from_url_import_happy_path(_fake_publish, _fake_run_import, monke
 
     pocket = await _PocketDoc.find_one({"workspace": _WS})
     assert pocket is not None
-    assert set(pocket.source or {}) == {"index.html", "about/index.html", "css/site.css"}
+    assert set(pocket.source or {}) == harvested | starter
+    assert pocket.engine == "project"
+    assert pocket.site_meta["project"]["template"] == "static"
 
 
 @pytest.mark.asyncio

@@ -7,17 +7,21 @@
 #   * GET /catalog/models/{id} resolves the URL-ENCODED "<provider>/<model>" id
 #     (the %2F-encoded slash) to one entry; a miss is 404.
 #   * a LiteLLM upstream failure (CatalogUpstreamError) surfaces as 502.
-#
-# Created 2026-06-26 (feat/mcg-1-catalog-api, MCG-1).
+#   * the list carries each model's availability for the caller's workspace
+#     (out of credit vs ok), and leaves it null when there is no session.
 
 from __future__ import annotations
+
+from datetime import UTC, datetime
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pocketpaw_ee.catalog import availability
 from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry, Pricing
+from pocketpaw_ee.catalog.router import caller_workspace_id
 from pocketpaw_ee.catalog.router import router as catalog_router
 from pocketpaw_ee.cloud.license import require_license
 
@@ -38,6 +42,7 @@ def client() -> TestClient:
     app = FastAPI()
     app.include_router(catalog_router, prefix="/api/v1")
     app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[caller_workspace_id] = lambda: None
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -107,3 +112,56 @@ def test_get_model_not_found_is_404(client, monkeypatch):
     monkeypatch.setattr(catalog_service, "get_model", _none)
     resp = client.get("/api/v1/catalog/models/nope%2Fnone")
     assert resp.status_code == 404
+
+
+_FLASH = ModelCatalogEntry(
+    id="deepseek/deepseek-v4-flash",
+    display_name="deepseek-v4-flash",
+    provider="deepseek",
+    modality=Modality.CHAT,
+)
+
+
+def test_list_models_carries_the_workspace_availability(client, monkeypatch):
+    async def _list(**kwargs):
+        return [_FLASH, _SONNET]
+
+    seen: dict = {}
+
+    async def _marks(workspace_id):
+        seen["ws"] = workspace_id
+        since = datetime(2026, 10, 23, 10, tzinfo=UTC).timestamp()
+        return {"provider:deepseek": {"since_ts": since, "until": 9e18}}
+
+    monkeypatch.setattr(catalog_service, "list_models", _list)
+    monkeypatch.setattr(availability, "read_marks", _marks)
+    client.app.dependency_overrides[caller_workspace_id] = lambda: "w1"
+
+    resp = client.get("/api/v1/catalog/models", params={"modality": "chat"})
+
+    assert resp.status_code == 200
+    rows = {m["id"]: m["availability"] for m in resp.json()["models"]}
+    assert seen["ws"] == "w1"
+    assert rows["deepseek/deepseek-v4-flash"]["status"] == "out_of_credit"
+    assert rows["deepseek/deepseek-v4-flash"]["since"].startswith("2026-10-23T10:00:00")
+    assert "credit" in rows["deepseek/deepseek-v4-flash"]["message"]
+    assert rows["anthropic/claude-3-5-sonnet"] == {"status": "ok", "since": None, "message": None}
+    # The cached catalog entries are never written to.
+    assert _FLASH.availability is None
+
+
+def test_list_models_without_a_session_leaves_availability_null(client, monkeypatch):
+    async def _list(**kwargs):
+        return [_FLASH]
+
+    async def _marks(workspace_id):  # pragma: no cover - must not be called
+        raise AssertionError("no workspace, no lookup")
+
+    monkeypatch.setattr(catalog_service, "list_models", _list)
+    monkeypatch.setattr(availability, "read_marks", _marks)
+    client.app.dependency_overrides[caller_workspace_id] = lambda: None
+
+    resp = client.get("/api/v1/catalog/models")
+
+    assert resp.status_code == 200
+    assert resp.json()["models"][0]["availability"] is None

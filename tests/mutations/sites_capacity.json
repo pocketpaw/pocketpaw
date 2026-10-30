@@ -1,0 +1,160 @@
+[
+  {
+    "label": "every DaytonaValidationError reads as capacity, so a bad image or invalid resource request is retried for five minutes and reported as 'capacity full' instead of failing fast",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "        if _is_validation_error(exc) and _CAPACITY_PATTERN.search(str(exc)):",
+    "replace": "        if _is_validation_error(exc):",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestClassification"
+    ]
+  },
+  {
+    "label": "any exception carrying the limit wording reads as capacity, so a non-Daytona error is retried as if the org were full",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "        if _is_validation_error(exc) and _CAPACITY_PATTERN.search(str(exc)):",
+    "replace": "        if _CAPACITY_PATTERN.search(str(exc)):",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestClassification"
+    ]
+  },
+  {
+    "label": "the retry budget never runs out, so a build waits on a full org forever instead of settling sandbox_unavailable:capacity",
+    "file": "ee/pocketpaw_ee/sites/capacity.py",
+    "find": "    if not isinstance(job_try, int) or job_try < 1 or job_try > len(RETRY_DELAYS_SECONDS):\n        return None\n    base = RETRY_DELAYS_SECONDS[job_try - 1]",
+    "replace": "    if not isinstance(job_try, int) or job_try < 1:\n        return None\n    base = RETRY_DELAYS_SECONDS[min(job_try, len(RETRY_DELAYS_SECONDS)) - 1]",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestRetrySchedule",
+      "tests/ee/sites/test_sandbox_capacity.py::TestPreviewLane",
+      "tests/ee/sites/test_sandbox_capacity.py::TestPublishLane"
+    ]
+  },
+  {
+    "label": "a superseded preview job keeps retrying on a full org, holding a queue slot for a render nobody will view",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "    return bool(current) and current != job_id",
+    "replace": "    return False",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestPreviewLane",
+      "tests/ee/sites/test_sandbox_capacity.py::TestProjectLane"
+    ]
+  },
+  {
+    "label": "a waiting publish is not re-stamped queued/waiting_for_capacity, so the row reads 'building' while nothing builds",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "            site, job_id=job_id, reason=capacity.WAITING_REASON\n",
+    "replace": "            site, job_id=job_id, reason=\"\"\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestPublishLane"
+    ]
+  },
+  {
+    "label": "the project lane reports capacity as no_sandbox, the prod bug: 'no build machine was free' and an agent saying the build server is down",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "        if capacity.is_capacity_error(exc):\n            return await _capacity_outcome(",
+    "replace": "        if False:\n            return await _capacity_outcome(",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestProjectLane"
+    ]
+  },
+  {
+    "label": "the workspace VM passes the raw seconds value to Daytona as minutes again, keeping an idle 4 GiB box up for 60 hours",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "        minutes = -(-int(raw) // 60)  # ceil",
+    "replace": "        minutes = int(raw)",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes"
+    ]
+  },
+  {
+    "label": "a stopped workspace VM is never resumed, so the 30-minute auto-stop breaks the agent's next tool call",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        await client.start_sandbox(sandbox_id)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
+  },
+  {
+    "label": "a stopped workspace VM waits a day to be archived again, holding its 10 GiB on the org disk quota (three fill Tier 1)",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 15\n",
+    "replace": "WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 24 * 60\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes",
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
+  },
+  {
+    "label": "the archive env override is ignored, so ops cannot tune how fast a stopped VM frees disk without a code change",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "        \"auto_archive_interval\": workspace_vm_archive_minutes(),",
+    "replace": "        \"auto_archive_interval\": WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES,",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes",
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
+  },
+  {
+    "label": "an env archive interval of 0 is passed through, which Daytona reads as its MAXIMUM, so a stopped VM holds disk for days",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "    clamped = max(\n        WORKSPACE_VM_MIN_AUTO_ARCHIVE_MINUTES, min(minutes, WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES)\n    )\n",
+    "replace": "    clamped = min(minutes, WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES)\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes"
+    ]
+  },
+  {
+    "label": "an existing VM never gets the lifecycle re-applied, so VMs made under the one-day archive keep it until re-provisioned",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        await client.set_sandbox_lifecycle(sandbox_id, **workspace_vm_lifecycle(config))\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
+  },
+  {
+    "label": "the archive env has no ceiling, so a mistyped 1440 holds a stopped VM's disk for a day again",
+    "file": "ee/pocketpaw_ee/cloud/daytona/store.py",
+    "find": "WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES = 60\n",
+    "replace": "WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES = 10**6\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestLifetimes"
+    ]
+  },
+  {
+    "label": "a VM caught stopping or archiving is not waited for, so start is refused and the tool call runs against a VM that is not running",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        while state in _SETTLING_STATES:\n",
+    "replace": "        while False:\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmTransitionalStates"
+    ]
+  },
+  {
+    "label": "a VM in an unusable state (error, unknown) is cached as started for a minute, so every tool call in that minute hits a dead VM",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "            logger.warning(\n                \"resolve_daytona_context: workspace VM %s is %s, not resumable\", sandbox_id, state\n            )\n            return\n",
+    "replace": "            _last_seen_started[sandbox_id] = time.monotonic()\n            return\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmTransitionalStates"
+    ]
+  },
+  {
+    "label": "a booting VM is started a second time instead of waited for",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        if state in _RESUMABLE_STATES:\n",
+    "replace": "        if state in _RESUMABLE_STATES or state in _BOOTING_STATES:\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmTransitionalStates"
+    ]
+  },
+  {
+    "label": "a failed lifecycle set is marked applied, so an old VM keeps its one-day archive for the life of the process",
+    "file": "ee/pocketpaw_ee/cloud/daytona/context.py",
+    "find": "        return\n    _lifecycle_applied.add(sandbox_id)\n",
+    "replace": "        _lifecycle_applied.add(sandbox_id)\n        return\n    _lifecycle_applied.add(sandbox_id)\n",
+    "tests": [
+      "tests/ee/sites/test_sandbox_capacity.py::TestWorkspaceVmResumes"
+    ]
+  }
+]

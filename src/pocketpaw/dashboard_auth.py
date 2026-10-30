@@ -1,15 +1,27 @@
 """Authentication middleware and token management for PocketPaw dashboard.
 
 Extracted from dashboard.py — contains:
-- ``_is_genuine_localhost()`` — checks for genuine localhost (not tunneled proxy)
+- ``_is_genuine_localhost()`` — checks for genuine localhost (not tunneled
+  proxy); remote hosts are rejected before any settings are loaded
+- ``_auth_dispatch()`` — the auth cascade; the per-IP ``api_limiter`` applies
+  only to callers that are neither authenticated here nor resolved by the EE
+  auth bridge (``request.state.ee_user_authenticated``, a limiter-only flag).
+  Signed-in cloud users, guests included, are exempt; guest-JWT minting is
+  capped separately by ``guest_mint_limiter`` (3/hr per IP)
 - ``verify_token()`` — standalone token verification
 - ``auth_middleware()`` — HTTP middleware (registered by dashboard.py)
 - ``auth_router`` — APIRouter with session token, cookie login/logout, QR code,
   and token regeneration endpoints
+
+Updated: 2026-10-03 — ``/api/v1/ws`` joins ``_WS_AUTH_OPTIONAL_PATHS`` so a
+browser can authenticate the dashboard socket with a first-frame ws_ticket.
+The route handler (``dashboard_ws.websocket_handler``) still runs the full
+token/cookie/bearer/protocol/localhost check and refuses everything else.
 """
 
 import hmac
 import io
+import json
 import logging
 import re
 
@@ -89,11 +101,13 @@ def _is_genuine_localhost(request_or_ws) -> bool:
 
     The ``localhost_auth_bypass`` setting (default True) controls whether genuine
     localhost connections skip auth.  Set to False to require tokens everywhere.
-    """
-    settings = Settings.load()
-    if not settings.localhost_auth_bypass:
-        return False
 
+    The cheap checks (client host, proxy headers) run first so remote traffic
+    never pays for ``Settings.load()`` (~5 ms: config.json + credential store).
+    All three conditions must hold, so the order does not change the result.
+    The setting is still read fresh (not via the cached ``get_settings()``)
+    because out-of-process config edits do not clear that cache.
+    """
     client_host = request_or_ws.client.host if request_or_ws.client else None
     if client_host not in _LOCALHOST_ADDRS:
         return False
@@ -109,7 +123,7 @@ def _is_genuine_localhost(request_or_ws) -> bool:
         if headers.get(hdr):
             return False
 
-    return True
+    return bool(Settings.load().localhost_auth_bypass)
 
 
 # ---------------------------------------------------------------------------
@@ -126,10 +140,16 @@ async def verify_token(
     """
     from fastapi import HTTPException
 
-    # SKIP AUTH for static files, uploads, and health checks (if any)
+    # SKIP AUTH for static files, agent avatars, and health checks (if any).
+    #
+    # Narrowed from "/uploads" alongside the StaticFiles mount and the
+    # _auth_dispatch exemptions. This function is currently reachable from
+    # nothing — dashboard.py re-exports it for backward compatibility only — so
+    # the change is consistency rather than a live fix, and it means wiring it
+    # up later cannot reintroduce the broad prefix.
     if (
         request.url.path.startswith("/static")
-        or request.url.path.startswith("/uploads")
+        or request.url.path.startswith("/uploads/avatars")
         or request.url.path.startswith("/pawbar-app")
         or request.url.path == "/favicon.ico"
     ):
@@ -159,7 +179,7 @@ async def verify_token(
 # ---------------------------------------------------------------------------
 
 
-_WS_AUTH_OPTIONAL_PATHS: tuple[str, ...] = ("/ws/cloud",)
+_WS_AUTH_OPTIONAL_PATHS: tuple[str, ...] = ("/ws/cloud", "/api/v1/ws")
 """WebSocket paths whose route handler does its own auth.
 
 The cloud EE router authenticates ``/ws/cloud`` via a short-lived
@@ -170,6 +190,13 @@ scope gate below, so accepting them here would require duplicating the
 EE verifier — instead we let the route handler reject with a typed
 close code, matching the existing HTTP ``auth_optional_prefixes``
 pattern for ``/api/v1/*``.
+
+``/api/v1/ws`` (the dashboard socket) is listed because a first-frame
+ws_ticket arrives only after the upgrade, so this pre-upgrade gate can't see
+it. ``dashboard_ws.websocket_handler`` repeats every check below, refuses a
+bad ``?token=`` with 4003 at the handshake, and otherwise demands the ticket
+frame (close 4001 on failure). ``/ws`` and ``/v1/ws`` stay gated here, so
+first-frame auth is only reachable on ``/api/v1/ws``.
 """
 
 
@@ -367,11 +394,16 @@ async def _auth_dispatch(request: Request) -> Response | None:
 
     # Brute-force guard for login / register / bearer-login (OWASP A07).
     # These paths used to be unconditionally exempt from rate limiting, which
-    # left an unbounded brute-force window. The per-(ip, email) bucket prevents
-    # an attacker from rotating the email field behind one IP to slip the
-    # per-IP api_limiter. fastapi-users reads the form body downstream, so we
-    # cache the body bytes on request.state and the ASGI wrapper in
-    # AuthMiddleware.__call__ replays them via a wrapped `receive`.
+    # left an unbounded brute-force window. The bucket is per (ip, email), so
+    # rotating the email behind one IP falls to the per-IP api_limiter, while
+    # distinct signups from one office IP do not share a bucket. The email is
+    # read by Content-Type: login posts an OAuth2 form ("username"), register
+    # posts JSON ("email"). request.form() does not raise on a JSON body, it
+    # returns an empty form, so JSON must be parsed explicitly. A missing or
+    # unparseable email keys on "" (per-IP), the conservative fallback.
+    # Downstream handlers read the body again, so we cache the bytes on
+    # request.state and the ASGI wrapper in AuthMiddleware.__call__ replays
+    # them via a wrapped `receive`.
     if request.method == "POST" and path in _LOGIN_RATE_LIMITED_PATHS:
         try:
             body_bytes = await request.body()
@@ -381,22 +413,14 @@ async def _auth_dispatch(request: Request) -> Response | None:
             request.state.cached_body = body_bytes
         email = ""
         try:
-            form = await request.form()
-            # fastapi-users uses OAuth2PasswordRequestForm — field is "username".
-            # /register receives JSON with an "email" field instead.
-            email = str(form.get("username") or form.get("email") or "").strip().lower()
+            if "json" in request.headers.get("content-type", "").lower():
+                payload = json.loads(body_bytes or b"{}")
+                fields = payload if isinstance(payload, dict) else {}
+            else:
+                fields = await request.form()
+            email = str(fields.get("username") or fields.get("email") or "").strip().lower()
         except Exception:
-            # JSON body on /register — best-effort parse for the email key.
-            try:
-                import json as _json
-
-                payload = _json.loads(body_bytes.decode("utf-8") or "{}")
-                if isinstance(payload, dict):
-                    email = (
-                        str(payload.get("email") or payload.get("username") or "").strip().lower()
-                    )
-            except Exception:
-                email = ""
+            email = ""
         key = f"login:{client_ip}:{email}"
         rl_info = login_limiter.check(key)
         if not rl_info.allowed:
@@ -436,7 +460,13 @@ async def _auth_dispatch(request: Request) -> Response | None:
     # webhooks, OAuth callbacks).
     exempt_paths = [
         "/static",
-        "/uploads",
+        # NOT "/uploads" — that exempted the whole prefix while the StaticFiles
+        # mount was rooted at the entire ~/.pocketpaw/uploads tree, so every
+        # subsystem's files were served unauthenticated. The mount is now the
+        # avatars directory alone (ee/pocketpaw_ee/cloud/__init__.py), and this
+        # exemption is narrowed to match so re-widening the mount does not
+        # silently inherit an unauthenticated prefix.
+        "/uploads/avatars",
         "/favicon.ico",
         # Paw Bar glass app bundle (pawbar.js/css) — loaded by the public
         # concierge iframe on published sites; visitors have no session.
@@ -444,6 +474,8 @@ async def _auth_dispatch(request: Request) -> Response | None:
         "/pawbar-app",
         # NOTE: /ws, /v1/ws, /api/v1/ws are no longer exempted here — WebSocket
         # scopes are now authenticated at the middleware level (issue #883).
+        # /api/v1/ws is in _WS_AUTH_OPTIONAL_PATHS for first-frame ws_ticket
+        # auth; its handler does the full check itself.
         "/api/auth/login",
         "/api/v1/docs",
         "/api/v1/redoc",
@@ -629,11 +661,12 @@ async def _auth_dispatch(request: Request) -> Response | None:
         if _verify_upload_grant(request, current_token):
             is_valid = True
 
-    # Allow frontend assets (/, /static/*, /uploads/*) through for SPA bootstrap.
+    # Allow frontend assets (/, /static/*, /uploads/avatars/*) through for SPA
+    # bootstrap. Narrowed from "/uploads/" for the reason given on exempt_paths.
     if (
         request.url.path == "/"
         or request.url.path.startswith("/static/")
-        or request.url.path.startswith("/uploads/")
+        or request.url.path.startswith("/uploads/avatars/")
     ):
         return None  # allow through
 
@@ -642,16 +675,23 @@ async def _auth_dispatch(request: Request) -> Response | None:
     # Runs now that the auth cascade above has set is_valid / full_access.
     # Authenticated callers are EXEMPT from this per-IP bucket:
     #   - full_access (master token / dashboard session / genuine localhost) is
-    #     already fully trusted — and is the bug we're fixing: the desktop
-    #     editor fans many /api/v1/* calls out of the single localhost IP, which
-    #     used to drain one shared 30-token bucket and 429.
+    #     already fully trusted; the desktop editor fans many /api/v1/* calls
+    #     out of the single localhost IP, which one 30-token bucket can't hold.
     #   - api-key callers already passed their own per-key limiter above
     #     (apikey:<id>); the per-IP bucket would only double-limit them.
     #   - oauth callers authenticated by token, not by IP.
-    # UNauthenticated /api (and any other non-exempt) traffic still hits the
-    # per-IP api_limiter, so the brute-force / abuse cap is preserved. The
+    #   - cloud users whose fastapi-users JWT the EE auth bridge resolved to an
+    #     active, non-revoked user (``ee_user_authenticated``), guests included.
+    #     A static SPA reload fans out 20+ /api/v1/* calls, which a 30-token
+    #     bucket cannot absorb. The flag only skips this bucket: it sets neither
+    #     is_valid nor full_access, so it grants no route access (their routes
+    #     authenticate the JWT themselves, and non-/api/v1/ paths still 401
+    #     below). Minting a guest JWT is capped separately by
+    #     ``guest_mint_limiter`` (3/hr per IP).
+    # Everyone else (anonymous, garbage/revoked/inactive-user tokens) stays on
+    # the per-IP api_limiter, so the brute-force / abuse cap is preserved. The
     # separate login / auth-session / qr buckets are untouched.
-    if not is_valid:
+    if not is_valid and not getattr(request.state, "ee_user_authenticated", False):
         rl_info = api_limiter.check(client_ip)
         if not rl_info.allowed:
             return JSONResponse(

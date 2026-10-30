@@ -1,37 +1,23 @@
-"""LiveKit Call Agent — meeting notes bot with Deepgram STT.
+"""LiveKit call bot: transcribes a group call, writes meeting notes, voices Ask Paw.
 
-Architecture
-------------
-This module provides a lightweight agent that connects to a LiveKit room
-as a silent listener participant and transcribes the conversation using
-Deepgram's speech-to-text API.
+Runs as a subprocess (``python -m pocketpaw_ee.cloud.livekit.agent``) that
+``service.py`` spawns per call, so WebRTC and Deepgram stay out of the API event
+loop. It joins with ``auto_subscribe=False`` and subscribes to microphone audio
+only (``_should_subscribe``): decoding everyone's video made big calls unstable.
+Each participant's mic is piped into Deepgram STT (Nova-3, ``language="multi"``,
+needs ``DEEPGRAM_API_KEY``); final segments are kept in memory, summarised every
+5 minutes into ``livekit:progressive:{group_id}``, and merged into the notes
+printed to stdout as one JSON line when the room empties or SIGTERM arrives.
 
-1. Connects to the LiveKit room via ``livekit.rtc.Room`` (WebRTC)
-2. Subscribes to remote MICROPHONE AUDIO tracks only — never video or
-   screenshare. The room is joined with ``auto_subscribe=False`` and each
-   audio publication is opted in via ``_should_subscribe`` /
-   ``publication.set_subscribed(True)``. This keeps the bot's per-participant
-   load flat: auto-subscribe would otherwise pull (and decode) every
-   participant's video, which the bot never uses (Bug A — the call got
-   unstable past a few participants).
-3. Pipes each track through Deepgram STT streaming for real-time transcription
-4. Accumulates transcript segments with speaker identification
-5. Detects when the room empties (via polling + room events)
-6. Generates a meeting summary using the configured LLM
-7. Posts the meeting notes to the group chat
-
-Usage
------
-The agent is started automatically by the ``LiveKitService`` when a room
-is created, or can be run as a standalone script:
-
-    python -m ee.cloud.livekit.agent --room group-call-abc123
-
-Deepgram Configuration
-----------------------
-Requires the ``DEEPGRAM_API_KEY`` environment variable (set in ``.env``).
-The Deepgram STT uses Nova-3 with ``language="multi"`` for multilingual
-transcription, supporting all Deepgram languages simultaneously.
+Ask Paw: every final segment is mirrored to ``livekit:transcript:{group_id}``
+(cleared at start). The bot publishes one microphone track ("paw-voice") and
+takes commands from ``assistant.py`` on ``livekit:bot:cmd:{group_id}``: ``say``
+(voice a sentence via Deepgram TTS), ``say_end``, ``stop``, ``listen_start`` /
+``listen_end`` (capture the asker's spoken question onto
+``livekit:ask:q:{ask_id}``; an unclosed window hands back "" after 20s). When an
+answer has played out, or was cut by ``stop``, it pushes to
+``livekit:ask:done:{ask_id}``. Paw's lines stay in the notes transcript, but Paw
+is never listed as a participant. Redis failures never interrupt transcription.
 """
 
 from __future__ import annotations
@@ -43,6 +29,7 @@ import os
 import time
 from typing import Any
 
+from pocketpaw_ee.cloud.livekit.llm import call_llm_text
 from pocketpaw_ee.cloud.livekit.prompts import (
     ANTHROPIC_SUMMARY_PROMPT,
     DEEPSEEK_SUMMARY_PROMPT,
@@ -76,6 +63,29 @@ _MAX_STDOUT_TRANSCRIPT_CHARS = 40_000
 _REDIS_PROGRESSIVE_KEY = "livekit:progressive:{group_id}"
 # TTL for the progressive summaries Redis key (6 hours — plenty for any call)
 _REDIS_PROGRESSIVE_TTL = 6 * 3600
+
+# Ask Paw Redis contract, shared with assistant.py (the API-process side).
+REDIS_TRANSCRIPT_KEY = "livekit:transcript:{group_id}"
+REDIS_TRANSCRIPT_TTL = 6 * 3600
+REDIS_BOT_CMD_CHANNEL = "livekit:bot:cmd:{group_id}"
+REDIS_ASK_QUESTION_KEY = "livekit:ask:q:{ask_id}"
+REDIS_ASK_QUESTION_TTL = 120
+REDIS_ASK_DONE_KEY = "livekit:ask:done:{ask_id}"
+REDIS_ASK_DONE_TTL = 120
+
+BOT_IDENTITY = "call-bot"
+PAW_SPEAKER = "Paw"
+
+# Deepgram finalizes a flushed utterance shortly after the push-to-talk release;
+# segments arriving inside this grace still belong to the question.
+_LISTEN_END_GRACE_SECONDS = 1.5
+# A push-to-talk window nobody closes is dropped after this, handing back "".
+_LISTEN_WINDOW_SECONDS = 20.0
+
+_SUBSCRIBE_BACKOFF_SECONDS = (1, 2, 5, 10)
+
+_TTS_MODEL = "aura-2-andromeda-en"
+_TTS_SAMPLE_RATE = 24000
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +169,16 @@ class CallMeetingAgent:
         # Cached Redis client (created lazily)
         self._redis: Any = None
 
+        # ── Ask Paw voice state ──
+        self._stt_streams: dict[str, Any] = {}
+        self._audio_source: Any = None
+        self._tts: Any = None
+        self._say_queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+        self._speaking_task: asyncio.Task | None = None
+        self._speaking_ask_id: str = ""
+        self._listen_windows: dict[str, tuple[str, float]] = {}
+        self._bg_tasks: set[asyncio.Task] = set()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -172,6 +192,8 @@ class CallMeetingAgent:
         """
         self._running = True
         self._call_start_time = time.time()
+
+        await self._clear_live_transcript()
 
         logger.info(
             "CallMeetingAgent started for room %s (group %s)",
@@ -245,15 +267,58 @@ class CallMeetingAgent:
         speaker: str,
         text: str,
         timestamp: float | None = None,
+        *,
+        identity: str | None = None,
     ) -> None:
-        """Add a transcribed speech segment."""
-        self.transcript_segments.append(
-            {
-                "speaker": speaker,
-                "text": text,
-                "timestamp": timestamp or time.time(),
-            }
-        )
+        """Add a transcribed speech segment and mirror it to the live transcript."""
+        segment: dict[str, Any] = {
+            "speaker": speaker,
+            "text": text,
+            "timestamp": timestamp or time.time(),
+        }
+        if identity:
+            segment["identity"] = identity
+        self.transcript_segments.append(segment)
+        self._spawn_bg(self._mirror_segment(segment))
+
+    def _spawn_bg(self, coro: Any) -> None:
+        """Run ``coro`` fire-and-forget, holding a reference until it finishes."""
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            coro.close()
+            return
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _mirror_segment(self, segment: dict[str, Any]) -> None:
+        redis = await self._get_redis()
+        if redis is None:
+            return
+        try:
+            key = REDIS_TRANSCRIPT_KEY.format(group_id=self.group_id)
+            payload = json.dumps(
+                {
+                    "identity": segment.get("identity", ""),
+                    "speaker": segment["speaker"],
+                    "text": segment["text"],
+                    "ts": segment["timestamp"],
+                }
+            )
+            await redis.rpush(key, payload)
+            await redis.expire(key, REDIS_TRANSCRIPT_TTL)
+        except Exception as exc:
+            logger.debug("Agent: live transcript mirror failed: %s", exc)
+
+    async def _clear_live_transcript(self) -> None:
+        """Drop a previous call's live transcript so Ask Paw never reads it."""
+        redis = await self._get_redis()
+        if redis is None:
+            return
+        try:
+            await redis.delete(REDIS_TRANSCRIPT_KEY.format(group_id=self.group_id))
+        except Exception as exc:
+            logger.debug("Agent: could not clear live transcript: %s", exc)
 
     # ------------------------------------------------------------------
     # Internal: LiveKit RTC connection + Deepgram transcription
@@ -285,7 +350,9 @@ class CallMeetingAgent:
         # Declared before the try so the finally block can always clean them
         # up — even if the livekit import below fails.
         stt_streams: dict[str, Any] = {}  # participant identity → Deepgram stream
+        self._stt_streams = stt_streams
         pipe_tasks: dict[str, asyncio.Task] = {}  # participant identity → audio pipe task
+        voice_tasks: list[asyncio.Task] = []
         http_session: Any = None
 
         try:
@@ -507,6 +574,8 @@ class CallMeetingAgent:
                 len(room.remote_participants),
             )
 
+            voice_tasks.extend(await self._start_voice(room, http_session))
+
             # ------------------------------------------------------------------
             # Subscribe to existing participants
             # ------------------------------------------------------------------
@@ -554,6 +623,10 @@ class CallMeetingAgent:
 
             logger.error("Traceback:\n%s", traceback.format_exc())
         finally:
+            for t in voice_tasks:
+                t.cancel()
+            if voice_tasks:
+                await asyncio.gather(*voice_tasks, return_exceptions=True)
             # Cancel any still-running audio pipe tasks
             for t in pipe_tasks.values():
                 t.cancel()
@@ -624,6 +697,7 @@ class CallMeetingAgent:
                             self.add_transcript_segment(
                                 speaker=speaker,
                                 text=text,
+                                identity=participant_id,
                             )
                             logger.info(
                                 "Transcript [%s]: %s",
@@ -636,6 +710,241 @@ class CallMeetingAgent:
                 participant_id,
                 exc,
             )
+
+    # ------------------------------------------------------------------
+    # Internal: Ask Paw voice (speaking + command channel)
+    # ------------------------------------------------------------------
+
+    async def _start_voice(self, room: Any, http_session: Any) -> list[asyncio.Task]:
+        """Publish the bot's voice track and start the command/speaker tasks.
+
+        Each step fails soft: without a publish grant or a Deepgram key the bot
+        stays a silent transcriber, and the command listener still runs so
+        spoken-question capture keeps working.
+        """
+        try:
+            from livekit import rtc
+
+            source = rtc.AudioSource(_TTS_SAMPLE_RATE, 1)
+            track = rtc.LocalAudioTrack.create_audio_track("paw-voice", source)
+            options = rtc.TrackPublishOptions()
+            options.source = rtc.TrackSource.SOURCE_MICROPHONE
+            await room.local_participant.publish_track(track, options)
+            self._audio_source = source
+        except Exception as exc:
+            logger.warning("Agent: could not publish voice track, Paw stays silent: %s", exc)
+
+        if self._audio_source is not None:
+            try:
+                from livekit.plugins.deepgram.tts import TTS as DeepgramTTS
+
+                self._tts = DeepgramTTS(
+                    model=_TTS_MODEL,
+                    sample_rate=_TTS_SAMPLE_RATE,
+                    http_session=http_session,
+                )
+            except Exception as exc:
+                logger.warning("Agent: Deepgram TTS unavailable, Paw stays silent: %s", exc)
+
+        return [
+            asyncio.create_task(self._command_listener()),
+            asyncio.create_task(self._speaker_worker()),
+        ]
+
+    def _get_command_redis(self) -> Any:
+        """Client for the pub/sub subscription (parks a connection, so the blocking pool)."""
+        from pocketpaw_ee.cloud._core.redis_client import get_blocking_redis
+
+        return get_blocking_redis()
+
+    async def _command_listener(self) -> None:
+        """Consume Ask Paw commands from ``livekit:bot:cmd:{group_id}``.
+
+        SUBSCRIBE is retried with backoff for as long as the bot runs, so a
+        Redis blip at join time doesn't leave Paw deaf for the whole call.
+        """
+        channel = REDIS_BOT_CMD_CHANNEL.format(group_id=self.group_id)
+        attempt = 0
+        pubsub: Any = None
+        while self._running:
+            try:
+                pubsub = self._get_command_redis().pubsub()
+                await pubsub.subscribe(channel)
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                backoff = _SUBSCRIBE_BACKOFF_SECONDS
+                delay = backoff[min(attempt, len(backoff) - 1)]
+                attempt += 1
+                logger.warning(
+                    "Agent: Ask Paw subscribe failed (attempt %d), retrying in %ss: %s",
+                    attempt,
+                    delay,
+                    exc,
+                )
+                pubsub = None
+                await asyncio.sleep(delay)
+        if pubsub is None:
+            return
+        try:
+            logger.info("Agent: listening for Ask Paw commands on %s", channel)
+            while self._running:
+                try:
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Agent: command channel read failed: %s", exc)
+                    await asyncio.sleep(1)
+                    continue
+                if message and message.get("type") == "message":
+                    self._handle_command(message.get("data"))
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+                await pubsub.aclose()
+            except Exception:
+                pass
+
+    def _handle_command(self, raw: Any) -> None:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "replace")
+        try:
+            cmd = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.debug("Agent: ignoring malformed command %r", raw)
+            return
+        if not isinstance(cmd, dict):
+            return
+        kind = cmd.get("type")
+        ask_id = str(cmd.get("ask_id") or "")
+        if kind == "say":
+            text = str(cmd.get("text") or "").strip()
+            if text:
+                self._say_queue.put_nowait((ask_id, text))
+        elif kind == "say_end":
+            if ask_id:
+                self._say_queue.put_nowait((ask_id, None))
+        elif kind == "stop":
+            self._stop_speaking()
+        elif kind == "listen_start":
+            identity = str(cmd.get("identity") or "")
+            if ask_id and identity:
+                self._listen_windows[ask_id] = (identity, time.time())
+                self._spawn_bg(self._expire_listen(ask_id))
+        elif kind == "listen_end":
+            if ask_id:
+                self._spawn_bg(self._finish_listen(ask_id))
+        else:
+            logger.debug("Agent: unknown command type %r", kind)
+
+    def _stop_speaking(self) -> None:
+        """Drop queued sentences, cut the one being spoken, and report those asks done."""
+        stopped: set[str] = set()
+        while not self._say_queue.empty():
+            ask_id, _ = self._say_queue.get_nowait()
+            stopped.add(ask_id)
+        if self._speaking_task is not None and not self._speaking_task.done():
+            stopped.add(self._speaking_ask_id)
+            self._speaking_task.cancel()
+        if self._audio_source is not None:
+            try:
+                self._audio_source.clear_queue()
+            except Exception:
+                pass
+        for ask_id in stopped - {""}:
+            self._spawn_bg(self._signal_done(ask_id))
+
+    async def _speaker_worker(self) -> None:
+        """Voice queued sentences one at a time; a ``None`` text marks an answer's end."""
+        while self._running:
+            ask_id, text = await self._say_queue.get()
+            if text is None:
+                await self._wait_for_playout()
+                await self._signal_done(ask_id)
+                continue
+            if self._tts is None or self._audio_source is None:
+                logger.info("Agent: no voice available, dropping Ask Paw sentence (%s)", ask_id)
+                continue
+            self._speaking_ask_id = ask_id
+            self._speaking_task = asyncio.create_task(self._speak(text))
+            try:
+                await self._speaking_task
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                logger.info("Agent: Ask Paw speech stopped (%s)", ask_id)
+            except Exception as exc:
+                logger.warning("Agent: TTS failed for Ask Paw sentence (%s): %s", ask_id, exc)
+            finally:
+                self._speaking_task = None
+                self._speaking_ask_id = ""
+
+    async def _speak(self, text: str) -> None:
+        async with self._tts.synthesize(text) as stream:
+            async for audio in stream:
+                await self._audio_source.capture_frame(audio.frame)
+        self.add_transcript_segment(speaker=PAW_SPEAKER, text=text, identity=BOT_IDENTITY)
+
+    async def _wait_for_playout(self) -> None:
+        if self._audio_source is None:
+            return
+        try:
+            await self._audio_source.wait_for_playout()
+        except Exception as exc:
+            logger.debug("Agent: wait_for_playout failed: %s", exc)
+
+    async def _signal_done(self, ask_id: str) -> None:
+        """Tell the API process an answer has finished playing (or was cut)."""
+        await self._push_ask_key(REDIS_ASK_DONE_KEY.format(ask_id=ask_id), "1", REDIS_ASK_DONE_TTL)
+
+    async def _push_ask_key(self, key: str, value: str, ttl: int) -> None:
+        redis = await self._get_redis()
+        if redis is None:
+            return
+        try:
+            await redis.rpush(key, value)
+            await redis.expire(key, ttl)
+        except Exception as exc:
+            logger.warning("Agent: could not write %s: %s", key, exc)
+
+    async def _expire_listen(self, ask_id: str) -> None:
+        await asyncio.sleep(_LISTEN_WINDOW_SECONDS)
+        if self._listen_windows.pop(ask_id, None) is not None:
+            logger.info("Agent: listen window %s expired without an end", ask_id)
+            await self._push_ask_key(
+                REDIS_ASK_QUESTION_KEY.format(ask_id=ask_id), "", REDIS_ASK_QUESTION_TTL
+            )
+
+    async def _finish_listen(self, ask_id: str) -> None:
+        """Close a push-to-talk window and hand the asker's words back to the API process.
+
+        Only the window's own identity is captured; whoever sent ``listen_end``
+        cannot redirect it to another participant.
+        """
+        window = self._listen_windows.pop(ask_id, None)
+        text = ""
+        if window is not None:
+            identity, started_at = window
+            stream = self._stt_streams.get(identity)
+            if stream is not None:
+                try:
+                    stream.flush()
+                except Exception as exc:
+                    logger.debug("Agent: STT flush failed for %s: %s", identity, exc)
+            await asyncio.sleep(_LISTEN_END_GRACE_SECONDS)
+            text = " ".join(
+                seg["text"]
+                for seg in self.transcript_segments
+                if seg.get("identity") == identity and seg["timestamp"] >= started_at
+            ).strip()
+        else:
+            logger.info("Agent: listen_end for %s without a listen window", ask_id)
+        await self._push_ask_key(
+            REDIS_ASK_QUESTION_KEY.format(ask_id=ask_id), text, REDIS_ASK_QUESTION_TTL
+        )
 
     async def _disconnect_rtc(self) -> None:
         """Disconnect from the LiveKit RTC room."""
@@ -778,7 +1087,8 @@ class CallMeetingAgent:
             transcript_lines = []
             for seg in self.transcript_segments:
                 speaker = seg.get("speaker", "Unknown")
-                speakers_seen.add(speaker)
+                if seg.get("identity") != BOT_IDENTITY:
+                    speakers_seen.add(speaker)
                 transcript_lines.append(f"[{speaker}]: {seg['text']}")
             transcript_text = "\n".join(transcript_lines)
 
@@ -1069,70 +1379,15 @@ class CallMeetingAgent:
         max_tokens: int,
         timeout: int,
     ) -> str:
-        """Call an LLM provider and return the raw response text.
-
-        Supports 'deepseek', 'anthropic', 'openai'. Returns the content string
-        from the response, or raises on failure.
-        """
-        import httpx
-
-        if provider == "deepseek":
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    "https://api.deepseek.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": max_tokens,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-        elif provider == "anthropic":
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": max_tokens,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                return data.get("content", [{}])[0].get("text", "")
-
-        elif provider == "openai":
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": max_tokens,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-        else:
-            raise ValueError(f"Unknown LLM provider: {provider}")
+        """Call an LLM provider and return the raw response text (see ``llm.call_llm_text``)."""
+        return await call_llm_text(
+            provider=provider,
+            api_key=api_key,
+            prompt=prompt,
+            model=model,
+            max_tokens=max_tokens,
+            timeout=timeout,
+        )
 
     def _parse_progressive_json(
         self,

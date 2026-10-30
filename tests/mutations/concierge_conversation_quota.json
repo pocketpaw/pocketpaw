@@ -47,7 +47,7 @@
   {
     "label": "the paywall flag is ignored — OSS and self-host get a ceiling they never bought",
     "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
-    "find": "    if not sites_enforced():\n        return False\n\n    from pocketpaw_ee.cloud.billing import site_plans",
+    "find": "    if not await sites_enforced_for(workspace_id, partner=partner):\n        return False\n\n    from pocketpaw_ee.cloud.billing import site_plans",
     "replace": "    from pocketpaw_ee.cloud.billing import site_plans",
     "tests": [
       "tests/cloud/test_concierge_conversation_quota.py::test_an_unenforced_deployment_has_no_ceiling"

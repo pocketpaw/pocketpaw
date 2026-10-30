@@ -170,6 +170,10 @@ class PromptContext:
     user_info: str = ""
     user_id: str | None = None
     channel_inputs: ChannelInputs | None = None
+    # False drops the per-message soul recall (``RetrievalLayer``). The cloud
+    # sets it on surfaces where each chat is its own subject (/sites), so one
+    # chat's memories cannot answer another's question.
+    soul_recall: bool = True
 
 
 class PromptLayer(Protocol):

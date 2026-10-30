@@ -75,7 +75,7 @@
   {
     "label": "zombie dispatch drops the notification again (no push fallback)",
     "file": "ee/pocketpaw_ee/cloud/push/dispatch.py",
-    "find": "        if delivered:\n            return NotifyResult(transport=\"ws\", ws_delivered=True)",
+    "find": "        if delivered or live_elsewhere:\n            return NotifyResult(transport=\"ws\", ws_delivered=True)",
     "replace": "        if True:\n            return NotifyResult(transport=\"ws\", ws_delivered=True)",
     "tests": [
       "tests/cloud/push/test_dispatch.py::test_zombie_socket_falls_back_to_web_push",

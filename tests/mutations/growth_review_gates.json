@@ -1,13 +1,13 @@
 [
   {
-    "label": "email shape check removed \u2014 a two-line address becomes storable",
+    "label": "email shape check removed — a two-line address becomes storable",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
     "find": "    if address.count(\"@\") != 1:\n        return None",
     "replace": "    if False:\n        return None",
     "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
   },
   {
-    "label": "local part unbounded \u2014 a 300-char local part becomes storable",
+    "label": "local part unbounded — a 300-char local part becomes storable",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
     "find": "    if not local or len(local) > 64:\n        return None",
     "replace": "    if not local:\n        return None",
@@ -23,8 +23,8 @@
   {
     "label": "tool output is collected again alongside the answer",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
-    "find": "            if getattr(event, \"type\", None) != \"message\":\n                continue",
-    "replace": "            if False:\n                continue",
+    "find": "        if getattr(event, \"type\", None) != \"message\":\n            continue",
+    "replace": "        if False:\n            continue",
     "tests": "tests/cloud/growth/test_researcher.py::TestToolOutputNeverPollutesTheAnswer"
   },
   {
@@ -49,7 +49,7 @@
     "tests": "tests/cloud/growth/test_mcp_server.py::TestTheGateHolds::test_no_tool_can_switch_a_hunt_on"
   },
   {
-    "label": "host label check relaxed \u2014 a@b.. and a@.com become storable",
+    "label": "host label check relaxed — a@b.. and a@.com become storable",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
     "find": "    if len(labels) < 2 or not all(labels):\n        return None",
     "replace": "    if len(labels) < 2:\n        return None",
@@ -63,14 +63,14 @@
     "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
   },
   {
-    "label": "answer picked by position again (first) \u2014 a leading echo wins",
+    "label": "answer picked by position again (first) — a leading echo wins",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
     "find": "    scored = [(o, _answer_score(o)) for o in objects]\n    best = max(scored, key=lambda pair: pair[1])",
     "replace": "    scored = [(o, _answer_score(o)) for o in objects]\n    best = (objects[0], _answer_score(objects[0]))",
     "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings"
   },
   {
-    "label": "answer picked by position again (last) \u2014 a trailing recap wins",
+    "label": "answer picked by position again (last) — a trailing recap wins",
     "file": "ee/pocketpaw_ee/cloud/growth/researcher.py",
     "find": "    best = max(scored, key=lambda pair: pair[1])",
     "replace": "    best = (objects[-1], _answer_score(objects[-1]))",
@@ -96,5 +96,61 @@
     "find": "    if any(ch.isspace() or unicodedata.category(ch) in (\"Cf\", \"Cc\") for ch in address):",
     "replace": "    if any(ch.isspace() for ch in address):",
     "tests": "tests/cloud/growth/test_researcher.py::TestTheReviewFindings::test_a_malformed_address_is_never_storable"
+  },
+  {
+    "label": "mock rows spend the real WhatsApp hourly cap again",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "            \"provider\": {\"$ne\": MOCK_DELIVERY_PROVIDER},\n",
+    "replace": "",
+    "tests": "tests/cloud/growth/test_delivery_queue.py::test_whatsapp_cap_ignores_mock_rows"
+  },
+  {
+    "label": "the mock-delivery setting is ignored — approvals always enqueue the real job",
+    "file": "ee/pocketpaw_ee/cloud/growth/executor.py",
+    "find": "        mock = channel in MOCK_DELIVERY_CHANNELS and await mock_delivery.is_mock_delivery_on(",
+    "replace": "        mock = False and await mock_delivery.is_mock_delivery_on(",
+    "tests": "tests/cloud/growth/test_delivery_queue.py::test_approve_uses_mock_delivery_only_when_on"
+  },
+  {
+    "label": "an unreadable setting fails OPEN — every approval becomes a fake send",
+    "file": "ee/pocketpaw_ee/cloud/growth/mock_delivery.py",
+    "find": "        logger.debug(\"growth mock delivery: setting unreadable for %s\", workspace_id, exc_info=True)\n        return False",
+    "replace": "        logger.debug(\"growth mock delivery: setting unreadable for %s\", workspace_id, exc_info=True)\n        return True",
+    "tests": "tests/cloud/growth/test_gate.py::test_single_approve_flips_draft_and_enqueues"
+  },
+  {
+    "label": "mock WhatsApp delivery skips the opt-in guard",
+    "file": "ee/pocketpaw_ee/cloud/growth/mock_delivery.py",
+    "find": "    if not prospect.opted_in:\n",
+    "replace": "    if False:\n",
+    "tests": "tests/cloud/growth/test_delivery_queue.py::test_mock_deliver_blocks_an_ineligible_draft"
+  },
+  {
+    "label": "deliver-approved restarts a draft whose delivery is already in flight",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "        if not _still_sending(logs.get(draft_id), stale_after)\n",
+    "replace": "        if True\n",
+    "tests": "tests/cloud/growth/test_delivery_queue.py::test_deliver_approved_starts_only_idle_approved_drafts"
+  },
+  {
+    "label": "the queue shows the OLDEST delivery attempt instead of the latest",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "        [(\"createdAt\", -1), (\"_id\", -1)]\n    )\n    async for row in cursor:\n        latest.setdefault",
+    "replace": "        [(\"createdAt\", 1), (\"_id\", 1)]\n    )\n    async for row in cursor:\n        latest.setdefault",
+    "tests": "tests/cloud/growth/test_delivery_queue.py::test_queue_attaches_the_latest_delivery"
+  },
+  {
+    "label": "a sending row stranded by a restart blocks deliver-approved forever",
+    "file": "ee/pocketpaw_ee/cloud/growth/service.py",
+    "find": "    return (datetime.now(UTC) - started).total_seconds() < stale_after\n",
+    "replace": "    return True\n",
+    "tests": "tests/cloud/growth/test_delivery_queue.py::test_deliver_approved_starts_only_idle_approved_drafts"
+  },
+  {
+    "label": "the no-worker refusal also blocks mock delivery, so mock sends never happen on a default deploy",
+    "file": "ee/pocketpaw_ee/cloud/growth/executor.py",
+    "find": "        if not mock and not _growth_worker_enabled():\n",
+    "replace": "        if not _growth_worker_enabled():\n",
+    "tests": "tests/cloud/growth/test_delivery_queue.py::test_approve_uses_mock_delivery_only_when_on"
   }
 ]

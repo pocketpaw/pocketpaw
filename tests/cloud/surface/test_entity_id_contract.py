@@ -227,6 +227,13 @@ _KNOWN_ADDRESSABLE_KINDS = frozenset(
         # (dev landed these tools without extending this set, so the harvester
         # tripped on the first branch that merged both growth and a full lane.)
         "draft",
+        # ``file`` — ``pocketpaw_files.read_upload`` takes a required ``file_id``
+        # (2026-09-14). The /files preamble DOES list this kind, so it owes the id
+        # and now renders it via ``entity_line``; the matching claim was removed
+        # from the unaddressed set above. Uploads live in object storage, so from
+        # the turn after an attachment arrives this id is the only way back to the
+        # document.
+        "file",
         "from",
         "icp",
         "input",
@@ -236,10 +243,28 @@ _KNOWN_ADDRESSABLE_KINDS = frozenset(
         "pocket",
         "project",
         "prospect",
+        # ``recipe`` — ``pocketpaw_sites_manager.apply_site_recipe`` takes a
+        # required ``recipe_id``: a paw-sites recipe slug (``d1-drizzle``), not a
+        # PocketPaw entity. The agent gets it from ``list_site_recipes`` output in
+        # the same turn, like ``style`` below.
+        "recipe",
         "run",
         "scenario",
+        # ``style`` — ``pocketpaw_refero.get_style`` takes a required
+        # ``style_id`` (2026-09-15). It is an OPAQUE UPSTREAM uuid minted by
+        # Refero, not a PocketPaw entity: nothing in our data model has that id,
+        # nothing persists it, and no prompt block can list one because the set
+        # is Refero's catalogue. The agent only ever gets one from
+        # ``search_styles`` output in the same turn — the same shape as
+        # ``app`` / ``box`` above.
+        "style",
         "task",
         "to",
+        # ``trace`` — ``pocketpaw_lens.lens_run`` takes a required ``trace_id``: a
+        # paw-lens trace (32 hex), not a PocketPaw entity. The agent_health
+        # preamble echoes at most the ONE run the user has open in its surface
+        # tag; every other id comes from ``lens_runs`` / ``lens_issues`` output.
+        "trace",
         "user",
         "widget",
     }
@@ -363,11 +388,26 @@ class TestUnaddressedClaimsStayTrue:
 
         THE MUTATION THAT BREAKS THIS: add ``unaddressed_line("widget", ...)``
         anywhere in the scan. Run: reported as unexpected and this failed.
+
+        ``file`` REMOVED 2026-09-14 (fix/attachment-not-on-disk): the tripwire
+        this docstring predicted fired. ``pocketpaw_files.read_upload`` takes a
+        required ``file_id``, so handlers/files.py stopped claiming the kind is
+        unaddressed and renders the id through ``entity_line`` instead. It is in
+        ``_KNOWN_ADDRESSABLE_KINDS`` now, which is the other half of the same
+        decision.
+
+        ``skill`` added 2026-09-08 (sites.py ``_design_skills_note``): a skill is
+        invoked BY NAME through the ``Skill`` tool — the loader keys them in a
+        dict, so the name is unique by construction and IS the address. No MCP
+        tool takes a ``skill_id``, which is not asserted here but by
+        ``test_nothing_claims_unaddressed_for_a_kind_a_tool_addresses``, which
+        re-derives the addressable kinds from the tool schemas every run. If one
+        ever ships, that test fails and this claim has to come out.
         """
         found = {
             kind for path in _scanned_files() for kind, _ln in _unaddressed_claims(path) if kind
         }
-        assert found == {"agent", "calendar_event", "file", "kb_scope"}, (
+        assert found == {"agent", "calendar_event", "kb_scope", "skill"}, (
             f"the set of unaddressed-entity claims moved: {sorted(found)}"
         )
 

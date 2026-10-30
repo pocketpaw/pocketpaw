@@ -2,7 +2,9 @@
 
 Core event loop that consumes from the message bus, feeds messages
 through AgentRouter (which delegates to the configured backend),
-and streams AgentEvent responses back to channels.
+and streams AgentEvent responses back to channels. On a processing error it
+stops only that session's run (``router.stop(session_key=...)``), never every
+session sharing the router.
 
 PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
 
@@ -78,6 +80,7 @@ from pocketpaw.bus.commands import get_command_handler
 from pocketpaw.bus.events import Channel
 from pocketpaw.config import Settings, get_settings
 from pocketpaw.memory import get_memory_manager
+from pocketpaw.prompt.channel import CHANNEL_TURN_CONTEXT_LAYERS
 from pocketpaw.recent_files import get_recent_files_tracker
 from pocketpaw.security.injection_scanner import ThreatLevel, get_injection_scanner
 from pocketpaw.security.redact import redact_output
@@ -1252,6 +1255,11 @@ class AgentLoop:
                 ),
             )
             system_prompt = assembled_prompt.text
+            # The per-message layers (memory recall, KB hits), kept apart for a
+            # backend that takes them as ``turn_context``: its system prompt is
+            # fixed at connect, so on a warm client they would otherwise stay
+            # turn 1's. The router picks the full or the split form per backend.
+            stable_prompt, turn_layers = assembled_prompt.split(CHANNEL_TURN_CONTEXT_LAYERS)
 
             # 2a0. Studio Flow build context — tell the agent WHICH flow this
             # request belongs to so its build_studio_flow call carries the id the
@@ -1263,14 +1271,17 @@ class AgentLoop:
             if isinstance(flow_ctx, dict) and flow_ctx.get("flow_id"):
                 _fid = str(flow_ctx["flow_id"])
                 _fname = str(flow_ctx.get("project_name") or "Untitled flow")
-                system_prompt = (
-                    f"{system_prompt}\n\n[studio flow context]\n"
+                flow_block = (
+                    f"[studio flow context]\n"
                     f"You are building a Studio Flow on the desktop canvas.\n"
                     f"ACTIVE FLOW ID: {_fid}\n"
                     f"ACTIVE FLOW NAME: {_fname}\n"
                     f'Call build_studio_flow with flow_id="{_fid}" so the graph '
                     f"saves into that flow project. Do NOT invent a different id."
                 )
+                system_prompt = f"{system_prompt}\n\n{flow_block}"
+                # Per request, so per turn on a warm client too.
+                turn_layers = f"{turn_layers}\n\n{flow_block}" if turn_layers else flow_block
 
             # 2a. Emit AGENTS.md event for the dashboard Activity panel
             try:
@@ -1316,6 +1327,7 @@ class AgentLoop:
             # change in behaviour. Pinned by
             # ``tests/test_channel_prompt_digest.py``.
             system_prompt = _reinforce_identity(system_prompt, identity_block, message_count)
+            stable_prompt = _reinforce_identity(stable_prompt, identity_block, message_count)
 
             # 2c. Emit agent_start + thinking events
             agent_started = True
@@ -1413,6 +1425,7 @@ class AgentLoop:
                 # parameter must keep working, so the check is on the signature
                 # and it lives in ``agents.backend``.
                 system_prompt_digest=assembled_prompt.stable_digest,
+                turn_split=(stable_prompt, turn_layers),
             )
             try:
                 async for event in run_iter:
@@ -1940,10 +1953,11 @@ class AgentLoop:
                     "Failed to persist processing error in health engine",
                     exc_info=True,
                 )
-            # Kill the backend on error
+            # Stop THIS session's run on error. Scoped: the router is shared by
+            # every session, and an unscoped stop killed their streams too.
             if router is not None:
                 try:
-                    await router.stop()
+                    await router.stop(session_key=session_key)
                 except Exception:
                     logger.warning(
                         "Failed to stop router cleanly after processing error",

@@ -4,8 +4,8 @@
 # (``service._PROXY_TRANSPORT`` → httpx.MockTransport) so the full request
 # shape — path, model, prompt, size, count, the OpenAI ``user`` tenant tag, and
 # the Bearer key — is asserted end-to-end without a live proxy. The media
-# storage adapter and ``_history_path`` are redirected to tmp dirs so nothing
-# touches the developer's real ``~/.pocketpaw``. Coverage:
+# storage adapter is redirected to a tmp dir so nothing touches the developer's
+# real ``~/.pocketpaw``; generation history is Mongo (the ``mongo_db`` fixture). Coverage:
 #   * list_models — catalog image/video entries map onto StudioModel shapes,
 #     first image model is the catalog default, chat entries are excluded.
 #   * generate (image) — happy path (b64_json): POSTs the right payload, saves a
@@ -37,7 +37,15 @@ from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry, Pricing
 from pocketpaw_ee.cloud.media import storage as media_storage
-from pocketpaw_ee.cloud.studio import fal_edit, fal_elements, fal_motion, fal_video, schemas
+from pocketpaw_ee.cloud.studio import (
+    fal_edit,
+    fal_elements,
+    fal_image,
+    fal_motion,
+    fal_music,
+    fal_video,
+    schemas,
+)
 
 from pocketpaw.uploads.local import LocalStorageAdapter
 
@@ -73,8 +81,8 @@ def proxy_env(monkeypatch):
 
 
 @pytest.fixture
-def studio_env(tmp_path, monkeypatch):
-    """Redirect media storage + history persistence + flow-project persistence
+def studio_env(tmp_path, monkeypatch, mongo_db):
+    """Redirect media storage + flow-project persistence
     into tmp dirs so tests never touch the real ~/.pocketpaw, and resolve the
     tenant key to a fixed value.
 
@@ -86,12 +94,15 @@ def studio_env(tmp_path, monkeypatch):
     generated = media_root / "generated"
     generated.mkdir(exist_ok=True)
     monkeypatch.setattr(media_storage, "_ADAPTER", LocalStorageAdapter(root=media_root))
+    # History is Mongo now (the ``mongo_db`` fixture inits Beanie); this path is
+    # kept only so callers can keep unpacking a 2-tuple.
     history = tmp_path / "studio" / "generations.jsonl"
     history.parent.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(service, "_history_path", lambda: history)
     projects = tmp_path / "studio" / "flow-projects.jsonl"
     projects.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(service, "_projects_path", lambda: projects)
+    timelines = tmp_path / "studio" / "timelines.jsonl"
+    monkeypatch.setattr(service, "_timelines_path", lambda: timelines)
 
     async def _tenant_key(workspace_id):
         return "sk-tenant-ws"
@@ -135,7 +146,7 @@ async def test_list_models_maps_image_and_video_entries(monkeypatch) -> None:
     models = await service.list_models()
 
     ids = [m.id for m in models]
-    assert ids == [
+    assert ids[:3] == [
         "fal_ai/fal-ai/flux/schnell",
         "fal_ai/fal-ai/gpt-image-1",
         "fal_ai/fal-ai/kling/v2",
@@ -153,6 +164,19 @@ async def test_list_models_maps_image_and_video_entries(monkeypatch) -> None:
     video = models[2]
     assert video.kind == "video"
     assert video.durationsSec == [2, 5, 10]
+
+    # Curated fal registries (the movie-maker surface) are appended after the
+    # LiteLLM-derived rows, deduplicated by id.
+    assert "fal-ai/nano-banana-2" in ids
+    assert "openai/gpt-image-2" in ids
+    assert "bytedance/seedance-2.5/text-to-video" in ids
+    assert "google/gemini-omni-flash/edit" in ids
+    audio = [m for m in models if m.kind == "audio"]
+    assert {m.id for m in audio} == {
+        "fal-ai/elevenlabs/music",
+        "fal-ai/ace-step-1.5",
+        "fal-ai/ace-step/prompt-to-audio",
+    }
 
 
 async def test_list_models_appends_fal_video_fallback_when_catalog_has_none(
@@ -174,12 +198,15 @@ async def test_list_models_appends_fal_video_fallback_when_catalog_has_none(
     models = await service.list_models()
 
     video = [m for m in models if m.kind == "video"]
-    assert len(video) == 1
-    assert video[0].id == fal_video.DEFAULT_VIDEO_MODEL
-    assert video[0].provider == "fal"
-    assert video[0].durationsSec == [2, 5, 10]
-    assert video[0].default is True
-    assert video[0].aspectRatios == ["16:9", "9:16", "1:1"]
+    fallback = next(m for m in video if m.id == fal_video.DEFAULT_VIDEO_MODEL)
+    assert fallback.provider == "fal"
+    assert fallback.durationsSec == [2, 5, 10]
+    assert fallback.default is True
+    assert fallback.aspectRatios == ["16:9", "9:16", "1:1"]
+    # The curated video registries are appended alongside the fallback.
+    video_ids = {m.id for m in video}
+    assert "bytedance/seedance-2.5/text-to-video" in video_ids
+    assert "google/gemini-omni-flash/edit" in video_ids
 
 
 async def test_list_models_does_not_append_fallback_when_video_served(
@@ -200,9 +227,12 @@ async def test_list_models_does_not_append_fallback_when_video_served(
     models = await service.list_models()
 
     videos = [m for m in models if m.kind == "video"]
-    assert len(videos) == 1
     assert videos[0].id == "fal_ai/fal-ai/kling/v2"
     assert videos[0].durationsSec == [2, 5, 10]
+    # No fallback row is appended (its label would be "Kling Video 1.0"), but the
+    # curated video registries still are.
+    assert not any(m.label == "Kling Video 1.0" for m in videos)
+    assert "bytedance/seedance-2.5/text-to-video" in {m.id for m in videos}
 
 
 async def test_list_models_upstream_failure_propagates(monkeypatch) -> None:
@@ -214,6 +244,59 @@ async def test_list_models_upstream_failure_propagates(monkeypatch) -> None:
     monkeypatch.setattr(catalog_service, "list_models", _boom)
     with pytest.raises(CatalogUpstreamError):
         await service.list_models()
+
+
+async def test_curated_image_models_expose_edit_params(monkeypatch) -> None:
+    """Curated image models surface their per-model edit knobs from
+    ``fal_image.MODEL_PARAMS`` — only the edit-capable models carry any."""
+
+    async def _list(**kw):
+        return []
+
+    monkeypatch.setattr(catalog_service, "list_models", _list)
+
+    models = await service.list_models()
+    by_id = {m.id: m for m in models}
+
+    nana = by_id["fal-ai/nano-banana-2"]
+    assert {p.key for p in nana.params} == {
+        "num_images",
+        "seed",
+        "output_format",
+        "safety_tolerance",
+    }
+    num = next(p for p in nana.params if p.key == "num_images")
+    assert num.type == "stepper" and num.min == 1 and num.max == 4
+
+    gpt = by_id["openai/gpt-image-2"]
+    assert {p.key for p in gpt.params} == {
+        "quality",
+        "num_images",
+        "size",
+        "background",
+        "output_format",
+        "seed",
+    }
+
+    seedream = by_id["bytedance/seedream/v5/pro/text-to-image"]
+    assert {p.key for p in seedream.params} == {
+        "num_images",
+        "resolution",
+        "output_format",
+        "seed",
+    }
+
+    grok = by_id["xai/grok-imagine-image/v2.0/text-to-image"]
+    assert {p.key for p in grok.params} == {
+        "resolution",
+        "quality",
+        "num_images",
+        "output_format",
+        "seed",
+    }
+
+    # Non-edit curated image models expose no params.
+    assert by_id["fal-ai/recraft/v3/text-to-image"].params == []
 
 
 # ── generate (image) ─────────────────────────────────────────────────────────
@@ -265,17 +348,16 @@ async def test_generate_image_happy_path(monkeypatch, proxy_env, studio_env) -> 
     assert len(captured["requests"]) == 1
 
     # History: one record, scoped to ws-1, re-readable as a wire Generation.
-    records = service._load_history()
+    records = await service.list_generations("ws-1")
     assert len(records) == 1
-    assert records[0]["_workspace"] == "ws-1"
-    listed = service.list_generations("ws-1")
+    listed = await service.list_generations("ws-1")
     assert [g.id for g in listed] == [gen.id]
-    assert service.get_generation(gen.id, "ws-1") is not None
+    assert await service.get_generation("ws-1", gen.id) is not None
     # A different workspace does not see it.
-    assert service.list_generations("ws-other") == []
-    assert service.get_generation(gen.id, "ws-other") is None
+    assert await service.list_generations("ws-other") == []
+    assert await service.get_generation("ws-other", gen.id) is None
     # The media router exclusion sees the saved file.
-    assert name in service.tracked_generation_filenames()
+    assert name in await service.tracked_generation_filenames()
 
 
 async def test_generate_image_url_path(monkeypatch, proxy_env, studio_env) -> None:
@@ -326,7 +408,19 @@ async def test_generate_video_happy_path(monkeypatch, studio_env) -> None:
     poster = b"\x89PNG\r\n\x1a\nfake-poster"
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
+    ):
         seen.update(
             prompt=prompt,
             duration_sec=duration_sec,
@@ -360,7 +454,7 @@ async def test_generate_video_happy_path(monkeypatch, studio_env) -> None:
     assert any(p.suffix == ".mp4" for p in saved)
     assert any(p.suffix == ".png" for p in saved)
     # The persisted record is scoped to the workspace.
-    assert service.list_generations("ws-1")[0].id == gen.id
+    assert (await service.list_generations("ws-1"))[0].id == gen.id
 
 
 async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -> None:
@@ -368,7 +462,19 @@ async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -
     by fal_video before dispatch."""
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
+    ):
         seen["model"] = model
         return b"mp4", "video/mp4", None, None
 
@@ -386,7 +492,19 @@ async def test_generate_video_alias_resolves_endpoint(monkeypatch, studio_env) -
 async def test_generate_video_fal_failure_is_upstream_error(monkeypatch, studio_env) -> None:
     """A fal video upstream failure surfaces as StudioUpstreamError (→ 502)."""
 
-    async def _boom(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _boom(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
+    ):
         raise fal_video.FalVideoError("fal video 'x' failed: bad key")
 
     monkeypatch.setattr(fal_video, "run_fal_video", _boom)
@@ -394,7 +512,7 @@ async def test_generate_video_fal_failure_is_upstream_error(monkeypatch, studio_
     req = schemas.GenerateRequest(prompt="a clip", kind="video", model="m", aspectRatio="16:9")
     with pytest.raises(service.StudioUpstreamError, match="bad key"):
         await service.generate(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_generate_video_image_to_video_passes_all_images(monkeypatch, studio_env) -> None:
@@ -404,7 +522,19 @@ async def test_generate_video_image_to_video_passes_all_images(monkeypatch, stud
     generated, history = studio_env
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
+    ):
         seen.update(
             prompt=prompt,
             duration_sec=duration_sec,
@@ -441,7 +571,19 @@ async def test_generate_video_image_to_video_forwards_typed_prompt(monkeypatch, 
     generated, history = studio_env
     seen: dict = {}
 
-    async def _fake_video(*, prompt, duration_sec, aspect_ratio, model, key=None, image_urls=None):
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
+    ):
         seen.update(prompt=prompt, image_urls=image_urls, duration_sec=duration_sec)
         return b"mp4", "video/mp4", None, None
 
@@ -475,6 +617,157 @@ async def test_generate_video_without_images_requires_prompt(monkeypatch, studio
         await service.generate(req, workspace_id="ws-1")
 
 
+async def test_generate_video_seedance_i2v_forwards_schema(monkeypatch, studio_env) -> None:
+    """A Seedance i2v video request forwards the Seedance-specific extras
+    (``resolution`` / ``generateAudio``) plus the resolved images to fal_video."""
+    generated, history = studio_env
+    seen: dict = {}
+
+    async def _fake_video(
+        *,
+        prompt,
+        duration_sec,
+        aspect_ratio,
+        model,
+        key=None,
+        image_urls=None,
+        resolution=None,
+        generate_audio=None,
+        audio_urls=None,
+        video_urls=None,
+    ):
+        seen.update(
+            model=model,
+            image_urls=image_urls,
+            resolution=resolution,
+            generate_audio=generate_audio,
+            duration_sec=duration_sec,
+            aspect_ratio=aspect_ratio,
+        )
+        return b"mp4", "video/mp4", None, None
+
+    monkeypatch.setattr(fal_video, "run_fal_video", _fake_video)
+
+    req = schemas.GenerateRequest(
+        prompt="a character walks across the frame",
+        kind="video",
+        model="bytedance/seedance-2.5/image-to-video",
+        aspectRatio="16:9",
+        durationSec=30,
+        inputImageUrls=["data:image/png;base64,AAAA"],
+        resolution="720p",
+        generateAudio=True,
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert seen["model"] == "bytedance/seedance-2.5/image-to-video"
+    assert seen["image_urls"] == ["data:image/png;base64,AAAA"]
+    assert seen["resolution"] == "720p"
+    assert seen["generate_audio"] is True
+    assert seen["duration_sec"] == 30
+    assert seen["aspect_ratio"] == "16:9"
+
+
+# ── curated image + music (direct fal.ai dispatch, movie-maker) ──────────────
+
+
+async def test_generate_curated_image_dispatches_direct_to_fal(monkeypatch, studio_env) -> None:
+    """A curated image model id (in fal_image.IMAGE_MODEL_IDS) skips the LiteLLM
+    proxy and dispatches directly against fal; each returned image is persisted."""
+    generated, _ = studio_env
+    png = b"\x89PNG\r\n\x1a\nfake-image"
+    seen: dict = {}
+
+    async def _fake_image(*, prompt, model, aspect_ratio, count, seed, key=None):
+        seen.update(prompt=prompt, model=model, aspect_ratio=aspect_ratio, count=count)
+        return [(png, "image/png")]
+
+    monkeypatch.setattr(fal_image, "run_fal_image", _fake_image)
+
+    req = schemas.GenerateRequest(
+        prompt="a poster",
+        kind="image",
+        model="fal-ai/nano-banana-2",
+        aspectRatio="16:9",
+        count=1,
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert gen.model == "fal-ai/nano-banana-2"
+    assert seen["model"] == "fal-ai/nano-banana-2"
+    assert seen["aspect_ratio"] == "16:9"
+    assert gen.assets and gen.assets[0].mime == "image/png"
+    assert gen.assets[0].url.startswith("/api/v1/media/")
+    assert any(p.suffix == ".png" for p in generated.iterdir())
+
+
+async def test_generate_image_edit_routes_on_references(monkeypatch, studio_env) -> None:
+    """Reference images switch image generation to the curated edit endpoint."""
+    png = b"\x89PNG\r\n\x1a\nfake-edit"
+    seen: dict = {}
+
+    async def _fake_edit(*, prompt, image_urls, model, aspect_ratio, count, seed, key=None):
+        seen.update(prompt=prompt, model=model, image_urls=image_urls)
+        return [(png, "image/png")]
+
+    monkeypatch.setattr(fal_image, "run_fal_image_edit", _fake_edit)
+
+    req = schemas.GenerateRequest(
+        prompt="same character in a new scene",
+        kind="image",
+        model="openai/gpt-image-2",
+        aspectRatio="1:1",
+        count=1,
+        referenceImageUrls=[_DATA_URL],
+    )
+    gen = await service.generate(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert seen["model"] == "openai/gpt-image-2"
+    assert len(seen["image_urls"]) == 1
+    assert seen["image_urls"][0] == _DATA_URL
+
+
+async def test_generate_music_happy_path(monkeypatch, studio_env) -> None:
+    """A fal music result → the audio is saved, a succeeded kind='audio'
+    Generation is returned, and history records it."""
+    generated, history = studio_env
+    mp3 = b"ID3\x04fake-audio"
+    seen: dict = {}
+
+    async def _fake_music(*, prompt, model, lyrics, instrumental, duration_sec, steps, key=None):
+        seen.update(prompt=prompt, model=model, instrumental=instrumental)
+        return mp3, "audio/mpeg"
+
+    monkeypatch.setattr(fal_music, "run_fal_music", _fake_music)
+
+    req = schemas.MusicRequest(
+        prompt="a tense thriller score",
+        model="fal-ai/elevenlabs/music",
+        instrumental=True,
+        durationSec=60,
+    )
+    gen = await service.generate_music(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert gen.kind == "audio"
+    assert seen["model"] == "fal-ai/elevenlabs/music"
+    assert seen["instrumental"] is True
+    assert gen.assets and gen.assets[0].mime == "audio/mpeg"
+    assert gen.assets[0].url.startswith("/api/v1/media/")
+    assert any(p.suffix == ".mp3" for p in generated.iterdir())
+    assert (await service.list_generations("ws-1"))[0].id == gen.id
+
+
+async def test_generate_music_missing_prompt_is_valueerror(monkeypatch, studio_env) -> None:
+    """A music request with no prompt fails fast with ValueError (→ 400)."""
+    req = schemas.MusicRequest(prompt="")
+    with pytest.raises(ValueError, match="prompt is required for music generation"):
+        await service.generate_music(req, workspace_id="ws-1")
+
+
 async def test_generate_proxy_failure_is_upstream_error(monkeypatch, proxy_env, studio_env) -> None:
     """A non-2xx proxy response surfaces as StudioUpstreamError (→ 502), and
     nothing is persisted."""
@@ -487,7 +780,7 @@ async def test_generate_proxy_failure_is_upstream_error(monkeypatch, proxy_env, 
     req = schemas.GenerateRequest(prompt="x", model="fal_ai/fal-ai/flux/schnell", aspectRatio="1:1")
     with pytest.raises(service.StudioUpstreamError):
         await service.generate(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 # ── edit (direct fal.ai dispatch) ────────────────────────────────────────────
@@ -521,10 +814,97 @@ async def test_edit_happy_path(monkeypatch, studio_env) -> None:
     assert (generated / name).read_bytes() == png
 
     # History: one record, scoped to ws-1, excluded from the /media list.
-    records = service._load_history()
+    records = await service.list_generations("ws-1")
     assert len(records) == 1
-    assert records[0]["_workspace"] == "ws-1"
-    assert name in service.tracked_generation_filenames()
+    assert name in await service.tracked_generation_filenames()
+
+
+async def test_edit_op_routes_curated_model_through_fal_image(monkeypatch, studio_env) -> None:
+    """``op='edit'`` with a curated image model id + per-model params dispatches
+    through the model's own /edit variant (fal_image), forwarding ``num_images``
+    and ``seed`` instead of the generic canvas op."""
+    png = b"\x89PNG\r\n\x1a\nedited"
+    seen: dict = {}
+
+    async def _fake_fal_image_edit(**kwargs):
+        seen.update(kwargs)
+        return [(png, "image/png")]
+
+    monkeypatch.setattr(fal_image, "run_fal_image_edit", _fake_fal_image_edit)
+
+    req = schemas.EditRequest(
+        op="edit",
+        sourceUrl=_DATA_URL,
+        prompt="turn the sky purple",
+        model="fal-ai/nano-banana-2",
+        params={"num_images": 3, "seed": "42"},
+    )
+    gen = await service.edit(req, workspace_id="ws-1")
+
+    assert gen.status == "succeeded"
+    assert seen["model"] == "fal-ai/nano-banana-2"
+    assert seen["count"] == 3
+    assert seen["seed"] == 42
+    assert seen["image_urls"] == [_DATA_URL]
+    assert gen.assets[0].url.startswith("/api/v1/media/")
+
+
+async def test_edit_op_forwards_gpt_image_2_knobs(monkeypatch, studio_env) -> None:
+    """gpt-image-2 edit forwards its own knobs (quality / size / background /
+    output_format) onto the fal arguments."""
+    png = b"\x89PNG\r\n\x1a\nedited"
+    seen: dict = {}
+
+    async def _fake_fal_image_edit(**kwargs):
+        seen.update(kwargs)
+        return [(png, "image/png")]
+
+    monkeypatch.setattr(fal_image, "run_fal_image_edit", _fake_fal_image_edit)
+
+    req = schemas.EditRequest(
+        op="edit",
+        sourceUrl=_DATA_URL,
+        prompt="livery",
+        model="openai/gpt-image-2",
+        params={
+            "quality": "high",
+            "size": "1536x1024",
+            "background": "transparent",
+            "output_format": "png",
+            "num_images": 2,
+        },
+    )
+    gen = await service.edit(req, workspace_id="ws-1")
+    assert gen.status == "succeeded"
+    assert seen["quality"] == "high"
+    assert seen["size"] == "1536x1024"
+    assert seen["background"] == "transparent"
+    assert seen["output_format"] == "png"
+    assert seen["count"] == 2
+
+
+async def test_edit_op_curated_params_blank_seed_is_none(monkeypatch, studio_env) -> None:
+    """A blank ``seed`` from the composer's untouched text knob coerces to None
+    (never ``int('')`` → 400/500)."""
+    png = b"\x89PNG\r\n\x1a\nedited"
+    seen: dict = {}
+
+    async def _fake_fal_image_edit(**kwargs):
+        seen.update(kwargs)
+        return [(png, "image/png")]
+
+    monkeypatch.setattr(fal_image, "run_fal_image_edit", _fake_fal_image_edit)
+
+    req = schemas.EditRequest(
+        op="edit",
+        sourceUrl=_DATA_URL,
+        prompt="recolor",
+        model="bytedance/seedream/v5/pro/text-to-image",
+        params={"seed": ""},
+    )
+    gen = await service.edit(req, workspace_id="ws-1")
+    assert gen.status == "succeeded"
+    assert seen["seed"] is None
 
 
 async def test_edit_resolves_stored_media_source(monkeypatch, studio_env) -> None:
@@ -574,7 +954,7 @@ async def test_edit_fal_failure_is_upstream_error(monkeypatch, studio_env) -> No
     req = schemas.EditRequest(op="upscale", sourceUrl=_DATA_URL)
     with pytest.raises(service.StudioUpstreamError):
         await service.edit(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_edit_missing_prompt_is_valueerror(monkeypatch, studio_env) -> None:
@@ -584,7 +964,7 @@ async def test_edit_missing_prompt_is_valueerror(monkeypatch, studio_env) -> Non
     req = schemas.EditRequest(op="edit", sourceUrl=_DATA_URL)
     with pytest.raises(ValueError, match="prompt is required"):
         await service.edit(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_edit_no_output_is_upstream_error(monkeypatch, studio_env) -> None:
@@ -598,7 +978,7 @@ async def test_edit_no_output_is_upstream_error(monkeypatch, studio_env) -> None
     req = schemas.EditRequest(op="upscale", sourceUrl=_DATA_URL)
     with pytest.raises(service.StudioUpstreamError, match="no output images"):
         await service.edit(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 # ── video elements (direct fal.ai Kling Elements dispatch) ───────────────────
@@ -644,7 +1024,7 @@ async def test_generate_video_elements_happy_path(monkeypatch, studio_env) -> No
     assert seen["input_image_urls"] == [_DATA_URL, _DATA_URL]
     assert seen["video_url"] == _DATA_URL
     assert seen["duration_sec"] == 5
-    assert service.list_generations("ws-1")[0].id == gen.id
+    assert (await service.list_generations("ws-1"))[0].id == gen.id
 
 
 async def test_generate_video_elements_prompt_only(monkeypatch, studio_env) -> None:
@@ -694,7 +1074,7 @@ async def test_generate_video_elements_fal_failure_is_upstream_error(
     req = schemas.VideoElementsRequest(prompt="a scene")
     with pytest.raises(service.StudioUpstreamError, match="bad key"):
         await service.generate_video_elements(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 # ── motion control (direct fal.ai Kling Motion Control dispatch) ─────────────
@@ -733,7 +1113,7 @@ async def test_generate_video_motion_happy_path(monkeypatch, studio_env) -> None
     assert seen["image_url"] == _DATA_URL
     assert seen["video_url"] == _DATA_URL
     assert seen["character_orientation"] == "video"
-    assert service.list_generations("ws-1")[0].id == gen.id
+    assert (await service.list_generations("ws-1"))[0].id == gen.id
 
 
 async def test_generate_video_motion_requires_image(monkeypatch, studio_env) -> None:
@@ -756,7 +1136,7 @@ async def test_generate_video_motion_fal_failure_is_upstream_error(monkeypatch, 
     req = schemas.VideoMotionRequest(imageUrl=_DATA_URL, videoUrl=_DATA_URL)
     with pytest.raises(service.StudioUpstreamError, match="bad key"):
         await service.generate_video_motion(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_generate_video_motion_validation_error_is_value_error(
@@ -773,7 +1153,7 @@ async def test_generate_video_motion_validation_error_is_value_error(
     req = schemas.VideoMotionRequest(imageUrl=_DATA_URL, videoUrl=_DATA_URL)
     with pytest.raises(ValueError, match="dimensions are too small"):
         await service.generate_video_motion(req, workspace_id="ws-1")
-    assert service._load_history() == []
+    assert await service.list_generations("ws-1") == []
 
 
 async def test_generate_video_motion_passes_public_video_url_through(
@@ -837,9 +1217,37 @@ def test_fit_character_image_passes_through_within_limit() -> None:
 def test_list_styles_matches_mock() -> None:
     styles = service.list_styles()
     ids = [s.id for s in styles]
-    assert ids == ["none", "cinematic", "photoreal", "watercolor", "anime", "threed", "neon"]
+    # The legacy quick styles stay first (the gallery/composer depend on the
+    # "none" head + the short ids); the curated rich registry is appended.
+    assert ids[:7] == ["none", "cinematic", "photoreal", "watercolor", "anime", "threed", "neon"]
     cinematic = next(s for s in styles if s.id == "cinematic")
     assert "cinematic" in cinematic.promptSuffix
+
+
+def test_list_styles_includes_curated_registry() -> None:
+    """Curated styles carry category/tags + full look/motion/references config so
+    the movie-maker can render detail cards (the Sci-Fi Futuristic example)."""
+    styles = service.list_styles()
+    ids = {s.id for s in styles}
+    assert "sci-fi-futuristic" in ids
+    assert len(ids) > 7  # quick styles + the curated registry
+
+    sci_fi = next(s for s in styles if s.id == "sci-fi-futuristic")
+    assert sci_fi.category == "film"
+    assert "scifi" in sci_fi.tags
+    assert sci_fi.config is not None
+    assert sci_fi.config.look.mood == "Futuristic and technological"
+    assert sci_fi.config.look.colorPalette == [
+        "#00FFFF",
+        "#0000FF",
+        "#C0C0C0",
+        "#800080",
+        "#00FF00",
+    ]
+    assert "holographic elements" in sci_fi.config.look.artStyle
+    assert sci_fi.config.motion.camera
+    assert len(sci_fi.config.references) == 3
+    assert "Art style" in sci_fi.promptSuffix  # "Use this style" appends treatment
 
 
 def test_suggest_prompt_heuristic() -> None:
@@ -927,3 +1335,81 @@ def test_delete_flow_project(studio_env) -> None:
     assert service.delete_flow_project("proj_1", "ws-1") is True
     assert service.get_flow_project("proj_1", "ws-1") is None
     assert service.delete_flow_project("proj_1", "ws-1") is False
+
+
+# ── Editor timelines ─────────────────────────────────────────────────────────
+
+
+def _doc(updated_at: int = 100, name: str = "Reel") -> dict:
+    return {
+        "version": 1,
+        "id": "tl_1",
+        "name": name,
+        "width": 1080,
+        "height": 1920,
+        "fps": 30,
+        "assets": [{"id": "a1", "kind": "video", "remoteUrl": "/api/v1/media/x.mp4"}],
+        "tracks": [],
+        "updatedAt": updated_at,
+    }
+
+
+def test_save_timeline_upserts_and_keeps_the_client_clock(studio_env) -> None:
+    """An unknown id creates, a known id updates in place. ``updatedAt`` is the
+    client's edit clock verbatim — the whole sync orders on it."""
+    saved = service.save_timeline_project(
+        "tl_1", "ws-1", name="Reel", doc=_doc(100), updated_at=100
+    )
+    assert saved.id == "tl_1"
+    assert saved.updatedAt == 100
+    assert saved.createdAt > 0
+    assert saved.doc["assets"][0]["id"] == "a1"
+
+    moved = service.save_timeline_project(
+        "tl_1", "ws-1", name=None, doc=_doc(200, "Reel v2"), updated_at=200
+    )
+    assert moved.name == "Reel"  # preserved when omitted
+    assert moved.createdAt == saved.createdAt
+    assert moved.updatedAt == 200
+    assert service.get_timeline_project("tl_1", "ws-1").doc["name"] == "Reel v2"
+
+
+def test_save_timeline_rejects_a_stale_clock(studio_env) -> None:
+    """A device that has been offline must not overwrite newer work: an older
+    edit clock is a 409, and the stored record is untouched."""
+    service.save_timeline_project("tl_1", "ws-1", name="Reel", doc=_doc(500), updated_at=500)
+
+    with pytest.raises(service.TimelineConflict) as exc:
+        service.save_timeline_project(
+            "tl_1", "ws-1", name="Reel", doc=_doc(400, "stale"), updated_at=400
+        )
+    assert exc.value.stored_updated_at == 500
+    assert service.get_timeline_project("tl_1", "ws-1").doc["name"] == "Reel"
+
+    # Equal clocks are NOT a conflict — the same device re-sending its own save.
+    same = service.save_timeline_project("tl_1", "ws-1", name="Reel", doc=_doc(500), updated_at=500)
+    assert same.updatedAt == 500
+
+
+def test_save_timeline_blank_name_falls_back(studio_env) -> None:
+    saved = service.save_timeline_project("tl_2", "ws-1", name="  ", doc=_doc(), updated_at=100)
+    assert saved.name == "Timeline"
+
+
+def test_list_timelines_workspace_scoped(studio_env) -> None:
+    """Only the caller's workspace, most-recently-updated first."""
+    service.save_timeline_project("a", "ws-1", name="A", doc=_doc(100), updated_at=100)
+    service.save_timeline_project("b", "ws-1", name="B", doc=_doc(300), updated_at=300)
+    service.save_timeline_project("c", "ws-2", name="C", doc=_doc(200), updated_at=200)
+
+    mine = service.list_timeline_projects("ws-1")
+    assert [p.id for p in mine] == ["b", "a"]
+    assert [p.id for p in service.list_timeline_projects("ws-2")] == ["c"]
+    assert service.get_timeline_project("a", "ws-2") is None
+
+
+def test_delete_timeline(studio_env) -> None:
+    service.save_timeline_project("tl_1", "ws-1", name="Reel", doc=_doc(), updated_at=100)
+    assert service.delete_timeline_project("tl_1", "ws-1") is True
+    assert service.get_timeline_project("tl_1", "ws-1") is None
+    assert service.delete_timeline_project("tl_1", "ws-1") is False

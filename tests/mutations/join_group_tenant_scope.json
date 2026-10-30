@@ -1,0 +1,44 @@
+[
+  {
+    "label": "drop the workspace comparison — the shipped state",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "    if group.workspace_id != workspace_id:\n        log_denial(\n            actor=user_id,\n            action=\"group.join\",\n            code=\"group.not_found\",\n            resource_id=group_id,\n        )\n        raise NotFound(\"group\", group_id)\n",
+    "replace": "",
+    "tests": ["tests/cloud/chat/test_join_group_is_tenant_scoped.py"]
+  },
+  {
+    "label": "compare the group's workspace to itself, which always passes",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "    if group.workspace_id != workspace_id:",
+    "replace": "    if group.workspace_id != group.workspace_id:",
+    "tests": ["tests/cloud/chat/test_join_group_is_tenant_scoped.py"]
+  },
+  {
+    "label": "raise Forbidden, turning the refusal into an existence oracle",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "            resource_id=group_id,\n        )\n        raise NotFound(\"group\", group_id)\n    if group.type == \"channel\" and group.visibility == \"private\":",
+    "replace": "            resource_id=group_id,\n        )\n        raise Forbidden(\"group.not_found\", \"Not a member of that workspace\")\n    if group.type == \"channel\" and group.visibility == \"private\":",
+    "tests": ["tests/cloud/chat/test_join_group_is_tenant_scoped.py"]
+  },
+  {
+    "label": "stop the route passing the caller's workspace to the service",
+    "file": "ee/pocketpaw_ee/cloud/chat/router.py",
+    "find": "    await group_service.join_group(group_id, user_id, workspace_id)",
+    "replace": "    await group_service.join_group(group_id, user_id, group_id)",
+    "tests": ["tests/cloud/chat/test_join_group_is_tenant_scoped.py"]
+  },
+  {
+    "label": "drop the archived check — a pre-existing factor",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "    if group.archived:\n        raise Forbidden(\"group.archived\", \"Cannot join an archived group\")",
+    "replace": "    pass",
+    "tests": ["tests/cloud/chat/test_join_group_is_tenant_scoped.py"]
+  },
+  {
+    "label": "drop the group-type check — a pre-existing factor",
+    "file": "ee/pocketpaw_ee/cloud/chat/group_service.py",
+    "find": "    if group.type not in (\"public\", \"channel\"):\n        raise Forbidden(\n            \"group.not_joinable\",\n            \"Only public groups and channels can be joined directly\",\n        )",
+    "replace": "    pass",
+    "tests": ["tests/cloud/chat/test_join_group_is_tenant_scoped.py"]
+  }
+]

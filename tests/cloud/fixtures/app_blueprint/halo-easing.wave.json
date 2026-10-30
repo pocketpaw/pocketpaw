@@ -1,0 +1,36 @@
+{
+  "title": "Ease keys",
+  "wave": "W2",
+  "order": 10,
+  "status": "planned",
+  "feature_issue": "file when ready",
+  "covers": "#428",
+  "waits_on": "layer-keys, history-files; #333; #771 and #63 not blocking (plain diamonds; keys picked from the EASING rows)",
+  "cells": {
+    "waits on (features)": "layer-keys, history-files",
+    "waits on (SuiteUI, creative-core)": "#333; #771 and #63 not blocking (plain diamonds; keys picked from the EASING rows)"
+  },
+  "depends": [
+    "layer-keys",
+    "history-files"
+  ],
+  "owned": [
+    "Sources/HaloModel/Live/LiveKeyEasing.swift",
+    "Sources/HaloModel/HaloKeySelection.swift",
+    "Sources/HaloModel/Availability/HaloAvailability+Easing.swift",
+    "Sources/HaloApp/HaloEasingInspector.swift",
+    "Sources/HaloApp/HaloTimelineView.swift",
+    "Sources/HaloApp/HaloWindow+Easing.swift",
+    "Tests/HaloModelTests/KeyEasingContractTests.swift",
+    "Tests/HaloModelTests/HaloEasingTests.swift",
+    "Tests/HaloModelTests/HaloEasingBudgetTests.swift",
+    "Tests/AppSnapshotTests/HaloEasingSnapshots.swift",
+    "UITests/HaloJourneyTests+Easing.swift"
+  ],
+  "core": "none (FlareCore `Easing` and `Timeline.value` already ease)",
+  "waits_ui": [
+    "#333",
+    "timeline key shapes and selection (Flare S10/S11, to file as needs-ui; plain diamonds meanwhile)"
+  ],
+  "note": "H-J7; HB-7; HF-4. Waits on layer-keys (keys to ease) and history-files (the journey reads the Undo name)."
+}

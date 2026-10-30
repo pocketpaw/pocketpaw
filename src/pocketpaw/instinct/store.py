@@ -197,6 +197,7 @@ from pocketpaw.instinct.models import (
     OutcomeVerdict,
 )
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
+from pocketpaw.sqlite_migrations import checkpoint_wal
 
 logger = logging.getLogger(__name__)
 
@@ -619,8 +620,7 @@ class InstinctStore:
         """
         self._initialized = False
         try:
-            async with aiosqlite.connect(self._db_path) as db:
-                await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await asyncio.to_thread(checkpoint_wal, self._db_path)
         except Exception:  # noqa: BLE001 — eviction cleanup is best-effort
             logger.debug("InstinctStore.aclose checkpoint skipped", exc_info=True)
 

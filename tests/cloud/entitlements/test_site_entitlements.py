@@ -12,18 +12,14 @@
 # the site's billing fields because ``entitlements`` may not import ``models.site``
 # (EE cloud rule 2).
 #
-# Updated 2026-08-21 (feat/site-free-custom-domain, PW-1). Several assertions here
-# INVERTED, and the inversion is the change, not a regression: free now includes a
-# custom domain ("only 1 site is allowed to have a custom domain in free" —
-# captain, 2026-08-21), so a site resolving to the floor gets ``custom_domain
-# True`` and ``max_domained_sites == 1`` where it used to get False and nothing.
-# Badge removal, the concierge, and the UNCAPPED allowance are untouched: those are
-# still paid grants and still need an active subscription, which is why the
-# badge half of every one of these tests still reads exactly as it did.
+# Free includes a custom domain on every site, so a site resolving to the floor
+# gets ``custom_domain True`` and ``max_domained_sites == 1``. Badge removal, the
+# concierge, and the UNCAPPED allowance are paid grants and still need an active
+# subscription.
 #
-# ``custom_domain`` answers "may this site have one at all" and is now True almost
-# everywhere. The question with teeth moved to the attach seam, which counts SITES
-# already holding a domain — see tests/cloud/sites/test_custom_domain_entitlement.py.
+# ``custom_domain`` answers "may this site have one at all" and is True almost
+# everywhere. The question with teeth is at the attach seam, which caps the
+# hostnames on THIS site (apex + www) — see tests/cloud/sites/test_custom_domain_cap.py.
 
 from __future__ import annotations
 
@@ -195,27 +191,28 @@ def test_an_unknown_or_absent_tier_falls_to_the_base(tier):
 
 
 @pytest.mark.parametrize("org_key", ["studio", "agency"])
-def test_an_org_flat_stored_on_a_site_grants_that_site_nothing(org_key):
-    """The security property of the two-scope catalog, at the resolver.
+def test_a_retired_org_key_stored_on_a_site_grants_that_site_nothing(org_key):
+    """The property survives the tier, which is the point of keeping this test.
 
-    ``studio`` and ``agency`` are real, resolvable catalog rows that sell
-    white-label and badge removal across a whole workspace. They are NOT legal
-    ``Site.plan_tier`` values, and this is what happens when one shows up there
-    anyway — a hand-edited document, a replayed webhook, a restored backup: the
-    site is treated as having no plan of its own and lands on the free floor.
+    ``studio`` and ``agency`` were org flats — real catalog rows selling
+    white-label and badge removal across a workspace, and never legal
+    ``Site.plan_tier`` values. They were retired on 2026-09-06 when the workspace
+    plan started carrying sites, and there is no migration: a Site document
+    written before then still says ``plan_tier: "studio"``.
 
-    Note the ``active`` status. That is deliberate: the tier grants badge removal
-    and the subscription says paid, so every gate this resolver has would open if
-    the key were accepted. The ONLY thing refusing is the scope check.
+    So the question this asks is unchanged and still live. What changed is which
+    line answers it — the scope check used to, and the unknown-key path does now.
+    Either way the site is treated as having no plan of its own and lands on the
+    free floor rather than holding an allowance an org used to pay for.
+
+    Note the ``active`` status. That is deliberate: the subscription says paid, so
+    every gate in this resolver would open if the key were accepted. The only
+    thing refusing is the resolution.
 
     Breaks on: ``resolve_site_entitlements`` reading ``get_site_plan`` instead of
-    ``site_scoped_tier``.
+    ``site_scoped_tier``, or either key returning to the catalog without a
+    decision about what a site storing it should get.
     """
-    assert site_plan_catalog.get_site_plan(org_key) is not None, "the row must still exist"
-    assert site_plan_catalog.get_site_plan(org_key).badge_removal is True, (
-        "if the org tier stopped selling badge removal this test would pass for the wrong reason"
-    )
-
     ent = _resolve(plan_tier=org_key, subscription_status="active")
 
     assert ent.plan_tier == site_plan_catalog.BASE_SITE_PLAN_KEY

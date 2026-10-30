@@ -14,6 +14,11 @@
 # process). Recording bus is autouse via tests/cloud/conftest.
 #
 # Created 2026-08-08 (feat/billing-rbac-member-caps).
+# Updated 2026-09-30 (fix/livekit-call-security): scheduled meetings. The
+# LiveKit meeting provider's start() called create_room(group_id) with no
+# workspace, so an auto-started meeting skipped the budget. The last two tests
+# pin that it now hits the gate, fails the meeting when the plan is out of call
+# time, and reuses its own Meeting row rather than inserting a second one.
 
 from __future__ import annotations
 
@@ -232,3 +237,75 @@ async def test_force_end_at_budget_emits_reason(mongo_db, mock_lk_api, recording
     ended = [e for e in recording_bus.events if e.type == "call.ended"]
     assert len(ended) >= 1
     assert ended[-1].data["reason"] == "budget_exhausted"
+
+
+# ---------------------------------------------------------------------------
+# Scheduled meetings — the auto-start path goes through the same gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def livekit_provider():
+    """Register the LiveKit meeting provider (normally done at app startup)."""
+    import pocketpaw_ee.cloud.meetings.providers.livekit  # noqa: F401
+
+
+async def _scheduled_meeting(workspace_id: str) -> MeetingDoc:
+    doc = MeetingDoc(
+        workspace=workspace_id,
+        source="livekit",
+        title="Standup",
+        join_url="",
+        scheduled_start=datetime.now(UTC),
+        status="scheduled",
+        raw_provider_payload={"group_id": "g1", "room_name": "group-call-g1"},
+        created_by_user_id="u-owner",
+    )
+    await doc.insert()
+    return doc
+
+
+async def test_scheduled_start_is_blocked_when_the_plan_has_no_call_time(
+    mongo_db, mock_lk_api, livekit_provider
+) -> None:
+    """The finding: provider.start called create_room(group_id) with no workspace,
+    so a scheduled meeting started a call on a plan with no call time at all."""
+    from pocketpaw_ee.cloud.meetings.scheduling import service as scheduling_service
+
+    ws_id = await _make_workspace("free")
+    meeting = await _scheduled_meeting(ws_id)
+
+    assert await scheduling_service.start_meeting(ws_id, str(meeting.id)) is None
+
+    mock_lk_api.create_room.assert_not_called()
+    after = await MeetingDoc.get(meeting.id)
+    assert after.status == "failed"
+    assert after.raw_provider_payload["start_error"] == "billing.call_limit"
+
+
+async def test_scheduled_start_within_budget_gets_a_deadline_and_no_duplicate(
+    mongo_db, mock_lk_api, livekit_provider
+) -> None:
+    """A scheduled start inside the budget runs, gets the budget watchdog, and
+    reuses its own Meeting row instead of inserting an "Instant call" twin."""
+    from pocketpaw_ee.cloud.meetings.scheduling import service as scheduling_service
+
+    ws_id = await _make_workspace("go")
+    meeting = await _scheduled_meeting(ws_id)
+    service._active_agents["g1"] = MagicMock()  # skip the agent subprocess spawn
+
+    with patch.object(service, "_force_end_at_budget", new_callable=AsyncMock) as mock_force:
+        started = await scheduling_service.start_meeting(ws_id, str(meeting.id))
+        await asyncio.sleep(0)
+
+    assert started is not None
+    mock_lk_api.create_room.assert_called_once()
+    after = await MeetingDoc.get(meeting.id)
+    assert after.status == "in_progress"
+    assert after.provider_meeting_id == "group-call-g1"
+    assert after.call_budget_deadline is not None
+    mock_force.assert_called_once()
+    rows = await MeetingDoc.find(
+        MeetingDoc.workspace == ws_id, MeetingDoc.source == "livekit"
+    ).to_list()
+    assert len(rows) == 1

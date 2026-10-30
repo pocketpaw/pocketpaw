@@ -1,78 +1,40 @@
 """Bridge between cloud chat events and the PocketPaw agent pool.
 
 Pure cross-domain orchestrator: subscribes to the legacy ``message.sent``
-``event_bus`` event and delegates every Beanie touch to the owning
-entity service (``chat.group_service`` for group lookup,
-``agents.service`` for persona, ``chat.message_service`` for history
-rehydration + reply persistence, ``pockets.service`` for ripple-spec
-auto-pocket creation).
+``event_bus`` event and delegates every Beanie touch to the owning entity
+service (``chat.group_service`` for group lookup, ``agents.service`` for persona,
+``chat.message_service`` for history rehydration + reply persistence,
+``pockets.service`` for ripple-spec auto-pocket creation).
 
-Responsibilities:
-1. Checks each agent's respond_mode (silent, auto, mention_only, smart)
-2. Triggers agents that should respond and streams responses via WebSocket
-3. Parses ripple specs from agent responses
-4. Delegates pocket creation to ``pockets_service.create_from_ripple_spec``
-5. Persists agent messages via ``message_service.create_agent_message``
+``_dispatch_agent_responses`` runs the shared run-start billing gate
+(``credits.guards.over_billing_limit``) BEFORE respond-mode evaluation, so an
+over-budget tenant triggers no model call (not even ``_smart_relevance_check``'s
+pre-classifier), then refuses an unpaid early-access workspace outright
+(``early_access_denial``): these replies never reach the credit ledger, so the
+wallet cannot bound them. A rejection emits one ``agent.error``. It then checks each
+agent's respond_mode (silent, auto, mention_only, smart).
 
-User-message attachments ride the ``message.sent`` payload so channel
-agents see the same filename/mime/size context DM agents already get —
-appended to the user prompt as an ``Attached files:`` block before
-``pool.run`` (matching ``src/pocketpaw/agents/loop.py``'s DM shape).
-
-Updated 2026-06-12: ``_run_agent_response`` now binds the agent's
-workspace/user identity (``attach_agent_identity``) around ``pool.run`` so
-in-process MCP tools that resolve scope from ContextVars (fabric, instinct,
-decisions, connectors) work on the group/DM bridge path. The SSE chat path
-already did this in ``run_core``; the bridge path skipped it, so every
-scoped tool returned "requires workspace context".
-
-Updated 2026-06-28 (feat/aiam-agent-revoke, AW-4): ``_run_agent_response``
-catches ``AgentDisabled`` from ``pool.get`` explicitly and SKIPS the agent
-(returns None, no error to the channel) — a soft-disabled agent simply stops
-responding in groups/DMs until re-enabled.
-
-Updated 2026-07-08 (feat/billing-enforce-gate): ``_dispatch_agent_responses``
-now runs the shared run-start billing gate (``credits.guards.over_billing_limit``)
-ABOVE the respond-mode evaluation — before ``_smart_relevance_check``'s Haiku
-pre-classifier call and before ``pool.run`` — so an over-budget tenant triggers
-NO model call on the group/DM auto-response path. On rejection it emits one
-``agent.error`` to the group and returns.
-Updated 2026-07-11 (ART-1): ``_run_agent_response`` binds a per-run
-delivered-artifact collector around ``pool.run`` and drains it into a
-``{type:"artifact", meta}`` attachment per successful ``deliver_artifact`` call,
-so a group/DM agent that delivers a file persists the structured signal too.
-This path has no run-transport SSE stream, so it emits no ``artifact`` event —
-that applies only to the streaming ``run_core`` path.
-
-Updated 2026-08-15 (HTN-11): the phrasing function moved to
-``shared/tool_narration.py`` as ``narrate_tool_use`` and this module imports it.
-It was private here while exactly one surface narrated; the streaming
-``run_core`` path now calls the same function, and a second copy is how the two
-surfaces would drift apart. Same arrangement as ``plan_normalizer``.
-
-Updated 2026-08-15 (HTN-2): ``narrate_tool_use`` takes the running agent and
-resolves that agent's OWN ``ToolRegistry`` (``tool_bridge.narration_registry_for``),
-so a tool's declared phrase is read off the live instance the registry holds
-rather than from a hardcoded name->class map that constructed the tool. Tools
-that declare nothing now derive a phrase from their name, so an unannotated
-tool reaches the wire as "Publishing the site" instead of no narration at all.
-
-Updated 2026-08-15 (HTN-1): the ``tool_use`` branch reads ``event.metadata``
-(name + input) with ``event.content`` as fallback — the precedence ``run_core``
-already uses — and adds an additive ``narration`` field to ``agent.tool_use``
-carrying the tool's plain-language phrase ("Searching the web for quarterly
-filings"). ``tool`` still carries the tool name, so clients keyed on it are
-unaffected; a tool with no ``Narration`` emits no ``narration`` field.
-
-Updated 2026-08-15 (HTN-5): the ``tool_use`` branch routes a recognized plan tool
-(``write_plan`` today) through ``shared/plan_normalizer.py`` and emits
-``agent.plan_updated`` INSTEAD of ``agent.tool_use`` — the panel is the narration,
-so "Using write_plan..." alongside it is bookkeeping noise. The substitution is
-fail-open: a plan call whose arguments cannot be read falls back to the ordinary
-``agent.tool_use``, so the surface degrades to today's behaviour rather than
-going silent. A per-run ``PlanTracker`` supplies the monotonic ``seq`` and
-suppresses re-emits of an unchanged plan (``write_plan`` fires at both the start
-and the end of every step and resends the whole list each time).
+``_run_agent_response`` streams one agent's reply over the WS:
+  * binds the agent's workspace/user identity (``attach_agent_identity``), a
+    per-run delivered-artifact collector and the turn slot around ``pool.run``,
+    so ContextVar-scoped MCP tools work and a ``deliver_artifact`` call lands as
+    an ``{type:"artifact", meta}`` attachment (no ``artifact`` SSE event: this
+    path has no run stream);
+  * skips an agent ``pool.get`` reports disabled (``AgentDisabled``), silently;
+  * appends user-message attachments as an ``Attached files:`` block;
+  * reads ``tool_use`` name + input from ``metadata`` first (``content`` is
+    prose), adds the tool's plain-language ``narration``
+    (``shared/tool_narration.narrate_tool_use``, resolved from the running
+    agent's own ``ToolRegistry``) when there is one, and emits a recognized plan
+    tool as ``agent.plan_updated`` instead of a tool chip (fail-open: an
+    unreadable plan call falls back to the chip; a per-run ``PlanTracker``
+    supplies ``seq`` and drops unchanged re-emits);
+  * feeds thinking, ``tool_use`` and ``tool_result`` events to a
+    ``StepRecorder`` through ``steps.record_agent_event`` (the adapter the belt
+    develop feed shares) and persists the steps on the agent Message, only when
+    some were recorded;
+  * parses ripple specs into pockets and persists the reply via
+    ``message_service.create_agent_message``.
 """
 
 from __future__ import annotations
@@ -84,8 +46,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
     AgentError,
     AgentPlanUpdated,
     AgentStreamChunk,
@@ -93,6 +55,7 @@ from pocketpaw_ee.cloud.realtime.events import (
     AgentStreamStart,
     AgentToolUse,
 )
+from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder, record_agent_event
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.shared.plan_normalizer import PlanTracker
 from pocketpaw_ee.cloud.shared.tool_narration import narrate_tool_use
@@ -169,14 +132,20 @@ async def _dispatch_agent_responses(data: dict) -> None:
     # ``_should_agent_respond`` -> ``_smart_relevance_check``: that pre-classifier
     # is itself a (cheap Haiku) model call, so gating only before ``pool.run``
     # would still let an over-budget workspace spend on the relevance check. The
-    # shared guard is flag-gated (a no-op unless ``billing_enforced``) and runs
-    # both the empty-wallet and monthly-ceiling assertions; on rejection we emit a
+    # shared guard is flag-gated (a no-op unless ``billing_enforced`` or
+    # ``credits_enforced``) and runs both the empty-wallet and monthly-ceiling
+    # assertions; on rejection we emit a
     # single terminal ``agent.error`` to the group (best-effort — no run_id /
     # stream transport on this event-bus path) and return without dispatching any
     # agent. An empty ``workspace_id`` is a no-op (no wallet to attribute).
-    from pocketpaw_ee.cloud.credits.guards import over_billing_limit
+    # An unpaid early-access workspace is refused after that (403
+    # ``early_access.not_available``): this path is not billed, so a positive
+    # wallet would never run down and the replies would be unbounded.
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial, over_billing_limit
 
-    billing_reject = await over_billing_limit(workspace_id)
+    billing_reject = await over_billing_limit(workspace_id) or await early_access_denial(
+        workspace_id
+    )
     if billing_reject is not None:
         logger.warning(
             "Agent bridge: workspace %s over billing limit (%s) — skipping all agents in group %s",
@@ -235,6 +204,7 @@ async def _dispatch_agent_responses(data: dict) -> None:
                 group_members=group.members,
                 attachments=attachments,
                 response_label=None,
+                trigger_message_id=data.get("message_id"),
             )
         except Exception:
             logger.exception(
@@ -277,6 +247,7 @@ async def _dispatch_agent_responses(data: dict) -> None:
             group_members=group.members,
             attachments=None,
             response_label="Final response:",
+            trigger_message_id=data.get("message_id"),
         )
     except Exception:
         logger.exception(
@@ -406,9 +377,12 @@ async def _smart_relevance_check(agent_id: str, content: str) -> bool:
             return False
 
         from pocketpaw.agents.registry import get_backend_class
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
 
-        settings = Settings.load()
+        # ``Settings.load()`` re-parses config + env (~115 ms) on every group
+        # message. The cached instance is shared process-wide, so copy before
+        # overriding the backend and model.
+        settings = get_settings().model_copy(deep=True)
         settings.agent_backend = "claude_agent_sdk"
         settings.claude_sdk_model = "claude-haiku-4-5-20251001"
 
@@ -490,8 +464,13 @@ async def _run_agent_response(
     group_members: list[str],
     attachments: list[dict] | None = None,
     response_label: str | None = None,
+    trigger_message_id: str | None = None,
 ) -> str | None:
     """Run an agent's response and stream it to the group.
+
+    ``trigger_message_id`` is the stored message that triggered the run. It is
+    already in the group's recent messages (``send_message`` inserts before it
+    emits) and it is the prompt, so it is left out of the history.
 
     ``attachments`` carries the triggering user message's files (shape matches
     ``ee.cloud.models.message.Attachment``: ``type``, ``url``, ``name``,
@@ -502,14 +481,18 @@ async def _run_agent_response(
     from pocketpaw.agents.pool import get_agent_pool
     from pocketpaw_ee.cloud.chat import message_service
     from pocketpaw_ee.cloud.chat.agent_service import (
+        TurnBinding,
         attach_agent_identity,
         attach_delivered_artifacts_collector,
+        bind_turn,
         detach_agent_identity,
         detach_delivered_artifacts_collector,
+        unbind_turn,
     )
 
     pool = get_agent_pool()
     session_key = f"cloud:{group_id}:{agent_id}"
+    trigger_content = user_message
 
     # Match the DM path's shape (``src/pocketpaw/agents/loop.py``) — append an
     # "Attached files" block to the prompt so agents can reason about channel
@@ -532,13 +515,12 @@ async def _run_agent_response(
 
     # Fetch recent conversation history from cloud Messages.
     recent_msgs = await message_service.list_recent_for_group(group_id, limit=20)
-    history = [
-        {
-            "role": "assistant" if m.sender_type == "agent" else "user",
-            "content": m.content,
-        }
-        for m in recent_msgs
-    ]
+    history = await _group_history_for_agent(
+        recent_msgs,
+        agent_id,
+        trigger_message_id=trigger_message_id,
+        trigger_content=trigger_content,
+    )
 
     # Inject knowledge context from agent's knowledge engine
     knowledge_context = ""
@@ -579,6 +561,8 @@ async def _run_agent_response(
     # rides ``agent.stream_start`` as ``message_id``, so reusing it as
     # ``run_id`` gives the panel a join key it already holds.
     plan_tracker = PlanTracker(run_id=temp_msg_id)
+    # The thinking and tool calls behind the reply, persisted on the Message.
+    recorder = StepRecorder()
     error_summary = ""
     last_emit_ts = 0.0
     STREAM_CHUNK_THROTTLE_S = 0.2
@@ -599,11 +583,18 @@ async def _run_agent_response(
     # SDK task's tool appends onto the same object this function drains below.
     delivered_artifacts: list[dict[str, Any]] = []
     delivered_token = attach_delivered_artifacts_collector(delivered_artifacts)
+    # A warm client's MCP tools keep the context they were connected in (turn 1's
+    # collector); the turn slot hands them THIS run's instead.
+    turn_handle = bind_turn(
+        session_key,
+        TurnBinding(workspace_id=workspace_id, user_id=agent_id, artifacts=delivered_artifacts),
+    )
     try:
         async for event in pool.run(
             agent_id, user_message, session_key, history, knowledge_context=knowledge_context
         ):
             if event.type in {"message", "text"}:
+                record_agent_event(recorder, event)
                 full_text += event.content
                 now = asyncio.get_event_loop().time()
                 if now - last_emit_ts >= STREAM_CHUNK_THROTTLE_S:
@@ -678,8 +669,12 @@ async def _run_agent_response(
                 narration = narrate_tool_use(tool_name, tool_input, instance)
                 if narration:
                     payload["narration"] = narration
+                record_agent_event(recorder, event, tool_name, tool_input, narration)
                 await emit(AgentToolUse(data=payload))
+            elif event.type == "tool_result":
+                record_agent_event(recorder, event)
             elif event.type == "thinking":
+                record_agent_event(recorder, event)
                 await emit(
                     AgentToolUse(
                         data={
@@ -700,6 +695,7 @@ async def _run_agent_response(
         logger.exception("Agent %s response failed in group %s", agent_id, group_id)
         full_text = full_text or "[Agent response failed]"
     finally:
+        unbind_turn(turn_handle)
         detach_agent_identity(identity_tokens)
         detach_delivered_artifacts_collector(delivered_token)
 
@@ -759,6 +755,7 @@ async def _run_agent_response(
         agent_id=agent_id,
         content=final_text,
         attachments=attachment_dicts or None,
+        **recorder.persist_kwargs(),
     )
 
     # Broadcast final message. ``temp_message_id`` is echoed from the
@@ -791,6 +788,53 @@ async def _run_agent_response(
         len(final_text),
     )
     return final_text
+
+
+async def _group_history_for_agent(
+    messages: list[Any],
+    agent_id: str,
+    *,
+    trigger_message_id: str | None,
+    trigger_content: str,
+) -> list[dict[str, str]]:
+    """The group's recent messages as ``agent_id``'s conversation history.
+
+    Only this agent's own replies are ``assistant`` turns. Everyone else, other
+    agents included, is a ``user`` line prefixed with their name, so the model
+    can tell who said what and never mistakes another agent's reply for its own.
+    Human names come from one batched lookup. The triggering message is dropped
+    (by id; by a trailing content match when the event carried no id).
+    """
+    kept = [m for m in messages if not trigger_message_id or str(m.id) != trigger_message_id]
+    if (
+        not trigger_message_id
+        and kept
+        and kept[-1].sender_type != "agent"
+        and kept[-1].content == trigger_content
+    ):
+        kept.pop()
+
+    human_ids = {m.sender for m in kept if m.sender_type != "agent" and m.sender}
+    names: dict[str, str] = {}
+    if human_ids:
+        try:
+            from pocketpaw_ee.cloud.auth.service import resolve_display_names
+
+            names = await resolve_display_names(human_ids)
+        except Exception:
+            logger.debug("group history: display-name lookup failed", exc_info=True)
+
+    history: list[dict[str, str]] = []
+    for m in kept:
+        if m.sender_type == "agent" and m.agent == agent_id:
+            history.append({"role": "assistant", "content": m.content})
+            continue
+        if m.sender_type == "agent":
+            name = m.sender_name or m.agent or "Another agent"
+        else:
+            name = m.sender_name or names.get(m.sender or "") or "A member"
+        history.append({"role": "user", "content": f"{name}: {m.content}"})
+    return history
 
 
 def register_agent_bridge() -> None:

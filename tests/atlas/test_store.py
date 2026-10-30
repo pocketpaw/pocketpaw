@@ -1,37 +1,13 @@
-# tests/atlas/test_store.py — AtlasStore loader / search / describe (AT-1).
-# Created: 2026-07-02 (feat/atlas-core). Proves the packaged seed validates
-# against paw.atlas/v1 with all 10 primitive entries, intent search ranks
-# the right primitive into the top results ("approve agent actions" →
-# Instinct, "build an app dashboard" → Pocket), describe returns the full
-# narrative, unknown ids return None, and the seed round-trips the schema.
-# Updated: 2026-07-02 (feat/atlas-surface, AT-3) — the seed now also carries
-# kind="surface" entries (paw-enterprise routes). Loader tests split into
-# per-kind completeness checks (every surface entry must carry a route in
-# its ``surface`` field); new search/describe tests pin "publish a website"
-# → sites with the /sites route populated, and primitives cross-linked to
-# their home surfaces.
-# Updated: 2026-07-02 (feat/atlas-compiler, AT-4) — the data file is now the
-# COMPILED artifact carrying extracted ``connector`` and ``sense`` entries
-# next to the authored ones, with ``generated: true``. Loader assertions
-# updated: authored ids are a subset (still exact per authored kind), every
-# entry kind is one of the four compiled kinds, and search-ranking pins are
-# unchanged (they must survive the 41 new entries).
-# Updated: 2026-07-02 (feat/atlas-widgets, AT-6) — the artifact now also
-# carries extracted ``widget`` (ripple catalog) and ``skill`` (bundled
-# skills) entries; COMPILED_KINDS widened to six. Search-ranking pins are
-# otherwise unchanged and must survive the ~165 new entries (widget/skill
-# specific pins live in tests/atlas/test_widgets_skills.py).
-# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3) — the artifact now also
-# carries hand-authored ``capability`` cards (the workspace-admin tools, one per
-# tool, each role-gated); COMPILED_KINDS widened to seven so the
-# seed-completeness check accepts them.
-# Updated: 2026-07-05 (fix/atlas-relevance-round2, Finding A) — new coverage for
-# the kind-priority bias: a real-store governance-paraphrase pin (Instinct #1,
-# not the /agents surface) and a synthetic-model ``TestKindPriorityBias`` proving
-# the primitive edges a same-overlap surface but a genuine margin still wins.
-# Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — two authored
-# primitives joined the seed (primitive:source-truth, primitive:verify-loop);
-# EXPECTED_PRIMITIVE_IDS pins the twelve.
+# tests/atlas/test_store.py — AtlasStore loader / search / describe.
+# Proves the compiled artifact validates against paw.atlas/v1; authored ids are
+# an exact set per authored kind (the twelve primitives and every surface,
+# including the craft studios) and every entry kind is one of COMPILED_KINDS;
+# every surface carries its route. Search pins: "approve agent actions" ->
+# Instinct, "build an app dashboard" -> Pocket, "publish a website" -> /sites,
+# a governance paraphrase -> Instinct over /agents (TestKindPriorityBias), and
+# TestVerbRankingSafety (the verb object-noun damper and the deterministic tie
+# order: surface before verb, then name hits, then id). Describe returns the
+# full narrative; unknown ids return None; the seed round-trips the schema.
 
 import json
 
@@ -46,6 +22,7 @@ COMPILED_KINDS = (
     "widget",
     "skill",
     "capability",
+    "verb",
 )
 
 EXPECTED_PRIMITIVE_IDS = {
@@ -70,6 +47,8 @@ EXPECTED_SURFACE_IDS = {
     "surface:chat",
     "surface:pockets",
     "surface:sites",
+    "surface:discover",
+    "surface:partners-directory",
     "surface:belt",
     "surface:decisions",
     "surface:decisions-graph",
@@ -82,6 +61,10 @@ EXPECTED_SURFACE_IDS = {
     "surface:knowledge",
     "surface:files",
     "surface:studio",
+    "surface:studio_editor",
+    "surface:studio_vector",
+    "surface:studio_photo",
+    "surface:studio_design",
     "surface:code",
     "surface:foresight",
     "surface:calendar",
@@ -89,6 +72,12 @@ EXPECTED_SURFACE_IDS = {
     "surface:activity",
     "surface:audit",
     "surface:security",
+    "surface:agents-activity",
+    "surface:agent-health",
+    "surface:fabric",
+    "surface:ship",
+    "surface:growth",
+    "surface:browser",
 }
 
 # primitive id → the home route its ``surface`` field must carry (AT-3
@@ -221,6 +210,8 @@ class TestKindPriorityBias:
                     summary="s",
                     narrative="n",
                     keywords=["widget"],
+                    presentation="window",
+                    agent_openable=False,
                 ),
             ]
         )
@@ -248,6 +239,8 @@ class TestKindPriorityBias:
                     summary="s",
                     narrative="n",
                     keywords=[],
+                    presentation="window",
+                    agent_openable=False,
                 ),
             ]
         )
@@ -275,3 +268,68 @@ class TestDescribe:
         assert entry is not None
         assert entry.kind == "surface"
         assert entry.surface == "/sites"
+
+
+class TestVerbRankingSafety:
+    """Live bug (2026-10-01): "show me my files" tied surface:files with
+    verb:file-delete and verb:file-download, and seed order picked the winner."""
+
+    @staticmethod
+    def _store(entries):
+        return AtlasStore(AtlasModel(entries=entries))
+
+    @staticmethod
+    def _surface(eid, name, keywords=()):
+        return AtlasEntry(
+            id=eid,
+            kind="surface",
+            name=name,
+            summary="s",
+            narrative="n",
+            keywords=list(keywords),
+            presentation="window",
+            agent_openable=False,
+        )
+
+    @staticmethod
+    def _verb(eid, name, keywords=(), applies_to=("file",)):
+        return AtlasEntry(
+            id=eid,
+            kind="verb",
+            name=name,
+            summary="s",
+            narrative="n",
+            keywords=list(keywords),
+            applies_to=list(applies_to),
+            triggers=["verb"],
+            risk="risky",
+            undo=False,
+        )
+
+    def test_object_noun_alone_does_not_tie_a_verb_with_the_surface(self):
+        store = self._store(
+            [self._verb("verb:file-delete", "Delete file"), self._surface("surface:files", "Files")]
+        )
+        (top_score, top), (verb_score, verb) = store.search_scored("show me my files")
+        assert top.id == "surface:files" and verb.id == "verb:file-delete"
+        assert verb_score <= 0.5 * top_score
+
+    def test_action_word_lifts_the_damping(self):
+        store = self._store(
+            [self._verb("verb:file-delete", "Delete file"), self._surface("surface:files", "Files")]
+        )
+        assert store.search("delete this file", limit=1)[0].id == "verb:file-delete"
+
+    def test_exact_tie_puts_surface_before_verb_then_name_hits_then_id_order(self):
+        # Same keyword-only overlap, no damping (the token is not an object
+        # noun). The verb comes FIRST in seed order and still ranks last.
+        store = self._store(
+            [
+                self._verb("verb:a", "A", keywords=["zap"], applies_to=["task"]),
+                self._surface("surface:b", "B", keywords=["zap"]),
+                self._surface("surface:z", "Z", keywords=["zap"]),
+            ]
+        )
+        ranked = store.search_scored("zap")
+        assert len({round(score, 9) for score, _ in ranked}) == 1, "fixture must tie"
+        assert [e.id for _, e in ranked] == ["surface:b", "surface:z", "verb:a"]

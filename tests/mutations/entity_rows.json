@@ -158,8 +158,8 @@
   {
     "label": "contract: files.py claims an addressable kind is unaddressed",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/files.py",
-    "find": "                    \"file\",",
-    "replace": "                    \"pocket\",",
+    "find": "entity_line(\n                    getattr(f, \"filename\", None),\n                    getattr(f, \"id\", None),",
+    "replace": "unaddressed_line(\n                    \"pocket\",\n                    getattr(f, \"filename\", None),",
     "tests": [
       "tests/cloud/surface/test_entity_id_contract.py"
     ]

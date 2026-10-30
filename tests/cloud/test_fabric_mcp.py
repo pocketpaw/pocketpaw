@@ -46,6 +46,8 @@ import pytest
 
 pytest.importorskip("pocketpaw_ee")
 
+from unittest.mock import AsyncMock
+
 import pocketpaw_ee.agent.mcp_servers.fabric as fabric_mcp  # noqa: E402
 from pocketpaw_ee.cloud.chat.agent_service import (  # noqa: E402
     attach_agent_identity,
@@ -357,7 +359,7 @@ def admin_ok(monkeypatch):
 
     monkeypatch.setattr(fabric_mcp, "_load_user", _fake_load_user)
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda user, ws, action: None
+        "pocketpaw_ee.guards.deps.check_workspace_action", AsyncMock(return_value=None)
     )
 
 

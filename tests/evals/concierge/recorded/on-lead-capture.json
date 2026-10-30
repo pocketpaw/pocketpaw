@@ -1,0 +1,10 @@
+{
+  "case_id": "on-lead-capture",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: a well-behaved lead card (send_to_team, prefilled, nothing claimed sent). Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "496152ac01d4c95e",
+  "raw_model_output": "Thanks, Priya. The team handles bulk orders directly. Check your details below and tap Send, and they'll get back to you about a price.\n```pawbar-card\n{\"ui\": {\"type\": \"form\", \"props\": {\"verb\": \"send_to_team\", \"title\": \"Send this to the team?\", \"submit_label\": \"Send\", \"fields\": [{\"name\": \"name\", \"label\": \"Name\", \"type\": \"text\", \"value\": \"Priya\"}, {\"name\": \"email\", \"label\": \"Email\", \"type\": \"email\", \"value\": \"priya@example.com\"}, {\"name\": \"message\", \"label\": \"Message\", \"type\": \"textarea\", \"value\": \"40 bags of house beans for our office every month; asking about a bulk price.\"}]}}}\n```"
+}

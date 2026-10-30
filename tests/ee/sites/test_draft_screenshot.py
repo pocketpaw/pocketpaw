@@ -298,6 +298,7 @@ async def test_an_already_built_pocket_is_read_off_disk(monkeypatch, tmp_path):
     )
     (built / "_app").mkdir()
     (built / "_app" / "a.css").write_text("h1{color:navy}", encoding="utf-8")
+    _stamp(tmp_path / "pocket-1", engine="ripple", ripple_spec={})
 
     out = await draft_markup.build_draft_markup(
         _draft(), generator=_NeverBuilds(), pocket={"engine": "ripple", "rippleSpec": {}}
@@ -305,6 +306,55 @@ async def test_an_already_built_pocket_is_read_off_disk(monkeypatch, tmp_path):
 
     assert "<style>h1{color:navy}</style>" in out
     assert "Built" in out
+
+
+def _stamp(project_dir, *, engine, source=None, ripple_spec=None) -> None:
+    from pocketpaw_ee.sites.generator_client import DRAFT_SOURCE_STAMP_FILE, draft_source_hash
+
+    (project_dir / DRAFT_SOURCE_STAMP_FILE).write_text(
+        draft_source_hash(engine=engine, source=source, ripple_spec=ripple_spec),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stamped", [False, True])
+async def test_a_stale_on_disk_build_is_not_served(monkeypatch, tmp_path, stamped):
+    """RUNG 1 serves a build of the CURRENT content only. An unstamped build, or one
+    stamped for content the pocket no longer has (an edit since), falls through: a
+    ripple draft then takes the placeholder, not the old page."""
+    monkeypatch.setenv("PAW_SITES_BUILD_DIR", str(tmp_path))
+    built = tmp_path / "pocket-1" / ".svelte-kit" / "cloudflare"
+    built.mkdir(parents=True)
+    (built / "index.html").write_text("<body><h1>Old page</h1></body>", encoding="utf-8")
+    if stamped:
+        _stamp(tmp_path / "pocket-1", engine="ripple", ripple_spec={"v": 1})
+
+    out = await draft_markup.build_draft_markup(
+        _draft(), generator=_NeverBuilds(), pocket={"engine": "ripple", "rippleSpec": {"v": 2}}
+    )
+
+    assert out == ""
+
+
+@pytest.mark.asyncio
+async def test_a_stale_html_build_falls_through_to_the_current_source(monkeypatch, tmp_path):
+    """html's next rung is its own source map, so a stale build is replaced by the
+    edited page rather than by a placeholder."""
+    monkeypatch.setenv("PAW_SITES_BUILD_DIR", str(tmp_path))
+    built = tmp_path / "pocket-1"
+    built.mkdir(parents=True)
+    (built / "index.html").write_text("<body><h1>Old page</h1></body>", encoding="utf-8")
+    _stamp(built, engine="html", source={"index.html": "<body><h1>Old page</h1></body>"})
+
+    out = await draft_markup.build_draft_markup(
+        _draft(),
+        generator=_NeverBuilds(),
+        pocket={"engine": "html", "source": {"index.html": "<body><h1>New page</h1></body>"}},
+    )
+
+    assert "New page" in out
+    assert "Old page" not in out
 
 
 @pytest.mark.asyncio

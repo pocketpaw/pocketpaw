@@ -21,6 +21,7 @@ from typing import Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from pocketpaw.lens_checkins import monitored_job
 from pocketpaw.mission_control.manager import get_mission_control_manager
 from pocketpaw.mission_control.models import AgentStatus
 
@@ -75,9 +76,12 @@ class HeartbeatDaemon:
         self._running = True
 
         # Add the heartbeat job
+        trigger = IntervalTrigger(minutes=self._interval_minutes)
         self._scheduler.add_job(
-            self._heartbeat_cycle,
-            trigger=IntervalTrigger(minutes=self._interval_minutes),
+            monitored_job(
+                self._heartbeat_cycle, kind="heartbeat", id=self._job_id, trigger=trigger
+            ),
+            trigger=trigger,
             id=self._job_id,
             replace_existing=True,
             next_run_time=datetime.now(UTC) + timedelta(seconds=30),  # First run in 30s

@@ -1,29 +1,25 @@
-"""Persistent workspace-to-sandbox mapping store.
+"""Persistent workspace-to-sandbox mapping store, and the workspace VM lifecycle.
 
 TWO layers of mapping:
 
-1. **Workspace-level VM** (PRIMARY — now DB-backed).
-   Maps ``workspace_id`` → a single Daytona sandbox shared by ALL projects
-   in that workspace.  Projects live as subdirectories under a configurable
-   workspace root (default ``/workspace``).
+1. **Workspace-level VM** (PRIMARY, DB-backed).
+   Maps ``workspace_id`` to a single Daytona sandbox shared by ALL projects
+   in that workspace, stored in MongoDB (the ``workspace_vms`` collection,
+   ``WorkspaceVm`` doc) so reads are tenant-scoped and survive across
+   processes/replicas. Projects live as subdirectories under a configurable
+   workspace root (default ``/workspace``). The accessors are ``async``.
 
-2. **Per-project sandbox** (LEGACY — kept for backward compat).
-   Maps ``projects/{workspace_id}/{user_id}/{project_name}/`` keys to
-   Daytona sandbox IDs.  Deprecated in favour of the workspace-level VM.
+2. **Per-project sandbox** (LEGACY, deprecated, migrate on touch).
+   Maps ``projects/{workspace_id}/{user_id}/{project_name}/`` keys to Daytona
+   sandbox IDs in a local JSON file.
 
-Moved from inline helpers in router.py: 2026-07-01
-Updated: 2026-07-10 — added workspace-level VM mapping.
-Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — the workspace-level VM map
-    moved out of the local ``~/.pocketpaw/daytona_workspace_vm_map.json`` file
-    and into MongoDB (the ``workspace_vms`` collection, ``WorkspaceVm`` doc).
-    A local-first JSON artifact does not belong in multi-tenant cloud: reads
-    must be tenant-scoped and survive across processes/replicas. The six
-    workspace-VM functions are now ``async`` and read/write the collection;
-    every caller ``await``s them. The LEGACY per-project map below is still
-    JSON-file-backed and unchanged — deprecated, migrate on touch.
+``workspace_vm_lifecycle`` is the one source of a workspace VM's idle lifecycle
+(stop after idle, archive soon after the stop, never delete); provisioning and
+``context._ensure_lifecycle`` both apply it, so an existing VM converges on its
+next resolve. The archive interval reads ``PAW_DAYTONA_WORKSPACE_VM_AUTO_ARCHIVE_MINUTES``.
 
 store.py owns the ``workspace_vms`` collection: the ``WorkspaceVm`` doc class is
-imported ONLY inside this module (ee/cloud Rule 2 spirit — store.py is a
+imported ONLY inside this module (ee/cloud Rule 2 spirit: store.py is a
 persistence helper, not a full 4-file entity).
 """
 
@@ -31,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -49,15 +46,93 @@ _MAP_PATH = Path.home() / ".pocketpaw" / "daytona_workspace_map.json"
 WS_VM_MAP_PATH = Path.home() / ".pocketpaw" / "daytona_workspace_vm_map.json"
 
 # Default VM configuration
-# TODO(bug): root_dir should be /home/daytona; auto_stop_interval is MINUTES not
-# 3600s. Changing these VALUES alters legacy VM behavior — out of scope here.
+# TODO(bug): root_dir should be /home/daytona. Changing it alters legacy VM layout.
+# ``auto_stop_interval`` is SECONDS here (the API's documented unit); it is converted
+# to Daytona's MINUTES by :func:`workspace_vm_lifecycle`, never passed through raw.
 _DEFAULT_VM_CONFIG: dict = {
     "cpu": 2,
     "memory": 4,  # GB
     "disk": 10,  # GB
     "root_dir": "/workspace",
-    "auto_stop_interval": 3600,
+    "auto_stop_interval": 1800,  # seconds — 30 min idle
 }
+
+# Workspace VM lifecycle, in Daytona's MINUTES. The VM is persistent: it holds the
+# workspace's project files and ``resolve_daytona_context`` restarts it when it is
+# stopped or archived. So an idle VM STOPS (frees its cpu/memory from the org's
+# running total, which site builds also draw from), is ARCHIVED shortly after (frees
+# its disk: our VMs are Daytona CONTAINER sandboxes, and a stopped container keeps its
+# full disk reservation on the org quota until archived; files survive in object
+# storage, the next start restores them and takes longer), and is NEVER auto-deleted.
+WORKSPACE_VM_DEFAULT_AUTO_STOP_MINUTES = 30
+#: Ceiling on a configured auto-stop: a VM idling longer than a day holds 4 GiB of
+#: the org's memory limit for nobody.
+WORKSPACE_VM_MAX_AUTO_STOP_MINUTES = 24 * 60
+WORKSPACE_VM_MIN_AUTO_STOP_MINUTES = 5
+#: Minutes a STOPPED VM keeps its 10 GiB disk on the org quota before Daytona archives
+#: it. 15 lets a user back from a short break resume a stopped VM (fast) rather than
+#: restore an archived one (slow), and the VM has already sat idle for its auto-stop
+#: window before this clock starts. The env override is clamped to 1..60: 1 is
+#: Daytona's smallest interval (0 means its MAXIMUM, not "now") and the ops setting for
+#: a disk crunch; past an hour a stopped VM is just holding disk.
+WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES = 15
+WORKSPACE_VM_MIN_AUTO_ARCHIVE_MINUTES = 1
+WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES = 60
+WORKSPACE_VM_AUTO_ARCHIVE_ENV = "PAW_DAYTONA_WORKSPACE_VM_AUTO_ARCHIVE_MINUTES"
+WORKSPACE_VM_AUTO_DELETE_MINUTES = -1  # never
+
+
+def workspace_vm_archive_minutes() -> int:
+    """Auto-archive interval for workspace VMs: the env override clamped to 1..60, or
+    the default when unset or not an integer. Read per call (no code deploy to change)."""
+    raw = os.environ.get(WORKSPACE_VM_AUTO_ARCHIVE_ENV, "").strip()
+    if not raw:
+        return WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES
+    try:
+        minutes = int(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a number of minutes; using %d",
+            WORKSPACE_VM_AUTO_ARCHIVE_ENV,
+            raw,
+            WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES,
+        )
+        return WORKSPACE_VM_DEFAULT_AUTO_ARCHIVE_MINUTES
+    clamped = max(
+        WORKSPACE_VM_MIN_AUTO_ARCHIVE_MINUTES, min(minutes, WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES)
+    )
+    if clamped != minutes:
+        logger.warning(
+            "%s=%d is outside %d..%d minutes; using %d",
+            WORKSPACE_VM_AUTO_ARCHIVE_ENV,
+            minutes,
+            WORKSPACE_VM_MIN_AUTO_ARCHIVE_MINUTES,
+            WORKSPACE_VM_MAX_AUTO_ARCHIVE_MINUTES,
+            clamped,
+        )
+    return clamped
+
+
+def workspace_vm_lifecycle(config: dict | None) -> dict[str, int]:
+    """``create_sandbox`` lifecycle kwargs (MINUTES) for a workspace VM.
+
+    ``config["auto_stop_interval"]`` is read as SECONDS (the unit the config API has
+    always documented) and clamped to [5 min, 1 day]. Before this, the raw number
+    reached Daytona as minutes, so the 3600 default kept an idle VM up for 60 hours."""
+    raw = (config or {}).get("auto_stop_interval")
+    if isinstance(raw, int | float) and not isinstance(raw, bool) and raw > 0:
+        minutes = -(-int(raw) // 60)  # ceil
+    else:
+        minutes = WORKSPACE_VM_DEFAULT_AUTO_STOP_MINUTES
+    minutes = max(
+        WORKSPACE_VM_MIN_AUTO_STOP_MINUTES, min(minutes, WORKSPACE_VM_MAX_AUTO_STOP_MINUTES)
+    )
+    return {
+        "auto_stop_interval": minutes,
+        "auto_archive_interval": workspace_vm_archive_minutes(),
+        "auto_delete_interval": WORKSPACE_VM_AUTO_DELETE_MINUTES,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Per-project accessors (LEGACY — DEPRECATED, still JSON-file-backed)

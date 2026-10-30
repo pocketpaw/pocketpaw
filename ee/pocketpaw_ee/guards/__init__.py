@@ -27,6 +27,13 @@ from pocketpaw_ee.guards.deps import (
     resolve_group_role,
     resolve_workspace_role,
 )
+from pocketpaw_ee.guards.platform import (
+    PLATFORM_ACTIONS,
+    PlatformActionRule,
+    PlatformRole,
+    check_platform_action,
+    get_platform_rule,
+)
 from pocketpaw_ee.guards.policy import PolicyContext, PolicyResult
 from pocketpaw_ee.guards.rbac import (
     Forbidden,
@@ -58,6 +65,11 @@ __all__ = [
     "get_rule",
     "log_denial",
     "log_privileged_action",
+    "PLATFORM_ACTIONS",
+    "PlatformActionRule",
+    "PlatformRole",
+    "check_platform_action",
+    "get_platform_rule",
     "make_require_action",
     "require_plan_feature",
     "require_pocket_access",

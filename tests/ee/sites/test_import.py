@@ -3,12 +3,13 @@
 #
 # Created 2026-07-22. Covers:
 #   * POST /sites/import happy path through the real router → import_service →
-#     pockets (real agent_create) → create_draft_site → publish (FAKED — a real
-#     publish spawns bun): the html pocket + Site doc are minted, the generator is
-#     handed engine="html" with the text ``source`` map and the base64 ``assets``
-#     sideband, and the derived ``import_report`` (pages/titles, asset counts,
-#     forms with original actions) is persisted on the Site doc AND surfaced on
-#     the response + the GET /sites read.
+#     pockets (real agent_create) → create_draft_site → publish (FAKED): a
+#     ``project`` pocket on the ``static`` starter (manifest, AGENTS.md, a linked
+#     tokens file) + Site doc are minted, publish gets engine="project" and the
+#     rewired text source, images move to the public asset rail with every
+#     reference rewritten (other binaries are left out with a warning), and the
+#     ``import_report`` is persisted on the Site doc AND surfaced on the response
+#     + the GET /sites read.
 #   * Safety guards, each failing closed as a 4xx: zip-slip (../ traversal and
 #     absolute entry paths), the entry-count cap, the uncompressed-size cap
 #     (decompression bomb), the 25MB upload cap at the router (413), and a zip
@@ -35,7 +36,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from pocketpaw_ee.sites import import_service
+from pocketpaw_ee.sites import import_service, project_build
 from pocketpaw_ee.sites import service as sites_service
 
 _INDEX_HTML = (
@@ -48,6 +49,8 @@ _INDEX_HTML = (
 )
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+pytestmark = pytest.mark.usefixtures("_fake_static_starter")
 
 
 def _zip_bytes(entries: dict[str, bytes]) -> bytes:
@@ -162,23 +165,33 @@ async def _post_zip(app: FastAPI, data: bytes, name: str = "") -> Any:
 
 @pytest.mark.asyncio
 async def test_import_zip_happy_path(_fake_publish, _fake_run_import, monkeypatch):
-    """A good zip imports end to end: Site doc minted + flipped live, the generator
-    input carries engine=html / text source / base64 assets, forms are REWIRED to the
-    capture API, and the authoritative import_report is persisted and returned."""
+    """A good zip imports end to end onto the ``static`` starter: Site doc minted +
+    flipped live, a project pocket whose source is the REWIRED files plus the starter
+    manifest, AGENTS.md and a linked tokens file, forms REWIRED to the capture API,
+    and the authoritative import_report persisted and returned."""
     app = _build_app("ws_owner", monkeypatch)
     resp = await _post_zip(app, _good_zip(), name="My imported site")
     assert resp.status_code == 200, resp.text
     body = resp.json()
+    assert body["engine"] == "project"
 
-    # The publish rode the html engine with the REWIRED source map + assets sideband.
-    assert _fake_publish["engine"] == "html"
-    assert set(_fake_publish["source"]) == {"index.html", "about.html", "app.js"}
+    # The publish rode the project engine (the no-build lane) with the REWIRED source.
+    assert _fake_publish["engine"] == "project"
+    assert set(_fake_publish["source"]) == {
+        "index.html",
+        "about.html",
+        "app.js",
+        "paw.template.json",
+        "AGENTS.md",
+        "styles/tokens.css",
+    }
+    assert not _fake_publish.get("assets")
     # The deployed html is the rewired source, not the raw upload: the form now posts
     # to the capture endpoint and the original action is preserved on the element.
     deployed_index = _fake_publish["source"]["index.html"]
     assert f"action='{sites_service._capture_base()}/capture/form'" in deployed_index
     assert "data-paw-original-action='https://old-backend.example/submit'" in deployed_index
-    assert _fake_publish["assets"] == {"img/logo.png": base64.b64encode(_PNG_BYTES).decode("ascii")}
+    assert '<link rel="stylesheet" href="/styles/tokens.css">' in deployed_index
     assert _fake_publish["pattern"] == "imported"
 
     # The response is the live SiteResponse carrying the report.
@@ -216,6 +229,47 @@ async def test_import_zip_happy_path(_fake_publish, _fake_run_import, monkeypatc
     # The stored form posts to capture, with the original preserved on the element.
     assert f"action='{sites_service._capture_base()}/capture/form'" in stored_index
     assert "data-paw-original-action='https://old-backend.example/submit'" in stored_index
+    # It is a project on the static starter: the no-build lane previews and publishes it.
+    assert pocket.engine == "project"
+    assert pocket.pattern == "imported"
+    assert pocket.site_meta["project"] == {
+        "template": "static",
+        "framework": "static",
+        "recipes": [],
+    }
+    assert project_build.is_no_build(pocket.source)
+    assert pocket.source == _fake_publish["source"]
+
+
+@pytest.mark.asyncio
+async def test_import_zip_moves_binary_files_onto_the_public_asset_rail(
+    _fake_publish, _fake_run_import, public_assets_put, monkeypatch
+):
+    """A project source map holds text only, so an image goes to the public asset
+    rail and every reference to it (relative, root-absolute, CSS url()) points at the
+    returned URL. A binary the rail refuses (a font) is dropped with a warning."""
+    data = _zip_bytes(
+        {
+            "index.html": b"<html><head></head><body><img src='img/logo.png'></body></html>",
+            "about/index.html": b'<html><body><img src="/img/logo.png" alt=""></body></html>',
+            "css/site.css": (
+                b"@font-face{src:url(../fonts/a.woff2)} .h{background:url('../img/logo.png')}"
+            ),
+            "img/logo.png": _PNG_BYTES,
+            "fonts/a.woff2": b"wOF2" + b"\x00" * 8,
+        }
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    resp = await _post_zip(app, data)
+    assert resp.status_code == 200, resp.text
+    assert public_assets_put == ["logo.png"]
+    source = _fake_publish["source"]
+    assert not any(path.endswith((".png", ".woff2")) for path in source)
+    assert "src='https://cdn.test/" in source["index.html"]
+    assert 'src="https://cdn.test/' in source["about/index.html"]
+    assert "url('https://cdn.test/" in source["css/site.css"]
+    warnings = resp.json()["import_report"]["warnings"]
+    assert any("fonts/a.woff2" in w for w in warnings), warnings
 
 
 @pytest.mark.asyncio
@@ -243,7 +297,8 @@ async def test_import_zip_single_root_dir_flattens(_fake_publish, _fake_run_impo
     data = _zip_bytes({"mysite/index.html": _INDEX_HTML.encode(), "mysite/style.css": b":root{}"})
     resp = await _post_zip(app, data)
     assert resp.status_code == 200, resp.text
-    assert set(_fake_publish["source"]) == {"index.html", "style.css"}
+    starter = {"paw.template.json", "AGENTS.md", "styles/tokens.css"}
+    assert set(_fake_publish["source"]) == {"index.html", "style.css"} | starter
 
 
 # --------------------------------------------------------------------------- #
@@ -388,6 +443,13 @@ async def test_from_url_returns_202_queued(beanie_test_db, monkeypatch):
     assert doc.import_report["status"] == "queued"
     assert doc.import_report["source_url"] == "https://example.com/landing"
     assert any("crawler" in w for w in doc.import_report["warnings"])
+    # The queued pocket is already a static project; the crawl fills its files.
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+    pocket = await _PocketDoc.get(ObjectId(body["pocket_id"]))
+    assert pocket.engine == "project"
+    assert project_build.is_no_build(pocket.source)
 
 
 @pytest.mark.asyncio

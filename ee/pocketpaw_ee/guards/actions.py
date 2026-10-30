@@ -246,6 +246,15 @@ ACTIONS: dict[str, ActionRule] = {
     # it is adding to. If that trade is wrong for a given deployment, this is one
     # word.
     "sites.buy_plan": ActionRule(WorkspaceRole.ADMIN, "sites.plan_purchase_forbidden"),
+    # Confirming that a publish may DELETE a site's Durable Object data for good
+    # (``confirm_do_data_loss``). Publishing is MEMBER; destroying stored data is the
+    # irreversible half, so it needs the same tier as buying a plan.
+    "sites.confirm_data_loss": ActionRule(WorkspaceRole.ADMIN, "sites.data_loss_confirm_forbidden"),
+    # The Sites Data dashboard: editing a site's live data (rows, files, KV keys) and
+    # restoring its database to an earlier point. Reading is ``fabric.read`` (MEMBER);
+    # changing what a live site's visitors see is ADMIN, like confirming data loss.
+    "sites.data_write": ActionRule(WorkspaceRole.ADMIN, "sites.data_write_forbidden"),
+    "sites.data_restore": ActionRule(WorkspaceRole.ADMIN, "sites.data_restore_forbidden"),
     # /ship — managed deploys onto real infrastructure.
     # Reading boxes / apps / logs is MEMBER. ``ship.manage`` (ADMIN) gates the
     # DESTRUCTIVE verbs — destroy, rollback, prod deploy — which never execute
@@ -372,6 +381,10 @@ ACTIONS: dict[str, ActionRule] = {
     # action guards every route (reads included) because the decision feed
     # itself carries who-tried-to-egress-what, which is sensitive.
     "security.manage": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
+    # Agent health (ee.cloud.lens.router) — mute / resolve an issue in paw-lens.
+    # ADMIN because muting silences alerting for the whole workspace; the lens
+    # reads stay member-level (any member may view their workspace's health).
+    "lens.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Herdr cockpit — the read-only pane-telemetry surface (ee.cloud.herdr_cockpit
     # .router, HR-10a). ADMIN because herdr panes are NOT paw-workspace-scoped
     # (herdr mints its own workspace ids), so on a shared box a member-visible

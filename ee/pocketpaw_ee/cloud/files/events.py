@@ -1,7 +1,7 @@
 """Domain events published by providers on file mutations.
 
 Subscribers (realtime bridge in Phase 4) consume these via the
-ee.cloud.realtime bus. Phase 1-2 only defines the shapes.
+ee.cloud._core.realtime bus. Phase 1-2 only defines the shapes.
 """
 
 from __future__ import annotations

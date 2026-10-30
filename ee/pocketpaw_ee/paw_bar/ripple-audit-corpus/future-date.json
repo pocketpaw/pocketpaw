@@ -1,0 +1,28 @@
+{
+  "about": "A date the card made up, months after the audit's now (2026-10-13). Core only.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "Next check-in 2026-12-25"
+          }
+        }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "futureDate",
+        "path": "/ui/children/0/props/text",
+        "message": "2026-12-25 is after today (2026-10-13); use a given date, or mark a made-up card `meta.sample: true`"
+      }
+    ],
+    "python": []
+  }
+}

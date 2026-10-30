@@ -509,7 +509,13 @@ async def test_identity_reinforcement_moves_the_text_and_never_the_digest(
     turns: list[tuple[str, str]] = []
 
     async def capturing_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         turns.append((system_prompt, system_prompt_digest))
         yield AgentEvent(type="done", content="")

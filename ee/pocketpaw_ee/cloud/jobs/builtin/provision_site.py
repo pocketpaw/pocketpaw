@@ -41,6 +41,13 @@
 # The Beanie Site reads/writes funnel through ``sites.service`` seams (the
 # import-linter keeps this builtin off the Beanie doc); the build + deploy mechanics
 # reuse ``_deploy_site_doc``'s helpers rather than duplicating put_worker/build.
+#
+# Updated 2026-09-23 (VS-1, feat/sites-worker-name-decouple) -- step (e) hands
+# ``provision_deploy`` the row's ``workers_deploy.site_worker_name``, so a ``workers``
+# deploy lands on the Worker the row names instead of one re-derived from the id.
+# Unchanged for every row today: ``Site.worker_name`` is unset and the accessor falls
+# back to ``paw-site-<id>``. The D1 is still created and migrated under the
+# site-id-derived name (``d1_migrate.database_name``), which is a database name.
 
 """Built-in ``provision_site`` job: stand up a Dynamic Paw Site's D1 data plane."""
 
@@ -49,6 +56,7 @@ from __future__ import annotations
 from pocketpaw_ee.cloud.pockets import service as pockets_service
 from pocketpaw_ee.sites import d1_migrate
 from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.sites.workers_deploy import site_worker_name
 
 
 class ProvisionError(RuntimeError):
@@ -131,6 +139,7 @@ class ProvisionSiteJob:
                 bundle=bundle,
                 d1_database_id=d1_database_id,
                 cloudflare=cf,
+                worker_name=site_worker_name(site),
             )
 
             # f. Mark the Site doc provisioned + live.

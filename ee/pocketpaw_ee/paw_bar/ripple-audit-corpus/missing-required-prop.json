@@ -1,0 +1,33 @@
+{
+  "about": "A quiz with no questions. Both sides refuse the node.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "quiz",
+          "props": {
+            "title": "Capitals"
+          }
+        }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "missingProp",
+        "path": "/ui/children/0",
+        "message": "quiz needs prop `questions`"
+      }
+    ],
+    "python": [
+      {
+        "code": "missingProp",
+        "path": "/ui/children/0"
+      }
+    ]
+  }
+}

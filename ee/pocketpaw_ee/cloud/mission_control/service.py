@@ -1,163 +1,30 @@
-# ee/cloud/mission_control/service.py
-# Created: 2026-05-13 (feat/mission-control-facade) — façade service that
-# composes Instinct (Nudges + Pawprints) and the in-process activity buffer
-# into Mission Control's unified WorkItem shape. PR 1 of three.
-# Updated: 2026-05-13 (feat/mission-control-cleanup) — lifted the 501 stubs
-# on bulk-reassign + bulk-snooze now that the Tasks entity (PR 2) is on
-# ``ee``. Both endpoints delegate per-id to ``ee.cloud.tasks.service`` and
-# skip non-Task ids (Instinct Actions don't reassign or snooze). Also
-# tagged the per-bulk approve/reject loops with ``# no-event`` comments
-# so rule #9 is satisfied without redundant double-emits.
-# Updated: 2026-05-17 (feat/planner-gaps-and-deps) — pocketpaw#1118 P4
-# threaded ``task.blocked_by`` through the WorkItem projection. Each
-# dependency id is prefixed with ``task:`` so the frontend's heterogeneous
-# feed can link dependency edges to their corresponding WorkItem rows
-# without translating ids client-side.
-# Updated: 2026-05-18 (feat/mc-plan-sessions-endpoint) — added
-# ``agent_list_plan_sessions`` that delegates to
-# ``planner.service.list_plan_sessions`` (the only module allowed to
-# touch the PlanSession Beanie doc) and DTO-maps the typed summaries to
-# the wire envelope. Status vocabulary mapping (ready/stale ↔
-# draft/archived) lives here so the planner entity keeps its internal
-# vocabulary while Mission Control surfaces the operator's terms.
-# Updated: 2026-05-19 (feat/mc-create-cycle-endpoint) — added
-# ``agent_create_cycle`` that backs POST /mission-control/cycles for the
-# rail's "+ New cycle" button. Parses the wire's ISO strings, derives
-# ``status`` from start/end relative to ``now`` (upcoming | active), and
-# delegates the actual Beanie write to ``cycles.service.agent_create_cycle``
-# — the single-owner rule (only ``ee.cloud.cycles.service`` may write to
-# the Cycle Beanie doc) is enforced by an import-linter forbidden
-# contract; the MC façade can never bypass it.
-# Updated: 2026-06-10 (W4c — scope instinct reads to workspace) — closes the
-# residual cross-tenant read surface W4a left open on the INTERNAL caller side.
-# W4a workspace-scoped the public instinct router endpoints + the store reads,
-# but this façade still called the (shared, global) instinct store WITHOUT a
-# ``workspace_id``, so on shared infra it read every tenant's Nudges/audit
-# before the pocket-visibility filter ran (and ``agent_outcomes_summary`` is
-# NOT pocket-filtered at the store, only in Python). The three instinct reads
-# — ``store.pending`` / ``store.list_actions`` in ``agent_list_work_items`` and
-# ``store.list_actions`` in ``agent_outcomes_summary`` — now thread the caller's
-# ``ctx.workspace_id`` (already resolved by ``_require_workspace``) into the
-# store so the SQL restricts to the tenant's own rows (plus legacy NULL rows)
-# BEFORE the existing pocket filter. ``workspace_id`` crosses to the OSS store
-# as a PLAIN str; this is a read FILTER only and never touches the W2b audit
-# hash chain. The bulk-approve / bulk-reject WRITE paths already gate on
-# ``_visible_pocket_ids`` (pocket-layer tenancy), so they are unchanged.
-# Updated: 2026-06-10 (fix/mc-bulk-approve-strands-writes — W0c) — fixed
-# two defects in ``agent_bulk_approve`` that together stranded every write
-# a manager bulk-approved, undermining the Instinct governance moat:
-#   (1) Routing regression — a prior commit routed ids through
-#       ``_classify_task_id``, whose forward-compat default classifies a
-#       BARE id as a Task. Bulk-approving a Nudge by its bare id (the shape
-#       the frontend + every existing test send) was misrouted to the
-#       Tasks branch, failed ``agent_complete_task``, and landed in
-#       ``missing`` — the Nudge was never even approved. Routing is now by
-#       explicit prefix (``task:`` → Tasks; ``nudge:`` / bare → Instinct
-#       Nudge, prefix stripped), consistent with ``agent_bulk_reject``.
-#   (2) Stranded writes — even once a Nudge approved, the façade called
-#       ``store.bulk_approve`` and stopped, never firing the parked
-#       ``_pocket_write``, so the write stalled at ``approved`` forever
-#       (no execution, no audit/chain emit). The façade now mirrors the
-#       single-/bulk-approve HTTP path
-#       (``ee.instinct.router.bulk_approve_actions``): for each approved
-#       Nudge it emits ``human.corrected(accepted)`` +
-#       ``policy.evaluated(passed=True)`` and fires
-#       ``instinct_bridge.execute_approved_write`` (which lands the write
-#       and closes the chain), reusing the router's helpers rather than
-#       forking the chain logic. New ``_execute_bulk_approved_nudge`` runs
-#       one item with per-item error isolation; the response carries an
-#       ``executed`` list of per-item outcomes so one failing write can't
-#       silently drop the rest.
-# Updated: 2026-06-10 (sov/r2a FIX 3) — ``_execute_bulk_approved_nudge`` now
-# imports the chain-emit helpers (``_emit_human_corrected`` /
-# ``_emit_policy_evaluated_approved`` / ``_pocket_write_blob``) from the new
-# shared ``ee.instinct.chain_emitters`` module instead of reaching into the
-# Instinct router's private internals. Behavior is identical (same helpers,
-# same call order) — the façade no longer couples to the router.
-# Updated: 2026-06-12 (fix/tray-workspace-scoped-nudges) — workspace-scoped
-# nudges now reach The Tray. External-action proposals stamp
-# ``Action.pocket_id = workspace_id`` (they aren't pocket-bound — see
-# ``external_actions/propose.py``), but ``agent_list_work_items`` dropped any
-# action whose ``pocket_id`` wasn't a visible POCKET id, so every gated
-# external action sat pending without ever surfacing in the feed. The
-# per-action filter now also admits ``a.pocket_id == workspace_id`` (the
-# caller's own workspace only — the W4c store-level scope still keeps other
-# tenants' rows out in SQL), the instinct block runs even when the workspace
-# has zero visible pockets, and a workspace-scoped item projects with
-# pocket_name "Workspace" instead of leaking the raw workspace hex id.
-# Pocket-bound nudges keep the exact same visibility filter as before.
-# Updated: 2026-07-04 (fix/approval-resolution) — closed the list-vs-approve
-# tenancy mismatch that made a workspace-scoped nudge (``pocket_id ==
-# workspace_id`` — ``_admin_action`` / ``_external_action`` proposals) LIST in
-# The Tray but report ``missing`` on bulk-approve, leaving the proposal pending
-# forever. TWO fixes: (1) ``_split_ids_by_tenancy`` now admits ``pocket_id ==
-# workspace_id`` — the SAME clause ``agent_list_work_items`` uses — so a nudge
-# that lists also resolves; the store read is already tenant-scoped, so this
-# only ever admits the caller's own workspace. (2) ``_execute_bulk_approved_nudge``
-# now dispatches EVERY gated blob kind's executor (new
-# ``_execute_gated_bulk_approved_nudge`` mirrors the router's per-kind dispatch
-# for ``_admin_action`` / ``_external_action`` / ``_code_change`` /
-# ``_fabric_objects`` / ``_pocket_create`` / ``_instinct_rule`` / ``_belt_plan``
-# / ``_artifact_change``), not just ``_pocket_write`` — so a bulk-approved admin
-# action actually EXECUTES (e.g. ``billing.manage`` produces its Dodo checkout
-# url) instead of flipping to ``approved`` and stranding the write. The router's
-# approve/executor logic is unchanged; the façade reuses its blob accessors +
-# executors.
-# Updated: 2026-07-04 (fix/approval-resolution) — two projection fixes so The
-# Tray shows human names and honors its status filter:
-#   (1) Actor NAME resolution — a gated proposal's ``trigger.source`` is the
-#       PROPOSER user id (a raw ObjectId hex — see ``admin_proposals/propose.py``
-#       and ``external_actions/propose.py``, both ``trigger.type == "agent"``).
-#       ``_action_to_work_item`` projected that raw id into ``agent_name`` /
-#       ``assignee_name``, so the approval tray rendered ``6a47…`` instead of a
-#       person. ``agent_list_work_items`` now collects the unique trigger.source
-#       ids across all projected actions and batch-resolves them ONCE via a
-#       single ``_UserDoc.find({"_id": {"$in": ...}})`` (the ripple_sources /
-#       group_service pattern, mirroring how ``_pocket_name_map`` builds its map
-#       once), then passes an ``actor_name_map`` into ``_action_to_work_item``.
-#       Name preference: ``full_name`` → ``email`` → the id (never raises; a
-#       malformed / non-ObjectId source or an unknown user falls back to the id).
-#   (2) ``status`` filter — the ``/items`` endpoint accepted ``section`` but not
-#       the ``status`` it documents, so ``GET /items?status=pending`` was
-#       silently ignored and terminal (done/failed) items leaked into the
-#       awaiting-approval feed. ``agent_list_work_items`` now filters the
-#       assembled items by ``body.status`` when set, with ``"pending"`` aliased
-#       to ``WorkItemStatus.AWAITING_APPROVAL`` (the projection already maps
-#       ``ActionStatus.PENDING`` → that). ``status=None`` returns everything as
-#       before; ``status`` composes with the section/agent/pocket filters.
-# Updated: 2026-07-04 (fix/deep-work-feed-500-created-at-sort) — fixed a 500 on
-# the unfiltered Deep Work feed (``GET /items`` with no section). The final
-# ``items.sort`` compared ``(created_at, id)`` tuples across two projections
-# whose ``created_at`` types disagree: a Nudge carries ``Action.created_at`` —
-# a tz-NAIVE ``datetime`` — while a Task carries ``TaskResponse.created_at`` —
-# an ISO ``str`` (``iso_utc``). When both coexisted in one list, ``datetime <
-# str`` raised ``TypeError`` and the endpoint returned 500. Section-filtered
-# fetches (tray = nudges only, agents = tasks only) stayed homogeneous and
-# never crashed, so operators saw an EMPTY main feed but a populated in-flight
-# tab. Fixed at BOTH points: (1) ``_task_to_work_item`` now coerces
-# ``created_at`` / ``updated_at`` str→datetime, mirroring the existing
-# ``due_at`` coercion, so the projection is homogeneous; (2) the sort key is a
-# new module-level ``_sort_created_at`` that normalises ANY input — str, naive
-# datetime, aware datetime, or None — to a single tz-aware datetime, so the sort
-# can never raise regardless of caller (also fixes the naive-vs-aware case).
-# Sort semantics are unchanged (newest-first, ``id`` tiebreak); the fix restores
-# the full feed including completed/approved (Pawprints) items alongside pending.
-# Updated: 2026-07-05 (fix/mission-control-resolver-consistency) — two resolver
-# consistency fixes so the counters and the agent filter agree with the list:
-#   (A) ``agent_outcomes_summary`` now admits ``a.pocket_id == workspace_id`` in
-#       its in-window predicate, matching ``agent_list_work_items`` and
-#       ``_split_ids_by_tenancy``. Before, the summary filtered ``pocket_id in
-#       visible`` ONLY, so workspace-scoped nudges (every ``_admin_action`` /
-#       ``_external_action`` / connector proposal, whose ``pocket_id`` IS the
-#       workspace id) were DROPPED from the counters even though they list in
-#       Pawprints/Snags — the summary undercounted vs the list.
-#   (C) The ``?agent=`` filter in ``agent_list_work_items`` now matches BOTH the
-#       raw ``trigger.source`` id AND its resolved display name. The feed
-#       projects ``agent_name`` as the RESOLVED display name, but the filter
-#       compared ``body.agent`` to the raw ``trigger.source`` ObjectId hex only,
-#       so filtering by the visible name matched zero items. The collect →
-#       resolve-names → filter order was reordered so the display name is
-#       available when the filter runs (still ONE batched name-resolution query).
+# ee/pocketpaw_ee/cloud/mission_control/service.py — the Mission Control façade.
+#
+# Composes Instinct (Nudges, Pawprints), the Tasks entity and the in-process
+# activity buffer into one WorkItem feed, plus the bulk actions, outcome
+# counters, activity, plan sessions, cycles and analytics behind
+# ``/api/v1/mission-control``. What the code must keep true:
+#
+#   * List, approve and the outcome counters agree on tenancy: an action counts
+#     when its pocket is visible to the caller OR ``pocket_id == workspace_id``
+#     (workspace-scoped nudges such as ``_admin_action`` / ``_external_action``),
+#     on top of the store-level workspace scope (``_split_ids_by_tenancy``).
+#   * The feed sorts on ``_sort_created_at`` (any str / naive / aware datetime
+#     normalised to aware), because Nudges and Tasks carry different types.
+#   * Actor names resolve in ONE batched user query (full_name, email, id), and
+#     ``?agent=`` matches the raw trigger source or its display name;
+#     ``?status=pending`` means awaiting approval.
+#   * Bulk ids route by prefix (``task:`` to Tasks, ``nudge:`` or bare to
+#     Instinct). Every bulk-approved Nudge FIRES its parked write: a gated kind
+#     through its own executor (``_execute_gated_bulk_approved_nudge``, the
+#     router's per-kind dispatch), a pocket write through the Instinct bridge,
+#     each with the chain emits from ``instinct.chain_emitters`` and per-item
+#     isolation (``executed`` reports each outcome).
+#   * A queued Belt run (``instinct.router._is_queued_station_run``) is never
+#     bulk-approved: it stays pending and is reported in ``missing``. Each Belt
+#     run's item says so up front (``belt_change_ready``; ``None`` off Belt).
+#
+# History lives in ``git log -p`` on this file.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -176,7 +43,7 @@ Tenancy:
          before anything reaches Python. This closes the cross-tenant
          leak on shared infra; it is the load-bearing isolation.
       2. Pocket-level: a Nudge additionally only surfaces if its pocket
-         is visible to the caller's workspace. ``pockets_service.list_pockets``
+         is visible to the caller's workspace. ``pockets_service.visible_pocket_refs``
          enforces this as the chokepoint. This stays as a second filter
          (owner / shared_with / visibility within the tenant), layered on
          top of the store scope, not in place of it. Workspace-scoped
@@ -302,9 +169,9 @@ async def _visible_pocket_ids(ctx: RequestContext, *, project_id: str | None = N
 
     Drives the workspace filter on Instinct reads: a Nudge surfaces in
     Mission Control only if its ``pocket_id`` is in this set. We rely on
-    ``pockets_service.list_pockets`` as the chokepoint — it already
-    enforces ``workspace + (owner | shared_with | visibility)`` per
-    pocket. If a pocket isn't visible at the pocket layer, its Nudges
+    ``pockets_service.visible_pocket_refs`` as the chokepoint — it applies
+    ``list_pockets``' filter, ``workspace + (owner | team | shared_with |
+    visibility)``, per pocket. If a pocket isn't visible at the pocket layer, its Nudges
     aren't visible at the Mission Control layer either.
 
     ``project_id`` narrows the set to pockets in a single project (or to
@@ -313,15 +180,20 @@ async def _visible_pocket_ids(ctx: RequestContext, *, project_id: str | None = N
     from their parent pocket — Instinct itself doesn't know about
     projects, but it knows about pockets.
     """
-    workspace_id = _require_workspace(ctx)
-    pockets = await pockets_service.list_pockets(workspace_id, ctx.user_id, project_id=project_id)
-    return {p["_id"] for p in pockets if p.get("_id")}
+    return set(await _pocket_name_map(ctx, project_id=project_id))
 
 
 async def _pocket_name_map(ctx: RequestContext, *, project_id: str | None = None) -> dict[str, str]:
-    """Build pocket_id → pocket_name mapping for visible pockets."""
+    """pocket_id → pocket_name for the pockets the caller can see.
+
+    Reads ``visible_pocket_refs``: ``list_pockets``' exact visibility filter as
+    one projected query, without resolving every pocket's rippleSpec. Its keys
+    are also the visible-id set, so a caller needing both reads this once.
+    """
     workspace_id = _require_workspace(ctx)
-    pockets = await pockets_service.list_pockets(workspace_id, ctx.user_id, project_id=project_id)
+    pockets = await pockets_service.visible_pocket_refs(
+        workspace_id, ctx.user_id, project_id=project_id
+    )
     return {p["_id"]: p.get("name", p["_id"]) for p in pockets if p.get("_id")}
 
 
@@ -387,6 +259,8 @@ def _action_to_work_item(
     When the source isn't in the map (unknown user, malformed id) we fall
     back to the id — the same non-leaking behavior the map's builder uses.
     """
+    from pocketpaw_ee.instinct.router import _code_change_blob, _is_queued_station_run
+
     name_map = actor_name_map or {}
     section, status = _status_to_section_status(action.status)
     assignee_id = action.assignee or _trigger_assignee(action) or ""
@@ -414,6 +288,9 @@ def _action_to_work_item(
         created_at=action.created_at,
         updated_at=action.updated_at,
         fabric_refs=tuple(action.context.object_ids) if action.context else (),
+        belt_change_ready=(
+            not _is_queued_station_run(action) if _code_change_blob(action) is not None else None
+        ),
     )
 
 
@@ -601,8 +478,8 @@ async def agent_list_work_items(
     """
     body = ListWorkItemsRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
-    visible = await _visible_pocket_ids(ctx, project_id=body.project_id)
     name_map = await _pocket_name_map(ctx, project_id=body.project_id)
+    visible = set(name_map)
 
     items: list[WorkItem] = []
 
@@ -1019,6 +896,15 @@ async def agent_bulk_approve(
         eligible, blocked = await _split_ids_by_tenancy(
             store, nudge_store_ids, visible, workspace_id
         )
+        # A queued Belt run has no diff to apply yet: leave it pending (the
+        # belt executor would fail it) and report it with the blocked ids.
+        from pocketpaw_ee.instinct.router import _is_queued_station_run
+
+        for action_id in list(eligible):
+            action = await store.get_action(action_id)
+            if action is not None and _is_queued_station_run(action):
+                eligible.remove(action_id)
+                blocked.append(action_id)
         nudge_approved, nudge_missing, _ = await store.bulk_approve(
             eligible, approver=ctx.user_id, note=body.note
         )
@@ -1894,7 +1780,7 @@ async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsR
     ]
 
     # By pocket — resolve pocket names via the pockets service
-    pockets = await pockets_service.list_pockets(ctx.workspace_id, ctx.user_id)
+    pockets = await pockets_service.visible_pocket_refs(ctx.workspace_id, ctx.user_id)
     pocket_name_map: dict[str, str] = {
         p["_id"]: p.get("name", p["_id"]) for p in pockets if p.get("_id")
     }

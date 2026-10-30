@@ -1,22 +1,27 @@
 # tests/cloud/test_site_kb_ingest.py — site content → the pocket KB its concierge
-# reads (ee.pocketpaw_ee.sites.kb_ingest).
-# Created 2026-07-26. A dedicated concierge reads exactly ONE scope,
-# pocket:<pocket_id>, and nothing used to put the site's own pages there, so the
-# agent was live and knowledge-empty. Layers:
+# reads (ee.pocketpaw_ee.sites.kb_ingest). A dedicated concierge reads exactly ONE
+# scope, pocket:<pocket_id>, and this module is what fills it. Layers:
 #   * Extraction (pure, no I/O): HTML strips script/style but keeps the title and
-#     image alt text; Svelte drops script/style blocks and template expressions;
+#     image alt text; a crawled/hosted HTML page reaches the KB as Markdown, so a
+#     table stays a table and headings stay headings (the size-guide fixture is
+#     our own demo store's page); Svelte drops script/style blocks and template expressions;
 #     ripple walks the spec for copy while skipping structural keys, and renders
 #     price-ish numbers with their key so they are retrievable.
 #   * Article sources: deterministic and kb-safe, so a re-sync UPDATES rather than
 #     duplicating, and "/", "index.html" and a SvelteKit root route are one article.
-#   * Sync: ingests into pocket:<id>, records the ids on the Site, prunes only the
-#     ids it previously wrote (the scope is shared with owner-uploaded files, which
-#     must survive), and reports rather than raises on an empty or broken read.
+#   * Sync: ingests into pocket:<id>, records the ids (and the crawl index) on the
+#     Site, prunes only the ids it previously wrote (the scope is shared with
+#     owner-uploaded files), reports rather than raises on an empty or broken read,
+#     and records a crash (sync_failed, previous ids kept) without ever raising.
 #   * Triggers: a live publish and an agent provision each schedule a sync; a
-#     PREVIEW publish does not.
+#     PREVIEW publish does not. A sync that read the pocket schedules the catalog
+#     sync, and a failing catalog import changes neither the report nor the catalog.
 
 from __future__ import annotations
 
+import re
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -49,6 +54,70 @@ def test_html_survives_malformed_markup():
     text = kb_ingest.html_to_text("<p>Open daily<p>Closed Sunday</div></span>")
     assert "Open daily" in text
     assert "Closed Sunday" in text
+
+
+_SIZE_GUIDE = Path(__file__).resolve().parents[1] / "fixtures" / "size_guide.html"
+# The US men's 10 row of the demo store's footwear chart, as a Markdown table row.
+SHOE_ROW = re.compile(r"\|\s*10\s*\|\s*11\.5\s*\|\s*9\s*\|\s*44\s*\|\s*28\.0\s*\|")
+
+
+def test_a_site_page_keeps_its_tables_and_headings_as_markdown():
+    """A size chart flattened to one cell per line made the compile model rebuild
+    the table, and the concierge then said the chart "isn't available". The page
+    reaches the KB as Markdown instead: rows stay rows, headings stay headings."""
+    html = _SIZE_GUIDE.read_text(encoding="utf-8")
+
+    [doc] = kb_ingest.extract_site_documents(engine="html", source={"size-guide.html": html})
+
+    assert SHOE_ROW.search(doc.text), doc.text
+    assert re.search(r"^#{1,6} Footwear\s*$", doc.text, re.MULTILINE)
+    assert re.search(r"^# Size guide\s*$", doc.text, re.MULTILINE)
+    assert "Size guide | Cairn & Co." in doc.text  # the <title> is still read
+    assert "(541) 555-0142" in doc.text  # the footer's contact details are copy
+    assert "__sveltekit" not in doc.text  # script content stays out
+    assert "Tents & Sleep" not in doc.text  # navigation link lists stay out
+    assert "\n\n\n" not in doc.text
+
+
+def test_html_to_markdown_keeps_title_and_alt_text_and_drops_code():
+    html = (
+        "<html><head><title>Brew &amp; Co | Hours</title>"
+        "<style>body{color:red}</style></head>"
+        "<body><nav><a href='/'>Home</a></nav><h1>Brew &amp; Co</h1><p>We open at 8am.</p>"
+        "<script>var tracker = 1;</script>"
+        '<img src="latte.jpg" alt="Latte art"></body></html>'
+    )
+    text = kb_ingest.html_to_markdown(html)
+    assert "Brew & Co | Hours" in text
+    assert re.search(r"^# Brew & Co\s*$", text, re.MULTILINE)
+    assert "We open at 8am." in text
+    assert "Latte art" in text
+    assert "color:red" not in text
+    assert "tracker" not in text
+    assert "Home" not in text
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<p>Open daily<p>Closed Sunday</div></span>",
+        "<table><tr><td>Open daily<td>Closed Sunday",
+        "<<<>>>Open daily</p></p></table> Closed Sunday",
+    ],
+)
+def test_html_to_markdown_survives_malformed_markup(html):
+    text = kb_ingest.html_to_markdown(html)
+    assert "Open daily" in text
+    assert "Closed Sunday" in text
+
+
+def test_html_to_markdown_falls_back_to_plain_text_when_conversion_fails(monkeypatch):
+    def _boom(*_a: Any, **_kw: Any) -> str:
+        raise RuntimeError("converter crashed")
+
+    monkeypatch.setattr(kb_ingest, "_convert_markdown", _boom)
+    text = kb_ingest.html_to_markdown("<h1>Menu</h1><p>Flat white</p>")
+    assert "Menu" in text and "Flat white" in text
 
 
 def test_svelte_drops_code_blocks_and_expressions():
@@ -183,6 +252,44 @@ def test_page_count_is_capped():
     assert len(docs) == kb_ingest._MAX_DOCUMENTS
 
 
+def test_left_out_pages_are_named_with_a_reason():
+    """The owner's index view lists what the concierge never read: a page with
+    too little text, and every page past the cap, not just a count."""
+    source = {f"p{i:03}.html": f"<p>{_long('Page about our services.')}</p>" for i in range(62)}
+    source["empty.html"] = "<div></div>"
+    skips: list[dict] = []
+
+    docs = kb_ingest.extract_site_documents(engine="html", source=source, skips=skips)
+
+    assert len(docs) == kb_ingest._MAX_DOCUMENTS
+    assert {"path": "empty.html", "reason": "too_short", "detail": ""} in skips
+    capped = [s["path"] for s in skips if s["reason"] == "page_cap"]
+    assert capped == ["p060.html", "p061.html"]
+
+
+def test_a_foreign_crawl_reports_its_cap_and_its_notes():
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.sites.foreign_grounding import GROUNDING_MAX_PAGES
+
+    report = kb_ingest.SiteKnowledgeReport()
+    harvest = SimpleNamespace(
+        source={f"p{i}.html": "x" for i in range(GROUNDING_MAX_PAGES - 1)},
+        pages_failed=1,
+        skipped_by_robots=2,
+        warnings=["skipped https://a.example/events — HTTP 500"],
+    )
+
+    kb_ingest._note_harvest(report, harvest)
+
+    assert report.page_cap == GROUNDING_MAX_PAGES
+    assert report.capped is True
+    assert (report.pages_failed, report.skipped_by_robots) == (1, 2)
+    assert report.skips == [
+        {"path": "", "reason": "crawl", "detail": "skipped https://a.example/events — HTTP 500"}
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Sync
 # --------------------------------------------------------------------------- #
@@ -211,6 +318,37 @@ class _FakeSite:
             setattr(self, key, value)
 
 
+def patch_page_ingest(monkeypatch, fake):
+    """Fake the sync's one ingest call, ``ingest_sections_to_scope``, with a
+    per-article ``fake(scope, text, source)`` returning a kb receipt. A raise
+    fails that section; a page whose every section failed raises, as the real
+    one does."""
+    from pocketpaw_ee.cloud.agents.knowledge import (
+        KnowledgeEngineUnavailable,
+        KnowledgeService,
+        extract_ingest_article_id,
+    )
+
+    async def _sections(scope, sections):
+        ids = []
+        for section in sections:
+            try:
+                ids.append(
+                    extract_ingest_article_id(await fake(scope, section.text, section.source))
+                )
+            except KnowledgeEngineUnavailable:
+                raise
+            except Exception:
+                if len(sections) == 1:
+                    raise
+                ids.append("")
+        if not any(ids):
+            raise RuntimeError("no section landed")
+        return {"article": next(i for i in ids if i), "section_articles": ids}
+
+    monkeypatch.setattr(KnowledgeService, "ingest_sections_to_scope", staticmethod(_sections))
+
+
 def _patch_kb(monkeypatch, *, ingested: list[str], removed: list[str]):
     """Capture what the sync asks kb-go to do, without a subprocess."""
     calls: dict[str, list] = {"ingest": [], "remove": []}
@@ -224,9 +362,7 @@ def _patch_kb(monkeypatch, *, ingested: list[str], removed: list[str]):
         removed.append(article_id)
         return True
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _ingest
-    )
+    patch_page_ingest(monkeypatch, _ingest)
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.remove_article", _remove
     )
@@ -332,9 +468,7 @@ async def test_one_failed_page_does_not_lose_the_others(monkeypatch):
             raise RuntimeError("kb exploded")
         return {"article": source}
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _ingest
-    )
+    patch_page_ingest(monkeypatch, _ingest)
     _patch_pocket(
         monkeypatch,
         {
@@ -352,6 +486,15 @@ async def test_one_failed_page_does_not_lose_the_others(monkeypatch):
     assert report.ingested == 1
     assert report.skipped == 1
     assert site.kb_article_ids == ["site-home"]
+    # The owner sees which page was lost and why, and when the rest were read.
+    assert site.kb_crawl_report["skips"] == [
+        {"path": "about.html", "reason": "ingest_failed", "detail": ""}
+    ]
+    assert site.kb_crawl_report["page_cap"] == kb_ingest._MAX_DOCUMENTS
+    assert site.kb_crawl_report["capped"] is False
+    home = site.kb_page_index[""]
+    assert home["crawled_at"] and home["chars"] > 0
+    assert home["sections"][0]["chars"] > 0
 
 
 @pytest.mark.asyncio
@@ -368,11 +511,58 @@ async def test_safe_sync_swallows_everything(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_safe_sync_records_a_crash_on_the_site(monkeypatch):
+    """A crash is a failure like any other, so it lands on the Site the way the
+    others do: the reason in kb_sync_error, a fresh kb_synced_at, and the previous
+    article ids kept (they are still in the KB, so a future prune must reach them).
+    Before this, the crash returned sync_failed and wrote nothing, and the owner's
+    knowledge panel went on showing the last clean sync."""
+
+    async def _boom(site):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(kb_ingest, "sync_site_knowledge", _boom)
+    site = _FakeSite(kb_article_ids=["site-home"], kb_sync_error="")
+    report = await kb_ingest.safe_sync_site_knowledge(site)
+
+    assert report.error == "sync_failed"
+    assert len(site.set_calls) == 1
+    assert set(site.set_calls[0]) == {"kb_article_ids", "kb_synced_at", "kb_sync_error"}
+    assert site.kb_sync_error == "sync_failed"
+    assert site.kb_synced_at is not None
+    assert site.kb_article_ids == ["site-home"]
+
+
+@pytest.mark.asyncio
+async def test_safe_sync_survives_a_failure_to_record_the_crash(monkeypatch):
+    """Recording is best-effort: a Site that cannot be written still gets the
+    sync_failed report back, never an exception."""
+
+    async def _boom(site):
+        raise RuntimeError("nope")
+
+    class _Unwritable(_FakeSite):
+        async def set(self, updates: dict) -> None:
+            raise RuntimeError("mongo is down")
+
+    monkeypatch.setattr(kb_ingest, "sync_site_knowledge", _boom)
+    report = await kb_ingest.safe_sync_site_knowledge(_Unwritable())
+    assert report.error == "sync_failed"
+
+    class _Broken:
+        """No kb fields at all and no ``set``: the recording path must not raise
+        even on a Site object this malformed."""
+
+    report = await kb_ingest.safe_sync_site_knowledge(_Broken())
+    assert report.error == "sync_failed"
+
+
+@pytest.mark.asyncio
 async def test_sync_only_writes_its_own_fields(monkeypatch):
     """The sync runs in the background, minutes after the publish that scheduled it,
     holding a Site instance snapshotted at that moment. A whole-document save would
     silently roll back anything written to the same Site in between — a connected
-    domain, a stamped subscription. It must touch only the three kb_* fields.
+    domain, a stamped subscription. It must touch only its own kb_* fields.
     """
     _patch_kb(monkeypatch, ingested=[], removed=[])
     _patch_pocket(
@@ -384,7 +574,13 @@ async def test_sync_only_writes_its_own_fields(monkeypatch):
     await kb_ingest.sync_site_knowledge(site)
 
     assert len(site.set_calls) == 1
-    assert set(site.set_calls[0]) == {"kb_article_ids", "kb_synced_at", "kb_sync_error"}
+    assert set(site.set_calls[0]) == {
+        "kb_article_ids",
+        "kb_page_index",
+        "kb_synced_at",
+        "kb_sync_error",
+        "kb_crawl_report",
+    }
 
 
 @pytest.mark.asyncio
@@ -396,9 +592,7 @@ async def test_total_ingest_failure_is_reported_not_called_clean(monkeypatch):
     async def _broken(scope, text, source):
         raise RuntimeError("kb binary not found")
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _broken
-    )
+    patch_page_ingest(monkeypatch, _broken)
     _patch_pocket(
         monkeypatch,
         {"engine": "html", "source": {"index.html": f"<p>{_long('We open at 8am.')}</p>"}},
@@ -427,9 +621,7 @@ async def test_a_failed_ingest_never_purges_the_existing_knowledge(monkeypatch):
         removed.append(article_id)
         return True
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.ingest_text_to_scope", _broken
-    )
+    patch_page_ingest(monkeypatch, _broken)
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.remove_article", _remove
     )
@@ -443,3 +635,221 @@ async def test_a_failed_ingest_never_purges_the_existing_knowledge(monkeypatch):
 
     assert removed == []  # nothing deleted
     assert site.kb_article_ids == ["site-home", "site-about", "site-pricing"]  # all kept
+
+
+# --------------------------------------------------------------------------- #
+# The kb engine itself is missing or outdated
+# --------------------------------------------------------------------------- #
+
+_THREE_PAGES = {
+    "engine": "html",
+    "source": {
+        "index.html": f"<p>{_long('We open at 8am.')}</p>",
+        "about.html": f"<p>{_long('Baking since 1998.')}</p>",
+        "menu.html": f"<p>{_long('Sourdough, rye and seeded loaves.')}</p>",
+    },
+}
+
+
+def _patch_real_ingest(monkeypatch, kb_result):
+    """Run the REAL section ingest, faking only the agent's section compile and
+    the kb subprocess. Returns the call counters."""
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    calls = {"compile": 0, "kb": 0}
+
+    async def _compile(section, source, index, total, lang=None, **_kw):
+        calls["compile"] += 1
+        return {"title": source, "summary": "s", "content": section.text, "source": source,
+                "concepts": [], "categories": [], "compiled_with": "test"}  # fmt: skip
+
+    def _kb(*args, input_text=None, timeout=120):
+        calls["kb"] += 1
+        if isinstance(kb_result, BaseException):
+            raise kb_result
+        return kb_result
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(knowledge, "_compile_section_with_agent", _compile)
+    monkeypatch.setattr(knowledge, "_kb", _kb)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_an_outdated_kb_binary_stops_the_sync_and_names_the_engine(monkeypatch):
+    """A kb-go build older than `ingest --article-json` ignores the flag, stores
+    the payload verbatim and answers without `compiled_with`. Every page then
+    failed on its own: one paid agent compile, one junk article and one warning
+    PER PAGE, ending in an `ingest_failed` that blamed the save. The first such
+    answer must stop the sync and report the engine, not the site."""
+    old_binary_receipt = {"article": "manual", "title": "manual", "words": 8}
+    calls = _patch_real_ingest(monkeypatch, old_binary_receipt)
+    _patch_pocket(monkeypatch, _THREE_PAGES)
+    site = _FakeSite(kb_article_ids=["site-home"])
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert report.error == "kb_unavailable"
+    assert site.kb_sync_error == "kb_unavailable"
+    assert calls["kb"] == 1  # stopped at the first page
+    assert calls["compile"] == 1  # no further paid compiles
+    assert site.kb_article_ids == ["site-home"]  # nothing pruned
+
+
+@pytest.mark.asyncio
+async def test_a_missing_kb_binary_reports_the_engine(monkeypatch):
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    monkeypatch.setattr(knowledge, "KB_BIN", "Z:/definitely/not/here/kb-go-missing")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    async def _compile(section, source, index, total, lang=None, **_kw):
+        return {"title": source, "summary": "s", "content": section.text, "source": source,
+                "concepts": [], "categories": [], "compiled_with": "test"}  # fmt: skip
+
+    monkeypatch.setattr(knowledge, "_compile_section_with_agent", _compile)
+    _patch_pocket(monkeypatch, _THREE_PAGES)
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert report.error == "kb_unavailable"
+    assert report.ingested == 0
+
+
+@pytest.mark.asyncio
+async def test_a_per_page_kb_error_still_skips_only_that_page(monkeypatch):
+    """An ordinary kb failure is still per page: the engine works, one page broke."""
+    calls = _patch_real_ingest(monkeypatch, RuntimeError("kb failed: bad utf-8"))
+    _patch_pocket(monkeypatch, _THREE_PAGES)
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert calls["kb"] == 3
+    assert report.error == "ingest_failed"
+
+
+# --------------------------------------------------------------------------- #
+# The catalog follows the knowledge: a sync schedules the site's catalog sync
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_sync_schedules_the_catalog_sync(monkeypatch, scheduled_catalog_syncs):
+    _patch_kb(monkeypatch, ingested=[], removed=[])
+    _patch_pocket(
+        monkeypatch,
+        {"engine": "html", "source": {"index.html": f"<p>{_long('Mugs for sale.')}</p>"}},
+    )
+    site = _FakeSite()
+
+    await kb_ingest.sync_site_knowledge(site)
+
+    assert scheduled_catalog_syncs == [site]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_pocket_schedules_no_catalog_sync(monkeypatch, scheduled_catalog_syncs):
+    _patch_pocket(monkeypatch, None)
+
+    await kb_ingest.sync_site_knowledge(_FakeSite())
+
+    assert scheduled_catalog_syncs == []
+
+
+@pytest.mark.asyncio
+async def test_a_failing_catalog_import_changes_neither_the_report_nor_the_catalog(
+    monkeypatch, scheduled_catalog_syncs, tmp_path
+):
+    from pocketpaw_ee.paw_bar import catalog_import, catalog_sync
+    from pocketpaw_ee.paw_bar.catalog_import import CatalogImportPreview
+
+    from pocketpaw.paw_bar.models import PawBarSpec, PawBarWidget
+    from pocketpaw.paw_bar.store import PawBarStore
+
+    store = PawBarStore(tmp_path / "paw_bar.db")
+    widget = await store.create_widget(
+        PawBarWidget(
+            pocket_id="pocket-1",
+            owner="user:maya",
+            workspace_id="ws-1",
+            spec=PawBarSpec(widget_id="w", pocket_id="pocket-1"),
+        )
+    )
+    await store.upsert_catalog_items(widget.id, [{"id": "p1", "name": "Mine", "price_cents": 5}])
+    monkeypatch.setattr("pocketpaw_ee.paw_bar.router._store", lambda: store)
+
+    async def _failed(site, **_kw):
+        return CatalogImportPreview(status="failed", reason="fetch_failed")
+
+    monkeypatch.setattr(catalog_import, "preview_catalog_import", _failed)
+    _patch_kb(monkeypatch, ingested=[], removed=[])
+    _patch_pocket(
+        monkeypatch,
+        {"engine": "html", "source": {"index.html": f"<p>{_long('Mugs for sale.')}</p>"}},
+    )
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+    before = (asdict(report), list(site.kb_article_ids), site.kb_sync_error, site.kb_synced_at)
+    [scheduled] = scheduled_catalog_syncs
+    await catalog_sync.safe_sync_site_catalog(scheduled)
+
+    after = (asdict(report), list(site.kb_article_ids), site.kb_sync_error, site.kb_synced_at)
+    assert after == before
+    assert report.error == "" and report.ingested == 1
+    items, _ = await store.list_catalog(widget.id)
+    assert [i.id for i in items] == ["p1"]
+    assert site.catalog_sync_status == "fetch_failed"
+
+
+# --------------------------------------------------------------------------- #
+# A long page is several section articles
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_a_long_page_records_every_section_and_prunes_the_old_set(monkeypatch):
+    """The real sectioned ingest, faked at the LLM and the kb binary: a page past
+    the section size lands as several articles, all recorded on the Site, the
+    first standing for the page; a re-sync that produces a new set prunes every
+    id of the old one."""
+    from pocketpaw_ee.cloud.agents import knowledge
+
+    from tests.cloud.agents.test_knowledge_sectioned_ingest import (
+        _Compiler,
+        _FakeKb,
+        _install,
+        _long_doc,
+    )
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    kb = _FakeKb()
+    monkeypatch.setattr(knowledge, "_kb", kb)
+    _install(monkeypatch, _Compiler())
+
+    def page(topic: str, count: int) -> dict:
+        body = "".join(
+            f"<h2>{line[2:]}</h2>" if line.startswith("# ") else f"<p>{line}</p>"
+            for line in _long_doc(count).replace("Chapter", topic).split("\n\n")
+        )
+        return {"engine": "html", "source": {"pricing.html": body}}
+
+    _patch_pocket(monkeypatch, page("Spring", 4))
+    site = _FakeSite()
+
+    report = await kb_ingest.sync_site_knowledge(site)
+
+    assert (report.ingested, report.error) == (1, "")
+    first = list(site.kb_article_ids)
+    assert len(first) > 1 and sorted(first) == sorted(kb.articles)
+    [entry] = site.kb_page_index.values()
+    assert entry["id"] == first[0]
+
+    _patch_pocket(monkeypatch, page("Summer", 3))
+    await kb_ingest.sync_site_knowledge(site)
+
+    assert sorted(kb.deleted) == sorted(first)
+    assert sorted(site.kb_article_ids) == sorted(kb.articles)
+    assert not set(site.kb_article_ids) & set(first)

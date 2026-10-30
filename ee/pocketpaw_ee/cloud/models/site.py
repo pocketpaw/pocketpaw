@@ -1,227 +1,70 @@
-# ee/pocketpaw_ee/cloud/models/site.py — a published Paw Site + its custom
-# domains. workspace-scoped. The capture config (origin allowlist, signed key,
-# rate limits, event mapping) lives here so the public capture endpoint can
-# harden ingest without a second store. SiteDomain tracks the Cloudflare-for-
-# SaaS hostname lifecycle the Domains panel polls.
+# ee/pocketpaw_ee/cloud/models/site.py — a published Paw Site + its custom domains
+# (SiteDomain tracks the Cloudflare-for-SaaS hostname lifecycle). Workspace-scoped.
+# Field comments below say what each field means; these are the cross-cutting rules.
 #
-# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
-# ``analytics_since``, which says whether this site's visitors are being counted and,
-# if so, when that started. It is the ONLY thing on this document that separates "this
-# site has never recorded anything" from "this site is recording and nobody visited" —
-# ``deployed_at`` says a publish happened, not that it carried a counter. The read
-# endpoint reports those two as different states rather than serving 0 for both, which
-# is the whole point of the field. It is SET by a publish that deploys a counter and
-# CLEARED by one that does not, so a site that lapsed and re-upgraded cannot report a
-# stale start date over months nothing was recording. None on every pre-existing row,
-# and None reads as "not counting yet", so no migration.
+# Identity: ``_id`` is infrastructure, derived from (workspace, pocket_id) by
+# ``service._live_object_id``, so a republish upserts one row per pocket. On legacy
+# rows and the WfP lane it is also the Worker script name; ``worker_name`` (None =
+# the derived ``paw-site-<id>``) and the name-based ``slug`` (claimed on first
+# ``workers`` publish; renames wait in ``slug_pending``) cover the rest. ``slug``'s
+# unique indexes are PARTIAL on a string value, not sparse: Beanie writes null on
+# every row. A transfer must not re-derive ``_id``; ``identity_workspace`` marks a
+# moved row, and ``asset_source_prefixes`` records where its public images still
+# live (their keys embed the old workspace and never move). ``archived`` tombstones
+# pre-dedupe duplicates; reads filter it, nothing deletes them.
 #
-# Updated 2026-08-12 (sites Settings consolidation): added the owner's CLIENT
-# record — ``client_name`` / ``client_contact`` / ``client_notes`` and a
-# ``client_invoices`` list of ``SiteInvoice``. TWO BILLING RELATIONSHIPS NOW MEET
-# ON THIS DOCUMENT AND THEY ARE NOT THE SAME ONE: ``plan_tier`` /
-# ``subscription_status`` are what the site's owner pays US, while these four are
-# what the owner's OWN client owes THEM. Only the first is a real charge; the
-# second is an address book and a receipt book, and nothing in the deploy or
-# billing lanes reads it. It lives on the Site rather than in its own collection
-# because it is per-site by definition and has no lifecycle of its own — it is
-# born and deleted with the site. All four default empty, so no migration.
+# Capture and the concierge: ``signed_key`` + ``allowed_origins`` are the public,
+# origin-bound embed credential for both site forms and the Paw Bar (``scopes``,
+# ``revoked`` = a 401 kill switch on the KEY). Lead capture additionally accepts the
+# owner-added ``lead_intake_origins``. ``concierge_enabled`` is the owner's
+# 403 switch on the concierge, and a concierge exists only once its owner created it
+# (``concierge_created_at``). ``concierge_*`` fields hold the owner's settings
+# (runtime, guided fields, FAQs, sources, doc code, transcript retention, lead
+# capture); owner text is only ever rendered as quoted data, never into the frame.
 #
-# Updated 2026-07-31 (provisioning brick): added ``provision_started_at`` — the
-# clock behind a BOUNDED single-flight guard. ``provision_status="provisioning"``
-# alone is a one-way door: a job that no worker ever consumed, or that died before
-# writing a terminal status, pinned the Site there and every later publish of that
-# pocket short-circuited to the in-progress no-op. Stamp the entry, and the
-# service can re-enqueue once the window lapses. Do NOT reuse ``updated_at`` for
-# this — the Site model has no such field, and reading one that isn't there makes
-# every row look stale and defeats the single-flight guard entirely.
+# Billing: ``plan_tier`` / ``subscription_*`` / ``billing_rail`` /
+# ``period_paid_usd`` are what the owner pays US; ``client_*`` are what the owner's
+# own client owes THEM (an address and receipt book nothing bills from). A paid site
+# is created pending (``pending_deploy_inputs``) until payment confirms.
+# ``partner_client_id`` (PH-2, 2026-10-02) is the Paw Partners client (a Fabric
+# ``Customer`` object id) a partner sold this site to; None on every other site.
+# ``partner_payments`` (PH-13, 2026-10-02) are the one-time pay links a partner
+# sent its client for this site: the SERVER-SIDE record a verified payment must
+# match (by Dodo payment id) before it activates anything or earns a commission.
+# Metadata alone never qualifies. Indexed on ``partner_payments.payment_id``
+# because the webhook looks the payment up globally.
 #
-# Created 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.2): new Site +
-# SiteDomain documents. Capture-hardening fields mirror
-# ``pocketpaw.sites_capture.SiteFormConfig`` so the public endpoint reads one
-# store. Compound (workspace, pocket_id) index serves the per-pocket lookup.
-#
-# Updated 2026-06-01 (Phase 3 — local fake-deploy): added ``url`` — the deployed
-# site's canonical URL. In LOCAL deploy mode (no Cloudflare creds) publish()
-# stores the localhost URL the per-site static server serves
-# (http://127.0.0.1:<port>/<site_id>/) so the SiteResponse carries a real
-# openable address for the cmux smoke. In the real CF path it is left "" in v1
-# (the deployed Worker is reached via its custom domain, surfaced through the
-# domains list) until a canonical workers.dev URL is wired.
-#
-# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): added
-# ``builder_origin`` — the builder origin the site was published with, or "" for
-# a normal (non-editable) site. When set, the generated page carries the gated
-# edit-bridge keyed on it. Persisted so a component-edit republish re-applies it
-# and the site stays editable across edits.
-#
-# Updated 2026-06-18 (feat/sites-stable-identity, PERF-1): a published Paw Site now
-# has a STABLE per-(workspace, pocket_id) identity — its ``_id`` is derived
-# deterministically from the pair (``service._live_object_id``), so a re-publish
-# UPSERTS the SAME Site doc (one canonical row per pocket) instead of inserting a
-# fresh one each time. No schema change: the upsert keys on the primary ``_id``
-# (already unique), so the existing compound (workspace, pocket_id) index — which
-# still serves the per-pocket reads — is sufficient and no new unique key is added.
-#
-# Updated 2026-06-18 (feat/sites-dedupe-migration, PERF-2): added ``archived`` — a
-# non-destructive tombstone flag for the duplicate Site docs the pre-PERF-1 minting
-# left behind. PERF-1 made NEW publishes stable (one upserted doc per pocket), but
-# EXISTING data still carries dupes (one pocket had 14 docs). The PERF-2 dedupe
-# migration (``sites.dedupe``) keeps ONE canonical doc per (workspace, pocket_id)
-# active and sets ``archived=True`` on the rest — it NEVER deletes, so the data is
-# recoverable. The gallery read (``service.list_for_workspace`` / listSites) filters
-# ``archived`` so each pocket shows exactly one card. Defaults False, so every
-# existing doc and every fresh publish reads active until the migration archives it.
-#
-# Updated 2026-06-19 (P2b-backend — "Last Deployed"): added ``deployed_at`` — the UTC
-# timestamp of the most recent SUCCESSFUL live deploy. ``service.publish`` stamps it
-# (``datetime.now(UTC)``) ONLY when a non-preview deploy succeeds and ``deployed``
-# flips True — NOT on a preview/edit/arm build and NOT on every ``updatedAt`` bump,
-# so it is a true "last shipped" marker, not a "last touched" one. Defaults None;
-# backfill is not required (pre-P2b rows read null, exposed as None on the DTOs).
-#
-# Updated 2026-06-20 (DS-2 — dynamic-site D1 bindings): added ``d1_database_id`` —
-# the Cloudflare D1 database id a DYNAMIC site's deployed Worker is bound to.
-# ``service.publish`` derives a STABLE per-(workspace, pocket) id for a
-# ``pattern="dynamic"`` publish, persists it here on first publish, and REUSES the
-# stored value on every re-publish so the binding target (and the data behind it)
-# is stable across deploys. "" for static sites (no D1 binding). Defaults "", so
-# pre-DS-2 rows and every static publish read empty — no migration.
-#
-# Updated 2026-06-24 (integration/billing-credits, BC-9 — per-site annual plan):
-# added the per-site billing fields a published site carries on its OWN recurring
-# annual plan (the Webflow model — each site has its own tier, not just the
-# workspace plan). ``plan_tier`` is the site-plan catalog key (basic | pro |
-# business — ``site_plans.SITE_PLAN_CATALOG``), ``subscription_id`` the Dodo
-# subscription this site's annual sub maps to, ``renewal_date`` the next
-# renewal stamp the webhook updates, and ``subscription_status`` the lifecycle
-# (none | active | cancelled). ``service.publish_pocket`` stamps ``plan_tier`` +
-# ``subscription_id`` at publish; the per-site ``subscription.*`` webhook (routed
-# by a ``site_id`` on its metadata) advances ``subscription_status`` /
-# ``renewal_date``. All default to backward-compatible values (None /
-# "none") so every pre-BC-9 row and every workspace-plan-only site reads as having
-# no per-site sub — no migration.
-#
-# Updated 2026-06-24 (feat/charge-first-sites — charge-first per-site publishing):
-# a PAID-tier site is now created as PENDING and NOT deployed live until the
-# ``subscription.active`` webhook confirms payment. Two additions support that:
-#   * ``pending_deploy_inputs`` — the deploy inputs (rippleSpec / theme / engine /
-#     svelte source / pattern / builder_origin / name) captured at publish time so
-#     the webhook-time ``activate_site`` can run the deferred deploy WITHOUT
-#     re-reading the pocket (the webhook only carries workspace_id + site_id, and
-#     the pocket's draft may have moved on by activation time). Set ONLY for a
-#     pending paid publish; "" / empty for a free/live publish, and cleared once
-#     the site is activated. Default empty dict so every pre-charge-first row reads
-#     as having no pending deploy.
-#   * ``_checkout_url`` — a TRANSIENT pydantic PrivateAttr (NOT persisted to Mongo)
-#     the publish path stashes the Dodo checkout link on so the router can surface
-#     it on ``SiteResponse.checkout_url`` for a paid publish. None for a free
-#     publish. Private so it never round-trips through the DB.
-#
-# Updated 2026-07-08 (DP0-1 — Dynamic Paw Sites Phase 0 provisioning state): added
-# ``provision_status`` (none | provisioning | provisioned | failed) alongside
-# ``d1_database_id``. It tracks where a dynamic site is in the durable D1 provision
-# job. The contract the job upholds: it persists ``d1_database_id`` IMMEDIATELY
-# after the D1 is created (status still ``provisioning``) so a retry reuses the same
-# D1 instead of orphaning a second one; status advances to ``provisioned`` only
-# after migrate + deploy succeed, and to ``failed`` on error. Defaults ``"none"`` so
-# every static site and every pre-DP0 row reads "not provisioning" — no migration.
-#
-# Updated 2026-07-09 (DP0-4 — publish async split + single-flight): added
-# ``_provision_job_id`` — a TRANSIENT pydantic PrivateAttr (NOT persisted to Mongo),
-# mirroring ``_checkout_url``. A DYNAMIC-site publish no longer deploys inline; it
-# ensures the Site doc in ``provision_status="provisioning"`` and enqueues the
-# durable ``provision_site`` job, stashing the enqueued job id here so the router
-# can surface it on ``SiteResponse.provision_job_id``. None for a static publish and
-# for any DB-loaded doc (the PrivateAttr defaults to None). Private so it never
-# round-trips through the DB.
-#
-# Updated 2026-08-10 (SL-2 slice 2 — the build lane got its first caller): pinned the
-# FORMAT of ``build_reason`` to ``"<rung>:<cause>"``. It was described as "the rung name,
-# plus the cause for a user-blamed failure", which is two shapes and would have had every
-# consumer branch on blame before it could read a rung. One shape, both halves from closed
-# sets, colon-separated — see the field. The writer is ``sites/build_job.py``; the fields
-# themselves are written only through the ``sites.service`` seams, and only with a
-# targeted ``set`` so a minutes-long build can never roll back a concurrent publish.
-#
-# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): added ``import_report`` —
-# the per-import summary an IMPORTED site carries ({pages, asset_count, asset_bytes,
-# forms, scripts, warnings}), persisted by the import service after the html deploy
-# and surfaced on ``SiteResponse.import_report``. Derived minimally from the zip
-# contents today; the generator-side import plan enriches it (form-rewiring
-# verdicts) once the parallel paw-sites slice lands. Defaults to an empty dict, so
-# every non-imported site and every pre-SI-4 row reads "no import" — no migration.
-#
-# Updated 2026-07-14 (Paw Bar concierge seam, T1): the Site's ``signed_key`` +
-# ``allowed_origins`` (already here since RFC 12) ARE the public, origin-bound
-# embed credential a Paw Bar concierge authenticates with — no parallel key model
-# is introduced. Three additive fields make that credential a first-class scoped
-# key: ``scopes`` (what a resolved concierge request may do — chat / kb.read /
-# event.ingest by default), ``revoked`` (a kill switch the resolver fails closed
-# on), and a ``rotate_signed_key`` helper (regenerate the embed key, e.g. after a
-# leak — caller persists). A ``signed_key`` index backs the key→Site lookup
-# ``auth.site_keys.resolve_site_key`` does on every concierge request. All defaults
-# are backward-compatible (existing docs read ``revoked=False`` + the default
-# scope set), so no migration.
-#
-# Updated 2026-07-16 (Paw Bar concierge settings + kill switch, D1 — folds in
-# staffed-sites SS-6): added the owner-facing concierge controls, distinct from the
-# key-level ``revoked`` flag above. ``concierge_enabled`` is the owner's on/off kill
-# switch for the concierge itself (NOT the embed key): the three public paw-bar
-# entry points (frame / chat / action) fail closed with a 403 when it is False, so
-# an owner can silence the bar without deleting the Site or rotating the key.
-# ``revoked`` still cuts the KEY (401, anti-enumeration); ``concierge_enabled=False``
-# refuses the resolved concierge (403) — two different switches. ``concierge_greeting``
-# is the opening line the glass bar renders; it rides into the frame's
-# ``window.__PAWBAR__`` config payload. Both default backward-compatibly
-# (``concierge_enabled=True`` + ``concierge_greeting=""``), so every existing Site
-# reads as enabled with no greeting — no migration.
-#
-# Updated 2026-07-26 (concierge transcripts): added ``concierge_store_transcripts``
-# — the owner's retention switch for the VISITOR half of a conversation. It is
-# deliberately its own toggle rather than a fold into ``concierge_enabled``,
-# because it is the one concierge setting that governs whether NEW personal data
-# is collected (visitor free text can carry a name, an email, an order number).
-# Defaults True so the owner-facing transcript is a real two-sided conversation;
-# an owner on a privacy-sensitive site turns it off and keeps the concierge.
-#
-# Updated 2026-07-26 (site knowledge sync): added ``kb_article_ids`` /
-# ``kb_synced_at`` / ``kb_sync_error`` — the bookkeeping behind "this site's own
-# pages are in the pocket KB its concierge reads". Without it a dedicated concierge
-# was provisioned knowledge-empty and could not answer a question about the business
-# it fronts. The ids exist so a re-sync can prune what a renamed page left behind
-# without clearing a scope that also holds owner-uploaded files. All default
-# empty/None, so no migration.
-#
-# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot): added
-# ``preview_image_url`` — the stored URL of a screenshot of this site's live page,
-# written by the best-effort capture ``sites.screenshot`` schedules from the tail
-# of a successful deploy. Empty when no screenshot has landed (never deployed, no
-# public url yet, capture failed, or Cloudflare is unconfigured), and the gallery
-# card falls back to its text layout on empty — so it is always optional and never
-# a gate on publishing. Defaults "" so every existing row reads "no preview" — no
-# migration.
-#
-# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): no schema
-# change, only the write POLICY for that field, recorded where the field lives.
-# ``preview_image_url`` is rewritten on EVERY successful deploy (a republish
-# included — there is no TTL and no "only if empty" guard, since a republish is
-# exactly the case where a value exists and is wrong) and by an explicit
-# POST /sites/{site_id}/preview-refresh. Every capture stores a NEW uploads row, so
-# the value changes each time and nothing overwrites bytes behind a stable URL —
-# a reader may treat an unchanged value as unchanged art. Written by targeted
-# ``set()``, never ``save()``: the capture lands seconds after the publish that
-# scheduled it, holding a doc snapshotted before it.
+# Writes from background jobs (builds, provisioning, screenshots, KB sync) use
+# targeted ``set()``, never ``save()``, so a late job can't roll back a concurrent
+# publish. ``_checkout_url`` and ``_provision_job_id`` are transient PrivateAttrs,
+# never persisted. ``provision_status`` advances to provisioned only after
+# migrate + deploy, with ``d1_database_id`` saved as soon as the D1 exists.
+# Every field added after launch defaults so that old rows need no migration;
+# the exceptions are backfilled at boot: ``concierge_enabled`` (default False) by
+# ``sites.migrate_concierge_marker``, and appearances stored under the old look
+# defaults by ``sites.migrate_appearance_follow_site``.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from beanie import Indexed
 from pydantic import BaseModel, Field, PrivateAttr
+from pymongo import IndexModel
 
 from pocketpaw.paw_bar.appearance import ConciergeAppearance
+from pocketpaw.paw_bar.concierge_fields import ConciergeEscalation, ConciergeTone
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
+
+# ``Site.concierge_knowledge_chars``: the default and the bounds. 4,000 is one
+# whole knowledge item (``concierge_runtime._ITEM_CHARS``): below it not even a
+# single section arrives whole. 60,000 (about 15,000 tokens) is five times the
+# default, enough for a docs site's answer spread over many sections, and keeps
+# a public, per-visitor turn's prompt cost and latency bounded.
+CONCIERGE_KNOWLEDGE_CHARS_DEFAULT = 12_000
+CONCIERGE_KNOWLEDGE_CHARS_MIN = 4_000
+CONCIERGE_KNOWLEDGE_CHARS_MAX = 60_000
 
 
 class SiteDomain(BaseModel):
@@ -245,8 +88,14 @@ class SiteInvoice(BaseModel):
 
     This is bookkeeping the owner keeps, not a charge we process: nothing here
     moves money, and the sites service never reads it back for billing. Amounts
-    are integer MINOR units (cents) so a receipt cannot drift through float
-    arithmetic on its way to and from the wire.
+    are integer ISO 4217 minor units of ``currency`` (the ``_cents`` name is
+    historical) so a receipt cannot drift through float arithmetic on its way to
+    and from the wire.
+
+    ``amount_unit`` says which convention ``amount_cents`` is in: "iso4217" for
+    minor units, stamped on every write since 2026-10-01; "" for a legacy row a
+    client wrote as major × 100, which the invoice minor-units migration converts
+    and stamps. A stamped row is never converted again.
     """
 
     id: str
@@ -255,6 +104,97 @@ class SiteInvoice(BaseModel):
     currency: str = "USD"
     paid: bool = True
     note: str = ""
+    amount_unit: str = ""
+
+
+class PartnerClientPayment(BaseModel):
+    """One pay link a partner sent its client for a yearly partner plan (PH-13).
+
+    Created by the pay-link route with the Dodo ``payment_id`` returned at
+    creation; the ``payment.succeeded`` webhook matches on that id and nothing
+    else. ``status``: pending -> paid | flagged; paid -> reversed (refund or lost
+    dispute within 60 days). ``commission_credits`` / ``rate_bps`` are frozen at
+    the moment the payment is claimed so a redelivery never recomputes them.
+    """
+
+    payment_id: str
+    sku: str
+    amount_minor: int
+    currency: str
+    client_id: str
+    checkout_url: str = ""
+    created_at: datetime
+    status: str = "pending"
+    paid_at: datetime | None = None
+    commission_credits: int = 0
+    rate_bps: int = 0
+    flag_reason: str = ""
+
+
+class ConciergeFaq(BaseModel):
+    """One pinned answer on a site's concierge (CR-8): a question the owner wants
+    answered the same way every time, and that answer.
+
+    ``id`` is minted here (hex uuid), never taken from a request body. Both texts
+    are owner-written, stripped, and capped by the knowledge routes; the runner
+    treats them as data like any KB article.
+    """
+
+    id: str
+    question: str
+    answer: str
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def new(cls, question: str, answer: str) -> ConciergeFaq:
+        import uuid
+
+        now = datetime.now(UTC)
+        return cls(
+            id=uuid.uuid4().hex,
+            question=question,
+            answer=answer,
+            created_at=now,
+            updated_at=now,
+        )
+
+
+class ConciergeKnowledgeSource(BaseModel):
+    """One uploaded file or single link a site's concierge answers from (CR-9).
+
+    ``kind`` is ``file`` (PDF, DOCX, Markdown, text) or ``link`` (one web page,
+    fetched through the SSRF-safe fetcher). ``status`` is ``processing`` until the
+    background ingest ends, then ``ready`` or a refusal the dashboard turns into a
+    sentence: ``failed`` (``reason`` says why), ``too_large``, ``unsupported`` or
+    ``blocked``. ``mime`` is what the server sniffed, never the client's claim.
+    ``article_ids`` are the kb articles in ``pocket:<pocket_id>`` this source
+    produced, one per section of a long document; removing the source deletes
+    them all. ``sections_total`` / ``sections_failed`` count the document's
+    sections and the ones that did not compile (a source is ``ready`` once one
+    did); ``sections_truncated`` counts sections past the plan's char cap that
+    were never read. The file itself is not stored.
+    """
+
+    id: str
+    kind: Literal["file", "link"]
+    name: str
+    url: str | None = None
+    mime: str = ""
+    size_bytes: int = 0
+    status: Literal["processing", "ready", "failed", "too_large", "unsupported", "blocked"] = (
+        "processing"
+    )
+    reason: str = ""
+    chars: int = 0
+    truncated: bool = False
+    article_ids: list[str] = Field(default_factory=list)
+    sections_total: int = 0
+    sections_failed: int = 0
+    sections_truncated: int = 0
+    created_at: datetime
+    updated_at: datetime
+    indexed_at: datetime | None = None
 
 
 class Site(TimestampedDocument):
@@ -264,8 +204,40 @@ class Site(TimestampedDocument):
     pocket_id: str
     owner: str
     name: str = ""
-    # Workers-for-Platforms script name (== site id) once deployed.
+    # SM-1: the owner's own one-line blurb for this site, shown as the gallery card's
+    # sublabel. EMPTY on every existing row, which reads as "no description" — the
+    # card already falls back to the host or the script name, so there is no
+    # migration and nothing changes for a site nobody has described.
+    #
+    # The frontend has carried a typed ``description`` placeholder since the card was
+    # written, with a comment saying nothing populated it; this is the field it was
+    # waiting for. Capped at the DTO edge rather than here, so an over-long value is
+    # a 422 the form can show instead of a record that silently lost its tail.
+    description: str = ""
+    # Workers-for-Platforms script name (== site id) once deployed. Also the id the
+    # public lead-capture URL is keyed by. NOT the workers.dev Worker's name: that is
+    # ``worker_name`` below.
     script_name: str = ""
+    # VS-1: the Worker script name (and workers.dev subdomain) a ``workers``-target
+    # deploy uses. None means "derive it": ``workers_deploy.site_worker_name`` falls
+    # back to ``paw-site-<id>``, which is what every row written before this field
+    # was deployed under. Read it only through that accessor -- deploy, custom-domain
+    # routes and the delete cascade must all name the same script.
+    worker_name: str | None = None
+    # VS-2: the name-based address this site claimed on its first ``workers`` publish
+    # (``acme-bakery``). Set together with ``worker_name`` and never changed by a
+    # republish. None on every site that published before it existed; those keep
+    # ``paw-site-<id>``. Globally unique (workers.dev is one namespace per account),
+    # enforced by the partial unique index in ``Settings.indexes``.
+    slug: str | None = None
+    # VS-4: the address the owner asked to rename this site to. RESERVED now (the
+    # partial unique index below keeps two sites from asking for one name) and applied
+    # on the next ``workers`` publish, which deploys under it, re-points the custom
+    # domains and then clears it. None when no rename is waiting.
+    slug_pending: str | None = None
+    # VS-4: when each accepted rename request landed. The service drops entries older
+    # than 24h and refuses a 4th within the window.
+    slug_changes: list[datetime] = Field(default_factory=list)
     deployed: bool = False
     # Which target the last SUCCESSFUL deploy actually used: "" (never deployed) |
     # "local" | "workers" | "wfp". Stamped only after a deploy returns, so it records
@@ -332,6 +304,28 @@ class Site(TimestampedDocument):
     # Stable across re-publishes (publish reuses the stored value) so the D1
     # binding target — and the data behind it — never moves under a live site.
     d1_database_id: str = ""
+    # Bundle-deploy backends ``sites.binding_provisioner`` created for this site,
+    # keyed by the binding NAME the build requested: namespace id per KV binding,
+    # bucket name per R2 binding. Written only by the provisioner (never from
+    # author input), saved right after each create so a retry reuses rather than
+    # duplicates, and torn down by the delete cascade's ``bindings`` step.
+    kv_namespaces: dict[str, str] = Field(default_factory=dict)
+    r2_buckets: dict[str, str] = Field(default_factory=dict)
+    # Durable Objects on the site's script (``sites.durable_objects``): the migration
+    # tags applied to it, oldest first (the last is the live tag), and the classes
+    # live on it. Written only after a successful upload, from Cloudflare's
+    # ``migration_tag``; read to plan the next publish and by the delete cascade.
+    do_migration_tags: list[str] = Field(default_factory=list)
+    do_classes: list[str] = Field(default_factory=list)
+    # Daily DO usage from ``sites.do_metering`` (``{"YYYY-MM-DD": {"requests",
+    # "active_time", "stored_bytes"}}``, last 35 days), and whether today's requests
+    # passed the plan's ceiling. The flag reaches the Worker as ``PAW_DO_THROTTLED``
+    # on the next deploy.
+    do_usage: dict[str, dict[str, int]] = Field(default_factory=dict)
+    do_throttled: bool = False
+    # Today's requests passed PAW_SITES_DO_SUSPEND_FACTOR x the ceiling: the platform
+    # wrapper answers 503 (``PAW_DO_SUSPENDED``) until a day under it.
+    do_suspended: bool = False
     # DP0-1: where a dynamic site sits in the durable D1 provision job
     # (none | provisioning | provisioned | failed). Contract: the job persists
     # ``d1_database_id`` IMMEDIATELY after the D1 is created (status still
@@ -405,9 +399,11 @@ class Site(TimestampedDocument):
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key — one of the SITE-SCOPED rungs
-    # (free | site | staff — see ``billing.site_plans``), never one of the org
-    # flats (studio | agency), which cover a whole workspace and are refused here
-    # by ``site_plans.site_scoped_tier``. Documents written before 2026-08-22 hold
+    # (free | site | staff — see ``billing.site_plans``). The org flats it could
+    # never hold (studio | agency) were retired on 2026-09-06; a document still
+    # storing one now resolves to no tier at all and lands on the free floor —
+    # the same answer the scope guard used to give, from the plain catalog lookup.
+    # Documents written before 2026-08-22 hold
     # the old names (basic | pro | business); those resolve through the catalog's
     # permanent legacy aliases, and ``scripts/migrate_site_plan_keys.py`` rewrites
     # them. None until a publish stamps one. ``subscription_id``
@@ -420,6 +416,94 @@ class Site(TimestampedDocument):
     subscription_id: str | None = None
     renewal_date: datetime | None = None
     subscription_status: str = "none"
+    # WHICH RAIL PAID FOR THIS SITE, and it exists because two of the three are
+    # indistinguishable without it. A site bought with workspace CREDITS and a
+    # site bought as a Dodo ADD-ON both end up ``subscription_status="active"``
+    # with a paid ``plan_tier`` and NO ``subscription_id`` — and the add-on cart
+    # (``billing.service._site_addon_cart``) selects on exactly that shape. So a
+    # credits-paid site would be silently added to the workspace's next Dodo
+    # invoice and charged a second time for the month the wallet already bought.
+    #
+    # Values: ``"credits"`` (the wallet paid — the rail every new purchase takes),
+    # ``"addon"`` (a line on the workspace's Dodo subscription), ``"subscription"``
+    # (a legacy per-site Dodo subscription, which also holds a ``subscription_id``),
+    # and ``""`` for every document written before this field existed.
+    #
+    # EMPTY MUST KEEP MEANING WHAT IT MEANT. Every pre-existing paid row is an
+    # add-on or a per-site subscription, so the cart's exclusion keys on
+    # ``== "credits"`` rather than ``!= "addon"``: an unstamped legacy row stays on
+    # the invoice it is already on, and no migration is needed to keep billing
+    # correct.
+    billing_rail: str = ""
+    # A SITE POCKETPAW DOES NOT HOST. True only for a row minted by
+    # ``sites.service.mint_foreign_site`` — a Paw Bar concierge embedded on a page
+    # the customer already owns (a Squarespace site, a hand-rolled marketing page).
+    # There is no Worker, so ``script_name`` stays "" and ``deployed`` stays False
+    # FOREVER, and that is the finished, working state rather than a failure.
+    #
+    # IT IS A STAMP AND NOT A DERIVATION, because what reads it decides whether to
+    # MOVE MONEY. The renewal sweep refuses to charge an undeployed site — a paid
+    # site that never deployed needs an operator, not another month's debit — and a
+    # foreign site has to be the one exception. ``script_name == ""`` would also
+    # describe every draft and every half-written row, so deriving the exception
+    # from it would let an unrelated empty string open the door to a debit. An
+    # explicit flag only the mint sets means every other row reads False and keeps
+    # the old refusal.
+    #
+    # Defaults False, so every pre-existing document reads "hosted" — no migration.
+    foreign_origin: bool = False
+    # THE MOST EXPENSIVE TIER THIS SITE HAS ALREADY PAID FOR IN THE CURRENT PERIOD,
+    # in whole USD. It exists so a mid-period tier change charges the DIFFERENCE
+    # rather than a fresh month, and so a change that is not an upgrade charges
+    # nothing at all.
+    #
+    # Without it the publish path priced every tier change at the new tier's full
+    # month, which produced three separate wrong bills from one line of code: a
+    # DOWNGRADE charged more than the plan it was leaving; flipping between two
+    # tiers on one afternoon charged a month per flip and could drain a wallet;
+    # and an upgrade charged a second full month for a period already bought.
+    # Comparing against a stored "already paid" high-water mark makes all three
+    # arithmetic instead of policy.
+    #
+    # It is a HIGH-WATER MARK and deliberately not "the price of the current
+    # tier": after staff -> site the customer has still paid for staff until the
+    # period ends, so going back up to staff inside that period must be free. A
+    # downgrade therefore leaves this field alone; only a charge raises it, and
+    # only a new period (the renewal sweep) or a fresh purchase resets it.
+    #
+    # 0 on every row written before the field, which is the safe default for the
+    # only population that has one: legacy Dodo-rail sites, whose tier changes are
+    # refused outright rather than priced from this.
+    period_paid_usd: int = 0
+    # CANCEL AT PERIOD END. True when someone has dropped this site to the free
+    # floor while it is still inside a month it has already paid for.
+    #
+    # It exists because closing the subscription on the spot would have taken back
+    # what the customer bought. The whole pricing model here is "the PERIOD is
+    # bought, and a tier change re-prices it rather than restarting it" — which is
+    # exactly why a downgrade costs nothing and going back up inside the period is
+    # free. Ending the plan the instant somebody clicks away would contradict that
+    # for the one move where it costs the customer real money: paying $19 on the
+    # 1st and cancelling on the 2nd would forfeit 28 days and make re-buying cost
+    # a whole second month.
+    #
+    # So the plan STAYS ACTIVE and keeps its tier, its ``renewal_date`` and its
+    # ``period_paid_usd``; entitlements read ``subscription_status``, so the custom
+    # domain, analytics and badge removal all survive to the end of the month that
+    # paid for them. The renewal sweep is what closes it: a due site carrying this
+    # flag drops to the floor instead of being charged.
+    #
+    # Cleared by resuming (an authorized republish naming the tier again) and by
+    # any authorized tier change, so a site cannot be scheduled to close and then
+    # be quietly renewed anyway. False on every legacy row, which is right — none
+    # of them was ever scheduled to close.
+    plan_cancels_at_period_end: bool = False
+    # Paw Partners (PH-2): the partner's client this site was sold to — a Fabric
+    # ``Customer`` object id, stamped by ``sites.service.sell_site_plan``.
+    partner_client_id: str | None = None
+    # Paw Partners (PH-13): client pay links for this site, newest last. See
+    # ``PartnerClientPayment``.
+    partner_payments: list[PartnerClientPayment] = Field(default_factory=list)
     # charge-first: the deploy inputs captured at publish time for a PENDING paid
     # site, so the ``subscription.active`` webhook can run the deferred deploy
     # without re-reading the pocket (the webhook carries only workspace_id +
@@ -441,6 +525,94 @@ class Site(TimestampedDocument):
     # canonical doc per (workspace, pocket_id) active and sets this True on the
     # rest (never deletes). The gallery read filters it so each pocket shows once.
     archived: bool = False
+    # ── The delete cascade's own lifecycle (sites lifecycle wave 1) ────────
+    # Deliberately SEPARATE from build_* and provision_*, for the same reason those
+    # two are separate from each other: a site is provisioned once, rebuilt many
+    # times, and deleted exactly once, so collapsing them would let one overwrite
+    # another's status and make a delete look like a failed build.
+    #
+    # ``delete_status`` — none | queued | exporting | tearing_down | failed.
+    # There is NO terminal success value, because success deletes this row. A reader
+    # that finds no Site has found a completed delete; a reader that finds one of
+    # these has found an unfinished one.
+    delete_status: str = "none"
+    # When the CURRENT delete attempt entered queued (UTC). Same bounded
+    # single-flight reasoning as ``build_started_at`` and ``provision_started_at``,
+    # and the same asymmetry: a row with no stamp reads as STALE, because a
+    # redundant re-enqueue costs one idempotent pass over a ledger that skips
+    # finished steps, while a stuck guard makes a site undeletable forever.
+    delete_started_at: datetime | None = None
+    # PERSISTED, like ``build_job_id`` and unlike the transient provision one. A
+    # delete is exactly the case where the user reloads the page — it is the longest
+    # irreversible thing the product does — and on reload a transient id is gone.
+    delete_job_id: str | None = None
+    # ── THE LEDGER: what makes a partial teardown resumable ────────────────
+    # Step name -> outcome, written as each step completes. A re-entered job SKIPS
+    # every step already recorded here, which is what turns a resume into a skip
+    # rather than a retry — and several of these steps are not safely repeatable in
+    # spirit even where they are idempotent in fact (cancelling a subscription
+    # twice, re-charging a purge over a bucket).
+    #
+    # THIS IS WHY THE SITE DOCUMENT IS DELETED LAST. The ledger lives on the very
+    # row the cascade is destroying, so deleting the row first would make every
+    # later failure both unresumable and invisible. The ordering is a consequence of
+    # where this field lives, not a convention someone has to remember.
+    delete_ledger: dict[str, str] = Field(default_factory=dict)
+    # The SiteExport document holding the customer's data, captured before anything
+    # was destroyed. Its own row outlives this one — see cloud/models/site_export.py
+    # for why it is not stored the other way round.
+    delete_export_id: str = ""
+    # WHY the delete reached ``failed``, as ``"<step>:<cause>"`` — the SAME two-part
+    # shape ``build_reason`` uses, reused verbatim rather than re-minted so a
+    # consumer parses once and can always split on the colon to group by step. A
+    # failure with no reason is not a smaller error, it is an unactionable one.
+    delete_reason: str | None = None
+    # -- Transfer: moving this site to another workspace (wave 3) -----------
+    # ``transfer_status`` -- none | offered | in_flight | failed. No terminal
+    # success value, for the same reason ``delete_status`` has none: a finished
+    # transfer returns the row to ``none`` and ``transferred_at`` is what records
+    # that it happened.
+    transfer_status: str = "none"
+    # The workspace the site has been OFFERED to, and the only key the destination
+    # can find this row by -- every other sites read is scoped on ``workspace``,
+    # which still names the SOURCE until the move completes. Indexed below with
+    # ``transfer_status``, because the incoming-offers list queries the pair and
+    # would otherwise scan every site in the deployment.
+    transfer_to_workspace: str = ""
+    transfer_offered_by: str = ""
+    transfer_offered_at: datetime | None = None
+    # Step name -> outcome, exactly like ``delete_ledger``, and resumable the same
+    # way. A transfer is short, but it is several writes across two tenants and a
+    # crash in the middle leaves ownership split -- which is the failure this
+    # records enough to finish rather than guess at.
+    transfer_ledger: dict[str, str] = Field(default_factory=dict)
+    transfer_reason: str | None = None
+    transferred_at: datetime | None = None
+    # THE WORKSPACE THIS ROW'S ``_id`` WAS MINTED FROM, and the field that stops a
+    # transferred site silently forking in two.
+    #
+    # ``service._live_object_id`` derives ``_id`` from ``(workspace, pocket_id)``
+    # (PERF-1), and that id is ALSO the Cloudflare Worker's script name and the
+    # subdomain the site is served at. A transfer therefore cannot re-derive it --
+    # doing so renames a live Worker and moves a public URL. But leaving it alone
+    # means the next publish in the destination derives a DIFFERENT id, inserts a
+    # SECOND Site row, uploads a SECOND Worker, and serves it at a SECOND address
+    # while every custom domain still resolves to the first.
+    #
+    # Set ONLY by a transfer, and only once (the minting workspace, not the most
+    # recent one). "" on every row that has never moved, which is what makes
+    # ``_resolve_live_site_oid`` a no-op for them -- the dedupe invariant PERF-1
+    # and PERF-2 established is untouched for every site but a transferred one.
+    identity_workspace: str = ""
+    # Public-asset prefixes this site's images are STILL stored under after a
+    # transfer, because the object key embeds the workspace id and that key is
+    # baked into an immutable, year-cached public URL inside the deployed HTML.
+    # Moving the bytes would blank every image on a live site; see
+    # ``sites/transfer.py:_move_assets``. Recorded because the delete cascade
+    # purges ``prefix_for(site.workspace, ...)`` -- which after a transfer names an
+    # empty prefix -- so without this list the real objects are unreclaimable and
+    # stay public forever.
+    asset_source_prefixes: list[str] = Field(default_factory=list)
     # SE-2b: the builder origin this site was published with, or "" when it was
     # published as a normal (non-editable) site. When set, the generated page
     # carries the gated edit-bridge keyed on this origin. Persisted so a
@@ -481,6 +653,12 @@ class Site(TimestampedDocument):
     # back. Existing rows read the default and are therefore un-gated, which is the
     # intended migration: they were the ones silently dropping leads.
     enforce_origin: bool = False
+    # Extra hosts the OWNER allowed to post leads (Collect leads settings), bare
+    # lowercased hostnames, at most 20. Kept apart from ``allowed_origins`` so the
+    # publish stamp and add/remove_domain never drop them, and so an unverified
+    # owner-typed host widens lead capture only, never the concierge key gate or
+    # frame CSP. See ``cloud/leads/intake.py``.
+    lead_intake_origins: list[str] = Field(default_factory=list)
     signed_key: str = ""
     rate_limit_per_min: int = 60
     per_ip_limit_per_min: int = 10
@@ -505,9 +683,36 @@ class Site(TimestampedDocument):
     # three public entry points (frame / chat / action) refuse with a 403, so the
     # owner can silence the bar instantly without deleting the Site or rotating the
     # key. Re-read on EVERY request (never cached on a warm client) so a toggle
-    # takes effect immediately. Defaults True (every existing site stays live), so
-    # no migration.
-    concierge_enabled: bool = True
+    # takes effect immediately. Defaults False since CR-12: a concierge is created
+    # off and turned on by its owner. Rows that predate CR-12 never stored this
+    # field; ``sites.migrate_concierge_marker`` writes their old effective value
+    # (True) explicitly so the flip does not silence them.
+    concierge_enabled: bool = False
+    # Paw Bar concierge (CR-12, 2026-09-28): WHEN the owner created this site's
+    # concierge, or None when it has none. Existence is this stored marker, never
+    # "the widget has an agent" — v2 answers without one. Stamped only by
+    # ``POST /paw-bar/admin/site/{id}/concierge`` (and the one-shot backfill for
+    # bars that were already live), cleared by ``DELETE``. Nothing else writes it,
+    # which is the captain's rule: no concierge is ever created automatically.
+    # ``site_keys.concierge_available`` requires it, so "none" reads as "off" at
+    # every public seam.
+    concierge_created_at: datetime | None = None
+    # VS-3: the owner's "hide the PocketPaw badge" preference. Only half of the
+    # rule: ``sites.service._stamp_free_badge`` drops the badge when the site is
+    # ENTITLED to remove it (``SiteEntitlements.badge_required`` is False) AND this is
+    # True. On a free site it changes nothing. Defaults True, which is exactly
+    # today's behaviour for an entitled site, so a row without the field needs no
+    # migration. Written only through ``PATCH /sites/{id}/branding``, which refuses
+    # True with a 402 on a site that is not entitled.
+    badge_hidden: bool = True
+    # AV-1: the owner's opt-in for AI TRAINING crawlers (GPTBot, ClaudeBot, CCBot, ...).
+    # Changes only the training lines of the robots.txt every workers deploy writes;
+    # search and assistant bots are never blocked. Default False = training opted out.
+    # Written through ``PATCH /sites/{id}/ai-visibility``; takes effect on next publish.
+    ai_training_allowed: bool = False
+    # AV-1: this site's IndexNow key, minted on its first workers publish and kept for
+    # life (IndexNow ties the key file at ``/<key>.txt`` to the host). "" until then.
+    indexnow_key: str = ""
     # Paw Bar concierge (D1 / SS-6): the opening line the glass bar renders. Rides
     # into the frame's ``window.__PAWBAR__`` config as ``greeting``; the glass app
     # reads it in a parallel slice and falls back to its own default when "".
@@ -527,24 +732,137 @@ class Site(TimestampedDocument):
     # NOT retroactively purge lines already stored. Defaults True (the transcript
     # the dashboard promises), so no migration.
     concierge_store_transcripts: bool = True
-    # Paw Bar appearance (2026-08-19). The owner's white-label settings, rendered
-    # into the frame's ``window.__PAWBAR__.tokens`` as ``--pawbar-*`` custom
-    # properties. The widget has read that map since it shipped and the backend
-    # answered ``{}`` the whole time; this is the other end of that wire.
-    # Defaults reproduce today's look exactly, so an unstyled Site is unchanged
-    # and there is no migration.
+    # Paw Bar appearance: the owner's overrides of the host site's look, rendered
+    # into the frame's ``window.__PAWBAR__.tokens`` / ``tokensDark`` as
+    # ``--pawbar-*`` custom properties. Every look default follows the site.
     concierge_appearance: ConciergeAppearance = Field(default_factory=ConciergeAppearance)
+    # Which appearance semantics the stored ``concierge_appearance`` was written
+    # under. 2 = follow-site ("" accent, "site" font, None radius follow the site).
+    # A row without the field predates them and still holds the old defaults
+    # (#3b6fe0 / system / 20) as literal values; ``sites.migrate_appearance_follow_site``
+    # rewrites those at boot and stamps 2, so a value an owner sets later is never
+    # mistaken for an old default.
+    concierge_appearance_version: int = 2
+    # Paw Bar concierge runtime (CR-1, 2026-09-27). "legacy" dispatches the
+    # concierge as a full agent run (RunSpec -> executor); "v2" answers in one
+    # streamed model call with NO tools, grounded in the site KB. Read per chat
+    # turn, so a flip takes effect on the next message. Default "legacy" until
+    # the v2 eval gate passes; a row written before the field existed reads as
+    # legacy too (callers use getattr with that default).
+    concierge_runtime: Literal["legacy", "v2"] = "legacy"
+    # Paw Bar pinned FAQs (CR-8, 2026-09-28). The owner's question/answer pairs,
+    # in the order they were added; the v2 runner's ``retrieve`` puts them ahead
+    # of every KB hit. Written only through ``paw_bar.knowledge_routes`` (which
+    # caps count and length from config) and cleared by its ``delete_faqs``.
+    concierge_faqs: list[ConciergeFaq] = Field(default_factory=list)
+    # Paw Bar knowledge sources (CR-9, 2026-09-28): uploaded files and single links,
+    # ingested into ``pocket:<pocket_id>`` beside the site's own pages. Written only
+    # through ``paw_bar.knowledge_routes`` (count capped per plan from config) and
+    # cleared, un-indexed, by its ``delete_sources``. The page sync never prunes
+    # these articles: it only deletes ids listed in ``kb_article_ids``.
+    concierge_sources: list[ConciergeKnowledgeSource] = Field(default_factory=list)
+    # "Answer with code examples from your docs" (CR-2, 2026-09-28). Off: a v2
+    # reply never shows a code block. On: a code block passes only when it is
+    # found, verbatim, in the knowledge retrieved for that turn
+    # (``concierge_runtime.is_grounded_code``); anything else is still replaced.
+    # For documentation sites. Off by default and for rows older than the field.
+    concierge_allow_doc_code: bool = False
+    # Leads from conversation. On (the default, and for rows older than the
+    # field): the v2 concierge may offer a ``send_to_team`` lead card and the
+    # visitor's tap on Send writes a Lead (``paw_bar.actions``). Off: no lead card
+    # is offered or accepted.
+    concierge_lead_capture: bool = True
+    # "Guide visitors around your site". On: the v2 concierge may suggest one
+    # page action per reply (navigate to a known page of this site, scroll to or
+    # highlight a section), validated by ``paw_bar.action_spec`` and run by the
+    # owner's paw-bar actions script. Off (the default, and for rows older than
+    # the field): the model is never told about actions and any it writes is
+    # dropped.
+    concierge_page_actions: bool = False
+    # Which cards the v2 concierge may write (``concierge_runtime.ui_profile``).
+    # "pawbar" (the default, and rows older than the field): the paw-bar widget's
+    # small card set. "ripple": the full Ripple catalog with bigger bounds and a
+    # bigger reply cap (``card_spec.RIPPLE_PROFILE``), for a demo site.
+    concierge_ui_profile: Literal["pawbar", "ripple"] = "pawbar"
+    # The base URL of the store the ripple concierge orders and books against
+    # (``paw_bar.concierge_store``): its menu goes in the prompt and fills
+    # menu-order and booking cards. Site config, never model data. Used only on
+    # an ops site on the ripple profile; None (the default) means no store.
+    concierge_store_url: str | None = None
+    # This site's daily concierge spend cap in USD. None (the default, and rows
+    # older than the field) uses the global ``pawbar_concierge_daily_spend_cap``;
+    # a number replaces it for this site, and 0 pauses the concierge. The settings
+    # PATCH accepts 0..``CONCIERGE_DAILY_SPEND_CAP_MAX``.
+    concierge_daily_spend_cap: float | None = None
+    # The v2 concierge's per-turn knowledge budget, in characters of the
+    # <knowledge> block (``concierge_runtime.knowledge_chars``). None (the
+    # default, and rows older than the field) means
+    # ``CONCIERGE_KNOWLEDGE_CHARS_DEFAULT``. The settings PATCH accepts
+    # ``CONCIERGE_KNOWLEDGE_CHARS_MIN``..``_MAX``; the runtime clamps to the same.
+    concierge_knowledge_chars: int | None = None
+    # Visitor options the frame passes to the bar (``router._pawbar_frame_config``).
+    # The two texts are validated on the settings PATCH
+    # (``pocketpaw.paw_bar.concierge_fields``). The disclosure is the bar's AI
+    # line ("" = the widget's own wording; it can be reworded, never removed);
+    # the privacy URL is "" or an https link. Every default is today's bar, so
+    # rows older than the fields need no migration.
+    concierge_disclosure: str = ""
+    concierge_privacy_url: str = ""
+    # Ask the visitor to agree before the first message.
+    concierge_consent_required: bool = False
+    # Voice dictation in the composer.
+    concierge_voice: bool = True
+    # The bar's full-screen button.
+    concierge_expandable: bool = True
+    # Whether a visitor may move the bar to another side of the screen.
+    concierge_movable: bool = True
+    # Guided fields (CR-4, 2026-09-28): how the owner shapes the v2 concierge.
+    # Validated on the settings PATCH (``pocketpaw.paw_bar.concierge_fields``),
+    # rendered by ``paw_bar.concierge_prompt.render_owner_block`` into quoted
+    # values in the request's data half, never the frame. Every default is
+    # "unset" and renders nothing, so rows older than the fields need no migration.
+    concierge_name: str = ""
+    concierge_tone: ConciergeTone | None = None
+    # BCP-47 codes; the first is the fallback reply language.
+    concierge_languages: list[str] = Field(default_factory=list)
+    concierge_about: str = ""
+    concierge_avoid_topics: list[str] = Field(default_factory=list)
+    # None: the frame's own "say you don't know" applies, with no route offered.
+    concierge_escalation: ConciergeEscalation | None = None
     # Site knowledge sync (``sites.kb_ingest``): the kb-go article ids this site's
     # own content currently occupies in ``pocket:<pocket_id>`` — the scope its
     # concierge reads. Kept so a later sync can delete the articles a renamed or
     # deleted page left behind WITHOUT touching the rest of the scope, which also
     # holds owner-uploaded files. Empty until the first sync, so no migration.
     kb_article_ids: list[str] = Field(default_factory=list)
+    # The crawl index (CR-3): ``{page_key: {"id", "title", "sections"}}`` for each
+    # page the last sync ingested, keyed by ``kb_ingest.page_key``. ``sections``
+    # lists the page's articles in page order (``{id, title, source, hash,
+    # anchor}``, see ``sites.page_sections``) and ``id`` is the first of them, so
+    # an entry written before sections (``{"id", "title"}`` only) still reads,
+    # through ``page_sections.index_sections``. The v2 concierge looks the
+    # visitor's page up here (``concierge_runtime.resolve_page``); this is the
+    # only page-to-article link. Empty until the site's next sync, so no
+    # migration: a page then reads as not indexed.
+    kb_page_index: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # When the last sync ran (success or not) and why it produced nothing, so the
     # dashboard can tell "this concierge has no knowledge yet" apart from "syncing
     # is broken". "" means the last sync was clean.
     kb_synced_at: datetime | None = None
     kb_sync_error: str = ""
+    # What the last sync that reached the site's pages left out, for the owner's
+    # index view: ``{"skips": [{path, reason, detail}], "page_cap", "capped",
+    # "pages_failed", "skipped_by_robots"}`` (``kb_ingest._record_sync``). Empty
+    # until the next sync, so no migration.
+    kb_crawl_report: dict[str, Any] = Field(default_factory=dict)
+    # The catalog sync a knowledge sync schedules (``paw_bar.catalog_sync``): when it
+    # last ran, how it ended (the importer's ``ok`` / ``partial`` / ``empty``, its
+    # failure reason, or ``sync_failed``) and what it did to the rows (added,
+    # updated, sold_out, ...). Unset until a site with a concierge widget first
+    # syncs, so no migration.
+    catalog_synced_at: datetime | None = None
+    catalog_sync_status: str = ""
+    catalog_sync_counts: dict[str, int] = Field(default_factory=dict)
     # SC-1: the stored URL of a screenshot of this site's live page — what the
     # gallery card renders instead of a title and three pills. Written by the
     # best-effort capture ``sites.screenshot`` schedules from the tail of a
@@ -564,6 +882,11 @@ class Site(TimestampedDocument):
     # back to the globe on empty, so this is never a gate on publishing. Defaults ""
     # so every existing row reads "no icon" — no migration.
     favicon_url: str = ""
+    # What a CONNECTED site's own homepage calls itself (its <title>, else
+    # og:title), sanitised and capped. Written by ``sites.connected_card`` from one
+    # safe fetch of the verified origin. Never the owner's ``name``: the card shows
+    # name, then this, then the host. "" for hosted sites and rows that predate it.
+    origin_title: str = ""
     # The site owner's record of WHO this site is for, and what they have billed
     # them. Two billing relationships meet on this document and they are not the
     # same one: ``plan_tier`` / ``subscription_status`` above are what the owner
@@ -607,4 +930,30 @@ class Site(TimestampedDocument):
             # resolver rejects an empty key before it ever queries, so a blank
             # key never resolves against those rows.
             [("signed_key", 1)],
+            # Wave 3: the destination's "what has been offered to me" read. It
+            # is the one sites query NOT anchored on ``workspace`` -- it cannot
+            # be, since the row still belongs to the source until it is accepted
+            # -- so without this it scans the whole collection.
+            [("transfer_to_workspace", 1), ("transfer_status", 1)],
+            # PH-13: the payment webhook finds a client pay link by Dodo payment id.
+            IndexModel(
+                [("partner_payments.payment_id", 1)],
+                partialFilterExpression={"partner_payments.payment_id": {"$exists": True}},
+            ),
+            # VS-2: one site per address. PARTIAL, not sparse -- see the header note:
+            # every slug-less row stores ``slug: null``, which a sparse index would
+            # still index and treat as a duplicate.
+            IndexModel(
+                [("slug", 1)],
+                unique=True,
+                partialFilterExpression={"slug": {"$type": "string"}},
+            ),
+            # VS-4: one pending rename per address, PARTIAL for the same reason. A
+            # pending name must also not equal another site's ``slug``; no single index
+            # spans two fields, so the service enforces that with write-then-verify.
+            IndexModel(
+                [("slug_pending", 1)],
+                unique=True,
+                partialFilterExpression={"slug_pending": {"$type": "string"}},
+            ),
         ]

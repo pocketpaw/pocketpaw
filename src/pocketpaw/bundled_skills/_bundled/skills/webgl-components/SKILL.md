@@ -5,23 +5,38 @@ description: "Build small, always-on WebGL visuals (identity avatars, ambient or
 
 # WebGL Components
 
+<!--
+  Vendored from flornkm/skills (MIT). The PocketPaw note below is local: it says
+  where client JS runs on each Paw Sites engine and how a library gets declared,
+  and defers to pocketpaw-design-taste 2.C for when a canvas is worth it.
+-->
+
 > **PocketPaw note (read this first).** Vendored from
 > [flornkm/skills](https://github.com/flornkm/skills) (MIT) and true as written for
-> app UI. Two PocketPaw constraints come first and override anything below:
+> app UI. These PocketPaw constraints come first and override anything below:
 >
-> 1. **A static Paw Site prunes its client bundle.** Static sites build with
->    `csr = false` and a post-build step deletes the orphan client JS, so
->    `onMount`, `use:` actions, IntersectionObserver and `requestAnimationFrame`
->    never run and a `<canvas>` stays blank. Everything in this skill needs JS,
->    so it applies ONLY where the bundle survives: a **dynamic** site, a site
->    that explicitly declared `keepsClientBundle`, or app UI (paw-enterprise,
->    ripple). On a plain static site, ship the CSS background alone. If you are
->    unsure which you are on, assume the bundle is pruned.
-> 2. **No npm imports on a Paw Site.** The generated `package.json` is
->    generator-owned and your source map supplies files only, so `three`, `ogl`,
->    `threlte` and `gsap` never resolve. Hand-written GLSL only. See
->    `pocketpaw-design-taste` §2.C, which owns the canvas guardrail and stays
->    authoritative on Paw Sites; this skill supplies the mechanics behind it.
+> 0. **New sites are project sites.** A repo started from a paw-sites template
+>    runs its client JS normally. A library such as `three`, `ogl` or `gsap` goes
+>    in the template's `package.json`; build the scene client-side (`onMount`,
+>    `useEffect`, or a client-only island) over markup that already paints. Points
+>    1 and 2 below apply only to older single-engine sites reached on refine.
+> 1. **A Paw Site KEEPS its client bundle by default.** `keepsClientBundle`
+>    resolves from `sites_keep_client_bundle_default`, which is True, so the
+>    generator emits `csr = true` and `onMount`, `use:` actions,
+>    IntersectionObserver, `requestAnimationFrame` and a `<canvas>` all run. The
+>    page is still PRERENDERED, so everything here ENHANCES markup that already
+>    paints. Two cases prune the bundle and leave a `<canvas>` blank: a site that
+>    declared `keepsClientBundle: false`, and every **ripple** site, whose build
+>    deletes the emitted hydration bundle. There, ship the CSS fallback alone.
+> 2. **Libraries are declared packages.** On **svelte** and **react**, `three`,
+>    `ogl` or `gsap` go through `set_site_dependencies` (or the create's
+>    `dependencies`) and the scene is built inside `onMount` / `useEffect` (a library that
+>    touches `window` at import time goes in a dynamic `import()` there). `get_effect` returns an
+>    effect's `needs` as `dependencies` to declare on **react**; on **html**
+>    and **svelte** it ships them vendored. A dynamic svelte site takes no packages: use `needs_js=false`
+>    effects or hand-written GLSL there. See `pocketpaw-design-taste` §2.C, which
+>    owns the canvas guardrail and stays authoritative on Paw Sites; this skill
+>    supplies the mechanics behind it.
 >
 > The fallback section near the end is the part worth reading even when you never
 > write a shader, because it is about what users see when the GPU says no.

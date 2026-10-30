@@ -2,8 +2,8 @@
   {
     "label": "preview lane: the cache check no longer short-circuits, so every view queues a sandbox",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    cached = store.read(pocket_id, content_hash)\n    if cached is not None:\n        body_html, css = cached",
-    "replace": "    cached = None\n    if cached is not None:\n        body_html, css = cached",
+    "find": "    cached = store.read(pocket_id, content_hash)\n    preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)",
+    "replace": "    cached = None\n    preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)",
     "tests": [
       "tests/ee/sites/test_preview_build_lane.py",
       "tests/ee/sites/test_native_artifact.py"
@@ -49,8 +49,8 @@
   {
     "label": "preview lane: the worker stores under its own key instead of the hash the enqueue carried",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "            pocket_id=pocket_id,\n            content_hash=content_hash,\n            output_rel=artifact_rel,",
-    "replace": "            pocket_id=pocket_id,\n            content_hash=\"recomputed\",\n            output_rel=artifact_rel,",
+    "find": "                artifact,\n                engine=engine,\n                pocket_id=pocket_id,\n                content_hash=content_hash,",
+    "replace": "                artifact,\n                engine=engine,\n                pocket_id=pocket_id,\n                content_hash=\"recomputed\",",
     "tests": [
       "tests/ee/sites/test_preview_build_lane.py"
     ]

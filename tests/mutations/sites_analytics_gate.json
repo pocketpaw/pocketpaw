@@ -18,19 +18,10 @@
     ]
   },
   {
-    "label": "an ORG key stored on a site resolves — one site is handed the analytics an org flat buys for twenty-five",
-    "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
-    "find": "    tier = site_plan_catalog.site_scoped_tier(plan_tier)\n    if tier is None or not _subscription_is_active(subscription_status):",
-    "replace": "    tier = site_plan_catalog.get_site_plan(plan_tier)\n    if tier is None or not _subscription_is_active(subscription_status):",
-    "tests": [
-      "tests/ee/sites/test_sites_analytics_gate.py"
-    ]
-  },
-  {
     "label": "the publish path stops passing the resolved entitlement — the deploy writer's counting default wins and the gate is dead code",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            site_id, build.project_dir, engine=engine, analytics_entitled=counts_pageviews",
-    "replace": "            site_id, build.project_dir, engine=engine",
+    "find": "                    analytics_entitled=counts_pageviews,\n                    worker_name=deploy_name,\n",
+    "replace": "                    worker_name=deploy_name,\n",
     "tests": [
       "tests/ee/sites/test_sites_analytics_gate.py"
     ]

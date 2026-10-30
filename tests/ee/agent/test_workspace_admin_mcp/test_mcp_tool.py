@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -200,7 +201,8 @@ def test_provider_exposes_server_and_tool_ids():
 async def test_members_list_member_allowed_returns_roster(monkeypatch, _patch_user):
     """A MEMBER may read the roster — gate passes, service returns members."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.MEMBER
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.MEMBER),
     )
 
     called = {}
@@ -275,7 +277,8 @@ async def test_member_update_role_admin_files_proposal_not_inline(monkeypatch, _
     envelope carrying the action id. The ``update_member_role`` service call is
     spied and asserted NOT called inline (an admin write is human-gated)."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.ADMIN
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.ADMIN),
     )
 
     # Spy the propose helper (the tool imports it function-locally).
@@ -355,7 +358,8 @@ async def test_member_update_role_member_denied_no_service_call(monkeypatch, _pa
 async def test_member_update_role_rejects_bad_role(monkeypatch, _patch_user):
     """An out-of-set role is refused before any gate/mutation."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.ADMIN
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.ADMIN),
     )
     with _identity(workspace="w1", user="admin1"):
         res = await wa_mcp._member_update_role_handler({"user_id": "u2", "role": "superuser"})
@@ -377,10 +381,24 @@ async def test_member_update_role_outside_stream_errors():
 
 from types import SimpleNamespace  # noqa: E402
 
+# The billing usage doubles below build the REAL response DTOs rather than a
+# SimpleNamespace: the handler renders every field, so a stand-in that omits one
+# tests the double instead of the contract. Importing them here keeps that honest.
+from pocketpaw_ee.cloud.billing.dto import (  # noqa: E402
+    UsageBucket,
+    UsageModelStats,
+    WorkspaceUsageResponse,
+)
+
 
 def _allow(role=WorkspaceRole.MEMBER):
-    """Patch factory: check_workspace_action passes, returning ``role``."""
-    return lambda *a, **k: role
+    """Patch factory: check_workspace_action passes, returning ``role``.
+
+    Returns a COROUTINE function: check_workspace_action is async (it awaits
+    the per-member override read), so a sync stub makes the production
+    ``await`` raise "object NoneType can't be used in 'await' expression".
+    """
+    return AsyncMock(return_value=role)
 
 
 def _deny_forbidden(code="workspace.insufficient_role", detail="nope"):
@@ -636,20 +654,33 @@ async def test_billing_usage_read_admin_allowed(monkeypatch, _patch_user):
 
     called = {}
 
+    # The REAL response DTOs, not a SimpleNamespace. A hand-built double cannot go
+    # stale against the contract, which is how this test would otherwise keep
+    # passing while the handler dropped a field the service had started returning.
+    #
+    # The figures are a SUB-CREDIT day, which is the ordinary case: 750_000 micro
+    # is three-quarters of a cent, and 0 whole credits. An agent answering "what
+    # did we spend?" must not report that as nothing.
     async def _get_workspace_usage(workspace_id, *, start_date=None, end_date=None):  # noqa: ANN001
         called["ws"] = workspace_id
         called["start_date"] = start_date
         called["end_date"] = end_date
-        return SimpleNamespace(
+        return WorkspaceUsageResponse(
             start_date="2026-06-01",
             end_date="2026-06-30",
             models=["gpt-4o"],
-            total_credits=42,
+            total_credits=0,
+            total_credits_micro=750_000,
             buckets=[
-                SimpleNamespace(
+                UsageBucket(
                     date="2026-06-01",
-                    total_credits=42,
-                    by_model={"gpt-4o": SimpleNamespace(credits=42, requests=3, tokens=0)},
+                    total_credits=0,
+                    total_credits_micro=750_000,
+                    by_model={
+                        "gpt-4o": UsageModelStats(
+                            credits=0, credits_micro=750_000, requests=3, tokens=0
+                        )
+                    },
                 )
             ],
         )
@@ -663,9 +694,15 @@ async def test_billing_usage_read_admin_allowed(monkeypatch, _patch_user):
 
     body = _body(res)
     assert body["ok"] is True
-    assert body["total_credits"] == 42
     assert body["models"] == ["gpt-4o"]
-    assert body["buckets"][0]["by_model"]["gpt-4o"]["credits"] == 42
+    # The whole-credit figures are an honest 0 — and on their own they are the
+    # answer "you spent nothing", which is false.
+    assert body["total_credits"] == 0
+    assert body["buckets"][0]["by_model"]["gpt-4o"]["credits"] == 0
+    # The exact figures are what make the answer true.
+    assert body["total_credits_micro"] == 750_000
+    assert body["buckets"][0]["total_credits_micro"] == 750_000
+    assert body["buckets"][0]["by_model"]["gpt-4o"]["credits_micro"] == 750_000
     assert called == {"ws": "w1", "start_date": "2026-06-01", "end_date": "2026-06-30"}
 
 
@@ -714,14 +751,16 @@ async def test_billing_usage_read_gates_on_the_billing_action(monkeypatch, _patc
     """
     seen: dict = {}
 
-    def _record(user, workspace_id, action):  # noqa: ANN001
+    async def _record(user, workspace_id, action):  # noqa: ANN001
+        # async because check_workspace_action is: it awaits the per-member
+        # override read. A sync stub makes the production await raise.
         seen["action"] = action
         return WorkspaceRole.ADMIN
 
     monkeypatch.setattr("pocketpaw_ee.guards.deps.check_workspace_action", _record)
 
     async def _get_workspace_usage(workspace_id, *, start_date=None, end_date=None):  # noqa: ANN001
-        return SimpleNamespace(
+        return WorkspaceUsageResponse(
             start_date="2026-06-01",
             end_date="2026-06-30",
             models=[],
@@ -740,6 +779,82 @@ async def test_billing_usage_read_gates_on_the_billing_action(monkeypatch, _patc
 
     assert seen["action"] == "billing.view"
     assert ACTIONS[seen["action"]].minimum == WorkspaceRole.ADMIN
+
+
+# ---------------------------------------------------------------------------
+# billing_usage_read — the MODEL-VISIBLE description
+#
+# The handler's Python docstring is NOT the contract and never reaches the model:
+# the SDK serializes ``SdkMcpTool.description`` (the second positional arg to
+# ``@tool``) — see claude_agent_sdk/_internal/query.py — and ``__doc__`` appears
+# nowhere in its source. Guidance written in the docstring is silence.
+#
+# That is not theoretical. The micro-credit fields shipped with their "read the
+# micro field" instruction in the docstring, so the model got the fields and no
+# unit. Handed ``{"total_credits": 0, "total_credits_micro": 750000}`` with the
+# unit undefined, the plausible wrong answers are "nothing" (the original bug) and
+# "$750,000" (new, and worse — a customer can tell that 0 is wrong).
+#
+# These read the description back through the REAL server's tools/list handler,
+# which is the exact string the SDK puts on the wire, rather than a stand-in.
+# ---------------------------------------------------------------------------
+
+
+async def _tool_description(name: str) -> str:
+    """The description the MODEL receives for ``name``, off the built server."""
+    import mcp.types as mcp_types
+    from pocketpaw_ee.agent.mcp_servers.workspace_admin import build_admin_server
+
+    built = build_admin_server()
+    assert built is not None, "claude_agent_sdk is required for this test"
+    _server_name, config = built
+    handler = config["instance"].request_handlers[mcp_types.ListToolsRequest]
+    result = await handler(mcp_types.ListToolsRequest(method="tools/list"))
+    for listed in result.root.tools:
+        if listed.name == name:
+            return listed.description
+    raise AssertionError(f"{name} is not on the server the model sees")
+
+
+@pytest.mark.asyncio
+async def test_billing_usage_read_description_defines_the_micro_unit():
+    """The model is told what a micro-credit is, and told to answer from it.
+
+    Both halves matter. Without the conversion the model can quote 750000 as
+    dollars; without "answer from the micro fields" it falls back to the
+    whole-credit 0 and reports a light day as no spend at all.
+
+    Mutation that breaks this: drop the UNITS sentence from the ``@tool``
+    description at workspace_admin.py, or move it back into the handler docstring.
+    """
+    description = await _tool_description("billing_usage_read")
+
+    # The unit chain, end to end — micro to credit to dollars.
+    assert "micro" in description.lower()
+    assert "1000000" in description
+    assert "$0.01" in description
+    # Name the fields, so the model can tell which key is which unit.
+    assert "credits_micro" in description
+    # And say which one to answer from.
+    assert "micro fields" in description
+
+
+@pytest.mark.asyncio
+async def test_billing_usage_read_description_does_not_promise_member_access():
+    """The description must not tell the model a MEMBER may read usage.
+
+    It said exactly that until this commit, while the gate had moved to
+    ``billing.view`` (ADMIN) on 2026-09-02 — so the tool advertised a read the
+    gate then denied, and the model would promise it to the user before finding
+    out. The gate tier is read from the canonical table, not a copied string.
+    """
+    from pocketpaw_ee.guards.actions import ACTIONS
+
+    description = await _tool_description("billing_usage_read")
+
+    assert ACTIONS[wa_mcp._BILLING_READ_ACTION].minimum == WorkspaceRole.ADMIN
+    assert "ADMIN" in description
+    assert "Any workspace member may read" not in description
 
 
 # ---------------------------------------------------------------------------
@@ -856,7 +971,8 @@ def _spy_propose(monkeypatch):
 def _admin(monkeypatch):
     """check_workspace_action passes as ADMIN."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.ADMIN
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.ADMIN),
     )
 
 
@@ -1177,7 +1293,8 @@ async def test_write_tools_outside_stream_error():
 def _owner(monkeypatch):
     """check_workspace_action passes as OWNER."""
     monkeypatch.setattr(
-        "pocketpaw_ee.guards.deps.check_workspace_action", lambda *a, **k: WorkspaceRole.OWNER
+        "pocketpaw_ee.guards.deps.check_workspace_action",
+        AsyncMock(return_value=WorkspaceRole.OWNER),
     )
 
 

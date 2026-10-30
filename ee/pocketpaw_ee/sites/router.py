@@ -1,262 +1,59 @@
 # ee/pocketpaw_ee/sites/router.py — REST surface for the Sites control plane.
-# Publish acts on a pocket the caller can edit; domain ops are workspace-scoped
-# and gated by the same plan feature (fabric) + action (fabric.write/read) as
-# the Leads surface (Task 3.4). Mirrors the leads router's context/deps wiring.
 #
-# Updated 2026-09-02 (SA-4 — the visitor-analytics read): GET
-# ``/sites/{site_id}/analytics``, the read half of the counter SA-1/SA-2 deploy.
-# Gated ``fabric.read`` and tenant-scoped through the service's ``_load`` like the
-# per-site reads beside it. Its response leads with a ``status`` because THREE
-# different customer situations otherwise render as the same panel of zeros — not
-# on a plan that buys analytics, on one but not republished since, and genuinely no
-# traffic — and a FAILED read is an error response rather than a fourth status, so
-# an outage cannot arrive looking like a quiet week.
+# Thin FastAPI handlers over ``sites.service``: publish and preview, opening a draft
+# of a published project site, the composer's Enhance button
+# (``sites.prompt_enhance``), the native editing and asset routes
+# (upload, list, delete, Studio generate and copy-from-Studio via
+# ``sites.media_generation``),
+# the html-to-project upgrade and its undo
+# (``sites.site_upgrade``), custom domains, slugs and renames, owner settings
+# (metadata, branding, AI visibility, client record and invoices), site-plan
+# requests, analytics and entitlements, transfers, export, delete, origin claims
+# and the foreign-origin concierge.
 #
-# Updated 2026-08-31 (feat/sites-public-asset-uploads): three endpoints for the
-# site's PUBLIC asset rail — POST/GET/DELETE ``/sites/by-pocket/{pocket_id}/assets``.
-# A site could not display an image the owner supplied: the source map the generator
-# takes is text-only, its base64 ``assets`` sideband is refused for every engine but
-# html, and both URLs this codebase already mints are unusable by an anonymous
-# visitor (a presign expires; ``/api/v1/uploads/{id}`` is auth-gated). These store
-# the bytes on a world-readable bucket and hand back a durable absolute URL.
-#
-# IMAGES ONLY, AND THAT IS THE FEATURE'S EDGE. A document — the PRD case — is agent
-# INPUT, not site content, and putting a customer's requirements doc on an
-# unauthenticated URL is a data leak. Documents keep going through the private
-# upload rail; only raster images land here, proven by magic bytes rather than by
-# the Content-Type the client claims.
-#
-# Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane): GET
-# ``/sites/by-pocket/{pocket_id}/native-artifact`` now has TWO response shapes and
-# ``build_status`` says which. A cache hit is unchanged (the render, ``build_status``
-# ``"none"``); a cold miss queues the armed build in a Daytona sandbox and answers
-# immediately with empty ``body_html`` / ``css`` plus ``build_status`` / ``build_job_id``
-# to poll. The endpoint stops 5xxing as ``sites.generator_failed``, which is what it did
-# on every cold preview in the deployed container — there is no ``bun`` there to build
-# with. An enqueue that fails is a 503, deliberately: a job id for a job nobody will run
-# makes a client poll forever.
-#
-# Updated 2026-08-12 (the custom-domain routing lane): added DELETE
-# ``/sites/{site_id}/domains/{hostname}``. Domains could be connected and never
-# disconnected, so a removed or re-pointed domain left its Cloudflare custom hostname
-# on the zone permanently — consuming quota, pointing at a Worker that might no longer
-# exist, and (because Cloudflare rejects duplicate hostnames) blocking that domain from
-# ever being connected to a different site. Gated on ``fabric.write`` like ``add_domain``:
-# it releases a name on the shared zone that anyone may then claim.
-#
-# Updated 2026-08-12 (sites Settings consolidation): three endpoints for the
-# owner's client record — GET + PATCH ``/sites/{site_id}/client`` and POST
-# ``/sites/{site_id}/invoices``. They exist because the builder's Settings surface
-# had shipped a Client panel and a "Record payment" button backed by nothing:
-# component state with a comment saying persistence was a later task, so every
-# value typed there was lost on reload. Gated by the same fabric.read /
-# fabric.write actions as the domain ops above, tenant-scoped through the
-# service's ``_load``. NONE OF THIS CHARGES ANYONE — recording a receipt is the
-# owner writing down that their client paid, and is unrelated to the owner's own
-# subscription with us (``/sites/publish``'s ``site_plan_key``).
-#
-# Pocket read: uses pockets_service.get(pocket_id, user_id) — the real
-# single-pocket reader, which returns a wire DICT (camelCase keys: rippleSpec,
-# name) and RAISES NotFound when missing / access-denied (it does not return
-# None). theme is pulled from the rippleSpec subtree.
-#
-# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): new
-# POST /sites/{site_id}/preview-refresh, the manual half of the preview policy
-# (automatic capture on every successful deploy + an explicit refresh). It is the
-# one capture in this subsystem that REPORTS failure rather than swallowing it —
-# every other one hangs off a publish, which it may never endanger; this one hangs
-# off a button press, whose whole value is the answer.
-#
-# Updated 2026-07-17 (fix/sites-prewarm-origin): ``publish_site`` and
-# ``apply_leaf_edits_by_pocket`` now thread the request ``Origin`` header into the
-# service as ``prewarm_origin`` so the background native-artifact pre-warm builds with
-# the SAME origin the browser's ``GET /native-artifact`` view resolves — otherwise the
-# pre-warm falls back to PAW_SITES_BUILDER_ORIGIN, its content hash never matches the
-# view's, and every view is a cold miss. The PUBLIC deploy is unchanged (still plain —
-# ``prewarm_origin`` steers only the pre-warmed armed artifact), mirroring the existing
-# Origin precedence /editable + /dev-preview + /native-artifact already use.
-#
-# Updated 2026-06-01 (Phase 4 — chat→create-site): publish_site now delegates to
-# sites_service.publish_pocket(), the shared pocket-read + publish path the new
-# in-process MCP tool also calls. The pocket-read/theme-derive logic that used to
-# be inline here lives in the service now so the chat and REST surfaces share one
-# code path.
-#
-# Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
-#
-# Updated 2026-05-30 (follow-up item 4): added GET /sites/{site_id}/domains — an
-# authed, tenant-scoped read of the site's domains + statuses (same
-# require_plan_feature("sites") router gate + require_action_any_workspace
-# scoping as the other authed sites reads) so the Domains tab can rehydrate on
-# reload. A site in another workspace surfaces as a 404 (via the service _load).
-#
-# Updated 2026-06-25 (decouple-sites-from-fabric): the router plan gate moved from
-# require_plan_feature("fabric") to require_plan_feature("sites") — Sites now
-# unlocks on the consumer "sites" flag (go+), decoupled from the enterprise-only
-# Fabric ontology, which keeps the "fabric" flag.
-#
-# Updated 2026-06-17 (pocketpaw#1345 backend half — by-pocket preview + status):
-# added GET /sites/by-pocket/{pocket_id}/preview and
-# GET /sites/by-pocket/{pocket_id}/status — the two by-pocket reads the #432
-# frontend already calls (getSitePreviewByPocket / getSiteStatusByPocket). The
-# backend half of #1345 never landed on dev, so every Preview-tab fetch 404'd and
-# the builder showed "Nothing to preview yet". Both are authed fabric.read reads
-# under the router-level fabric plan gate, scoped on ctx.workspace_id /
-# ctx.user_id, matching the other authed sites reads. preview delegates to
-# sites_service.preview_pocket (pockets_service.get raises NotFound → 404 itself);
-# status delegates to sites_service.pocket_status (tenant-scoped Site lookup, no
-# 404 — an unpublished pocket simply reads draft / not live).
-# Updated 2026-06-17 (feat/sites-local-reserve): added POST /sites/reserve — the
-# explicit "re-serve local sites" action. Locally-deployed sites die after a
-# backend restart (the per-process static server binds an ephemeral port and is
-# only started during publish), so this (re)starts the server and rewrites the
-# workspace's site urls to the fresh live base via sites_service
-# .reserve_local_sites(ctx.workspace_id), then returns the reconciled list. Gated
-# like the other authed sites writes (fabric.write). No-op outside local mode.
-# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): added POST
-# /sites/by-pocket/{pocket_id}/editable — republish the pocket's site as
-# editable (the generated page carries SE-1's gated edit-bridge). Same fabric
-# plan gate + fabric.write action scope as publish. The builder origin is
-# resolved in precedence: explicit body ``builder_origin`` > request ``Origin``
-# header > configured PAW_SITES_BUILDER_ORIGIN (env fallback in the service), so
-# the SE-3 editor's call carries the right origin with no extra wiring.
-# Updated 2026-06-18 (feat/branch-primitive-revert-history, BP-4): added two
-# Branch-primitive surfaces over the BP-1 versions spine.
-#   * GET /sites/by-pocket/{pocket_id}/versions — the ordered version timeline
-#     for the pocket (the source pocket is the versionable artifact; scope_type=
-#     "pocket"), tenant-scoped (fabric.read). Reads the durable ArtifactVersion
-#     rows (list_versions) — the exact, current log — not a journal replay.
-#   * POST /sites/by-pocket/{pocket_id}/request-publish — the CLEAN entry to the
-#     Instinct merge gate (BP-3): the server builds the ``_artifact_change``
-#     review proposal so the CLIENT never hand-builds the Instinct propose (BP-5
-#     needs this). Returns the created Action (id/status) so the client shows
-#     "submitted for review". fabric.write — it creates a gate item that, on
-#     approve, publishes + deploys. A 400 when there is no draft to publish.
-# Updated 2026-06-18 (feat/branch-primitive-audit, BP-7 — producer 2): added
-# POST /sites/by-pocket/{pocket_id}/audit — run the deterministic site audit over
-# the pocket's content and return findings, each with a ``fix_prompt`` the UI
-# feeds to the EXISTING edit path so a fix lands as a reviewable draft (no new
-# apply endpoint). It's a read of the pocket's content, so it carries fabric.read
-# (the same gate as preview/status). Tenant-scoped on ctx; the pockets service
-# raises NotFound → 404 itself.
-# Updated 2026-06-18 (feat/sites-devserver, Phase 2 / P2a): added POST
-# /sites/by-pocket/{pocket_id}/dev-preview — start (or reuse) a live Vite dev-server
-# for the pocket's EDITING preview and return its localhost url. Delegates to
-# sites_service.dev_preview_pocket → the DevServerManager singleton (long-lived
-# `vite dev` per pocket, HMR in ~ms vs a per-edit rebuild). Carries fabric.write (it
-# spawns a process / mutates server state); a missing pocket is a 404 (the pockets
-# service raises NotFound during materialize). Publish/editable are unchanged.
-# Updated 2026-06-26 (feat/sites-dev-bridge-source, S1 — dev source carries the
-# edit-bridge): dev_preview_by_pocket now resolves a ``builder_origin`` (the
-# request ``Origin`` header, with the PAW_SITES_BUILDER_ORIGIN env fallback applied
-# in the service) and threads it to dev_preview_pocket → ensure_dev_server →
-# _default_materialize → GeneratorClient.build(builder_origin=..., static_build=
-# False). This makes the dev-server-materialized SOURCE carry SE-1's section anchors
-# + gated edit-bridge (mirroring /editable's origin precedence), so the hover-edit
-# overlay works against the dev server — without it the dev path materialized
-# anchorless source and flipping BRIDGE_IN_DEV regressed the overlay. static_build
-# stays False (no prod build on the dev path — only the generate/scaffold step needs
-# builder_origin for the source injection).
-# Updated 2026-06-19 (P2b-backend — revert endpoint): added POST
-# /sites/by-pocket/{pocket_id}/versions/{version_no}/revert — revert a pocket's site
-# to a prior version by ordinal. Delegates to sites_service.revert_pocket_version,
-# which resolves version_no → the durable ArtifactVersion row (tenant-scoped, main
-# branch) and writes a NEW forward-moving draft snapshot of that version's content;
-# the normal review/publish flow then applies (request-publish → merge gate). Returns
-# the new draft as a SiteVersionResponse (the same row shape the versions timeline
-# uses). fabric.write (it creates a draft); an unknown version_no is a 404 (the
-# service raises ValueError).
-# Updated 2026-06-20 (DS-3 — read a dynamic site's D1 data): added two fabric.read
-# operator data-view endpoints over a DYNAMIC site's per-tenant Cloudflare D1.
-#   * GET /sites/by-pocket/{pocket_id}/data — list the site's tables (from the
-#     pocket spec's ``objects``). Always lists the schema; ``available`` is False
-#     with reason="live_on_cloudflare_only" in local/dev mode (no live D1).
-#   * GET /sites/by-pocket/{pocket_id}/data/{table} — read one table's rows
-#     (bounded LIMIT). ``table`` is validated against the spec's declared objects
-#     (unknown → 404, never interpolated); values bind through query params. Local
-#     mode degrades cleanly (available=False, columns still listed, no rows).
-#   Both delegate to sites_service; a NON-dynamic pocket → 422 (not_dynamic), a
-#   missing / access-denied pocket → 404 / 403 (the pockets service raises it).
-#   Tenant-scoped on ctx — the data view is read-only (no request body).
-#
-# Updated 2026-07-01 (NE-4b — native-editing leaf-edit persist): added POST
-# /sites/by-pocket/{pocket_id}/leaf-edits — the native editor forwards its
-# already-rendered {uid, op} leaf edits and this persists them as a reviewable
-# Branch draft (splice via the apply-leaf-edit CLI → set_svelte_source_file), NO
-# rebuild. fabric.write; tenant-scoped; returns one verdict per edit. A non-svelte
-# pocket or empty batch → 422; a missing / access-denied pocket → 404 / 403 (the
-# pockets service raises it). Delegates to sites_service.apply_leaf_edits.
-#
-# Updated 2026-07-01 (NE-5b — native-artifact endpoint): added GET
-# /sites/by-pocket/{pocket_id}/native-artifact — serves the armed svelte build's
-# <body> inner HTML + concatenated CSS as {pocket_id, body_html, css} so the native
-# editor shadow-renders the site instead of framing an iframe. fabric.write (it
-# ensures/triggers the armed build); the builder_origin is resolved from the request
-# Origin header (the service applies the PAW_SITES_BUILDER_ORIGIN env fallback),
-# mirroring /editable + /dev-preview. A pocket with no native edit lane → 422; a
-# missing / access-denied pocket → 404 / 403 (the pockets service raises it).
-# Delegates to sites_service.get_native_artifact.
-#
-# Updated 2026-08-22 (RX-2): the 422 guard is no longer svelte-only — it is now
-# ``has_native_edit_lane`` (svelte + react), and the response body's error code
-# changed from ``pocket.not_svelte_site`` to ``pocket.no_native_edit_lane``. html
-# and ripple are still rejected: html's served artifact IS its source (selected
-# through its own srcdoc, no build to render) and ripple has no source map. The
-# rest of the wire contract (request/response, origin resolution, 404/403) is
-# unchanged.
-#
-# Updated 2026-07-17 (feat/sites-native-artifact-no-build): get_native_artifact is now a
-# READ-THROUGH cache — a repeat view with unchanged source is a disk read with ZERO
-# subprocess builds (publish + the post-edit pre-warm populate the store ahead of the
-# view). fabric.write is RETAINED because a COLD miss still builds (mutates on-disk
-# state), so the endpoint can still trigger work; it is not a pure read. The wire
-# contract (request/response, origin resolution, 422/404/403) is unchanged.
-#
-# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): added the two IMPORT
-# endpoints, both tenant-scoped writes (fabric.write) under the router's sites plan
-# gate like every sibling mutation:
-#   * POST /sites/import — multipart zip upload (25MB cap enforced while reading the
-#     upload). Delegates to import_service.import_zip_site: safe in-memory unpack
-#     (zip-slip + decompression-bomb guards), mint pocket + DRAFT Site doc, publish
-#     through the existing html/static deploy path (binary files ride the
-#     generator's ``assets`` base64 sideband — cross-repo seam), persist an
-#     ``import_report`` on the Site doc, Journal event. Returns the SiteResponse
-#     (now carrying import_report).
-#   * POST /sites/import/from-url — {url} → 202 {site_id, pocket_id,
-#     status:"queued"}. Validates the URL shape and mints the draft Site with a
-#     queued import_report.
-#
-# Updated 2026-07-23 (SI-5 — feat/sites-import-crawler): the from-url crawler is
-# REAL. The endpoint contract is unchanged (202 queued), but validation now also
-# runs the crawler's SSRF shape floors (non-http(s) scheme, embedded credentials,
-# non-80/443 port, literal private/loopback/metadata IP → 422 before any write),
-# and the service schedules the same-site crawl as a background task: crawl →
-# the zip import pipeline → import_report flips to "imported"/"failed" with
-# crawl stats. See import_service.crawl_site_from_url + url_crawler.
+# Per-site writes are gated on ``fabric.write`` (reads on ``fabric.read``) in the
+# caller's workspace and are tenant-scoped, so a missing or cross-tenant site is a
+# 404. Publish additionally requires edit rights on the pocket. Handlers never
+# raise HTTPException and never import Beanie documents; errors are CloudErrors
+# mapped by ``_core.http``.
 
 from __future__ import annotations
+
+from typing import Any
 
 from fastapi import (
     APIRouter,
     Depends,
     File,
     Form,
+    Header,
     HTTPException,
     Query,
     Request,
     UploadFile,
 )
+from fastapi.responses import Response, StreamingResponse
 
+from pocketpaw.money import MONEY_UNITS_HEADER, client_sends_minor_units
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
+from pocketpaw_ee.cloud._core.rate_limit import rate_limit_slug_check
 from pocketpaw_ee.cloud.auth.service import resolve_display_names
-from pocketpaw_ee.sites import import_service
+from pocketpaw_ee.sites import import_service, ownership, prompt_enhance, site_upgrade
 from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.sites.data_router import router as site_data_router
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
     DomainRequest,
     DomainStatusResponse,
+    EnhancePromptRequest,
+    EnhancePromptResponse,
+    ForeignConciergeBindRequest,
+    ForeignConciergeOrigin,
+    ForeignConciergeRebindRequest,
+    ForeignConciergeResponse,
+    HtmlArmedSourceResponse,
     ImportBriefStatusResponse,
     ImportFromUrlRequest,
     ImportFromUrlResponse,
@@ -265,25 +62,49 @@ from pocketpaw_ee.sites.dto import (
     LeafEditVerdict,
     MakeEditableRequest,
     NativeArtifactResponse,
+    OpenDraftResponse,
+    OriginClaimRequest,
+    OriginClaimResponse,
+    OriginVerificationResponse,
     PublishRequest,
     RequestPublishResponse,
+    SiteAiVisibilityUpdate,
     SiteAnalyticsResponse,
     SiteAssetDeleteRequest,
+    SiteAssetFromStudioRequest,
+    SiteAssetGenerateRequest,
     SiteAssetListResponse,
     SiteAssetResponse,
+    SiteBrandingUpdate,
+    SiteBuildListResponse,
+    SiteBuildLogResponse,
+    SiteBuildResponse,
     SiteClientResponse,
     SiteClientUpdate,
     SiteDataRowsResponse,
     SiteDataTablesResponse,
+    SiteDeleteQueuedResponse,
+    SiteDeleteStatusResponse,
     SiteEntitlementsResponse,
+    SiteExportResponse,
     SiteInvoiceCreate,
+    SiteMediaAssetsResponse,
+    SiteMetadataUpdate,
     SitePlanRequestBody,
     SitePlanRequestResponse,
     SitePreviewRefreshResponse,
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
+    SiteTokensRewriteResponse,
+    SiteTransferListResponse,
+    SiteTransferOfferRequest,
+    SiteTransferResponse,
+    SiteUpgradeResponse,
+    SiteUpgradeRevertResponse,
     SiteVersionResponse,
+    SlugAvailability,
+    SlugRenameRequest,
     VersionHistoryResponse,
 )
 from pocketpaw_ee.versions import service as versions_service
@@ -293,8 +114,13 @@ router = APIRouter(
     dependencies=[Depends(require_plan_feature("sites"))],
 )
 
+# The Data dashboard routes (``sites.data_router``) go in FIRST so they inherit the
+# plan gate and win the match: ``.../data/inventory`` would otherwise be taken by the
+# legacy ``.../data/{table}`` read below.
+router.include_router(site_data_router)
 
-def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
+
+async def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
     """May this caller commit the workspace to a recurring site charge?
 
     Asked as a QUESTION rather than enforced as a dependency, because the answer
@@ -311,7 +137,7 @@ def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
     from pocketpaw_ee.guards.deps import check_workspace_action
 
     try:
-        check_workspace_action(user, workspace_id, "sites.buy_plan")
+        await check_workspace_action(user, workspace_id, "sites.buy_plan")
     except CloudError:
         return False
     except Exception:  # noqa: BLE001 — a broken role read must not sell a plan
@@ -324,6 +150,27 @@ def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
         )
         return False
     return True
+
+
+async def _require_data_loss_confirmer(user: object, workspace_id: str, classes: list[str]) -> None:
+    """A publish that confirms Durable Object data loss needs a workspace admin
+    (``sites.confirm_data_loss``). Raises ``Forbidden`` with
+    ``sites.data_loss_confirm_forbidden`` for anyone else; a publish confirming
+    nothing is not asked."""
+    if not classes:
+        return
+    from pocketpaw_ee.cloud._core.errors import Forbidden as CloudForbidden
+    from pocketpaw_ee.guards.deps import check_workspace_action
+    from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
+
+    try:
+        await check_workspace_action(user, workspace_id, "sites.confirm_data_loss")
+    except GuardForbidden as exc:
+        raise CloudForbidden(
+            exc.code,
+            "Only a workspace owner or admin can confirm deleting a site's Durable Object "
+            f"data ({', '.join(sorted(classes))}). Ask one to publish this change.",
+        ) from exc
 
 
 @router.post("/sites/publish", response_model=SiteResponse)
@@ -349,18 +196,16 @@ async def publish_site(
     # never matches the view's, and every view is a cold miss. This does NOT arm the
     # PUBLIC deploy (builder_origin stays unset here — the public site stays plain); it
     # only steers the pre-warmed armed artifact the native editor consumes.
+    await _require_data_loss_confirmer(user, ctx.workspace_id, list(body.confirm_do_data_loss))
     doc = await sites_service.publish_pocket(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
         pocket_id=body.pocket_id,
         site_plan_key=body.site_plan_key,
-        purchase_authorized=_may_buy_site_plan(user, ctx.workspace_id),
+        purchase_authorized=await _may_buy_site_plan(user, ctx.workspace_id),
         prewarm_origin=request.headers.get("origin") or None,
-        # Also the checkout's return base for a PAID publish. The frontend sends the
-        # whole page to ``checkout_url``, so with no return_url the buyer pays and
-        # has no route back into the app. Falls back to the
-        # ``dodo_checkout_return_base`` config inside the service when absent.
-        origin=request.headers.get("origin") or None,
+        confirm_destructive_migrations=body.confirm_destructive_migrations,
+        confirm_do_data_loss=list(body.confirm_do_data_loss),
     )
     return sites_service._to_response(doc)
 
@@ -402,7 +247,8 @@ async def request_site_plan(
     # quotes a price, and a client showing "$0/month" for a tier we could not
     # resolve would be worse than the refusal it replaced.
     tier = site_plans.site_scoped_tier(site_plans.canonical_site_tier_key(body.site_plan_key))
-    if tier is None:
+    # Partner-only rungs are sold through /partners/sell, never requested here.
+    if tier is None or tier.partner_only:
         raise ValidationError(
             "sites.unknown_plan_tier",
             f"'{body.site_plan_key}' is not a plan a single site can be put on",
@@ -434,6 +280,39 @@ async def request_site_plan(
         status="pending",
         site_plan_key=tier.key,
         monthly_price_usd=int(tier.monthly_price_usd or 0),
+    )
+
+
+@router.post("/sites/enhance-prompt", response_model=EnhancePromptResponse)
+async def enhance_site_prompt(
+    body: EnhancePromptRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> EnhancePromptResponse:
+    """The composer's Enhance button: a sharper brief that is still the user's
+    idea, or up to three fact questions when the idea is too thin. Runs on the
+    workspace's Sites agent (or ``agent_id``) with the composer's ``model``.
+    Always a 200; any failure (no agent, backend error, timeout, guard, rate
+    limit, credits) returns the original prompt with ``changed=false`` so the
+    composer never breaks, and ``reason`` tells the client which case it was."""
+    answers = [
+        prompt_enhance.EnhanceAnswer(question=a.question, answer=a.answer)
+        for a in body.answers or []
+    ]
+    result = await prompt_enhance.enhance_prompt(
+        body.prompt,
+        answers or None,
+        user_id=ctx.user_id,
+        workspace_id=ctx.workspace_id,
+        model=body.model,
+        agent_id=body.agent_id,
+    )
+    return EnhancePromptResponse(
+        prompt=result.prompt,
+        questions=result.questions,
+        changed=result.changed,
+        reason=result.reason,
+        sources=result.sources,
     )
 
 
@@ -522,6 +401,49 @@ async def apply_leaf_edits_by_pocket(
 
 
 @router.get(
+    "/sites/by-pocket/{pocket_id}/html-armed-source",
+    response_model=HtmlArmedSourceResponse,
+)
+async def get_html_armed_source_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> HtmlArmedSourceResponse:
+    """Serve an html pocket's source with ``data-uid`` stamped on its editable leaves,
+    plus the leaf manifest (HE-9).
+
+    The html peer of ``/native-artifact``, and deliberately a DIFFERENT endpoint rather
+    than a branch inside it. That one serves a BUILT, armed tree for shadow-rendering
+    and is gated on ``has_native_edit_lane``, which html sits outside of on purpose —
+    an html site's served artifact IS its source, so there is no build to arm. This is
+    a parse and a splice over the source map: no Bun build, no Daytona, no artifact
+    cache.
+
+    It exists because select and write did not share an identity. The builder assembles
+    the pocket's RAW source into a sandboxed srcdoc, so nothing in the previewed
+    document carries a uid and a click resolved to a DOM-walk guess that
+    ``apply_leaf_edits`` could never look up. Rendering THIS source instead closes that.
+
+    Gated on ``fabric.write`` like ``/leaf-edits``: arming is a step in an edit flow,
+    not a public read, and it returns the operator's unpublished draft content.
+
+    A non-html pocket is a 422 (``pocket.not_html_site``); a missing / cross-tenant
+    pocket is the pockets service's own 404 / 403. Callers RE-ARM after an edit rather
+    than caching — spans shift under a splice, so a held manifest goes stale.
+    """
+    out = await sites_service.get_html_armed_source(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+    )
+    return HtmlArmedSourceResponse(
+        pocket_id=pocket_id,
+        source=out["source"],
+        manifest=out["manifest"],
+    )
+
+
+@router.get(
     "/sites/by-pocket/{pocket_id}/native-artifact",
     response_model=NativeArtifactResponse,
 )
@@ -557,10 +479,15 @@ async def native_artifact_by_pocket(
     needs to stamp data-uid + the manifest — is resolved from the request's ``Origin``
     header, with the service applying the ``PAW_SITES_BUILDER_ORIGIN`` env fallback when
     it is absent (the same precedence as ``/editable`` / ``/dev-preview``), so the call
-    works with no header. A pocket with no native edit lane is a 422 — svelte and
-    react are armable, html (served straight from its source) and ripple are not;
+    works with no header. A pocket with no native edit lane is a 422 — svelte, react
+    and html are served, ripple is not;
     a missing / access-denied pocket surfaces as a 404 / 403 (the pockets service
-    raises it inside the service)."""
+    raises it inside the service).
+
+    DRAFT PREVIEW ORIGIN: every engine, html included, also answers ``preview_url`` —
+    the draft's site root on the cookieless preview host (``preview_origin.py``),
+    ``None`` while a build is pending or failed. html never builds, so it is always
+    ``build_status="none"`` with a URL and empty body/css. Ripple still 422s."""
     # Mirror /editable + /dev-preview origin resolution: the request Origin header
     # here; the service applies the PAW_SITES_BUILDER_ORIGIN env fallback when blank.
     builder_origin = request.headers.get("origin") or ""
@@ -581,10 +508,11 @@ async def import_site(
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteResponse:
     """Import an uploaded site zip (SI-4): unpack safely in memory (zip-slip +
-    decompression-bomb guards in the service), mint the html pocket + DRAFT Site
-    doc, publish through the existing html/static deploy path (binary files ride
-    the generator's ``assets`` base64 sideband), persist the ``import_report`` on
-    the Site doc, and return the SiteResponse (carrying the report).
+    decompression-bomb guards in the service), mint a ``static`` starter project
+    pocket + DRAFT Site doc, publish it through the no-build project lane (images
+    and video move to the public asset rail, since the source map holds text only),
+    persist the ``import_report`` on the Site doc, and return the SiteResponse
+    (carrying the report).
 
     The 25MB upload cap gates PROCESSING, not ingress: Starlette's multipart
     parser spools the whole request body to a temp file before this handler
@@ -604,7 +532,7 @@ async def import_site(
         data=data,
         name=name,
     )
-    return sites_service._to_response(doc, pattern=import_service.IMPORT_PATTERN, engine="html")
+    return sites_service._to_response(doc, pattern=import_service.IMPORT_PATTERN, engine="project")
 
 
 @router.post(
@@ -646,6 +574,53 @@ async def import_site_from_url(
 @router.get("/sites", response_model=list[SiteResponse])
 async def list_sites(ctx: RequestContext = Depends(request_context)) -> list[SiteResponse]:
     return await sites_service.list_for_workspace(ctx.workspace_id)
+
+
+@router.get("/sites/slug-available", response_model=SlugAvailability)
+async def slug_available(
+    slug: str = Query(..., max_length=200),
+    site_id: str | None = Query(None),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+    _rl: None = Depends(rate_limit_slug_check),
+) -> SlugAvailability:
+    """Is this address free? ``slug`` is raw input; the answer carries what it
+    normalizes to, why it is not free (``invalid`` | ``reserved`` | ``taken`` |
+    ``held``) and a free suggestion. With ``site_id`` that site's own current and
+    pending address read as available; a site outside the workspace is a 404."""
+    return await sites_service.check_slug_availability(
+        workspace_id=ctx.workspace_id, raw=slug, site_id=site_id
+    )
+
+
+@router.put("/sites/{site_id}/slug", response_model=SiteResponse)
+async def rename_site_slug(
+    site_id: str,
+    body: SlugRenameRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Reserve a new address for this site. It goes live on the NEXT publish, which
+    moves the Worker and every custom domain to it; until then the site serves at its
+    current address and the response shows the new one as ``slug_pending``.
+
+    422 ``sites.slug_invalid``; 409 ``sites.slug_reserved`` / ``sites.slug_taken`` /
+    ``sites.slug_held`` / ``sites.slug_unsupported_lane`` / ``sites.slug_needs_publish``
+    / ``sites.slug_changed``; 429 ``sites.slug_rate_limited`` (3 a day per site); 404
+    for a site outside the workspace."""
+    return await sites_service.reserve_slug_rename(
+        workspace_id=ctx.workspace_id, site_id=site_id, raw=body.slug
+    )
+
+
+@router.delete("/sites/{site_id}/slug/pending", response_model=SiteResponse)
+async def cancel_site_slug_rename(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Cancel a waiting rename. Idempotent; the site keeps its current address."""
+    return await sites_service.cancel_slug_rename(workspace_id=ctx.workspace_id, site_id=site_id)
 
 
 @router.get("/sites/by-pocket/{pocket_id}/preview", response_model=SitePreviewResponse)
@@ -700,6 +675,63 @@ async def dev_preview_by_pocket(
     )
 
 
+@router.get("/sites/by-pocket/{pocket_id}/builds/latest", response_model=SiteBuildResponse)
+async def latest_build_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteBuildResponse:
+    """A project pocket's newest draft build (job id, status, ``preview_mode``), for
+    polling: no realtime event exists for site builds. 404 when it never built, 422
+    for a non-project pocket, the pockets service's 404 / 403 for no access."""
+    result = await sites_service.project_latest_build(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteBuildResponse(**result)
+
+
+@router.get("/sites/by-pocket/{pocket_id}/builds", response_model=SiteBuildListResponse)
+async def list_builds_by_pocket(
+    pocket_id: str,
+    limit: int = Query(20, ge=1, le=50),
+    offset: int = Query(0, ge=0, le=1_000),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteBuildListResponse:
+    """A project pocket's recent builds, newest first and paged: id, status, reason,
+    trigger (``draft`` / ``agent``), start / finish times and content hash, no logs.
+    Same auth and scoping as ``builds/latest``; a pocket that never built is an empty
+    page."""
+    result = await sites_service.project_builds(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        limit=limit,
+        offset=offset,
+    )
+    return SiteBuildListResponse(**result)
+
+
+@router.get(
+    "/sites/by-pocket/{pocket_id}/builds/{job_id}/log",
+    response_model=SiteBuildLogResponse,
+)
+async def build_log_by_pocket(
+    pocket_id: str,
+    job_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteBuildLogResponse:
+    """One project build's log (install, build and wrangler dry-run output), redacted
+    and capped by the worker before it was stored. Owner/editor only, like the other
+    by-pocket write routes: the log is the author's own build output. A job id that is
+    not this pocket's is a 404."""
+    result = await sites_service.project_build_log(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, job_id=job_id
+    )
+    return SiteBuildLogResponse(**result)
+
+
 @router.get("/sites/by-pocket/{pocket_id}/status", response_model=SiteStatusResponse)
 async def status_by_pocket(
     pocket_id: str,
@@ -718,12 +750,14 @@ async def site_data_tables_by_pocket(
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
 ) -> SiteDataTablesResponse:
-    """List a DYNAMIC site's data tables for the operator data-view (DS-3):
+    """List a DYNAMIC or database-backed PROJECT site's data tables (DS-3):
     {pocket_id, available, reason, tables}. The table list comes from the pocket
     spec's ``objects`` (the declared D1 tables), so it is populated even when the
     live D1 is not reachable. ``available`` is False with
     ``reason="live_on_cloudflare_only"`` in local/dev mode (no live D1) so the UI
-    degrades cleanly — it can show the schema but explain why no rows load.
+    degrades cleanly — it can show the schema but explain why no rows load. A
+    ``project`` site's tables are introspected from its live D1 (none in local
+    mode, and ``reason="not_published"`` before its database exists).
 
     A NON-dynamic pocket (a static landing / brochure) has no data store, so the
     service raises ValidationError("sites.not_dynamic") → 422. A missing /
@@ -738,6 +772,8 @@ async def site_data_tables_by_pocket(
 async def site_data_rows_by_pocket(
     pocket_id: str,
     table: str,
+    limit: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0, le=1_000_000),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
 ) -> SiteDataRowsResponse:
@@ -750,11 +786,19 @@ async def site_data_rows_by_pocket(
     interpolated into SQL; every value binds through query params. In local/dev
     mode (no live D1) ``available`` is False with
     ``reason="live_on_cloudflare_only"`` and ``rows`` empty, but ``columns`` is
-    still listed from the spec. A NON-dynamic pocket → 422
+    still listed from the spec. ``limit`` (capped server-side) and ``offset`` page
+    the rows. A ``project`` site reads its tables from the live D1 instead (unknown
+    table → 404; ``reason="not_published"`` before its database exists). Auth
+    tables' credential columns read "•••". A NON-dynamic pocket → 422
     ("sites.not_dynamic"); a missing / access-denied pocket → 404 / 403.
     Tenant-scoped on ctx."""
     return await sites_service.read_site_data_table(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, table=table
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        table=table,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -857,6 +901,79 @@ async def request_publish_by_pocket(
         to_version_id=str(blob.get("to_version_id") or ""),
         from_version_id=blob.get("from_version_id"),
     )
+
+
+@router.post("/sites/by-pocket/{pocket_id}/upgrade", response_model=SiteUpgradeResponse)
+async def upgrade_site_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteUpgradeResponse:
+    """Upgrade an html site (imported ones included) into a static project in place
+    (``sites.site_upgrade``). Needs edit rights on the pocket, like publish. 422
+    ``sites.upgrade_unsupported`` for any other engine, 422 ``sites.upgrade_no_index``
+    with no root index.html, 409 ``sites.upgrade_file_exists`` when the site already
+    has the starter's paw.template.json or AGENTS.md, 409 ``sites.upgrade_conflict``
+    when an edit raced the upgrade, 503 ``sites.upgrade_starter_unavailable`` when the
+    starter cannot be read. The live site keeps serving until the next publish."""
+    result = await site_upgrade.upgrade_html_site(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteUpgradeResponse(**result)
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/upgrade/revert", response_model=SiteUpgradeRevertResponse
+)
+async def revert_site_upgrade_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteUpgradeRevertResponse:
+    """Undo the upgrade: back to html with the old source and site_meta. 422
+    ``sites.upgrade_not_upgraded`` when the site was never upgraded, 409
+    ``sites.upgrade_revert_stale`` once it was edited after the upgrade, 409
+    ``sites.upgrade_snapshot_missing`` when the snapshot version is gone."""
+    result = await site_upgrade.revert_html_upgrade(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteUpgradeRevertResponse(**result)
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/upgrade/tokens", response_model=SiteTokensRewriteResponse
+)
+async def retheme_site_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteTokensRewriteResponse:
+    """Opt-in re-run for a site already on the static starter: point its own CSS at
+    ``styles/tokens.css`` so theme edits reach it (``sites.site_upgrade.retheme_site``).
+    Rendering is unchanged; it saves only when something changed. 422
+    ``sites.tokens_unsupported`` unless it is a static project with a tokens file, 409
+    ``sites.upgrade_conflict`` when an edit raced it."""
+    result = await site_upgrade.retheme_site(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteTokensRewriteResponse(**result)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/open-draft", response_model=OpenDraftResponse)
+async def open_draft_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> OpenDraftResponse:
+    """Open a draft of a published project site: the builder stops showing the live
+    site for the published content and builds a draft of it, so the editing tools
+    work. ``opened`` is False when the pocket already shows a draft. Idempotent; the
+    next publish returns it to the published view. A missing or another workspace's
+    pocket is a 404, no edit access a 403."""
+    out = await sites_service.open_pocket_draft(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return OpenDraftResponse(**out)
 
 
 @router.post(
@@ -983,6 +1100,130 @@ async def domain_status(
     )
 
 
+# ── Site data exports ────────────────────────────────────────────────────
+#
+# Declared BEFORE the "/sites/{site_id}/..." reads below so a literal "exports"
+# segment can never be captured as a site id by a future route of that shape.
+#
+# The download is a STREAM, not a URL. Sites has no durable public address worth
+# using for this — presigns expire, and the public asset rail is world-readable
+# with an immutable year-long cache, which is right for a hero image and wrong for
+# someone's booking records. So the bytes are re-authorised on every request
+# instead: the storage key never leaves the backend and possession of a link grants
+# nothing. Same shape as the workspace audit export.
+
+
+@router.post("/sites/{site_id}/export", response_model=SiteExportResponse)
+async def create_site_export(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteExportResponse:
+    """Capture this site's data (its D1 tables and captured leads) for download.
+
+    This is the precondition the delete cascade is gated on, so it either produces a
+    bundle we can vouch for or FAILS — a dynamic site whose live data cannot be read
+    is an error here, never an export reporting zero rows. The row is written before
+    the build, so a crash leaves a visible failed export rather than nothing.
+    """
+    return await sites_service.create_site_export(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
+    )
+
+
+@router.get("/sites/exports", response_model=list[SiteExportResponse])
+async def list_site_exports(
+    site_id: str = Query(default=""),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> list[SiteExportResponse]:
+    """This workspace's data exports, newest first; optionally one site's.
+
+    Exports OUTLIVE the sites they came from — that is the point of them — so this
+    lists rows whose ``site_id`` may no longer resolve to anything.
+    """
+    return await sites_service.list_site_exports(workspace_id=ctx.workspace_id, site_id=site_id)
+
+
+@router.get("/sites/exports/{export_id}/download")
+async def download_site_export(
+    export_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> StreamingResponse:
+    """Stream one READY export as a file attachment.
+
+    A pending or failed export is a 400, never an empty download — zero bytes here
+    would read as a site that had no data, which is the one thing this whole path
+    exists to never say.
+    """
+    filename, chunks = await sites_service.open_site_export(
+        workspace_id=ctx.workspace_id, export_id=export_id
+    )
+    return StreamingResponse(
+        chunks,
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="' + filename + '"'},
+    )
+
+
+@router.delete("/sites/{site_id}", response_model=SiteDeleteQueuedResponse, status_code=202)
+async def delete_site(
+    site_id: str,
+    force: bool = Query(default=False),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteDeleteQueuedResponse:
+    """Destroy a site and everything it owns. OWNER ONLY, and IRREVERSIBLE.
+
+    202 AND NOT 204, which is the whole shape of this endpoint. The teardown is a
+    durable job over an ordered cascade — cancel the billing, revoke the key, pull the
+    routes, hostnames and Worker, then the D1, the bucket prefix and the dependent
+    rows — and the site is STILL SERVING when this call returns. A 204 would be a
+    simpler contract and a lie. Poll ``/delete-status`` from here.
+
+    A DATA EXPORT IS FORCED FIRST, inside the job, before anything destructive runs.
+    That is the entire recovery story for an action with no undo, and it is a hard
+    stop rather than a best effort: an export that cannot be vouched for leaves the
+    site completely untouched and settles the row at ``export:<cause>``.
+
+    ``fabric.write`` like every sibling write, and then OWNER-ONLY on top of it in the
+    service — a workspace member who may edit a site may not destroy it. The owner
+    check is in the service rather than here because jobs, bus handlers and MCP tools
+    reach services directly; see ``sites_service.start_site_delete``.
+
+    ``?force=true`` deletes even when that export fails (the owner chose to lose the
+    data); the export is still attempted first.
+    """
+    return await sites_service.start_site_delete(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id, force=force
+    )
+
+
+@router.get("/sites/{site_id}/delete-status", response_model=SiteDeleteStatusResponse)
+async def site_delete_status(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteDeleteStatusResponse:
+    """How far a delete has got. 404 ONCE IT FINISHES — and that 404 is the success.
+
+    There is no terminal "deleted" status to return, by construction: the cascade's
+    last step removes the Site document, and ``delete_status`` is a field on that
+    document. A client that treats this 404 as an error reports every successful
+    delete as a broken one, so the shipped client reads it as completion instead.
+
+    Owner-only like the delete itself. ``delete_reason`` names which step of a
+    teardown stopped, which is operational detail about a site the reader may be able
+    to see but not administer. A site in ANOTHER workspace is a 404 from the service's
+    tenant-scoped load, which is a different answer from the 403 a non-owner inside
+    the workspace gets, on purpose.
+    """
+    return await sites_service.site_delete_status(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
+    )
+
+
 @router.get("/sites/{site_id}/entitlements", response_model=SiteEntitlementsResponse)
 async def get_site_entitlements(
     site_id: str,
@@ -998,6 +1239,50 @@ async def get_site_entitlements(
     lookup.
     """
     return await sites_service.site_entitlements(workspace_id=ctx.workspace_id, site_id=site_id)
+
+
+@router.get("/sites/{site_id}/project")
+async def download_site_project(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> Response:
+    """This site's project as a zip attachment — the copy its owner keeps.
+
+    A PAID per-site capability. A site whose plan does not include it gets 402
+    ``billing.project_download_not_entitled``, and the pre-check that lets the UI
+    disable the button instead of provoking that is ``project_download`` on
+    ``GET /sites/{site_id}/entitlements``. Do not gate the button on the workspace's
+    source visibility instead — different plan, different resolver, and a paid site
+    in a free workspace may download a project whose Code tab is hidden.
+
+    A Ripple site is a 400 ``sites.project_not_downloadable``, never a zero-byte zip:
+    an empty archive is indistinguishable from a site whose files vanished, and the
+    archive is the one thing a customer cannot re-derive.
+
+    ``Response`` and not ``StreamingResponse``, unlike the export download beside it.
+    The archive is assembled whole in memory before any of it can be sent — it is one
+    zip built from one Mongo document, capped at 16 MiB — so wrapping those bytes in
+    an iterator would add a streaming interface over a payload that is already
+    complete. The export streams because it reads pages from D1 as it goes.
+
+    Tenant-scoped through the service's ``_load``, so a cross-tenant or missing site
+    is a 404, and that check runs BEFORE the entitlement so a 402 can never confirm
+    that another workspace's site exists.
+    """
+    assembled = await sites_service.download_site_project(
+        workspace_id=ctx.workspace_id, site_id=site_id, user_id=ctx.user_id
+    )
+    return Response(
+        content=assembled.data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="' + assembled.filename + '"',
+            # Set explicitly because the whole payload is already in hand, so a
+            # download UI can show real progress instead of an indeterminate spinner.
+            "Content-Length": str(len(assembled.data)),
+        },
+    )
 
 
 @router.get("/sites/{site_id}/analytics", response_model=SiteAnalyticsResponse)
@@ -1027,6 +1312,68 @@ async def site_analytics(
     """
     return await sites_service.site_analytics(
         workspace_id=ctx.workspace_id, site_id=site_id, window=window
+    )
+
+
+@router.patch("/sites/{site_id}/metadata", response_model=SiteResponse)
+async def update_site_metadata(
+    site_id: str,
+    body: SiteMetadataUpdate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Rename a site or edit its one-line description.
+
+    Three-way: a field the caller omits is left alone, and an explicit empty string
+    clears it — which is how the form deletes a description without a second
+    endpoint. A blank NAME is refused (422) rather than accepted, because the name is
+    both the site's identity in the gallery and the string the delete confirmation
+    asks the owner to type back.
+
+    Tenant-scoped like every sibling per-site write; a missing or cross-tenant site
+    is a 404.
+    """
+    return await sites_service.update_site_metadata(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
+    )
+
+
+@router.patch("/sites/{site_id}/branding", response_model=SiteResponse)
+async def update_site_branding(
+    site_id: str,
+    body: SiteBrandingUpdate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Show or hide the "Built with PocketPaw" badge on this site (VS-3).
+
+    ``badge_hidden=true`` needs a plan that grants badge removal: a site that is not
+    entitled gets 402 ``billing.badge_removal_not_entitled`` and nothing is written.
+    ``badge_hidden=false`` is always accepted. Repeating the stored value is a no-op.
+
+    Authorized like ``PATCH /sites/{id}/metadata``: ``fabric.write`` in the caller's
+    workspace, tenant-scoped, so a missing or cross-tenant site is a 404.
+    """
+    return await sites_service.update_site_branding(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
+    )
+
+
+@router.patch("/sites/{site_id}/ai-visibility", response_model=SiteResponse)
+async def update_site_ai_visibility(
+    site_id: str,
+    body: SiteAiVisibilityUpdate,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteResponse:
+    """Let AI-training crawlers use this site, or not (AV-1).
+
+    ``ai_training_allowed`` changes only the training lines of the robots.txt the
+    next publish writes; search and assistant crawlers are always allowed. Authorized
+    like ``PATCH /sites/{id}/branding``; a missing or cross-tenant site is a 404.
+    """
+    return await sites_service.update_site_ai_visibility(
+        workspace_id=ctx.workspace_id, site_id=site_id, body=body
     )
 
 
@@ -1060,15 +1407,21 @@ async def update_site_client(
 async def record_site_invoice(
     site_id: str,
     body: SiteInvoiceCreate,
+    x_paw_money_units: str | None = Header(default=None, alias=MONEY_UNITS_HEADER),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteClientResponse:
     """Log one manual receipt against the site's client. This records that the
     owner was paid — it does NOT charge anyone, and it is unrelated to the owner's
     own subscription with us. Returns the whole updated client record so the caller
-    re-renders from one response instead of splicing the new row in locally."""
+    re-renders from one response instead of splicing the new row in locally.
+    ``X-Paw-Money-Units: iso4217`` marks the amount as minor units; without it the
+    amount is read as a legacy client's major × 100 and converted."""
     return await sites_service.record_site_invoice(
-        workspace_id=ctx.workspace_id, site_id=site_id, body=body
+        workspace_id=ctx.workspace_id,
+        site_id=site_id,
+        body=body,
+        minor_units=client_sends_minor_units(x_paw_money_units),
     )
 
 
@@ -1186,6 +1539,151 @@ async def delete_site_asset(
         raise HTTPException(403, str(exc)) from exc
 
 
+# ``SiteMediaError.reason`` → HTTP status. ``failed`` is the provider or the store
+# breaking, not the caller's input, hence 502.
+_SITE_MEDIA_STATUS = {
+    "not_found": 404,
+    "generation_not_found": 404,
+    "missing": 404,
+    "no_store": 503,
+    "invalid": 400,
+    "bad_source": 400,
+    "unsupported": 400,
+    "rejected": 400,
+    "not_ready": 409,
+    "unavailable": 503,
+    "busy": 503,
+    "failed": 502,
+}
+
+_IMAGE_ASPECTS = ("1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3")
+_VIDEO_ASPECTS = ("16:9", "9:16", "1:1")
+
+
+def _asset_dto(asset: Any) -> SiteAssetResponse:
+    return SiteAssetResponse(
+        key=asset.key, url=asset.url, mime=asset.mime, size=asset.size, filename=asset.filename
+    )
+
+
+def _media_response(result: Any) -> SiteMediaAssetsResponse:
+    return SiteMediaAssetsResponse(
+        assets=[_asset_dto(a) for a in result.assets],
+        poster=_asset_dto(result.poster) if result.poster is not None else None,
+        generation_id=result.generation_id,
+        errors=list(result.errors),
+    )
+
+
+def _site_media_http_error(exc: Any, *, what: str, hint: str) -> HTTPException:
+    status = _SITE_MEDIA_STATUS.get(exc.reason, 502)
+    if exc.reason == "no_store":
+        return HTTPException(
+            503,
+            "Public asset storage is not configured for this deployment "
+            "(set POCKETPAW_UPLOAD_ADAPTER=s3 and S3_PUBLIC_BUCKET).",
+        )
+    if exc.reason == "not_found":
+        return HTTPException(404, "No site with that id in this workspace.")
+    if exc.reason == "failed":
+        return HTTPException(
+            502,
+            f"{what} failed: {exc.message}. Nothing was added to the site. {hint}",
+        )
+    return HTTPException(status, exc.message)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/assets/generate", response_model=SiteMediaAssetsResponse)
+async def generate_site_asset(
+    pocket_id: str,
+    body: SiteAssetGenerateRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteMediaAssetsResponse:
+    """Generate an image (1-4) or a short video with Studio and publish it.
+
+    Same gate as upload, plus pocket ownership and the early-access refusal
+    (Studio spend never reaches the credit ledger). Lands in the /studio history
+    with ``source="sites"``. A video renders synchronously and can take minutes.
+    """
+    # TODO(SM-2): meter this. Studio generation is unmetered today
+    # (StudioModel.credits is decorative); this route spends with no debit.
+    from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed
+    from pocketpaw_ee.sites import media_generation
+
+    aspect_ratio = body.aspect_ratio or "16:9"
+    if body.kind == "image":
+        if body.image_url or body.duration is not None or body.engine is not None:
+            raise HTTPException(400, "image_url, duration and engine apply to video only.")
+        if aspect_ratio not in _IMAGE_ASPECTS:
+            raise HTTPException(400, f"aspect_ratio must be one of {', '.join(_IMAGE_ASPECTS)}.")
+    else:
+        if body.count != 1:
+            raise HTTPException(400, "count applies to images only; a video is one clip.")
+        if aspect_ratio not in _VIDEO_ASPECTS:
+            raise HTTPException(400, f"aspect_ratio must be one of {', '.join(_VIDEO_ASPECTS)}.")
+
+    _asset_store_or_503()
+    await assert_early_access_allowed(ctx.workspace_id)
+
+    what = "Image generation" if body.kind == "image" else "Video generation"
+    try:
+        if body.kind == "image":
+            result = await media_generation.generate_site_image_assets(
+                workspace_id=ctx.workspace_id,
+                pocket_id=pocket_id,
+                prompt=body.prompt,
+                count=body.count,
+                aspect_ratio=aspect_ratio,
+            )
+        else:
+            result = await media_generation.generate_site_video_asset(
+                workspace_id=ctx.workspace_id,
+                pocket_id=pocket_id,
+                prompt=body.prompt,
+                image_url=body.image_url,
+                aspect_ratio=aspect_ratio,
+                duration_sec=body.duration or 5,
+                video_engine=body.engine,
+            )
+    except media_generation.SiteMediaError as exc:
+        raise _site_media_http_error(
+            exc, what=what, hint="Try again in a moment, or change the prompt."
+        ) from exc
+    return _media_response(result)
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/assets/from-studio", response_model=SiteMediaAssetsResponse
+)
+async def add_studio_generation_to_site(
+    pocket_id: str,
+    body: SiteAssetFromStudioRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteMediaAssetsResponse:
+    """Publish an existing Studio generation of this workspace onto the site.
+
+    Reads only the generation's own stored media (never a URL), so a repeat copy
+    is idempotent (content-addressed keys). A video's poster comes back as
+    ``poster``. Another workspace's generation is a 404, like a missing one.
+    """
+    from pocketpaw_ee.sites import media_generation
+
+    _asset_store_or_503()
+    try:
+        result = await media_generation.copy_studio_generation(
+            workspace_id=ctx.workspace_id,
+            pocket_id=pocket_id,
+            generation_id=body.generation_id,
+        )
+    except media_generation.SiteMediaError as exc:
+        raise _site_media_http_error(
+            exc, what="Copying from Studio", hint="Try again in a moment."
+        ) from exc
+    return _media_response(result)
+
+
 @router.get("/sites/import/brief/{brief_id}", response_model=ImportBriefStatusResponse)
 async def get_import_brief(
     brief_id: str,
@@ -1202,3 +1700,500 @@ async def get_import_brief(
     readable. A read, so no ``fabric.write`` — same shape as the sibling listings.
     """
     return await import_service.read_design_brief(workspace_id=ctx.workspace_id, brief_id=brief_id)
+
+
+# --- Wave 3: transferring a site to another workspace ----------------------
+#
+# Appended at end-of-file, and gated on BOTH ends. The send half is
+# ``fabric.write`` in the SOURCE workspace plus an owner check in the service; the
+# receive half is ``fabric.write`` in the DESTINATION plus a membership check read
+# from the accepting user's own record. Neither half alone is sufficient, which is
+# the whole reason this is an offer and an accept rather than one call.
+
+
+@router.post("/sites/{site_id}/transfer", response_model=SiteTransferResponse)
+async def offer_site_transfer(
+    site_id: str,
+    body: SiteTransferOfferRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteTransferResponse:
+    """Offer this site to another workspace. Nothing moves until it is accepted.
+
+    Tenant-scoped through the service's ``_load``, so the caller can only offer a
+    site their own workspace owns. Owner-only beyond that, and refused outright when
+    an admin has turned off outbound transfers — a site leaving takes its leads with
+    it, which makes this a data-egress control rather than a preference.
+    """
+    wire = await sites_service.offer_site_transfer(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        site_id=site_id,
+        destination_workspace_id=body.destination_workspace_id,
+    )
+    return _transfer_response(wire)
+
+
+@router.delete("/sites/{site_id}/transfer", response_model=SiteTransferResponse)
+async def cancel_site_transfer(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteTransferResponse:
+    """Withdraw an offer that has not been accepted yet."""
+    wire = await sites_service.cancel_site_transfer(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        site_id=site_id,
+    )
+    return _transfer_response(wire)
+
+
+@router.get("/sites/transfers/incoming", response_model=SiteTransferListResponse)
+async def list_incoming_site_transfers(
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteTransferListResponse:
+    """Sites other workspaces have offered to this one.
+
+    The one sites read not anchored on the caller's ``workspace`` — it cannot be,
+    since an offered site still belongs to the sender. ``transfer_to_workspace`` is
+    the tenant filter instead, and only an owner of the sending side can write it,
+    so a workspace sees exactly what was addressed to it.
+
+    Starlette matches routes in REGISTRATION order, not by specificity, so a
+    literal path registered after a parameterised one is not automatically safe.
+    This one is safe because nothing overlaps: ``/sites/{site_id}/transfer`` would
+    only swallow this if the final segment read ``transfer``, and it reads
+    ``incoming``. Adding a ``/sites/{site_id}/incoming`` later would break it.
+    """
+    rows = await sites_service.list_incoming_site_transfers(workspace_id=ctx.workspace_id)
+    return SiteTransferListResponse(transfers=[_transfer_response(r) for r in rows])
+
+
+@router.post("/sites/transfers/{site_id}/accept", response_model=SiteTransferResponse)
+async def accept_site_transfer(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteTransferResponse:
+    """Accept a site offered to this workspace, and take ownership of it.
+
+    Deliberately NOT under ``/sites/{site_id}/`` — every route on that prefix is
+    tenant-scoped to the caller's workspace, and this one addresses a site that
+    still belongs to somebody else. Putting it on its own prefix keeps that
+    difference visible at the URL rather than buried in a service function.
+
+    The receiving guard that matters is not this dependency: ``fabric.write`` says
+    the caller may write in the workspace the header names, and the service
+    re-checks that they are actually a MEMBER of it against their own user record.
+    A header is a request, not a credential.
+    """
+    wire = await sites_service.accept_site_transfer(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        site_id=site_id,
+    )
+    return _transfer_response(wire)
+
+
+def _transfer_response(wire: dict) -> SiteTransferResponse:
+    """Map the service's wire dict onto the response model.
+
+    Hand-written rather than ``model_validate`` because the service speaks camelCase
+    (the shape every other sites read returns) and the DTO is snake_case.
+    """
+    return SiteTransferResponse(
+        site_id=wire.get("siteId", ""),
+        name=wire.get("name", ""),
+        url=wire.get("url", "") or "",
+        from_workspace_id=wire.get("fromWorkspaceId", ""),
+        to_workspace_id=wire.get("toWorkspaceId", "") or "",
+        offered_by=wire.get("offeredBy", "") or "",
+        offered_at=wire.get("offeredAt"),
+        status=wire.get("status", "none"),
+    )
+
+
+# --- SF-8: proving the workspace controls an origin -------------------------
+#
+# These two exist so a later slice can crawl a customer's OWN pages without
+# becoming a crawler-for-hire. Both are workspace-scoped writes (``fabric.write``)
+# under the router's sites plan gate, like every sibling mutation: a claim mints a
+# secret and a verification flips a durable permission, so neither is a read.
+#
+# NOTHING IS MINTED AND NOTHING IS CRAWLED HERE. A claim writes one
+# ``SiteOriginClaim`` row; a verification updates it or raises. No Site document,
+# no import, no crawl is reachable from either — the crawl is a separate slice
+# that asks ``ownership.verified_origin`` first.
+
+
+@router.post("/sites/origins/claims", response_model=OriginClaimResponse, status_code=201)
+async def claim_site_origin(
+    body: OriginClaimRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> OriginClaimResponse:
+    """Issue this workspace's verification token for a domain it says it owns.
+
+    The token is bound to (workspace, host) and is the ONLY response shape that
+    carries it. Re-claiming a pending domain re-mints the token; re-claiming one
+    that is already verified returns the verified row untouched, because
+    re-issuing there would unprove a live binding.
+
+    A malformed or non-public host (URL syntax, a single label, any literal IP —
+    loopback and link-local included) is a 422 raised during normalization, before
+    any row is written and before any DNS lookup.
+    """
+    claim = await ownership.claim_origin(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, host=body.host
+    )
+    return OriginClaimResponse(
+        host=claim.host,
+        token=claim.token,
+        status=claim.status,
+        expires_at=claim.expires_at,
+        well_known_url=f"https://{claim.host}{ownership.WELL_KNOWN_PATH}",
+        meta_tag=f'<meta name="{ownership.META_NAME}" content="{claim.token}">',
+        verified_at=claim.verified_at,
+        method=claim.method,
+    )
+
+
+@router.post("/sites/origins/verify", response_model=OriginVerificationResponse)
+async def verify_site_origin(
+    body: OriginClaimRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> OriginVerificationResponse:
+    """Read the token back off the claimed domain and record the origin verified.
+
+    The host travels in the BODY rather than the path deliberately: a hostname in
+    a path segment invites percent-encoding bugs on exactly the input whose
+    normalization is a security boundary here.
+
+    The service fetches through the one SSRF-hardened fetch, pinned to the claimed
+    host. A failure — nothing published, the wrong token, an expired claim, an
+    unreachable domain — is an error response and writes nothing at all.
+    """
+    claim = await ownership.verify_origin(workspace_id=ctx.workspace_id, host=body.host)
+    # A fresh proof is what lets a connected site's card read the customer's page,
+    # so every connected site on this host refreshes its title, icon and picture.
+    await sites_service.schedule_connected_cards_for_origin(ctx.workspace_id, claim.host)
+    return OriginVerificationResponse(
+        host=claim.host,
+        status=claim.status,
+        method=claim.method,
+        verified_at=claim.verified_at,
+    )
+
+
+# --- SF-13: the foreign concierge over HTTP --------------------------------
+#
+# Four slices built the foreign concierge — ownership proof, a charged mint, an
+# idempotent bind, knowledge grounding — and none of them reached the wire, so
+# the feature was complete as a library and unreachable as a product. These are
+# the routes the setup UI calls.
+#
+# THE BIND SPENDS MONEY, which is what makes its gate different from every other
+# mutation on this router. ``fabric.write`` says the caller may write in this
+# workspace; ``sites.buy_plan`` (ADMIN, refusal code
+# ``sites.plan_purchase_forbidden``) says they may commit it to a recurring
+# charge. Both are required, which is the pair ``publish_site`` already uses —
+# the difference is that a publish is usually free, so it ASKS the second
+# question and lets the service decide, while a first bind is always a $19/month
+# purchase and there is nothing to decide. A member who may not buy still gets
+# the GET, so "does one already exist" never needs an admin.
+#
+# IDEMPOTENCE IS THE SERVICE'S, AND THIS LAYER MUST NOT HELP. The guarantee is a
+# derived primary key (a duplicate insert fails BEFORE the debit) plus an
+# in-process lock. So nothing here mints an id, retries a ``DuplicateKeyError``,
+# or catches a conflict and re-calls: each of those would turn one purchase into
+# two. The route calls ``bind_foreign_concierge`` — the resolve-or-buy layer —
+# and never ``mint_foreign_site``, which buys a month unconditionally.
+#
+# THE ERROR VOCABULARY IS THE SERVICE'S TOO, and the mapping is the standard
+# envelope rather than anything written here: ``sites.origin_unverified`` and
+# ``sites.origin_verification_stale`` are both 403 but are DIFFERENT codes,
+# because "you never proved you own this domain" and "your proof is older than
+# 30 days" need different sentences from the owner, and a panel that collapsed
+# them would tell a customer to re-verify a domain they never claimed.
+#
+# WHAT IS NOT HERE, BECAUSE IT ALREADY EXISTS: the grounding result. GET/POST
+# ``/paw-bar/admin/site/{site_id}/knowledge`` already serve the article count,
+# the last sync stamp, the sync error and an owner-triggered re-sync for any Site
+# in the workspace, a foreign row included. This response carries ``site_id`` so
+# the panel can call them; a second read of the same fields would be a second
+# thing to keep in step.
+
+_FOREIGN_CONCIERGE_PATH = "/sites/by-pocket/{pocket_id}/foreign-concierge"
+
+
+async def _assert_pocket_readable(pocket_id: str, user_id: str) -> None:
+    """Refuse a caller who cannot reach this pocket, before the Site is looked up.
+
+    ``foreign_site_for_pocket`` filters on workspace and ``foreign_origin`` and
+    nothing else, so it answers "is there a concierge here" rather than "may YOU
+    ask". Both of this surface's guards are MEMBER — ``fabric.read`` and
+    ``fabric.write`` say what a call INTENDS, not who is privileged to make it —
+    so without this a member who is refused a private pocket everywhere else in
+    the product could still read its concierge's ``site_key`` and embed snippet,
+    and could rotate that key out from under a live page.
+
+    Raises whatever the pockets service raises: Forbidden
+    ``pocket.access_denied`` for a pocket this user may not read, NotFound for one
+    that does not exist. Called for the side effect only — the doc it returns is
+    not this surface's business.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    await pockets_service.get(pocket_id, user_id)
+
+
+async def _foreign_concierge_response(site: Any) -> ForeignConciergeResponse:
+    """Render one foreign Site as the panel's view of its concierge.
+
+    The snippet comes from ``embed.concierge_snippet`` rather than being formatted
+    here, so the five gates that decide whether a site has earned a bar keep
+    exactly one definition. Its ``concierge_entitled`` half is asked of
+    ``site_keys.concierge_plan_entitled`` — the plan half of the predicate the
+    public seams use — so this panel and the visitor's first message cannot
+    disagree about the plan. The response carries that half, the switch and the
+    create marker separately, so the panel can say which one is missing.
+
+    FAILURE-SOFT ON THE BAR, NOT ON THE ROW. paw_bar is imported lazily (the
+    sites service must load in a deployment that does not carry it) and anything
+    escaping the widget lookup leaves the snippet empty with a log line, because a
+    row that is paid for and readable matters more than the panel's copy button.
+    """
+    from pocketpaw_ee.cloud.auth.site_keys import (
+        concierge_available,
+        concierge_exists,
+        concierge_plan_entitled,
+    )
+    from pocketpaw_ee.sites import foreign_grounding
+
+    workspace_id = str(getattr(site, "workspace", "") or "")
+    pocket_id = str(getattr(site, "pocket_id", "") or "")
+    site_key = str(getattr(site, "signed_key", "") or "")
+    from pocketpaw_ee.cloud.billing.enforcement import load_partner
+
+    partner = await load_partner(workspace_id)
+    available = bool(concierge_available(site, partner=partner))
+    entitled = bool(concierge_plan_entitled(site, partner=partner))
+    enabled = bool(getattr(site, "concierge_enabled", False))
+    exists = concierge_exists(site)
+
+    snippet = ""
+    widget_id = ""
+    agent_id = ""
+    try:
+        from pocketpaw_ee.paw_bar import embed
+        from pocketpaw_ee.paw_bar.agent_provisioning import site_widget
+
+        widget = await site_widget(pocket_id, workspace_id)
+        widget_id = str(getattr(widget, "id", "") or "") if widget else ""
+        agent_id = str(getattr(widget, "agent_id", "") or "") if widget else ""
+        snippet = await embed.concierge_snippet(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            site_key=site_key,
+            api_base=sites_service._capture_base(),
+            concierge_enabled=enabled,
+            # The plan half, from the one helper that owns the rule (it also
+            # honours the sites-billing flag, which a re-expression here would
+            # have to remember).
+            concierge_entitled=entitled,
+            # CR-12: a bought connection has no concierge until its owner creates one.
+            concierge_exists=exists,
+        )
+    except Exception:  # noqa: BLE001 — the row is real whether or not the bar is
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "sites.foreign_concierge: could not resolve the bar for site %s",
+            str(getattr(site, "id", "?")),
+            exc_info=True,
+        )
+
+    origins: list[ForeignConciergeOrigin] = []
+    for host in list(getattr(site, "allowed_origins", None) or []):
+        record = await ownership.verified_origin_record(workspace_id, host)
+        origins.append(
+            ForeignConciergeOrigin(
+                host=host,
+                verified=record is not None,
+                verified_at=getattr(record, "verified_at", None),
+                # The same 30-day rule the bind and the crawl apply, asked of the
+                # same function — so the panel cannot say "verified" about a proof
+                # the next grounding run will refuse.
+                verification_fresh=foreign_grounding.verification_is_fresh(record),
+            )
+        )
+
+    return ForeignConciergeResponse(
+        exists=True,
+        site_id=str(getattr(site, "id", "") or ""),
+        pocket_id=pocket_id,
+        name=str(getattr(site, "name", "") or ""),
+        site_key=site_key,
+        embed_snippet=snippet,
+        widget_id=widget_id,
+        agent_id=agent_id,
+        origins=origins,
+        plan_tier=str(getattr(site, "plan_tier", "") or ""),
+        subscription_status=str(getattr(site, "subscription_status", "") or "none"),
+        renewal_date=getattr(site, "renewal_date", None),
+        concierge_available=available,
+        concierge_entitled=entitled,
+        concierge_enabled=enabled,
+        concierge_exists=exists,
+    )
+
+
+@router.post(
+    _FOREIGN_CONCIERGE_PATH,
+    response_model=ForeignConciergeResponse,
+    dependencies=[Depends(require_action_any_workspace("sites.buy_plan"))],
+)
+async def bind_pocket_foreign_concierge(
+    pocket_id: str,
+    body: ForeignConciergeBindRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ForeignConciergeResponse:
+    """Create or return the one foreign concierge for this pocket.
+
+    The first call debits $19/month from the workspace credit wallet; every call
+    after it returns the same concierge and charges nothing. A repeat is a 200
+    with the same ``site_id``, not a 409 — a double-clicked button is the case
+    this endpoint is shaped around.
+
+    Every refusal happens before a row exists and before money moves: a pocket
+    the caller cannot access, or one that belongs to a different workspace (403
+    ``pocket.access_denied`` for both — the same code, so a guessed id is not
+    told which), an origin the workspace has not proved it controls (403
+    ``sites.origin_unverified``), a
+    proof older than 30 days (403 ``sites.origin_verification_stale``), no usable
+    origin (422 ``sites.origin_required``) and a wallet that cannot cover the
+    month (402 ``credits.insufficient``). The last one deletes the unpaid row it
+    had just inserted, so a 402 leaves nothing behind either.
+    """
+    site = await sites_service.bind_foreign_concierge(
+        workspace_id=ctx.workspace_id,
+        pocket_id=pocket_id,
+        owner=ctx.user_id,
+        allowed_origins=body.allowed_origins,
+        name=body.name,
+    )
+    return await _foreign_concierge_response(site)
+
+
+@router.get(_FOREIGN_CONCIERGE_PATH, response_model=ForeignConciergeResponse)
+async def get_pocket_foreign_concierge(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> ForeignConciergeResponse:
+    """What this pocket's foreign concierge currently is, if it has one.
+
+    ``fabric.read`` and not the bind's admin gate, deliberately: a member who may
+    not commit the workspace to a charge still needs to see that the concierge
+    exists, what its snippet is, and which of its origins have gone stale.
+
+    A pocket with no foreign concierge is ``exists: false``, not a 404. The
+    lookup is ``foreign_site_for_pocket``, which filters on ``foreign_origin``, so
+    a pocket that also has a PUBLISHED site never has that site reported here.
+
+    A pocket that does not EXIST is a 404 rather than ``exists: false``, because
+    the pocket gate below runs ahead of the site lookup. That is the honest answer
+    — "this pocket has no concierge" is a statement about a pocket — and the
+    alternative would have this route describe pockets the caller cannot see.
+    """
+    # THE READ'S POCKET GATE. Reading a concierge hands back its ``site_key`` and
+    # the snippet that uses it; neither should reach a caller who cannot open the
+    # pocket the concierge speaks for.
+    await _assert_pocket_readable(pocket_id, ctx.user_id)
+    site = await sites_service.foreign_site_for_pocket(ctx.workspace_id, pocket_id)
+    if site is None:
+        return ForeignConciergeResponse(exists=False, pocket_id=pocket_id)
+    return await _foreign_concierge_response(site)
+
+
+@router.post(f"{_FOREIGN_CONCIERGE_PATH}/rotate-key", response_model=ForeignConciergeResponse)
+async def rotate_pocket_foreign_concierge_key(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ForeignConciergeResponse:
+    """Retire this concierge's embed key and issue a new one.
+
+    ``fabric.write`` rather than the bind's ``sites.buy_plan``: a rotation is not
+    a repurchase — same row, same tier, same renewal date — and gating a leak
+    response behind an admin would leave a member who can see the leak unable to
+    act on it.
+
+    The response carries the NEW snippet, which is the whole point: the old key
+    stops resolving the moment this returns, so the owner's page is serving a
+    dead credential until they paste this one in. 404 when the pocket has no
+    foreign concierge to rotate, and 403 when the caller cannot open the pocket.
+    """
+    # THE ROTATION'S POCKET GATE, and the loudest of the three. A rotation kills
+    # the live key the instant it lands, so without this a member who is refused
+    # the pocket can still take a customer's published page offline.
+    await _assert_pocket_readable(pocket_id, ctx.user_id)
+    site = await sites_service.rotate_foreign_concierge_key(
+        workspace_id=ctx.workspace_id, pocket_id=pocket_id
+    )
+    return await _foreign_concierge_response(site)
+
+
+@router.post(f"{_FOREIGN_CONCIERGE_PATH}/rebind", response_model=ForeignConciergeResponse)
+async def rebind_pocket_foreign_concierge(
+    pocket_id: str,
+    body: ForeignConciergeRebindRequest,
+    ctx: RequestContext = Depends(request_context),
+    caller: Any = Depends(require_action_any_workspace("fabric.write")),
+) -> ForeignConciergeResponse:
+    """Point this concierge's bar at a different agent, leaving the row alone.
+
+    Nothing about the purchase moves: the embedded ``signed_key`` keeps
+    resolving, the tier stays bought and the renewal date stays where it was, so
+    swapping the answering agent never costs the buyer their credential or their
+    month. A non-admin may only name an agent that ALREADY answers for a
+    foreign concierge in this workspace; anything else is 403
+    ``sites.agent_not_published``, an agent in another tenant included. The
+    service owns that rule and its reasoning; the role is the only part this
+    layer knows. For an ADMIN the rule is relaxed, and a cross-tenant
+    ``agent_id`` is then a 404 from inside the funnel, deliberately
+    indistinguishable from an agent that does not exist.
+
+    The row is re-read for the response rather than returned by the rebind, which
+    hands back the bound agent id; ``exists: false`` here means the concierge was
+    deleted between the two, not that the rebind failed.
+    """
+    # THE REBIND'S POCKET GATE. A rebind decides which agent answers the public,
+    # so it is at least as privileged as reading the pocket it answers for.
+    await _assert_pocket_readable(pocket_id, ctx.user_id)
+    # The role, read off the membership the guard above already resolved rather
+    # than re-asked through ``check_workspace_action`` — that function AUDITS a
+    # denial, and a member doing an ordinary rebind has not been denied anything.
+    from pocketpaw_ee.guards.actions import WorkspaceRole
+    from pocketpaw_ee.guards.deps import resolve_workspace_role
+
+    role = resolve_workspace_role(caller, ctx.workspace_id or "")
+    await sites_service.rebind_foreign_concierge(
+        workspace_id=ctx.workspace_id,
+        pocket_id=pocket_id,
+        agent_id=body.agent_id,
+        widget_id=body.widget_id,
+        caller_is_admin=role.level >= WorkspaceRole.ADMIN.level,
+    )
+    # Named for what it is — a re-read after the write — rather than sharing the
+    # read endpoint's ``site``. The two blocks are otherwise identical text, and a
+    # mutation anchored on either one would then match both, which is how a plan
+    # ends up unable to say which arm it covers.
+    refreshed = await sites_service.foreign_site_for_pocket(ctx.workspace_id, pocket_id)
+    if refreshed is None:
+        return ForeignConciergeResponse(exists=False, pocket_id=pocket_id)
+    return await _foreign_concierge_response(refreshed)

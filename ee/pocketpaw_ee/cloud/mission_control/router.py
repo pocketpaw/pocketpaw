@@ -1,35 +1,19 @@
-# ee/cloud/mission_control/router.py
-# Created: 2026-05-13 (feat/mission-control-facade) — REST surface for the
-# Mission Control façade. Endpoints exactly as specified in the audit doc:
-# items list, bulk approve/reject, bulk reassign/snooze stubs (501 until
-# PR 2), outcomes summary, activity feed.
-# Updated: 2026-05-13 (feat/mission-control-cleanup) — lifted the 501s on
-# bulk-reassign / bulk-snooze. Both now return a ``BulkActionResponse``
-# shape (``affected`` + ``skipped`` + ``bulk_id``) by delegating per-id
-# to the Tasks service.
-# Updated: 2026-05-18 (feat/mc-plan-sessions-endpoint) — added
-# ``GET /plan-sessions`` for the Plan tab drafts list. Rejects the
-# ``?workspace_id`` query param before DTO construction (tenancy from
-# auth ctx) per the Audit endpoint's pattern.
-# Updated: 2026-05-19 (feat/mc-create-cycle-endpoint) — added
-# ``POST /cycles`` so the rail's "+ New cycle" button has a façade
-# endpoint to call. Rejects ``?workspace_id`` before DTO construction
-# (mirrors the audit + plan-sessions guard); the actual Beanie write
-# is delegated to ``cycles.service.agent_create_cycle`` via the MC
-# service so the cycles entity stays the sole owner of the write path.
-# Updated: 2026-07-04 (fix/approval-resolution) — ``GET /items`` now
-# accepts a ``status`` query param and threads it into
-# ``ListWorkItemsRequest``. Previously the endpoint documented a status
-# filter but never accepted the param, so ``?status=pending`` was silently
-# ignored and terminal (done/failed) items leaked into the awaiting-approval
-# feed; the service now honors it (``pending`` → awaiting-approval).
-# Updated: 2026-07-05 (fix/mission-control-resolver-consistency) — ``GET /items``
-# now validates ``section`` at the router boundary and raises a
-# ``ValidationError`` (422 ``mission_control.invalid_section``) on an out-of-enum
-# value. Before, an unknown ``section`` raised a raw pydantic
-# ``ValidationError`` when the router built ``ListWorkItemsRequest``, which
-# escaped as HTTP 500. The check mirrors the lenient ``status`` handling
-# (typed ``str``, normalised downstream); valid section values are unchanged.
+# ee/pocketpaw_ee/cloud/mission_control/router.py — REST surface for the
+# Mission Control façade: the heterogeneous work-item feed (Instinct Nudges +
+# Tasks), bulk approve / reject / reassign / snooze / revert, outcomes,
+# activity, plan sessions, and cycles. Every handler delegates to
+# ``mission_control.service``.
+#
+# Invariants:
+#   * Deciding a Nudge (bulk approve / reject) needs ``instinct.approve``
+#     (ADMIN), the same gate as ``/instinct/actions/{id}/approve``. The check
+#     runs only when the batch holds a Nudge id (bare or ``nudge:``), so a
+#     MEMBER can still bulk-complete or block their own Tasks, which the Tasks
+#     service gates by creator / assignee.
+#   * Tenancy comes from the auth context. Query params that would name a
+#     workspace (``?workspace_id``) are refused before DTO construction.
+#   * Bad enum / timestamp input surfaces as a 422 ``ValidationError``, never
+#     a raw pydantic error (HTTP 500).
 """Mission Control façade router.
 
 Thin per ee/cloud rule #4 — parses requests, delegates to
@@ -52,9 +36,12 @@ canonical URLs are:
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Query, Request
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.deps import current_user, require_action_any_workspace
 from pocketpaw_ee.cloud._core.errors import CloudError, ValidationError
 from pocketpaw_ee.cloud.cycles.dto import CycleResponse
 from pocketpaw_ee.cloud.license import require_license
@@ -129,12 +116,35 @@ async def list_items(
     return await mc_service.agent_list_work_items(ctx, body)
 
 
+_instinct_approve_guard = require_action_any_workspace("instinct.approve")
+
+
+async def _require_nudge_decision(user: Any, ctx: RequestContext, ids: list[str]) -> None:
+    """Refuse a batch that decides a Nudge unless the caller holds
+    ``instinct.approve`` in the request's workspace.
+
+    The service routes every non-``task:`` id to the Instinct store, so any
+    such id makes this an Instinct decision. Runs the same guard as the
+    single-approve route (role, per-member override, audited denial) and
+    denies the whole batch rather than silently dropping the Nudges.
+    """
+    if all(i.startswith("task:") for i in ids):
+        return
+    await _instinct_approve_guard(user=user, workspace_id=ctx.workspace_id or "")
+
+
 @router.post("/items/bulk-approve")
 async def bulk_approve(
     body: BulkActionRequest,
     ctx: RequestContext = Depends(request_context),
+    user: Any = Depends(current_user),
 ) -> dict:
-    """Approve N pending Nudges. Returns ``{bulk_id, approved, missing}``."""
+    """Approve N pending Nudges / complete N Tasks.
+
+    Returns ``{bulk_id, approved, missing, executed}``. 403 when the batch
+    holds a Nudge and the caller lacks ``instinct.approve``.
+    """
+    await _require_nudge_decision(user, ctx, body.ids)
     return await mc_service.agent_bulk_approve(ctx, body)
 
 
@@ -142,13 +152,16 @@ async def bulk_approve(
 async def bulk_reject(
     body: BulkActionRequest,
     ctx: RequestContext = Depends(request_context),
+    user: Any = Depends(current_user),
 ) -> dict:
-    """Reject N pending Nudges. Requires non-empty ``reason``.
+    """Reject N pending Nudges / block N Tasks. Requires non-empty ``reason``.
 
     Returns ``{bulk_id, rejected, missing}``. The reason text lands on
     every Action's ``rejected_reason`` AND on every audit row's
-    ``context.reason`` for soul-bridge replay.
+    ``context.reason`` for soul-bridge replay. 403 when the batch holds a
+    Nudge and the caller lacks ``instinct.approve``.
     """
+    await _require_nudge_decision(user, ctx, body.ids)
     return await mc_service.agent_bulk_reject(ctx, body)
 
 

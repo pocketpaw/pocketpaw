@@ -8,7 +8,9 @@
 # (see test_pattern_field.py, which this mirrors). These tests seed a REAL Pocket
 # doc (so its ObjectId can be matched), publish a Site whose pocket_id == that doc's
 # id, and assert the response carries the pocket's engine. Empty-safe cases
-# (missing pocket) read "".
+# (missing pocket) read "". The same two reads carry ``capabilities`` for every
+# engine, with ``has_database`` from the dynamic pattern/spec, the d1-drizzle
+# recipe or the Site's bound D1; an unresolved pocket reads None.
 #
 # Created: 2026-07-09 (feat/sites-engine-field, SR-9).
 from __future__ import annotations
@@ -161,3 +163,133 @@ async def test_engines_for_pockets_batch_read(beanie_test_db):
     out = await pockets_service.engines_for_pockets("ws1", [a, b, other, missing, "garbage"])
 
     assert out == {a: "svelte", b: "ripple"}
+
+
+# ---------------------------------------------------- capabilities on the site reads
+
+
+async def _draft_site(workspace_id: str = "ws1", **pocket_fields) -> str:
+    """Seed a site pocket with ``pocket_fields`` and mint its DRAFT Site doc (no
+    publish, so any engine works). Returns the pocket id."""
+    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+    pocket_fields.setdefault("engine", "svelte")
+    doc = _PocketDoc(workspace=workspace_id, name="S", owner="u1", type="site", **pocket_fields)
+    await doc.insert()
+    await sites_service.create_draft_site(
+        workspace_id=workspace_id, user_id="u1", pocket_id=str(doc.id), name="S"
+    )
+    return str(doc.id)
+
+
+async def _listed_caps(workspace_id: str = "ws1") -> dict:
+    return {
+        s.pocket_id: s.capabilities for s in await sites_service.list_for_workspace(workspace_id)
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["ripple", "svelte", "html", "react", "project"])
+async def test_list_and_status_carry_capabilities_for_every_engine(beanie_test_db, engine):
+    from pocketpaw_ee.sites.engines import site_capabilities
+
+    pocket_id = await _draft_site(engine=engine)
+    expected = site_capabilities(engine, has_database=False)
+
+    assert (await _listed_caps())[pocket_id] == expected
+    status = await sites_service.pocket_status(workspace_id="ws1", pocket_id=pocket_id)
+    assert status.capabilities == expected
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_pocket_without_an_engine_reads_ripple_capabilities(beanie_test_db):
+    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+    from pocketpaw_ee.sites.engines import site_capabilities
+
+    pocket_id = await _draft_site(engine="ripple")
+    await _PocketDoc.get_pymongo_collection().update_one(
+        {"_id": ObjectId(pocket_id)}, {"$unset": {"engine": ""}}
+    )
+
+    assert (await _listed_caps())[pocket_id] == site_capabilities("ripple", has_database=False)
+
+
+@pytest.mark.asyncio
+async def test_has_database_from_the_dynamic_pattern(beanie_test_db):
+    pocket_id = await _draft_site(engine="ripple", pattern="dynamic")
+    assert (await _listed_caps())[pocket_id]["has_database"] is True
+
+
+@pytest.mark.asyncio
+async def test_has_database_from_a_spec_that_declares_actions(beanie_test_db):
+    pocket_id = await _draft_site(
+        engine="ripple", pattern="landing", rippleSpec={"ui": {}, "actions": {"add": {}}}
+    )
+    assert (await _listed_caps())[pocket_id]["has_database"] is True
+
+
+@pytest.mark.asyncio
+async def test_has_database_from_the_d1_recipe(beanie_test_db):
+    with_db = await _draft_site(
+        engine="project",
+        site_meta={
+            "project": {"template": "astro", "framework": "astro", "recipes": ["d1-drizzle"]}
+        },
+    )
+    without = await _draft_site(
+        engine="project",
+        site_meta={"project": {"template": "astro", "framework": "astro", "recipes": ["kv"]}},
+    )
+    caps = await _listed_caps()
+    assert caps[with_db]["has_database"] is True
+    assert caps[without]["has_database"] is False
+    status = await sites_service.pocket_status(workspace_id="ws1", pocket_id=with_db)
+    assert status.capabilities["has_database"] is True
+
+
+@pytest.mark.asyncio
+async def test_has_database_from_the_sites_bound_d1(beanie_test_db):
+    from pocketpaw_ee.cloud.models.site import Site
+
+    pocket_id = await _draft_site(engine="svelte", pattern="landing")
+    site = await Site.find_one(Site.pocket_id == pocket_id)
+    site.d1_database_id = "11111111-2222-3333-4444-555555555555"
+    await site.save()
+
+    assert (await _listed_caps())[pocket_id]["has_database"] is True
+    status = await sites_service.pocket_status(workspace_id="ws1", pocket_id=pocket_id)
+    assert status.capabilities["has_database"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_pocket_has_no_capabilities(beanie_test_db):
+    pocket_id = await _draft_site(workspace_id="ws_owner")
+
+    status = await sites_service.pocket_status(workspace_id="ws_intruder", pocket_id=pocket_id)
+    assert status.engine == ""
+    assert status.capabilities is None
+
+
+@pytest.mark.asyncio
+async def test_site_database_inputs_for_pockets_batch_read(beanie_test_db):
+    """One tenant-scoped projected read; never the whole rippleSpec."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    a = await _draft_site(
+        engine="ripple",
+        pattern="dynamic",
+        rippleSpec={"ui": {"big": "x" * 100}, "sources": {"rows": {}}},
+    )
+    b = await _draft_site(
+        engine="project", site_meta={"project": {"template": "t", "recipes": ["d1-drizzle"]}}
+    )
+    other = await _draft_site(workspace_id="ws2")
+
+    out = await pockets_service.site_database_inputs_for_pockets(
+        "ws1", [a, b, other, str(ObjectId()), "garbage"]
+    )
+
+    assert set(out) == {a, b}
+    assert out[a]["pattern"] == "dynamic"
+    assert out[a]["ripple_spec"] == {"sources": {"rows": {}}}
+    assert out[b]["site_meta"] == {"project": {"recipes": ["d1-drizzle"]}}

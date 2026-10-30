@@ -63,6 +63,18 @@ def _reset_manager() -> None:
     _manager = None
 
 
+async def open_soul(path: Path) -> Any:
+    """Awaken the soul at ``path`` (a .soul archive or a soul directory).
+
+    The per-path entry point for callers that hold a soul path rather than
+    the global SoulManager (e.g. a mandate's bound soul). Raises whatever
+    soul-protocol raises; callers decide how to degrade.
+    """
+    from soul_protocol import Soul
+
+    return await Soul.awaken(path)
+
+
 class SoulManager:
     """Manages the Soul instance lifecycle."""
 

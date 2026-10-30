@@ -1,29 +1,23 @@
 # tests/cloud/sites/test_custom_domain_cap.py — free includes a custom domain on
-# ONE site, and this tree is the count that enforces the word "one".
+# EVERY site, and this tree is the per-site count that bounds it.
 #
-# Created 2026-08-21 (feat/site-free-custom-domain, PW-1). The rule: "only 1 site
-# is allowed to have a custom domain in free" (captain, 2026-08-21). Its sibling
-# tree, test_custom_domain_entitlement.py, covers the CAPABILITY gate — may this
-# site have a domain at all. This one covers the COUNT — has the workspace room
-# for another site that has one. Different question, different 402 code, different
-# remedy, so they are deliberately not one file.
+# Pricing is per site, so the free allowance is per site: each free site may
+# carry one custom domain, apex + ``www``, and nothing a sibling site holds counts
+# against it. Its sibling tree, test_custom_domain_entitlement.py, covers the
+# CAPABILITY gate (may this site have a domain at all). This one covers the COUNT
+# (has THIS site used its free hostnames). Different question, different 402 code,
+# different remedy, so they are deliberately not one file.
 #
-# THE UNIT IS THE SITE, NOT THE HOSTNAME, and that is the single thing most worth
-# pinning here. ``SiteDomain`` is one row per hostname, so a count that reads rows
-# refuses apex + ``www`` — the pair almost every customer wants — while looking
-# completely correct. The first test in the file is that pair, on purpose: it is
-# the case an earlier draft of this design got wrong.
+# What is pinned here:
+#   * apex + ``www`` both land on one free site, and a third hostname is refused
+#   * every free site in a workspace gets its own domain
+#   * the refusal comes before any Cloudflare call and leaves no half-state
+#   * paid sites are uncapped, and archived or foreign sites change nothing
+#   * re-adding a connected hostname is never refused, even on a full site
+#   * billing off means no cap at all, and the gate never scans sibling sites
 #
-# Three counting rules, one test each, plus the guard that keeps the site-unit rule
-# from being free-for-all:
-#   1. sites holding >= 1 domain, not hostnames  -> the apex + www test
-#   2. FLOOR sites only                          -> the mixed-workspace test
-#   3. the target site excluded from its own cap -> the apex + www test again
-#   + a per-site hostname cap, since (1) leaves hostname count unbounded
-#
-# Every tier key is read off the catalog, never written as a literal, so the
-# pricing-spec rekey (basic/pro/business -> free/site/staff) moves this tree with
-# the ladder instead of breaking it.
+# Every tier key is read off the catalog, never written as a literal, so a
+# pricing rekey moves this tree with the ladder instead of breaking it.
 
 from __future__ import annotations
 
@@ -49,18 +43,11 @@ def _the_free_tier() -> str:
 
 
 def _an_uncapped_tier() -> str:
-    """The cheapest catalog tier with no ceiling on domained sites."""
+    """The cheapest catalog tier with no ceiling on custom domains."""
     for tier in site_plans.list_site_plans():
         if tier.max_domained_sites is None:
             return tier.key
     raise AssertionError("no site plan tier has an uncapped domain allowance — catalog changed")
-
-
-def _the_free_site_limit() -> int:
-    """How many domained sites the floor allows, read from the catalog."""
-    floor = site_plans.get_site_plan(site_plans.BASE_SITE_PLAN_KEY)
-    assert floor is not None and floor.max_domained_sites is not None
-    return floor.max_domained_sites
 
 
 class _RecordingCF:
@@ -135,19 +122,21 @@ async def _attach(ws: str, site_id: str, hostname: str, cf: _RecordingCF | None 
     )
 
 
+async def _fill(ws: str, site_id: str, domain: str) -> None:
+    """Spend a free site's whole hostname allowance: apex, then ``www``."""
+    hosts = [domain, f"www.{domain}"]
+    for host in hosts[: site_plans.free_max_hostnames_per_site()]:
+        await _attach(ws, site_id, host)
+
+
 # --------------------------------------------------------------------------- #
-# Rule 1 + rule 3 — the unit is the SITE, and a site is not counted against
-# itself. This is the test the whole design turns on.
+# One free domain is apex + www on the same site.
 # --------------------------------------------------------------------------- #
 
 
 async def test_apex_and_www_both_land_on_one_free_site(monkeypatch):
-    """The pair every customer wants, and the case a hostname-counting cap refuses.
-
-    ``acme.com`` and ``www.acme.com`` are two ``SiteDomain`` rows on ONE site. Under
-    a cap of one they must both succeed, because the cap counts sites. If this ever
-    fails with ``billing.custom_domain_limit``, the count has drifted back to rows.
-    """
+    """The pair every customer wants. ``acme.com`` and ``www.acme.com`` are two
+    ``SiteDomain`` rows on ONE site, and both must succeed on the free floor."""
     _enforce(monkeypatch, on=True)
     ws = "ws_apex_www"
     site_id = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
@@ -160,24 +149,20 @@ async def test_apex_and_www_both_land_on_one_free_site(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# The cap itself — the SECOND site is where free stops.
+# Per site, not per workspace — a sibling's domain never closes this site's slot.
 # --------------------------------------------------------------------------- #
 
 
-async def test_a_second_free_site_is_refused(monkeypatch):
-    """One site's worth of custom domain, and the second site asking is told so."""
+async def test_every_free_site_gets_its_own_domain(monkeypatch):
+    """Three free sites in one workspace, each with its own apex + www."""
     _enforce(monkeypatch, on=True)
-    ws = "ws_second_site"
-    first = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
-    await _attach(ws, first, "www.first.com")
-    second = await _seed_site(workspace_id=ws, pocket_id="pk_2", plan_tier=_the_free_tier())
+    ws = "ws_every_site"
+    for i in range(3):
+        site_id = await _seed_site(workspace_id=ws, pocket_id=f"pk_{i}", plan_tier=_the_free_tier())
+        await _fill(ws, site_id, f"site{i}.com")
 
-    with pytest.raises(CloudError) as exc:
-        await _attach(ws, second, "www.second.com")
-
-    assert exc.value.status_code == 402
-    assert exc.value.code == "billing.custom_domain_limit"
-    assert str(_the_free_site_limit()) in exc.value.message
+        doc = await Site.get(site_id)
+        assert len(doc.domains) == site_plans.free_max_hostnames_per_site()
 
 
 async def test_the_refusal_precedes_every_cloudflare_call(monkeypatch):
@@ -186,50 +171,45 @@ async def test_the_refusal_precedes_every_cloudflare_call(monkeypatch):
     attach fail on a 1406 duplicate they can neither see nor clear."""
     _enforce(monkeypatch, on=True)
     ws = "ws_cap_no_cf"
-    first = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
-    await _attach(ws, first, "www.first.com")
-    second = await _seed_site(workspace_id=ws, pocket_id="pk_2", plan_tier=_the_free_tier())
+    site_id = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
+    await _fill(ws, site_id, "first.com")
     cf = _RecordingCF()
 
     with pytest.raises(CloudError):
-        await _attach(ws, second, "www.second.com", cf)
+        await _attach(ws, site_id, "extra.first.com", cf)
 
     assert cf.create_calls == []
     assert cf.route_calls == []
 
 
-async def test_a_refused_second_site_keeps_a_clean_document(monkeypatch):
-    """No half-state on the refused site: nothing on ``domains``, and nothing on
-    ``allowed_origins`` either — that list is what authorizes a host to POST
-    captures at the site, so a stray entry there is a real capture hole."""
+async def test_a_refused_attach_keeps_a_clean_document(monkeypatch):
+    """No half-state on the refused site: the domains and ``allowed_origins`` it
+    had before, and nothing more. ``allowed_origins`` is what authorizes a host to
+    POST captures at the site, so a stray entry there is a real capture hole."""
     _enforce(monkeypatch, on=True)
     ws = "ws_cap_clean"
-    first = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
-    await _attach(ws, first, "www.first.com")
-    second = await _seed_site(workspace_id=ws, pocket_id="pk_2", plan_tier=_the_free_tier())
+    site_id = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
+    await _fill(ws, site_id, "first.com")
+    before = await Site.get(site_id)
 
     with pytest.raises(CloudError):
-        await _attach(ws, second, "www.second.com")
+        await _attach(ws, site_id, "extra.first.com")
 
-    doc = await Site.get(second)
-    assert doc.domains == []
-    assert doc.allowed_origins == []
+    doc = await Site.get(site_id)
+    assert [d.hostname for d in doc.domains] == [d.hostname for d in before.domains]
+    assert doc.allowed_origins == before.allowed_origins
+    assert "extra.first.com" not in doc.allowed_origins
 
 
 # --------------------------------------------------------------------------- #
-# Rule 2 — count FLOOR sites only. A paying site does not eat the free allowance.
+# Paid sites and siblings.
 # --------------------------------------------------------------------------- #
 
 
 async def test_a_paid_sites_domain_does_not_consume_the_free_allowance(monkeypatch):
-    """The mixed workspace, and the rule easiest to leave out.
-
-    Site B pays for an uncapped allowance and holds a domain; site C is on the
-    floor and holds none. C's first attach must succeed — its allowance is one and
-    nothing on the floor has spent it. A census that counted every domained site
-    would refuse C, which means buying a plan for one site would silently take the
-    free domain away from every other site in the workspace.
-    """
+    """The mixed workspace: a paying site holds a domain, and a free site beside it
+    still attaches its own. Buying a plan for one site must never take the free
+    domain away from another."""
     _enforce(monkeypatch, on=True)
     ws = "ws_mixed"
     paid = await _seed_site(
@@ -247,8 +227,8 @@ async def test_a_paid_sites_domain_does_not_consume_the_free_allowance(monkeypat
 
 
 async def test_an_uncapped_site_is_never_refused_however_many_siblings_have_domains(monkeypatch):
-    """The paid tier's actual product: no ceiling. Two free-floor sites elsewhere
-    in the workspace do not stand between a paying site and its domain."""
+    """The paid tier's actual product: no ceiling. Free-floor sites elsewhere in
+    the workspace do not stand between a paying site and its domain."""
     _enforce(monkeypatch, on=True)
     ws = "ws_uncapped"
     other = await _seed_site(workspace_id=ws, pocket_id="pk_other", plan_tier=_the_free_tier())
@@ -266,8 +246,7 @@ async def test_an_uncapped_site_is_never_refused_however_many_siblings_have_doma
 
 
 async def test_another_workspaces_domains_are_invisible(monkeypatch):
-    """Tenancy. The census is scoped to one workspace, so a busy neighbour cannot
-    spend this workspace's allowance."""
+    """Tenancy. Nothing another workspace attaches has any bearing here."""
     _enforce(monkeypatch, on=True)
     neighbour = await _seed_site(
         workspace_id="ws_neighbour", pocket_id="pk_1", plan_tier=_the_free_tier()
@@ -281,12 +260,8 @@ async def test_another_workspaces_domains_are_invisible(monkeypatch):
 
 
 async def test_an_archived_duplicate_does_not_spend_the_allowance(monkeypatch):
-    """Archived sites are dedupe tombstones (PERF-2), not sites a user can see.
-
-    Counting one would charge a workspace twice for a single site it only has one
-    card for, and the user would have no way to find the row consuming their
-    domain. Matches the gallery read's ``archived: {"$ne": True}``.
-    """
+    """Archived sites are dedupe tombstones (PERF-2), not sites a user can see. A
+    tombstone holding a domain must not stand in the way of the live site's own."""
     _enforce(monkeypatch, on=True)
     ws = "ws_archived"
     ghost = await _seed_site(
@@ -310,55 +285,49 @@ async def test_an_archived_duplicate_does_not_spend_the_allowance(monkeypatch):
 
 # --------------------------------------------------------------------------- #
 # Never retroactive — the posture the capability gate already had, re-pinned for
-# the count because the count is the newer and easier one to place wrongly.
+# the count because the count is the easier one to place wrongly.
 # --------------------------------------------------------------------------- #
 
 
 async def test_re_adding_a_connected_hostname_is_never_refused_for_quota(monkeypatch):
     """Pressing Add on a hostname the site already has must stay a no-op that
-    returns the stored row, even when the workspace is over its cap.
+    returns the stored row, even when the site is already at its hostname cap.
 
     It is the only self-service repair for a domain connected before the routing
     lane shipped — those have no Worker route and silently serve the fallback
     origin while Cloudflare reports them active. Placing the count gate above the
-    already-connected branch would make a workspace at its cap unable to fix them.
+    already-connected branch would make a full site unable to fix them.
     """
     _enforce(monkeypatch, on=True)
     ws = "ws_repair_over_cap"
     site_id = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
-    await _attach(ws, site_id, "www.legacy.com")
+    await _fill(ws, site_id, "legacy.com")
     # Strip the route and stamp a deploy target, reproducing a pre-routing domain.
     doc = await Site.get(site_id)
     doc.deploy_target = "workers"
-    doc.domains[0].cf_route_id = ""
+    doc.domains[-1].cf_route_id = ""
     await doc.save()
-    # ...and put the workspace over its cap from a second site, so a quota check
-    # placed above the repair would fire.
-    over = await _seed_site(workspace_id=ws, pocket_id="pk_2", plan_tier=_the_free_tier())
-    over_doc = await Site.get(over)
-    over_doc.domains = (await Site.get(site_id)).domains
-    await over_doc.save()
+    hostname = doc.domains[-1].hostname
     cf = _RecordingCF()
 
     res = await sites_service.add_domain(
-        workspace_id=ws, site_id=site_id, hostname="www.legacy.com", _cloudflare=cf
+        workspace_id=ws, site_id=site_id, hostname=hostname, _cloudflare=cf
     )
 
-    assert res.hostname == "www.legacy.com"
+    assert res.hostname == hostname
     assert len(cf.route_calls) == 1
     assert cf.create_calls == []
 
 
 # --------------------------------------------------------------------------- #
-# The per-site hostname guard. A recommendation this build made, not a rule the
-# captain handed down — one constant, one comparison, deletable in a line.
+# The per-site hostname cap — one constant, one comparison.
 # --------------------------------------------------------------------------- #
 
 
 async def test_a_free_site_may_carry_apex_plus_www_and_no_more(monkeypatch):
-    """The site-unit cap leaves hostname count unbounded, so a free workspace could
-    otherwise point fifty domains at its one allowed site, each costing a Cloudflare
-    custom hostname and a Worker route at $0 revenue. Two is apex + www."""
+    """Without a ceiling a free site could point fifty domains at itself, each
+    costing a Cloudflare custom hostname and a Worker route at $0 revenue. Two is
+    apex + www."""
     _enforce(monkeypatch, on=True)
     ws = "ws_hostname_guard"
     site_id = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
@@ -370,6 +339,7 @@ async def test_a_free_site_may_carry_apex_plus_www_and_no_more(monkeypatch):
 
     assert exc.value.status_code == 402
     assert exc.value.code == "billing.custom_domain_limit"
+    assert str(site_plans.free_max_hostnames_per_site()) in exc.value.message
 
 
 async def test_the_hostname_guard_does_not_apply_to_a_paying_site(monkeypatch):
@@ -390,33 +360,30 @@ async def test_the_hostname_guard_does_not_apply_to_a_paying_site(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# OSS / self-host — billing off means no paywall AND no extra read.
+# OSS / self-host — billing off means no paywall.
 # --------------------------------------------------------------------------- #
 
 
-async def test_with_billing_off_a_second_site_attaches_freely(monkeypatch):
+async def test_with_billing_off_a_free_site_is_not_capped(monkeypatch):
     """Self-host has no billing and must not inherit a cap from this branch."""
     _enforce(monkeypatch, on=False)
     ws = "ws_oss_cap"
-    first = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
-    await _attach(ws, first, "www.first.com")
-    second = await _seed_site(workspace_id=ws, pocket_id="pk_2", plan_tier=_the_free_tier())
+    site_id = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
+    for i in range(site_plans.free_max_hostnames_per_site() + 1):
+        await _attach(ws, site_id, f"host{i}.acme.com")
 
-    res = await _attach(ws, second, "www.second.com")
+    doc = await Site.get(site_id)
+    assert len(doc.domains) == site_plans.free_max_hostnames_per_site() + 1
 
-    assert res.hostname == "www.second.com"
 
+async def test_the_attach_never_scans_sibling_sites(monkeypatch):
+    """The allowance is per site, so the gate reads only the site it loaded.
 
-async def test_with_billing_off_the_census_query_never_runs(monkeypatch):
-    """Not just "no error raised" — no DB read either.
-
-    The census scans every domained site in the workspace. On a self-host install
-    that read buys nothing and would still cost a round trip on every attach, so
-    the flag check comes first. ``_load`` uses ``find_one``; the census is the only
-    caller of ``find`` on this path, which is what makes the assertion specific.
+    ``_load`` uses ``find_one``; a ``find`` on this path would mean a workspace
+    census has crept back in. Checked with billing ON, where it would bite.
     """
-    _enforce(monkeypatch, on=False)
-    ws = "ws_oss_noread"
+    _enforce(monkeypatch, on=True)
+    ws = "ws_no_census"
     site_id = await _seed_site(workspace_id=ws, pocket_id="pk_1", plan_tier=_the_free_tier())
 
     finds: list[object] = []

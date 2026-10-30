@@ -27,6 +27,9 @@
 #      stderr tail and assert it reaches the log and not the row.
 #
 # Mutations in tests/mutations/sl2_build_job.json, run and caught.
+#
+# Changes (2026-10-01, CN-4): the arq pool moved to _core.redis_client, so the
+# unset-URL test resets it there.
 
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pocketpaw_ee.cloud._core import redis_client
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.sites import build_job as bj
 from pocketpaw_ee.sites import build_state as bs
@@ -218,6 +222,36 @@ class TestTheCaptureSecretNeverLeavesThisProcess:
         payload = pool.calls[0]["args"]
         assert "site_key_realsecret" not in repr(payload)
 
+    async def test_a_publish_is_queued_on_the_site_build_lane(self, beanie_test_db) -> None:
+        """backend-perf C1 — the publish enqueue names its own queue.
+
+        On arq's default queue this job competed for one cluster-wide ``max_jobs`` of 10
+        with chat runs, workspace jobs and both /ship jobs. Ten concurrent publishes left
+        chat with no slot, and the request that lost did not fail: it sat in Redis behind
+        a 30-minute ``job_timeout`` while its SSE stream delivered heartbeats and nothing
+        else. Dropping the kwarg puts the job back on the shared ceiling silently, so the
+        queue is asserted rather than inferred from the fact that builds still run.
+        """
+        site = await _insert_site()
+        pool = FakePool()
+
+        await bj.enqueue_site_build(
+            site, engine="react", generator_input=_input(), _pool_override=pool
+        )
+
+        assert pool.calls[0]["kwargs"]["_queue_name"] == bj.SITE_BUILD_QUEUE_NAME
+
+    async def test_the_build_lane_is_not_arqs_default_queue(self) -> None:
+        """The constant has to differ from arq's default, or the split is a no-op.
+
+        Asserted on its own because every other test here would pass just as happily with
+        ``SITE_BUILD_QUEUE_NAME = "arq:queue"``: the kwarg would be present, the enqueue
+        would work, and the lane would still be sharing one ceiling with chat.
+        """
+        from arq.constants import default_queue_name
+
+        assert bj.SITE_BUILD_QUEUE_NAME != default_queue_name
+
 
 # ---------------------------------------------------------------------------
 # Reading the scaffold
@@ -345,10 +379,11 @@ class TestTheJobCarriesItsOwnTimeout:
         assert site_build.coroutine is bj.run_site_build
         assert site_build.timeout_s == bj.site_build_job_timeout_seconds()
         assert site_build.timeout_s != registered["execute_workspace_job"].timeout_s
-        # A build is billed per attempt in a third-party sandbox, and the retry decision
-        # belongs to ``settle`` (which records why it gave up), not to a silent arq retry
-        # of a job whose row already reads ``failed``.
-        assert site_build.max_tries == 1
+        # A build is billed per attempt, so arq retries ONLY the job's own capacity
+        # ``Retry`` (Daytona's org limit was full and nothing ran): one try per delay.
+        from pocketpaw_ee.sites.capacity import CAPACITY_MAX_TRIES
+
+        assert site_build.max_tries == CAPACITY_MAX_TRIES
 
 
 # ---------------------------------------------------------------------------
@@ -937,7 +972,7 @@ class TestTheEnqueueNeedsRedisConfigured:
         self, beanie_test_db, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("POCKETPAW_REDIS_URL", raising=False)
-        bj._reset_for_tests()
+        redis_client._reset_for_tests()
         try:
             site = await _insert_site()
             with pytest.raises(RuntimeError, match="POCKETPAW_REDIS_URL"):
@@ -949,7 +984,7 @@ class TestTheEnqueueNeedsRedisConfigured:
             assert fresh.build_reason == "enqueue_failed:pool_or_enqueue_raised"
         finally:
             # A cached pool would outlive this test and be handed to every later enqueue.
-            bj._reset_for_tests()
+            redis_client._reset_for_tests()
 
 
 class TestTheBuildLaneCannotRollBackAConcurrentPublish:

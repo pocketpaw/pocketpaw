@@ -1,26 +1,15 @@
 # chat.py — /chat surface preamble.
 #
-# Updated: 2026-06-06 — ``_session_count`` now passes ``surface="chat"`` so
-# the preamble reports only chat-surface (+ legacy null) threads, not the
-# files / pocket-creation / foresight sessions that live in their own rails
-# (session-isolation fix).
+# On the chat surface itself the agent already has the conversation on hand, so
+# the preamble stays minimal: the surface tag plus the caller's chat-thread
+# count (chat-surface and legacy null rows only, via
+# ``sessions_service.count_for_user``, a server-side count), so the agent can
+# answer "how many threads do I have?" without a round-trip. A failed count
+# renders as "unavailable" rather than failing the turn.
 #
-# Updated: 2026-05-24 — The sessions service now exposes a real
-# ``list_for_user`` helper, so the forward-compat getattr probe in
-# ``_session_count`` can go. Direct call, graceful try/except remains
-# for genuine runtime failures (DB down, etc.).
-#
-# Originally created: 2026-05-24 — When the user is on the chat surface
-# itself (not a pocket / not the home dashboard) we keep the preamble
-# minimal: the agent already has the conversation state on hand. We
-# surface the session count as a tiny hint so the agent can answer
-# "how many threads do I have?" without an extra round-trip.
-#
-# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
-# ``SurfacePreamble``. The one mutable thing this handler reads — the session
-# count — is the one thing it renders, so a digest of the rendered text is an
-# exact key here rather than an approximation: nothing was read that the text
-# does not show. It moves when a thread is created or deleted.
+# Returns a ``SurfacePreamble`` whose cache key is a digest of the rendered
+# text. That key is exact: the count is the one mutable thing read and the one
+# thing rendered, so it moves when a thread is created or deleted.
 
 from __future__ import annotations
 
@@ -52,10 +41,7 @@ async def _session_count(workspace_id: str, user_id: str) -> int | None:
         # Scope to the chat surface (chat + legacy null rows) so the count
         # reflects the /chat sidebar, not files / pocket-creation / foresight
         # threads that live in their own rails.
-        sessions = await sessions_service.list_for_user(
-            workspace_id=workspace_id, user_id=user_id, surface="chat"
-        )
-        return len(sessions or [])
+        return await sessions_service.count_for_user(workspace_id, user_id, surface="chat")
     except Exception:
         logger.debug("chat_handler: session count failed", exc_info=True)
         return None

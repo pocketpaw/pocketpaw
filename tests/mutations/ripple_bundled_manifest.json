@@ -1,0 +1,38 @@
+[
+  {
+    "label": "readers fetch over the network instead of using the bundled catalog",
+    "file": "src/pocketpaw/ripple/manifest.py",
+    "find": "    if not url:\n        return load_bundled_manifest()\n",
+    "replace": "    if not url:\n        url = \"http://localhost:5174/manifest.json\"\n",
+    "tests": [
+      "tests/unit/test_bundled_ripple_manifest.py"
+    ]
+  },
+  {
+    "label": "a failing override returns no catalog instead of the bundled one",
+    "file": "src/pocketpaw/ripple/manifest.py",
+    "find": "        parsed = bundled\n    else:\n",
+    "replace": "        return None\n    else:\n",
+    "tests": [
+      "tests/unit/test_bundled_ripple_manifest.py"
+    ]
+  },
+  {
+    "label": "an override older than the bundled catalog is served",
+    "file": "src/pocketpaw/ripple/manifest.py",
+    "find": "        if got is None or (floor is not None and got < floor):\n",
+    "replace": "        if got is None:\n",
+    "tests": [
+      "tests/unit/test_bundled_ripple_manifest.py"
+    ]
+  },
+  {
+    "label": "Paw Bar reads a different catalog than the other readers",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "RIPPLE_MANIFEST: dict[str, Any] = load_bundled_manifest()\n",
+    "replace": "RIPPLE_MANIFEST: dict[str, Any] = json.loads(RIPPLE_MANIFEST_PATH.read_text(encoding=\"utf-8\"))\n",
+    "tests": [
+      "tests/ee/test_ripple_manifest_readers_bundled.py"
+    ]
+  }
+]

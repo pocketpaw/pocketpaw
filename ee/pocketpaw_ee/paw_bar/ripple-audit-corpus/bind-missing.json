@@ -1,0 +1,29 @@
+{
+  "about": "An input bound to a state path the spec never seeds. Core only.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "input",
+          "bind": "email",
+          "props": {
+            "label": "Email"
+          }
+        }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "bindMissing",
+        "path": "/ui/children/0/bind",
+        "message": "bind path `email` is not in state; seed it"
+      }
+    ],
+    "python": []
+  }
+}

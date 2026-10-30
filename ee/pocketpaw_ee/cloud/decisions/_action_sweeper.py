@@ -81,6 +81,8 @@ import aiosqlite
 from fastapi import FastAPI
 from soul_protocol.spec.journal import Actor
 
+from pocketpaw_ee.cloud._core.periodic import sweep_tick
+
 logger = logging.getLogger(__name__)
 
 _TASK_KEY = "_decisions_action_sweeper_task"
@@ -383,7 +385,8 @@ async def _run_sweeper_loop() -> None:
             raise
 
         try:
-            await sweep_abandoned_actions()
+            async with sweep_tick("decisions_action_sweeper", interval):
+                await sweep_abandoned_actions()
         except Exception:  # noqa: BLE001
             logger.exception("decisions.action_sweeper: pass failed")
 

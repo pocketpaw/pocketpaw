@@ -10,24 +10,22 @@ Public API is module-level ``async def`` functions:
 - ``set_active_workspace(ctx, workspace_id)``
 - ``set_avatar_path(ctx, avatar_path)``
 - ``get_home_pocket_id(user_id)`` / ``claim_home_pocket_id(user_id, id, *, expected)``
-- ``resolve_display_names(user_ids)`` / ``resolve_identities(user_ids)``
+- ``resolve_display_names(user_ids)`` / ``resolve_identities(user_ids)`` /
+  ``resolve_public_names(user_ids)``: batch id -> name lookups, one query each.
+  ``resolve_identities`` adds the avatar (a separate function: a dozen callers
+  read ``resolve_display_names`` as a plain ``dict[str, str]``).
+  ``resolve_public_names`` never falls back to the email, for anonymous
+  surfaces (a Discover card's opt-in creator name).
 
-Updated: 2026-08-24 — added ``resolve_identities``, the name-AND-avatar
-sibling of ``resolve_display_names``, for surfaces that put a face next to
-a name (the Paw Bar concierge thread attributes each takeover reply to the
-teammate who typed it). A separate function rather than a widened return
-type: a dozen callers already read ``resolve_display_names`` as a plain
-``dict[str, str]``.
-
-Updated: 2026-05-21 — added the ``home_pocket_id`` get + atomic-claim
-pair. The pockets service owns home-pocket provisioning but stores the
-resolved id here so it survives across sessions and devices; routing the
-read/write through this service keeps ``models.user`` writes inside the
-auth entity. ``claim_home_pocket_id`` is a compare-and-swap (not a plain
-write) so a first-login provision race resolves to a single home pocket.
+The pockets service owns home-pocket provisioning but stores the resolved id
+here, so ``models.user`` writes stay inside the auth entity;
+``claim_home_pocket_id`` is a compare-and-swap so a first-login provision race
+resolves to a single home pocket.
 """
 
 from __future__ import annotations
+
+import re
 
 from beanie import PydanticObjectId
 
@@ -57,6 +55,14 @@ def _to_domain(doc: _UserDoc) -> AuthUser:
         is_verified=doc.is_verified,
         is_superuser=doc.is_superuser,
         mfa_enabled=doc.mfa_enabled,
+        is_guest=bool(getattr(doc, "is_guest", False)),
+        # Direct attribute access, not getattr-with-default: the field is
+        # declared on the User document, so a missing one is a schema bug that
+        # should raise here rather than read back as "no platform access" on
+        # every request forever.
+        platform_role=doc.platform_role,
+        early_access_granted_at=doc.early_access_granted_at,
+        notify_plans_at=doc.notify_plans_at,
     )
 
 
@@ -184,9 +190,10 @@ async def suggest_workspace_members(workspace_id: str, q: str, *, limit: int = 8
     full_name / email. Used by the chat ``/mentions/suggest`` endpoint."""
     query: dict = {"workspaces.workspace": workspace_id}
     if q:
+        pattern = re.escape(q)  # literal substring: no injection, no ReDoS
         query["$or"] = [
-            {"full_name": {"$regex": q, "$options": "i"}},
-            {"email": {"$regex": q, "$options": "i"}},
+            {"full_name": {"$regex": pattern, "$options": "i"}},
+            {"email": {"$regex": pattern, "$options": "i"}},
         ]
     docs = await _UserDoc.find(query).limit(limit).to_list()
     return [
@@ -224,6 +231,23 @@ async def resolve_display_names(user_ids: set[str]) -> dict[str, str]:
         str(u.id): ((u.full_name or "").strip() or (u.email or "").strip() or str(u.id))
         for u in docs
     }
+
+
+async def resolve_public_names(user_ids: set[str]) -> dict[str, str]:
+    """Batch-resolve user ids -> the name an ANONYMOUS viewer may see, in one
+    query: the trimmed ``full_name`` only. A user with no name, a non-ObjectId
+    id and an unknown id are all absent from the map; the email is never a
+    fallback, because the caller puts this on a public page."""
+    object_ids: list[PydanticObjectId] = []
+    for uid in user_ids:
+        try:
+            object_ids.append(PydanticObjectId(uid))
+        except Exception:
+            continue
+    if not object_ids:
+        return {}
+    docs = await _UserDoc.find({"_id": {"$in": object_ids}}).to_list()
+    return {str(u.id): name for u in docs if (name := (u.full_name or "").strip())}
 
 
 async def resolve_identities(user_ids: set[str]) -> dict[str, UserIdentity]:
@@ -269,6 +293,7 @@ __all__ = [
     "get_home_pocket_id",
     "get_profile",
     "resolve_display_names",
+    "resolve_public_names",
     "set_active_workspace",
     "set_avatar_path",
     "suggest_workspace_members",

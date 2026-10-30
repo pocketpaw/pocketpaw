@@ -16,6 +16,8 @@ from pocketpaw_ee.cloud.models.notification import Notification as _Notification
 from pocketpaw_ee.cloud.models.notification import NotificationSource as _NotificationSourceDoc
 from pocketpaw_ee.cloud.notifications.router import router
 
+from tests.cloud.conftest import fake_workspace_user, override_cloud_user
+
 
 async def _seed(
     *,
@@ -42,17 +44,15 @@ async def _seed(
 
 @pytest_asyncio.fixture
 async def app_client(mongo_db) -> AsyncClient:
-    from pocketpaw_ee.cloud.auth import current_active_user
+    async for client in _client_as("member"):
+        yield client
 
-    class _U:
-        id = "user-1"
-        active_workspace = "w1"
-        workspaces: list = []
 
+async def _client_as(role: str):
     app = FastAPI()
     add_error_handler(app)
     app.include_router(router, prefix="/api/v1")
-    app.dependency_overrides[current_active_user] = lambda: _U()
+    override_cloud_user(app, fake_workspace_user(role=role, workspace_id="w1", user_id="user-1"))
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://t") as client:
@@ -75,8 +75,13 @@ async def test_list_returns_dto_shape(app_client) -> None:
         "title",
         "body",
         "source_id",
+        "source_type",
+        "source_pocket_id",
+        "source_room_id",
+        "source_agent_id",
         "read",
         "created_at",
+        "actor_id",
     }
     assert item["user_id"] == "user-1"
     assert item["workspace_id"] == "w1"
@@ -84,6 +89,8 @@ async def test_list_returns_dto_shape(app_client) -> None:
     assert item["title"] == "hi"
     assert item["body"] == "b"
     assert item["source_id"] == "m1"
+    assert item["source_type"] == "message"
+    assert item["source_pocket_id"] is None
     assert item["read"] is False
     assert item["created_at"].endswith("+00:00")
 
@@ -121,3 +128,11 @@ async def test_clear_returns_count(app_client) -> None:
     resp = await app_client.post("/api/v1/notifications/clear")
     assert resp.status_code == 200
     assert resp.json() == {"cleared": 2}
+
+
+async def test_member_denied_delivery_config(mongo_db) -> None:
+    """``notifications.manage`` is ADMIN: a plain member must get the role 403."""
+    async for client in _client_as("member"):
+        resp = await client.get("/api/v1/notifications/delivery-config")
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "workspace.insufficient_role"

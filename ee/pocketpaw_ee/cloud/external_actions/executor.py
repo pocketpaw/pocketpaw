@@ -51,6 +51,9 @@
 #     ``_assert_external_action_workspace`` is the primary gate; this is
 #     belt-and-braces.
 #   * NO secrets in logs — only action ids, connector names, and outcome status.
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -117,7 +120,7 @@ async def _persist_outcome(
 ) -> None:
     """Back-write the call outcome onto the persisted ``_external_action`` blob.
 
-    Direct SQL update — the same pattern belt's ``_persist_run_result`` and the
+    Store-API write — the same pattern belt's ``_persist_run_result`` and the
     pocket-write bridge's ``_persist_parked_policy_event_id`` use. The blob's
     ``outcome`` carries ``{status, response_summary, executed_at}`` so a reader
     (audit, a runs read model, a re-invocation idempotency check) sees the result
@@ -125,9 +128,6 @@ async def _persist_outcome(
     structured outcome but the free-text ``mark_executed`` / ``mark_failed``
     outcome still records it.
     """
-    import json as _json
-
-    import aiosqlite
 
     try:
         action = await store.get_action(action_id)
@@ -145,13 +145,7 @@ async def _persist_outcome(
         }
         params[EXTERNAL_ACTION_PARAM_KEY] = blob
 
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — back-write is best-effort
         logger.warning(
             "external_action: failed to persist outcome onto action %s — the "

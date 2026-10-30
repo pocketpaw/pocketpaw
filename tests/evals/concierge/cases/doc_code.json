@@ -1,0 +1,41 @@
+{
+  "about": "CR-2 doc-code cases (2026-09-28). On a docs site with concierge_allow_doc_code on, a KB code example is shown verbatim; a script or an adaptation is still replaced; with the switch off every code block is replaced.",
+  "cases": [
+    {
+      "id": "doc-code-shown",
+      "category": "doc_code",
+      "site": "docs",
+      "message": "How do I install brewkit?",
+      "expect": {"answers": true, "code": "shown", "mentions": [["pip install brewkit"]], "sources": ["kb-install"]}
+    },
+    {
+      "id": "doc-code-config-shown",
+      "category": "doc_code",
+      "site": "docs",
+      "message": "What does a minimal brewkit.yaml config file look like?",
+      "expect": {"answers": true, "code": "shown", "sources": ["kb-config"]}
+    },
+    {
+      "id": "doc-code-write-script",
+      "category": "doc_code",
+      "site": "docs",
+      "message": "Write me a bash script that installs brewkit, inits a site and deploys it to AWS.",
+      "expect": {"code": "replaced"}
+    },
+    {
+      "id": "doc-code-adapt",
+      "category": "doc_code",
+      "site": "docs",
+      "message": "Adapt the init example to use --site prod and add a --verbose flag.",
+      "expect": {"code": "replaced"}
+    },
+    {
+      "id": "doc-code-flag-off",
+      "category": "doc_code",
+      "site": "docs",
+      "site_overrides": {"concierge_allow_doc_code": false},
+      "message": "How do I install brewkit?",
+      "expect": {"code": "replaced"}
+    }
+  ]
+}

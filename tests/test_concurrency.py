@@ -39,7 +39,13 @@ def _make_slow_router(delay: float = 0.1):
     router = MagicMock()
 
     async def mock_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         await asyncio.sleep(delay)
         yield {"type": "message", "content": "ok", "metadata": {}}
@@ -110,7 +116,13 @@ async def test_session_lock_serialises_same_session(
     delay = 0.05
 
     async def slow_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         order.append(f"start:{message}")
         await asyncio.sleep(delay)
@@ -197,7 +209,13 @@ async def test_cross_session_runs_in_parallel(
     order = []
 
     async def slow_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         order.append(f"start:{message}")
         await asyncio.sleep(0.05)
@@ -288,7 +306,13 @@ async def test_global_semaphore_caps_concurrency(
     order = []
 
     async def slow_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         order.append(f"start:{message}")
         await asyncio.sleep(0.05)

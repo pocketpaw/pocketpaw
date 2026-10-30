@@ -1,14 +1,12 @@
 # tests/cloud/kb/test_router_ingest_funnel.py — REST ingest routes use the funnel.
-# Created: 2026-08-04 — ingest hardening follow-up. POST /kb/ingest/text and
-# POST /kb/ingest/url used to call ``_kb("ingest", ...)`` directly, bypassing
-# the hardened ``KnowledgeService.ingest_text_to_scope`` funnel: no
-# agent-backend compile on keyless boxes, no verbatim-fallback rejection —
-# the original silent-poisoning hole, re-opened through the REST door.
-# These tests drive the routes end-to-end through the REAL funnel and spy at
-# the subprocess boundary: whatever hits the kb binary must be one of the two
-# funnel argv shapes (plain ingest with a key, --article-json without one),
-# never a bare direct call; and fallback-marker rejection must surface as the
-# route's 500, not a stored article.
+#
+# POST /kb/ingest/text and POST /kb/ingest/url must ingest through the
+# hardened ``KnowledgeService`` funnel (agent-backend compile, verbatim-fallback
+# rejection), never call ``_kb("ingest", ...)`` directly. These tests drive the
+# routes end-to-end through the REAL funnel and spy at the subprocess boundary:
+# whatever hits the kb binary must be the funnel's ``--article-json`` argv,
+# with or without an API key in the environment; and fallback-marker rejection
+# must surface as the route's 500, not a stored article.
 """REST ingest routes are pinned to the hardened ingest funnel."""
 
 from __future__ import annotations
@@ -94,10 +92,14 @@ async def test_ingest_text_without_key_uses_article_json_funnel(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ingest_text_with_key_uses_plain_funnel(monkeypatch):
-    """With a key, the route emits the funnel's plain-ingest argv, no bare call."""
+async def test_ingest_text_with_key_still_uses_article_json_funnel(monkeypatch):
+    """An API key in the environment changes nothing: kb-go never compiles,
+    so the route still emits the pre-compiled --article-json call."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    spy = _SubprocessSpy([(0, json.dumps({"id": "art-r2", "compiled_with": "llm"}), "")])
+    _install_compiler(monkeypatch)
+    spy = _SubprocessSpy(
+        [(0, json.dumps({"id": "art-r2", "compiled_with": "pocketpaw-agent:claude_agent_sdk"}), "")]
+    )
     monkeypatch.setattr(knowledge.subprocess, "run", spy)
 
     with _patch_candidates():
@@ -109,15 +111,8 @@ async def test_ingest_text_with_key_uses_plain_funnel(monkeypatch):
 
     assert result["id"] == "art-r2"
     cmd = spy.calls[0]["cmd"]
-    assert cmd[1:] == [
-        "ingest",
-        "--scope",
-        f"workspace:{WORKSPACE}",
-        "--source",
-        "manual",
-        "--json",
-    ]
-    assert spy.calls[0]["input"] == "note"
+    assert cmd[1:] == ["ingest", "--article-json", "--scope", f"workspace:{WORKSPACE}", "--json"]
+    assert json.loads(spy.calls[0]["input"])["raw_text"] == "note"
 
 
 @pytest.mark.asyncio
@@ -173,7 +168,8 @@ async def test_ingest_text_old_binary_missing_compiled_with_maps_to_500(monkeypa
 @pytest.mark.asyncio
 async def test_ingest_text_fallback_marker_maps_to_500(monkeypatch):
     """Fallback rejection applies at the REST door: 500, not a stored article."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _install_compiler(monkeypatch)
     spy = _SubprocessSpy(
         [(0, json.dumps({"id": "art-r4", "compiled_with": "none (fallback)"}), "")]
     )

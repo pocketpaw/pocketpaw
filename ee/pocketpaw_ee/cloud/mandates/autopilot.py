@@ -1,5 +1,4 @@
 # ee/pocketpaw_ee/cloud/mandates/autopilot.py
-# Created: 2026-06-11 (feat/belt-autopilot).
 #
 # AUTOPILOT — Foresight-seeded simulated users that exercise a mandate's surface
 # and feed the FEEDBACK PATROL. When autopilot is ON, a per-mandate background
@@ -8,48 +7,34 @@
 #
 #   1. Reads the bound repo's surface context — the README's first lines + the
 #      recent commit titles (``git log``) — so the personas "use" something real.
-#   2. Builds N personas (1-10, default 3) via the FORESIGHT module's persona
-#      seeding (``ee.foresight.persona.OceanDrift`` — a genuine bridge to the sim
-#      module; the seeded drift shapes each persona's temperament).
+#   2. Builds N personas (1-10, default 3) seeded with the FORESIGHT module's
+#      ``OceanDrift`` (the drift shapes each persona's temperament).
 #   3. Each persona emits 1-3 STRUCTURED feedback items {text, severity 1-5,
-#      source: "autopilot:<persona>"} through a pluggable ``UserSim`` interface,
-#      POSTed through the EXISTING feedback service path
-#      (``service.file_feedback`` — NOT raw HTTP) so they become Sightings the
-#      next shift's foreman cites.
+#      source: "autopilot:<persona>"} through a pluggable ``UserSim``, filed
+#      through the EXISTING feedback service path (``service.file_feedback``) so
+#      they become Sightings the next shift's foreman cites.
 #
-# WHICH PATH + WHY (the honesty note the brief asks for): the brief allows a
-# lighter persona LLM call when foresight's full scenario runner is too heavy
-# for a per-cycle call. We took the LIGHTER path:
-#
-#   * Foresight's ``run_scenario`` / OASIS substrate is a TICK-BASED world
-#     simulation (CAMEL + OASIS + a YAML scenario config, anchors, prediction
-#     records) geared to "rehearse a decision across a population of personas",
-#     NOT "use a product and emit free-text feedback". Spinning it up per cycle
-#     would pull in torch/igraph/pandas and a multi-tick world loop for what is a
-#     one-shot "react to this surface" call — far too heavyweight, and its
-#     action vocabulary (``action/rationale/put``) is the wrong shape.
-#   * Instead we reuse the FOREMAN's proven pluggable transport pattern
-#     (``POCKETPAW_MANDATE_LLM=claude|mock`` — the SAME env the foreman reads) and
-#     the foresight ``OceanDrift`` persona-seed value object. The persona LLM
-#     call lives behind the ``UserSim`` interface so a later PR can swap the full
-#     foresight scenario runner in with no caller change. Mock mode is
-#     deterministic + seeded so tests get stable sightings.
+# Transport: ``POCKETPAW_MANDATE_LLM=claude|mock`` (the SAME env the foreman
+# reads). ``claude`` makes one call per persona through the foreman's sandboxed
+# ``run_claude_no_tools`` (no tools, empty temp cwd, scrubbed env, prompt on
+# stdin; the prompt carries repo text). ``mock`` is deterministic and seeded so
+# tests get stable sightings. Foresight's full scenario runner (a tick-based
+# OASIS world simulation) is too heavy for a per-cycle "react to this surface"
+# call; ``UserSim`` is the seam where it could replace the persona call.
 #
 # RESILIENCE: autopilot must NEVER crash a shift or the app. Every persona call,
 # every feedback POST, and every cycle is wrapped — a failure is logged and
 # swallowed per-cycle; the loop sleeps and tries again next interval.
 #
 # BACKGROUND TASK: each mandate's loop is an asyncio task in the process-local
-# ``_TASKS`` registry keyed by mandate id (mirrors
-# ``decisions._action_sweeper``'s create-task + cancel-and-await shape, but
-# per-mandate so STOP can cancel exactly one). The persisted
-# ``MandateDoc.autopilot.on`` flag is the source of truth for whether autopilot
-# SHOULD be running; the task is process-local and is re-derived from that flag
-# at boot by ``reconcile_autopilot_tasks`` (lifespan startup, run_immediate=False
-# so a boot never storms cycles); ``shutdown_all_autopilot_tasks`` drains every
-# loop at lifespan shutdown. Both are registered in ``cloud/__init__.mount_cloud``
-# under the same POCKETPAW_CLOUD_SCHEDULER_ENABLED gate the decisions
-# reconciler / run sweeper use.
+# ``_TASKS`` registry keyed by mandate id. The persisted ``MandateDoc.autopilot.on``
+# flag is the source of truth; ``reconcile_autopilot_tasks`` re-derives the loops
+# from it (run_immediate=False, so a boot never storms cycles) and
+# ``shutdown_all_autopilot_tasks`` drains them. ``autopilot_singleton`` wraps that
+# pair in the ``mandate_autopilot`` lease (``_core/lease.py``), so with several
+# web processes only the holder runs loops. A start/stop request handled by
+# another process saves the flag and announces ``mandate.autopilot``; the holder
+# re-reads the flag and starts or stops that one loop (``_on_remote_change``).
 
 from __future__ import annotations
 
@@ -60,8 +45,11 @@ import logging
 import os
 import random
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+from pocketpaw.lens_checkins import automation_run
 
 logger = logging.getLogger(__name__)
 
@@ -257,47 +245,30 @@ class MockUserSim:
         return [{"text": text, "severity": rng.randint(2, 5)} for text in chosen]
 
 
+@dataclass
 class ClaudeCliUserSim:
-    """Real persona transport — shells the ``claude`` CLI (demo bar).
-
-    Mirrors the foreman's ``ClaudeCliLlm``: ``claude -p <prompt> --output-format
-    json``; the prompt is a single argv element (the CLI does its own auth). The
-    model is asked for STRICT JSON: a list of ``{text, severity}`` feedback items.
+    """Real persona transport — the foreman's sandboxed tool-less call
+    (``foreman.run_claude_no_tools``: no tools, empty temp cwd, scrubbed env,
+    prompt on stdin), since the prompt carries repo text (README, commit titles).
+    The model is asked for STRICT JSON: a list of ``{text, severity}`` items.
     A transport / parse failure returns an empty list — the caller logs + skips
-    that persona; autopilot never raises out of a cycle."""
+    that persona; autopilot never raises out of a cycle. ``run`` is the develop
+    station's subprocess runner (injectable for tests)."""
+
+    run: Any = None
 
     async def react(self, *, persona: Persona, surface: dict[str, Any]) -> list[dict[str, Any]]:
+        from pocketpaw_ee.cloud.mandates.foreman import run_claude_no_tools
+
         prompt = _build_persona_prompt(persona, surface)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "claude",
-                "-p",
-                prompt,
-                "--output-format",
-                "json",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            text = await run_claude_no_tools(
+                prompt, timeout=_CLI_TIMEOUT, run=self.run, prefix="belt-autopilot-"
             )
-            try:
-                out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=_CLI_TIMEOUT)
-            except TimeoutError:
-                proc.kill()
-                await proc.wait()
-                logger.warning("autopilot: persona %s CLI timed out", persona.name)
-                return []
-            if proc.returncode != 0:
-                logger.warning(
-                    "autopilot: persona %s CLI failed (exit %s): %s",
-                    persona.name,
-                    proc.returncode,
-                    err_b.decode("utf-8", "replace").strip()[:200],
-                )
-                return []
-            text = _unwrap_cli_result(out_b.decode("utf-8", "replace"))
-            return _parse_items(text)
         except Exception:  # noqa: BLE001 — a transport failure skips this persona
-            logger.warning("autopilot: persona %s react crashed", persona.name, exc_info=True)
+            logger.warning("autopilot: persona %s claude call failed", persona.name, exc_info=True)
             return []
+        return _parse_items(text)
 
 
 def _build_persona_prompt(persona: Persona, surface: dict[str, Any]) -> str:
@@ -320,18 +291,6 @@ in the voice of the persona. Each item has a severity 1 (minor) to 5 (blocking).
 
 Reply with STRICT JSON only — no prose, no markdown fences:
 [{{"text": "<one concrete piece of feedback>", "severity": 3}}]"""
-
-
-def _unwrap_cli_result(out: str) -> str:
-    """Pull the ``result`` field off the claude CLI JSON envelope, tolerating a
-    bare-text response (mirrors the foreman's ClaudeCliLlm)."""
-    try:
-        envelope = json.loads(out)
-    except json.JSONDecodeError:
-        return out
-    if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
-        return envelope["result"]
-    return out
 
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
@@ -403,7 +362,15 @@ async def run_autopilot_cycle(
     through the EXISTING ``service.file_feedback`` path (not raw HTTP), so each
     item becomes a Sighting the next shift's foreman cites, with
     ``source="autopilot:<persona>"``."""
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
     from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    # Persona reactions are model calls off the credit ledger. A loop started
+    # before the launch flip (or rehydrated at boot) files nothing for an
+    # unpaid early-access workspace.
+    if await early_access_denial(workspace_id) is not None:
+        logger.info("autopilot: %s skipped, not in early access", mandate_id)
+        return 0
 
     sim: UserSim = user_sim or resolve_user_sim()
 
@@ -522,7 +489,13 @@ async def _autopilot_loop(
             logger.info("autopilot: loop for mandate %s cancelled — exiting", mandate_id)
             raise
         try:
-            await run_autopilot_cycle(workspace_id, mandate_id, users=users)
+            async with automation_run(
+                "mandate",
+                mandate_id,
+                schedule={"interval_seconds": interval},
+                workspace_id=workspace_id,
+            ):
+                await run_autopilot_cycle(workspace_id, mandate_id, users=users)
         except Exception:  # noqa: BLE001 — a bad cycle never sinks the loop
             logger.warning("autopilot: cycle failed for mandate %s", mandate_id, exc_info=True)
 
@@ -555,6 +528,65 @@ async def stop_autopilot(mandate_id: str) -> None:
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError, Exception):
         await task
+
+
+# ---------------------------------------------------------------------------
+# Several web processes: one holder runs every loop (see the header).
+# ---------------------------------------------------------------------------
+
+AUTOPILOT_LEASE = "mandate_autopilot"
+_CHANGE_INVALIDATOR = "mandate.autopilot"
+_singleton = None  # the lease-wrapped start/stop pair, once mount_cloud made it
+
+
+def autopilot_singleton():
+    """The ``mandate_autopilot`` lease around reconcile/shutdown, for the
+    lifespan hooks in ``mount_cloud``."""
+    global _singleton
+    from pocketpaw_ee.cloud._core.lease import leased
+
+    _singleton = leased(AUTOPILOT_LEASE, reconcile_autopilot_tasks, shutdown_all_autopilot_tasks)
+    return _singleton
+
+
+def runs_here() -> bool:
+    """Whether this process runs autopilot loops: the lease holder, or any
+    process when there is no lease (single process, or the scheduler is off)."""
+    return _singleton is None or _singleton.held
+
+
+def announce_change(mandate_id: str) -> None:
+    """Tell the other web processes this mandate's autopilot flag changed.
+    A no-op unless ``POCKETPAW_REALTIME_BUS=redis-streams``."""
+    from pocketpaw_ee.cloud._core.realtime.broadcast import broadcast_invalidate_soon
+
+    broadcast_invalidate_soon(_CHANGE_INVALIDATOR, mandate_id)
+
+
+async def _on_remote_change(mandate_id: str) -> None:
+    if not runs_here():
+        await stop_autopilot(mandate_id)
+        return
+    from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+    # ponytail: scans every autopilot-on mandate; a by-id read if that list grows.
+    rows = await mandate_service.list_autopilot_enabled()
+    row = next((r for r in rows if str(r["mandate_id"]) == mandate_id), None)
+    if row is None:
+        await stop_autopilot(mandate_id)
+    else:
+        await start_autopilot(
+            str(row["workspace_id"]), mandate_id, int(row["users"]), run_immediate=False
+        )
+
+
+def _register_change_invalidator() -> None:
+    from pocketpaw_ee.cloud._core.realtime.broadcast import register_invalidator
+
+    register_invalidator(_CHANGE_INVALIDATOR, _on_remote_change)
+
+
+_register_change_invalidator()
 
 
 def is_running(mandate_id: str) -> bool:
@@ -620,6 +652,10 @@ async def shutdown_all_autopilot_tasks() -> None:
 
 
 __all__ = [
+    "AUTOPILOT_LEASE",
+    "announce_change",
+    "autopilot_singleton",
+    "runs_here",
     "ClaudeCliUserSim",
     "MockUserSim",
     "Persona",

@@ -1,9 +1,9 @@
 [
   {
-    "label": "H3: unmatched requests key on the raw URL again",
+    "label": "H3: every unmatched request mints its own key again",
     "file": "ee/pocketpaw_ee/cloud/_core/timing.py",
-    "find": "            else UNMATCHED_PATH",
-    "replace": "            else request.url.path",
+    "find": "else UNMATCHED_PATH",
+    "replace": "else f\"<unmatched-{len(_buffers)}>\"",
     "tests": ["tests/cloud/_core/test_unbounded_maps.py::TestTimingKeySpace"]
   },
   {

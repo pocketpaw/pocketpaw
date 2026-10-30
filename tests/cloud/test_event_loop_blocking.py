@@ -354,6 +354,8 @@ class TestStreamLifetime:
             return _Doc()
 
         monkeypatch.setattr(runs_router, "_authorize", _authorize)
+        # The stream route authorizes readers through ``_authorize_read``.
+        monkeypatch.setattr(runs_router, "_authorize_read", _authorize)
 
         response = await runs_router.get_run_stream(
             "r1", after="0", user_id="u1", workspace_id="w1"

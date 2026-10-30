@@ -1,0 +1,58 @@
+[
+  {
+    "label": "entitlements always report payments closed",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/dto.py",
+    "find": "        payments_open=get_settings().payments_open,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_client_contract.py::test_entitlements_follow_the_settings"
+    ]
+  },
+  {
+    "label": "entitlements drop the free model allowlist",
+    "file": "ee/pocketpaw_ee/cloud/entitlements/dto.py",
+    "find": "        free_model_allowlist=list(get_settings().free_model_allowlist),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_client_contract.py::test_entitlements_default_to_payments_closed_and_the_settings_allowlist",
+      "tests/cloud/credits/test_early_access_client_contract.py::test_entitlements_follow_the_settings"
+    ]
+  },
+  {
+    "label": "a repeat notify moves the stored time",
+    "file": "ee/pocketpaw_ee/cloud/early_access/service.py",
+    "find": "{\"_id\": oid, \"notify_plans_at\": None}",
+    "replace": "{\"_id\": oid}",
+    "tests": [
+      "tests/cloud/credits/test_early_access_client_contract.py::test_notify_stamps_once_and_repeats_the_same_time",
+      "tests/cloud/credits/test_early_access_client_contract.py::test_notify_keeps_an_earlier_stamp"
+    ]
+  },
+  {
+    "label": "auth/me drops the grant stamp",
+    "file": "ee/pocketpaw_ee/cloud/auth/dto.py",
+    "find": "        early_access_granted_at=iso_utc(user.early_access_granted_at),\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_client_contract.py::test_auth_me_carries_grant_and_notify_stamps"
+    ]
+  },
+  {
+    "label": "auth/me drops the notify stamp at the domain mapper",
+    "file": "ee/pocketpaw_ee/cloud/auth/service.py",
+    "find": "        notify_plans_at=doc.notify_plans_at,\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/credits/test_early_access_client_contract.py::test_auth_me_carries_grant_and_notify_stamps"
+    ]
+  },
+  {
+    "label": "notify returns a zone-less time the browser reads as local",
+    "file": "ee/pocketpaw_ee/cloud/early_access/router.py",
+    "find": "notified_at=iso_utc(await service.notify_plans(ctx.user_id))",
+    "replace": "notified_at=(await service.notify_plans(ctx.user_id)).isoformat()",
+    "tests": [
+      "tests/cloud/credits/test_early_access_client_contract.py::test_notify_stamps_once_and_repeats_the_same_time"
+    ]
+  }
+]

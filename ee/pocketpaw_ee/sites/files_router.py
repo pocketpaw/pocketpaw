@@ -1,0 +1,219 @@
+# ee/pocketpaw_ee/sites/files_router.py — the HTTP surface for a PROJECT site's files,
+# so the builder's Code view can list, read and save the repo the agent edits.
+#
+# Five routes under ``/sites/by-pocket/{pocket_id}/files``: list, read one file, write
+# many, patch one with exact-once ``{old, new}`` blocks, delete many. Each is a thin
+# shell over ``sites.project_tools``, the same functions the agent's file tools call,
+# so the path policy, size caps, lockfile rule and "every write queues the draft build"
+# behaviour cannot drift between the two. ``GET .../source-file?path=PLAN.md`` serves
+# the agent's plan as raw ``text/markdown`` (``no-store``, ``nosniff``) for the chat's
+# PLAN.md artifact card; it reads only that file (``project_tools.read_source_file``).
+# ``POST .../visual-edit`` applies a preview click's edit to the stamped source file
+# (``sites.visual_edit``) and saves it through the same writer, renewing the pocket's
+# edit session. ``POST`` / ``DELETE
+# .../edit-session`` start (or renew) and end that session: while it lasts a framework
+# draft builds its source-tagged copy, and outside it only the untagged bundle.
+#
+# Every write can carry the base hash (sha256 of the text, the hash the read route
+# returns) of each file it replaces; a file that moved since is a 409 with its current
+# hash and text and nothing is saved (project_tools.check_bases). No base, no check.
+#
+# Auth, the same as A1's build routes: a session (``request_context``), the "sites"
+# plan feature, and ``fabric.write`` (owner / editor) on every route, reads included,
+# since the source is the author's own. The pocket is resolved through
+# ``sites.service.project_pocket``: the pockets read rule plus an explicit workspace
+# match (another workspace's pocket is a 404) and engine ``project`` (anything else is
+# 422 ``sites.not_a_project``). Writes also pass ``pockets.service`` edit access.
+# Its own router module so the route-auth audit (ROUTER_MODULES) can name it.
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
+
+from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
+from pocketpaw_ee.sites import project_tools, visual_edit
+from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.sites.dto import (
+    EditSessionEndResponse,
+    EditSessionResponse,
+    ProjectFileContentResponse,
+    ProjectFileListResponse,
+    ProjectFilePatchRequest,
+    ProjectFilesDeleteRequest,
+    ProjectFilesWriteRequest,
+    ProjectFileWriteResponse,
+    VisualEditRequest,
+    VisualEditResponse,
+)
+
+router = APIRouter(
+    tags=["Sites"],
+    dependencies=[Depends(require_plan_feature("sites"))],
+)
+
+_FILES = "/sites/by-pocket/{pocket_id}/files"
+
+
+@router.get(_FILES, response_model=ProjectFileListResponse)
+async def list_project_files(
+    pocket_id: str,
+    prefix: str | None = Query(default=None, max_length=512),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ProjectFileListResponse:
+    """Every file of a project site as ``{path, size}`` (UTF-8 bytes), sorted by path;
+    ``prefix`` keeps the paths that start with it."""
+    result = await project_tools.list_files(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, prefix=prefix
+    )
+    return ProjectFileListResponse(**result)
+
+
+@router.get(f"{_FILES}/content", response_model=ProjectFileContentResponse)
+async def read_project_file(
+    pocket_id: str,
+    path: str = Query(..., min_length=1, max_length=512),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ProjectFileContentResponse:
+    """One file, complete (never truncated: the editor saves it back). 404 for a path
+    that is not in the project."""
+    files = await project_tools.read_files(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, paths=[path]
+    )
+    return ProjectFileContentResponse(**files[0])
+
+
+@router.get("/sites/by-pocket/{pocket_id}/source-file")
+async def read_project_source_file(
+    pocket_id: str,
+    path: str = Query(..., min_length=1, max_length=512),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> Response:
+    """The draft's current ``PLAN.md`` as raw ``text/markdown``: what the chat's PLAN.md
+    artifact card opens, so it always shows the latest plan. Any other path is a 422
+    (``sites.source_file_not_allowed``, or ``sites.project_bad_path`` for one the file
+    tools refuse), a missing file a 404. Never cached; ``nosniff`` keeps it text."""
+    text = await project_tools.read_source_file(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, path=path
+    )
+    return Response(
+        content=text.encode("utf-8"),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.put(_FILES, response_model=ProjectFileWriteResponse)
+async def write_project_files(
+    pocket_id: str,
+    body: ProjectFilesWriteRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ProjectFileWriteResponse:
+    """Create or overwrite files (full contents) in one draft save, then queue the
+    draft build. One refused path or size saves nothing. A file whose stored hash is
+    not its base_hashes entry is a 409 sites.project_file_conflict carrying
+    the current hash and text; nothing is saved."""
+    result = await project_tools.write_files(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        files=body.files,
+        base_hashes=body.base_hashes,
+    )
+    return ProjectFileWriteResponse(**result)
+
+
+@router.post(f"{_FILES}/patch", response_model=ProjectFileWriteResponse)
+async def patch_project_file(
+    pocket_id: str,
+    body: ProjectFilePatchRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ProjectFileWriteResponse:
+    """Apply ``edits`` to one existing file; each ``old`` must match the running text
+    exactly once (422 otherwise, nothing saved). A base_hash the file no longer
+    has is a 409, like the PUT."""
+    result = await project_tools.patch_file(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        path=body.path,
+        edits=[e.model_dump() for e in body.edits],
+        base_hash=body.base_hash,
+    )
+    return ProjectFileWriteResponse(**result)
+
+
+@router.delete(_FILES, response_model=ProjectFileWriteResponse)
+async def delete_project_files(
+    pocket_id: str,
+    body: ProjectFilesDeleteRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> ProjectFileWriteResponse:
+    """Delete files. Every path must exist (404, nothing deleted otherwise);
+    package.json cannot be deleted (422)."""
+    result = await project_tools.delete_files(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, paths=body.paths
+    )
+    return ProjectFileWriteResponse(**result)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/visual-edit", response_model=VisualEditResponse)
+async def visual_edit_project_file(
+    pocket_id: str,
+    body: VisualEditRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> VisualEditResponse:
+    """Apply one edit made on the preview (text, class, attr, delete, duplicate, move)
+    to the source file its ``src`` stamp names, save it like any file write and queue
+    the draft build. 409 when the file moved on (``stale``), 422 for a bad request or
+    an element the generator will not edit, 501 when the generator has no visual-edit."""
+    result = await visual_edit.apply_visual_edit(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        src=body.src,
+        kind=body.kind,
+        value=body.value,
+        base_hash=body.base_hash,
+    )
+    return VisualEditResponse(**result)
+
+
+_EDIT_SESSION = "/sites/by-pocket/{pocket_id}/edit-session"
+
+
+@router.post(_EDIT_SESSION, response_model=EditSessionResponse)
+async def start_edit_session(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> EditSessionResponse:
+    """Start or renew the visual-edit session on a project draft (a select / design
+    tool turned on) and answer the draft: its source-tagged copy is queued when only
+    the untagged one was built, so poll it like ``/native-artifact``. 404 for another
+    workspace's pocket, 403 without edit access, 422 for a site that is not a project."""
+    result = await sites_service.start_project_edit_session(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return EditSessionResponse(**result)
+
+
+@router.delete(_EDIT_SESSION, response_model=EditSessionEndResponse)
+async def end_edit_session(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> EditSessionEndResponse:
+    """End the visual-edit session (the builder left its edit tools): later draft
+    builds are untagged only. Idempotent."""
+    result = await sites_service.end_project_edit_session(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return EditSessionEndResponse(**result)

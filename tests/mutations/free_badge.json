@@ -159,8 +159,8 @@
   {
     "label": "the pseudo-element guard is dropped, so ::after can cover the badge",
     "file": "ee/pocketpaw_ee/sites/badge.py",
-    "find": "    return f\"{BADGE_OPEN}<style>{_LOOK_CSS}{_GUARD_CSS}</style>{build_badge_anchor()}{BADGE_CLOSE}\"",
-    "replace": "    return f\"{BADGE_OPEN}<style>{_LOOK_CSS}</style>{build_badge_anchor()}{BADGE_CLOSE}\"",
+    "find": "    return f\"{BADGE_OPEN}<style>{_LOOK_CSS}{_GUARD_CSS}</style>{anchor}{BADGE_CLOSE}\"",
+    "replace": "    return f\"{BADGE_OPEN}<style>{_LOOK_CSS}</style>{anchor}{BADGE_CLOSE}\"",
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_a_pseudo_element_overlay_is_neutralised"
     ]
@@ -219,6 +219,71 @@
     "tests": [
       "tests/ee/sites/test_free_badge.py::test_every_page_in_the_tree_gets_a_badge",
       "tests/ee/sites/test_free_badge.py::test_a_first_publish_badges_before_it_deploys"
+    ]
+  },
+  {
+    "label": "a partner-sold site ships the free badge (or nothing) instead of its co-brand mark",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and getattr(site_plans.site_scoped_tier(ent.plan_tier), \"partner_only\", False)",
+    "replace": "        and False",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_partner_sold_site_carries_the_cobrand_mark",
+      "tests/ee/sites/test_free_badge.py::test_selling_a_free_site_swaps_its_badge_for_the_cobrand"
+    ]
+  },
+  {
+    "label": "a lapsed partner site keeps its co-brand instead of getting the free badge back",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        and ent.subscription_active\n        and getattr(site_plans",
+    "replace": "        and True\n        and getattr(site_plans",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_lapsed_partner_site_gets_the_free_badge_back"
+    ]
+  },
+  {
+    "label": "a non-ASCII co-brand name reaches the page raw and breaks the latin-1 write-back",
+    "file": "ee/pocketpaw_ee/sites/badge.py",
+    "find": "    return html.escape(value).encode(\"ascii\", \"xmlcharrefreplace\").decode(\"ascii\")",
+    "replace": "    return html.escape(value)",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_hostile_cobrand_name_is_escaped_and_ascii"
+    ]
+  },
+  {
+    "label": "the sale stops stamping its client before the redeploy, so the sold site ships unmarked",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    prior_client_id = getattr(doc, \"partner_client_id\", None)\n    await doc.set({\"partner_client_id\": partner_client_id})\n",
+    "replace": "    prior_client_id = getattr(doc, \"partner_client_id\", None)\n",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_the_sale_redeploy_already_carries_the_cobrand_mark"
+    ]
+  },
+  {
+    "label": "a refused sale leaves the site marked as sold to the client",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            await doc.set({\"partner_client_id\": prior_client_id})\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_a_short_wallet_refuses_the_sale_and_changes_nothing",
+      "tests/cloud/partners/test_partners.py::test_a_failed_resale_keeps_the_previous_client"
+    ]
+  },
+  {
+    "label": "a long partner name is shown whole and runs the pill off a phone screen",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                if len(footer_name) <= _COBRAND_NAME_MAX\n",
+    "replace": "                if True\n",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_long_footer_name_is_shortened_on_screen_but_whole_for_screen_readers"
+    ]
+  },
+  {
+    "label": "the co-brand drops the full name from its accessible label",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "                label=f\"Made by {footer_name} · Paw Sites by PocketPaw\",\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_free_badge.py::test_a_long_footer_name_is_shortened_on_screen_but_whole_for_screen_readers"
     ]
   }
 ]

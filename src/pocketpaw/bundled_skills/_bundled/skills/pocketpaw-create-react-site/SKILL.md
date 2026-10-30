@@ -10,8 +10,7 @@ description: |
   static marketing page ("build a dentist landing page", "a marketing page for
   my bakery") — that is the common case and belongs to the html track
   (create_html_site) or pocketpaw-create-paw-site. When you DO use it: YOU
-  write the React components (Hero, Pricing, Faq, ...) at the quality bar set
-  by pocketpaw-design-taste, assemble them into a source map rooted at
+  write the React components, assemble them into a source map rooted at
   src/App.tsx, and a deterministic tool persists the pocket stamped
   type="site" + pattern="landing" + engine="react". You do NOT compose a
   rippleSpec, do NOT call get_widget_spec, do NOT use the pocket specialist.
@@ -25,6 +24,18 @@ description: |
 ---
 
 # Build a Paw Site — the React-track authoring brain
+
+<!--
+  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): "What the
+  project has" teaches declaring npm packages (`dependencies` /
+  set_site_dependencies; any package, version or dist-tag) and importing them
+  normally, with a dynamic import() in useEffect only for browser-only
+  libraries; package.json / vite.config.* are author-writable; a "Verify
+  loop" section follows STEP 3 (only
+  `verification.status == passed` means ready; fix → verify_site, max 3
+  rounds; unverified said plainly). The edit bullet and paw-fx entry no longer
+  claim a dependency cannot be added.
+-->
 
 You're building a **Paw Site** on the **React track**: a real, standalone
 marketing website that you **author as hand-written React components** and that
@@ -42,29 +53,13 @@ difference is the **payload**:
 
 **The one rule that changes everything: there is NO rippleSpec and NO
 catalog.** You are not picking widgets from a catalog or drafting a spec a
-validator gates. You write premium React — a `Hero`, a `Pricing`, an `Faq` —
-exactly as a senior frontend engineer would, and hand the files to a
-deterministic tool. The component files ARE the page.
+validator gates. You write React components exactly as a senior frontend
+engineer would, and hand the files to a deterministic tool. The component files
+ARE the page.
 
 So: **do NOT call `get_widget_spec`. Do NOT draft a `rippleSpec`. Do NOT call
 `pocket_specialist__create`. Do NOT delegate to a subagent.** Author the
 components, assemble the `source` map, and call `create_react_site`.
-
-## The quality bar
-
-**Run `pocketpaw-design-taste` FIRST — before you author a line.** It is the
-engine-agnostic creative-director system: the Vision Ledger and the one-line
-Design Read, the Trend Engine identity, the aesthetic direction family, the
-three dials, the layout-variance and materiality rules, the CSS-first motion
-vocabulary, and the anti-slop copy discipline. Everything it says about taste
-applies here unchanged — this skill does not restate it and does not override
-it. Author the sections honouring the direction it produces.
-
-The only thing THIS skill owns is what React does differently: the prerender
-contract, the source-map shape, and the interactivity flag below.
-
-Write **real, concrete copy** — never "TBD" or "Lorem ipsum". A dentist gets
-real service names, real testimonial quotes with names, real tier prices.
 
 ## ⚠️ THE PRERENDER AUTHORING RULE (read this before you write a line)
 
@@ -161,11 +156,11 @@ flashes instead of staying broken. Both rules apply, always.
 
 ## STEP 1 — Author the components
 
-Write the page as React components under `src/components/`, one per section, in
-conversion order. A strong default funnel:
+Which sections the page carries is decided from the brief before this step; this
+step only covers how each one is written.
 
-`Nav` → `Hero` → `Features` → `HowItWorks` → `Pricing` → `Testimonial` →
-`Faq` → `FinalCta` → `Footer`
+Write the page as React components under `src/components/`, one component per
+section.
 
 `src/App.tsx` is the **composition root** — it imports the sections, imports
 your stylesheet, and returns them in order. It is the one file the generator
@@ -175,14 +170,9 @@ Each component is a normal function component: props typed inline, the markup
 returned, and its styling from your stylesheet (plain CSS — there is no CSS
 framework installed; see "What the project has" below).
 
-Conversion essentials the page should carry:
-
-- A **hero** with a real headline promise + subtitle + a primary CTA that is an
-  **anchor** (`href="#pricing"`), not a bare `onClick` button.
-- A **pricing** section with real tiers and a highlighted recommended tier.
-- A **lead form** — see "Lead capture" below; it is a native form POST, not an
-  `onSubmit` handler.
-- Every CTA is an anchor (`#book`, `tel:`, `mailto:`).
+A CTA must be a real anchor (`href="#book"`, `tel:`, `mailto:`) rather than a
+click handler, because a page that ships no JavaScript has nothing to run the
+handler. The lead form is a native form POST — see "Lead capture" below.
 
 ### Sourcing photography (real images, not placeholders)
 
@@ -207,9 +197,16 @@ ship a photo-free wireframe when the page calls for imagery.
    build — no upload step.
 3. **Always set `alt`** from the returned `alt`, and **render the `credit`**
    line near the image or in the footer. The providers' terms require it.
-4. If it returns an **empty list**, fall back to a tasteful gradient/solid
+4. **For what stock cannot supply, GENERATE it** — call
+   **`mcp__pocketpaw_site_media__generate_site_image`** with the `pocket_id` and
+   a concrete visual `prompt` (subject, composition, lighting, mood): a bespoke
+   hero, a product or concept shot, a brand texture. It **costs money per
+   image** — deliberate use only, never for photography stock already covers.
+   Returns a permanent public `url`; embed it verbatim. On an error, relay it
+   and drop to the fallback below.
+5. If it returns an **empty list**, fall back to a tasteful gradient/solid
    treatment rather than a broken `<img>`. Never fabricate a photo URL.
-5. Set `width`/`height` (or `aspect-ratio`) on every image so the page does not
+6. Set `width`/`height` (or `aspect-ratio`) on every image so the page does not
    jump as assets load.
 
 **Video and other media are allowed.** If the brief's asset manifest carries a
@@ -234,10 +231,10 @@ There **is** a capture endpoint, and it is the shared one. Post to it natively:
   <input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__" />
   <input type="hidden" name="paw_redirect" value="/thank-you" />
 
-  <label>Your name<input name="full_name" required /></label>
-  <label>Email<input type="email" name="email" required /></label>
-  <label>Phone<input type="tel" name="phone" /></label>
-  <label>How can we help?<textarea name="message" /></label>
+  <input name="full_name" required />
+  <input type="email" name="email" required />
+  <input type="tel" name="phone" />
+  <textarea name="message" />
 
   <button type="submit">Send</button>
 </form>
@@ -248,27 +245,55 @@ publish substitutes the real capture URL, site id and signed key. You do not
 have those values while authoring (on a create the site does not exist yet, and
 the key is minted at publish), so never invent one or leave the action empty.
 
-**The visible field names are fixed**: `full_name`, `email`, `phone`, `message`.
-They are the names the lead pipeline maps; a field named anything else is stored
-empty and the business never sees what the visitor typed.
+**The field names are fixed**: `full_name`, `email`, `phone`, `message`. They are
+the names the lead pipeline maps; a field named anything else is stored empty and
+the business never sees what the visitor typed. The NAMES are the contract —
+labels, grouping, order and styling are yours to choose.
 
-**`paw_redirect` must be a relative path on this site** — an absolute URL is
-rejected with a 400 — so author the page it points at (a small `thank-you`
-route or `thank-you.html` confirming the message was sent).
+**If the page carries a form, `paw_redirect` must be a relative path on this
+site** — an absolute URL is rejected with a 400 — so author the page it points
+at (a small `thank-you` route or `thank-you.html`). The destination exists
+because the form does: a page with no form needs no `paw_redirect` and no such
+page.
 
 Do **not** wire an `onSubmit` handler that fetches. A static page should capture
 the lead whether or not JavaScript ran, and this is a plain native browser POST.
 
-### What the project has (and what it does not)
+### What the project has, and how to add a package
 
 The generator writes a deliberately tiny project: **react**, **react-dom**,
-**vite**, and **@vitejs/plugin-react**. That is all.
+**vite**, and **@vitejs/plugin-react**. Those are generator-owned, so never
+declare them. There is **no router**: the site is **one page**, and
+multi-route React is not supported on this track.
 
-There is **no router**, **no CSS framework**, **no state library**, **no
-animation library** installed, and you cannot add dependencies — the package
-manifest is generator-owned and dependency-allowlisted. Write plain components
-and plain CSS. The site is **one page**; multi-route React is not supported on
-this track.
+Anything else you **declare**: pass `dependencies=[{"name": "gsap"}]` to
+`create_react_site`, or call `set_site_dependencies(pocket_id, add=[...],
+remove=[...])` on an existing site. Any public npm package works, at any exact
+version, range or dist-tag (`{"name": "x", "range": "next"}`); each is pinned to
+an exact version. `rejected` only holds what could not be resolved (a misspelt
+name, no matching version): don't import those. `warnings` carry security
+advisories or deprecation notes; mention them to the user. You may also write
+`package.json` and `vite.config.*` yourself when the build needs it.
+
+**Import packages the normal way.** Component and icon libraries
+(`lucide-react`, `motion`, a UI kit) are fine as top-level imports. Only a
+browser-only library that touches `window` / `document` when it is imported
+(`three`, `gsap` plugins, some carousels) needs a dynamic `import()` inside
+`useEffect`, because the page is prerendered where `window` doesn't exist:
+
+```tsx
+useEffect(() => {
+  let cancelled = false;
+  import('gsap').then(({ gsap }) => {
+    if (!cancelled) gsap.from('.hero h1', { y: 24, opacity: 0 });
+  });
+  return () => { cancelled = true; };
+}, []);
+```
+
+If a `top_level_client_import` warning names a library, move that one into
+`useEffect`. Packages need the client bundle, so never pass
+`interactive=false` alongside `dependencies`.
 
 ## STEP 2 — Assemble the `source` map
 
@@ -284,20 +309,24 @@ src/App.tsx                  the composition root — imports the stylesheet + r
 Add as needed:
 
 ```
-src/components/*.tsx         your section components (Hero.tsx, Pricing.tsx, Faq.tsx, ...)
+src/components/*.tsx         your section components (SectionA.tsx, SectionB.tsx, ...)
 src/index.css                the design system — tokens (CSS vars), @font-face / font imports, base reset
 public/*                     static assets served at the site root
 ```
+
+Root build files you MAY write when you need them (the generator merges
+them with its toolchain): `package.json`, `vite.config.*`, `bunfig.toml`,
+`.npmrc`.
 
 **Paths you may NOT write** — the generator owns them, and writing one fails the
 create:
 
 ```
 index.html                   the HTML template (carries the prerender outlet)
-package.json                 the dependency manifest (allowlisted)
-vite.config.ts               the build config
+paw.dependencies.json        written only by `dependencies` / set_site_dependencies
 paw-prerender.mjs            the prerender pass
 src/paw/**                   the generated client + server entries
+bun.lock / lockfiles         produced by the build
 ```
 
 That reservation is what guarantees the page cannot silently become a
@@ -308,8 +337,8 @@ A minimal valid map:
 
 ```json
 {
-  "src/App.tsx": "import './index.css';\nimport Hero from './components/Hero';\n\nexport default function App() {\n  return (\n    <main>\n      <Hero />\n    </main>\n  );\n}\n",
-  "src/components/Hero.tsx": "export default function Hero() {\n  return (\n    <section className=\"hero\">\n      <h1>...</h1>\n    </section>\n  );\n}\n",
+  "src/App.tsx": "import './index.css';\nimport SectionA from './components/SectionA';\n\nexport default function App() {\n  return (\n    <main>\n      <SectionA />\n    </main>\n  );\n}\n",
+  "src/components/SectionA.tsx": "export default function SectionA() {\n  return (\n    <section className=\"section-a\">\n      <h1>...</h1>\n    </section>\n  );\n}\n",
   "src/index.css": ":root { --ink: #17130f; ... }\n/* fonts, reset, base type */\n"
 }
 ```
@@ -329,11 +358,12 @@ with no rippleSpec and no specialist.
 
 ```
 mcp__pocketpaw_sites_manager__create_react_site(
-  source      = <the source map from STEP 2>,
-  name        = "Bright Smile Dental",   // optional; defaults to "React site"
-  interactive = true                     // declare it: true when any component
+  source       = <the source map from STEP 2>,
+  name         = "<the business name>",  // optional; defaults to "React site"
+  interactive  = true,                   // declare it: true when any component
                                          // needs the browser, false to opt a
                                          // purely static page out of the bundle
+  dependencies = [{"name": "gsap"}]      // optional; only what you import
 )
 ```
 
@@ -342,10 +372,33 @@ interactivity flag section above. Set it to `true` when any component has client
 behaviour; leave it off for a purely static page. Getting it wrong is silent:
 the site builds, deploys and looks right, and the menu just never opens.
 
-It returns `{ ok, pocket_id, pocket }`. Keep `pocket_id` for STEP 4. If `ok` is
+It returns `{ ok, pocket_id, pocket, verification }` (plus `packages` /
+`rejected` when you declared any). Keep `pocket_id` for STEP 4, and run the
+verify loop below before you say anything is ready. If `ok` is
 false, **relay the error** — do **not** claim a phantom create and do **not**
 fall back to another engine. The tool fails closed when the map is missing
 `src/App.tsx` or writes a reserved path, and names which one; fix it and retry.
+
+## Verify loop — never call it ready unless it passed
+
+Every create and edit result carries `verification`: `{status, reason?,
+layers, errors, warnings}`, from a static check, a real build and a
+headless-browser load of the built pages. It is your only evidence the draft
+works.
+
+- **`passed`** — only now tell the user the site (or the change) is ready.
+- **`failed`** — fix the listed `errors` (each names `file`, `line`,
+  `message`), then call `mcp__pocketpaw_sites_manager__verify_site(pocket_id)`.
+  At most **3** fix-and-verify rounds; if errors remain, tell the user plainly
+  which ones are left. Never call it ready.
+- **`unverified`** — it could not be checked (`reason`, e.g.
+  `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
+  why. When the result has a `message`, give that sentence as written: a full
+  build queue is not an outage, so never say the build server is down. On
+  `timeout` or `waiting_for_capacity` the build is still coming, so one more
+  `verify_site` is worth it. Never report `unverified` as a pass.
+- **`warnings`** don't block a pass, but move a `top_level_client_import`
+  client-side anyway: it is how a prerender build breaks.
 
 ## STEP 4 — Stop at the draft (publish only when asked)
 
@@ -362,7 +415,7 @@ only a publish runs. **Do not tell the user they can look at their page.** Say
 the draft is ready, be specific that /sites shows the source until it is built,
 and offer to build and publish it.
 
-So **do NOT call `publish` by default.** e.g. *"Your Bright Smile site is ready
+So **do NOT call `publish` by default.** e.g. *"Your site is ready
 as a draft — you'll find its code under /sites; React sites render once they're
 built, so say **publish** when you want me to build it and put it live."* Then
 stop.
@@ -426,8 +479,10 @@ mcp__pocketpaw_sites_manager__edit_react_component(
   `src/components/Testimonials.tsx`, then a second call with `edits` on
   `src/App.tsx` to import and render it. Stop after the first and you have
   shipped a component nothing renders.
-- The generator-owned paths above stay refused, so an edit **cannot** add a
-  dependency.
+- The generator-owned paths above stay refused. To add a package, call
+  `set_site_dependencies` first, then import it (browser-only libraries in
+  `useEffect`).
+- Every edit returns `verification`; the verify loop above applies.
 - Every rule in this skill still binds — above all the **prerender rule**: an
   edit that swaps a static value for a `useState(0)` + count-up effect bakes
   "0" into the shipped HTML.
@@ -439,21 +494,23 @@ The full edit brain is `pocketpaw-edit-react-site` — load it when the user is 
 the site's own refine chat. The essentials are inlined here because this create
 surface loads only the skill you are reading.
 
-## Quality bar — done right when
+## Done when
 
-- The Design Read and direction came from `pocketpaw-design-taste`, and the page
-  honours them — not a default clean house style.
-- With **all JavaScript disabled**, every section looks finished: real copy,
-  real images, the first accordion panel open, counters at their real values.
-- `interactive` is declared either way — `true` when something actually needs
-  the browser, `false` for a purely static page — rather than left to the
-  default. Every interactive component still rests correctly in markup.
-- Real copy throughout. No "TBD", no "Lorem ipsum", no invented testimonials or
-  fabricated statistics.
-- Every CTA is an anchor; the lead form is a native `<form>` with flat named
-  fields.
-- The source map writes only `src/**` and `public/**` — never a generator-owned
-  path.
+- Every component's resting state is in its returned markup: with all JavaScript
+  disabled, nothing renders empty or waiting on an effect.
+- The source map is complete — every import reachable from `src/App.tsx`
+  resolves to a key in the map.
+- No reserved path was written; the map writes only `src/**` and `public/**`.
+- `interactive` is declared explicitly and matches what the components actually
+  need — `true` when any of them requires the browser, `false` when none does.
+- If the page carries a lead form, it posts to
+  `__CAPTURE_API_BASE__/capture/form` with its three hidden inputs and the four
+  fixed field names.
+- Every declared package came back in `packages`, not `rejected`, and is
+  imported client-side.
+- `verification.status` was `passed` before you called it ready, or you told the
+  user which errors remain, or that it could not be checked and why.
+- The run stopped at the draft, unless publishing was explicitly asked for.
 
 ## Related tools (via MCP)
 
@@ -461,8 +518,13 @@ surface loads only the skill you are reading.
 - `mcp__pocketpaw_sites_manager__edit_react_component` — CHANGE a component of an
   existing react site (STEP 4). The tool for every follow-up edit; never
   re-create.
+- `mcp__pocketpaw_sites_manager__set_site_dependencies` — declare or drop npm packages
+- `mcp__pocketpaw_sites_manager__verify_site` — re-run the checks after a fix
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour
 - `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
 - `mcp__pocketpaw_stock__search_stock_images` — real photography
 - `mcp__pocketpaw_icons__search_icons` — feature icons
+- `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
+  Pass `engine="react"`: an effect with `needs` comes back with `dependencies`
+  to declare via `set_site_dependencies`.

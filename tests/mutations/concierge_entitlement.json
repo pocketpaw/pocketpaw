@@ -1,6 +1,6 @@
 [
   {
-    "label": "the plan is never consulted — concierge_entitled reverts to a pass-through",
+    "label": "the plan is never consulted \u2014 concierge_entitled reverts to a pass-through",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "        concierge_entitled = tier.sells_concierge",
     "replace": "        concierge_entitled = True",
@@ -10,7 +10,7 @@
     ]
   },
   {
-    "label": "the fail-closed default inverts — an unknown tier is handed a concierge",
+    "label": "the fail-closed default inverts \u2014 an unknown tier is handed a concierge",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "    concierge_entitled = False",
     "replace": "    concierge_entitled = True",
@@ -21,7 +21,7 @@
     ]
   },
   {
-    "label": "the subscription is ignored — a lapsed paid tier keeps its concierge",
+    "label": "the subscription is ignored \u2014 a lapsed paid tier keeps its concierge",
     "file": "ee/pocketpaw_ee/cloud/entitlements/service.py",
     "find": "    if tier is not None and subscription_active:\n        badge_removal = tier.badge_removal",
     "replace": "    if tier is not None:\n        badge_removal = tier.badge_removal",
@@ -40,7 +40,7 @@
     ]
   },
   {
-    "label": "concierge_available drops the owner half — entitlement overrides the switch",
+    "label": "concierge_available drops the owner half \u2014 entitlement overrides the switch",
     "file": "ee/pocketpaw_ee/cloud/entitlements/domain.py",
     "find": "        return self.concierge_enabled and self.concierge_entitled",
     "replace": "        return self.concierge_entitled",
@@ -51,16 +51,16 @@
   {
     "label": "the chat/action seam stops asking the plan",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
-    "find": "    if not concierge_available(site):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
+    "find": "    if not concierge_available(site, partner=partner):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_chat_is_refused_for_a_free_site"
     ]
   },
   {
-    "label": "the frame stops asking the plan — a free site's bar renders",
+    "label": "the frame stops asking the plan \u2014 a free site's bar renders",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "    if not concierge_available(site):\n        return _dead_frame_response(po, site.allowed_origins)",
+    "find": "    if not concierge_available(site, partner=partner):\n        return _dead_frame_response(po, site.allowed_origins)",
     "replace": "    pass",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_refuses_a_free_site_with_the_self_remove_message"
@@ -69,26 +69,26 @@
   {
     "label": "the frame refuses with a JSON error rendered onto the customer's page",
     "file": "ee/pocketpaw_ee/paw_bar/router.py",
-    "find": "    if not concierge_available(site):\n        return _dead_frame_response(po, site.allowed_origins)",
-    "replace": "    if not concierge_available(site):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
+    "find": "    if not concierge_available(site, partner=partner):\n        return _dead_frame_response(po, site.allowed_origins)",
+    "replace": "    if not concierge_available(site, partner=partner):\n        raise HTTPException(status_code=403, detail=\"concierge_not_entitled\")",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_refused_frame_never_renders_an_error_payload"
     ]
   },
   {
-    "label": "the billing_enforced guard is dropped — OSS/self-host loses its concierge",
+    "label": "the billing_enforced guard is dropped \u2014 OSS/self-host loses its concierge",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
-    "find": "    if not sites_enforced():\n        return True",
+    "find": "    if not sites_enforced(partner):\n        return True",
     "replace": "    if False:\n        return True",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_is_unaffected_when_billing_is_off"
     ]
   },
   {
-    "label": "the guard inverts — the gate fires ONLY when billing is off",
+    "label": "the guard inverts \u2014 the gate fires ONLY when billing is off",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
-    "find": "    if not sites_enforced():\n        return True",
-    "replace": "    if sites_enforced():\n        return True",
+    "find": "    if not sites_enforced(partner):\n        return True",
+    "replace": "    if sites_enforced(partner):\n        return True",
     "tests": [
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_chat_is_refused_for_a_free_site",
       "tests/cloud/test_paw_bar_concierge_entitlement.py::test_the_frame_is_unaffected_when_billing_is_off"
@@ -104,7 +104,7 @@
     ]
   },
   {
-    "label": "the entitled path breaks too — the gate refuses every site",
+    "label": "the entitled path breaks too \u2014 the gate refuses every site",
     "file": "ee/pocketpaw_ee/cloud/auth/site_keys.py",
     "find": "    return ent.concierge_entitled",
     "replace": "    return False",
@@ -114,7 +114,7 @@
     ]
   },
   {
-    "label": "publish embeds the bar on an unentitled site — it would 403 every visitor",
+    "label": "publish embeds the bar on an unentitled site \u2014 it would 403 every visitor",
     "file": "ee/pocketpaw_ee/paw_bar/embed.py",
     "find": "    if not concierge_enabled or not concierge_entitled or not site_key or not pocket_id:",
     "replace": "    if not concierge_enabled or not site_key or not pocket_id:",
@@ -125,7 +125,7 @@
   {
     "label": "the publish-path resolver is deleted entirely",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        if sites_enforced():\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
+    "find": "        if await sites_enforced_for(workspace_id):\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "replace": "        if False:\n            from pocketpaw_ee.cloud.entitlements import service as entitlements_service",
     "tests": [
       "tests/ee/sites/test_concierge_autoembed.py::test_a_free_site_publishes_with_no_bar_when_billing_is_enforced",
@@ -133,7 +133,7 @@
     ]
   },
   {
-    "label": "the charge-first window reopens — pending is refused at publish",
+    "label": "the charge-first window reopens \u2014 pending is refused at publish",
     "file": "ee/pocketpaw_ee/sites/service.py",
     "find": "                subscription_status=\"active\" if status == \"pending\" else status,",
     "replace": "                subscription_status=status,",
@@ -144,10 +144,10 @@
   {
     "label": "activation flips the status AFTER the deploy again (the original P0)",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    doc.subscription_status = \"active\"\n    # Persist the AUTHORITATIVE gateway subscription id from the verified webhook.",
-    "replace": "    # Persist the AUTHORITATIVE gateway subscription id from the verified webhook.",
+    "find": "    await _mark_subscription_active(doc)\n\n    deployed = await _deploy_site_doc(",
+    "replace": "    deployed = await _deploy_site_doc(",
     "tests": [
-      "tests/cloud/sites/test_charge_first.py::test_the_subscription_reads_active_before_the_activation_deploy_runs"
+      "tests/cloud/sites/test_credits_publish.py::test_the_subscription_reads_active_before_the_deploy_runs"
     ]
   },
   {

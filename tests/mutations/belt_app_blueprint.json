@@ -1,0 +1,596 @@
+[
+  {
+    "label": "a landed lead run is not done",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"done\", run.get(\"status\") == \"landed\" or (closed and done_pr)),",
+    "replace": "(\"done\", closed and done_pr),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a closed issue with a done PR is not done",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"done\", run.get(\"status\") == \"landed\" or (closed and done_pr)),",
+    "replace": "(\"done\", run.get(\"status\") == \"landed\"),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a merged done PR is not built",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"built\", done_pr),",
+    "replace": "(\"built\", False),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "any merged PR counts as feature-done",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "done_pr = any(p.get(\"done\") and p.get(\"state\") == \"MERGED\" for p in prs)",
+    "replace": "done_pr = any(p.get(\"state\") == \"MERGED\" for p in prs)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "an unmerged done PR counts",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "done_pr = any(p.get(\"done\") and p.get(\"state\") == \"MERGED\" for p in prs)",
+    "replace": "done_pr = any(p.get(\"done\") for p in prs)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "the lead's own PRs are ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "prs = [*prs, *(lead.get(\"prs\") or [])]",
+    "replace": "prs = list(prs)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a claim ahead of the evidence is not a gap",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"gap\", ahead or closed),",
+    "replace": "(\"gap\", closed),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "an issue closed without done is not a gap",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"gap\", ahead or closed),",
+    "replace": "(\"gap\", ahead),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a done claim is never ahead",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "ahead = claimed in (\"built\", \"done\") and not done_pr",
+    "replace": "ahead = claimed == \"built\" and not done_pr",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "claimed_ahead ignores the done PR",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "ahead = claimed in (\"built\", \"done\") and not done_pr",
+    "replace": "ahead = claimed in (\"built\", \"done\")",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "stuck ranks above gap",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "        (\"gap\", ahead or closed),\n        (\"waiting\", parked and issue.get(\"mark\") == \"mac\"),\n        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),",
+    "replace": "        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),\n        (\"gap\", ahead or closed),\n        (\"waiting\", parked and issue.get(\"mark\") == \"mac\"),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "building ranks above stuck",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),\n        (\"building\", bool(run)),",
+    "replace": "        (\"building\", bool(run)),\n        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "needs-human does not stick",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "stuck = parked or stalls >= 2",
+    "replace": "stuck = stalls >= 2",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "one stall rung sticks",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "or stalls >= 2",
+    "replace": "or stalls >= 1",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "stall rungs never stick",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "or stalls >= 2",
+    "replace": "or stalls >= 99",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a released run is not stuck",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"stuck\", stuck or run.get(\"status\") in _SETTLED),",
+    "replace": "(\"stuck\", stuck),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a failed run reads as building",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "_SETTLED = {\"landed\", \"rejected\", \"failed\"}",
+    "replace": "_SETTLED = {\"landed\", \"rejected\"}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a pending lead run is not building",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"building\", bool(run)),",
+    "replace": "(\"building\", False),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "filed needs no issue number",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"filed\", issue_number is not None),",
+    "replace": "(\"filed\", True),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "an issue state in capitals is open",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "closed = str(issue.get(\"state\") or \"\").lower() == \"closed\"",
+    "replace": "closed = str(issue.get(\"state\") or \"\") == \"closed\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "issue_closed_not_done is never raised",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "([\"issue_closed_not_done\"] if closed and status != \"done\" else [])",
+    "replace": "([])",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a done feature with a closed issue is flagged",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "([\"issue_closed_not_done\"] if closed and status != \"done\" else [])",
+    "replace": "([\"issue_closed_not_done\"] if closed else [])",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "feature_no_owned is never raised",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "([] if owned else [\"feature_no_owned\"])",
+    "replace": "([])",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a missing Stage line is guessed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "\"stage\": fields.get(\"Stage\")",
+    "replace": "\"stage\": fields.get(\"Stage\", \"unknown\")",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "feature_issue matches a prefix",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "issue = re.fullmatch(r\"#(\\d+)\", str(raw.get(\"feature_issue\") or \"\").strip())",
+    "replace": "issue = re.match(r\"#(\\d+)\", str(raw.get(\"feature_issue\") or \"\").strip())",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "not-blocking refs count as waits",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "if \"not blocking\" not in c]",
+    "replace": "]",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "the wave keeps its W prefix",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "\"wave\": str(raw.get(\"wave\") or \"\").removeprefix(\"W\"),",
+    "replace": "\"wave\": str(raw.get(\"wave\") or \"\"),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "every table is read as tasks",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "header = names if {\"id\", \"files\"} <= set(names) else []",
+    "replace": "header = names",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "the separator row is read as a task",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "if not header or set(cells[0]) <= set(\"-: \"):",
+    "replace": "if not header:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "same as <id> is not followed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "            files = files_of.get(same.group(1), [])",
+    "replace": "            files = []",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a token matches any name suffix",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "s.endswith(\"/\" + stem)",
+    "replace": "s.endswith(stem)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "Tests/ files go to their container",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "if path.startswith((\"Tests/\", \"UITests/\")):",
+    "replace": "if path.startswith((\"UITests/\",)):",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "UITests/ files go to their container",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "if path.startswith((\"Tests/\", \"UITests/\")):",
+    "replace": "if path.startswith((\"Tests/\",)):",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "an unmapped file is app",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "return layers.get(component_for(path, index) or \"\", \"other\")",
+    "replace": "return layers.get(component_for(path, index) or \"\", \"app\")",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "test files vote in the task majority",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "rest = Counter(p for p in placed if p != \"tests\")",
+    "replace": "rest = Counter(placed)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a tests-only task is unknown",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "return rest.most_common(1)[0][0] if rest else (\"tests\" if placed else \"unknown\")",
+    "replace": "return rest.most_common(1)[0][0] if rest else \"unknown\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a task with no files is tests",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "return rest.most_common(1)[0][0] if rest else (\"tests\" if placed else \"unknown\")",
+    "replace": "return rest.most_common(1)[0][0] if rest else \"tests\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "an external system's container is not engine",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "external=s is not owned)",
+    "replace": "external=False)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "the engine rule is skipped",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "    if external:\n        return \"engine\"\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "shell ranks above tests",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "    (\"tests\", re.compile(r\".*-(tests|journeys|snapshots)|app-audit\")),\n    (\"shell\", re.compile(r\"suiteui.*|suite-shell|afterglow-.*\")),",
+    "replace": "    (\"shell\", re.compile(r\"suiteui.*|suite-shell|afterglow-.*\")),\n    (\"tests\", re.compile(r\".*-(tests|journeys|snapshots)|app-audit\")),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "journeys containers are not tests",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "r\".*-(tests|journeys|snapshots)|app-audit\"",
+    "replace": "r\".*-(tests|snapshots)|app-audit\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "app-audit is not tests",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "r\".*-(tests|journeys|snapshots)|app-audit\"",
+    "replace": "r\".*-(tests|journeys|snapshots)\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "afterglow containers are not shell",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "r\"suiteui.*|suite-shell|afterglow-.*\"",
+    "replace": "r\"suiteui.*|suite-shell\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "suite-logic is not model",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "r\".*-model|suite-logic\"",
+    "replace": "r\".*-model\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "apps is not app",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "r\".*-app|apps\"",
+    "replace": "r\".*-app\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "owned paths do not place the feature",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "placed = {file_layer(p, index, layers) for p in owned}",
+    "replace": "placed: set[str] = set()",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "RECORD tasks do not place an unowned feature",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "placed = placed or {t[\"layer\"] for t in tasks} or {\"unknown\"}",
+    "replace": "placed = placed or {\"unknown\"}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "owned paths do not resolve off-dev task files",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "t[\"files\"] = resolve_files(t[\"files\"], [*tree, *owned])",
+    "replace": "t[\"files\"] = resolve_files(t[\"files\"], tree)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "an unowned feature gets no components from its tasks",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "for p in owned or [f for t in tasks for f in t[\"files\"]])",
+    "replace": "for p in owned)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "an unlisted issue has no state or labels",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "{\"state\": \"unknown\", \"labels\": [], **(issue or {}), \"number\": wave[\"issue\"]}",
+    "replace": "{**(issue or {}), \"number\": wave[\"issue\"]}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a run row has no record_at",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "| {\"record_at\": None}",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a slice done with gaps reads plain done",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "status = \"done-with-gaps\" if gaps else \"done\"",
+    "replace": "status = \"done\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py::test_each_slice_takes_its_status_from_the_lead_run"
+    ]
+  },
+  {
+    "label": "an unsafe slice id is shown",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "        if not SLICE_ID.match(s[\"id\"]):\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py::test_each_slice_takes_its_status_from_the_lead_run"
+    ]
+  },
+  {
+    "label": "a settled lead's PRs still mark slices building",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": " if live else set()",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py::test_slices_are_planned_without_a_live_lead_and_absent_without_any"
+    ]
+  },
+  {
+    "label": "no slice is ever building",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "        elif s[\"id\"] in named:",
+    "replace": "        elif False:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py::test_each_slice_takes_its_status_from_the_lead_run"
+    ]
+  },
+  {
+    "label": "a done slice reads planned",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "        if got.get(\"done\"):",
+    "replace": "        if False:",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py::test_each_slice_takes_its_status_from_the_lead_run"
+    ]
+  },
+  {
+    "label": "a feature row drops its slices",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "\"slices\": slice_status(wave[\"slices\"], run),",
+    "replace": "\"slices\": [],",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py::test_each_slice_takes_its_status_from_the_lead_run"
+    ]
+  },
+  {
+    "label": "a slice entry without an id is kept",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "if isinstance(s, dict) and isinstance(s.get(\"id\"), str)",
+    "replace": "if isinstance(s, dict)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py::test_wave_slices_keep_entries_with_an_id_and_their_waits_keys"
+    ]
+  },
+  {
+    "label": "a string slice field is read as a list",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "if isinstance(s.get(k), list | dict)",
+    "replace": "if s.get(k)",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py::test_wave_slices_keep_entries_with_an_id_and_their_waits_keys"
+    ]
+  },
+  {
+    "label": "a contact sheet on a released run is not done",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"done\", issue.get(\"mark\") == \"sheet\"),",
+    "replace": "(\"done\", False),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a parked issue waiting on the Mac is stuck",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"waiting\", parked and issue.get(\"mark\") == \"mac\"),",
+    "replace": "(\"waiting\", False),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "Mac work waits without needs-human",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "(\"waiting\", parked and issue.get(\"mark\") == \"mac\"),",
+    "replace": "(\"waiting\", issue.get(\"mark\") == \"mac\"),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "stuck ranks above waiting",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "        (\"waiting\", parked and issue.get(\"mark\") == \"mac\"),\n        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),",
+    "replace": "        (\"stuck\", stuck or run.get(\"status\") in _SETTLED),\n        (\"waiting\", parked and issue.get(\"mark\") == \"mac\"),",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "a packet not on dev yet reads as new",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "return live.get(packet, \"writing\") if isinstance(packet, str) and packet else \"new\"",
+    "replace": "return live.get(packet, \"new\") if isinstance(packet, str) and packet else \"new\"",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "an adopter takes the feature's status, not its own packet's",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "{\"app\": a[\"app\"], \"packet\": text(a.get(\"packet\")), \"status\": status(a.get(\"packet\"))}",
+    "replace": "{\"app\": a[\"app\"], \"packet\": text(a.get(\"packet\")), \"status\": status(f.get(\"packet\"))}",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  },
+  {
+    "label": "the counts include adopters",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint.py",
+    "find": "Counter(f[\"status\"] for f in features)",
+    "replace": "Counter([f[\"status\"] for f in features] + [a[\"status\"] for f in features for a in f[\"adopters\"]])",
+    "tests": [
+      "tests/cloud/test_belt_app_blueprint.py"
+    ]
+  }
+]

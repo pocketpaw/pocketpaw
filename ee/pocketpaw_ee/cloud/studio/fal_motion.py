@@ -63,16 +63,27 @@ class FalMotionValidationError(FalMotionError):
 
 # ── Endpoint + argument building ─────────────────────────────────────────────
 
+# Endpoint namespaces that pass straight through resolve (fal's own ``fal-ai/…``
+# plus provider namespaces fal serves without the fal-ai prefix).
+_ENDPOINT_NAMESPACES: tuple[str, ...] = (
+    "fal-ai/",
+    "bytedance/",
+    "google/",
+    "openai/",
+    "xai/",
+    "recraft/",
+)
+
 
 def resolve_endpoint(model_id: str | None) -> str:
     """Map a requested model id onto a real fal endpoint.
 
-    ``fal-ai/...`` ids pass straight through (the caller already picked an
-    endpoint); anything else — including None — falls back to the Kling Motion
-    Control default.
+    Endpoint-looking ids (``fal-ai/…``, ``bytedance/…``, ``google/…``, …) pass
+    straight through (the caller already picked an endpoint); anything else —
+    including None — falls back to the Kling Motion Control default.
     """
     m = (model_id or "").strip()
-    if m.startswith("fal-ai/"):
+    if m.startswith(_ENDPOINT_NAMESPACES):
         return m
     return DEFAULT_MOTION_MODEL
 

@@ -72,6 +72,7 @@ async def _consume_one_batch(monkeypatch, batch, dispatch):
     """Run the consumer just long enough to process one batch."""
     redis = _FakeRedis(batch)
     monkeypatch.setattr(xproc, "get_redis", lambda: redis)
+    monkeypatch.setattr(xproc, "get_blocking_redis", lambda: redis)
     monkeypatch.setattr(xproc, "_dispatch", dispatch)
 
     task = asyncio.create_task(xproc.run_consumer(consumer_name="test", block_ms=1))
@@ -105,6 +106,7 @@ class TestLaneConcurrency:
         batch = [_entry(f"e{i}", _ws(f"scope-{i}", 0)) for i in range(6)]
         redis = _FakeRedis(batch)
         monkeypatch.setattr(xproc, "get_redis", lambda: redis)
+        monkeypatch.setattr(xproc, "get_blocking_redis", lambda: redis)
         monkeypatch.setattr(xproc, "_dispatch", _dispatch)
 
         task = asyncio.create_task(xproc.run_consumer(consumer_name="t", block_ms=1))
@@ -142,6 +144,7 @@ class TestLaneConcurrency:
         batch = [_entry(f"e{i}", _ws("scope-A", i)) for i in range(count)]
         redis = _FakeRedis(batch)
         monkeypatch.setattr(xproc, "get_redis", lambda: redis)
+        monkeypatch.setattr(xproc, "get_blocking_redis", lambda: redis)
         monkeypatch.setattr(xproc, "_dispatch", _dispatch)
 
         task = asyncio.create_task(xproc.run_consumer(consumer_name="t", block_ms=1))

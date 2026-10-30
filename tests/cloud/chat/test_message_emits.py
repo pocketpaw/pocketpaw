@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Tests that message_service emits realtime events via the bus.
 
 Each public message_service mutation must fire the appropriate Event
@@ -9,14 +11,7 @@ no fake repositories or seam-patching needed.
 from __future__ import annotations
 
 import pytest
-from pocketpaw_ee.cloud.chat import message_service
-from pocketpaw_ee.cloud.chat.schemas import (
-    EditMessageRequest,
-    SendMessageRequest,
-)
-from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
-from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
-from pocketpaw_ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud._core.realtime.events import (
     MessageDeleted,
     MessageEdited,
     MessageNew,
@@ -26,6 +21,14 @@ from pocketpaw_ee.cloud.realtime.events import (
     ThreadCreated,
     UnreadUpdate,
 )
+from pocketpaw_ee.cloud.chat import message_service
+from pocketpaw_ee.cloud.chat.schemas import (
+    EditMessageRequest,
+    SendMessageRequest,
+)
+from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
+from pocketpaw_ee.cloud.models.notification import Notification as _NotificationDoc
 
 
 async def _make_group(
@@ -133,6 +136,36 @@ async def test_toggle_reaction_emits_message_reaction(mongo_db, recording_bus):
     assert reacts[0].data["user_id"] == "u1"
 
 
+@pytest.mark.asyncio
+async def test_reaction_event_carries_full_reactions_array(mongo_db, recording_bus):
+    """The event must carry the post-toggle reactions, not just the delta.
+
+    Peers render reaction chips straight off this payload — a delta-only
+    event leaves them with nothing to paint, so the chip only appeared
+    after a manual reload. Shape matches the REST wire dict
+    (``dto.message_to_wire_dict``) so both paths patch identically.
+    """
+    group = await _make_group(owner="u1", members=["u1", "u2"])
+    msg = await _make_message(group_id=str(group.id), sender="u1")
+
+    await message_service.toggle_reaction(str(msg.id), "u2", "\U0001f44d")
+
+    reacts = [e for e in recording_bus.events if isinstance(e, MessageReaction)]
+    assert reacts[-1].data["reactions"] == [{"emoji": "\U0001f44d", "users": ["u2"]}]
+
+    # A second reactor is additive on the same emoji.
+    await message_service.toggle_reaction(str(msg.id), "u1", "\U0001f44d")
+    reacts = [e for e in recording_bus.events if isinstance(e, MessageReaction)]
+    assert reacts[-1].data["reactions"] == [{"emoji": "\U0001f44d", "users": ["u2", "u1"]}]
+
+    # Un-reacting empties the array rather than omitting the key — peers
+    # need the empty list to clear the chip.
+    await message_service.toggle_reaction(str(msg.id), "u2", "\U0001f44d")
+    await message_service.toggle_reaction(str(msg.id), "u1", "\U0001f44d")
+    reacts = [e for e in recording_bus.events if isinstance(e, MessageReaction)]
+    assert reacts[-1].data["reactions"] == []
+
+
 def test_router_no_longer_broadcasts_message_events():
     """Regression guard: the four _ws_message_* handlers must not call manager.broadcast/send."""
     from pathlib import Path
@@ -160,18 +193,11 @@ async def test_send_message_fans_out_everyone_mention_to_all_members(
     mention counter."""
     group = await _make_group(owner="sender", members=["sender", "u2", "u3"])
 
-    created_notifs: list[dict] = []
     bumped: list[tuple[str, str]] = []
-
-    async def fake_notif(**kwargs):
-        created_notifs.append(kwargs)
 
     async def fake_bump(user_id, group_id):
         bumped.append((user_id, group_id))
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.chat.message_service.notifications_service.create", fake_notif
-    )
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump
     )
@@ -182,8 +208,8 @@ async def test_send_message_fans_out_everyone_mention_to_all_members(
     )
     await message_service.send_message(str(group.id), "sender", body)
 
-    recipients = {n["recipient"] for n in created_notifs}
-    assert recipients == {"u2", "u3"}
+    mentions = await _NotificationDoc.find({"type": "mention"}).to_list()
+    assert sorted(n.recipient for n in mentions) == ["u2", "u3"]
     assert set(bumped) == {("u2", str(group.id)), ("u3", str(group.id))}
 
 
@@ -194,17 +220,9 @@ async def test_send_message_user_and_broadcast_mention_dedupes(
     """If a message has both @user(u2) and @everyone, u2 only gets one notification."""
     group = await _make_group(owner="sender", members=["sender", "u2", "u3"])
 
-    created_notifs: list[dict] = []
-
-    async def fake_notif(**kwargs):
-        created_notifs.append(kwargs)
-
     async def fake_bump(user_id, group_id):
         pass
 
-    monkeypatch.setattr(
-        "pocketpaw_ee.cloud.chat.message_service.notifications_service.create", fake_notif
-    )
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump
     )
@@ -221,7 +239,8 @@ async def test_send_message_user_and_broadcast_mention_dedupes(
     # @u2 and @everyone both target u2; the mention fan-out must dedupe to a
     # single mention per recipient. (The general per-member "message" notif is
     # a separate kind and isn't what this test guards.)
-    mention_recipients = sorted(n["recipient"] for n in created_notifs if n["kind"] == "mention")
+    mentions = await _NotificationDoc.find({"type": "mention"}).to_list()
+    mention_recipients = sorted(n.recipient for n in mentions)
     assert mention_recipients == ["u2", "u3"]  # no duplicate u2
 
 
@@ -297,7 +316,7 @@ async def test_close_thread_emits_thread_closed(mongo_db, recording_bus):
 @pytest.mark.asyncio
 async def test_send_reply_emits_message_new_not_thread_reply(mongo_db, recording_bus):
     """Inline replies fan out via MessageNew; no ThreadReply event fires."""
-    from pocketpaw_ee.cloud.realtime.events import ThreadReply
+    from pocketpaw_ee.cloud._core.realtime.events import ThreadReply
 
     group = await _make_group(owner="sender", members=["sender"])
     parent = await _make_message(group_id=str(group.id), sender="u_other")

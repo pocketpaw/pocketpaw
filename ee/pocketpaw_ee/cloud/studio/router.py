@@ -7,12 +7,15 @@
 #
 #   GET  /studio/models          → StudioModelsResponse   (gateway-backed)
 #   GET  /studio/styles          → StudioStylesResponse   (static)
-#   GET  /studio/generations     → GenerationsResponse    (per-workspace history)
+#   GET  /studio/generations     → GenerationsResponse    (per-workspace history;
+#                                  optional ?source= and ?pocket_id= filters)
 #   POST /studio/generate        → Generation             (LiteLLM + fal.ai)
 #   GET  /studio/generations/{id}→ Generation
 #   POST /studio/edit            → Generation             (fal.ai edit endpoints)
 #   POST /studio/video-elements  → Generation             (fal.ai Kling Elements)
 #   POST /studio/video-motion-control → Generation        (fal.ai Kling Motion Control)
+#   POST /studio/music           → Generation             (fal.ai music, kind=audio)
+#   POST /studio/transcribe      → TranscriptResponse     (Deepgram STT, multipart audio)
 #   POST /studio/suggest-prompt  → PromptSuggestion       (heuristic, no LLM)
 #
 # The tenant is attached per-request via ``current_workspace_id`` (the frontend
@@ -20,14 +23,20 @@
 # tagged as the OpenAI ``user`` on each proxy generation so proxy spend attributes
 # to the workspace. Mounted in ``mount_cloud()``.
 #
-# Created 2026-08-17 (studio-real-backend): new entity router.
+# Every route that calls a paid model (generate, edit, the two video routes,
+# music, transcribe) carries ``require_paid_or_early_access_allowed``: refused
+# with 403 ``early_access.not_available`` for an unpaid early-access workspace,
+# since that spend never reaches the credit ledger. Reads stay open.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
-from pocketpaw_ee.cloud._core.deps import current_workspace_id
+from pocketpaw_ee.cloud._core.deps import (
+    current_workspace_id,
+    require_paid_or_early_access_allowed,
+)
 from pocketpaw_ee.cloud.license import require_license
 
 from . import schemas, service
@@ -53,16 +62,34 @@ async def list_styles() -> schemas.StudioStylesResponse:
     return schemas.StudioStylesResponse(styles=service.list_styles())
 
 
+@router.get("/camera-catalog", response_model=schemas.CameraCatalogResponse)
+async def list_camera_catalog() -> schemas.CameraCatalogResponse:
+    """List the Camera & lighting dialog's pick-lists (static, backend-owned).
+
+    Served rather than mirrored into the client so there is exactly one copy of
+    the phrasing that gets injected into prompts."""
+    return service.list_camera_catalog()
+
+
 @router.get("/generations", response_model=schemas.GenerationsResponse)
 async def list_generations(
     workspace_id: str = Depends(current_workspace_id),
+    source: str | None = Query(default=None, max_length=32),
+    pocket_id: str | None = Query(default=None, max_length=64),
 ) -> schemas.GenerationsResponse:
     """Return the workspace's generation history, newest first (persisted, so it
-    survives reloads)."""
-    return schemas.GenerationsResponse(generations=service.list_generations(workspace_id))
+    survives reloads). ``source`` ("studio" | "sites") and ``pocket_id`` narrow it,
+    e.g. to what a site agent generated for one site. Both omitted = everything."""
+    return schemas.GenerationsResponse(
+        generations=await service.list_generations(workspace_id, source=source, pocket_id=pocket_id)
+    )
 
 
-@router.post("/generate", response_model=schemas.Generation)
+@router.post(
+    "/generate",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def generate(
     req: schemas.GenerateRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -76,6 +103,12 @@ async def generate(
         raise HTTPException(400, str(exc)) from exc
     except service.StudioNotSupported as exc:
         raise HTTPException(501, str(exc)) from exc
+    except service.StudioRejectedError as exc:
+        # The provider refused this input. NOT a 502: the service is up and the
+        # user can fix it by changing an image, a track or a value. The detail
+        # is already a clean sentence — it carries no request payload — so the
+        # client can show it verbatim.
+        raise HTTPException(422, str(exc)) from exc
     except service.StudioUpstreamError as exc:
         raise HTTPException(502, f"Image generation failed: {exc}") from exc
     except CatalogUpstreamError as exc:
@@ -88,13 +121,17 @@ async def get_generation(
     workspace_id: str = Depends(current_workspace_id),
 ) -> schemas.Generation:
     """Return one generation by id (scoped to the workspace), or 404."""
-    generation = service.get_generation(gen_id, workspace_id)
+    generation = await service.get_generation(workspace_id, gen_id)
     if generation is None:
         raise HTTPException(404, f"Generation '{gen_id}' not found")
     return generation
 
 
-@router.post("/edit", response_model=schemas.Generation)
+@router.post(
+    "/edit",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def edit(
     req: schemas.EditRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -116,7 +153,11 @@ async def edit(
         raise HTTPException(502, f"Image edit failed: {exc}") from exc
 
 
-@router.post("/video-elements", response_model=schemas.Generation)
+@router.post(
+    "/video-elements",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def video_elements(
     req: schemas.VideoElementsRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -135,7 +176,11 @@ async def video_elements(
         raise HTTPException(502, f"Video edit failed: {exc}") from exc
 
 
-@router.post("/video-motion-control", response_model=schemas.Generation)
+@router.post(
+    "/video-motion-control",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
 async def video_motion_control(
     req: schemas.VideoMotionRequest,
     workspace_id: str = Depends(current_workspace_id),
@@ -154,11 +199,76 @@ async def video_motion_control(
         raise HTTPException(502, f"Motion control failed: {exc}") from exc
 
 
+@router.post(
+    "/music",
+    response_model=schemas.Generation,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
+async def music(
+    req: schemas.MusicRequest,
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.Generation:
+    """Generate a music/audio track directly against fal.ai (the movie-maker's
+    soundtrack). The produced audio persists as a NEW generation (kind='audio').
+    Bad input (missing prompt) returns 400; a fal upstream failure 502."""
+    try:
+        return await service.generate_music(req, workspace_id=workspace_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except service.StudioUpstreamError as exc:
+        raise HTTPException(502, f"Music generation failed: {exc}") from exc
+
+
 @router.post("/suggest-prompt", response_model=schemas.PromptSuggestion)
 async def suggest_prompt(req: schemas.SuggestPromptRequest) -> schemas.PromptSuggestion:
     """Enrich a plain sentence into a generation prompt + inferred media kind.
     Heuristic mirror of the mock (no LLM call)."""
     return service.suggest_prompt(req.sentence)
+
+
+@router.post(
+    "/transcribe",
+    response_model=schemas.TranscriptResponse,
+    dependencies=[Depends(require_paid_or_early_access_allowed)],
+)
+async def transcribe(
+    file: UploadFile = File(..., description="Audio extracted from a clip (wav/mp3/m4a/ogg)"),
+    model: str | None = Form(default=None, description="Deepgram model override (e.g. nova-2)"),
+    language: str | None = Form(default=None, description="BCP-47 language hint (e.g. en-US)"),
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.TranscriptResponse:
+    """Transcribe speech in an uploaded audio file via Deepgram.
+
+    The /studio editor decodes a clip's audio track with Mediabunny and posts
+    it here as multipart; the response carries word-level millisecond timings
+    so the frontend can lay them on the caption track without a second call.
+
+    Multipart rather than JSON because the payload is raw audio bytes. An empty
+    upload returns 400; a provider failure or missing key returns 502 with
+    Deepgram's message relayed plainly, so the UI never shows a phantom
+    transcript.
+
+    ``current_workspace_id`` is the AUTH here, not bookkeeping. This route spends
+    real money — it uploads caller-supplied audio to Deepgram against a
+    deployment-wide POCKETPAW_DEEPGRAM_API_KEY — and it previously had no session
+    dependency at all, so any anonymous caller could drain that credit unmetered.
+    The router-wide ``require_license`` is NOT a substitute: it checks one
+    process-wide licence key and answers identically for every caller, including
+    one with no session. Every other spending route on this router (/generate,
+    /edit, /music, /video-*) already resolved a workspace; this one was missed.
+    """
+    audio_bytes = await file.read()
+    try:
+        return await service.transcribe(
+            audio_bytes,
+            content_type=file.content_type or "audio/wav",
+            model=model,
+            language=language,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except service.StudioUpstreamError as exc:
+        raise HTTPException(502, f"Transcription failed: {exc}") from exc
 
 
 # ── Flow projects (persisted server-side, workspace-scoped) ─────────────────
@@ -203,3 +313,50 @@ async def delete_flow_project(
     """Delete one flow project, or 404 if it doesn't exist in this workspace."""
     if not service.delete_flow_project(project_id, workspace_id):
         raise HTTPException(404, f"Flow project '{project_id}' not found")
+
+
+# ── Editor timelines (cross-device sync for the /studio editor) ─────────────
+# The editor keeps its authoritative copy locally (IndexedDB + OPFS media); this
+# is the sync target that lets a second device rebuild the same edit. The doc is
+# opaque — the backend stores and returns it without inspecting it.
+
+
+@router.get("/timelines", response_model=schemas.TimelineProjectsResponse)
+async def list_timelines(
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.TimelineProjectsResponse:
+    """Return the workspace's timelines, most-recently-updated first."""
+    return schemas.TimelineProjectsResponse(
+        projects=service.list_timeline_projects(workspace_id),
+    )
+
+
+@router.put("/timelines/{project_id}", response_model=schemas.TimelineProject)
+async def save_timeline(
+    project_id: str,
+    req: schemas.TimelineProjectSave,
+    workspace_id: str = Depends(current_workspace_id),
+) -> schemas.TimelineProject:
+    """Create-or-update a timeline (UPSERT). A save carrying an older edit clock
+    than the stored one is refused with 409 so a stale device cannot overwrite
+    newer work."""
+    try:
+        return service.save_timeline_project(
+            project_id,
+            workspace_id,
+            name=req.name,
+            doc=req.doc,
+            updated_at=req.updatedAt,
+        )
+    except service.TimelineConflict as exc:
+        raise HTTPException(409, f"Timeline '{project_id}' has newer changes") from exc
+
+
+@router.delete("/timelines/{project_id}", status_code=204)
+async def delete_timeline(
+    project_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    """Delete one timeline, or 404 if it doesn't exist in this workspace."""
+    if not service.delete_timeline_project(project_id, workspace_id):
+        raise HTTPException(404, f"Timeline '{project_id}' not found")

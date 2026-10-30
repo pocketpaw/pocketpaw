@@ -305,6 +305,7 @@ class WorkItemResponse(BaseModel):
     fabric_refs: list[str] = Field(default_factory=list)
     blocked_by: list[str] = Field(default_factory=list)
     due_at: str | None = None
+    belt_change_ready: bool | None = None
 
 
 def work_item_to_response(item: WorkItem) -> WorkItemResponse:
@@ -331,6 +332,7 @@ def work_item_to_response(item: WorkItem) -> WorkItemResponse:
         fabric_refs=list(item.fabric_refs),
         blocked_by=list(item.blocked_by),
         due_at=iso_utc(item.due_at),
+        belt_change_ready=item.belt_change_ready,
     )
 
 

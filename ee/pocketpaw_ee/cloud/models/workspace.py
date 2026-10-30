@@ -1,52 +1,59 @@
-"""Workspace document — one per deployment/org.
+"""Workspace document — one per deployment/org, and the sub-models embedded in it.
 
-2026-07-10 (compliance-starter): ``WorkspaceSettings.retention_days`` is no
-longer decorative. Added a field validator so a persisted value is always
-``None`` (keep forever) or a POSITIVE day count — 0 / negative are rejected
-at construction, closing both the dedicated retention endpoint and the
-general ``update()`` settings-merge path. The setting is read/written through
-``workspace.service.get_retention`` / ``set_retention`` and enforced by
-``workspace.service.enforce_retention`` (purges audit rows older than the
-cutoff). Nothing else on this document changed.
+``PartnerProfile`` / ``Workspace.partner`` (Paw Partners): the operator fields are
+set only by the platform route in ``cloud/platform/partners.py`` (via the workspace
+service's platform partner writer); an ``active`` profile turns the per-site
+billing seams on for THIS workspace (``billing.enforcement.sites_enforced``).
+``IsoCountry`` is the one country validator. ``tier`` is SYSTEM-owned: recomputed
+from active sold sites (``partners.service.refresh_standing``), raised right after
+a sale / client payment, lowered only by the monthly sweep, which stamps
+``tier_reviewed_at``; an operator-set tier stands until the next recompute that
+moves it. The public-profile fields are the partner's own (see the class).
 
-2026-06-28 (AW-7 template gate deny-on-no-match): added
-``Workspace.instinct_template_default_deny`` — the PER-WORKSPACE override for
-the TEMPLATE-level deny-by-default. ``None`` (the default) means "use the
-global config default" (``Settings.instinct_template_default_deny``, itself
-False). When set True, a template BOUND to a pocket that declares no rule
-matching a MUTATING action parks the write for a human instead of firing;
-reads stay ungated. Resolved exactly like ``instinct_approval_level`` (per-
-workspace field → global default) via
-``resolve_workspace_template_default_deny``; the cloud router reads it and
-threads it through ``run_action`` → ``gate_action``.
+``Workspace`` carries the tenant's plan, its members' roles, and the embedded
+config below. The sub-models are separated by WHAT THEY ARE, not by who edits
+them, and the split is load-bearing:
 
-2026-06-19 (layered/learning gate, T6): added
-``Workspace.instinct_approval_level`` — the PER-WORKSPACE override for the
-layered Instinct gate's triager activation level ("ASK" | "TRIAGE" |
-"TRUSTED"). ``None`` (the default) means "use the global config default"
-(``Settings.instinct_approval_level``, itself "ASK"). A workspace must
-explicitly set this to a non-ASK value to activate auto/optimistic/dry-run
-lanes for its writes — a global env var changes the default for NEW
-workspaces only and can never silently upgrade an existing tenant (design
-MF-9). The cloud router reads this field and passes the resolved level to
-``run_action`` → ``gate_action``.
+* ``WorkspaceSettings`` — operational config a workspace admin owns
+  (``retention_days``, validated to ``None`` or a positive day count so the
+  retention endpoint and the generic settings merge cannot persist 0;
+  ``site_transfers_allowed``, which gates only the OUTBOUND half of a site
+  transfer — the receiving side is governed by consent at the accept step;
+  ``growth_mock_delivery``, which makes an approved /growth email or WhatsApp
+  draft deliver through an in-process fake provider instead of the real one).
+* ``Branding`` — per-tenant IDENTITY for white-label theming. Deliberately not
+  folded into settings. Every sub-field is optional and an unset one falls back
+  to the Paw default at RENDER time, so nothing here stores a default.
+* ``WorkspaceOverrides`` — a platform OPERATOR's per-tenant entitlement
+  overrides. Written only through ``cloud/platform/entitlements.py`` and applied
+  only by ``entitlements.service.resolve_entitlements``. It covers a subset of
+  ``Entitlements`` on purpose; its own docstring accounts for what is missing.
 
-2026-06-14 (WB-1): added the ``Branding`` sub-model and a top-level
-``Workspace.branding`` field for white-label theming (logo, display name,
-tab title, accent color, favicon, paw-mark toggle). Branding is a per-tenant
-IDENTITY field — kept separate from ``WorkspaceSettings`` (operational config)
-on purpose. Every sub-field is optional; an unset field falls back to the Paw
-default at render time (a frontend concern, not stored here).
+The two Instinct fields (``instinct_approval_level``,
+``instinct_template_default_deny``) are PER-WORKSPACE overrides of a global
+config default, and both resolve the same way: the field if set, else the
+``Settings`` value. ``None`` means "use the global default" — which is what
+makes a global env var able to change the default for NEW workspaces only, and
+never silently upgrade an existing tenant's gate (design MF-9). The cloud router
+reads the resolved values and threads them through ``run_action`` →
+``gate_action``.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Annotated, Literal
 
 from beanie import Indexed
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator
+from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
+from pocketpaw_ee.cloud.partners.domain import (
+    PARTNER_SLUG_PATTERN,
+    PartnerService,
+    validate_partner_slug,
+)
 
 
 class WorkspaceSettings(BaseModel):
@@ -57,6 +64,25 @@ class WorkspaceSettings(BaseModel):
     # ``workspace.service.enforce_retention``). Zero / negative is rejected so
     # a bad value can never silently disable retention or wipe everything.
     retention_days: int | None = None
+    # Whether a site owner may move one of this workspace's sites OUT to another
+    # workspace (sites lifecycle wave 3). A transfer carries the site's leads and
+    # its concierge transcripts with it, so this is a DATA-EGRESS control and
+    # belongs to the workspace rather than to whoever happens to own the site —
+    # the same reasoning Netlify applies to its team-level transfer lock.
+    #
+    # Defaults True, which keeps the feature self-serve for the ordinary case: a
+    # workspace that has never thought about this reads as permissive, exactly as
+    # it did before the field existed, so there is no migration and nothing that
+    # worked yesterday stops. An admin turning it off is making a deliberate
+    # choice, and only the SOURCE side is gated — receiving a site is governed by
+    # the recipient's own consent, which is the accept step.
+    site_transfers_allowed: bool = True
+    # /growth demo mode. When on, approving an email or WhatsApp draft delivers
+    # it in-process through a staged fake provider (MessageLog provider "mock")
+    # rather than enqueueing the real dispatch job, so the whole outbound loop
+    # can be shown without Mailtrap, MSG91 or a growth worker. Off by default:
+    # a workspace that never touches it sends for real, exactly as before.
+    growth_mock_delivery: bool = False
 
     @field_validator("retention_days")
     @classmethod
@@ -83,6 +109,78 @@ class Branding(BaseModel):
     tab_title: str | None = None  # browser tab title
     accent_color: str | None = None  # hex "#RRGGBB" — tints the UI theme
     show_paw_mark: bool = True  # keep/hide our paw icon
+
+
+class WorkspaceOverrides(BaseModel):
+    """Platform-operator entitlement overrides (Paw Admin chunk 7, Decision 7).
+
+    Each field is independently tri-state: ``None`` means "not overridden — use
+    the plan catalog's value", the literal string ``"uncapped"`` means
+    "override to no limit", and an int means "override to exactly this limit".
+    Three states because a plain ``int | None`` cannot tell "leave the catalog
+    alone" apart from "override to unlimited" — both would collapse onto the
+    same wire value (``null``) otherwise, and an operator lifting Free's
+    ``max_seats=0`` to uncapped needs to say that, not merely "no opinion".
+
+    ``site_source_visible`` is the one field here that is NOT a ceiling, so its
+    tri-state is its own: ``None`` means "no opinion — each site's own per-site
+    tier decides", ``True`` grants source on every site in the workspace, and
+    ``False`` REVOKES it on every site, paid ones included. That third case is
+    the reason the field is ``bool | None`` and not merely a flag to set —
+    revoking source from a paying tenant is an abuse response, and it has to be
+    expressible without touching their sites' plans. It is excluded from the non-negative
+    validator below, which exists for the integer ceilings.
+
+    Every field here is read by ``resolve_entitlements``, which is the single
+    choke point every enforcement path in the codebase calls through — an
+    override set here reaches all of them with no extra plumbing. That
+    includes ``max_call_seconds_per_day``, which Decision 7's original field
+    list omitted despite it already being resolver-enforced (PRD errata C2).
+
+    Deliberately does NOT model ``monthly_credit_allotment`` or
+    ``extra_features``. Verified against every consumer in the tree, not just
+    ``Entitlements``: the credit-renewal grant reads
+    ``plan_catalog.get_plan(event.plan_key).monthly_credit_allotment`` directly
+    (``billing/service.py``), and both ``require_plan_feature`` implementations
+    (``cloud/_core/deps.py``, ``guards/deps.py``) test
+    ``feature in PLAN_FEATURES.get(plan, set())`` directly — neither goes
+    through the resolver. An override on either field would be stored, shown
+    on the console, and change nothing, which the PRD errata calls worse than
+    the field not existing: the ticket would read as fixed when it is not.
+    Add either field here only once its underlying gate reads the resolver.
+
+    ``expires_at`` — ``None`` never expires. Once past, the resolver treats
+    every field on this document as absent, not just the ones past their own
+    clock — a partial expiry would leave an operator unable to reason about
+    what is still in effect.
+    """
+
+    monthly_ceiling: int | Literal["uncapped"] | None = None
+    max_seats: int | Literal["uncapped"] | None = None
+    max_pockets: int | Literal["uncapped"] | None = None
+    max_connectors: int | Literal["uncapped"] | None = None
+    max_call_seconds_per_day: int | Literal["uncapped"] | None = None
+    max_storage_bytes: int | Literal["uncapped"] | None = None
+    included_sites: int | Literal["uncapped"] | None = None
+    # Not a ceiling, so no ``"uncapped"`` sentinel: ``bool | None`` is already
+    # tri-state. ``False`` is a REVOCATION, not "no opinion".
+    site_source_visible: bool | None = None
+    expires_at: datetime | None = None
+
+    @field_validator(
+        "monthly_ceiling",
+        "max_seats",
+        "max_pockets",
+        "max_connectors",
+        "max_call_seconds_per_day",
+        "max_storage_bytes",
+        "included_sites",
+    )
+    @classmethod
+    def _validate_non_negative(cls, v: int | str | None) -> int | str | None:
+        if isinstance(v, int) and v < 0:
+            raise ValueError("override value must be zero or positive, or the string 'uncapped'")
+        return v
 
 
 class SsoConfig(BaseModel):
@@ -113,6 +211,60 @@ class VerifiedDomain(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+def normalize_iso2(v: str) -> str:
+    """Upper-case ISO-3166 alpha-2 country code, or ValueError."""
+    v = v.strip().upper()
+    if len(v) != 2 or not v.isalpha():
+        raise ValueError("billing_country must be an ISO-3166 alpha-2 code")
+    return v
+
+
+# The ONE billing-country validator; the platform write body reuses this type.
+IsoCountry = Annotated[str, AfterValidator(normalize_iso2)]
+PartnerStatus = Literal["applied", "active", "suspended"]
+PartnerTier = Literal["bronze", "silver", "gold"]
+# Vocabulary shared with the wire DTOs: ``partners.domain`` (pure constants).
+PartnerSlug = Annotated[
+    str, Field(pattern=PARTNER_SLUG_PATTERN), AfterValidator(validate_partner_slug)
+]
+
+
+class PartnerProfile(BaseModel):
+    """Paw Partners (PH-1): this workspace resells sites to its own clients.
+
+    ``None`` on the workspace = not a partner. Only ``status == "active"`` turns
+    on site billing for the workspace; ``applied`` and ``suspended`` do not.
+    The operator fields are written by the workspace service's platform partner
+    writer; the public-profile fields (``slug`` .. ``public``) by the partner
+    itself through ``partners.service.update_public_profile`` (a targeted
+    ``$set``, ``workspace.service.set_partner_public_profile``). ``slug`` is
+    unique across workspaces (partial unique index below plus a service
+    pre-check). A profile is listed in the public directory only when
+    ``status == "active"`` and ``public`` is True.
+    """
+
+    status: PartnerStatus
+    # System-owned since PH-15 (see the module docstring); the operator PUT can
+    # still set it, and the next recompute that moves it overwrites that value.
+    tier: PartnerTier = "bronze"
+    footer_name: str = Field(min_length=1, max_length=120)
+    billing_country: IsoCountry = "IN"
+    founding: bool = False
+    joined_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    # When the monthly tier sweep last reviewed (and maybe lowered) ``tier``.
+    tier_reviewed_at: datetime | None = None
+    # Public profile (PW-7). Shown on /pros/directory and /pros/{slug} (Find a Pro)
+    # only while ``public`` and ``status == "active"``.
+    slug: PartnerSlug | None = None
+    display_name: str | None = Field(default=None, min_length=1, max_length=80)
+    city: str | None = Field(default=None, min_length=1, max_length=80)
+    country: IsoCountry | None = None
+    services: list[PartnerService] = Field(default_factory=list, max_length=5)
+    bio: str | None = Field(default=None, max_length=600)
+    contact_url: str | None = Field(default=None, pattern=r"^https://", max_length=300)
+    public: bool = False
+
+
 class Workspace(TimestampedDocument):
     """Organization workspace — one per enterprise deployment."""
 
@@ -126,6 +278,15 @@ class Workspace(TimestampedDocument):
     # nested under settings (which holds operational config). None = no
     # custom branding; the frontend renders the Paw defaults.
     branding: Branding | None = None
+    # Platform-operator entitlement overrides (Paw Admin chunk 7). None = no
+    # override in effect; set/cleared only by the platform write route in
+    # ``cloud/platform/entitlements.py`` (via its cross-tenant helper in
+    # ``workspace/service.py``), never by the tenant's own admin. See
+    # ``WorkspaceOverrides`` for the field list and why two ``Entitlements``
+    # fields are deliberately absent from it.
+    overrides: WorkspaceOverrides | None = None
+    # Paw Partners (PH-1). Platform-admin set only; see ``PartnerProfile``.
+    partner: PartnerProfile | None = None
     sso_config: SsoConfig | None = None
     verified_domains: list[VerifiedDomain] = Field(default_factory=list)
     deleted_at: datetime | None = None
@@ -157,3 +318,37 @@ class Workspace(TimestampedDocument):
 
     class Settings:
         name = "workspaces"
+        # Added 2026-09-14 for the Paw Admin tenant directory. Until now the
+        # only index on this collection was the unique one Beanie derives from
+        # ``slug``, because every read was "the workspaces this user belongs
+        # to" — resolved from the USER document, which never touches this
+        # collection's predicates at all.
+        #
+        # The operator console inverts that: it lists and filters across all
+        # tenants, so these predicates run against the whole collection for the
+        # first time and each one was a COLLSCAN.
+        indexes = [
+            # The default directory listing: not-deleted, newest first. Sorting
+            # is by _id (monotonic, unique) rather than createdAt, so the
+            # cursor cannot skip a row or repeat one when two workspaces land
+            # in the same clock tick.
+            IndexModel([("deleted_at", 1), ("_id", -1)], name="deleted_at_1__id_-1"),
+            # "Which workspaces does this user own", and the owner-email search
+            # path, which resolves emails to ids and then matches $in here.
+            IndexModel([("owner", 1)], name="owner_1"),
+            # Plan filter, and the plan-mix aggregate the dashboard will read.
+            IndexModel([("plan", 1)], name="plan_1"),
+            # Name search. A case-insensitive $regex can only use this for an
+            # anchored prefix, so a mid-string match still scans — acceptable
+            # while the tenant count is small, and the honest fix later is a
+            # text index or a normalised lowercase field, not a bigger regex.
+            IndexModel([("name", 1)], name="name_1"),
+            # Public partner slug, unique across workspaces. Partial so the
+            # many workspaces with no partner (or no slug) never collide.
+            IndexModel(
+                [("partner.slug", 1)],
+                name="partner_slug_1",
+                unique=True,
+                partialFilterExpression={"partner.slug": {"$type": "string"}},
+            ),
+        ]

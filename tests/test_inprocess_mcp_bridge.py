@@ -8,6 +8,11 @@ These servers (sites, pocket, connectors, media, ...) are registered through the
 and nothing else, so an agent on ``pydantic_ai`` asked to build a site had no
 ``create_svelte_site`` to call. "The model wrote a file instead of calling the
 tool" is what a missing tool looks like from the outside.
+
+Updated 2026-09-27 (fix/pydantic-ai-tool-images): added
+``test_images_a_tool_returns_reach_the_model_inside_the_tool_result`` (MCP
+``image`` blocks arrive as ``BinaryContent`` in the tool's own return instead of
+being dropped) and ``test_a_text_only_tool_result_stays_a_plain_string``.
 """
 
 from __future__ import annotations
@@ -240,3 +245,100 @@ async def test_the_real_sites_tools_reach_the_backend():
         "publish",
     ):
         assert "pocketpaw_sites_manager_" + tool in names, tool + " missing"
+
+
+def _image_server(png: bytes, *, blocks: int = 1):
+    """A server whose one tool answers the way the sites preview tools do: a
+    caption and then MCP ``image`` blocks carrying base64 JPEG/PNG bytes."""
+    import base64
+
+    import mcp.types as mcp_types
+    from mcp.server.lowlevel import Server
+
+    server = Server("srv")
+
+    @server.list_tools()
+    async def _list():
+        return [mcp_types.Tool(name="preview", description="Renders.", inputSchema={})]
+
+    @server.call_tool()
+    async def _call(name: str, arguments: dict):
+        encoded = base64.b64encode(png).decode("ascii")
+        return [mcp_types.TextContent(type="text", text="Captured the draft.")] + [
+            mcp_types.ImageContent(type="image", data=encoded, mimeType="image/png")
+            for _ in range(blocks)
+        ]
+
+    class _P:
+        def build_server(self):
+            return ("srv", {"instance": server})
+
+    return _P()
+
+
+async def test_images_a_tool_returns_reach_the_model_inside_the_tool_result(only_fake_providers):
+    """Reported from /sites on pydantic_ai: the preview captured six screenshots
+    and the agent said it never saw them. The bridge kept each block's ``.text``
+    and dropped every ``image`` block, so a vision model got the caption alone.
+    The pictures have to arrive as ``BinaryContent`` in the tool's own return."""
+    from pydantic_ai import Agent, BinaryContent
+    from pydantic_ai.messages import ToolReturnPart
+    from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
+
+    png = b"\x89PNG\r\n\x1a\nfake-pixels"
+    only_fake_providers(_image_server(png, blocks=2))
+
+    seen: list = []
+
+    async def stream_fn(messages, info: AgentInfo):
+        if len(messages) == 1:
+            yield {0: DeltaToolCall(name="srv_preview", json_args="{}", tool_call_id="c1")}
+            return
+        seen.extend(
+            part
+            for message in messages
+            for part in getattr(message, "parts", [])
+            if isinstance(part, ToolReturnPart)
+        )
+        yield "done"
+
+    agent = Agent(
+        FunctionModel(stream_function=stream_fn), toolsets=await build_inprocess_mcp_toolsets()
+    )
+    async with agent.run_stream_events("go") as stream:
+        async for _ in stream:
+            pass
+
+    assert len(seen) == 1
+    content = seen[0].content
+    assert isinstance(content, list)
+    images = [item for item in content if isinstance(item, BinaryContent)]
+    assert [(img.data, img.media_type) for img in images] == [(png, "image/png")] * 2
+    assert "Captured the draft." in [item for item in content if isinstance(item, str)]
+
+
+async def test_a_text_only_tool_result_stays_a_plain_string(only_fake_providers):
+    """No images, no change: every existing tool keeps returning the scanned
+    string it always did."""
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import ToolReturnPart
+    from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
+
+    only_fake_providers(_fake_provider("srv", [("publish", {})]))
+    seen: list = []
+
+    async def stream_fn(messages, info: AgentInfo):
+        if len(messages) == 1:
+            yield {0: DeltaToolCall(name="srv_publish", json_args="{}", tool_call_id="c1")}
+            return
+        seen.extend(p for m in messages for p in m.parts if isinstance(p, ToolReturnPart))
+        yield "done"
+
+    agent = Agent(
+        FunctionModel(stream_function=stream_fn), toolsets=await build_inprocess_mcp_toolsets()
+    )
+    async with agent.run_stream_events("go") as stream:
+        async for _ in stream:
+            pass
+
+    assert seen[0].content == "publish got []"

@@ -1,12 +1,12 @@
 # Stock image search tool — search free royalty-free stock photography from
 # Pexels + Unsplash and return hotlink-ready CDN URLs.
 #
-# Created: 2026-07-04 (feat/paw-sites-stock-imagery). Closes the "generated Paw
-# Sites ship text-and-color only" gap: the Svelte-track site-authoring agent can
-# now source real photography and bake the returned CDN `url` straight into its
-# hand-written sections. Provider logic ports joelio/stocky (MIT) but drops its
-# MCP packaging — the shared `search_stock_images()` helper below is the single
-# code path, surfaced two ways (this BaseTool for the non-SDK backends + an EE
+# Closes the "generated Paw Sites ship text-and-color only" gap: the
+# Svelte-track site-authoring agent can source real photography and bake the
+# returned CDN `url` straight into its hand-written sections. Provider logic
+# ports joelio/stocky (MIT) but drops its MCP packaging — the shared
+# `search_stock_images()` helper below is the single code path, surfaced two
+# ways (this BaseTool for the non-SDK backends + an EE
 # in-process MCP server for the claude_agent_sdk backend that runs the site
 # skill), mirroring how image_gen shares `generate_image_file()`.
 #
@@ -17,9 +17,13 @@
 # hotlinked Unsplash photo stays inside Unsplash's API terms. Graceful
 # degradation: zero configured keys → `[]` (site ships text-only, no regression);
 # one provider errors/rate-limits → its results are simply absent.
+#
+# `search_stock_images()` is synchronous (sync httpx); both async callers run it
+# in `asyncio.to_thread` so provider latency never blocks the event loop.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -258,7 +262,11 @@ class StockImageTool(BaseTool):
         import json
 
         try:
-            results = search_stock_images(query, orientation=orientation, count=count)
+            # Sync httpx under the hood: run it off the event loop so a slow
+            # provider can't stall every other request in the process.
+            results = await asyncio.to_thread(
+                search_stock_images, query, orientation=orientation, count=count
+            )
         except Exception as e:  # noqa: BLE001
             return self._error(f"Stock image search failed: {e}")
 

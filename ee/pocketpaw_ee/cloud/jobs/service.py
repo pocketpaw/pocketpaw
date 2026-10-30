@@ -57,19 +57,17 @@
 # record no longer matches — safe default), and (2) a ``_DENYLISTED_SOURCE_
 # COLLECTIONS`` constant blocks credential / identity / system collections
 # outright (returns ``[]`` + logs a warning), even intra-tenant.
+#
+# Changes (2026-10-01, CN-4): the lazy arq pool getter is gone; the pool is the
+# process-wide one in _core.redis_client (get_arq_pool), closed on shutdown.
 
 """Workspace-jobs service — Beanie writes + dispatch + lifecycle."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 from datetime import UTC, datetime
 from typing import Any
-
-from arq import create_pool
-from arq.connections import ArqRedis, RedisSettings
 
 from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
 from pocketpaw_ee.cloud._core.errors import CloudError
@@ -78,35 +76,17 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     WorkspaceJobQueued,
     WorkspaceJobUpdated,
 )
+from pocketpaw_ee.cloud._core.redis_client import get_arq_pool
 from pocketpaw_ee.cloud.jobs.domain import WORKSPACE_JOB_IDENTITY
 from pocketpaw_ee.cloud.jobs.registry import resolve_job, validate_job_params
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
 
 logger = logging.getLogger(__name__)
 
-# Reuse the same lazy-pool pattern as the chat-runs ArqExecutor — one pool per
-# process, double-checked lock so concurrent first-dispatches don't leak pools.
-_pool: ArqRedis | None = None
-_pool_lock = asyncio.Lock()
-
-
-async def _get_pool() -> ArqRedis:
-    global _pool
-    if _pool is None:
-        async with _pool_lock:
-            if _pool is None:
-                url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
-                if not url:
-                    raise RuntimeError(
-                        "POCKETPAW_REDIS_URL is not set — workspace jobs need Redis."
-                    )
-                _pool = await create_pool(RedisSettings.from_dsn(url))
-    return _pool
-
-
-def _reset_for_tests() -> None:
-    global _pool
-    _pool = None
+# The process-wide arq pool (one pool, closed on shutdown) lives in
+# _core.redis_client. ``_get_pool`` is this module's name for it: callers and
+# tests monkeypatch it here.
+_get_pool = get_arq_pool
 
 
 # ---------------------------------------------------------------------------

@@ -411,6 +411,10 @@ class DecisionStore:
         until: datetime | None = None,
         input_id: str | None = None,
         correlation_id: UUID | None = None,
+        action: str | None = None,
+        before: datetime | None = None,
+        exclude_id: UUID | None = None,
+        limit: int | None = None,
     ) -> Iterable[Decision]:
         """Index-driven multi-axis filter. The most selective axis is
         picked by SQLite's planner via the indexes the RFC lists. Scope
@@ -420,6 +424,11 @@ class DecisionStore:
 
         ``input_id`` narrows via a join on decision_inputs; the
         ``idx_inputs_id`` index keeps this O(matches).
+
+        ``action`` matches exactly; ``before`` is strictly ``ts <``
+        (compared as ISO strings, same as ``since``/``until``);
+        ``exclude_id`` drops one decision; ``limit`` caps the rows after
+        the ``ts DESC, id DESC`` ordering, so only that many hydrate.
         """
         assert self._conn is not None
 
@@ -463,12 +472,24 @@ class DecisionStore:
         if correlation_id is not None:
             clauses.append("correlation_id = ?")
             params.append(str(correlation_id))
+        if action is not None:
+            clauses.append("action = ?")
+            params.append(action)
+        if before is not None:
+            clauses.append("ts < ?")
+            params.append(before.isoformat())
+        if exclude_id is not None:
+            clauses.append("id != ?")
+            params.append(str(exclude_id))
 
         sql = base
         if clauses:
             joiner = " AND " if "WHERE" in sql else " WHERE "
             sql = sql + joiner + " AND ".join(clauses)
         sql = sql + " ORDER BY ts DESC, id DESC"
+        if limit is not None:
+            sql = sql + " LIMIT ?"
+            params.append(limit)
 
         for row in self._conn.execute(sql, params):
             yield self._hydrate_decision(row)

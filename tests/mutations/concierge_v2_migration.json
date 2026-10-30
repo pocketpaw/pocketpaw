@@ -1,0 +1,56 @@
+[
+  {
+    "label": "a shut gate is ignored and sites move anyway",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_v2.py",
+    "find": "    if _gate_runtime() != \"v2\":\n",
+    "replace": "    if _gate_runtime() == \"never\":\n",
+    "tests": [
+      "tests/cloud/sites/test_concierge_v2_migration.py::test_a_shut_gate_writes_nothing"
+    ]
+  },
+  {
+    "label": "a declared server-run verb no longer keeps a site on legacy",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_v2.py",
+    "find": "    if server_verbs:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/sites/test_concierge_v2_migration.py::test_a_declared_server_verb_is_skipped"
+    ]
+  },
+  {
+    "label": "a hand-bound agent is treated as the dedicated one",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_v2.py",
+    "find": "agent.slug != concierge_slug(str(site[\"_id\"]))",
+    "replace": "False",
+    "tests": [
+      "tests/cloud/sites/test_concierge_v2_migration.py::test_a_hand_bound_agent_is_skipped"
+    ]
+  },
+  {
+    "label": "an owner-customised agent no longer keeps a site on legacy",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_v2.py",
+    "find": "    if changed:\n        return \"its agent is customised: \"",
+    "replace": "    if False:\n        return \"its agent is customised: \"",
+    "tests": [
+      "tests/cloud/sites/test_concierge_v2_migration.py::test_an_owner_customised_agent_is_skipped"
+    ]
+  },
+  {
+    "label": "a dry run writes",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_v2.py",
+    "find": "        if not dry_run:\n",
+    "replace": "        if True:\n",
+    "tests": [
+      "tests/cloud/sites/test_concierge_v2_migration.py::test_a_dry_run_writes_nothing"
+    ]
+  },
+  {
+    "label": "a bar with no agent moves (and switches on unasked)",
+    "file": "ee/pocketpaw_ee/sites/migrate_concierge_v2.py",
+    "find": "        return \"its bar has no agent\"\n",
+    "replace": "        return None\n",
+    "tests": [
+      "tests/cloud/sites/test_concierge_v2_migration.py::test_a_bar_with_no_live_agent_is_skipped"
+    ]
+  }
+]

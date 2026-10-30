@@ -38,7 +38,7 @@
   {
     "label": "draft screenshot: a LIVE site gets photographed as a draft",
     "file": "ee/pocketpaw_ee/sites/screenshot.py",
-    "find": "    if (getattr(site, \"url\", \"\") or \"\").strip():\n        # A deployed site — ``take_site_screenshot`` photographs the real page.\n        return \"\"",
+    "find": "    if (getattr(site, \"url\", \"\") or \"\").strip() or getattr(site, \"foreign_origin\", False):\n        # A deployed site, or a connected one — ``take_site_screenshot`` photographs\n        # the real page. A connected site's pocket is not the page visitors see.\n        return \"\"",
     "replace": "    pass",
     "tests": [
       "tests/ee/sites/test_draft_screenshot.py"

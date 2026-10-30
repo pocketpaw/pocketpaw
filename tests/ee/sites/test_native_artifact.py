@@ -1,4 +1,8 @@
 # tests/ee/sites/test_native_artifact.py — the native-artifact render path (NE-5b).
+# Updated 2026-09-27 (fix/sites-preview-fonts): _extract_css keeps a remote font
+#   stylesheet link as an @import and hoists every @import to the top of the joined CSS.
+# Updated 2026-09-24 (PP-2): a component edit warms the artifact through its
+#   verification build rather than scheduling a separate pre-warm.
 # Created 2026-07-01 (feat/native-editing-ne4b).
 # Updated 2026-08-24 (SP-2 — the cold miss QUEUES instead of building here): every test
 # in this file that drove a cache MISS used to assert on an inline ``generator.build``.
@@ -62,6 +66,7 @@ import pytest
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
 from pocketpaw_ee.cloud.pockets import service as pockets_service
 from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.sites.engines import site_capabilities
 
 _HERO_V1 = "<section class='hero'><h1>Bright Smile</h1></section>"
 _SVELTE_SOURCE = {
@@ -474,6 +479,10 @@ async def test_native_artifact_store_hit_skips_build(beanie_test_db):
         "build_status": "none",
         "build_reason": None,
         "build_job_id": None,
+        # A body/css-only store holds no draft files, so there is no preview URL.
+        "preview_url": None,
+        # Every engine's answer carries the site's capability flags.
+        "capabilities": site_capabilities("svelte", has_database=False),
     }
     assert store.writes == 0, "a cache hit must not re-store"
     assert pool.calls == [], "a cache hit must not queue a sandbox"
@@ -581,7 +590,7 @@ async def test_leaf_edit_change_schedules_prewarm(beanie_test_db, _captured_prew
     captured, not run)."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         new = dict(source)
         new["src/lib/components/Hero.svelte"] = "<section class='hero'><h1>Edited</h1></section>"
         return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}
@@ -602,7 +611,7 @@ async def test_leaf_edit_rejected_schedules_no_prewarm(beanie_test_db, _captured
     """A REJECTED leaf edit persists nothing, so it warms nothing — no pre-warm scheduled."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         # Byte-identical source back (a rejected edit) → the persist loop writes nothing.
         return {
             "source": dict(source),
@@ -621,11 +630,14 @@ async def test_leaf_edit_rejected_schedules_no_prewarm(beanie_test_db, _captured
 
 
 @pytest.mark.asyncio
-async def test_component_edit_schedules_prewarm(beanie_test_db, _captured_prewarms):
-    """A targeted component edit (edit_svelte_component) also schedules a pre-warm after
-    its preview republish succeeds."""
+async def test_component_edit_warms_through_the_verify_build_not_a_second_prewarm(
+    beanie_test_db, _captured_prewarms, edit_verifier
+):
+    """PP-2: a component edit no longer schedules its own pre-warm. Its VERIFICATION
+    enqueues the preview build under the same content hash the view reads, so the
+    verify build IS the pre-warm — scheduling another would only re-enqueue the same
+    job id."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
-    gen = _CountingGenerator("/tmp/paw-native-artifact-unused")
 
     await sites_service.edit_svelte_component(
         workspace_id="ws1",
@@ -633,13 +645,10 @@ async def test_component_edit_schedules_prewarm(beanie_test_db, _captured_prewar
         pocket_id=pocket_id,
         component_path="src/lib/components/Hero.svelte",
         new_source="<section class='hero'><h1>Edited</h1></section>",
-        _generator=gen,
-        _cloudflare=_FakeCF(),
-        _bundle_reader=lambda d: b"export default {}",
-        _local_deploy=_fake_local_deploy,
     )
 
-    assert len(_captured_prewarms) == 1, "a component edit must schedule a native-artifact pre-warm"
+    assert _captured_prewarms == [], "the verify build is the pre-warm; nothing else queues"
+    assert len(edit_verifier.calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -759,7 +768,7 @@ async def test_leaf_edit_prewarm_uses_prewarm_origin(beanie_test_db, monkeypatch
 
     monkeypatch.setattr(sites_service, "_schedule_native_prewarm", _capture)
 
-    async def _fake_apply(*, source, edits):
+    async def _fake_apply(*, source, edits, lane=None):
         new = dict(source)
         new["src/lib/components/Hero.svelte"] = "<section class='hero'><h1>Edited</h1></section>"
         return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}
@@ -818,3 +827,36 @@ def test_filesystem_store_evicts_to_keep_cap(tmp_path, monkeypatch):
     assert store.read("pocketZ", "hash3") is not None  # newest survives
     assert store.read("pocketZ", "hash2") is not None
     assert store.read("pocketZ", "hash0") is None  # oldest evicted
+
+
+def test_extract_css_keeps_remote_font_stylesheets_and_hoists_imports(tmp_path):
+    """A font linked from the page head survives, and every @import leads the CSS.
+
+    The native preview only gets ``{body_html, css}``, so a
+    ``<link rel="stylesheet" href="https://fonts.googleapis.com/...">`` in ``<head>``
+    used to be read as a file path under the build dir, not found, and dropped: the
+    preview showed system fonts. And CSS ignores an ``@import`` that is not at the
+    top of a sheet, so one from app.css joined after other rules did nothing.
+    """
+    root = tmp_path / "cloudflare"
+    (root / "_app").mkdir(parents=True)
+    (root / "_app" / "page.css").write_text(
+        '@import url("https://fonts.googleapis.com/css2?family=Zodiak&display=swap");\n'
+        ".hero{color:red}",
+        encoding="utf-8",
+    )
+    html = (
+        "<html><head><style>.crit{margin:0}</style>"
+        '<link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=satoshi@400&display=swap">'
+        '<link rel="stylesheet" href="./_app/page.css">'
+        "</head><body><p>hi</p></body></html>"
+    )
+
+    css = sites_service._extract_css(html, root)
+
+    assert "api.fontshare.com/v2/css?f[]=satoshi@400&display=swap" in css
+    first_rule = css.index(".crit")
+    assert css.index("api.fontshare.com") < first_rule
+    assert css.index("fonts.googleapis.com") < first_rule
+    assert css.count("@import") == 2
+    assert ".hero{color:red}" in css

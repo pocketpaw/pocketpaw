@@ -26,9 +26,15 @@ import io
 import json
 import tarfile
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from pocketpaw_ee.sites import daytona_build as db
+
+#: The token ``build_usage``'s end-of-build probe command carries, so the fakes can tell
+#: it from the build exec. A literal (not an import) so these fakes load on their own;
+#: ``test_build_usage`` pins it to ``build_usage.USAGE_PROBE_MARKER``.
+USAGE_PROBE_MARKER = "paw-usage-probe"
 
 # ---------------------------------------------------------------------------
 # Sentinels — the evidence a build writes to prove it completed
@@ -307,6 +313,11 @@ class FaultyDaytonaClient:
         self.exec_timeout: int | None = None
         self.uploaded: list[tuple[Any, str]] = []
         self._failures: dict[str, int] = {}
+        #: The end-of-build usage probe (``build_usage``) is recorded apart from the
+        #: build exec, as ``measure``, so phase injection and ``exec_timeout`` stay
+        #: about the build itself.
+        self.probe_commands: list[str] = []
+        self.probe_output = ""
         # ``sentinel=None`` means the build left NO proof; omitting it means a healthy
         # one. Same split for the artifact, where None means the download came back
         # empty. See ``_Unset``.
@@ -349,6 +360,10 @@ class FaultyDaytonaClient:
         self._maybe_fail("upload")
 
     async def execute_command(self, sandbox_id: str, command: str, timeout: int = 30) -> Any:
+        if USAGE_PROBE_MARKER in command:
+            self.calls.append("measure")
+            self.probe_commands.append(command)
+            return SimpleNamespace(exit_code=0, result=self.probe_output)
         self.calls.append("exec")
         self.exec_timeout = timeout
         self._maybe_fail("exec")

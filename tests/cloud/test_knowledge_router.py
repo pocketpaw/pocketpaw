@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pocketpaw_ee.cloud.kb.knowledge_router as knowledge_router_module
 import pytest
@@ -54,7 +55,7 @@ def client(monkeypatch):
     # For routers that DO consume _core.deps, patch the consumer instead — see test_audit_router.py.
     from pocketpaw_ee.guards import deps as guards_deps
 
-    monkeypatch.setattr(guards_deps, "check_workspace_action", lambda *a, **k: None)
+    monkeypatch.setattr(guards_deps, "check_workspace_action", AsyncMock(return_value=None))
 
     # Build a fake user that already has ws-alpha as its active workspace.
     fake_user = SimpleNamespace(

@@ -23,7 +23,10 @@
         "get started",
         "capabilities",
         "getting started"
-      ]
+      ],
+      "slash": "home",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:chat",
@@ -44,7 +47,10 @@
         "agent room",
         "channel",
         "group"
-      ]
+      ],
+      "slash": "chat",
+      "presentation": "inline",
+      "agent_openable": true
     },
     {
       "id": "surface:pockets",
@@ -65,7 +71,10 @@
         "open pocket",
         "workspace apps",
         "tracker"
-      ]
+      ],
+      "slash": "pockets",
+      "presentation": "inline",
+      "agent_openable": true
     },
     {
       "id": "surface:sites",
@@ -87,7 +96,63 @@
         "domain",
         "live site",
         "online"
-      ]
+      ],
+      "slash": "sites",
+      "presentation": "inline",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:discover",
+      "kind": "surface",
+      "name": "Discover",
+      "summary": "Discover: free tools, games and site templates that people publish from Paw, open to browse without signing in; remix one into your own workspace.",
+      "narrative": "Discover is the public index of things people chose to share from Paw: small free tools, games and site templates, filterable by kind and audience and searchable by title. Anyone can browse it and open a live demo without signing in; a signed-in user remixes a listing into a private copy in their own workspace, or reports it. Point a user here when they want a ready-made free tool, game or template someone else published, or to see what the community has shared.",
+      "how": "",
+      "surface": "/discover",
+      "requires": [],
+      "keywords": [
+        "discover",
+        "free tools",
+        "free tool",
+        "games",
+        "community",
+        "published by others",
+        "browse templates",
+        "remix",
+        "explore",
+        "showcase",
+        "gallery"
+      ],
+      "slash": "discover",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:partners-directory",
+      "kind": "surface",
+      "name": "Find a Pro",
+      "summary": "Find a Pro: local print, design, web, marketing and photo pros who build and run sites for nearby businesses, listed by city and service, open to browse and apply to without signing in.",
+      "narrative": "Find a Pro is the public directory of Paw Pros by PocketPaw: local shops that chose to be found and that set up and run websites for the businesses around them. Each Pro's profile shows their name, city, services, a short bio, a contact link and the sites they have published to Discover. Anyone can browse it, filter by city or service, open one Pro by its slug, or apply to become a Pro through a short form (no sign-in). Point a user here when they want someone nearby to build or run their site, or when a shop asks how to join Paw Pros. Inside the product and for operators these accounts are partners (the signed-in hub is /partners).",
+      "how": "HTTP only: GET /api/v1/pros/directory?city=&service=&cursor=&limit= (public, 60/min per IP), GET /api/v1/pros/{slug} (public), POST /api/v1/pros/apply {name, email, city, country, services, message, turnstile_token} (public, 5/hour per IP). A Pro edits its own listing with PATCH /api/v1/partners/me/profile.",
+      "surface": "/pros/find",
+      "requires": [],
+      "keywords": [
+        "find a pro",
+        "paw pros",
+        "pro directory",
+        "become a pro",
+        "local web designer",
+        "print shop",
+        "pro near me",
+        "partner directory",
+        "paw partners",
+        "find a partner",
+        "reseller",
+        "agency"
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:belt",
@@ -102,13 +167,16 @@
       ],
       "keywords": [
         "belt",
-        "coding task",
+        "coding work",
         "diff",
         "station",
         "develop",
         "code change",
         "proposed change"
-      ]
+      ],
+      "slash": "belt",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:decisions",
@@ -129,7 +197,10 @@
         "what happened",
         "instinct",
         "review decisions"
-      ]
+      ],
+      "slash": "decisions",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:decisions-graph",
@@ -150,7 +221,10 @@
         "projection",
         "drill down",
         "audit trail"
-      ]
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:mission-control",
@@ -172,8 +246,14 @@
         "plan",
         "analytics",
         "in flight",
-        "mission control"
-      ]
+        "mission control",
+        "tasks",
+        "my tasks",
+        "task list"
+      ],
+      "slash": "deep-work",
+      "presentation": "inline",
+      "agent_openable": false
     },
     {
       "id": "surface:agents",
@@ -192,7 +272,10 @@
         "plugins",
         "soul",
         "tune"
-      ]
+      ],
+      "slash": "agents",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:settings",
@@ -211,7 +294,10 @@
         "security",
         "notifications",
         "configure"
-      ]
+      ],
+      "slash": "settings",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:integrations",
@@ -232,7 +318,10 @@
         "api key",
         "external service",
         "providers"
-      ]
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:workspace-admin",
@@ -250,7 +339,10 @@
         "policy",
         "sso",
         "channels"
-      ]
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:billing",
@@ -274,7 +366,10 @@
         "upgrade",
         "top up",
         "pricing"
-      ]
+      ],
+      "slash": null,
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:knowledge",
@@ -292,14 +387,17 @@
         "wiki",
         "search knowledge",
         "docs"
-      ]
+      ],
+      "slash": "knowledge",
+      "presentation": "inline",
+      "agent_openable": true
     },
     {
       "id": "surface:files",
       "kind": "surface",
       "name": "Files",
-      "summary": "Workspace file browser panel.",
-      "narrative": "The Files surface is the workspace file browser. Point a user here to browse, inspect, or manage the files the workspace holds — including files that feed the knowledge base.",
+      "summary": "Workspace file browser and notes library: files, folders, markdown notes with [[wikilinks]], backlinks, tags, and a link graph.",
+      "narrative": "The Files surface is the workspace file browser and the place to write notes. Point a user here to browse, inspect, or manage the files the workspace holds (including files that feed the knowledge base), to make a markdown note or today's daily note, to link notes with [[wikilinks]] and see which notes link back, to tag files with #tags, or to view the whole library as a link graph. Behind it: GET /api/v1/files/{file_id}/links (outgoing links + backlinks) and GET /api/v1/files/graph (nodes, edges, ghost names for links with no file yet).",
       "how": "",
       "surface": "/files",
       "requires": [],
@@ -308,8 +406,22 @@
         "browser",
         "documents",
         "uploads",
-        "folders"
-      ]
+        "folders",
+        "notes",
+        "note",
+        "daily note",
+        "wikilink",
+        "wikilinks",
+        "backlinks",
+        "linked mentions",
+        "link graph",
+        "graph view",
+        "tags",
+        "tag"
+      ],
+      "slash": "files",
+      "presentation": "inline",
+      "agent_openable": true
     },
     {
       "id": "surface:studio",
@@ -329,14 +441,120 @@
         "poster",
         "illustration",
         "gallery"
-      ]
+      ],
+      "slash": "studio",
+      "presentation": "inline",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:studio_editor",
+      "kind": "surface",
+      "name": "Timeline Editor",
+      "summary": "Video timeline editor: arrange clips on tracks, trim them, add captions and titles, set transitions, and export the cut.",
+      "narrative": "The timeline editor is where generated or uploaded media is ASSEMBLED into one finished video. Tracks hold clips; the agent can arrange, trim, split and order them, place captions at given timings, lay audio into lanes and set transitions, all in one batch that lands as a single undo step. It does NOT generate footage — that is /studio. Point a user here when they have media and want to cut it together, caption it, or export it.",
+      "how": "",
+      "surface": "/studio/editor",
+      "requires": [],
+      "keywords": [
+        "timeline",
+        "editor",
+        "clip",
+        "arrange",
+        "trim",
+        "split",
+        "caption",
+        "subtitle",
+        "transition",
+        "cut",
+        "track",
+        "lane",
+        "sequence"
+      ],
+      "slash": "studio/editor",
+      "presentation": "window",
+      "agent_openable": true
+    },
+    {
+      "id": "surface:studio_vector",
+      "kind": "surface",
+      "name": "Vector Design Editor",
+      "summary": "Print-ready vector design editor: visiting cards, wedding cards, flex banners and logos, in CMYK, with Hindi and other Indic text.",
+      "narrative": "The vector editor is where print artwork is DRAWN: shapes, paths, text, colour and layout on a sized artboard, ready for a print shop. The agent edits the open design through edit_vector, one batch per change landing as a single undo step. Point a user here when they want a visiting card, wedding card, banner, flyer or logo made or changed. It does not generate photos or video; that is /studio.",
+      "how": "",
+      "surface": "/studio/vector",
+      "requires": [],
+      "keywords": [
+        "vector",
+        "design",
+        "visiting",
+        "card",
+        "wedding",
+        "invitation",
+        "banner",
+        "flex",
+        "logo",
+        "print",
+        "cmyk",
+        "artboard"
+      ],
+      "slash": "studio/vector",
+      "presentation": "window",
+      "agent_openable": true
+    },
+    {
+      "id": "surface:studio_photo",
+      "kind": "surface",
+      "name": "Photo Editor",
+      "summary": "Photo editor for print shops: retouch customer photos, cut out backgrounds and make 35x45 mm passport photos at 300 ppi.",
+      "narrative": "The photo editor is where a customer's photo is RETOUCHED for print: levels, curves, brightness, hue, sharpening, crops, resizing, subject selection, background fills, text and layers. The agent edits the open photo through edit_photo, one batch per change landing as a single undo step. Point a user here for a passport or ID photo, a photo touch-up or a background swap. It does not generate new images; that is /studio.",
+      "how": "",
+      "surface": "/studio/photo",
+      "requires": [],
+      "keywords": [
+        "photo",
+        "passport",
+        "retouch",
+        "levels",
+        "curves",
+        "sharpen",
+        "crop",
+        "background",
+        "id photo"
+      ],
+      "slash": "studio/photo",
+      "presentation": "window",
+      "agent_openable": true
+    },
+    {
+      "id": "surface:studio_design",
+      "kind": "surface",
+      "name": "Page Layout Editor",
+      "summary": "Page layout editor for print: visiting cards, flyers, letterheads and invitations laid out in mm with bleed, exported as PDF/X-4.",
+      "narrative": "The page layout editor is where print PAGES are laid out: sized pages with bleed, text frames, shapes, colour, alignment and multiple pages, measured in millimetres and exported print-ready. The agent edits the open document through edit_design, one batch per change landing as a single undo step. Point a user here for a flyer, letterhead, bill book or multi-page invitation. Freeform artwork such as a logo belongs in /studio/vector.",
+      "how": "",
+      "surface": "/studio/design",
+      "requires": [],
+      "keywords": [
+        "layout",
+        "page",
+        "flyer",
+        "letterhead",
+        "brochure",
+        "bleed",
+        "pdf",
+        "mm",
+        "pages"
+      ],
+      "slash": "studio/design",
+      "presentation": "window",
+      "agent_openable": true
     },
     {
       "id": "surface:code",
       "kind": "surface",
       "name": "Code",
-      "summary": "In-browser IDE: real workspace file tree, editor tabs, and an agent-side edit-run-verify loop.",
-      "narrative": "The Code surface is an in-browser IDE over the shared workspace: a real file tree, editor tabs, and an honest activity indicator while the agent does the work agent-side. Point a user here to read or edit workspace code with the agent alongside.",
+      "summary": "In-browser IDE: real workspace source tree, editor tabs, and an agent-side edit-run-verify loop.",
+      "narrative": "The Code surface is an in-browser IDE over the shared workspace: a real source tree, editor tabs, and an honest activity indicator while the agent does the work agent-side. Point a user here to read or edit workspace code with the agent alongside.",
       "how": "",
       "surface": "/code",
       "requires": [],
@@ -344,17 +562,22 @@
         "code",
         "ide",
         "editor",
-        "file tree",
+        "source tree",
+        "repo tree",
+        "source code",
         "scripts",
         "edit code"
-      ]
+      ],
+      "slash": "code",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:foresight",
       "kind": "surface",
       "name": "Foresight",
-      "summary": "Scenario rehearsal: create, run, and compare what-if scenarios (runs, insights, fabric, aggregate views).",
-      "narrative": "Foresight is the rehearsal surface: create what-if scenarios, run them, and inspect runs, insights, and aggregate views before committing to a decision. Point a user here to rehearse, simulate, or forecast a decision.",
+      "summary": "Scenario rehearsal: create, run, and compare what-if scenarios (runs, insights, aggregate views).",
+      "narrative": "Foresight is the rehearsal surface: create what-if scenarios, run them, and inspect runs, insights, the Fabric view, and aggregate views before committing to a decision. Point a user here to rehearse, simulate, or forecast a decision.",
       "how": "",
       "surface": "/foresight",
       "requires": [],
@@ -367,7 +590,10 @@
         "what if",
         "runs",
         "insights"
-      ]
+      ],
+      "slash": "foresight",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:calendar",
@@ -384,7 +610,10 @@
         "schedule",
         "upcoming",
         "meetings schedule"
-      ]
+      ],
+      "slash": "calendar",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:meetings",
@@ -401,7 +630,10 @@
         "recordings",
         "notes",
         "transcript"
-      ]
+      ],
+      "slash": "meetings",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:activity",
@@ -419,7 +651,10 @@
         "events",
         "river",
         "what happened"
-      ]
+      ],
+      "slash": "activity",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:audit",
@@ -437,7 +672,10 @@
         "trail",
         "record",
         "who did what"
-      ]
+      ],
+      "slash": "audit",
+      "presentation": "window",
+      "agent_openable": false
     },
     {
       "id": "surface:security",
@@ -461,7 +699,133 @@
         "mode",
         "blocked",
         "protection"
-      ]
+      ],
+      "slash": "security",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:agents-activity",
+      "kind": "surface",
+      "name": "Agent Activity",
+      "summary": "Which of the workspace's agents are working right now, and on what.",
+      "narrative": "The /agents/activity board is the member-level, workspace-scoped view of live agent work: which agents are busy, what they are running, and what just finished. Point a user here when they ask what their agents are doing right now; the agent list and editor live at /agents.",
+      "how": "",
+      "surface": "/agents/activity",
+      "requires": [],
+      "keywords": [
+        "agent activity",
+        "agents working",
+        "busy agents",
+        "running agents",
+        "live agents"
+      ],
+      "slash": "agents/activity",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:agent-health",
+      "kind": "surface",
+      "name": "Agent Health",
+      "summary": "Where the workspace's agents fail, what their runs cost, and the run timeline behind each issue.",
+      "narrative": "Agent Health at /agent-health is the workspace-scoped view of agent reliability, read from paw-lens traces: runs, failing rate, cost, cache hits, the open issues grouped by cause, and a per-agent table. Each issue opens at /agent-health/issues/<fingerprint> with the runs it hit, and each run opens its span timeline at /agent-health/runs/<traceId>. Point a user here when they ask why an agent failed, which agent is erroring, or what runs cost; for what agents are doing right now use /agents/activity. Muting or resolving an issue needs a workspace admin.",
+      "how": "",
+      "surface": "/agent-health",
+      "requires": [],
+      "keywords": [
+        "agent health",
+        "failing runs",
+        "agent errors",
+        "agent issues",
+        "run timeline"
+      ],
+      "slash": "agent-health",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:fabric",
+      "kind": "surface",
+      "name": "Fabric",
+      "summary": "Browse the workspace's Fabric: its typed entities, their properties and links.",
+      "narrative": "The /fabric page is the human view of Fabric, the workspace's typed knowledge graph of entities and the links between them. Point a user here to browse or inspect the entities Fabric holds; to explain Fabric itself or use it from an agent, see primitive:fabric.",
+      "how": "",
+      "surface": "/fabric",
+      "requires": [
+        "primitive:fabric"
+      ],
+      "keywords": [
+        "fabric browser",
+        "entity browser",
+        "ontology view",
+        "object types"
+      ],
+      "slash": "fabric",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:ship",
+      "kind": "surface",
+      "name": "Ship",
+      "summary": "Managed-deploy console: provision boxes and ship apps to them.",
+      "narrative": "The /ship console is the managed-deploy surface: boxes (servers) the workspace deploys to, their apps and deploy status, in a three-pane layout with a chat rail. Point a user here when they want to deploy or check on a deployed app; publishing a website is Sites, not Ship.",
+      "how": "",
+      "surface": "/ship",
+      "requires": [],
+      "keywords": [
+        "deploy",
+        "deployment",
+        "server",
+        "box",
+        "managed deploy",
+        "ship it"
+      ],
+      "slash": "ship",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:growth",
+      "kind": "surface",
+      "name": "Growth",
+      "summary": "The outbound engine's workspace: prospects, outreach drafts and the LinkedIn queue.",
+      "narrative": "The /growth surface is where a human runs the outbound engine: the prospect list and detail pages, outreach drafts waiting for approval, and the manual LinkedIn queue. Point a user here for prospecting and outreach work.",
+      "how": "",
+      "surface": "/growth",
+      "requires": [],
+      "keywords": [
+        "outbound",
+        "prospects",
+        "outreach",
+        "leads",
+        "cold email",
+        "linkedin queue"
+      ],
+      "slash": "growth",
+      "presentation": "window",
+      "agent_openable": false
+    },
+    {
+      "id": "surface:browser",
+      "kind": "surface",
+      "name": "Browser",
+      "summary": "Chat-driven web browsing: the agent drives a server-side browser and brings back results.",
+      "narrative": "The /browser surface is where the agent drives a headless browser on the server and only the results reach the user; there is no URL bar or live view. Point a user here when they want the agent to look something up or act on a website for them.",
+      "how": "",
+      "surface": "/browser",
+      "requires": [],
+      "keywords": [
+        "web browsing",
+        "browse the web",
+        "headless browser",
+        "look it up online",
+        "visit a website"
+      ],
+      "slash": "browser",
+      "presentation": "window",
+      "agent_openable": false
     }
   ]
 }

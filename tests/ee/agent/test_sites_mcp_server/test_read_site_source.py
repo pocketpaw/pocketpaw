@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import json
+import re
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -72,6 +73,25 @@ def _listed_tool(name: str = "read_site_source"):
 def _body(out: dict) -> dict:
     """Decode the JSON body a success response carries."""
     return json.loads(out["content"][0]["text"])
+
+
+_HEADER = re.compile(r"^=== FILE: (?P<path>.+) \((?P<bytes>\d+) bytes\) ===$")
+
+
+def _file_blocks(out: dict) -> dict[str, str]:
+    """Map path -> contents from the plain-text file blocks after the metadata.
+
+    Each block is a one-line ``=== FILE: <path> (<n> bytes) ===`` header, a
+    newline, then the file's contents verbatim."""
+    blocks: dict[str, str] = {}
+    for block in out["content"][1:]:
+        assert block["type"] == "text"
+        header, _, contents = block["text"].partition("\n")
+        m = _HEADER.match(header)
+        assert m, header
+        assert int(m["bytes"]) == len(contents.encode("utf-8"))
+        blocks[m["path"]] = contents
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -226,9 +246,13 @@ class TestReadHandler:
             return_value={
                 "pocket_id": "pk1",
                 "engine": "html",
-                "file_path": "index.html",
-                "bytes": len(source.encode("utf-8")),
-                "contents": source,
+                "files": [
+                    {
+                        "path": "index.html",
+                        "bytes": len(source.encode("utf-8")),
+                        "contents": source,
+                    }
+                ],
             }
         )
         with (
@@ -240,8 +264,7 @@ class TestReadHandler:
             )
 
         assert not out.get("is_error"), out
-        body = _body(out)
-        assert body["contents"] == source
+        assert _file_blocks(out) == {"index.html": source}
 
     @pytest.mark.asyncio
     async def test_missing_identity_is_an_error(self) -> None:
@@ -366,8 +389,9 @@ class TestReadService:
                 user_id="u1", pocket_id="pk1", file_path="index.html"
             )
 
-        assert out["contents"] == source
-        assert out["bytes"] == len(source.encode("utf-8"))
+        assert out["files"] == [
+            {"path": "index.html", "bytes": len(source.encode("utf-8")), "contents": source}
+        ]
 
     @pytest.mark.asyncio
     async def test_a_ripple_pocket_is_rejected_not_a_keyerror(self) -> None:
@@ -401,3 +425,168 @@ class TestReadService:
                 await sites_service.read_site_source(
                     user_id="u1", pocket_id="pk1", file_path="about.html"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Complete, unescaped contents and batch reads
+# ---------------------------------------------------------------------------
+
+# Quotes, backslashes, tabs, CRLF and non-ASCII: every character JSON would
+# escape, plus a line that looks like the block header itself.
+_TRICKY = (
+    '<!doctype html>\n<h1 class="a">Hi \\ "there"</h1>\r\n'
+    "\t<script>const s = 'a\\nb';</script>\n"
+    "=== FILE: fake.html (1 bytes) ===\n"
+    "café — \U0001f600\n"
+)
+
+
+def _pocket(files: dict[str, str]) -> dict:
+    return {"engine": "html", "source": dict(files)}
+
+
+class TestCompleteUnescapedRead:
+    """The bug: file contents were JSON-dumped inside one text block, so every
+    newline and quote was escaped, inflating a large file past Claude Code's MCP
+    output cap. The agent never saw the whole file and re-called the tool. The
+    contents now ride in their own plain-text block, byte-for-byte."""
+
+    @pytest.mark.asyncio
+    async def test_contents_come_back_verbatim_in_their_own_block(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        get = AsyncMock(return_value=_pocket({"index.html": _TRICKY}))
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.cloud.pockets.service.get", new=get),
+        ):
+            out = await mcp._read_site_source_handler(
+                {"pocket_id": "pk1", "file_path": "index.html"}
+            )
+
+        assert not out.get("is_error"), out
+        assert _file_blocks(out) == {"index.html": _TRICKY}
+        # The JSON-escaped copy must not travel in the metadata block either.
+        assert json.dumps(_TRICKY)[1:-1] not in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_metadata_block_lists_files_without_contents(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        get = AsyncMock(return_value=_pocket({"index.html": _TRICKY}))
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.cloud.pockets.service.get", new=get),
+        ):
+            out = await mcp._read_site_source_handler(
+                {"pocket_id": "pk1", "file_path": "index.html"}
+            )
+
+        meta = _body(out)
+        assert meta["ok"] is True
+        assert meta["pocket_id"] == "pk1"
+        assert meta["engine"] == "html"
+        assert meta["files"] == [{"path": "index.html", "bytes": len(_TRICKY.encode("utf-8"))}]
+        assert "contents" not in json.dumps(meta)
+        assert meta["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_large_file_is_returned_whole(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        big = "".join(f'<p class="row-{i}">line "{i}"</p>\n' for i in range(20_000))
+        get = AsyncMock(return_value=_pocket({"index.html": big}))
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.cloud.pockets.service.get", new=get),
+        ):
+            out = await mcp._read_site_source_handler(
+                {"pocket_id": "pk1", "file_path": "index.html"}
+            )
+
+        assert _file_blocks(out)["index.html"] == big
+
+
+class TestBatchRead:
+    @pytest.mark.asyncio
+    async def test_file_paths_reads_several_files_from_one_pocket_fetch(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        files = {"index.html": _TRICKY, "styles.css": "a{b:c}\n", "about.html": "<p>x</p>"}
+        get = AsyncMock(return_value=_pocket(files))
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.cloud.pockets.service.get", new=get),
+        ):
+            out = await mcp._read_site_source_handler(
+                {"pocket_id": "pk1", "file_paths": ["styles.css", "index.html"]}
+            )
+
+        assert not out.get("is_error"), out
+        assert get.await_count == 1
+        blocks = _file_blocks(out)
+        assert list(blocks) == ["styles.css", "index.html"]
+        assert blocks == {"styles.css": files["styles.css"], "index.html": _TRICKY}
+        assert [f["path"] for f in _body(out)["files"]] == ["styles.css", "index.html"]
+
+    @pytest.mark.asyncio
+    async def test_file_path_and_file_paths_combine_deduped_in_order(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        files = {"index.html": "<h1/>", "styles.css": "a{}", "app.js": "x()"}
+        get = AsyncMock(return_value=_pocket(files))
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.cloud.pockets.service.get", new=get),
+        ):
+            out = await mcp._read_site_source_handler(
+                {
+                    "pocket_id": "pk1",
+                    "file_path": "index.html",
+                    "file_paths": ["app.js", "index.html", "./app.js", "styles.css"],
+                }
+            )
+
+        assert not out.get("is_error"), out
+        assert list(_file_blocks(out)) == ["index.html", "app.js", "styles.css"]
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_path_fails_the_call_and_names_what_exists(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        get = AsyncMock(return_value=_pocket({"index.html": "<h1/>", "styles.css": "a{}"}))
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.cloud.pockets.service.get", new=get),
+        ):
+            out = await mcp._read_site_source_handler(
+                {"pocket_id": "pk1", "file_paths": ["index.html", "nope.html"]}
+            )
+
+        assert out.get("is_error") is True
+        text = out["content"][0]["text"]
+        assert "nope.html" in text
+        assert "styles.css" in text
+
+    @pytest.mark.asyncio
+    async def test_file_paths_must_be_a_list_of_non_empty_strings(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with patch.object(mcp, "_identity", return_value=("ws1", "u1")):
+            for bad in ("index.html", [], [""], [3]):
+                out = await mcp._read_site_source_handler({"pocket_id": "pk1", "file_paths": bad})
+                assert out.get("is_error") is True, bad
+
+    def test_schema_advertises_file_paths(self) -> None:
+        tool = next(t for t in _listed_tool() if t.name == "read_site_source")
+        props = (tool.inputSchema or {}).get("properties") or {}
+        assert props["file_paths"]["type"] == "array"
+        assert props["file_paths"]["items"]["type"] == "string"
+
+    def test_description_steers_to_one_batched_read(self) -> None:
+        tool = next(t for t in _listed_tool() if t.name == "read_site_source")
+        desc = tool.description or ""
+        assert "file_paths" in desc
+        assert "ONE call" in desc
+        assert "wastes" not in desc
+        assert "paw_site_id" in desc  # the form-plumbing warning stays

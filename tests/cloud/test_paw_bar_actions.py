@@ -1,4 +1,14 @@
 # tests/cloud/test_paw_bar_actions.py — Paw Bar action registry (C1), end to end.
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
+# Updated 2026-09-26: customer_ref values lengthened to 8+ chars: chat and the legacy ingest now
+#   enforce the same 8-128 [A-Za-z0-9_-] bound as every other public paw-bar
+#   route (fix/pawbar-public-route-gates, 2026-09-26).
 # Updated 2026-07-30: TestFormCardPreamble pins the form-card instruction block —
 # rendered only for gated actions WITH args (contract fence, per-verb arg list,
 # name-based type mapping, emit-once + skip-when-details-present), absent for
@@ -129,18 +139,22 @@ def stores(tmp_path: Path, monkeypatch):
 
 class TestExecutorAuto:
     async def test_add_to_cart_happy_path(self, stores) -> None:
-        from pocketpaw_ee.paw_bar.actions import execute_action
+        from pocketpaw_ee.paw_bar.actions import _cart_ref, execute_action
 
         pp_store, _ = stores
         widget = await pp_store.create_widget(_widget())
-        out = await execute_action(widget, "ws-1", "c1", "add_to_cart", {"product_id": "espresso"})
+        # Non-hex characters, so the ref can never show up inside the hex cart handle by chance.
+        ref = "customer-ref-xyz"
+        out = await execute_action(widget, "ws-1", ref, "add_to_cart", {"product_id": "espresso"})
         assert out.ok
         assert out.result == {"added": "espresso", "qty": 1}
         assert out.cart["total_cents"] == 350
         assert out.cart["items"][0]["id"] == "espresso"
         # checkout_url is rendered with the opaque cart ref (no raw customer_ref).
-        assert "{cart_ref}" not in out.cart["checkout_url"]
-        assert "c1" not in out.cart["checkout_url"]
+        assert out.cart["checkout_url"] == (
+            f"https://brewco.com/checkout?cart={_cart_ref(str(widget.id), ref)}"
+        )
+        assert ref not in out.cart["checkout_url"]
 
     async def test_add_to_cart_unknown_product_rejected(self, stores) -> None:
         from pocketpaw_ee.paw_bar.actions import execute_action
@@ -151,6 +165,24 @@ class TestExecutorAuto:
         assert not out.ok
         assert out.error == "unknown_product"
         assert out.http_status == 422
+
+    async def test_add_to_cart_in_a_second_currency_is_refused(self, stores) -> None:
+        from pocketpaw_ee.paw_bar.actions import execute_action
+
+        pp_store, _ = stores
+        catalog = [
+            {"id": "espresso", "name": "Espresso", "price_cents": 350, "currency": "USD"},
+            {"id": "matcha", "name": "Matcha", "price_cents": 1500, "currency": "JPY"},
+        ]
+        widget = await pp_store.create_widget(_widget(spec=_actions_spec(catalog=catalog)))
+        first = await execute_action(widget, "ws-1", "c1", "add_to_cart", {"product_id": "matcha"})
+        assert first.ok and first.cart["currency"] == "JPY" and first.cart["total_cents"] == 1500
+        out = await execute_action(widget, "ws-1", "c1", "add_to_cart", {"product_id": "espresso"})
+        assert not out.ok
+        assert (out.error, out.http_status) == ("cart_currency_mismatch", 409)
+        assert "JPY" in out.result["message"] and "USD" in out.result["message"]
+        cart = await pp_store.get_cart(widget.id, "c1")
+        assert [i.id for i in cart.items] == ["matcha"]
 
     async def test_undeclared_verb_and_unknown_arg_rejected(self, stores) -> None:
         from pocketpaw_ee.paw_bar.actions import execute_action
@@ -315,6 +347,12 @@ async def _site(**ov: Any):
         allowed_origins=["brewco.com"],
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s
@@ -434,6 +472,26 @@ class TestActionEndpoint:
         )
         assert res.status_code == 422
 
+    async def test_currency_mismatch_surfaces_409(self, action_client) -> None:
+        client, store = action_client
+        await _site()
+        catalog = [
+            {"id": "espresso", "name": "Espresso", "price_cents": 350, "currency": "USD"},
+            {"id": "dates", "name": "Dates", "price_cents": 1250, "currency": "KWD"},
+        ]
+        widget = await store.create_widget(_widget(spec=_actions_spec(catalog=catalog)))
+        ok = await client.post(
+            "/paw-bar/action", json=_action_body(widget.id), headers={"Origin": _ORIGIN}
+        )
+        assert ok.status_code == 200, ok.text
+        res = await client.post(
+            "/paw-bar/action",
+            json=_action_body(widget.id, args={"product_id": "dates"}),
+            headers={"Origin": _ORIGIN},
+        )
+        assert res.status_code == 409
+        assert "cart_currency_mismatch" in res.text
+
     async def test_empty_cart_returns_empty_shape(self, action_client) -> None:
         client, store = action_client
         await _site()
@@ -509,9 +567,7 @@ class TestWidgetPatch:
         client, store = admin_client
         import asyncio
 
-        widget = asyncio.get_event_loop().run_until_complete(
-            store.create_widget(_widget(agent_id="", workspace_id="ws-1"))
-        )
+        widget = asyncio.run(store.create_widget(_widget(agent_id="", workspace_id="ws-1")))
         res = client.patch(
             f"/paw-bar/widgets/{widget.id}",
             json={"agent_id": "agent-new", "name": "Renamed"},
@@ -528,7 +584,7 @@ class TestWidgetPatch:
         client, store = admin_client
         import asyncio
 
-        widget = asyncio.get_event_loop().run_until_complete(
+        widget = asyncio.run(
             store.create_widget(_widget(agent_id="agent-xyz", workspace_id="ws-1"))
         )
         res = client.patch(
@@ -544,9 +600,7 @@ class TestWidgetPatch:
         import asyncio
 
         # A widget owned by ws-other must 404 for the ws-1 admin session.
-        widget = asyncio.get_event_loop().run_until_complete(
-            store.create_widget(_widget(workspace_id="ws-other"))
-        )
+        widget = asyncio.run(store.create_widget(_widget(workspace_id="ws-other")))
         res = client.patch(
             f"/paw-bar/widgets/{widget.id}",
             json={"agent_id": "x"},
@@ -710,7 +764,7 @@ class TestSessionKeyInterlock:
             json={
                 "widget_id": widget.id,
                 "signed_key": _VALID_KEY,
-                "customer_ref": "cust-1",
+                "customer_ref": "cust-0001",
                 "message": "hi",
             },
             headers={"Origin": _ORIGIN},
@@ -749,15 +803,26 @@ class TestCatalogPreamble:
                 {"id": "espresso", "name": "Espresso", "price_cents": 350, "currency": "USD"}
             ],
         )
-        pre = await build_preamble("ws", "u", meta)
+        pre = (await build_preamble("ws", "u", meta)).text
         assert "espresso" in pre and "$3.50" in pre
         assert "pawbar_add_to_cart" in pre
+
+    async def test_an_item_with_no_price_lists_no_price(self) -> None:
+        """price_cents 0 is "no listed price" (an application-only event, an owner
+        item never priced): the line names the item and claims no $0.00."""
+        from pocketpaw_ee.cloud.surface.handlers.concierge import _catalog_block
+
+        block = _catalog_block(
+            [{"id": "jazz", "name": "Jazz Night", "price_cents": 0, "currency": "USD"}]
+        )
+        assert 'id "jazz": Jazz Night\n' in block
+        assert "$0.00" not in block
 
     async def test_no_actions_preamble_has_no_catalog(self) -> None:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
 
-        pre = await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))
+        pre = (await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))).text
         assert "Products you can sell" not in pre
         assert "don't act" in pre
 
@@ -770,9 +835,11 @@ class TestFormCardPreamble:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
 
-        return await build_preamble(
-            "ws", "u", SurfaceMeta(route_path="/paw-bar", pawbar_actions=actions)
-        )
+        return (
+            await build_preamble(
+                "ws", "u", SurfaceMeta(route_path="/paw-bar", pawbar_actions=actions)
+            )
+        ).text
 
     async def test_gated_action_with_args_renders_form_instructions(self) -> None:
         """A gated action with typed args teaches the "form" pawbar-card: the
@@ -802,7 +869,7 @@ class TestFormCardPreamble:
         from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
         from pocketpaw_ee.cloud.surface.handlers.concierge import build_preamble
 
-        pre = await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))
+        pre = (await build_preamble("ws", "u", SurfaceMeta(route_path="/paw-bar"))).text
         assert "FORMS for gated actions" not in pre
         assert '"kind": "form"' not in pre
 

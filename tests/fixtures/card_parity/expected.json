@@ -1,0 +1,108 @@
+{
+  "_about": [
+    "Expected verdicts for cases.json. The same three files live in pocketpaw (tests/fixtures/card_parity/) and paw-bar; change them in both.",
+    "client: what paw-bar's parseSpecCard (app/src/lib/spec-card.ts) returns: spec | invalid | legacy.",
+    "server: what pocketpaw's card_spec does with the fence: accept (emitted, hydrated) | reject (dropped) | legacy (the old kind:product/form path).",
+    "The server is stricter by design: an unknown widget type or a disallowed action is 'spec' on the client (it draws a fallback or ignores the event) and 'reject' on the server. Client 'invalid' must always be server 'reject', and client 'legacy' must always be server 'legacy'.",
+    "Hydration (valid_product_card) uses catalog.json."
+  ],
+  "bounds": {
+    "max_chars": 32000,
+    "max_nodes": 80,
+    "max_depth": 8,
+    "host_events": [
+      "add_to_cart",
+      "checkout"
+    ]
+  },
+  "verdicts": {
+    "valid_layout": {
+      "client": "spec",
+      "server": "accept"
+    },
+    "valid_product_card": {
+      "client": "spec",
+      "server": "accept"
+    },
+    "valid_emit_add_to_cart": {
+      "client": "spec",
+      "server": "accept"
+    },
+    "valid_emit_checkout": {
+      "client": "spec",
+      "server": "accept"
+    },
+    "valid_local_state": {
+      "client": "spec",
+      "server": "accept"
+    },
+    "valid_form": {
+      "client": "spec",
+      "server": "accept"
+    },
+    "at_char_limit": {
+      "client": "spec",
+      "server": "accept"
+    },
+    "over_char_limit": {
+      "client": "invalid",
+      "server": "reject"
+    },
+    "at_node_limit": {
+      "client": "spec",
+      "server": "accept"
+    },
+    "over_node_limit": {
+      "client": "invalid",
+      "server": "reject"
+    },
+    "at_depth_limit": {
+      "client": "spec",
+      "server": "accept"
+    },
+    "over_depth_limit": {
+      "client": "invalid",
+      "server": "reject"
+    },
+    "unknown_type": {
+      "client": "spec",
+      "server": "reject"
+    },
+    "bad_action_navigate": {
+      "client": "spec",
+      "server": "reject"
+    },
+    "bad_emit_target": {
+      "client": "spec",
+      "server": "reject"
+    },
+    "children_not_list": {
+      "client": "invalid",
+      "server": "reject"
+    },
+    "node_without_type": {
+      "client": "invalid",
+      "server": "reject"
+    },
+    "ui_not_object": {
+      "client": "invalid",
+      "server": "reject"
+    },
+    "state_not_object": {
+      "client": "invalid",
+      "server": "reject"
+    },
+    "legacy_product": {
+      "client": "legacy",
+      "server": "legacy"
+    },
+    "legacy_form": {
+      "client": "legacy",
+      "server": "legacy"
+    },
+    "not_json": {
+      "client": "legacy",
+      "server": "legacy"
+    }
+  }
+}

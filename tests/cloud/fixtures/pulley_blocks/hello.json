@@ -1,0 +1,27 @@
+{
+  "$comment": "pulley/examples/hello/manifest.json — created 2026-08-11 (T-1): manifest of the hand-written hello example block. Exercises a route, a nav entry, one env var, and a table prefix; no ports, no deps.",
+  "name": "hello",
+  "version": "0.1.0",
+  "description": "Minimal example block proving the pulley block spec end to end.",
+  "kind": "domain",
+  "tablePrefix": "hello_",
+  "routes": [
+    { "path": "/hello", "page": "HelloPage" }
+  ],
+  "nav": [
+    { "slot": "main", "label": "Hello", "icon": "hand-wave", "order": 90 }
+  ],
+  "env": [
+    {
+      "name": "HELLO_GREETING",
+      "required": false,
+      "description": "Overrides the default greeting text shown on the hello page.",
+      "secret": false
+    }
+  ],
+  "perms": ["hello.read"],
+  "events": {
+    "emits": ["hello.greeted"]
+  },
+  "skill": "SKILL.md"
+}

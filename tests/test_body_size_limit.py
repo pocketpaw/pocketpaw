@@ -52,11 +52,15 @@ class _RecordingApp:
         await send({"type": "http.response.body", "body": b"ok"})
 
 
-def _scope(headers: list[tuple[bytes, bytes]], method: str = "POST"):
+def _scope(
+    headers: list[tuple[bytes, bytes]],
+    method: str = "POST",
+    path: str = "/api/v1/uploads",
+):
     return {
         "type": "http",
         "method": method,
-        "path": "/api/v1/uploads",
+        "path": path,
         "headers": headers,
     }
 
@@ -254,3 +258,202 @@ class TestItIsActuallyWired:
         assert order.index(BodySizeLimitMiddleware) < order.index(AuthMiddleware), (
             "the body ceiling runs inside AuthMiddleware, which reads the body itself"
         )
+
+
+class TestMultipartRelayPartCeiling:
+    """The one route with its own ceiling (feat/uploads-multipart-endpoints).
+
+    ``PUT /api/v1/uploads/multipart/{id}/parts/{n}`` carries one bare storage
+    part, so the global ceiling — derived from a 50-file multipart batch — is
+    the wrong shape for it. The branch is matched on SHAPE, and a near-miss
+    falls back to the global ceiling rather than to no ceiling: the opposite of
+    the rotted allowlists the module header argues against, where a miss
+    silently removes a bound.
+
+    Mutations: tests/mutations/uploads_multipart_api.json.
+    """
+
+    async def test_a_part_gets_its_own_ceiling_rather_than_the_global_one(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**9, relay_part_bytes=100)
+        scope = _scope(
+            [(b"content-length", b"5000")],
+            method="PUT",
+            path="/api/v1/uploads/multipart/mpu_abc/parts/3",
+        )
+
+        sent = await _drive(mw, scope, [b"x" * 50])
+
+        assert _status(sent) == 413
+        assert app.called is False, (
+            "the relay route was measured against the global ceiling, so a 5 GB "
+            "part would reach the handler"
+        )
+
+    async def test_a_legitimate_part_reaches_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10, relay_part_bytes=10_000)
+        scope = _scope(
+            [(b"content-length", b"50")],
+            method="PUT",
+            path="/api/v1/uploads/multipart/mpu_abc/parts/3",
+        )
+
+        sent = await _drive(mw, scope, [b"x" * 50])
+
+        assert _status(sent) == 200
+        assert app.body_bytes == 50, "the exemption is not applied to the relay route"
+
+    async def test_anything_that_is_not_the_relay_route_gets_the_global_ceiling(self):
+        """Fail-closed: a POST to that shape, a renamed path, or the simple
+        upload route must all keep the global bound."""
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10, relay_part_bytes=10_000)
+        cases = [
+            ("POST", "/api/v1/uploads/multipart/mpu_abc/parts/3"),
+            ("PUT", "/api/v1/uploads/multipart/mpu_abc/chunks/3"),
+            ("PUT", "/api/v1/uploads/multipart/mpu_abc"),
+            ("PUT", "/api/v1/uploads"),
+        ]
+        for method, path in cases:
+            scope = _scope([(b"content-length", b"50")], method=method, path=path)
+            assert _status(await _drive(mw, scope, [b"x" * 50])) == 413, f"{method} {path}"
+
+    def test_the_global_ceiling_is_not_raised_to_cover_large_uploads(self):
+        """``max_file_bytes`` must stay at 25 MiB. Raising it to 5 GiB to make
+        large uploads work would lift the GLOBAL ceiling to ~250 GB, which is
+        precisely the bug this module exists to prevent."""
+        from pocketpaw.security.body_limit import _configured_ceiling
+        from pocketpaw.uploads.config import UploadSettings
+
+        assert UploadSettings().max_file_bytes == 25 * 1024 * 1024
+        assert _configured_ceiling() < 2 * 1024 * 1024 * 1024
+
+
+class TestSiteDataCsvPreviewCeiling:
+    """``POST /api/v1/sites/by-pocket/{id}/data/tables/{table}/import:preview`` takes
+    one CSV of at most 5 MB, so it gets a ~6 MiB ceiling of its own instead of the
+    ~1.27 GB global one: without it a huge multipart body is spooled to disk before
+    the route (or even auth) runs. Matched on shape; a miss keeps the global bound.
+
+    Mutations: tests/mutations/site_data_import_restore.json.
+    """
+
+    _PATH = "/api/v1/sites/by-pocket/pk_1/data/tables/orders/import:preview"
+
+    async def test_an_oversized_csv_upload_is_refused_before_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**9)
+        declared = str(7 * 1024 * 1024).encode()
+        sent = await _drive(mw, _scope([(b"content-length", declared)], path=self._PATH), [b"x"])
+        assert _status(sent) == 413 and app.called is False
+
+    async def test_a_chunked_oversized_csv_upload_is_refused(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**9)
+        chunks = [b"x" * (1024 * 1024)] * 7
+        sent = await _drive(mw, _scope([], path=self._PATH), chunks)
+        assert _status(sent) == 413
+
+    async def test_a_five_mb_csv_upload_reaches_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10)
+        body = b"x" * (5 * 1024 * 1024 + 4096)  # the 5 MB file plus multipart framing
+        declared = str(len(body)).encode()
+        sent = await _drive(mw, _scope([(b"content-length", declared)], path=self._PATH), [body])
+        assert _status(sent) == 200 and app.body_bytes == len(body)
+
+    async def test_other_routes_keep_the_global_ceiling(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10)
+        for method, path in [
+            ("GET", self._PATH),
+            ("POST", "/api/v1/sites/by-pocket/pk_1/data/tables/orders/import"),
+            ("POST", "/api/v1/sites/by-pocket/pk_1/data/tables/a/b/import:preview"),
+        ]:
+            scope = _scope([(b"content-length", b"50")], method=method, path=path)
+            assert _status(await _drive(mw, scope, [b"x" * 50])) == 413, f"{method} {path}"
+
+
+class TestSiteDataFileUploadCeiling:
+    """``PUT /api/v1/sites/by-pocket/{id}/data/files/{binding}/object`` takes one raw
+    file of at most 50 MiB, so it gets a 51 MiB ceiling instead of the global one.
+    Matched on shape (method and path); a miss keeps the global bound.
+
+    Mutations: tests/mutations/site_data_files_kv.json.
+    """
+
+    _PATH = "/api/v1/sites/by-pocket/pk_1/data/files/SITE_FILES/object"
+
+    async def test_an_oversized_upload_is_refused_before_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**10)
+        declared = str(52 * 1024 * 1024).encode()
+        scope = _scope([(b"content-length", declared)], method="PUT", path=self._PATH)
+        sent = await _drive(mw, scope, [b"x"])
+        assert _status(sent) == 413 and app.called is False
+
+    async def test_a_chunked_oversized_upload_is_refused(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10**10)
+        chunks = [b"x" * (4 * 1024 * 1024)] * 13
+        sent = await _drive(mw, _scope([], method="PUT", path=self._PATH), chunks)
+        assert _status(sent) == 413
+
+    async def test_a_fifty_mib_upload_reaches_the_app(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10)
+        size = 50 * 1024 * 1024
+        scope = _scope([(b"content-length", str(size).encode())], method="PUT", path=self._PATH)
+        sent = await _drive(mw, scope, [b"x" * size])
+        assert _status(sent) == 200 and app.body_bytes == size
+
+    async def test_other_routes_keep_the_global_ceiling(self):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=10)
+        for method, path in [
+            ("POST", self._PATH),
+            ("PUT", "/api/v1/sites/by-pocket/pk_1/data/files/a/b/object"),
+            ("PUT", "/api/v1/sites/by-pocket/pk_1/data/files/SITE_FILES/object:move"),
+        ]:
+            scope = _scope([(b"content-length", b"50")], method=method, path=path)
+            assert _status(await _drive(mw, scope, [b"x" * 50])) == 413, f"{method} {path}"
+
+
+class TestSiteDataKvAndMoveCeilings:
+    """The Sites Data KV write (``PUT …/data/kv/{binding}/keys/{key}``, a 1 MB value
+    as JSON) gets 3 MiB, and a file move (``POST …/data/files/{binding}/object:move``,
+    two keys) gets 64 KiB, instead of the global ceiling.
+
+    Mutations: tests/mutations/site_data_files_kv.json.
+    """
+
+    _KV = "/api/v1/sites/by-pocket/pk_1/data/kv/CACHE/keys/a/b"
+    _MOVE = "/api/v1/sites/by-pocket/pk_1/data/files/SITE_FILES/object:move"
+
+    async def _status_for(self, method, path, size, *, max_bytes=10**10):
+        app = _RecordingApp()
+        mw = BodySizeLimitMiddleware(app, max_bytes=max_bytes)
+        scope = _scope([(b"content-length", str(size).encode())], method=method, path=path)
+        return _status(await _drive(mw, scope, [b"x" * size])), app
+
+    async def test_an_oversized_kv_write_is_refused(self):
+        status, app = await self._status_for("PUT", self._KV, 3 * 1024 * 1024 + 1)
+        assert status == 413 and app.called is False
+
+    async def test_a_three_mib_kv_write_reaches_the_app(self):
+        status, _ = await self._status_for("PUT", self._KV, 3 * 1024 * 1024, max_bytes=10)
+        assert status == 200
+
+    async def test_an_oversized_move_is_refused(self):
+        status, app = await self._status_for("POST", self._MOVE, 64 * 1024 + 1)
+        assert status == 413 and app.called is False
+
+    async def test_a_small_move_reaches_the_app(self):
+        status, _ = await self._status_for("POST", self._MOVE, 2048, max_bytes=10)
+        assert status == 200
+
+    async def test_other_methods_keep_the_global_ceiling(self):
+        for method, path in [("GET", self._KV), ("PUT", self._MOVE), ("DELETE", self._KV)]:
+            status, _ = await self._status_for(method, path, 50, max_bytes=10)
+            assert status == 413, f"{method} {path}"

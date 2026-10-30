@@ -1,31 +1,16 @@
-# Tests for the Sites Cloudflare client (RFC 12, Task 2.2).
-# Created: 2026-05-30 (feat/paw-sites-backend) — exercises the two CF
-# surfaces the control plane uses, with httpx.MockTransport standing in
-# for the real Cloudflare API (no network):
-#   * put_worker — uploads a user Worker to the Workers-for-Platforms
-#     dispatch namespace (asserts URL + PUT verb).
-#   * create_custom_hostname — Cloudflare-for-SaaS hostname create, returns
-#     the single CNAME target the client pastes.
-#   * get_hostname_status — maps CF's status/ssl pair onto HostnameStatus.
-#   * non-2xx responses fail closed (raise).
-# Updated 2026-06-20 (DS-2 — dynamic-site D1 bindings): put_worker gains an
-# optional ``bindings`` param. When supplied it switches to the Workers
-# multipart/form-data upload (a ``metadata`` JSON part carrying main_module +
-# bindings + compatibility_date, plus the module file part) so a dynamic site's
-# deployed Worker reaches its per-tenant D1. When omitted it keeps the exact
-# single-module upload (static sites unchanged) — both paths are asserted here.
-# Updated 2026-07-08 (DP0-1 — D1 provisioning): added coverage for
-# create_database(): a successful create returns the uuid at ``result.uuid``, and
-# a Cloudflare error envelope (success:false or non-2xx) fails closed by raising
-# ValidationError with code ``sites.cloudflare_error``.
-# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added coverage for
-# query_analytics_sql(), which breaks two of this module's conventions on purpose —
-# the body is raw SQL rather than JSON, and a SUCCESSFUL query answers
-# ``{meta, data, rows}`` with no ``success`` key, so ``_unwrap`` would raise on every
-# good response. Both are pinned here because either is one line of house-style
-# tidying away from breaking every read. It is fail-closed on a non-2xx, a non-JSON
-# body, and a 2xx with no data array: returning [] would render a Cloudflare outage
-# as a customer's quiet week.
+# Tests for the Sites Cloudflare client (ee/pocketpaw_ee/sites/cloudflare_client.py),
+# with httpx.MockTransport standing in for the real Cloudflare API (no network):
+#   * put_worker: the single-module PUT (static sites) and the one-module multipart
+#     with a ``bindings`` metadata part (dynamic sites' D1), URL and verb pinned.
+#   * custom hostnames: create returns the configured CNAME target; status maps CF's
+#     status/ssl pair onto HostnameStatus.
+#   * create_database: returns ``result.uuid``; the body carries the operator's
+#     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``, unknown values left
+#     out) and the opt-in ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication``).
+#   * query_analytics_sql: raw SQL body and a success body with no ``success`` key,
+#     both pinned because house-style tidying would break every read; fail-closed on
+#     a non-2xx, a non-JSON body and a 2xx with no data array.
+#   * every non-2xx or ``success: false`` fails closed with Cloudflare's own detail.
 from __future__ import annotations
 
 import json
@@ -696,3 +681,274 @@ async def test_analytics_sql_fails_closed_on_a_2xx_with_no_data_array():
         with pytest.raises(ValidationError) as exc:
             await client.query_analytics_sql("SELECT 1")
         assert exc.value.code == "sites.cloudflare_error", body
+
+
+# ── Teardown primitives (sites lifecycle, wave 1 chunk 1) ────────────────
+#
+# These assert the two things a teardown call can get wrong in a way nothing else
+# notices: the PATH (a delete aimed at the wrong surface silently removes nothing and
+# reports success) and the 404 CONTRACT (a resumed cascade re-runs completed steps, so
+# "already gone" must not raise). The house rule for every delete here is that 404 is
+# success — a teardown that cannot finish leaves exactly the orphan it was called to
+# remove.
+
+
+@pytest.mark.asyncio
+async def test_delete_worker_targets_the_dispatch_namespace_script():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    await _client(handler).delete_worker("site_abc")
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == (
+        "/client/v4/accounts/acct_1/workers/dispatch/namespaces/paw-sites/scripts/site_abc"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_account_script_targets_the_account_level_path():
+    """The ``workers`` deploy mode's script does NOT live in the dispatch namespace.
+
+    Sending this delete to the namespace path would 404 — and because 404 is success,
+    the cascade would record a completed teardown over a Worker still serving.
+    """
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    await _client(handler).delete_account_script("site_abc")
+    assert seen["path"] == "/client/v4/accounts/acct_1/workers/scripts/site_abc"
+
+
+@pytest.mark.asyncio
+async def test_delete_database_targets_the_d1_uuid():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    await _client(handler).delete_database("db-uuid-1")
+    assert seen["method"] == "DELETE"
+    assert seen["path"] == "/client/v4/accounts/acct_1/d1/database/db-uuid-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.delete_worker("gone"),
+        lambda c: c.delete_account_script("gone"),
+        lambda c: c.delete_database("gone"),
+    ],
+)
+async def test_a_404_is_success_for_every_teardown_delete(call):
+    """A resumed cascade re-runs steps it already finished. If "already gone" raised,
+    a partial teardown could never be completed — the exact orphan these exist to stop.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"success": False, "errors": [{"message": "nope"}]})
+
+    await call(_client(handler))  # must not raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.delete_worker("x"),
+        lambda c: c.delete_account_script("x"),
+        lambda c: c.delete_database("x"),
+    ],
+)
+async def test_a_real_failure_still_raises(call):
+    """404 is the ONLY forgiven status. A 500 means the resource may still exist, and
+    swallowing it would mark the step done while the orphan survives."""
+
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"success": False, "errors": [{"message": "boom"}]})
+
+    with pytest.raises(ValidationError):
+        await call(_client(handler))
+
+
+# ── D1 create options: location hint and read replication (new databases only) ──
+
+
+def _create_body(monkeypatch, env: dict[str, str]) -> dict:
+    import asyncio
+
+    for key in ("PAW_SITES_D1_LOCATION_HINT", "PAW_SITES_D1_READ_REPLICATION"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"success": True, "result": {"uuid": "u1"}})
+
+    assert asyncio.run(_client(handler).create_database("site-db")) == "u1"
+    return seen["body"]
+
+
+def test_create_database_sends_only_the_name_by_default(monkeypatch):
+    assert _create_body(monkeypatch, {}) == {"name": "site-db"}
+
+
+def test_create_database_passes_the_configured_location_hint(monkeypatch):
+    body = _create_body(monkeypatch, {"PAW_SITES_D1_LOCATION_HINT": " APAC "})
+    assert body == {"name": "site-db", "primary_location_hint": "apac"}
+
+
+def test_an_unknown_location_hint_is_left_out_so_cloudflare_chooses(monkeypatch):
+    body = _create_body(monkeypatch, {"PAW_SITES_D1_LOCATION_HINT": "sam"})
+    assert body == {"name": "site-db"}
+
+
+def test_read_replication_is_opt_in_at_create(monkeypatch):
+    body = _create_body(
+        monkeypatch,
+        {"PAW_SITES_D1_READ_REPLICATION": "1", "PAW_SITES_D1_LOCATION_HINT": "weur"},
+    )
+    assert body == {
+        "name": "site-db",
+        "primary_location_hint": "weur",
+        "read_replication": {"mode": "auto"},
+    }
+    assert "read_replication" not in _create_body(
+        monkeypatch, {"PAW_SITES_D1_READ_REPLICATION": "0"}
+    )
+
+
+# --------------------------------------------------------------------------- D1 Time Travel
+
+_D1 = "/client/v4/accounts/acct_1/d1/database/db-1"
+
+
+@pytest.mark.asyncio
+async def test_d1_info_gets_the_database_and_returns_its_version():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(
+            200, json={"success": True, "result": {"uuid": "db-1", "version": "production"}}
+        )
+
+    info = await _client(handler).d1_info("db-1")
+    assert seen == {"method": "GET", "path": _D1}
+    assert info["version"] == "production"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timestamp", [None, "2026-10-27T10:00:00Z"])
+async def test_d1_bookmark_reads_the_time_travel_bookmark(timestamp):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"success": True, "result": {"bookmark": "00000085-ab"}})
+
+    assert await _client(handler).d1_bookmark("db-1", timestamp) == "00000085-ab"
+    assert seen["method"] == "GET"
+    assert seen["path"] == _D1 + "/time_travel/bookmark"
+    assert seen["params"] == ({"timestamp": timestamp} if timestamp else {})
+
+
+@pytest.mark.asyncio
+async def test_d1_bookmark_without_one_fails_closed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    with pytest.raises(Exception) as exc:
+        await _client(handler).d1_bookmark("db-1")
+    assert getattr(exc.value, "code", "") == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kw", "params"),
+    [
+        ({"timestamp": "2026-10-27T10:00:00Z"}, {"timestamp": "2026-10-27T10:00:00Z"}),
+        ({"bookmark": "00000085-ab"}, {"bookmark": "00000085-ab"}),
+    ],
+)
+async def test_d1_restore_posts_one_target_and_returns_the_undo_bookmark(kw, params):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {"bookmark": "b-new", "previous_bookmark": "b-old", "message": "ok"},
+            },
+        )
+
+    out = await _client(handler).d1_restore("db-1", **kw)
+    assert seen == {"method": "POST", "path": _D1 + "/time_travel/restore", "params": params}
+    assert out == {"bookmark": "b-new", "previous_bookmark": "b-old", "message": "ok"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw", [{}, {"bookmark": "a", "timestamp": "2026-10-27T10:00:00Z"}])
+async def test_d1_restore_needs_exactly_one_target(kw):
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("no request should be made")
+
+    with pytest.raises(Exception) as exc:
+        await _client(handler).d1_restore("db-1", **kw)
+    assert getattr(exc.value, "code", "") == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+async def test_d1_restore_refusal_fails_closed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"success": False, "errors": [{"code": 7500, "message": "too many"}]}
+        )
+
+    with pytest.raises(Exception) as exc:
+        await _client(handler).d1_restore("db-1", timestamp="2026-10-27T10:00:00Z")
+    assert "too many" in str(getattr(exc.value, "message", exc.value))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.d1_bookmark("db-1", "2020-01-01T00:00:00Z"),
+        lambda c: c.d1_restore("db-1", timestamp="2020-01-01T00:00:00Z"),
+    ],
+)
+async def test_a_timestamp_before_the_database_is_out_of_window(call):
+    """Live D1 answers 400 code 7400 for a moment before the database existed or
+    past retention; that is the owner's choice of time, not a Cloudflare fault."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "success": False,
+                "errors": [{"code": 7400, "message": "Provided timestamp is too old"}],
+            },
+        )
+
+    with pytest.raises(Exception) as exc:
+        await call(_client(handler))
+    assert getattr(exc.value, "code", "") == "sites.data_restore_out_of_window"
+    assert getattr(exc.value, "status_code", 0) == 422

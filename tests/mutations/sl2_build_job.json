@@ -31,8 +31,8 @@
   {
     "label": "the enqueue stops scrubbing the per-site capture key, so a real secret is written into the Redis job payload and uploaded into a third-party sandbox — the exposure the ephemeral-sandbox decision rests on NOT being durable",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "            scrub_build_input(generator_input),",
-    "replace": "            generator_input,",
+    "find": "            site_id,\n            scrub_build_input(generator_input),",
+    "replace": "            site_id,\n            generator_input,",
     "tests": [
       "tests/ee/sites/test_build_job.py::TestTheCaptureSecretNeverLeavesThisProcess::test_the_key_never_enters_the_arq_payload"
     ]
@@ -150,8 +150,8 @@
   {
     "label": "the sandbox is held to a budget re-derived from the environment instead of the one the enqueue measured its staleness window against, so a config change mid-flight leaves a live build outside its own window and it gets re-enqueued on top of itself",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "                timeout_seconds=timeout_seconds,\n                client=_client,\n                artifact_rel=artifact_rel,\n            )\n        except Exception:\n            # Nothing ran: Daytona unconfigured, or the sandbox could not be created.",
-    "replace": "                timeout_seconds=resolve_build_timeout_seconds(engine),\n                client=_client,\n                artifact_rel=artifact_rel,\n            )\n        except Exception:\n            # Nothing ran: Daytona unconfigured, or the sandbox could not be created.",
+    "find": "                timeout_seconds=timeout_seconds,\n                client=_client,\n                artifact_rel=artifact_rel,\n                labels=sandbox_labels(ctx, str(getattr(site, \"pocket_id\", \"\") or \"\")),\n                **_publish_lease_hooks(ctx, site),\n            )\n        except Exception as exc:\n            if capacity.is_capacity_error(exc):\n                # The org is full, not down",
+    "replace": "                timeout_seconds=resolve_build_timeout_seconds(engine),\n                client=_client,\n                artifact_rel=artifact_rel,\n                labels=sandbox_labels(ctx, str(getattr(site, \"pocket_id\", \"\") or \"\")),\n                **_publish_lease_hooks(ctx, site),\n            )\n        except Exception as exc:\n            if capacity.is_capacity_error(exc):\n                # The org is full, not down",
     "tests": [
       "tests/ee/sites/test_build_job.py::TestTheJobRecordsWhatHappened::test_the_sandbox_is_held_to_the_budget_it_was_enqueued_with"
     ]
@@ -204,11 +204,12 @@
   },
   {
     "label": "an unset POCKETPAW_REDIS_URL silently falls back to localhost, so a typoed production config enqueues every build into a Redis no worker is reading — the exact split-brain the worker's own RedisSettings review finding #4 was about",
-    "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "                if not url:\n                    raise RuntimeError(\n                        \"POCKETPAW_REDIS_URL is not set — the site-build lane needs Redis.\"\n                    )",
+    "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
+    "find": "                if not url:\n                    raise RuntimeError(\n                        \"POCKETPAW_REDIS_URL is not set — arq job queues need Redis.\"\n                    )",
     "replace": "                if not url:\n                    url = \"redis://localhost:6379\"",
     "tests": [
-      "tests/ee/sites/test_build_job.py::TestTheEnqueueNeedsRedisConfigured"
+      "tests/ee/sites/test_build_job.py::TestTheEnqueueNeedsRedisConfigured",
+      "tests/cloud/runs/test_redis_client.py::test_get_arq_pool_without_url_raises"
     ]
   },
   {

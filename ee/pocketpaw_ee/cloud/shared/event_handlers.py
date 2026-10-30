@@ -2,6 +2,11 @@
 
 Registered on app startup via register_event_handlers().
 Handles side effects that span domain boundaries.
+
+Nothing here listens to ``message.sent``: the writer of a message owns its
+group stats and mention notifications (``chat.message_service.send_message``,
+``livekit.service`` for meeting notes). A handler that also wrote them here
+double-counted ``message_count`` and inserted every user mention twice.
 """
 
 from __future__ import annotations
@@ -43,46 +48,6 @@ async def _on_invite_accepted(data: dict) -> None:
         title="Invite accepted",
         body="You joined workspace",
     )
-
-
-async def _on_message_sent(data: dict) -> None:
-    """Create notifications for mentioned users, update group stats."""
-    group_id = data.get("group_id")
-    sender_id = data.get("sender_id")
-    mentions = data.get("mentions", [])
-
-    if not group_id:
-        return
-
-    # Update group stats (last_message_at, message_count)
-    from datetime import UTC, datetime
-
-    from beanie import PydanticObjectId
-
-    from pocketpaw_ee.cloud.models.group import Group
-
-    try:
-        group = await Group.get(PydanticObjectId(group_id))
-        if group:
-            group.last_message_at = datetime.now(UTC)
-            group.message_count += 1
-            await group.save()
-    except Exception:
-        logger.exception("Failed to update group stats on message sent")
-
-    # Create notifications for mentioned users
-    workspace_id = data.get("workspace_id", "")
-    for mention in mentions:
-        if mention.get("type") == "user" and mention.get("id") != sender_id:
-            await _create_notification(
-                workspace_id=workspace_id,
-                recipient=mention["id"],
-                type="mention",
-                title="You were mentioned",
-                body=data.get("content", "")[:100],
-                source_type="group",
-                source_id=group_id,
-            )
 
 
 async def _on_pocket_shared(data: dict) -> None:
@@ -176,7 +141,6 @@ async def _create_notification(
 def register_event_handlers() -> None:
     """Wire up all cross-domain event handlers."""
     event_bus.subscribe("invite.accepted", _on_invite_accepted)
-    event_bus.subscribe("message.sent", _on_message_sent)
     event_bus.subscribe("pocket.shared", _on_pocket_shared)
     event_bus.subscribe("member.removed", _on_member_removed)
     logger.info("Cloud event handlers registered")

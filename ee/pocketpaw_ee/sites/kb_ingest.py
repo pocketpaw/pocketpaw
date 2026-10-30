@@ -1,64 +1,78 @@
 # ee/pocketpaw_ee/sites/kb_ingest.py — put a site's own content into the pocket KB
-# its concierge reads from.
+# its concierge reads from, so a dedicated concierge does not start knowledge-empty.
 #
-# Created 2026-07-26. A dedicated concierge agent used to start KNOWLEDGE-EMPTY: it
-# was provisioned with a soul and a persona and a KB scope, and nothing was ever put
-# in that scope. Demos only looked grounded because the widget spec happened to
-# carry a catalog. Ask a concierge "what are your opening hours" and the answer was
-# an honest "I don't know" about a business whose own homepage says 8am.
+# A CONCIERGE run reads ``pocket:<pocket_id>`` and ``agent:<its id>`` only
+# (``agent_service._kb_scopes_for_context``); the agent scope holds the owner's
+# attachments, this module owns the pocket scope, so a re-publish can never clobber
+# what an owner attached. The scope is SHARED with owner uploads: a sync never
+# clears it, it only deletes article ids it recorded writing.
 #
-# The concierge's grounding scopes are fixed by
-# ``agent_service._kb_scopes_for_context``: a CONCIERGE run reads
-# ``pocket:<pocket_id>`` and ``agent:<its own agent id>``, and nothing else (no
-# workspace:, no user: — a public caller must never read the whole tenant's KB).
-# The second scope is the owner's own attachments on the site's agent; this module
-# owns the FIRST one, so "the concierge knows the business without anyone uploading
-# anything" reduces to one job: get the site's pages into ``pocket:<pocket_id>``.
-# That is all this module does, and it is why a re-publish can never clobber what an
-# owner attached to the agent — the two scopes have separate writers.
+# SOURCE OF TRUTH. For a site we host it is the POCKET (durable, no network, what a
+# re-publish deploys), read by one extractor per engine (``extract_site_documents``):
+# html (the ``source`` map, also what the URL-import crawler writes), svelte
+# (components, code dropped) and ripple (the rippleSpec walked for copy). A FOREIGN
+# site (``mint_foreign_site``: a concierge on a page we never rendered) has an
+# empty pocket, so ``sites.foreign_grounding`` crawls its verified, fresh origin
+# into a source map the html extractor reads. An html page is read as Markdown
+# (``html_to_markdown``, also used by concierge links and URL ingest) so tables
+# and headings reach the compile intact. Its failures each get a status code,
+# a failed crawl ingests nothing, and a partial one ingests but never prunes. A
+# crawl that reached the origin also schedules the site's first card screenshot
+# when it has none. Crawls run at bind and on the owner's re-sync, never on a
+# visitor's turn.
 #
-# SOURCE OF TRUTH — the POCKET, not the built artifact and not the live URL:
-#   * the pocket is durable, so this works at publish time, at agent-provision time
-#     for a site published months ago, and on an owner's manual re-sync — a build
-#     directory only exists during a publish;
-#   * it needs no network, so there is no SSRF surface. Fetching a site's own
-#     ``url`` would mean fetching a customer-controlled hostname server-side, which
-#     is exactly the class of request ``url_crawler`` had to be hardened against;
-#   * it is what a re-publish would deploy, so the KB never describes a page the
-#     site no longer serves.
+# SECTIONS. ``page_sections.split_page`` cuts a long page at its headings; each
+# section is its own article with the source "<page source>#<heading slug>" and
+# the title "Page › Heading". A short page stays one article under the page
+# source and the page's title. Every one goes through
+# ``KnowledgeService.ingest_sections_to_scope``: PocketPaw's fact-preserving
+# (restructure, never compress) compile, written with ``kb ingest
+# --article-json``, with or without an API key; kb-go never compiles a page.
 #
-# LANES. Three engines, three shapes, one extractor each (see ``extract_site_documents``):
-#   * html   — the ``source`` map is the site's real HTML (this is also what the
-#              URL-import crawler writes, so an agency's imported client site is
-#              covered by this path);
-#   * svelte — the ``source`` map is hand-written components; script/style blocks and
-#              template expressions are dropped, the prose survives;
-#   * ripple — there is no HTML yet, the copy lives in the rippleSpec, so the spec is
-#              walked for its text-bearing values.
+# IDEMPOTENCE. Sources are deterministic (``site-<path-slug>``, plus the section
+# slug), so kb-go replaces an article in place instead of duplicating it. A
+# section whose hash matches the last sync's index entry is not recompiled; one
+# whose compile fails keeps its previous article (and old hash, so the next sync
+# retries). Ids this site produced before but not now (a removed page or
+# section) are pruned, only after a trustworthy, complete sync.
 #
-# NOT COVERED (deliberate, named so it is not mistaken for done): a site minted by
-# ``mint_foreign_site`` — a concierge embedded on a site we do not host — has no
-# content in its pocket, so it syncs zero documents. Grounding those means crawling
-# the customer's own origin, which is the ``url_crawler`` SSRF-hardened path, and is
-# its own slice. ``sync_site_knowledge`` reports it as skipped rather than pretending.
+# BOOKKEEPING on the Site (``_record_sync``, a targeted ``$set``): article ids,
+# ``kb_page_index`` (``{page_key: {"id", "title", "crawled_at", "chars",
+# "sections": [{id, title, source, hash, anchor, chars}]}}``, the only
+# page-to-article link; ``id`` is the first section so an old reader still works,
+# and ``page_sections.index_sections`` also reads an entry written before
+# sections; ``concierge_runtime.resolve_page`` looks the visitor's page up by the
+# same ``page_key``), ``kb_crawl_report`` (the pages left out and why: too short,
+# past the page cap, no section compiled, or a foreign crawl's own note; plus the
+# cap and the crawl's counts), ``kb_synced_at`` and ``kb_sync_error``. A full sync
+# replaces ids and index, a partial crawl merges, a failure (a crash too:
+# ``sync_failed``) keeps them. A missing or outdated kb binary stops at the first
+# page: ``kb_unavailable``.
 #
-# IDEMPOTENCE. kb-go derives an article id from ``--source`` and re-ingesting the
-# same source bumps that article's version instead of duplicating it, so the page
-# sources here are deterministic (``site-<path-slug>``). The Site then remembers the
-# ids it produced, and a later sync deletes the ones that stopped being produced —
-# that is how a deleted or renamed page leaves the KB. The pocket scope is SHARED
-# with owner-uploaded files, so this NEVER clears the scope; it only removes ids it
-# is certain it wrote.
+# THE CATALOG FOLLOWS. A sync that reached the site's content (hosted: the pocket
+# was read; foreign: the crawl reached the origin) schedules the fire-and-forget
+# ``paw_bar.catalog_sync``, which imports the site's products into its concierge's
+# catalog. It never waits on, fails or changes this sync.
 
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from typing import Any
+
+from pocketpaw.paw_bar.pages import page_key
+from pocketpaw_ee.sites.page_sections import (
+    PageSection,
+    heading_anchors,
+    index_sections,
+    page_title,
+    split_page,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,12 +84,26 @@ _MAX_DOCUMENTS = 60
 # tail is dropped rather than stored.
 _MAX_DOCUMENT_CHARS = 40_000
 
+# Most skipped pages recorded per sync, so a huge site cannot bloat the Site doc.
+_MAX_SKIPS = 200
+
 # Pages shorter than this carry no answerable content (an empty layout, a redirect
 # stub) and are skipped so they don't dilute BM25 scoring.
 _MIN_DOCUMENT_CHARS = 40
 
 # Tags whose CONTENT is never page copy.
 _NON_CONTENT_TAGS = {"script", "style", "noscript", "template", "svg", "head"}
+
+# What ``html_to_markdown`` also drops: Markdown keeps link targets, so a <nav>
+# becomes a list of links repeated on every page (noise for BM25 and the compile).
+# A footer stays: it is where a store keeps its phone, address and hours.
+_MARKDOWN_DROP_TAGS = _NON_CONTENT_TAGS | {"nav"}
+
+# Void elements never get an end tag, so ``_ContentFilter`` must not wait for one.
+_VOID_TAGS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+    "param", "source", "track", "wbr",
+}  # fmt: skip
 
 # rippleSpec keys that carry structure rather than copy. Everything else is treated
 # as potential copy: over-collecting costs a few noise tokens in a BM25 index,
@@ -132,11 +160,16 @@ _SVELTE_EXPR_RE = re.compile(r"\{[^{}]*\}")
 
 @dataclass(frozen=True)
 class SiteDocument:
-    """One ingestable unit of a site: a page, or the whole spec for a ripple site."""
+    """One ingestable unit of a site: a page, or the whole spec for a ripple site.
+
+    ``anchors`` pairs each heading of an html page that carries an ``id`` with
+    that id (``page_sections.heading_anchors``), so a section can be cited at
+    ``page#id``."""
 
     path: str
     source: str
     text: str
+    anchors: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -147,7 +180,21 @@ class SiteKnowledgeReport:
     removed: int = 0
     skipped: int = 0
     article_ids: list[str] = field(default_factory=list)
+    # ``{page_key: {"id", "title", "sections": [...]}}`` for this run's pages
+    # (``page_sections.index_sections`` reads an entry).
+    page_index: dict[str, dict[str, Any]] = field(default_factory=dict)
     error: str = ""
+    # Why pages the owner has are not in ``page_index``: ``{path, reason, detail}``
+    # with reason ``too_short``, ``page_cap``, ``ingest_failed`` or ``crawl`` (a
+    # foreign crawl's own note, verbatim in ``detail``). Recorded on the Site as
+    # ``kb_crawl_report`` so the owner can see what the concierge never read.
+    skips: list[dict[str, str]] = field(default_factory=list)
+    # The page cap this sync ran under, and whether it was reached. 0 means the
+    # sync never reached any content (nothing to report).
+    page_cap: int = 0
+    capped: bool = False
+    pages_failed: int = 0
+    skipped_by_robots: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -231,6 +278,108 @@ def html_to_text(html: str) -> str:
     except Exception:  # noqa: BLE001 — partial text beats no text
         logger.debug("sites.kb: HTML parse ended early; keeping partial text", exc_info=True)
     return harvester.text()
+
+
+class _ContentFilter(HTMLParser):
+    """Re-serialize an HTML document without its non-content elements.
+
+    The pre-pass ``html_to_markdown`` runs before the converter: it drops
+    ``_MARKDOWN_DROP_TAGS`` (contents included), comments and the doctype, reads
+    the <title> out of the dropped <head>, and turns each <img> into its alt text
+    (the old ``html_to_text`` behaviour: an alt is content, an image url is not).
+    Everything else is written back as markup, escaped, for the converter to parse.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._out: list[str] = []
+        self._suppress_depth = 0
+        self._in_title = False
+        self.title_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag == "title":
+            self._in_title = True
+            return
+        if tag in _MARKDOWN_DROP_TAGS:
+            if tag not in _VOID_TAGS:
+                self._suppress_depth += 1
+            return
+        if self._suppress_depth:
+            return
+        if tag == "img":
+            alt = next((v for k, v in attrs or [] if k == "alt" and v), "")
+            if alt.strip():
+                self._out.append(f" {html_lib.escape(alt.strip())} ")
+            return
+        rendered = "".join(
+            f' {k}="{html_lib.escape(v, quote=True)}"' if v is not None else f" {k}"
+            for k, v in attrs or []
+        )
+        self._out.append(f"<{tag}{rendered}>")
+
+    def handle_startendtag(self, tag: str, attrs: Any) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag not in _VOID_TAGS:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
+            return
+        if tag in _MARKDOWN_DROP_TAGS:
+            self._suppress_depth = max(0, self._suppress_depth - 1)
+            return
+        if not self._suppress_depth and tag not in _VOID_TAGS:
+            self._out.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title:
+            self.title_parts.append(data)
+        elif not self._suppress_depth:
+            self._out.append(html_lib.escape(data, quote=False))
+
+    def markup(self) -> str:
+        return "".join(self._out)
+
+
+def _convert_markdown(html: str) -> str:
+    """The conversion itself, without the safety net (``html_to_markdown``)."""
+    from html_to_markdown import ConversionOptions, convert
+
+    content_filter = _ContentFilter()
+    content_filter.feed(html)
+    content_filter.close()
+    # tier1 is the converter's full DOM parse: it keeps implicitly closed cells
+    # (``<td>a<td>b``), which its default fast path drops. Its one quirk, an
+    # inline <svg> written out as a data-URI image, cannot happen here: the
+    # filter has already removed every <svg>.
+    options = ConversionOptions(
+        heading_style="atx",
+        extract_metadata=False,
+        tier_strategy="tier1",
+    )
+    body = convert(content_filter.markup(), options).content or ""
+    title = _WS_RE.sub(" ", "".join(content_filter.title_parts)).strip()
+    text = f"{title}\n\n{body}" if title else body
+    lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
+    return _BLANKS_RE.sub("\n\n", "\n".join(lines)).strip()
+
+
+def html_to_markdown(html: str) -> str:
+    """An HTML document as Markdown: headings as ``#``, tables as Markdown tables,
+    lists, links and emphasis kept; script, style, nav and the other
+    ``_MARKDOWN_DROP_TAGS`` dropped; the <title> leads and image alt text is kept.
+
+    Never raises: this runs over customer-authored and crawled pages, so a parse
+    or converter failure (or an empty result) falls back to ``html_to_text``.
+    """
+    try:
+        markdown = _convert_markdown(html)
+    except Exception:  # noqa: BLE001 — plain text beats no text
+        logger.debug("sites.kb: Markdown conversion failed; using plain text", exc_info=True)
+        return html_to_text(html)
+    return markdown or html_to_text(html)
 
 
 def svelte_to_text(source: str) -> str:
@@ -322,7 +471,7 @@ def _path_slug(path: str) -> str:
 
 def _page_text(path: str, body: str, engine: str) -> str:
     if engine == "html":
-        return html_to_text(body)
+        return html_to_markdown(body)
     if engine == "svelte":
         return svelte_to_text(body)
     return _tidy(body)
@@ -344,28 +493,39 @@ def extract_site_documents(
     engine: str,
     ripple_spec: Any = None,
     source: dict[str, Any] | None = None,
+    skips: list[dict[str, str]] | None = None,
 ) -> list[SiteDocument]:
     """Turn a pocket's stored content into ingestable documents, one per page.
 
     Pure — no I/O, no Beanie, no kb subprocess — so the lane rules are unit-testable
     on their own. Returns [] when there is nothing to ingest (a foreign site with an
     empty pocket, a spec with no copy), which the caller reports rather than treats
-    as a failure.
+    as a failure. A page left out (too little text, past ``_MAX_DOCUMENTS``) is
+    appended to ``skips`` when the caller passes a list.
     """
     docs: list[SiteDocument] = []
+
+    def skip(path: str, reason: str) -> None:
+        if skips is not None and len(skips) < _MAX_SKIPS:
+            skips.append({"path": path, "reason": reason, "detail": ""})
 
     if engine in ("html", "svelte") and isinstance(source, dict):
         # Sorted so a sync is deterministic and the homepage tends to lead.
         for path in sorted(source):
-            if len(docs) >= _MAX_DOCUMENTS:
-                break
             body = source.get(path)
             if not isinstance(body, str) or not _is_page(path, engine):
                 continue
+            if len(docs) >= _MAX_DOCUMENTS:
+                skip(path, "page_cap")
+                continue
             text = _page_text(path, body, engine)[:_MAX_DOCUMENT_CHARS]
             if len(text) < _MIN_DOCUMENT_CHARS:
+                skip(path, "too_short")
                 continue
-            docs.append(SiteDocument(path=path, source=_path_slug(path), text=text))
+            anchors = heading_anchors(body) if engine == "html" else ()
+            docs.append(
+                SiteDocument(path=path, source=_path_slug(path), text=text, anchors=anchors)
+            )
         return docs
 
     # ripple (and anything unrecognised that still carries a spec): the spec is the
@@ -373,6 +533,8 @@ def extract_site_documents(
     text = spec_to_text(ripple_spec or {})[:_MAX_DOCUMENT_CHARS]
     if len(text) >= _MIN_DOCUMENT_CHARS:
         docs.append(SiteDocument(path="/", source=_path_slug("/"), text=text))
+    else:
+        skip("/", "too_short")
     return docs
 
 
@@ -413,6 +575,141 @@ async def _load_pocket_content(site: Any) -> dict[str, Any] | None:
         return None
 
 
+async def _ingest_documents(
+    site: Any, scope: str, docs: list[SiteDocument], report: SiteKnowledgeReport
+) -> None:
+    """Ingest each page section by section, counting what landed and what did not.
+
+    A page is cut by ``page_sections.split_page`` (a short page is one section).
+    A section whose source and hash match the previous sync's index entry, and
+    whose article this site still records, is reused without a compile. A
+    section that fails keeps its previous article (and old hash, so the next
+    sync retries it) rather than leaving it to the prune. A page where nothing
+    landed counts as ``skipped`` and the loop continues: one bad page must not
+    lose the rest. A missing or outdated kb binary stops the whole sync.
+    """
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeEngineUnavailable
+
+    previous_ids = set(getattr(site, "kb_article_ids", None) or [])
+    previous_index = getattr(site, "kb_page_index", None) or {}
+    crawled_at = datetime.now(UTC).isoformat()
+    for doc in docs:
+        key = page_key(doc.path)
+        sections = split_page(doc)
+        old_entry = previous_index.get(key) if isinstance(previous_index, dict) else None
+        known = {
+            s["source"]: s
+            for s in index_sections(old_entry)
+            if s["source"] and s["id"] in previous_ids
+        }
+        ids = [""] * len(sections)
+        hashes = [""] * len(sections)
+        todo: list[int] = []
+        for i, section in enumerate(sections):
+            old = known.get(section.source)
+            if old is not None and old["hash"] == section.hash:
+                ids[i], hashes[i] = old["id"], section.hash
+            else:
+                todo.append(i)
+        if todo:
+            try:
+                fresh = await _ingest_sections(scope, doc, sections, todo)
+            except KnowledgeEngineUnavailable as exc:
+                # The engine, not this page: every remaining page would fail the
+                # same way, each after a paid compile. Stop here and name it.
+                report.error = "kb_unavailable"
+                logger.error(
+                    "sites.kb: kb engine unavailable, stopping the sync for site %s: %s",
+                    getattr(site, "id", "?"),
+                    exc,
+                )
+                return
+            except Exception:  # noqa: BLE001 — one bad page must not lose the rest
+                logger.warning(
+                    "sites.kb: ingest failed for %s on site %s",
+                    doc.path,
+                    getattr(site, "id", "?"),
+                    exc_info=True,
+                )
+                fresh = {}
+            for i, article_id in fresh.items():
+                ids[i], hashes[i] = article_id, sections[i].hash
+        landed = any(ids)
+        for i, section in enumerate(sections):
+            old = known.get(section.source)
+            if not ids[i] and old is not None:
+                ids[i], hashes[i] = old["id"], old["hash"]  # kept, retried next sync
+        kept = [i for i in range(len(sections)) if ids[i]]
+        report.article_ids.extend(ids[i] for i in kept)
+        if not landed:
+            report.skipped += 1
+            if len(report.skips) < _MAX_SKIPS:
+                report.skips.append({"path": doc.path, "reason": "ingest_failed", "detail": ""})
+            if kept and isinstance(old_entry, dict):
+                report.page_index.setdefault(key, old_entry)
+            continue
+        report.ingested += 1
+        single = len(sections) == 1 and sections[0].source == doc.source
+        title = page_title(doc.text, doc.path)
+        # Two spellings of one page (about.html and about/index.html): the first
+        # wins. The page's first section stands for the page (``id``), so a
+        # reader of the old ``{id, title}`` shape still finds it.
+        report.page_index.setdefault(
+            key,
+            {
+                "id": ids[kept[0]],
+                "title": title.strip(),
+                "crawled_at": crawled_at,
+                "chars": len(doc.text),
+                "sections": [
+                    {
+                        "id": ids[i],
+                        "title": title.strip() if single else sections[i].title,
+                        "source": sections[i].source,
+                        "hash": hashes[i],
+                        "anchor": sections[i].anchor,
+                        "chars": len(sections[i].text),
+                    }
+                    for i in kept
+                ],
+            },
+        )
+
+
+async def _ingest_sections(
+    scope: str, doc: SiteDocument, sections: list[PageSection], todo: list[int]
+) -> dict[int, str]:
+    """Compile and ingest ``sections[i]`` for each ``i`` in ``todo`` (a short
+    page is one section). Returns ``{i: article id}`` for the ones that landed.
+    Raises when nothing landed."""
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService, NamedSection
+
+    receipt = await KnowledgeService.ingest_sections_to_scope(
+        scope, [NamedSection(sections[i].source, sections[i].title, sections[i].text) for i in todo]
+    )
+    by_section = list((receipt or {}).get("section_articles") or [])
+    for failure in (receipt or {}).get("failures") or []:
+        logger.warning("sites.kb: a section of %s did not ingest: %s", doc.path, failure)
+    landed = {i: by_section[n] for n, i in enumerate(todo) if n < len(by_section)}
+    return {i: article_id for i, article_id in landed.items() if article_id}
+
+
+async def _prune_stale(scope: str, previous: list[str], report: SiteKnowledgeReport) -> None:
+    """Delete the ids this site used to produce and no longer does.
+
+    Callable ONLY after a successful ingest whose document set is a TRUSTWORTHY
+    answer to "what pages does this site have": the fresh set is what "no longer
+    produced" is measured against, so a failed or partial run would mark existing
+    articles stale and delete a knowledge base over a transient outage.
+    """
+    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+
+    fresh = set(report.article_ids)
+    for article_id in [a for a in previous if a not in fresh]:
+        if await KnowledgeService.remove_article(scope, article_id):
+            report.removed += 1
+
+
 async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
     """Ingest a site's own content into its pocket KB and prune what it replaced.
 
@@ -421,26 +718,35 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
     so a removed page stops being quotable. Only ids recorded on THIS Site are ever
     deleted — the pocket scope also holds owner-uploaded files and must survive.
 
-    Records ``kb_article_ids`` / ``kb_synced_at`` / ``kb_sync_error`` on the Site so
-    the dashboard can show whether the concierge actually has anything to work with.
-    """
-    from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
+    Records ``kb_article_ids`` / ``kb_page_index`` / ``kb_synced_at`` /
+    ``kb_sync_error`` on the Site so the dashboard can show whether the concierge
+    actually has anything to work with, and the concierge can find the visitor's page.
 
+    A FOREIGN site forks first, into ``_sync_foreign_site_knowledge``: its pocket
+    holds no pages, so the content comes off its own verified origin instead.
+    """
     report = SiteKnowledgeReport()
     scope = kb_scope_for_pocket(site.pocket_id or "")
     previous = list(getattr(site, "kb_article_ids", None) or [])
+
+    if getattr(site, "foreign_origin", False):
+        return await _sync_foreign_site_knowledge(site, report, scope=scope, previous=previous)
 
     pocket = await _load_pocket_content(site)
     if pocket is None:
         report.error = "pocket_unavailable"
         await _record_sync(site, report, previous=previous)
         return report
+    _schedule_catalog_sync(site)
 
     docs = extract_site_documents(
         engine=pocket.get("engine") or "ripple",
         ripple_spec=pocket.get("rippleSpec") or {},
         source=pocket.get("source") if isinstance(pocket.get("source"), dict) else None,
+        skips=report.skips,
     )
+    report.page_cap = _MAX_DOCUMENTS
+    report.capped = any(s["reason"] == "page_cap" for s in report.skips)
     if not docs:
         # Nothing to ingest is a real state, not an error: a foreign site's pocket
         # holds no pages. Previously-ingested articles are left alone rather than
@@ -449,24 +755,10 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
         await _record_sync(site, report, previous=previous)
         return report
 
-    for doc in docs:
-        try:
-            result = await KnowledgeService.ingest_text_to_scope(scope, doc.text, doc.source)
-        except Exception:  # noqa: BLE001 — one bad page must not lose the rest
-            report.skipped += 1
-            logger.warning(
-                "sites.kb: ingest failed for %s on site %s",
-                doc.path,
-                getattr(site, "id", "?"),
-                exc_info=True,
-            )
-            continue
-        article_id = str((result or {}).get("article") or "").strip()
-        if not article_id:
-            report.skipped += 1
-            continue
-        report.ingested += 1
-        report.article_ids.append(article_id)
+    await _ingest_documents(site, scope, docs, report)
+    if report.error == "kb_unavailable":
+        await _record_sync(site, report, previous=previous)
+        return report
 
     if not report.ingested:
         # The site HAS pages and not one of them made it in — the ingest engine is
@@ -483,16 +775,9 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
         return report
 
     # Prune what this site used to publish and no longer does. Anything not in the
-    # fresh set is a page that was renamed or deleted.
-    #
-    # Reachable ONLY after a successful ingest, deliberately: the fresh set is the
-    # thing "no longer produced" is measured against, so an empty one from a failed
-    # run would mark EVERY existing article stale and delete the site's whole
-    # knowledge base over a transient outage.
-    stale = [a for a in previous if a not in set(report.article_ids)]
-    for article_id in stale:
-        if await KnowledgeService.remove_article(scope, article_id):
-            report.removed += 1
+    # fresh set is a page that was renamed or deleted. Reachable only after a
+    # successful ingest — see ``_prune_stale``.
+    await _prune_stale(scope, previous, report)
 
     await _record_sync(site, report, previous=previous)
     logger.info(
@@ -506,26 +791,234 @@ async def sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
     return report
 
 
-async def _record_sync(site: Any, report: SiteKnowledgeReport, *, previous: list[str]) -> None:
+async def _sync_foreign_site_knowledge(
+    site: Any,
+    report: SiteKnowledgeReport,
+    *,
+    scope: str,
+    previous: list[str],
+) -> SiteKnowledgeReport:
+    """The FOREIGN lane's sync: the site's own live origin into its pocket scope.
+
+    Same destination and same idempotence as the hosted lanes — the crawler emits
+    the source map the HTML lane already reads, so the extraction, the article ids
+    and the prune rule are shared code, not a parallel implementation.
+
+    WHAT IS DIFFERENT IS THE FAILURE POLICY, because the input is a third party's
+    live server rather than a durable document:
+
+      * EVERY REFUSAL AND FAILURE IS REPORTED, and each has its own status code
+        (``origin_unverified``, ``origin_verification_stale``,
+        ``crawl_blocked_by_robots``, ``crawl_too_large``, ``crawl_failed``, …). A
+        concierge that silently knows nothing, on a site whose own robots.txt is
+        the cause, is unguessable from the owner's side unless we name it.
+      * A FAILED CRAWL INGESTS NOTHING. It returns before ``_ingest_documents``,
+        so the scope is never left half-refreshed and the previous article ids
+        survive for a future prune.
+      * A PARTIAL CRAWL DOES NOT PRUNE. If a page failed mid-walk the harvest is
+        not a trustworthy answer to "what pages does this site have", so the
+        pages that DID arrive are ingested (a re-ingest only versions an article)
+        while nothing is deleted, the previous ids are kept alongside the fresh
+        ones so nothing is orphaned, and the status says ``crawl_partial``. A
+        half-crawled site that reported success would quietly delete the articles
+        for whichever pages happened to 502.
+    """
+    from pocketpaw_ee.sites import foreign_grounding
+
+    harvest = await foreign_grounding.harvest_foreign_site(site)
+    if harvest.error:
+        report.error = harvest.error
+        await _record_sync(site, report, previous=previous)
+        return report
+
+    _schedule_foreign_card_meta(site, harvest)
+    _schedule_first_foreign_screenshot(site)
+    _schedule_catalog_sync(site)
+
+    docs = extract_site_documents(engine="html", source=harvest.source, skips=report.skips)
+    _note_harvest(report, harvest)
+    if not docs:
+        # The origin was reachable and carried no answerable text (a JS-rendered
+        # shell, a parked page). A real state, not a failure, and the previous
+        # articles are left alone rather than purged on one empty read.
+        report.error = "no_content"
+        await _record_sync(site, report, previous=previous)
+        return report
+
+    await _ingest_documents(site, scope, docs, report)
+    if report.error == "kb_unavailable":
+        await _record_sync(site, report, previous=previous)
+        return report
+    if not report.ingested:
+        report.error = "ingest_failed"
+        await _record_sync(site, report, previous=previous)
+        logger.warning(
+            "sites.kb: every crawled page failed to ingest for foreign site %s (%d skipped)",
+            getattr(site, "id", "?"),
+            report.skipped,
+        )
+        return report
+
+    if harvest.complete:
+        await _prune_stale(scope, previous, report)
+        await _record_sync(site, report, previous=previous)
+    else:
+        report.error = "crawl_partial"
+        await _record_sync(site, report, previous=previous, keep_previous=True)
+
+    logger.info(
+        "sites.kb: grounded foreign site %s from %s into %s "
+        "(ingested=%d removed=%d skipped=%d robots_skipped=%d status=%s)",
+        getattr(site, "id", "?"),
+        harvest.host,
+        scope,
+        report.ingested,
+        report.removed,
+        report.skipped,
+        harvest.skipped_by_robots,
+        report.error or "ok",
+    )
+    for warning in harvest.warnings:
+        logger.info("sites.kb: %s crawl note — %s", harvest.host, warning)
+    return report
+
+
+def _note_harvest(report: SiteKnowledgeReport, harvest: Any) -> None:
+    """Copy what the crawl knows about pages it did not bring back onto the report:
+    its counts, whether it stopped at its page budget, and each of its notes
+    ("skipped <url> — HTTP 404"), verbatim, as a ``crawl`` skip."""
+    from pocketpaw_ee.sites.foreign_grounding import GROUNDING_MAX_PAGES
+
+    report.page_cap = GROUNDING_MAX_PAGES
+    report.pages_failed = int(getattr(harvest, "pages_failed", 0) or 0)
+    report.skipped_by_robots = int(getattr(harvest, "skipped_by_robots", 0) or 0)
+    fetched = len(getattr(harvest, "source", None) or {}) + report.pages_failed
+    report.capped = fetched >= GROUNDING_MAX_PAGES
+    for note in getattr(harvest, "warnings", None) or []:
+        if len(report.skips) >= _MAX_SKIPS:
+            break
+        report.skips.append({"path": "", "reason": "crawl", "detail": str(note)[:300]})
+
+
+def _schedule_foreign_card_meta(site: Any, harvest: Any) -> None:
+    """Fill a connected site's missing card title / icon from the crawl. Never
+    blocks, never raises.
+
+    The second chance behind the bind-time card refresh (``sites.connected_card``):
+    only when ``origin_title`` or ``favicon_url`` is still empty, and only from the
+    homepage HTML this crawl already holds, so it costs no extra page request.
+    """
+    if (getattr(site, "origin_title", "") or "") and (getattr(site, "favicon_url", "") or ""):
+        return
+    markup = (getattr(harvest, "source", None) or {}).get("index.html")
+    if not markup:
+        return
+    try:
+        from pocketpaw_ee.sites import connected_card
+
+        connected_card.schedule_connected_card(
+            site, markup=markup, base_url=f"https://{harvest.host}/", screenshot=False
+        )
+    except Exception:  # noqa: BLE001 — a card is never a gate on a sync
+        logger.warning(
+            "sites.kb: could not schedule a card refresh for foreign site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_first_foreign_screenshot(site: Any) -> None:
+    """Give a connected site its first card picture. Never blocks, never raises.
+
+    A connected site never deploys, so the post-deploy capture never runs for it,
+    and a crawl that just reached its verified origin is the one moment that page
+    is known to be up. Only when the site has no picture yet: replacing one is the
+    owner's refresh, not a side effect of a knowledge re-sync. The capture itself is
+    the fire-and-forget ``screenshot.schedule_site_screenshot``, so the sync result
+    never waits on, or fails with, a picture.
+    """
+    if (getattr(site, "preview_image_url", "") or "").strip():
+        return
+    try:
+        from pocketpaw_ee.sites import screenshot
+
+        screenshot.schedule_site_screenshot(site)
+    except Exception:  # noqa: BLE001 — a picture is never a gate on a sync
+        logger.warning(
+            "sites.kb: could not schedule a first screenshot for foreign site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+def _schedule_catalog_sync(site: Any) -> None:
+    """Have the site's concierge catalog pick up the products the site publishes.
+    Never blocks, never raises: the catalog is never a gate on a knowledge sync."""
+    try:
+        from pocketpaw_ee.paw_bar import catalog_sync
+
+        catalog_sync.schedule_site_catalog_sync(site)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "sites.kb: could not schedule a catalog sync for site %s",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
+
+
+async def _record_sync(
+    site: Any,
+    report: SiteKnowledgeReport,
+    *,
+    previous: list[str],
+    keep_previous: bool = False,
+) -> None:
     """Persist the sync bookkeeping on the Site.
 
-    Writes ONLY the three kb_* fields, via ``$set`` rather than a whole-document
-    save. This runs in the background, minutes after the publish that scheduled it,
-    holding a Site instance snapshotted at that moment — so a full save would
-    silently roll back anything written to the same Site in between (a domain
-    connected, a subscription stamped). A targeted set touches nothing it does not
-    own.
+    Writes ONLY the kb_* fields (``kb_page_index`` only after a sync that ingested),
+    via ``$set`` rather than a whole-document save. This runs in the background,
+    minutes after the publish that scheduled it, holding a Site instance snapshotted
+    at that moment — so a full save would silently roll back anything written to the
+    same Site in between (a domain connected, a subscription stamped). A targeted set
+    touches nothing it does not own.
 
     A failed or empty sync keeps the PREVIOUS article ids: they are still in the KB,
     so forgetting them would strand them beyond the reach of any future prune. The
     reason is recorded so the dashboard can tell "no knowledge yet" from "syncing is
     broken".
+
+    ``keep_previous`` is for a sync that ingested successfully but was NOT allowed
+    to prune (the foreign lane's partial crawl). It records the union — fresh ids
+    first, then the ones that were not re-produced — because those older articles
+    are still in the scope, and dropping them from the Site's list would strand
+    them where no later prune could ever reach them.
     """
-    updates = {
-        "kb_article_ids": report.article_ids if report.ingested else previous,
+    if report.ingested and keep_previous:
+        fresh = set(report.article_ids)
+        ids = report.article_ids + [a for a in previous if a not in fresh]
+    else:
+        ids = report.article_ids if report.ingested else previous
+    updates: dict[str, Any] = {
+        "kb_article_ids": ids,
         "kb_synced_at": datetime.now(UTC),
         "kb_sync_error": report.error,
     }
+    # The crawl index follows the ids: replaced by a sync that ingested, merged by
+    # one that may not prune, and untouched (not even written) by one that failed.
+    if report.ingested:
+        index = dict(report.page_index)
+        if keep_previous:
+            index = {**(getattr(site, "kb_page_index", None) or {}), **index}
+        updates["kb_page_index"] = index
+    # What the sync left out, whenever it reached the site's pages at all.
+    if report.page_cap:
+        updates["kb_crawl_report"] = {
+            "skips": list(report.skips),
+            "page_cap": report.page_cap,
+            "capped": report.capped,
+            "pages_failed": report.pages_failed,
+            "skipped_by_robots": report.skipped_by_robots,
+        }
     try:
         await site.set(updates)
     except Exception:  # noqa: BLE001 — bookkeeping must not fail the caller
@@ -537,12 +1030,35 @@ async def _record_sync(site: Any, report: SiteKnowledgeReport, *, previous: list
 
 
 async def safe_sync_site_knowledge(site: Any) -> SiteKnowledgeReport:
-    """``sync_site_knowledge`` that never raises — the form background callers use."""
+    """``sync_site_knowledge`` that never raises — the form background callers use.
+
+    A crash is recorded on the Site as ``sync_failed`` the way every other failure
+    is, because the owner's knowledge panel reads status off the Site, not off
+    this report. That includes stamping ``kb_synced_at``: every failure branch in
+    ``sync_site_knowledge`` stamps it (it means "last attempt", and the error says
+    how it went), and ``_knowledge_response`` reads no stamp plus no error as
+    ``never_synced``. The previous article ids are kept, since whatever the crash
+    interrupted, those articles are still in the scope for a later prune. A crash
+    after ingest but inside the prune therefore records the previous ids, not the
+    fresh ones; the next sync re-ingests the same deterministic ids and records
+    them again, so nothing stays stranded. The recording is best-effort and never
+    raises.
+    """
     try:
         return await sync_site_knowledge(site)
     except Exception:  # noqa: BLE001 — a KB sync is never a gate on publish or chat
         logger.warning("sites.kb: sync failed for site %s", getattr(site, "id", "?"), exc_info=True)
-        return SiteKnowledgeReport(error="sync_failed")
+        report = SiteKnowledgeReport(error="sync_failed")
+        try:
+            previous = list(getattr(site, "kb_article_ids", None) or [])
+            await _record_sync(site, report, previous=previous)
+        except Exception:  # noqa: BLE001 — recording the crash must not raise either
+            logger.warning(
+                "sites.kb: could not record the sync crash on site %s",
+                getattr(site, "id", "?"),
+                exc_info=True,
+            )
+        return report
 
 
 # Background-task keepalive: asyncio holds only a WEAK ref to a bare create_task, so
@@ -580,6 +1096,7 @@ __all__ = [
     "SiteDocument",
     "SiteKnowledgeReport",
     "extract_site_documents",
+    "html_to_markdown",
     "html_to_text",
     "kb_scope_for_pocket",
     "safe_sync_site_knowledge",

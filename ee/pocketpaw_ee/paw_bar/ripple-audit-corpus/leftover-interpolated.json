@@ -1,0 +1,28 @@
+{
+  "about": "Text that reads state the spec never seeds, inside a sentence; the missing value renders as blank. Core only (embedded expressions).",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "Price: {state.price} USD"
+          }
+        }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "leftover",
+        "path": "/ui/children/0/props/text",
+        "message": "`{state.price}` is undefined, so it renders as blank; seed the state it reads"
+      }
+    ],
+    "python": []
+  }
+}

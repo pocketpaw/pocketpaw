@@ -1,0 +1,37 @@
+{
+  "about": "A node type no catalog has. Both sides report the same item.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "Hello"
+          }
+        },
+        {
+          "type": "sparkle",
+          "props": {}
+        }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "unknownWidget",
+        "path": "/ui/children/1",
+        "message": "widget type \"sparkle\" isn't in the catalog"
+      }
+    ],
+    "python": [
+      {
+        "code": "unknownWidget",
+        "path": "/ui/children/1"
+      }
+    ]
+  }
+}

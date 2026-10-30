@@ -1,0 +1,38 @@
+{
+  "about": "Two inputs bound to one state value. Core only.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "input",
+          "bind": "name",
+          "props": {
+            "label": "Name"
+          }
+        },
+        {
+          "type": "input",
+          "bind": "name",
+          "props": {
+            "label": "Your name"
+          }
+        }
+      ]
+    },
+    "state": {
+      "name": ""
+    }
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "twoControls",
+        "path": "/ui/children/1/bind",
+        "message": "`name` is already bound by /ui/children/0; keep one control per value"
+      }
+    ],
+    "python": []
+  }
+}

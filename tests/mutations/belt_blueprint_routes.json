@@ -1,0 +1,164 @@
+[
+  {
+    "label": "the c4 route admits any app id",
+    "file": "ee/pocketpaw_ee/cloud/belt/router.py",
+    "find": "app: str = Query(pattern=r\"^[a-z0-9][a-z0-9-]*$\"),",
+    "replace": "app: str = Query(),",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "the c4 app id guard admits dots and capitals",
+    "file": "ee/pocketpaw_ee/cloud/belt/router.py",
+    "find": "app: str = Query(pattern=r\"^[a-z0-9][a-z0-9-]*$\"),",
+    "replace": "app: str = Query(pattern=r\"^[A-Za-z0-9./-]*$\"),",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "the graph read needs belt.manage",
+    "file": "ee/pocketpaw_ee/cloud/belt/router.py",
+    "find": "async def get_app_blueprint(\n    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.read\")),",
+    "replace": "async def get_app_blueprint(\n    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.manage\")),",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "the c4 read needs belt.manage",
+    "file": "ee/pocketpaw_ee/cloud/belt/router.py",
+    "find": "    app: str = Query(pattern=r\"^[a-z0-9][a-z0-9-]*$\"),\n    _user: Any = Depends(require_action_any_workspace(\"belt.read\")),",
+    "replace": "    app: str = Query(pattern=r\"^[a-z0-9][a-z0-9-]*$\"),\n    _user: Any = Depends(require_action_any_workspace(\"belt.manage\")),",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "a repo outside the allowlist reads as a missing run",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "raise BeltConsoleError(404, \"Repo not found.\", \"belt.repo_not_found\")",
+    "replace": "raise BeltConsoleError(404, \"Repo not found.\")",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "no graph yet is a generic error",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "_UNREADY = \"belt.blueprint_unavailable\"",
+    "replace": "_UNREADY = None",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "an app with no model serves an empty one",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "    if model is None:\n        raise BeltConsoleError(404, \"No C4 model for this app.\", \"belt.app_not_found\")",
+    "replace": "    if model is None:\n        model = {\"model\": {}}",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "a stuck owner does not paint failed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "_PAINT = {\"stuck\": \"failed\", \"waiting\": \"drift\", \"building\": \"changing\"}",
+    "replace": "_PAINT = {\"waiting\": \"drift\", \"building\": \"changing\"}",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "a building owner does not paint changing",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "_PAINT = {\"stuck\": \"failed\", \"waiting\": \"drift\", \"building\": \"changing\"}",
+    "replace": "_PAINT = {\"stuck\": \"failed\", \"waiting\": \"drift\"}",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "a built component reads planned",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "built = \"landed\" if c[\"status\"] == \"built\" else \"planned\"",
+    "replace": "built = \"planned\"",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "a partial component reads landed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "built = \"landed\" if c[\"status\"] == \"built\" else \"planned\"",
+    "replace": "built = \"landed\" if c[\"status\"] != \"planned\" else \"planned\"",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "status keys keep the app prefix",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "status[c[\"id\"][len(app) + 1 :]] = next(",
+    "replace": "status[c[\"id\"]] = next(",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "the c4 model is not kept on a refresh",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "\"models\": c4,",
+    "replace": "\"models\": {},",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "a failed refresh drops the stale flag on the route",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "entry = {**hit, \"graph\": {**hit[\"graph\"], \"stale\": True}}",
+    "replace": "entry = {**hit, \"graph\": {**hit[\"graph\"], \"stale\": False}}",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "a missing path reads landed",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "status = {p: \"landed\" if hit else \"planned\" for p, hit",
+    "replace": "status = {p: \"landed\" for p, hit",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "the c4 status map carries no paths",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "\"paths\": on_dev,",
+    "replace": "\"paths\": {},",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "the suite map read needs belt.manage",
+    "file": "ee/pocketpaw_ee/cloud/belt/router.py",
+    "find": "async def get_suite_map(\n    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.read\")),",
+    "replace": "async def get_suite_map(\n    repo: str = Query(min_length=1),\n    _user: Any = Depends(require_action_any_workspace(\"belt.manage\")),",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  },
+  {
+    "label": "a repo with no suite map serves an empty one",
+    "file": "ee/pocketpaw_ee/cloud/belt/app_blueprint_read.py",
+    "find": "    if joined is None:\n        msg = \"No suite feature map in this repo.\"",
+    "replace": "    if joined is None:\n        joined = {}\n    if False:\n        msg = \"No suite feature map in this repo.\"",
+    "tests": [
+      "tests/cloud/test_belt_console.py"
+    ]
+  }
+]

@@ -17,6 +17,10 @@
 # A starter is a pinned version, so the tarball is immutable and worth keeping.
 # The cache key includes the catalog epoch, so changing the extraction rules
 # cannot serve a tree extracted under the old ones.
+#
+# ── Off the event loop ───────────────────────────────────────────────────────
+# Download, disk I/O, sha512 and tar extraction are all blocking; each runs in
+# ``asyncio.to_thread`` so a multi-MB starter never stalls other requests.
 from __future__ import annotations
 
 import asyncio
@@ -134,9 +138,8 @@ async def _tarball(starter: Starter) -> bytes:
     cached = (
         cache_dir() / f"{CATALOG_EPOCH}-{starter.package.replace('/', '+')}-{starter.version}.tgz"
     )
-    if cached.is_file():
-        data = cached.read_bytes()
-        _verify(data, starter.integrity, starter)
+    data = await asyncio.to_thread(_read_cached, cached, starter)
+    if data is not None:
         return data
 
     url = tarball_url(starter)
@@ -158,16 +161,30 @@ async def _tarball(starter: Starter) -> bytes:
             502, "codescaffold.tarball_too_large", f"The {starter.label} starter is too large"
         )
 
+    await asyncio.to_thread(_verify_and_cache, data, cached, starter)
+    logger.info(
+        "codescaffold: cached %s@%s (%d bytes)", starter.package, starter.version, len(data)
+    )
+    return data
+
+
+def _read_cached(cached: Path, starter: Starter) -> bytes | None:
+    """Blocking: the verified cached tarball, or None when there is none."""
+    if not cached.is_file():
+        return None
+    data = cached.read_bytes()
+    _verify(data, starter.integrity, starter)
+    return data
+
+
+def _verify_and_cache(data: bytes, cached: Path, starter: Starter) -> None:
+    """Blocking: verify a downloaded tarball, then cache it."""
     _verify(data, starter.integrity, starter)
     # Write via a temp file and replace, so a crash mid-write cannot leave a
     # truncated tarball that later reads as cached.
     tmp = cached.with_suffix(".tgz.part")
     tmp.write_bytes(data)
     tmp.replace(cached)
-    logger.info(
-        "codescaffold: cached %s@%s (%d bytes)", starter.package, starter.version, len(data)
-    )
-    return data
 
 
 def _target_name(name: str, prefix: str) -> str:
@@ -256,7 +273,7 @@ def extract(data: bytes, starter: Starter) -> Template:
 async def fetch_template(starter: Starter) -> Template:
     """Download (or reuse), verify, and extract a starter."""
     data = await _tarball(starter)
-    template = extract(data, starter)
+    template = await asyncio.to_thread(extract, data, starter)
     logger.debug(
         "codescaffold.fetch %s@%s -> %d files, %d assets",
         starter.package,

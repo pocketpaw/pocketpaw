@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 
 from pocketpaw.prompt.layer import Priority, PromptContext, PromptLayer
@@ -119,11 +119,27 @@ class DroppedLayer:
 
 @dataclass(frozen=True)
 class AssembledPrompt:
-    """What the assembler hands back to a caller."""
+    """What the assembler hands back to a caller.
+
+    ``layer_texts`` is each kept layer's rendered text, in order, so a caller can
+    route some layers somewhere other than the system prompt (``split``) without
+    rendering anything twice. ``text`` is always their join.
+    """
 
     text: str
     stable_digest: str
     dropped: list[DroppedLayer] = field(default_factory=list)
+    layer_texts: tuple[tuple[str, str], ...] = ()
+
+    def split(self, names: Collection[str]) -> tuple[str, str]:
+        """``(text without the named layers, text of the named layers)``.
+
+        The digest is untouched: it is a property of the whole assembly, and a
+        layer routed elsewhere is still part of what the turn was built from.
+        """
+        kept = [t for n, t in self.layer_texts if n not in names]
+        moved = [t for n, t in self.layer_texts if n in names]
+        return _JOIN.join(kept), _JOIN.join(moved)
 
 
 def _digest(keyed: Sequence[tuple[str, str]]) -> str:
@@ -249,8 +265,15 @@ async def assemble(
         for record in rendered
         if record.cache_key is not None
     ]
-    texts = [record.text for record in rendered if record.kept and record.text]
-    return AssembledPrompt(text=_JOIN.join(texts), stable_digest=_digest(keyed), dropped=dropped)
+    layer_texts = tuple(
+        (record.name, record.text) for record in rendered if record.kept and record.text
+    )
+    return AssembledPrompt(
+        text=_JOIN.join(t for _, t in layer_texts),
+        stable_digest=_digest(keyed),
+        dropped=dropped,
+        layer_texts=layer_texts,
+    )
 
 
 def _apply_cap(name: str, text: str, cap: int | None, dropped: list[DroppedLayer]) -> str:

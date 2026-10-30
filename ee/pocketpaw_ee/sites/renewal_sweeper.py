@@ -1,0 +1,358 @@
+# ee/pocketpaw_ee/sites/renewal_sweeper.py — the periodic sweep for site plans:
+# renews the ones bought from the workspace credit wallet, and converges the ones
+# a workspace plan carries for free.
+#
+# CREDITS RENEWAL. A paid site bills against the workspace's credit balance, not a
+# gateway subscription, so nothing else makes a recurring plan recur: once a
+# site's ``renewal_date`` passes, ONE PERIOD of its tier (``tier.period_months``:
+# 1 for monthly rungs, 12 for partner-only yearly rungs) is debited at
+# ``billing.service.site_plan_price_usd`` and the date steps forward.
+# ``period_paid_usd`` records what was actually charged. Runs on the shared
+# 5-minute heartbeat (``pocketpaw_ee.extensions``).
+#
+# LAPSING IS GENTLE. A wallet that cannot cover the period, or a partner rung with
+# no price left to renew at, drops the site to the free floor (``cancelled``): the
+# badge returns, the custom domain stops resolving, the concierge goes quiet — but
+# THE SITE ITSELF IS NEVER TAKEN DOWN. Client-paid partner sites
+# (``billing_rail == "client"``) are never charged here; at their renewal date
+# they lapse the same way via ``sites.service.lapse_due_client_paid_sites``.
+#
+# PLAN-CARRIED SITES (``billing_rail == "plan"``) are never charged either. Each
+# tick first runs ``sites.service.reconcile_all_plan_carried_sites``, which
+# releases sites past what the workspace's plan (or override) now carries — the
+# only thing that catches an override expiring on the clock or a plan written
+# outside ``set_workspace_plan``. It moves no money, so the renewals kill switch
+# does not stop it.
+#
+# It NEVER deletes, never redeploys and never debits a site on another rail: a
+# site renewing at a gateway would be charged twice. A RENEWAL IS A DEBIT AND A
+# DATE, AND NOTHING ELSE — the rail carries FOREIGN sites (a Paw Bar concierge on
+# a page the customer hosts) with no Worker to redeploy, which is also why
+# ``foreign_origin`` is the one exception to the "never charge an undeployed
+# site" skip below.
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import UTC, datetime
+
+from dateutil.relativedelta import relativedelta
+
+from pocketpaw_ee.cloud._core.errors import ConflictError, InsufficientCredits
+from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+logger = logging.getLogger(__name__)
+
+# Cap per tick so a large backlog cannot wedge the shared heartbeat. A workspace
+# with more due sites than this simply finishes on the next tick five minutes
+# later, which is invisible at a monthly cadence.
+_SWEEP_BATCH_LIMIT = 200
+
+# Set POCKETPAW_SITE_RENEWALS_ENABLED=0 to stop charging renewals without
+# redeploying. An escape hatch rather than a feature flag: if renewals ever start
+# double-charging, an operator needs to be able to stop the money moving in one
+# environment variable, not in a release.
+_ENABLED_VAR = "POCKETPAW_SITE_RENEWALS_ENABLED"
+
+
+def _enabled() -> bool:
+    """Is the credits renewal sweep allowed to charge?
+
+    Read at sweep time rather than at import, so an operator can turn it off on a
+    running process. Defaults ON — a renewal that silently never happens is the
+    failure this module exists to prevent, so the safe default is to charge.
+    """
+    raw = (os.environ.get(_ENABLED_VAR) or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in {"0", "false", "no", "off"}
+
+
+async def sweep_site_renewals(*, now: datetime | None = None) -> dict[str, int]:
+    """Charge the next month for every credits-paid site whose renewal is due —
+    and END the ones that asked to be ended. Before any of that, plan-carried
+    sites are reconciled against each workspace's current allowance (see the
+    module header); that pass is not reflected in the returned counts.
+
+    Returns a count of what happened: ``{"renewed": n, "lapsed": n, "failed": n,
+    "not_live": n, "closed": n}``. The last two are the rows this deliberately
+    does NOT charge: ``not_live`` is a site that was billed and never deployed
+    (an operator problem, not another month's debit), and ``closed`` is a plan the
+    customer cancelled mid-period — cancelling schedules the close for the end of
+    the month already paid for, and this sweep is where that date arrives.
+
+    Selection is deliberately narrow, and each clause keeps money from moving
+    where it should not:
+
+      * ``billing_rail == "credits"`` — the ONLY rail this may charge. A site on
+        a Dodo subscription or an add-on cart line renews at the gateway; a debit
+        here would be the customer's second payment for one month.
+      * ``subscription_status == "active"`` — a cancelled or pending site is not
+        currently paying for anything, so there is nothing to renew.
+      * ``renewal_date <= now`` — due. A site with no renewal date at all is
+        skipped rather than charged: an absent date is an unknown, and guessing
+        one bills somebody on a day nobody chose.
+
+    Each site is charged in its own try, so one failure cannot stop the rest of
+    the batch. A gateway-shaped error (anything that is not
+    ``InsufficientCredits``) leaves the site untouched and due, and the next tick
+    retries it — the debit is idempotent per (site, tier, renewal day), so a
+    retry after a partial failure cannot double-charge.
+    """
+    from pocketpaw_ee.sites import service as sites_service
+
+    # Plan-carried sites converge first, ahead of the kill switch: releasing a site
+    # the plan no longer carries moves no money. Best-effort, and kept out of the
+    # returned counts (those are about renewals); its own log line reports it.
+    try:
+        reconciled = await sites_service.reconcile_all_plan_carried_sites()
+        if reconciled["released"] or reconciled["failed"]:
+            logger.warning(
+                "sites.renewal_sweeper: plan-carried reconcile over %d workspace(s) "
+                "released=%d failed=%d",
+                reconciled["workspaces"],
+                reconciled["released"],
+                reconciled["failed"],
+            )
+    except Exception:
+        logger.exception("sites.renewal_sweeper: plan-carried reconcile pass failed")
+
+    if not _enabled():
+        return {"renewed": 0, "lapsed": 0, "failed": 0, "not_live": 0, "closed": 0}
+
+    from pocketpaw_ee.cloud.billing import service as billing_service
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    at = now or datetime.now(UTC)
+
+    # PH-13: a client-paid year that ran out lapses; nothing is debited for it.
+    client_lapsed = await sites_service.lapse_due_client_paid_sites(at)
+    if client_lapsed:
+        logger.info(
+            "sites.renewal_sweeper: %d client-paid partner site(s) reached the end of the "
+            "year their client paid for and lapsed to the free floor (not charged)",
+            client_lapsed,
+        )
+    due = (
+        await _SiteDoc.find(
+            {
+                "billing_rail": billing_service.CREDITS_BILLING_RAIL,
+                "subscription_status": "active",
+                "renewal_date": {"$ne": None, "$lte": at},
+            }
+        )
+        .limit(_SWEEP_BATCH_LIMIT)
+        .to_list()
+    )
+    counts = {"renewed": 0, "lapsed": client_lapsed, "failed": 0, "not_live": 0, "closed": 0}
+    if not due:
+        return counts
+
+    for doc in due:
+        site_id = str(doc.id)
+
+        # A CLOSE THE CUSTOMER ALREADY ASKED FOR. Dropping a paying site to the
+        # free floor mid-period does not end it on the spot — the month was bought
+        # and the site keeps its tier and its capabilities until it runs out — it
+        # sets ``plan_cancels_at_period_end``. This is where it runs out.
+        #
+        # Checked FIRST, ahead of the not-deployed skip below, because that skip
+        # leaves a row due forever on purpose: a site scheduled to close that never
+        # deployed would otherwise be re-examined every tick for good, never
+        # charged and never closed.
+        #
+        # The row is left in the same shape an immediate downgrade produces — free
+        # tier, no subscription, no renewal, nothing pre-paid — so nothing
+        # downstream has to learn a second way of reading "this site is free now".
+        if getattr(doc, "plan_cancels_at_period_end", False):
+            doc.plan_tier = site_plans.BASE_SITE_PLAN_KEY
+            doc.subscription_status = "none"
+            doc.renewal_date = None
+            doc.period_paid_usd = 0
+            doc.plan_cancels_at_period_end = False
+            await doc.save()
+            counts["closed"] += 1
+            logger.info(
+                "sites.renewal_sweeper: site %s (workspace=%s) reached the end of "
+                "the period it paid for and closed as requested — it stays live on "
+                "the free floor and was NOT charged",
+                site_id,
+                doc.workspace,
+            )
+            continue
+
+        # NEVER CHARGE FOR A SITE THAT IS NOT UP. A row can be "active" and not
+        # deployed: ``activate_site`` marks the subscription active BEFORE running
+        # the deploy — deliberately, because the badge and concierge stampers read
+        # the status mid-deploy — so a deploy that raises leaves exactly this
+        # shape. The webhook that used to retry it is gone with the gateway, and
+        # the pending sweeper only looks for ``subscription_status == "pending"``,
+        # so nothing else sees these rows at all.
+        #
+        # Without this the customer is billed a month, every month, for a site
+        # that 404s. Skipping leaves ``renewal_date`` in the past, so the sweep
+        # re-examines it every tick and charges the moment it is genuinely live —
+        # a republish redeploys it and costs nothing, because the site is already
+        # inside a period it has paid for.
+        #
+        # A dynamic site mid-provision has this shape too, legitimately and for
+        # minutes. Deferring its renewal by one five-minute tick is the correct
+        # answer there as well.
+        #
+        # A FOREIGN SITE IS THE ONE UNDEPLOYED ROW THAT IS FINISHED. A Paw Bar
+        # concierge minted for a site the customer hosts themselves
+        # (``sites.service.mint_foreign_site``) has no Worker, no ``script_name``
+        # and no URL, and never will — ``deployed`` is False because there is
+        # nothing to deploy, not because a deploy failed. It was bought on this
+        # rail at a real monthly price, so skipping it here would give it away
+        # free forever, which is the exact failure this whole module exists to
+        # prevent, arriving through the safety check rather than around it.
+        #
+        # Nothing below deploys anything: the renewal is a debit and a date, so
+        # charging a foreign site needs no new path and must not grow one. The
+        # flag is a stamp only the mint writes rather than a derivation from
+        # ``script_name == ""``, so a draft or a half-written row cannot talk its
+        # way past the skip.
+        if not getattr(doc, "deployed", False) and not getattr(doc, "foreign_origin", False):
+            counts["not_live"] += 1
+            logger.warning(
+                "sites.renewal_sweeper: site %s (workspace=%s) is due but is NOT "
+                "DEPLOYED — skipping the charge and leaving it due. A paying site "
+                "that never deployed needs an operator, not another month's debit.",
+                site_id,
+                doc.workspace,
+            )
+            continue
+
+        tier = site_plans.site_scoped_tier(getattr(doc, "plan_tier", None))
+        if tier is None or tier.monthly_price_usd <= 0:
+            # The site is on the free floor, or on a key the catalog no longer
+            # resolves. Either way there is nothing to charge, and stamping a new
+            # renewal date would keep re-selecting it every tick forever.
+            doc.renewal_date = None
+            # Nothing is being paid for any more, so nothing is pre-paid. Left
+            # standing, this would discount the next real purchase by whatever the
+            # site used to be on.
+            doc.period_paid_usd = 0
+            await doc.save()
+            continue
+
+        # THE PERIOD BEING BOUGHT IS THE DATE ON THE ROW, not today. It is what
+        # makes the debit idempotent: a sweep that crashes after the charge and
+        # before the save re-reads the same due date next tick, computes the same
+        # idempotency key, and no-ops instead of charging a second time.
+        period = doc.renewal_date or at
+        # ONE PERIOD of the tier, priced for this workspace. For a monthly rung
+        # this IS ``monthly_price_usd``; a partner-only rung is a year at the
+        # partner's country price.
+        price_usd = 0
+        try:
+            # ``period_paid_usd`` is a per-period HIGH-WATER mark, not this tier's
+            # price (a mid-period downgrade leaves the dearer tier's number). It is
+            # offered only as a fallback for a partner whose profile is gone, and
+            # ``site_plan_price_usd`` keeps it only if it is a real price of this
+            # tier; otherwise there is no price and the site LAPSES (below), never
+            # charged at a guess.
+            price_usd = await billing_service.site_plan_price_usd(
+                tier, doc.workspace, last_paid_usd=getattr(doc, "period_paid_usd", 0) or 0
+            )
+            await billing_service.charge_site_plan_credits(
+                workspace_id=doc.workspace,
+                site_id=site_id,
+                tier_key=tier.key,
+                # A RENEWAL BUYS ONE WHOLE PERIOD of the tier (a month, or a year
+                # for a partner rung). The publish path is the one that charges a
+                # difference, and only when a tier changes mid-period.
+                amount_usd=price_usd,
+                period_start=period,
+                member_id=None,
+            )
+        except InsufficientCredits:
+            # LAPSED. Drop to the free floor and stop trying; the site stays up.
+            doc.subscription_status = "cancelled"
+            doc.renewal_date = None
+            # The period the wallet could not buy was never paid for, so it must
+            # not discount whatever the customer buys after topping up.
+            doc.period_paid_usd = 0
+            await doc.save()
+            counts["lapsed"] += 1
+            logger.warning(
+                "sites.renewal_sweeper: site %s (workspace=%s tier=%s) could not renew — "
+                "the wallet is short $%s. The site STAYS LIVE and drops to the free "
+                "floor; republishing after a top-up buys the tier again.",
+                site_id,
+                doc.workspace,
+                tier.key,
+                price_usd,
+            )
+            continue
+        except ConflictError as exc:
+            if exc.code != billing_service.PARTNER_PRICE_UNKNOWN:
+                counts["failed"] += 1
+                logger.warning(
+                    "sites.renewal_sweeper: site %s (workspace=%s) refused to renew (%s); "
+                    "left due and will be retried on the next tick",
+                    site_id,
+                    doc.workspace,
+                    exc.code,
+                )
+                continue
+            # NO PRICE TO RENEW AT (a partner rung whose partner profile is gone).
+            # Retrying forever would leave every paid capability on, unpaid. Lapse
+            # exactly as a short wallet does: free floor, site stays up.
+            doc.subscription_status = "cancelled"
+            doc.renewal_date = None
+            doc.period_paid_usd = 0
+            await doc.save()
+            counts["lapsed"] += 1
+            logger.warning(
+                "sites.renewal_sweeper: site %s (workspace=%s tier=%s) has no partner "
+                "price to renew at — lapsed to the free floor; the site STAYS LIVE.",
+                site_id,
+                doc.workspace,
+                tier.key,
+            )
+            continue
+        except Exception:
+            counts["failed"] += 1
+            logger.exception(
+                "sites.renewal_sweeper: site %s (workspace=%s tier=%s) failed to renew; "
+                "left due and will be retried on the next tick",
+                site_id,
+                doc.workspace,
+                tier.key,
+            )
+            continue
+
+        # Step from the DUE date, not from now. Stepping from now would let each
+        # sweep's few seconds of lateness accumulate, walking every customer's
+        # billing day slowly forward through the calendar.
+        doc.renewal_date = period + relativedelta(months=tier.period_months)
+        # A NEW PERIOD RESETS WHAT IT HAS BEEN PAID FOR. The high-water mark is
+        # per-period by definition, so carrying last month's across would let a
+        # customer who upgraded in March take the April upgrade for free forever.
+        # Set to the tier just charged, which is exactly what this month bought.
+        doc.period_paid_usd = int(price_usd)
+        await doc.save()
+        counts["renewed"] += 1
+
+    # ``closed`` is deliberately NOT in the warning condition: a site reaching a
+    # cancellation the customer asked for is the system working, and warning on it
+    # would train the operator to ignore the line that also carries ``failed``.
+    if counts["lapsed"] or counts["failed"] or counts["not_live"]:
+        logger.warning(
+            "sites.renewal_sweeper: renewed=%d lapsed=%d failed=%d not_live=%d closed=%d",
+            counts["renewed"],
+            counts["lapsed"],
+            counts["failed"],
+            counts["not_live"],
+            counts["closed"],
+        )
+    else:
+        logger.info(
+            "sites.renewal_sweeper: renewed=%d closed=%d",
+            counts["renewed"],
+            counts["closed"],
+        )
+    return counts

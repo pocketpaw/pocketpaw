@@ -1,62 +1,44 @@
 # backend/src/pocketpaw/ripple/manifest.py
-"""Fetch and cache the Ripple widget manifest from a CDN.
+"""Load, validate against and format the Ripple widget manifest.
 
-The manifest is generated at ripple build time and published as
-`@ripple-ui/svelte/dist/manifest.json`. This module fetches it,
-caches the parse result in-process for a configurable TTL, and
-formats it as a markdown block suitable for system-prompt injection.
+The one widget catalog every reader uses (chat agent, pocket tools, catalog
+gates, Paw Bar) is bundled beside this file as ``manifest.json``: the
+@ripple-ui/svelte release manifest pinned to ``RIPPLE_UI_SVELTE_VERSION``
+(``manifest.json.source`` says how to refresh it). ``load_bundled_manifest()``
+reads it once from disk; ``get_manifest(url, ttl)`` returns it when ``url`` is
+empty. A non-empty ``url`` (the ``ripple_manifest_url`` override) is fetched
+and TTL-cached, but a failed fetch, or a catalog older than the bundled one,
+logs a warning and serves the bundled catalog: never None, never a network
+call by default. Format for ``get_widget_spec``: the spec envelope, the
+action grammar (one line per verb), the node-level ``motion`` field with its
+budget rule, then each requested widget's props and example.
 
-On any failure (network, timeout, parse, schema), get_manifest()
-returns None — the caller is expected to fall back to a different
-source (today: kb scope search).
-
-Changes:
-  - 2026-06-07 (polish/rfc13-flow-nav-validation): made the catalog and
-    action-verb walkers (``_walk_catalog`` / ``_walk_action_verbs``) descend a
-    Chain Flow step's ``ui`` tree, its linear ``chain`` next step, and each
-    ``chain_map`` branch step — not just ``children`` / ``else_children``.
-    Previously a bad widget type or unknown action verb buried in step 2/3 of a
-    materialized flow escaped author-time validation; now every step's UI node
-    tree in the flow is checked, not just the root step's.
-  - 2026-06-04 (feat/sites-validator-site-aware): added ``relax_ssr_props``
-    to ``validate_against_manifest`` + the ``SSR_NODE_LEVEL_PROPS`` allowlist.
-    On the site-generation path the renderer-honored SSR node-level props
-    (``section``/``card`` ``id`` anchors, ``input``/``textarea`` ``name`` POST
-    fields, ``button``/``cta`` ``href`` anchor CTAs) are no longer flagged as
-    ``unknown_props`` — they render on a static Paw Site but the manifest omits
-    them from per-widget props, so the default walk was driving the agent's
-    redraft loop into stripping the marketing widgets. Closed combo list, gated
-    on the flag; dashboard validation (flag defaults False) is unchanged.
-  - 2026-05-31 (constraint-zone enforcer): added ``validate_required_props``
-    + ``required_props_from_manifest`` — a mechanical walker that flags any
-    node missing a prop the manifest marks ``required: true`` for its
-    ``type``. The rippleSpec analogue of the genesis "Constraint Zones" 🔒
-    HARD ``required_fields`` zone; sibling to ``validate_against_catalog`` /
-    ``validate_action_verbs``. Previously the ``required`` flag was surfaced
-    only in the system prompt and never enforced at gate time.
-  - 2026-05-22 (Increment 5): added ``validate_against_catalog`` — a
-    catalog-as-allowlist ingest gate that flags any node whose ``type``
-    is not in the widget manifest (sibling to ``validate_against_manifest``,
-    which only checks prop drift). Plus ``check_embed_node`` /
-    ``check_embed_nodes_in_spec`` — an https-only, host-allowlisted URL
-    policy for the sanctioned ``embed`` escape-hatch widget, with
-    loopback / private / link-local hosts hard-blocked unconditionally.
-  - 2026-05-24 (#1206 part a): added ``invoke_tool`` to
-    :data:`_KNOWN_ACTION_VERBS` — the click-driven sibling of
-    ``run_source`` / ``call_binding`` that routes a button into a
-    server-side tool via the new ``POST /pockets/{id}/tools/run`` wire.
+Validators (all pure walkers over a rippleSpec; they descend `children`,
+`else_children` and Chain Flow step trees):
+  * ``validate_against_manifest`` — props not declared for a node's type, plus
+    known inner-item aliases (``apply_aliases`` rewrites them in place);
+    ``relax_ssr_props`` allows the SSR node-level props a static Paw Site uses.
+  * ``validate_against_catalog`` — node types missing from the manifest, and
+    the https-only, host-allowlisted URL policy for the ``embed`` escape hatch.
+  * ``validate_required_props`` — props the manifest marks ``required``.
+  * action-verb checks against ``_action_verbs.ACTION_VERBS``, which
+    ``scripts/vendor_ripple_verbs.py`` generates from ripple's EventAction enum.
 """
 
 from __future__ import annotations
 
 import difflib
+import functools
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+
+from pocketpaw.ripple._action_verbs import ACTION_VERBS
 
 logger = logging.getLogger(__name__)
 
@@ -80,23 +62,61 @@ DEFAULT_EMBED_ALLOWED_HOSTS: tuple[str, ...] = (
 _FETCH_TIMEOUT_SECONDS = 5.0
 _SCHEMA = "ripple.manifest/v1"
 
+# The @ripple-ui/svelte version paw-enterprise renders (its package.json), which
+# the bundled manifest must match. pocketpaw CI can't read that repo, so a
+# Ripple upgrade bumps this, swaps manifest.json, and the pin test keeps the two
+# from drifting apart silently.
+RIPPLE_UI_SVELTE_VERSION = "0.8.2"
+BUNDLED_MANIFEST_PATH = Path(__file__).with_name("manifest.json")
+
 # Module-global cache: url -> (expires_at_monotonic, parsed_manifest)
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
-async def get_manifest(url: str, ttl_seconds: int) -> dict[str, Any] | None:
-    """Fetch the manifest from `url`, with in-process TTL caching.
+@functools.cache
+def load_bundled_manifest() -> dict[str, Any]:
+    """The bundled Ripple manifest, parsed once. Shared: callers must not mutate it."""
+    return json.loads(BUNDLED_MANIFEST_PATH.read_text(encoding="utf-8"))
 
-    Returns the parsed manifest dict on success, or None on any failure.
+
+def _version_tuple(version: Any) -> tuple[int, ...] | None:
+    try:
+        return tuple(int(part) for part in str(version).split("-")[0].split("."))
+    except ValueError:
+        return None
+
+
+async def get_manifest(url: str, ttl_seconds: int) -> dict[str, Any]:
+    """The Ripple manifest: the bundled one, or the ``url`` override when set.
+
+    An override is fetched and cached for ``ttl_seconds``. If the fetch fails,
+    or it serves a catalog older than the bundled one, the bundled manifest is
+    served (and cached under ``url`` so a dead override costs one timeout per
+    TTL, not one per call).
     """
+    if not url:
+        return load_bundled_manifest()
     now = time.monotonic()
     cached = _cache.get(url)
     if cached is not None and cached[0] > now:
         return cached[1]
 
+    bundled = load_bundled_manifest()
     parsed = await _fetch_and_validate(url)
     if parsed is None:
-        return None
+        logger.warning("ripple manifest override %s unavailable; using the bundled catalog", url)
+        parsed = bundled
+    else:
+        got, floor = _version_tuple(parsed.get("version")), _version_tuple(bundled["version"])
+        if got is None or (floor is not None and got < floor):
+            logger.warning(
+                "ripple manifest override %s is version %r, older than the bundled %s; "
+                "using the bundled catalog",
+                url,
+                parsed.get("version"),
+                bundled["version"],
+            )
+            parsed = bundled
 
     _cache[url] = (now + ttl_seconds, parsed)
     return parsed
@@ -611,44 +631,19 @@ def _walk_embed_policy(
 # the human / import path.
 # ---------------------------------------------------------------------------
 
-# Canonical action verbs the Ripple event dispatcher understands.
-# Source of truth: ``ripple/src/lib/core/event-dispatcher.ts`` — the
-# switch in ``dispatch()``. Drift between the two would let an invented
-# verb pass spec validation and silently no-op at runtime, which is the
-# exact failure we are guarding against; mirror this list whenever the
-# dispatcher gains a new case.
+# Canonical action verbs the Ripple event dispatcher understands. Generated
+# from ripple's ``EventAction`` enum (packages/core/src/schema/event-handler.ts)
+# by ``scripts/vendor_ripple_verbs.py``; refresh by re-running it, never by
+# hand. A stale set either lets an invented verb pass spec validation and
+# silently no-op at runtime, or rejects a valid one (``animate`` was rejected
+# until 2026-10-02).
 #
 # ``invoke_tool`` is the click-driven sibling of ``run_source`` /
 # ``call_binding`` (#1206 part a): a button hands the host a tool name +
 # resolved args, the host runs the named tool via the per-pocket
 # ``POST /pockets/{id}/tools/run`` wire, the result flows back into the
-# usual ``on_success`` / ``on_error`` chain. The verb is fully wired into
-# the dispatcher in part (a); the home-grid ``onEvent`` plumbing that
-# actually POSTs to the wire lands in part (b).
-_KNOWN_ACTION_VERBS: frozenset[str] = frozenset(
-    {
-        "set",
-        "toggle",
-        "push",
-        "remove",
-        "open",
-        "navigate",
-        "toast",
-        "emit",
-        "pin",
-        "unpin",
-        "api",
-        "run_source",
-        "call_binding",
-        "invoke_tool",
-        "flow",
-        "branch",
-        "confirm",
-        "validate",
-        "delay",
-        "invoke",
-    }
-)
+# usual ``on_success`` / ``on_error`` chain.
+_KNOWN_ACTION_VERBS: frozenset[str] = ACTION_VERBS
 
 # Button labels (case-insensitive substring match) that promise a live
 # fetch. Used by :func:`find_unwired_live_buttons` to know which buttons
@@ -1092,6 +1087,41 @@ def validate_required_props(
     return issues
 
 
+def _format_actions_and_motion(manifest: dict[str, Any]) -> list[str]:
+    """The action grammar (one line per verb: its fields and the first
+    sentence of its description) and the node-level ``motion``
+    field (description, budget rule, preset names). Examples and recipes are
+    left out: they run to kilobytes and the widget examples already show
+    handlers in place."""
+    lines: list[str] = []
+    actions = manifest.get("actions")
+    if isinstance(actions, dict) and actions:
+        lines.append("## Actions (event handler `action` values)")
+        lines.append("")
+        for name, entry in actions.items():
+            if not isinstance(entry, dict):
+                continue
+            shape = entry.get("shape") or {}
+            fields = ", ".join(k for k in shape if k != "action")
+            desc = " ".join(str(entry.get("description", "")).split()).split(". ")[0]
+            lines.append(f"- `{name}` {{{fields}}} — {desc}")
+        lines.append("")
+    motion = manifest.get("motion")
+    if isinstance(motion, dict) and motion.get("description"):
+        lines.append(f"## Motion (node-level `{motion.get('field') or 'motion'}` field)")
+        lines.append("")
+        lines.append(str(motion["description"]))
+        if motion.get("budgetRule"):
+            lines.append(str(motion["budgetRule"]))
+        presets = motion.get("presets")
+        if isinstance(presets, dict) and presets:
+            lines.append(
+                "Presets: " + "; ".join(f"`{k}` {str(v).rstrip('.')}" for k, v in presets.items())
+            )
+        lines.append("")
+    return lines
+
+
 def format_for_prompt(manifest: dict[str, Any]) -> str:
     """Render the manifest as a markdown block for system-prompt injection.
 
@@ -1142,6 +1172,8 @@ def format_for_prompt(manifest: dict[str, Any]) -> str:
         lines.append("")
         lines.append("## Widget catalog")
         lines.append("")
+
+    lines.extend(_format_actions_and_motion(manifest))
 
     lines.append(
         "The following Ripple widgets are available. Use these props, types, "

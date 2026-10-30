@@ -1,0 +1,160 @@
+[
+  {
+    "label": "one clean round already counts as done",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "rounds: list[list[FindingVerdict | None]], cap: int, clean_needed: int = 2",
+    "replace": "rounds: list[list[FindingVerdict | None]], cap: int, clean_needed: int = 1",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_loop_decision_needs_two_clean_rounds_in_a_row_under_the_cap"
+    ]
+  },
+  {
+    "label": "the stop rule never escalates at the cap",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "return \"escalate\" if len(rounds) >= cap else \"continue\"",
+    "replace": "return \"continue\"",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_loop_decision_needs_two_clean_rounds_in_a_row_under_the_cap"
+    ]
+  },
+  {
+    "label": "clean rounds need not be in a row",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "if len(tail) == clean_needed and all(round_clean(r) for r in tail):",
+    "replace": "if sum(round_clean(r) for r in rounds) >= clean_needed:",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_loop_decision_needs_two_clean_rounds_in_a_row_under_the_cap"
+    ]
+  },
+  {
+    "label": "a round is clean while one finding still blocks",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "return not any(decide(v).holds for v in verdicts)",
+    "replace": "return not all(decide(v).holds for v in verdicts)",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_round_clean_means_no_finding_blocks"
+    ]
+  },
+  {
+    "label": "a finding exactly at the blocking threshold is waved through",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "holds=not 0 <= verdict.blocking < BLOCKING_MIN,",
+    "replace": "holds=not 0 <= verdict.blocking <= BLOCKING_MIN,",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_decide_thresholds",
+      "tests/cloud/test_belt_clef_findings.py::test_round_clean_means_no_finding_blocks"
+    ]
+  },
+  {
+    "label": "an unanswered blocking score is waved through",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "holds=not 0 <= verdict.blocking < BLOCKING_MIN,",
+    "replace": "holds=verdict.blocking >= BLOCKING_MIN,",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_decide_thresholds",
+      "tests/cloud/test_belt_clef_findings.py::test_round_clean_means_no_finding_blocks"
+    ]
+  },
+  {
+    "label": "no verdict at all is waved through",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "return FindingDecision(holds=True, audit_rule=False, duplicate_of=0)",
+    "replace": "return FindingDecision(holds=False, audit_rule=False, duplicate_of=0)",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_decide_thresholds",
+      "tests/cloud/test_belt_clef_findings.py::test_round_clean_means_no_finding_blocks"
+    ]
+  },
+  {
+    "label": "mechanical exactly at its threshold adds audit-rule",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "audit_rule=verdict.mechanical > MECHANICAL_MIN,",
+    "replace": "audit_rule=verdict.mechanical >= MECHANICAL_MIN,",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_decide_thresholds"
+    ]
+  },
+  {
+    "label": "duplicate exactly at its threshold comments instead of filing",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "duplicate_of=verdict.duplicate_of if verdict.duplicate > DUPLICATE_MIN else 0,",
+    "replace": "duplicate_of=verdict.duplicate_of if verdict.duplicate >= DUPLICATE_MIN else 0,",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_decide_thresholds"
+    ]
+  },
+  {
+    "label": "shadow mode files follow-ups",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "            if live and not act.holds:\n",
+    "replace": "            if not act.holds:\n",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_shadow_records_a_failed_reviews_findings_and_changes_nothing"
+    ]
+  },
+  {
+    "label": "a live round of only follow-ups still fails the review",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "if round_clean(verdicts) and not held:",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_live_round_with_nothing_blocking_passes_and_files_follow_ups"
+    ]
+  },
+  {
+    "label": "the fixer gets the whole comment, follow-ups included",
+    "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
+    "find": "self._held.pop(str(pr.get(\"headRefOid\") or \"\"), \"\") or _review_note(pr)",
+    "replace": "_review_note(pr)",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_live_held_round_fails_and_its_fixer_gets_only_the_holding_items"
+    ]
+  },
+  {
+    "label": "a tester's bug is offered as its own duplicate",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "if not isinstance(number, int) or number == exclude:",
+    "replace": "if not isinstance(number, int):",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_candidates_rank_by_shared_words_and_skip_the_findings_own_issue",
+      "tests/cloud/test_belt_clef_findings.py::test_tester_bugs_are_judged_and_live_labels_them"
+    ]
+  },
+  {
+    "label": "the run's own issue is offered as a duplicate",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "rows = [r for r in rows if not own or r.get(\"number\") != int(own.group(1))]",
+    "replace": "rows = list(rows)",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_live_round_with_nothing_blocking_passes_and_files_follow_ups"
+    ]
+  },
+  {
+    "label": "a live Review Room duplicate still files a new issue",
+    "file": "ee/pocketpaw_ee/cloud/belt/review.py",
+    "find": "if act and act.duplicate_of:  # live: say it on the issue this duplicates",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_room_issue_is_judged_and_live_dedups_or_labels"
+    ]
+  },
+  {
+    "label": "a finding's text reaches the blob",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "        \"source\": finding.source,\n        \"actions\": list(actions),",
+    "replace": "        \"source\": finding.source,\n        \"text\": finding.text,\n        \"actions\": list(actions),",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_shadow_records_a_failed_reviews_findings_and_changes_nothing"
+    ]
+  },
+  {
+    "label": "the eval maps a won't-fix close to fixed",
+    "file": "ee/pocketpaw_ee/cloud/belt/clef.py",
+    "find": "\"COMPLETED\": \"fixed\", \"NOT_PLANNED\": \"wont_fix\"",
+    "replace": "\"COMPLETED\": \"fixed\", \"NOT_PLANNED\": \"fixed\"",
+    "tests": [
+      "tests/cloud/test_belt_clef_findings.py::test_issue_outcome",
+      "tests/cloud/test_belt_clef_findings.py::test_eval_rows_carry_findings_beside_what_happened_to_their_issue"
+    ]
+  }
+]

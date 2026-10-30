@@ -1,5 +1,13 @@
 """User and OAuth account models (fastapi-users + Beanie).
 
+Updated: 2026-09-01 (feat/byok-guest-backend) — added ``is_guest`` +
+``guest_limits`` for BYOK-first onboarding. A guest is a server-minted
+anonymous account (synthetic email, random password) with hard server-side
+limits; signup later ATTACHES real credentials to the SAME user id and flips
+``is_guest`` off. ``guest_limits`` is nullable: ``None`` on every non-guest
+row (no limits), populated at guest mint. The turn/session caps are enforced
+by ``ee.cloud.auth.guest_budget`` (fail-closed), not here.
+
 Updated: 2026-09-04 — added the ``workspaces.workspace`` index. Until now the
 only index on this collection was the unique ``email`` one that
 ``BeanieBaseUser`` contributes, so every membership lookup was a COLLSCAN.
@@ -42,6 +50,18 @@ class OAuthAccount(BaseOAuthAccount):
     linked_at: datetime | None = None
 
 
+class GuestLimits(BaseModel):
+    """Hard server-side caps for a guest account (BYOK-first onboarding).
+
+    Stored on the user (not env-config) so an individual guest's caps can be
+    raised without a deploy, and so the caps travel with the row the budget
+    reads. Defaults are the captain's launch numbers.
+    """
+
+    sessions: int = 2
+    turns_per_day: int = 40
+
+
 class WorkspaceMembership(BaseModel):
     workspace: str  # Workspace ID
     role: str = "member"  # owner | admin | member | viewer
@@ -62,6 +82,12 @@ class User(BeanieBaseUser, Document):  # type: ignore[misc]
     last_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
     oauth_accounts: list[OAuthAccount] = Field(default_factory=list)
 
+    # BYOK-first onboarding (2026-09-01): server-minted anonymous guest.
+    # ``is_guest`` gates the fail-closed turn/session budget and the upload
+    # block; the upgrade route flips it False and clears nothing else.
+    is_guest: bool = False
+    guest_limits: GuestLimits | None = None
+
     # MFA / TOTP state (Wave 3 Task 3). pending_setup + enabled form a
     # tri-state: (False, False) never set up; (True, False) secret minted
     # but not yet verified; (*, True) active. Backup codes stored as
@@ -71,6 +97,32 @@ class User(BeanieBaseUser, Document):  # type: ignore[misc]
     mfa_backup_codes: list[str] = Field(default_factory=list)
     mfa_verified_at: datetime | None = None
     mfa_pending_setup: bool = False
+
+    # Platform authority axis (2026-09-14) — see ee.guards.platform. ORTHOGONAL
+    # to ``workspaces[].role``: that says what the user may do inside one
+    # tenant, this says whether they may act across all of them. A workspace
+    # OWNER gets nothing here by being one.
+    #
+    # ``None`` on every existing row and on every new signup, which is the only
+    # safe default — platform access is granted deliberately, by the CLI in
+    # ee/pocketpaw_ee/cloud/platform/cli.py, and never by a signup path.
+    #
+    # Stored as a plain string rather than the enum so that an unrecognised
+    # value written by a newer node degrades to "no access"
+    # (``check_platform_action`` denies anything it cannot parse) instead of
+    # raising on load and taking out every read of that user. Same reasoning as
+    # ``workspaces[].role``, which is also a bare str.
+    platform_role: str | None = None
+
+    # Early access grant (credits.service.grant_early_access). The workspace is
+    # claimed once, atomically, and only ever one the user OWNS; the grant then
+    # lands there under the per-user ledger key. ``granted_at`` is stamped after
+    # the ledger grant and is only a fast path: the ledger key is the guarantee.
+    early_access_workspace_id: str | None = None
+    early_access_granted_at: datetime | None = None
+    # First "notify me when plans open" click (early_access.service.notify_plans).
+    # Set once and never moved, so a repeat click keeps the original time.
+    notify_plans_at: datetime | None = None
 
     class Settings:
         name = "users"

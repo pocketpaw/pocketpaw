@@ -1,292 +1,32 @@
 """Configuration management for PocketPaw.
 
-Changes:
-  - 2026-09-01 (feat/scale-concurrency-knobs): Added ``agent_pool_max_instances``
-    (default 20), ``session_warm_max_per_tenant`` (default 8) and
-    ``session_warm_max_global`` (default 64) — the three agent-tier ceilings that
-    were previously HARDCODED constructor defaults reachable only by editing
-    ``pool.py`` / ``session_supervisor.py``, because both singletons are built with
-    no arguments (``AgentPool()``, ``SessionSupervisor()``). Every default is the
-    literal that was already in force, so no existing deploy changes behaviour;
-    they exist so a multi-user deploy can raise them from env. Note these are
-    PER-PROCESS ceilings — they bound one web or worker process, and replicas
-    multiply them. Distinct from ``max_concurrent_conversations`` below, which
-    gates only the OSS channel-adapter loop, and from ``POCKETPAW_ARQ_MAX_JOBS``,
-    which is the cluster-wide arq ceiling.
-  - 2026-08-03 (PA-9): Re-measured ``prompt_pocket_summary_only``'s payoff against
-    the live layer and corrected its description. The flag saves ~1,631 chars/turn
-    (3,240 -> 1,609 on a 300-widget pocket), not the ~39.6k the old note implied —
-    PA-8a's ``_WIDGET_SUMMARY_MAX_CHARS`` had already bounded the block, so the
-    dramatic figure described behaviour that no longer exists. Default is
-    unchanged; only the docstring was wrong.
-  - 2026-08-03 (PA-8a): Added ``prompt_pocket_summary_only`` (default False, env
-    POCKETPAW_PROMPT_POCKET_SUMMARY_ONLY) — takes the bulk widget dump out of
-    the channel prompt's ``<current-pocket>`` block, leaving the pocket id, the
-    name, the widget COUNT, a snapshot stamp and the standing order to call
-    ``get_pocket``. Default False is byte-for-byte today's block, so no deploy
-    is changed by shipping it; flipping it is a config/env change, not a code
-    change. Read by ``pocketpaw.prompt.channel.request.ChannelCurrentPocketLayer``.
-  - 2026-07-11 (self-serve-analysis S1): Added ``fabric_analyst`` (default False,
-    env POCKETPAW_FABRIC_ANALYST) — gates the Fabric transparent-analysis read
-    engine (SQL GROUP BY aggregation + reasoning steps on FabricStore.query /
-    POST /fabric/query). Off (default): an aggregation query is rejected
-    fail-loud with FabricAnalystDisabledError -> HTTP 422
-    fabric.analyst_disabled; plain queries are unaffected either way.
-  - 2026-08-08 (feat/sites-js-by-default): Added
-    ``sites_keep_client_bundle_default`` (default True) — a published Paw Site
-    now ships its own client JavaScript UNLESS it declares otherwise. The
-    per-site ``keepsClientBundle`` declaration became tri-state (``None`` =
-    undeclared → this default; ``True``/``False`` = the author's explicit
-    choice, honoured in both directions), resolved at exactly one place,
-    ``sites/service.py:publish_pocket``. Note the default silences the
-    build-time resting-visibility smoke gate for undeclared sites — see the
-    Field description for the full tradeoff.
-  - 2026-07-11 (feat/external-alerting-c2c3): Added ``automation_evaluator_autostart``
-    (default True, env POCKETPAW_AUTOMATION_EVALUATOR_AUTOSTART) — the OSS
-    always-on automation switch. When on (default), the background
-    AutomationEvaluator starts at dashboard boot so threshold rules fire without
-    a manual POST /automations/evaluator/start. A new default-ON flag is safe: a
-    fresh install with no enabled rules just sleeps.
-  - 2026-07-11 (FST-8 — divergence report + docs): Refreshed the
-    ``fabric_source_truth_mode`` Field description — shadow/enforce semantics
-    SHIPPED in FST-3..7 (the FST-1 "RESERVED / INERT" wording was stale):
-    shadow records statements + divergence lines while the cache stays LWW,
-    enforce hands the cache to the trust-ladder resolver, and the flip to
-    enforce is gated by ``python -m pocketpaw.fabric.divergence_report``.
-    Description text only — no behavioral change.
-  - 2026-07-10 (FST-1 — Fabric source-truth schema): Added
-    ``fabric_source_truth_mode`` (Literal off|shadow|enforce, default 'off';
-    POCKETPAW_FABRIC_SOURCE_TRUTH_MODE) — the three-position rollout switch for
-    the Fabric source-truth chain, mirroring the ``litellm_spend_mode``
-    pattern. INERT in FST-1: no code path reads it yet; only the
-    fabric_statements/fabric_sources schema + append-only store CRUD exist.
-    'off' is byte-for-byte today's behavior (the flat properties dict is the
-    only read path); shadow/enforce semantics land in later FST slices.
-  - 2026-07-10 (feat/verify-mode-shadow): Added the three-position verify
-    rollout modes — ``deep_work_verify_mode`` and ``cloud_plan_verify_mode``
-    (Literal off|shadow|enforce, default 'off'; env
-    POCKETPAW_DEEP_WORK_VERIFY_MODE / POCKETPAW_CLOUD_PLAN_VERIFY_MODE) —
-    superseding the boolean kill-switches so a real tenant can run a SAFE
-    observe-only SHADOW phase (verdict + judge stamps + a
-    ``would_have=<done|requeued|escalated>`` telemetry line; task status
-    NEVER touched) before anyone risks ENFORCE. Resolved by
-    ``effective_deep_work_verify_mode()`` /
-    ``effective_cloud_plan_verify_mode()`` (mirrors
-    ``effective_spend_mode()``): a non-'off' mode wins outright; mode 'off'
-    + legacy bool True resolves to 'enforce' — NOT shadow — because the
-    bools' SHIPPED meaning is the full acting loop, and mapping them to
-    shadow would silently strip requeue/escalate from any deployment that
-    already set them. The legacy bools stay for back-compat.
-  - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
-    (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
-    False; when True AND deep_work_verify_loop_enabled is on, every completing
-    deep_work task is ALSO scored by the LlmJudgeVerdictProvider and the
-    verdict stamped observe-only on ``metadata["verify_judge_verdict"]`` — it
-    NEVER drives requeue/escalate; the deterministic verdict alone acts),
-    ``deep_work_verify_judge_model`` (default "haiku" — the ``claude`` CLI
-    ``--model`` alias for the cheap judge tier),
-    ``deep_work_verify_judge_timeout_seconds`` (default 60 — the CLI
-    subprocess timeout) and ``deep_work_verify_judge_confidence_floor``
-    (default 0.75 — below it the judge abstains to UNKNOWN). Env:
-    POCKETPAW_DEEP_WORK_VERIFY_JUDGE_* .
-  - 2026-07-02 (feat/svl-5-cloud-verify): Added the CLOUD planner-terminal
-    Self-Verifying Loop flags (SVL-5) — ``cloud_plan_verify_loop_enabled``
-    (default False; kill-switch — when False cloud plan tasks auto-complete
-    exactly as before) and ``cloud_plan_verify_max_requeues`` (default 2; the
-    verify-requeue bound, SEPARATE from any error-retry budget). Mirrors the
-    deep_work_verify_* pair at the ee/cloud planner terminal
-    (``_execute_ready_plan_tasks`` → ``_run_one``). Env:
-    POCKETPAW_CLOUD_PLAN_VERIFY_* .
-  - 2026-06-30 (feat/billing-quota-enforcement, chunk 4): Expanded the
-    ``billing_enforced`` field docstring — when the flag is on the run-start 402
-    hard-block now covers TWO conditions (was: balance <= 0 only): balance <= 0
-    (credits.insufficient) AND month-to-date spend >= the per-plan monthly credit
-    ceiling (credits.quota_exceeded), enforced at run start across both the chat
-    HTTP path and the worker/executor. No logic change — the gate was wired in
-    chunk 3; this only documents it. Kept the "default False -> OSS/self-host
-    unaffected" note.
-  - 2026-06-28 (AW-7 template gate deny-on-no-match): Added
-    ``instinct_template_default_deny`` (default False, env
-    POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY) — the host-wide default for the
-    TEMPLATE-level deny-by-default. When a template is BOUND to a pocket but
-    declares NO rule matching a MUTATING action, the template gate previously
-    returned EXECUTE (proceed). With this flag ON, that no-rule-match case
-    parks the write for human approval (PENDING_APPROVAL) instead; READS
-    (read_only / GET / HEAD actions) still proceed ungated. OFF by default so
-    day-one behavior is unchanged. A per-workspace override field
-    (``instinct_template_default_deny`` on the workspace document; null = use
-    this global default) is resolved exactly like
-    ``instinct_approval_level``.
-  - 2026-06-28 (AW-1 connector egress guard): Added
-    ``connector_egress_guard`` (default False; env
-    POCKETPAW_CONNECTOR_EGRESS_GUARD) — the kill-switch for routing
-    DirectREST connector HTTP through the SSRF egress guard
-    (``assert_egress_allowed`` + the pinned-IP transport). OFF by default so
-    flipping it on per-deployment closes the connector SSRF bypass without
-    risking live connectors in the same change. The existing
-    ``POCKETPAW_ALLOW_INTERNAL_URLS`` flag stays the dev escape that permits
-    internal/loopback hosts when the guard is on.
-  - 2026-06-28 (fix/billing-checkout-sessions): Added ``dodo_checkout_return_base``
-    (default "", env POCKETPAW_DODO_CHECKOUT_RETURN_BASE) — the fallback base URL a
-    Dodo subscription checkout session returns the buyer to after pay / cancel when
-    the /billing/subscribe request carries no Origin (or usable Referer) header.
-    Return urls become ``{base}/settings/billing?checkout=success|cancel``; empty
-    default omits the redirect when no origin is available.
-  - 2026-06-26 (WU-F billing cutover): Added ``litellm_spend_mode``
-    (Literal off|shadow|live, default 'off'; POCKETPAW_LITELLM_SPEND_MODE) — the
-    three-position billing-cutover switch that supersedes the
-    ``litellm_spend_ingest_enabled`` bool. 'off' keeps BC-3 per-run metering as
-    today; 'shadow' runs a read-only per-tenant compare (litellm spend vs BC-3
-    ledger, ZERO debits) that records a reconciliation row; 'live' makes LiteLLM
-    the sole meter (proxy-spend sweep debits + BC-3 sweep gated off). The legacy
-    bool is kept for back-compat and resolved by ``effective_spend_mode()`` — an
-    existing ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` maps to 'shadow' (NOT
-    'live') while the new mode is left at 'off', so deploying WU-F can never
-    auto-flip an old bool-setter into live billing; 'live' requires an explicit
-    POCKETPAW_LITELLM_SPEND_MODE=live.
-  - 2026-06-26: Added the L2 cross-backend harness-failover settings (MCG-10) —
-    ``backend_failover_enabled`` (default False; kill-switch — when False the
-    new ``AgentRouter.run_with_failover`` behaves exactly like ``run`` and no
-    harness switch ever happens) and ``backend_failover_chain`` (default
-    ["claude_agent_sdk", "codex_cli", "opencode"]; the ordered list of agent
-    HARNESSES to try when the whole primary lane is down — distinct from L1's
-    LiteLLM model/account failover, which cannot escape a provider-wide
-    outage). Only a lane-level failure (overload/unavailable/auth that
-    persists after the backend's own retries) before any token is streamed
-    triggers a switch; each harness is tried at most once. Env:
-    POCKETPAW_BACKEND_FAILOVER_ENABLED / POCKETPAW_BACKEND_FAILOVER_CHAIN
-    (JSON list). The EE cloud run path wiring is a follow-up — this ships the
-    mechanism + the OSS hook only.
-  - 2026-06-24: Added ``dodo_plan_products`` (default {}, env
-    POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object) — the BC-7 mapping of plan
-    tier key -> Dodo recurring product id. ``subscribe`` reads it to open a
-    recurring checkout; the subscription webhook reverses it (product_id ->
-    plan key) to know which tier renewed. A before-validator degrades a
-    malformed env string to {} so a typo can't crash settings load.
-  - 2026-08-21: Added ``dodo_site_products`` (default {}, env
-    POCKETPAW_DODO_SITE_PRODUCTS as a JSON object) — the PER-SITE analogue of
-    ``dodo_plan_products``. ``site_plans._dodo_product_for`` has read
-    ``getattr(get_settings(), "dodo_site_products", None)`` since BC-9 and the
-    field it reads was never declared, so the getattr always returned None, every
-    site tier's ``dodo_product_id`` was None, and no per-site plan could be
-    purchased on any deployment however it was configured. Declaring it makes the
-    env var mean something for the first time.
-  - 2026-08-26: Added ``dodo_site_addons`` (default {}, env
-    POCKETPAW_DODO_SITE_ADDONS as a JSON object) — the tier -> Dodo ADD-ON id map
-    that bills a paid site as a LINE on the workspace subscription instead of a
-    separate per-site subscription. ``dodo_site_products`` is deliberately kept
-    alongside it: per-site subscriptions are live in production and their renewal
-    and cancel webhooks still route through the product map.
-  - 2026-09-02: Added ``billing_dunning_grace_days`` (default 7, env
-    ``POCKETPAW_BILLING_DUNNING_GRACE_DAYS``) — how long a workspace keeps its
-    paid plan after a renewal payment fails. A ``subscription.on_hold`` webhook
-    stamps the deadline; the grace sweep revokes the plan once it passes, and a
-    successful retry clears it. Configurable because the right number depends on
-    the gateway's own retry schedule, and suspending a customer while the charge
-    is still being recovered is worse than a few extra days of service.
-  - 2026-08-21: Added ``sites_billing_enforced`` (default False, env
-    ``POCKETPAW_SITES_BILLING_ENFORCED``) — the PER-SITE paywall switch, so the
-    Paw Sites seams (custom-domain capability + count caps, concierge
-    entitlement) can be turned on without also 402ing chat runs, seats, pockets,
-    connectors, calls or uploads. Every sites seam reads ``billing_enforced OR
-    sites_billing_enforced``, so the global flag keeps working exactly as
-    documented and this is additive for existing tenants.
-  - 2026-06-24: Added ``billing_enforced`` (default False, env
-    POCKETPAW_BILLING_ENFORCED) — the BC-4 run-start hard-block flag. When
-    True the cloud rejects STARTING a new chat run on a zero-or-negative
-    credit balance with HTTP 402; in-flight runs are untouched. Off by
-    default so OSS / self-host stay unaffected.
-  - 2026-06-23: Added the deep_work Self-Verifying Loop flags (SVL-1) —
-    ``deep_work_verify_loop_enabled`` (default False; kill-switch — when
-    False deep_work tasks complete exactly as before) and
-    ``deep_work_verify_max_requeues`` (default 2; the requeue bound read by
-    SVL-2, landed here so later slices don't touch config). SVL-1 only reads
-    the enable flag to stamp an observe-only OutcomeVerdict on a completing
-    task. Env: POCKETPAW_DEEP_WORK_VERIFY_* .
-  - 2026-06-22: Added ``discovery_sovereign_model`` (default True) — the model-lane
-    sovereignty posture for discovery's categorize (F2) / refine (F3) passes.
-    True (default, unchanged behavior): hard-pin the model to the on-box Ollama
-    so tenant data never leaves the box. False: use the workspace's configured
-    provider via ``resolve_llm_client`` — a CLOUD model is allowed (explicit
-    tenant opt-in). The kb ingest/build tripwire holds regardless. Env:
-    POCKETPAW_DISCOVERY_SOVEREIGN_MODEL.
-  - 2026-06-21: Added ``instinct_enforce_discovered_rules`` (default False, F6) —
-    when true, approved workspace-discovered Instinct rules are merged with
-    template rules at the live gate and govern actions. Off by default; the
-    discovered branch is dead code on the default path. A separate, narrower
-    flag than ``instinct_approval_level``. Env:
-    POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES.
-  - 2026-06-18: Added the four layered/learning Instinct gate defaults —
-    ``instinct_approval_level`` (default "ASK", dormant),
-    ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
-    (False), ``instinct_optimistic_ttl_seconds`` (300). Global host-wide
-    defaults for the 4-lane triage router; per-workspace overrides land
-    with the gate integration layer. Dormant on ship (ASK escalates
-    everything). Env: POCKETPAW_INSTINCT_* .
-  - 2026-06-10: Added ``belt_repo_allowlist`` — the security boundary for the
-    Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
-    repo path must resolve inside one of these roots; empty defaults to the
-    cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
-  - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
-    the same-box shield daemon's control-API UNIX socket + Bearer token. The
-    cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
-    is never logged. Env: POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
-  - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
-    orientation (loom) MCP server settings. ``loom_model_path`` defaults
-    to None, which disables the loom MCP server; set it to a built
-    world-model JSON to enable orient / locate / why / what_depends_on /
-    boundaries for the cloud chat agent (BS-1, Belt & Pulley stations).
-  - 2026-05-26: Added ``foresight_use_skill`` — env gate for the
-    ``foresight-create-sim`` bundled skill (default OFF). The SKILL.md
-    still auto-installs; this flag toggles the chat-surface affordance
-    only. Read by the agent prompt assembler and the paw-enterprise
-    feature-flag echo. RFC 08 v1.0 wave 4.
-  - 2026-05-22: Added ``source_refresh_min_interval_seconds`` (interval
-    floor) and ``source_refresh_max_per_hour`` (per-pocket auto-refresh
-    budget) — cost controls for pocket data-source interval / webhook
-    refresh (RFC 04 M3).
-  - 2026-05-22: Added ``ripple_embed_allowed_hosts`` — host allow-list
-    for the Ripple ``embed`` widget's ``mode:"url"`` form (Increment 5,
-    escape-hatch node + embed URL policy).
-  - 2026-05-22: Added ``pocket_router_enabled`` (kill-switch) and
-    ``pocket_router_min_confidence`` (cheap-tier confidence floor) for
-    the pocket execution router (Increment 3).
-  - 2026-07-06: Added ``sites_crew_enabled`` — when true, the /sites
-    CREATE surface runs the guided authoring-crew flow (clarity gate →
-    interview → design-system + assets → build) instead of the single-shot
-    create preamble; default off (feat/sites-crew-create-flow, SC-crew).
-  - 2026-07-18: Added ``herdr_runtime_enabled`` (kill-switch, default off),
-    ``herdr_cli_path`` and ``herdr_cli_timeout_ms`` for the flagged,
-    fail-open HerdrRuntime adapter over the external ``herdr`` terminal
-    multiplexer (feat/herdr-runtime-adapter, HR-1).
-  - 2026-05-22: Added ``auto_install_bundled_templates`` — toggles the
-    boot-time mirror of built-in pocket templates into
-    ``~/.pocketpaw/templates/`` (feat/bundled-templates, Increment 2a).
-  - 2026-07-12: Removed ``auto_install_bundled_kb_scopes`` along with the
-    bundled ``ripple-recipes`` scope — the hand-authored pattern recipes
-    biased the agent's design toward fixed layouts.
-  - 2026-05-21: Added ``auto_install_bundled_skills`` — toggles the
-    boot-time mirror of bundled SKILL.md files.
-  - 2026-04-30: Added pluggable embedding adapter settings — ``kb_vectors_enabled``,
-    ``embedding_adapter``, ``embedding_dim``, ``embedding_monthly_cap_usd``,
-    ``vertex_project_id``, ``vertex_location``. Stage 2.D of "Files as Knowledge".
-  - 2026-04-30: Added ``kb_scopes`` (list[str]) for multi-scope KB queries.
-    ``kb_scope`` (single string) is now a deprecation shim — when set and
-    ``kb_scopes`` is empty, it copies forward and emits DeprecationWarning.
-    Stage 1.B of "Files as Knowledge".
-  - 2026-04-16: SSRF guard on URL config fields — opencode_base_url,
-    litellm_api_base, openai_compatible_base_url, mem0_ollama_base_url,
-    embedding_base_url, signal_api_url, mcp_client_metadata_url are now
-    validated by security.url_validators.validate_external_url. Closes #703.
-  - 2026-04-10: Removed old pocketclaw migration warning — fully shifted to pocketpaw.
-  - 2026-04-04: Added soul_cognitive_model setting for cheaper cognitive processing.
-  - 2026-03-16: Use Literal types for whatsapp_mode, tts_provider, stt_provider (#638).
-  - 2026-02-17: Added health_check_on_startup field for Health Engine.
-  - 2026-02-06: Secrets stored encrypted via CredentialStore; auto-migrate plaintext keys.
-  - 2026-02-06: Harden file/directory permissions (700 dir, 600 files).
-  - 2026-02-02: Added claude_agent_sdk to agent_backend options.
-  - 2026-02-02: Simplified backends - removed 2-layer mode.
-  - 2026-02-02: claude_agent_sdk is now RECOMMENDED (uses official SDK).
+``Settings`` is the single pydantic-settings model for the whole runtime: agent
+backend and model choice, channel adapters, memory and KB, security, sites, the
+Paw Bar concierge and the cloud capacity/abuse knobs. Every field can be set by
+env var with the ``POCKETPAW_`` prefix; see each field's ``description`` and
+``docs/`` for what it does.
+
+Sources, highest priority first: environment, then ``~/.pocketpaw/config.json``
+(skipped when ``POCKETPAW_IGNORE_CONFIG_JSON`` is truthy), then field defaults.
+Secret fields never live in config.json: ``Settings.save()`` writes them to the
+encrypted ``CredentialStore`` and ``Settings.load()`` merges them back in, and
+plaintext keys found in an old config.json are migrated once. The config dir is
+0700 and the files it holds are 0600.
+
+``Settings.load()`` reads the disk every call (a few ms). ``get_settings()`` is
+the ``lru_cache``'d accessor; in-process settings writers call
+``get_settings.cache_clear()``, but an edit made by another process is only seen
+by ``Settings.load()``. URL fields are SSRF-validated on construction.
+
+``get_access_token()`` returns the dashboard master token from
+``~/.pocketpaw/access_token``, generating one if it is missing. It caches the
+token keyed on the file's path, mtime, size and inode, so a per-request call
+costs a ``stat``. ``regenerate_token()`` (the only writer) writes a 0600 temp
+file and ``os.replace``s it in, so a rotation always changes the inode (and the
+cache key) and readers never see a partial file; it also refreshes the cache
+directly so the rotation is honoured on the next request.
+
+History lives in git (``git log -p src/pocketpaw/config.py``), not here.
 """
 
 from __future__ import annotations
@@ -501,6 +241,70 @@ class Settings(BaseSettings):
     claude_sdk_max_turns: int = Field(
         default=100,
         description="Max tool-use turns per query in Claude SDK (0 = unlimited)",
+    )
+    sites_app_build_max_turns: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Tool-use turn cap for a /sites project turn whose PLAN.md still has "
+            "unticked milestones: an approved app plan is built through every "
+            "milestone in one turn (a build, previews and a play-test each). "
+            "0 (default) = no cap for that turn; N > 0 = cap it at N, raising the "
+            "backend's own cap (claude_sdk_max_turns / pydantic_ai_max_turns) but "
+            "never lowering it. Every other chat keeps its backend cap, and a "
+            "platform-funded free run keeps free_run_max_turns either way. "
+            "Set via POCKETPAW_SITES_APP_BUILD_MAX_TURNS."
+        ),
+    )
+    claude_sdk_cli_path: str | None = Field(
+        default=None,
+        description=(
+            "Explicit path to the Claude Code CLI the Claude SDK backend spawns. "
+            "Unset (default) uses the CLI bundled in the claude-agent-sdk wheel, "
+            "which the SDK prefers over any `claude` on PATH. Set it when the "
+            'bundled CLI is too old for a model ("version 2.1.280 or newer is '
+            'required") and a newer `claude` is installed, e.g. the npm-installed '
+            "/usr/local/bin/claude in the Docker images."
+        ),
+    )
+    claude_sdk_max_mcp_output_tokens: int = Field(
+        default=200_000,
+        ge=1,
+        description=(
+            "MAX_MCP_OUTPUT_TOKENS handed to the Claude Code CLI subprocess: the "
+            "largest MCP tool result it passes to the model whole. Claude Code's own "
+            "default (25,000) truncates large results such as a site file from "
+            "read_site_source. An explicit MAX_MCP_OUTPUT_TOKENS in the process "
+            "environment wins over this."
+        ),
+    )
+    claude_sdk_tool_search: str = Field(
+        default="",
+        description=(
+            "ENABLE_TOOL_SEARCH handed to the Claude Code CLI subprocess: true, false, "
+            'auto or auto:N (N = 0-100); a JSON true/false is stored as "true"/"false" '
+            "and null as empty. Empty (default) keeps the CLI's own choice: MCP "
+            "tool search on for api.anthropic.com, off behind any other ANTHROPIC_BASE_URL "
+            "(the litellm, openrouter, openai_compatible, ollama and gemini providers), "
+            "where every MCP tool schema is sent upfront. Set it only for a gateway that "
+            "forwards anthropic-beta headers and tool_reference blocks, to a Claude 4.5 or "
+            "later model (scripts/check_gateway_tool_search.py tests this); otherwise "
+            "requests fail. Other values are ignored with a warning, and so is the "
+            "setting on the ollama and gemini providers, which never reach a Claude "
+            "model. A non-empty ENABLE_TOOL_SEARCH in the process environment wins "
+            "over this."
+        ),
+    )
+
+    claude_sdk_connect_timeout: float = Field(
+        default=90.0,
+        description=(
+            "Seconds the Claude SDK backend waits for the CLI subprocess to start "
+            "(connect()) before abandoning it and falling back. The SDK's own start-up "
+            "timeout follows CLAUDE_CODE_STREAM_CLOSE_TIMEOUT, which this backend sets "
+            "to 24h for long tool runs, so without this a hung CLI blocked a session "
+            "for a day."
+        ),
     )
 
     # OpenAI Agents SDK Settings
@@ -720,21 +524,27 @@ class Settings(BaseSettings):
         ),
     )
     agent_max_output_tokens: int = Field(
-        default=0,
+        default=-1,
         description=(
-            "Max output tokens an agent run may request. 0 (default) sends "
-            "8192, lowered to the model's documented ceiling when the pinned "
-            "litellm metadata knows it; a positive value replaces the 8192; a "
-            "negative value sends no cap at all. Sending nothing is not "
-            "neutral — OpenRouter prices its pre-flight credit check against "
-            "max_tokens and substitutes the model's own ceiling when none is "
-            "given, so a short reply is refused with a 402 over a reservation "
-            "nobody asked for. The metadata is a clamp rather than the source: "
-            "deepseek-v4-flash advertised 8192 and then 393216 on the same day, "
-            "and sending the larger number would have made that 402 six times "
-            "worse. Distinct from litellm_max_tokens, which only reaches the "
-            "plain-completion provider (chat titles and the like), never an "
-            "agent backend."
+            "Max output tokens an agent run may request. Negative (default) "
+            "sends no cap at all, leaving each provider to apply its own "
+            "per-model default; 0 sends 8192, lowered to the model's documented "
+            "ceiling when the pinned litellm metadata knows it; a positive value "
+            "replaces that 8192. Abstaining is the default because one number "
+            "cannot serve a gateway fronting 100+ models. What made the cap "
+            "per-model was a clamp reading litellm's PINNED metadata, and that "
+            "file trails new releases by design — so the newest models, the ones "
+            "most likely to need a different number, are precisely the ones it "
+            "cannot lower, and they all collapse onto the same flat 8192. A "
+            "provider's own default is per-model by construction and needs no "
+            "maintenance as the catalog grows. The cost is real and is why this "
+            "shipped capped: OpenRouter prices its pre-flight credit check "
+            "against max_tokens and substitutes the model's own ceiling when "
+            "none is given, refusing a short reply with a 402 over a reservation "
+            "nobody asked for. Set 8192, or any positive value, to take the cap "
+            "back on an OpenRouter-backed deployment. Distinct from "
+            "litellm_max_tokens, which only reaches the plain-completion "
+            "provider (chat titles and the like), never an agent backend."
         ),
     )
     pydantic_ai_max_turns: int = Field(
@@ -760,11 +570,14 @@ class Settings(BaseSettings):
         default=False,
         description=(
             "Emit OpenTelemetry spans for Pydantic AI agent runs (model "
-            "requests, tool calls, token usage, time to first chunk). Calls "
-            "``logfire.configure`` once per process with "
-            "``send_to_logfire='if-token-present'``, so without a LOGFIRE_TOKEN "
-            "the spans stay local and reach whatever OTel exporter is already "
-            "configured. Off by default. Cheap since pydantic-ai 2.17.0, which "
+            "requests, tool calls, token usage, time to first chunk). Logfire "
+            "is configured at startup with ``send_to_logfire='if-token-present'``, "
+            "so this is safe to enable on a deployment with no Logfire account. "
+            "Be clear about where the spans then go: NOWHERE. Without a "
+            "LOGFIRE_TOKEN or an OTEL_EXPORTER_OTLP_ENDPOINT the span processor "
+            "list is empty, and the spans are still built and serialized before "
+            "being dropped, so this is not free. Off by default. Cheap since "
+            "pydantic-ai 2.17.0, which "
             "caches per-message span serialization — before that it was O(n^2) "
             "over a run's history and a long tool loop paid for it."
         ),
@@ -1207,6 +1020,96 @@ class Settings(BaseSettings):
             "to reveal itself."
         ),
     )
+    sites_source_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "Withhold a Paw Site's authored SOURCE from the wire unless the "
+            "SITE is entitled to it: its own per-site tier is ``site`` or "
+            "``staff`` with an active subscription (``entitlements.service."
+            "site_code_entitled``). The workspace plan grants nothing; a "
+            "platform override (``WorkspaceOverrides.site_source_visible``) can "
+            "grant or revoke it workspace-wide. OFF by default so turning the "
+            "gate on is a separate, "
+            "revertible operational step rather than something that ships with "
+            "the code. "
+            "It is ANDed with a per-pocket cohort stamp (``Pocket."
+            "source_gated``), set at create time from this same setting, so "
+            "flipping it on never re-classifies a pocket that already exists — "
+            "only pockets created while it is on can ever be gated. Flipping it "
+            "back off restores source to every one of them immediately, which is "
+            "what makes the rollout reversible in both directions rather than "
+            "only forward. "
+            "It gates the POCKET WIRE DICT only — what a browser is handed by "
+            "``GET /pockets/{id}``, the gallery list, a write response and the "
+            "WebSocket broadcast. The build / publish / edit pipeline reads "
+            "source through ``pockets.service.get_with_source`` and is never "
+            "redacted, because withholding source from the generator would stop "
+            "the site being built at all."
+        ),
+    )
+    sites_source_gate_retroactive: bool = Field(
+        default=False,
+        description=(
+            "Apply ``sites_source_gate_enabled`` to pockets that ALREADY EXIST, "
+            "not only to ones created after it was switched on. "
+            "The cohort stamp (``Pocket.source_gated``) exists so that turning "
+            "the gate on never takes source away from somebody who already had "
+            "it. That default has a consequence: the gate shipped disabled, so "
+            "every pocket in existence was born outside the cohort, and turning "
+            "the master flag on therefore gates nothing that is already here — "
+            "free-tier sites keep serving their source. This is the second, "
+            "deliberate switch that closes that gap. "
+            "It is ANDed UNDER the master flag, never a replacement for it: with "
+            "``sites_source_gate_enabled`` off this does nothing at all. Both "
+            "flags stay reversible in both directions because neither writes to "
+            "the document — turn either one off and every grandfathered pocket "
+            "has its source back immediately, with no migration and no stored "
+            "state to unwind. "
+            "OFF by default. Taking a capability away from existing free-tier "
+            "customers is an operational decision, so it is switched on "
+            "deliberately rather than arriving with a deploy."
+        ),
+    )
+    inspo_mcp_url: str = Field(
+        default="",
+        description=(
+            "Override the endpoint the BUNDLED design-research server "
+            "(``pocketpaw_inspo``) calls. Empty (the default) uses the hosted "
+            "archive at https://inspomcp.dev/api/mcp. "
+            "The reason this exists: the hosted service rate-limits PER IP, and a "
+            "multi-tenant deploy presents a single egress IP for every tenant it "
+            "serves, so a busy install can exhaust the limit for all of its users "
+            "at once. The upstream is MIT-licensed with a documented self-host "
+            "path; point this at your own instance and nothing else changes. "
+            "Read per tool call, not cached, so it takes effect without a restart."
+        ),
+    )
+    sites_mcp_servers: str = Field(
+        default="",
+        description=(
+            "Comma-separated names of EXTERNAL MCP servers (from "
+            "``~/.pocketpaw/mcp_servers.json``) that the /sites surface may "
+            "call — e.g. ``refero`` for live design research. Empty (the "
+            "default) grants none, so an install that has not opted in sees no "
+            "behaviour change. "
+            "Names must match ``MCPServerConfig.name``; a name matching no "
+            "configured server is inert rather than an error, because the "
+            "server list is per-deploy and a surface should not fail to resolve "
+            "because an optional integration is absent. "
+            "MECHANISM: /sites runs a hard allow-list of fully-qualified "
+            "``mcp__<server>__<tool>`` ids, but an external server's tool names "
+            "are unknown until the SDK connects, so ``_collect_mcp_tool_ids`` "
+            "allow-lists it wholesale with a BARE ``mcp__<server>`` token. "
+            "Naming a server here puts that same bare token in the /sites allow "
+            "set, where it matches by exact string — scoping the grant to this "
+            "surface alone, unlike ``ALWAYS_ALLOWED_MCP_SERVERS`` which hands a "
+            "server to every surface at once. "
+            "A comma-separated STRING rather than ``list[str]`` on purpose: "
+            "pydantic-settings JSON-decodes complex types before any validator "
+            "runs, so ``POCKETPAW_SITES_MCP_SERVERS=refero`` would crash boot "
+            "on a list field."
+        ),
+    )
     sdk_load_bundled_skills: bool = Field(
         default=True,
         description=(
@@ -1297,6 +1200,33 @@ class Settings(BaseSettings):
         default=None,
         description="API key for LiteLLM proxy (the master key configured on the proxy)",
     )
+    byok_provider_api_key: str | None = Field(
+        default=None,
+        description=(
+            "BYOK: the END USER's own upstream provider key for THIS run, sent to "
+            "the LiteLLM proxy as the x-api-key header so the proxy forwards it "
+            "upstream and the user's own provider account is billed. Requires "
+            "forward_llm_provider_auth_headers on the proxy. Never set this on a "
+            "pooled/shared backend — only on one built per-run via "
+            "AgentRouter.create_isolated_backend."
+        ),
+    )
+    other_hand_require_byok: bool = Field(
+        default=False,
+        description=(
+            "Otherhand/kiosk only: a SIGNED-UP user must also bring their own "
+            "provider key, with no platform fallback. Guests are already "
+            "refused a keyless turn unconditionally (guest_key_required); this "
+            "extends the same rule to accounts on that ONE surface, for the "
+            "window between launching the kiosk and switching billing on. "
+            "Default False so every existing deploy is unchanged and the "
+            "rollout is one env var, reverted by removing it. Scoped to the "
+            "surface, never workspace-wide: the same deployment serves the full "
+            "Paw OS, where the platform fallback is the product. Refuses with "
+            "402 byok_key_required, a DISTINCT code from the guest one because "
+            "the fix is different — add a key, not create an account."
+        ),
+    )
     litellm_model: str = Field(
         default="",
         description=(
@@ -1308,6 +1238,155 @@ class Settings(BaseSettings):
     litellm_max_tokens: int = Field(
         default=0,
         description="Max output tokens for LiteLLM models (0 = provider default)",
+    )
+
+    # Paw Bar concierge v2 runner (``pocketpaw_ee.paw_bar.concierge_runtime``).
+    # A public, anonymous visitor can never steer model choice or reply length;
+    # the model follows the site owner's pick on the concierge agent.
+    pawbar_concierge_model: str = Field(
+        default="",
+        description=(
+            "Model the v2 Paw Bar concierge answers with when its agent names none "
+            "pydantic_ai can serve, as a pydantic_ai spec (``litellm:<model>`` or a "
+            "bare name on the configured provider). Empty uses the pydantic_ai "
+            "backend's own model resolution."
+        ),
+    )
+    pawbar_concierge_max_tokens: int = Field(
+        default=2000,
+        ge=1,
+        description=(
+            "Max output tokens for one v2 Paw Bar concierge reply. A reasoning "
+            "model's thinking counts against it, so it must hold thinking plus a card."
+        ),
+    )
+    pawbar_concierge_reasoning_effort: Literal["", "none", "minimal", "low", "medium", "high"] = (
+        Field(
+            default="",
+            description=(
+                "Reasoning effort for the v2 Paw Bar concierge, sent as OpenAI's "
+                "reasoning_effort. Empty sends nothing; set it only for a model "
+                "(or proxy) that accepts the field."
+            ),
+        )
+    )
+    # Pinned FAQs (``pocketpaw_ee.paw_bar.knowledge_routes``). Every pinned answer
+    # rides ahead of the KB hits in the v2 runner's ~12,000-char knowledge budget,
+    # so the defaults (15 x 500) keep them under ~7,500 and leave the rest for the
+    # site's own pages.
+    pawbar_concierge_faq_max_count: int = Field(
+        default=15,
+        ge=1,
+        description="Most pinned FAQs one site's concierge may keep.",
+    )
+    pawbar_concierge_faq_max_chars: int = Field(
+        default=500,
+        ge=20,
+        description="Longest pinned FAQ, question and answer together, in characters.",
+    )
+    # Knowledge sources: uploaded files and single links
+    # (``pocketpaw_ee.paw_bar.knowledge_routes``). Each ready source costs one
+    # compiled kb article in the site pocket, so the count is capped per site plan
+    # (files and links together). The byte cap bounds an upload and a link's body;
+    # the char cap bounds the text handed to the kb engine, which stores it whole.
+    pawbar_concierge_source_max_count_free: int = Field(
+        default=3,
+        ge=0,
+        description="Most knowledge files and links on a free-plan site's concierge.",
+    )
+    pawbar_concierge_source_max_count_site: int = Field(
+        default=20,
+        ge=0,
+        description="Most knowledge files and links on a Site-plan site's concierge.",
+    )
+    pawbar_concierge_source_max_count_staff: int = Field(
+        default=50,
+        ge=0,
+        description="Most knowledge files and links on a Staff-plan site's concierge.",
+    )
+    pawbar_concierge_source_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=1024,
+        description="Largest knowledge upload, or linked page body, in bytes.",
+    )
+    pawbar_concierge_source_max_chars: int = Field(
+        default=100_000,
+        ge=1_000,
+        description="Most extracted characters one knowledge source hands the kb; the rest is cut.",
+    )
+    pawbar_concierge_doc_code_chars: int = Field(
+        default=6_000,
+        ge=0,
+        description=(
+            "Most characters of documentation code one v2 Paw Bar concierge reply "
+            "may show, on sites that allow it. Code past this is replaced."
+        ),
+    )
+    # The v2 rollout gate (``pocketpaw_ee.paw_bar.concierge_gate``). "v2" is the
+    # default request, honoured only when the committed eval report for the
+    # configured model clears every threshold below; until then new concierges
+    # get legacy, and ``sites.migrate_concierge_v2`` moves no existing one.
+    # "legacy" opts a deployment out. Thresholds are the captain's call.
+    pawbar_concierge_default_runtime: Literal["legacy", "v2"] = Field(
+        default="v2",
+        description=(
+            "Runtime Paw Bar concierges ask for: new ones at create, existing ones "
+            "through the v2 move at boot. 'v2' (the default) takes effect only when "
+            "the committed v2 eval report passes the thresholds below; 'legacy' "
+            "keeps every concierge on the agent runtime."
+        ),
+    )
+    pawbar_concierge_eval_max_false_refusal_pct: float = Field(
+        default=5.0,
+        ge=0,
+        le=100,
+        description="Most on-topic questions (%) the v2 concierge may refuse.",
+    )
+    pawbar_concierge_eval_min_groundedness_pct: float = Field(
+        default=90.0,
+        ge=0,
+        le=100,
+        description="Fewest on-topic answers (%) that must be grounded in their sources.",
+    )
+    pawbar_concierge_eval_min_adversarial_held_pct: float = Field(
+        default=100.0,
+        ge=0,
+        le=100,
+        description="Fewest adversarial cases (%) the v2 concierge must hold.",
+    )
+    pawbar_concierge_eval_max_code_leaks: int = Field(
+        default=0,
+        ge=0,
+        description="Most ungrounded code blocks that may reach a visitor in the eval.",
+    )
+    pawbar_concierge_daily_spend_cap: float = Field(
+        default=5.0,
+        ge=0,
+        description=(
+            "Most one site's v2 Paw Bar concierge may spend on the model per UTC "
+            "day, in USD at provider cost. Past it, visitors get the `unavailable` "
+            "frame with reason limit, no model call is made, and the owner is "
+            "notified once that day. 0 turns the cap off."
+        ),
+    )
+    pawbar_ops_site_ids: str = Field(
+        default="",
+        description=(
+            "Comma-separated ids of sites the platform runs itself (a demo site). "
+            "Only these may use the ripple concierge card profile or a site daily "
+            "spend cap above pawbar_concierge_daily_spend_cap; any other site's own "
+            "cap can only lower the global one."
+        ),
+    )
+    # The concierge product catalog (``pocketpaw.paw_bar.catalog_store``). A plan
+    # split can come later the way the knowledge-source caps do it.
+    pawbar_catalog_max_items: int = Field(
+        default=5000,
+        ge=1,
+        description=(
+            "Most products one site's concierge catalog may hold. An import preview "
+            "returns at most this many, and a catalog write past it is refused."
+        ),
     )
 
     # LLM Configuration
@@ -1538,6 +1617,13 @@ class Settings(BaseSettings):
     whatsapp_verify_token: str | None = Field(
         default=None, description="WhatsApp webhook verification token"
     )
+    whatsapp_app_secret: str | None = Field(
+        default=None,
+        description=(
+            "Meta app secret; inbound business webhooks without a matching "
+            "X-Hub-Signature-256 are rejected (unset rejects all)"
+        ),
+    )
     whatsapp_allowed_phone_numbers: list[str] = Field(
         default_factory=list, description="WhatsApp phone numbers allowed to use the bot"
     )
@@ -1595,6 +1681,31 @@ class Settings(BaseSettings):
     )
     url_extract_provider: str = Field(
         default="auto", description="URL extract provider: 'auto', 'parallel', or 'local'"
+    )
+
+    # Design research (Refero)
+    refero_api_token: str | None = Field(
+        default=None,
+        description=(
+            "Refero API token — enables the design-research tools "
+            "(``refero_design_styles`` / ``refero_design_screens``) that ground "
+            "generated UI in real shipped design systems instead of model defaults. "
+            "Requires a paid Refero plan. UNSET (the default) degrades to empty "
+            "results everywhere: a site build proceeds WITHOUT design research rather "
+            "than failing, exactly like an unconfigured stock-photo provider. "
+            "NOTE on licensing: a per-seat Refero plan is licensed to ONE user and "
+            "forbids sharing access, so a token serving a multi-tenant deploy needs "
+            "Refero's usage-based integration agreement, not a Pro seat."
+        ),
+    )
+    refero_endpoint: str = Field(
+        default="",
+        description=(
+            "Override the Refero MCP endpoint. Empty uses the documented default "
+            "(``https://api.refero.design/mcp``). Exists so a deploy can point at a "
+            "proxy or a staging host without a code change; there is no reason to set "
+            "it otherwise."
+        ),
     )
 
     # Image Generation
@@ -1687,6 +1798,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    # paw-lens — the internal Go trace store. The cloud ``/api/v1/lens/*``
+    # router proxies its read API, scoped to the caller's workspace. Empty URL
+    # = lens disabled (every route answers {"enabled": false}, no network).
+    lens_api_url: str = Field(
+        default="",
+        description="Base URL of the paw-lens read API (internal network only).",
+    )
+    lens_api_token: str = Field(
+        default="",
+        description="Shared secret sent to paw-lens as 'X-Lens-Token'. Never logged.",
+    )
+
     # Security
     bypass_permissions: bool = Field(
         default=False, description="Skip permission prompts for agent actions (use with caution)"
@@ -1694,6 +1817,15 @@ class Settings(BaseSettings):
     localhost_auth_bypass: bool = Field(
         default=True,
         description="Allow unauthenticated localhost access (disable for non-CF proxies)",
+    )
+    terminal_enabled: bool = Field(
+        default=False,
+        description=(
+            "Expose the PTY terminal routes (/api/v1/terminal/*). Off by default: "
+            "they write to the stdin of a real bash process running as the server "
+            "user, and nothing in the product calls them. Turning this on also "
+            "requires an admin scope on the request."
+        ),
     )
     session_token_ttl_hours: int = Field(
         default=24,
@@ -1900,6 +2032,18 @@ class Settings(BaseSettings):
         default="openai", description="TTS provider: 'openai', 'elevenlabs', or 'sarvam'"
     )
     elevenlabs_api_key: str | None = Field(default=None, description="ElevenLabs API key for TTS")
+    # Speech-to-text for the /studio editor's "Generate transcript" button.
+    # Env auto-derives POCKETPAW_DEEPGRAM_API_KEY; the studio service falls back
+    # to a bare DEEPGRAM_API_KEY at read time, because that is the name the
+    # variable already ships under in .env (the livekit agent and the Recall
+    # meeting providers both read it un-prefixed).
+    deepgram_api_key: str | None = Field(
+        default=None, description="Deepgram API key for speech-to-text (Prerecorded submit)"
+    )
+    deepgram_stt_model: str = Field(
+        default="nova-3",
+        description="Deepgram STT model for /studio transcription (e.g. nova-2, nova-3)",
+    )
     tts_voice: str = Field(
         default="alloy", description="TTS voice name (OpenAI: alloy/echo/fable/onyx/nova/shimmer)"
     )
@@ -2152,13 +2296,15 @@ class Settings(BaseSettings):
         ),
     )
     ripple_manifest_url: str = Field(
-        default="http://localhost:5174/manifest.json",
+        default="",
         description=(
-            "URL to the Ripple UI manifest (widget specs). Defaults to the "
-            "local ripple dev server while @ripple-ui/svelte is unreleased; "
-            "swap to "
-            "https://cdn.jsdelivr.net/npm/@ripple-ui/svelte@latest/dist/manifest.json "
-            "(or any pinned version) once published."
+            "Optional override URL for the Ripple widget manifest. Empty (the "
+            "default) uses the catalog bundled in the package "
+            "(pocketpaw/ripple/manifest.json, pinned to the @ripple-ui/svelte "
+            "version Paw OS renders), with no network call. When set, the URL is "
+            "fetched and cached for ripple_manifest_ttl_seconds; if the fetch "
+            "fails or it serves a version older than the bundled one, a warning "
+            "is logged and the bundled catalog is used."
         ),
     )
     ripple_manifest_ttl_seconds: int = Field(
@@ -2171,10 +2317,8 @@ class Settings(BaseSettings):
             "When True, the strict (agent-generation) catalog gate FAILS CLOSED "
             "if the Ripple widget manifest can't be fetched — an unverifiable "
             "spec is rejected instead of persisted. Defaults False (best-effort "
-            "skip, preserving current behavior) because ripple_manifest_url "
-            "defaults to the local ripple dev server, which is often down in "
-            "dev; enable it on cloud/prod where the manifest URL points at a "
-            "reliable CDN. Set via "
+            "skip). The manifest is bundled now, so it is always available "
+            "and this flag rarely matters. Set via "
             "POCKETPAW_RIPPLE_CATALOG_GATE_REQUIRE_MANIFEST."
         ),
     )
@@ -2318,7 +2462,9 @@ class Settings(BaseSettings):
         default="test_mode",
         description=(
             "Dodo Payments environment — 'test_mode' (default) or 'live_mode'. "
-            "Selects the API base URL the DodoPayments client targets. Set via "
+            "Selects the API base URL the DodoPayments client targets. Webhook "
+            "deliveries grant credits or change plans only in 'live_mode' with "
+            "payments_open on, so a test-card payment never mints credits. Set via "
             "POCKETPAW_DODO_ENVIRONMENT."
         ),
     )
@@ -2350,6 +2496,25 @@ class Settings(BaseSettings):
             "denomination). Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID."
         ),
     )
+    dodo_credit_product_id_inr: str | None = Field(
+        default=None,
+        description=(
+            "Dodo product id for the INR-priced credits SKU (Paw Partners). An INR "
+            "top-up puts this product in the cart with a pay-what-you-want amount in "
+            "PAISE (a pay-what-you-want amount is denominated in the product's own "
+            "currency, so the USD product cannot carry it). Unset disables INR "
+            "top-ups. Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID_INR."
+        ),
+    )
+    fx_inr_per_usd: float = Field(
+        default=89.0,
+        gt=0,
+        description=(
+            "Rupees per US dollar, used ONLY as the fallback when a verified INR "
+            "payment.succeeded carries no USD settlement figure from Dodo: credits "
+            "= floor(paise / rate). Set via POCKETPAW_FX_INR_PER_USD."
+        ),
+    )
     dodo_plan_products: Annotated[dict[str, str], NoDecode] = Field(
         default_factory=dict,
         description=(
@@ -2363,62 +2528,145 @@ class Settings(BaseSettings):
             "subscriptions (subscribe raises a clear ValidationError)."
         ),
     )
-    dodo_site_products: Annotated[dict[str, str], NoDecode] = Field(
-        default_factory=dict,
-        description=(
-            "Mapping of PER-SITE plan tier key -> Dodo RECURRING product id (BC-9 "
-            "per-site subscriptions), the per-site analogue of "
-            "dodo_plan_products. ``sites.service.publish_pocket`` looks the "
-            "product up here to decide whether a paid site tier can open a "
-            "checkout at all: with a product it goes charge-first (the site is "
-            "created PENDING and deployed by the subscription.active webhook), "
-            "without one it publishes live and records the tier with NO charge. "
-            "Set via POCKETPAW_DODO_SITE_PRODUCTS as a JSON object keyed by tier, "
-            'e.g. {"site":"pdt_...","staff":"pdt_..."}. Only the SITE-SCOPED rungs '
-            "belong here — the org flats (studio, agency) are bought through an "
-            "org subscription that does not exist yet, and site_plans refuses "
-            "them regardless of what this map says. The pre-2026-08-22 keys "
-            '("pro", "business") are still honoured, so an existing deployment '
-            "keeps charging while the env var is re-keyed. Default empty "
-            "means no per-site tier is purchasable, which is what every "
-            "deployment has been until now — this field was READ by "
-            "site_plans._dodo_product_for from the day per-site plans shipped and "
-            "never DECLARED, so the read always found nothing and setting the env "
-            "var did nothing at all."
-        ),
-    )
-    dodo_site_addons: Annotated[dict[str, str], NoDecode] = Field(
-        default_factory=dict,
-        description=(
-            "Mapping of PER-SITE plan tier key -> Dodo ADD-ON id, the rails a paid "
-            "site bills on now that it is an add-on LINE on the workspace "
-            "subscription rather than a subscription of its own. An add-on is its "
-            "own Dodo entity with its own id and is NOT a product id, so this "
-            "cannot reuse dodo_site_products (which stays, for the per-site "
-            "subscriptions already live in production). "
-            "``billing.service.sync_site_addons`` reads it to build the workspace's "
-            "full add-on cart and pushes that cart with subscriptions.change_plan. "
-            "Set via POCKETPAW_DODO_SITE_ADDONS as a JSON object keyed by tier, "
-            'e.g. {"site":"adn_...","staff":"adn_..."}. Only the SITE-SCOPED rungs '
-            "belong here — the org flats (studio, agency) are refused by site_plans "
-            'regardless of what this map says. The pre-2026-08-22 keys ("pro", '
-            '"business") are honoured through the same alias lookup the product map '
-            "uses. Default empty means no site tier is purchasable as an add-on, and "
-            "a paid publish records the tier without a charge exactly as it does "
-            "with an unconfigured product."
-        ),
-    )
     dodo_checkout_return_base: str = Field(
         default="",
         description=(
-            "Fallback base URL the Dodo subscription CHECKOUT SESSION returns the "
-            "buyer to after pay / cancel, used ONLY when the /billing/subscribe "
-            "request carries no Origin (and no usable Referer) header. The return "
-            "urls become ``{base}/settings/billing?checkout=success|cancel``. Set "
+            "Fallback app base URL the Dodo subscription CHECKOUT SESSION returns "
+            "the buyer to after pay / cancel, used when the /billing/subscribe "
+            "request carries no Origin (and no usable Referer) header, and as the "
+            "redirect target when the return hop is handed an untrusted origin. "
+            "The buyer passes through the backend hop "
+            "``/api/v1/billing/checkout/return/{outcome}`` and lands on "
+            "``{base}/settings/billing?checkout=success|cancel``. Set "
             "via POCKETPAW_DODO_CHECKOUT_RETURN_BASE (e.g. https://app.example.com). "
             "Default empty: when both this and the request Origin are absent the "
             "redirect is omitted (the checkout still works, the buyer just isn't "
             "auto-returned)."
+        ),
+    )
+
+    # Owner notification email — Cloudflare Email Service, REST API. The email
+    # sink (ee/pocketpaw_ee/cloud/notifications/email.py) stays OFF, and logs
+    # once, until account id, token and from address are all set. The sending
+    # domain is onboarded once by ops: ``wrangler email sending enable <domain>``.
+    cf_email_account_id: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare account id that owns the onboarded sending domain. Set via "
+            "POCKETPAW_CF_EMAIL_ACCOUNT_ID."
+        ),
+    )
+    cf_email_api_token: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare API token with Email Sending permission, sent as a Bearer "
+            "token to /email/sending/send. Set via POCKETPAW_CF_EMAIL_API_TOKEN. "
+            "NEVER logged."
+        ),
+    )
+    cf_email_from: str | None = Field(
+        default=None,
+        description=(
+            "From address for owner notification email, on the onboarded domain "
+            "(e.g. notifications@example.com). Set via POCKETPAW_CF_EMAIL_FROM."
+        ),
+    )
+    cf_email_from_name: str = Field(
+        default="PocketPaw",
+        description="Display name on owner notification email. POCKETPAW_CF_EMAIL_FROM_NAME.",
+    )
+
+    # Partner lead WhatsApp — the platform's OWN MSG91 account (Paw Partners). A
+    # lead on a partner-sold site reaches the shop owner on WhatsApp from this
+    # account when the owner opted in. Unrelated to the per-workspace ``msg91``
+    # connector that /growth uses (that one deliberately has no env fallback).
+    # The sink stays OFF until authkey, integrated number and template are set.
+    msg91_platform_authkey: str | None = Field(
+        default=None,
+        description=(
+            "MSG91 authkey of the platform account that sends partner lead "
+            "WhatsApp messages. Set via POCKETPAW_MSG91_PLATFORM_AUTHKEY. NEVER logged."
+        ),
+    )
+    msg91_platform_integrated_number: str | None = Field(
+        default=None,
+        description=(
+            "The WhatsApp sender number registered on that MSG91 account. Set via "
+            "POCKETPAW_MSG91_PLATFORM_INTEGRATED_NUMBER."
+        ),
+    )
+    msg91_platform_lead_template: str | None = Field(
+        default=None,
+        description=(
+            "Name of the pre-approved WhatsApp template for a new lead; its one body "
+            "variable carries the message. Set via POCKETPAW_MSG91_PLATFORM_LEAD_TEMPLATE."
+        ),
+    )
+    msg91_platform_language: str = Field(
+        default="en",
+        description="Language code of that template. POCKETPAW_MSG91_PLATFORM_LANGUAGE.",
+    )
+
+    # AI visibility checks (AV-3) — the platform's OWN provider accounts that ask
+    # AI search engines about a business (ee/pocketpaw_ee/cloud/ai_visibility).
+    # An engine whose key is unset is skipped. All secrets, NEVER logged.
+    ai_visibility_openai_api_key: str | None = Field(
+        default=None,
+        description="OpenAI key for AI visibility checks. POCKETPAW_AI_VISIBILITY_OPENAI_API_KEY.",
+    )
+    ai_visibility_perplexity_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Perplexity key for AI visibility checks. POCKETPAW_AI_VISIBILITY_PERPLEXITY_API_KEY."
+        ),
+    )
+    ai_visibility_anthropic_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Anthropic key for AI visibility checks (web search engine and the judge "
+            "fallback). POCKETPAW_AI_VISIBILITY_ANTHROPIC_API_KEY."
+        ),
+    )
+    ai_visibility_cf_account_id: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare account id for the Workers AI decision model (Clef-flash). "
+            "POCKETPAW_AI_VISIBILITY_CF_ACCOUNT_ID."
+        ),
+    )
+    ai_visibility_cf_api_token: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare API token with Workers AI access, for Clef-flash. "
+            "POCKETPAW_AI_VISIBILITY_CF_API_TOKEN."
+        ),
+    )
+
+    # Free public AI check (AV-4, POST /api/v1/tools/ai-check).
+    turnstile_secret: str | None = Field(
+        default=None,
+        description=(
+            "Cloudflare Turnstile secret for the free AI check. Unset (dev) skips "
+            "verification with a warning. POCKETPAW_TURNSTILE_SECRET."
+        ),
+    )
+    # Shared secret the paw-web Worker sends as X-Paw-Web-Key so the public
+    # per-IP limits can trust its X-Paw-Client-IP (``cloud/_core/rate_limit``).
+    # Unset means the header is ignored everywhere. Rotate by setting the new
+    # value on both sides and redeploying both; there is no dual-key window.
+    public_web_key: str | None = Field(
+        default=None,
+        description=(
+            "Shared key the paw-web Worker sends as X-Paw-Web-Key; when it matches, "
+            "X-Paw-Client-IP is the address for public per-IP limits. Unset ignores "
+            "the header. POCKETPAW_PUBLIC_WEB_KEY."
+        ),
+    )
+    ai_check_daily_usd: float = Field(
+        default=5.0,
+        description=(
+            "Daily USD cap on engine spend for anonymous free AI checks; past it the "
+            "endpoint answers 503. POCKETPAW_AI_CHECK_DAILY_USD."
         ),
     )
 
@@ -2483,6 +2731,112 @@ class Settings(BaseSettings):
             "daily call budget and the storage cap. Default False, so OSS / "
             "self-host sees no paywall and the seams do no extra database read. Set "
             "via POCKETPAW_SITES_BILLING_ENFORCED."
+        ),
+    )
+    credits_enforced: bool = Field(
+        default=False,
+        description=(
+            "Chat credit gate only, independent of billing_enforced. When True, "
+            "starting a chat or agent run is refused with HTTP 402 when the "
+            "workspace credit balance is <= 0 (credits.insufficient) or its "
+            "monthly credit ceiling is reached (credits.quota_exceeded), on "
+            "every seam that reads the shared run-start guard (chat HTTP, "
+            "execute_run, the group/DM bridge, /files agent ops, the planner). "
+            "The guard reads billing_enforced OR this flag. Unlike "
+            "billing_enforced it turns on nothing else: the seat, pocket, "
+            "connector, upload, storage, call and sites gates stay off. It "
+            "exists for the early-access launch, where free credits are "
+            "metered but no plan or upgrade surface is live. The platform "
+            "settings route refuses writes to it on purpose: a runtime switch "
+            "that turns enforcement off is a footgun. Default False. Set via "
+            "POCKETPAW_CREDITS_ENFORCED."
+        ),
+    )
+    payments_open: bool = Field(
+        default=False,
+        description=(
+            "Whether customers can pay (plans, top-ups). While False, a "
+            "workspace on the free plan with no purchased top_up or "
+            "subscription_grant in its ledger is platform-funded early access "
+            "(credits.guards.is_platform_funded_free), and the early-access "
+            "guards apply to it. While False the billing service also refuses "
+            "every checkout (top-up, subscribe, partner pay link) with 403 "
+            "payments.closed, and the Dodo webhook grants no credits and changes "
+            "no plan. Flip it together with live payment provider credentials "
+            "(dodo_environment=live_mode). The platform settings route refuses "
+            "writes to it. "
+            "Default False. Set via POCKETPAW_PAYMENTS_OPEN."
+        ),
+    )
+    free_run_max_turns: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Model requests one platform-funded free run may make (an unpaid "
+            "early-access workspace, credits.guards.free_run_bounds), in place of "
+            "pydantic_ai_max_turns when lower. Such a run is also forced onto the "
+            "pydantic_ai backend and given a total token limit its wallet can pay "
+            "for. Applies only while credits_enforced or billing_enforced is on. "
+            "Set via POCKETPAW_FREE_RUN_MAX_TURNS."
+        ),
+    )
+    free_run_reserve_credits: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "Credits one platform-funded free run reserves on the daily early-access "
+            "ceiling (credits.guards.reserve_free_run) while it is in flight, or its "
+            "wallet when that is smaller. bill_run then moves the meter to the real "
+            "spend, overrun included, so the ceiling is a soft burn-rate limit: runs "
+            "already in flight may pass it. Higher holds more of the ceiling per "
+            "concurrent run. Set via POCKETPAW_FREE_RUN_RESERVE_CREDITS."
+        ),
+    )
+    free_model_allowlist: list[str] = Field(
+        default=[
+            "deepseek/deepseek-v4-flash",
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-6",
+        ],
+        description=(
+            "Models a platform-funded turn on an unpaid early-access workspace may "
+            "use (credits.guards.free_model_denial), the free default first. "
+            "claude-sonnet-4-6 stays only because it is pydantic_ai_model's code "
+            "default. Matched exactly, ignoring case "
+            "and one known provider prefix such as litellm:. The per-send model, the "
+            "agent's own model and the model the forced pydantic_ai run really "
+            "uses must all be on it, and priced by the metering ladder, else the "
+            "turn is refused with 400 model.not_allowed. Paid workspaces and BYOK "
+            "turns are not limited. Applies only while credits_enforced or "
+            "billing_enforced is on. pydantic_ai_model is always checked, so it "
+            "must be on this list or every free turn is refused: change the two "
+            "together. Set via POCKETPAW_FREE_MODEL_ALLOWLIST as a JSON list."
+        ),
+    )
+    early_access_grant_credits: int = Field(
+        default=1_000,
+        ge=0,
+        description=(
+            "Early access credits granted ONCE per verified user, into the first "
+            "workspace they own (credits.service.grant_early_access). Fired on "
+            "owned-workspace create and on the guest social upgrade; never into "
+            "a workspace the user was only invited to. Keep it at or below the "
+            "free plan's monthly ceiling. 0 turns the grant off. Grants are "
+            "permanent, so changing it affects new users only. Set via "
+            "POCKETPAW_EARLY_ACCESS_GRANT_CREDITS."
+        ),
+    )
+    password_signup_open: bool = Field(
+        default=True,
+        description=(
+            "Whether new accounts may be created with an email and password. "
+            "When False, POST /auth/register and the guest password upgrade "
+            "(POST /auth/guest/upgrade) are refused with 403 "
+            "auth.password_signup_closed, and social sign-in (Google) is the "
+            "only way in. Existing password accounts still sign in. The "
+            "early-access launch runs with it False. Default True so self-host "
+            "keeps working. Set via POCKETPAW_PASSWORD_SIGNUP_OPEN."
         ),
     )
     billing_dunning_grace_days: int = Field(
@@ -2938,49 +3292,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    @field_validator("dodo_site_products", mode="before")
-    @classmethod
-    def _parse_dodo_site_products(cls, v: object) -> object:
-        """Same degrade as the workspace-plan map: a malformed env string becomes
-        an empty mapping rather than crashing settings load at boot.
-
-        The consequence of an empty mapping is milder here and worth knowing: no
-        per-site tier is purchasable, so a paid selection publishes live and
-        records the tier without a charge. It does not raise.
-        """
-        if v is None or v == "":
-            return {}
-        if isinstance(v, str):
-            try:
-                parsed = json.loads(v)
-            except ValueError:
-                return {}
-            return parsed if isinstance(parsed, dict) else {}
-        return v
-
-    @field_validator("dodo_site_addons", mode="before")
-    @classmethod
-    def _parse_dodo_site_addons(cls, v: object) -> object:
-        """Same degrade as the two product maps: a malformed env string becomes an
-        empty mapping rather than crashing settings load at boot.
-
-        Needs ``NoDecode`` on the field for this to run at all — ``EnvSettingsSource``
-        JSON-decodes a complex field at SOURCE time and raises ``SettingsError``
-        before any field validator sees the value. The field carries it.
-
-        An empty mapping means no site tier is purchasable as an add-on: a paid
-        publish records the tier with no charge. It does not raise.
-        """
-        if v is None or v == "":
-            return {}
-        if isinstance(v, str):
-            try:
-                parsed = json.loads(v)
-            except ValueError:
-                return {}
-            return parsed if isinstance(parsed, dict) else {}
-        return v
-
     @field_validator("dodo_plan_products", mode="before")
     @classmethod
     def _parse_dodo_plan_products(cls, v: object) -> object:
@@ -3023,6 +3334,19 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [item.strip() for item in v.split(",") if item.strip()]
         return v
+
+    @field_validator("claude_sdk_tool_search", mode="before")
+    @classmethod
+    def _tool_search_from_json(cls, v: object) -> object:
+        """Store a JSON ``true``/``false`` as ``"true"``/``"false"`` and ``null`` as unset.
+
+        The settings API setattrs the raw JSON value and ``save()`` writes it back
+        as-is. Without this, ``Settings.load()`` rejects that config.json and falls
+        back to defaults, dropping every other saved value and stored secret.
+        """
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return "" if v is None else v
 
     @model_validator(mode="after")
     def _validate_composio_invariants(self) -> Settings:
@@ -3239,15 +3563,38 @@ def get_settings(force_reload: bool = False) -> Settings:
     return Settings.load()
 
 
+# (path, st_mtime_ns, st_size, st_ino) -> token. The auth middleware reads the
+# token on every request; this turns the per-request read into a stat.
+# regenerate_token() refreshes it directly, so in-process rotation never waits
+# on mtime granularity.
+_token_cache: tuple[tuple, str] | None = None
+
+
+def _token_cache_key(token_path: Path) -> tuple | None:
+    try:
+        st = token_path.stat()
+    except OSError:
+        return None
+    return (str(token_path), st.st_mtime_ns, st.st_size, st.st_ino)
+
+
 def get_access_token() -> str:
     """
     Get the current access token.
     If it doesn't exist, generate a new one.
+
+    The file is re-read whenever its path, mtime, size or inode changes, so a
+    rotation by another process is honoured on the next call.
     """
+    global _token_cache  # noqa: PLW0603
     token_path = get_token_path()
-    if token_path.exists():
+    key = _token_cache_key(token_path)
+    if key is not None:
+        if _token_cache is not None and _token_cache[0] == key:
+            return _token_cache[1]
         token = token_path.read_text().strip()
         if token:
+            _token_cache = (key, token)
             return token
 
     return regenerate_token()
@@ -3258,12 +3605,27 @@ def regenerate_token() -> str:
     Generate a new secure access token and save it.
     Invalidates previous tokens.
     """
+    import tempfile
     import uuid
 
     token = str(uuid.uuid4())
     token_path = get_token_path()
-    token_path.write_text(token)
+    # Write a 0600 temp file (mkstemp's mode) and swap it in: the new file has
+    # a new inode, so every get_access_token() cache key changes even when a
+    # rotation lands inside one mtime tick with the same size, and no reader
+    # ever sees a half-written or empty file.
+    fd, tmp = tempfile.mkstemp(dir=token_path.parent, prefix=".access_token.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(token)
+        os.replace(tmp, token_path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     _chmod_safe(token_path, 0o600)
+    global _token_cache  # noqa: PLW0603
+    key = _token_cache_key(token_path)
+    _token_cache = (key, token) if key is not None else None
     return token
 
 

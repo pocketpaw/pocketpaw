@@ -1,173 +1,54 @@
-"""Agent Pool — on-demand instantiation of cloud agents.
+"""Agent Pool: on-demand instantiation of cloud agents.
 
-Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace.
-Instances are cached and evicted when idle (default 5 minutes).
+Each cloud Agent gets its own AgentBackend + SoulManager + memory namespace,
+built from its Agent document (``_build``: the per-agent ``config.model`` is
+routed onto the field the backend reads via ``route_model`` and, when set, turns
+smart routing off for that agent so its pick is the model that runs; legacy backend
+names go through ``_LEGACY_BACKENDS`` first, opt-in MCP servers in
+``config.tools`` become the agent's ``ToolPolicy``). Instances are cached per
+process (``max_instances`` from settings), evicted when idle, rebuilt when the
+document changes (once, under the build lock, however many runs arrive
+together), and refused with ``AgentDisabled`` once the agent is disabled.
+Every backend the pool drops is torn down; ``invalidate`` defers that for a busy
+instance until its last run ends.
 
-Updated: 2026-09-01 (feat/scale-concurrency-knobs) — ``get_agent_pool`` now builds the
-  singleton with ``max_instances`` from settings (``POCKETPAW_AGENT_POOL_MAX_INSTANCES``,
-  default 20 — the value that was already in force). The constructor default is
-  unchanged, so direct ``AgentPool(...)`` construction in tests is unaffected; only
-  the app's one shared instance reads config. The cap is PER-PROCESS: the web process
-  and each arq worker each hold their own pool.
+``run`` assembles the system prompt as a list of layers
+(``_SYSTEM_PROMPT_LAYERS``, rendered by ``pocketpaw.prompt.assemble``) and
+forwards a ``stable_digest`` of the keyed layers to a backend that declares it.
+Per-turn layers ride ``turn_context`` for a backend whose ``run`` declares it;
+``prewarm`` builds the identical stable prompt so turn 1 reuses the warm client.
+Optional per-run knobs (deny/allow tool sets, skill subset, model override,
+exclusive tools, images, image attachments, the tool switch) are withheld when
+empty and forwarded only to a backend whose ``run`` signature declares them.
 
-Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — ``_accepts_prompt_digest``
-  and ``_accepts_prompt_digest_kwarg`` no longer live here; they moved to
-  ``pocketpaw.agents.backend`` and are re-imported. The channel path grew a
-  digest of its own, so ``AgentRouter`` and ``BackendFailoverRunner`` have to ask
-  the same signature question the pool asks — and three copies of "does this
-  backend declare the digest" is how one of them ends up counting ``**kwargs``.
-  Nothing about the pool's behaviour changed: same functions, same call sites,
-  same name resolution for anything importing them from here.
-Updated: 2026-08-03 (PA-6, feat/prompt-assembler-seam) — ``prewarm`` forwards the
-  digest too, and ``_accepts_prompt_digest_kwarg`` is split out to ask the same
-  signature question of a bound ``prewarm`` as of a backend class's ``run``. With
-  the warm-client key now hashing the digest, a prewarm that withheld it would
-  key under the OLD rule and be evicted by the very turn it spent ~12s connecting
-  for. Both entry points read the digest off the SAME ``AssembledPrompt``, which
-  is the only way the two keys can be equal.
-Updated: 2026-08-03 (PA-5, feat/prompt-assembler-seam) — ``_SYSTEM_PROMPT_LAYERS``
-  gains ``atlas`` and ``user`` directly under ``identity``, and
-  ``_assemble_system_prompt`` grows the four plain-data fields that feed them
-  plus a ``budget_chars``. NOTHING MOVED: neither layer has a producer yet, so
-  both render to nothing and the empty-text skip leaves no gap; the budget
-  defaults to unbounded and no pre-PA-5 layer declares a cap, so both sizing
-  passes are no-ops on every prompt this path builds today. What DID change is
-  the digest — two more keyed layers now contribute to it, which costs one
-  agent-cache rebuild at deploy, the same price every layer split in this sprint
-  has paid.
-Updated: 2026-08-02 (PA-4, feat/prompt-assembler-seam) — the authoritative
-  ``instructions`` left ``legacy_tail`` for their own KEYED layer, so the most
-  stable content in the prompt stops inheriting the knowledge wrapper's silence
-  on the cache-key question. NOT ONE BYTE MOVED: the tail rendered
-  instructions-then-knowledge and the layer list now names ``instructions``
-  immediately before it. The layer order itself became a contract a test holds —
-  every keyed layer above the volatile region, identity at the U-curve's head,
-  retrieval at its tail — rather than a comment on the tuple below.
-Updated: 2026-08-02 (PA-3, feat/prompt-assembler-seam) — the per-message soul
-  recall left ``legacy_tail`` for its own ``retrieval`` layer, which DECLARES
-  itself volatile (``cache_key=None``) rather than being inferred as volatile by
-  ``ClaudeSDKBackend._behavior_prefix``'s string surgery two modules away. It
-  renders LAST, so the assembled bytes moved from ``instructions → recall →
-  knowledge`` to ``instructions → knowledge → recall``; see the comment on
-  ``_SYSTEM_PROMPT_LAYERS`` for why that is free and where it is pinned.
-Updated: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — ``run`` and ``prewarm``
-  accept ``surface_preamble: str`` + ``surface_cache_key: str | None``, the
-  surface the user is looking at and what the EE handler that built it says it
-  read. Both are plain data (no ``pocketpaw_ee`` symbol crosses), and they feed
-  the new ``surface`` layer, which sits between ``identity`` and the tail. The
-  preamble used to ride inside ``knowledge_context``, where it landed under the
-  "Your Knowledge Base" wrapper and contributed nothing to the digest — so
-  navigating from pocket A to pocket B produced the same digest as staying put.
-  ``prewarm`` takes them too, and for the usual reason: it must assemble the
-  prompt turn 1 will, or turn 1 evicts the client it warmed. Both default to the
-  no-surface answer, so the channel path and OSS local runs are unchanged.
-Updated: 2026-08-02 (PA-1, feat/prompt-assembler-seam) —
-  ``_assemble_system_prompt`` no longer builds a string by appending blocks. It
-  renders a LIST OF LAYERS through ``pocketpaw.prompt.assemble`` and returns an
-  ``AssembledPrompt``: the same text (byte-identical), plus a ``stable_digest``
-  over the layers that declared themselves cacheable. One layer is real so far —
-  the agent identity block (soul/persona + the A1 ``system_message_override``),
-  keyed on the agent's id, its document revision, which branch produced it and
-  the override. Everything below it (the authoritative ``instructions``, the
-  per-message soul recall, the knowledge wrapper) rides one unkeyed passthrough
-  layer until it is split up.
-  The digest is forwarded to ``backend.run`` as ``system_prompt_digest`` for any
-  backend whose ``run`` declares the parameter (asked of the signature, like
-  ``_accepts_policy`` — a backend opts in by accepting it, not by being listed
-  here). ``pydantic_ai`` folds it into its agent cache key. This is the shape
-  fix behind PR #1842: an agent cached with a prompt baked in but keyed on
-  everything EXCEPT the prompt served session B what session A was told.
-Updated: 2026-07-24 (CX-2, feat/code-agent-exclusive-tools) — ``run`` and
-  ``prewarm`` accept ``exclusive_mcp_tools: bool = False`` and forward it to the
-  backend ONLY when True (same withhold-when-empty idiom as ``model_override`` /
-  ``skill_names``). Only the Claude SDK backend consumes it — there it CAPS the
-  MCP surface to ``allow_mcp_tool_ids`` alone (no universal grant), so a
-  ``tool_mode="exclusive"`` agent (e.g. /code) gets EXACTLY its declared ids.
-  ``False`` = the unchanged grant-union path for every existing run.
+A run with ``exclusive_tools`` (the deny-by-default concierge) is always served
+by pydantic_ai (``_deny_by_default_backend``), never the owner's backend. So is
+a run with ``force_pydantic_ai`` (the cloud's platform-funded free run), which
+swaps the backend without the tool lockdown. Per-run usage limits
+(``max_requests``, ``total_tokens_limit``) go only to a backend that declares
+them; a limited run on any other backend is refused, never run unlimited.
+``max_turns`` is the opposite knob, a surface overriding the tool-turn cap for
+one run (a Sites app build: 0 = no cap, N = raise to N, None = no override). Any
+non-None value, 0 included, goes only to a backend that declares it (a backend
+that does not keeps its own cap), and on pydantic_ai ``max_requests`` still wins.
 
-Updated: 2026-07-08 (CS-13, feat/per-send-model-override) — ``run`` accepts an
-  optional ``model_override: str | None`` (the client's per-send model choice) and
-  forwards it to the backend's ``run`` ONLY when non-None (the same
-  withhold-when-empty idiom as ``deny_mcp_tool_ids`` / ``skill_names``). Only the
-  Claude SDK backend consumes it, where it wins over smart-routing /
-  ``claude_sdk_model``. ``None`` = the unchanged legacy path.
-Updated: 2026-05-21 — ``_build`` now translates an agent's ``config.tools``
-  entries that name an opt-in in-process MCP server (see
-  ``pocketpaw.tools.policy.OPT_IN_MCP_SERVERS``) into a per-agent
-  ``ToolPolicy.mcp_servers_allow`` frozenset, and passes the resulting
-  policy to the Claude SDK backend. This is how a cloud agent opts into
-  the planner MCP server.
-Updated: 2026-06-05 (feat/sites-svelte-engine) — ``run`` accepts a
-  ``deny_mcp_tool_ids: frozenset[str]`` per-surface MCP-tool deny set (resolved
-  from the request's ``SurfaceProfile`` in the EE chat loop) and forwards it to
-  the backend's ``run`` when non-empty. Only the Claude SDK backend consumes it
-  (subtracting the ids from its tool allowlist before launch); it is withheld
-  from the call when empty so backends that don't accept the kwarg are
-  unaffected. Non-empty only on /sites svelte-create.
-Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
-  ``run`` also accepts ``allow_sdk_tools: frozenset[str]``, the per-entity
-  additive SDK-tool allowlist (resolved from the entity pocket's
-  ``surface_profile.allowed_sdk_tools`` upstream). It mirrors the
-  ``deny_mcp_tool_ids`` threading EXACTLY: a plain ``frozenset[str]`` forwarded
-  to the backend's ``run`` ONLY when non-empty (so the 6 non-Claude backends
-  keep their narrower signature), and consumed only by the Claude SDK backend,
-  which UNIONs it into the allowlist BEFORE subtracting the deny set —
-  precedence ``effective = (agent_tools ∪ allow) − deny`` (deny is the hard
-  cap). Empty for every legacy / non-entity run, so ordinary runs are untouched.
-  No ``pocketpaw_ee`` symbol crosses the boundary — only the frozenset.
-Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A1/A2) —
-  ``run`` grows two more entity-profile knobs, both plain data across the EE→OSS
-  boundary:
-   * ``system_message_override: str | None`` — when set, REPLACES the base
-     persona/soul identity portion of the system prompt while the downstream
-     layers (authoritative ``instructions`` incl. ripple LAW, soul memory recall,
-     knowledge-base wrapper) STILL append. So the final prompt is
-     ``override + instructions + soul-memory + knowledge``. ``None`` = unchanged.
-   * ``skill_names: frozenset[str]`` — the per-entity skill subset, forwarded to
-     the Claude SDK backend (withhold-when-empty, same idiom as deny/allow). The
-     SDK backend materializes those skills into a throwaway local plugin so ONLY
-     the named skills are surfaced. Empty = legacy all-skills behavior.
-Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``, which eagerly
-  warms the agent's CLI subprocess for a session before its first turn (only the
-  Claude SDK backend has one; no-op elsewhere). ``run``'s system-prompt assembly
-  was factored into a shared ``_assemble_system_prompt`` so ``prewarm`` builds
-  the IDENTICAL prompt the first turn will — the backend's warm-client cache key
-  hashes the prompt's stable behavioral prefix, so a divergent prefix would make
-  turn 1 evict the prewarmed client. ``prewarm`` folds in the agent's own skills
-  (``skill_refs`` + enabled-plugin skills) exactly as ``run`` does so the plugin
-  digest matches too. Fire-and-forget: never raises (the backend's ``prewarm``
-  swallows its own errors; this guards instance load + prompt assembly). The EE
-  trigger fires it as a background task in ``run_core.execute_run``.
-Updated: 2026-06-26 (feat/mcg-3-pool-route-model) — ``_build`` now routes the
-  per-agent ``config.model`` onto the correct backend Settings field via
-  ``pocketpaw.llm.providers.base.route_model`` instead of the old brittle
-  ``"claude" in backend`` / ``"openai" in backend`` / ``"google" in backend``
-  substring chain. That chain silently dropped the per-agent model for
-  ``codex_cli``, ``opencode``, ``deep_agents``, ``copilot_sdk`` and
-  ``langchain_react`` (and even wrote OpenAI Agents' model to the wrong field,
-  ``openai_model`` instead of ``openai_agents_model``). ``route_model`` is
-  driven by ``_BACKEND_MODEL_ATTR`` (+ the langchain_react->deep_agents_model
-  alias) so it covers every registered backend and preserves the composite
-  ``provider:model`` / ``provider/model`` formats verbatim. Legacy backend names
-  are resolved through ``_LEGACY_BACKENDS`` before routing so old agent docs
-  still map to the right field. Empty model stays a no-op (backend default).
-Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — soft-disable enforcement.
-  ``get`` now raises ``AgentDisabled`` whenever the resolved agent doc carries
-  ``disabled=True``, on BOTH the cached-instance path (checked before the
-  staleness branch, re-raised past the broad DB-error guard so it fails closed)
-  and the cold-build path. A disabled agent is therefore unresolvable on every
-  run path at once — chat SSE, group/DM bridge, planner — while in-flight runs
-  keep their already-resolved instance. Added ``invalidate(agent_id)`` for the
-  service to drop a cached instance the instant the flag flips (immediate
-  revoke; the staleness check is only a fallback). ``invalidate`` does not tear
-  down the backend so a live run is not aborted mid-stream.
+BYOK: a turn given ``byok_api_key`` runs on a private backend built for that
+turn alone (``AgentRouter.create_isolated_backend``), carrying the agent's own
+ToolPolicy and released when the turn ends. Only pydantic_ai reads the
+override, so ``spends_byok_key`` is the one answer to "will this turn spend the
+caller's key"; the cloud's credit gate asks it before letting a turn skip the
+wallet. If the private backend for a key-spending turn cannot be built, the
+turn is refused with an ``error`` event rather than run on the platform's
+credentials: the caller was let through as BYOK, so a silent fallback would be
+free platform spend. A backend that ignores the key falls back to the shared
+one, since that turn was gated and billed as platform anyway.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -177,12 +58,23 @@ from typing import TYPE_CHECKING, Any
 # protocol. Re-imported (not re-implemented) so ``AgentPool``'s own call sites
 # below and the existing ``from pocketpaw.agents.pool import ...`` importers
 # resolve to the ONE definition.
-from pocketpaw.agents.backend import _accepts_prompt_digest, _accepts_prompt_digest_kwarg
+from pocketpaw.agents.backend import (
+    ImageAttachment,
+    _accepts_exclusive_tools_kwarg,
+    _accepts_image_attachments_kwarg,
+    _accepts_images_kwarg,
+    _accepts_prompt_digest,
+    _accepts_prompt_digest_kwarg,
+    _accepts_run_limits_kwarg,
+    _accepts_tools_enabled_kwarg,
+    _accepts_turn_context_kwarg,
+)
 from pocketpaw.agents.errors import (
     AgentBackendUnavailable,
     AgentDisabled,
     AgentNotFound,
 )
+from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.prompt import AssembledPrompt, PromptContext, assemble, prompt_layer_registry
 
 if TYPE_CHECKING:
@@ -192,6 +84,37 @@ if TYPE_CHECKING:
     from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
+
+#: What a BYOK turn says when its private backend could not be built.
+BYOK_BACKEND_FAILED_MESSAGE = (
+    "Your API key couldn't be used for this turn, so it wasn't run. "
+    "Check the key in your workspace settings and try again."
+)
+
+#: The ``error`` a run carrying usage limits gets when the backend serving it
+#: cannot take them. Refused rather than run unlimited.
+RUN_LIMITS_UNSUPPORTED_MESSAGE = (
+    "This reply couldn't start because its usage limits aren't supported here."
+)
+
+
+def spends_byok_key(backend: str | None, *, exclusive_tools: bool = False) -> bool:
+    """Whether a turn served by ``backend`` spends the caller's BYOK override.
+
+    Only pydantic_ai reads it (``byok_provider_api_key``, or the gateway
+    settings), and a deny-by-default run (``exclusive_tools``) is always served
+    by pydantic_ai. Any other backend built with the override still runs on the
+    platform's credentials. A missing backend means ``claude_agent_sdk``, the
+    same literal ``_build`` falls back to; legacy names are canonicalised the
+    same way.
+    """
+    if exclusive_tools:
+        return True
+    from pocketpaw.agents.registry import _LEGACY_BACKENDS
+
+    name = backend or "claude_agent_sdk"
+    return _LEGACY_BACKENDS.get(name, name) == "pydantic_ai"
+
 
 # The cloud path's prompt layers, in the order they are concatenated. The names
 # resolve through ``prompt_layer_registry``; the ORDER is this caller's, because
@@ -273,6 +196,14 @@ _SYSTEM_PROMPT_LAYERS = (
     "retrieval",
 )
 
+# The per-turn layers: the knowledge-base wrapper (KB hits, <scope>,
+# <participants>, <current-pocket>, the member briefing, <uploaded-files>) and
+# the soul recall. Both are unkeyed and change every turn. A backend that
+# declares ``turn_context`` gets them there instead of in ``system_prompt``: the
+# Claude SDK applies its system prompt only at connect, so on a reused warm
+# client these would otherwise stay whatever the connecting turn carried.
+_TURN_CONTEXT_LAYERS = frozenset({"legacy_tail", "retrieval"})
+
 
 def _resolve_agent_model() -> Any:
     """Resolve the cloud ``Agent`` Beanie document class via the model registry.
@@ -309,6 +240,34 @@ class AgentInstance:
     # authoritative "this instance is busy" signal; ``last_active`` is just
     # for ranking idle eviction candidates.
     active_runs: int = 0
+    # The pydantic_ai backend deny-by-default runs (the public concierge) are
+    # forced onto when ``backend`` is something else. Built on first use by
+    # ``AgentPool._deny_by_default_backend``; stopped in ``_teardown``.
+    deny_by_default_backend: Any = None
+    # Set by ``invalidate`` on an instance dropped mid-run; the last run tears
+    # it down.
+    retired: bool = False
+
+
+async def _release_backend(backend: Any) -> None:
+    """Release a backend built for a single turn. Best-effort, never raises."""
+    release = getattr(backend, "cleanup", None) or getattr(backend, "stop", None)
+    if release is None:
+        return
+    try:
+        await release()
+    except Exception:
+        logger.debug("releasing a per-turn backend failed", exc_info=True)
+
+
+def _declares_param(func: Any, name: str) -> bool:
+    """Does ``func`` name ``name`` in its signature (``**kwargs`` does not count)?"""
+    import inspect
+
+    try:
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
 
 
 def _accepts_policy(backend_cls: type) -> bool:
@@ -339,7 +298,16 @@ class AgentPool:
         self._build_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        """Start the GC background task."""
+        """Start the GC background task. Idempotent.
+
+        Two callers reach this on a cloud boot: ``dashboard_lifecycle``'s
+        startup and the cloud lifespan hook, which only began running again when
+        the dropped-``on_event`` bug was fixed. Without this guard the second
+        call overwrites ``_gc_task`` and orphans the first loop, which then runs
+        forever with nothing holding a handle to cancel it.
+        """
+        if self._gc_task is not None and not self._gc_task.done():
+            return
         self._gc_task = asyncio.create_task(self._gc_loop())
         logger.info(
             "AgentPool started (max_idle=%ds, max_instances=%d)",
@@ -398,10 +366,22 @@ class AgentPool:
                             inst.active_runs,
                         )
                         return inst
-                    logger.info("Agent %s config changed, rebuilding", agent_id)
-                    await self._teardown(inst)
-                    del self._instances[agent_id]
-                    return await self._build(agent_doc)
+                    # Under the build lock, and only if ``inst`` is still the
+                    # cached one: concurrent runs for this agent all saw it
+                    # stale, and without this each tore it down and rebuilt,
+                    # dropping a sibling's fresh instance or handing back the
+                    # torn-down one.
+                    async with self._build_lock:
+                        current = self._instances.get(agent_id)
+                        if current is not None and current is not inst:
+                            return current
+                        # A run may have started on it while we waited.
+                        if inst.active_runs > 0:
+                            return inst
+                        logger.info("Agent %s config changed, rebuilding", agent_id)
+                        self._instances.pop(agent_id, None)
+                        await self._teardown(inst)
+                        return await self._build(agent_doc)
             except AgentDisabled:
                 # Must NOT be swallowed by the broad DB-error guard below — a
                 # disabled agent has to fail closed, not fall back to the
@@ -439,12 +419,18 @@ class AgentPool:
         cache invalidation — the staleness check in ``get`` is a fallback, but a
         disabled agent must be revoked the instant the flag flips, not on the
         next config-bump-detecting request. Idempotent: a no-op if uncached.
-        Does NOT tear down the backend (no ``_teardown``) so an instance with an
-        in-flight run is not aborted mid-stream — the entry is simply removed
-        from the cache and the live ``run`` retains its own reference until it
-        completes; the NEXT ``get`` rebuilds (or raises ``AgentDisabled``).
+        The dropped instance is torn down (its backend may hold a CLI
+        subprocess): at once when idle, and by its last run's ``finally`` when a
+        run is in flight, so a live stream is never aborted. The NEXT ``get``
+        rebuilds (or raises ``AgentDisabled``).
         """
-        self._instances.pop(agent_id, None)
+        instance = self._instances.pop(agent_id, None)
+        if instance is None:
+            return
+        if instance.active_runs > 0:
+            instance.retired = True
+            return
+        await self._teardown(instance)
 
     async def _assemble_system_prompt(
         self,
@@ -462,6 +448,7 @@ class AgentPool:
         user_info: str = "",
         user_id: str | None = None,
         budget_chars: int | None = None,
+        soul_recall: bool = True,
     ) -> AssembledPrompt:
         """Assemble the agent's system prompt from its layers.
 
@@ -540,6 +527,7 @@ class AgentPool:
             tenant_scope=tenant_scope,
             user_info=user_info,
             user_id=user_id,
+            soul_recall=soul_recall,
         )
         layers = [prompt_layer_registry.get(name) for name in _SYSTEM_PROMPT_LAYERS]
         return await assemble(layers, ctx, budget_chars=budget_chars)
@@ -558,6 +546,9 @@ class AgentPool:
         exclusive_mcp_tools: bool = False,
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
+        model_override: str | None = None,
+        tools_enabled: bool = True,
+        max_turns: int | None = None,
     ) -> None:
         """Eagerly warm the agent's CLI subprocess for ``session_key`` before its
         first turn, so the first ``run`` reuses it instead of paying the cold
@@ -581,6 +572,9 @@ class AgentPool:
         model is classified from the message, which prewarm doesn't have, so a
         prewarm could warm the wrong model tier and cause evict-churn. The
         run_core trigger gates on this.
+
+        It takes no history: the Claude SDK sends history in each turn's query
+        text, so a prewarmed client needs none.
         """
         try:
             instance = await self.get(agent_id)
@@ -623,9 +617,14 @@ class AgentPool:
 
         # The backend's prewarm swallows ALL of its own errors, so this is
         # already safe; the outer guards above cover instance/prompt failures.
+        # A backend that takes per-turn context separately is connected with the
+        # stable layers only, exactly what its turns will send as system prompt.
+        system_prompt = assembled.text
+        if _accepts_turn_context_kwarg(getattr(instance.backend, "run", None)):
+            system_prompt = assembled.split(_TURN_CONTEXT_LAYERS)[0]
         prewarm_kwargs: dict[str, Any] = {
             "session_key": session_key,
-            "system_prompt": assembled.text,
+            "system_prompt": system_prompt,
         }
         # PA-6: the digest is now what the warm-client key hashes, so a prewarm
         # that withheld it would key under ``t:`` and turn 1 would key under
@@ -649,6 +648,17 @@ class AgentPool:
         # True; the caller passes the agent's declared ids as ``allow_mcp_tool_ids``.
         if exclusive_mcp_tools:
             prewarm_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
+        # The turn's per-send model pick and tool switch change the model and
+        # ``allowed_tools``, so the cache key. Withheld when default, and only to
+        # a prewarm that declares them.
+        if model_override and _declares_param(backend_prewarm, "model_override"):
+            prewarm_kwargs["model_override"] = model_override
+        if tools_enabled is False and _declares_param(backend_prewarm, "tools_enabled"):
+            prewarm_kwargs["tools_enabled"] = False
+        # The turn's tool-turn override (0 = no cap) is fixed at connect(), so it is
+        # in the key. ``is not None``: a 0 must ride.
+        if max_turns is not None and _declares_param(backend_prewarm, "max_turns"):
+            prewarm_kwargs["max_turns"] = max_turns
         await backend_prewarm(**prewarm_kwargs)
 
     async def run(
@@ -669,8 +679,19 @@ class AgentPool:
         on_client_built: Callable[[Any, str, Callable], None] | None = None,
         model_override: str | None = None,
         exclusive_mcp_tools: bool = False,
+        tools_enabled: bool = True,
+        exclusive_tools: bool = False,
+        image_attachments: Sequence[ImageAttachment] = (),
         surface_preamble: str = "",
         surface_cache_key: str | None = None,
+        byok_api_key: str | None = None,
+        byok_settings_override: dict[str, object] | None = None,
+        images: tuple[tuple[bytes, str], ...] = (),
+        force_pydantic_ai: bool = False,
+        max_requests: int | None = None,
+        total_tokens_limit: int | None = None,
+        soul_recall: bool = True,
+        max_turns: int | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -746,6 +767,44 @@ class AgentPool:
         signature and only the Claude SDK backend acts on it (there it CAPS the MCP
         surface to ``allow_mcp_tool_ids`` alone — no universal grant). ``False``
         (the default) = the unchanged grant-union path.
+
+        ``images`` are the pictures THIS turn should look at, already read into
+        memory as (bytes, media_type). The caller reads them, because the caller
+        is the layer that can prove a path belongs to the tenant asking; nothing
+        below this line touches a filesystem on their behalf.
+
+        ``byok_api_key`` is the caller's OWN provider key for this one turn
+        (2026-08-28). It does NOT get forwarded to the cached backend — it
+        REPLACES it: the run is served by a fresh, uncached backend built from
+        the same settings with that key substituted.
+
+        That is the whole point. This pool hands every session and surface the
+        same cached instance, and a backend's provider credential is baked into
+        the model object it builds. Passing one tenant's key to a shared backend
+        would leave it there for the next tenant's turn, billing a stranger's
+        account. An isolated instance cannot outlive the run that made it.
+
+        ``byok_settings_override`` (2026-09-09) is what to substitute, when the
+        answer is more than one key. A key for an OpenAI-compatible gateway also
+        needs the gateway's address and model id, and those are as
+        tenant-specific as the key itself. The cloud builds this dict; when it
+        is absent the pool falls back to substituting ``byok_api_key`` alone,
+        which is byte-identical to the 2026-08-28 behaviour.
+
+        ``byok_api_key`` remains the GATE for both: no key, no isolated backend.
+
+        None (the default) = the shared cached instance, unchanged for every
+        existing run.
+
+        ``force_pydantic_ai`` serves a non-BYOK run on pydantic_ai whatever the
+        agent's backend is (the same backend ``_deny_by_default_backend`` builds,
+        without ``exclusive_tools``), dropping a per-send model picked for the
+        other backend. ``max_requests`` / ``total_tokens_limit`` cap the run; a
+        backend that cannot take them refuses the turn. The cloud sets all three
+        for a platform-funded free run. Defaults leave every run unchanged.
+
+        ``soul_recall=False`` leaves the per-message soul recall out of the
+        prompt (the cloud sets it on /sites, where each chat is about one site).
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -777,6 +836,7 @@ class AgentPool:
             system_message_override=system_message_override,
             surface_preamble=surface_preamble,
             surface_cache_key=surface_cache_key,
+            soul_recall=soul_recall,
         )
 
         # Mark this instance as actively running for the duration of the
@@ -788,6 +848,9 @@ class AgentPool:
         # ``active_runs > 0`` is the authoritative "busy" flag the GC and
         # LRU evictor honor.
         instance.active_runs += 1
+        # The backend serving THIS turn. A BYOK turn swaps in a private one built
+        # for the turn alone, which the ``finally`` below releases.
+        run_backend = instance.backend
         try:
             # Only forward the deny set when non-empty: the Claude SDK backend
             # accepts ``deny_mcp_tool_ids``, but the other backends keep the
@@ -867,12 +930,180 @@ class AgentPool:
             # False = legacy grant-union path, unchanged for every existing run.
             if exclusive_mcp_tools:
                 run_kwargs["exclusive_mcp_tools"] = exclusive_mcp_tools
-            async for event in instance.backend.run(message, **run_kwargs):
+            # Images for THIS turn, as (bytes, media_type). Forwarded further
+            # down, once the run's real backend is known — and only to a backend
+            # that DECLARES the parameter. Withhold-when-empty is not enough on
+            # its own here: seven of the eight backends have a narrower
+            # signature with no ``**kwargs``, and the Otherhand surface sends
+            # images on every turn, so an unconditional forward would end each
+            # of those turns in ``TypeError: run() got an unexpected keyword
+            # argument 'images'``. That is the /sites failure this file already
+            # records, one line above, with a different kwarg.
+            #
+            # ``image_attachments`` (the files the user attached, as
+            # ``ImageAttachment``) is forwarded from the SAME place and for the
+            # same reason. It is rarer than ``images`` — only a turn carrying an
+            # attachment sends one — but rarity is not a guard: the moment a user
+            # attaches a photo on an install running any of those seven backends,
+            # an unguarded forward is a TypeError on their turn. Withholding
+            # narrows WHEN, never WHERE; only the signature does that.
+            # BYOK: swap the SHARED backend for a private one, built for this
+            # run alone. If that build fails the turn is REFUSED, not run on the
+            # shared backend: the cloud's credit gate let this turn skip the
+            # wallet because the caller's key pays, so falling back to our
+            # credentials would be unbilled platform spend.
+            run_backend = instance.backend
+            byok_build_failed = False
+            if exclusive_tools:
+                # A deny-by-default run (the public Paw Bar concierge) ALWAYS runs
+                # on pydantic_ai, whatever backend the bound agent is configured
+                # for (captain decision 2026-09-27). pydantic_ai is the one backend
+                # that honours the whole lockdown: claude_sdk keeps its Read, Glob
+                # and Grep built-ins, and every other backend rejects
+                # ``exclusive_mcp_tools``. Fails closed: if no pydantic_ai backend
+                # can be built the turn errors rather than falling back to the
+                # owner's backend.
+                try:
+                    run_backend = self._deny_by_default_backend(
+                        instance,
+                        (byok_settings_override or {"byok_provider_api_key": byok_api_key})
+                        if byok_api_key
+                        else None,
+                    )
+                except Exception:
+                    if not byok_api_key:
+                        raise
+                    logger.warning(
+                        "BYOK: could not build an isolated pydantic_ai backend for %s; "
+                        "refusing the turn",
+                        agent_id,
+                        exc_info=True,
+                    )
+                    byok_build_failed = True
+                # A per-send model id was picked for the owner's backend; on a
+                # different backend it is not a model we know to be valid.
+                if run_backend is not instance.backend:
+                    run_kwargs.pop("model_override", None)
+            elif force_pydantic_ai and not byok_api_key:
+                # Raises when no pydantic_ai backend can be built: the run must
+                # not fall back to the agent's own backend.
+                run_backend = self._deny_by_default_backend(instance, None)
+                if run_backend is not instance.backend:
+                    run_kwargs.pop("model_override", None)
+            elif byok_api_key:
+                from pocketpaw.agents.registry import _LEGACY_BACKENDS
+
+                own_backend = instance.backend.settings.agent_backend
+                try:
+                    from pocketpaw.agents.router import AgentRouter
+
+                    run_backend = AgentRouter.create_isolated_backend(
+                        _LEGACY_BACKENDS.get(own_backend, own_backend),
+                        instance.backend.settings,
+                        settings_override=(
+                            byok_settings_override or {"byok_provider_api_key": byok_api_key}
+                        ),
+                        # The agent's own ToolPolicy (planner opt-ins, narrowed
+                        # profile), not the process-wide one a bare build gets.
+                        policy=(
+                            instance.backend.get_tool_policy()
+                            if hasattr(instance.backend, "get_tool_policy")
+                            else None
+                        ),
+                    )
+                except Exception:
+                    # Refuse only where the key would have paid. A backend that
+                    # ignores the override was gated and billed as platform
+                    # already, so the shared backend is the same turn.
+                    byok_build_failed = spends_byok_key(own_backend)
+                    logger.warning(
+                        "BYOK: could not build an isolated backend for agent %s; %s",
+                        agent_id,
+                        "refusing the turn" if byok_build_failed else "using the shared backend",
+                        exc_info=True,
+                    )
+            if byok_build_failed:
+                yield AgentEvent(type="error", content=BYOK_BACKEND_FAILED_MESSAGE)
+                return
+            if max_requests is not None or total_tokens_limit is not None:
+                if not _accepts_run_limits_kwarg(run_backend.run):
+                    yield AgentEvent(type="error", content=RUN_LIMITS_UNSUPPORTED_MESSAGE)
+                    return
+                if max_requests is not None:
+                    run_kwargs["max_requests"] = max_requests
+                if total_tokens_limit is not None:
+                    run_kwargs["total_tokens_limit"] = total_tokens_limit
+
+            # Asked of the signature for the same reason ``_accepts_policy``
+            # and ``_accepts_prompt_digest_kwarg`` are: a backend opts in by
+            # taking the argument. Asked of ``run_backend`` rather than the
+            # cached one because a BYOK run is served by a different object.
+            if images and _accepts_images_kwarg(run_backend.run):
+                run_kwargs["images"] = images
+            if image_attachments and _accepts_image_attachments_kwarg(run_backend.run):
+                run_kwargs["image_attachments"] = tuple(image_attachments)
+
+            # Per-send tool switch (2026-09-11). TWO gates, and the first one
+            # alone was a bug in production.
+            #
+            # Withhold-when-empty: the default True means "the tool surface this
+            # run already resolved", which says nothing, so only an explicit
+            # False is a request and only False rides. With the signature gate
+            # below in place this half no longer prevents a crash — forwarding
+            # True would be harmless, and a mutation that does so escapes the
+            # suite on purpose. It stays because it keeps ``run_kwargs``
+            # byte-identical on an ordinary turn, which is the shape every other
+            # optional kwarg in this block has.
+            #
+            # AND ask the signature. Withholding narrows WHEN the kwarg is sent;
+            # it never narrows WHERE. The moment a user turned the switch off,
+            # that False went to whatever backend their agent runs on — a
+            # logged-in workspace is on ``claude_agent_sdk`` — and every
+            # tools-off turn died in ``TypeError: run() got an unexpected
+            # keyword argument 'tools_enabled'``. Asked of ``run_backend``
+            # rather than the cached one because a BYOK run is served by a
+            # different object.
+            if tools_enabled is False and _accepts_tools_enabled_kwarg(run_backend.run):
+                run_kwargs["tools_enabled"] = tools_enabled
+            # A surface's tool-turn override (a Sites app build; 0 = no cap). Same
+            # two gates: any non-None value rides, 0 included, and only to a backend
+            # that declares it; any other keeps its own cap. pydantic_ai applies
+            # ``max_requests`` after it, so the bounded free run is never lifted.
+            if max_turns is not None and _declares_param(run_backend.run, "max_turns"):
+                run_kwargs["max_turns"] = max_turns
+            # Deny-by-default surface (the public concierge). Same two gates:
+            # only an explicit True rides, and only to a backend that declares
+            # it. The run also carries ``exclusive_mcp_tools``, forwarded
+            # unconditionally above, so a backend that declares neither fails
+            # rather than running with its full tool set.
+            if exclusive_tools and _accepts_exclusive_tools_kwarg(run_backend.run):
+                run_kwargs["exclusive_tools"] = True
+            # Per-turn layers ride ``turn_context`` for a backend that declares
+            # it (see ``_TURN_CONTEXT_LAYERS``); the digest is unchanged, since
+            # both layers are unkeyed. Asked of ``run_backend`` like the rest.
+            if _accepts_turn_context_kwarg(run_backend.run):
+                stable_text, turn_context = assembled.split(_TURN_CONTEXT_LAYERS)
+                run_kwargs["system_prompt"] = stable_text
+                if turn_context:
+                    run_kwargs["turn_context"] = turn_context
+
+            async for event in run_backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event
         finally:
             instance.active_runs -= 1
             instance.last_active = datetime.now(UTC)
+            # A backend built for this turn alone (BYOK) is released here: a
+            # Claude SDK backend otherwise keeps its CLI subprocess forever. The
+            # instance's own and its cached deny-by-default backend are shared.
+            if run_backend is not instance.backend and run_backend is not getattr(
+                instance, "deny_by_default_backend", None
+            ):
+                await _release_backend(run_backend)
+            # ``invalidate`` dropped this instance while it was busy; the last
+            # run to finish tears it down.
+            if getattr(instance, "retired", False) and instance.active_runs == 0:
+                await self._teardown(instance)
 
     async def observe(self, agent_id: str, user_input: str, agent_output: str) -> None:
         """Observe an interaction for soul learning."""
@@ -886,15 +1117,17 @@ class AgentPool:
     async def _build(self, agent_doc: Any) -> AgentInstance:
         """Build a new AgentInstance from an Agent document."""
         from pocketpaw.agents.registry import _LEGACY_BACKENDS, get_backend_class
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
         from pocketpaw.llm.providers.base import route_model
         from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
         agent_id = str(agent_doc.id)
         config = agent_doc.config.model_dump()
 
-        # Clone settings and override with agent config
-        settings = Settings.load()
+        # Clone the cached settings (``Settings.load()`` re-parses config + env
+        # on every build) and override with agent config. Deep copy: the cached
+        # instance is shared process-wide and is mutated below.
+        settings = get_settings().model_copy(deep=True)
         # The literal stays ``claude_agent_sdk`` on purpose, and is NOT the
         # cloud default (``pocketpaw_ee.cloud.agents.defaults``, which OSS core
         # cannot import anyway). ``AgentConfig`` carries a default, so
@@ -918,7 +1151,12 @@ class AgentPool:
         # agent doc (e.g. ``claude_code``) still routes to the right field.
         model = config.get("model", "")
         canonical_backend = _LEGACY_BACKENDS.get(settings.agent_backend, settings.agent_backend)
-        route_model(settings, canonical_backend, model)
+        if route_model(settings, canonical_backend, model):
+            # The agent pinned a model, so it beats smart routing (which on the
+            # Claude SDK backend otherwise outranks ``claude_sdk_model`` and
+            # picked the haiku tier for a short message). Agents with no model
+            # keep the process-wide routing. This is a per-agent clone.
+            settings.smart_routing_enabled = False
 
         # Instantiate backend
         backend_cls = get_backend_class(settings.agent_backend)
@@ -1043,12 +1281,68 @@ class AgentPool:
         await manager.initialize()
         return manager
 
+    @staticmethod
+    def _deny_by_default_backend(instance: Any, byok_override: dict[str, Any] | None) -> Any:
+        """The pydantic_ai backend a deny-by-default run is served by.
+
+        The agent's own backend when it already IS pydantic_ai, so its model and
+        its cached agent carry over. Otherwise a pydantic_ai backend built from
+        the agent's settings with ``agent_backend`` switched, so its model is the
+        deployment's ``pydantic_ai_model``: the owner's model id was chosen for a
+        different backend and is not assumed to be valid here. That backend is
+        cached on the instance (and stopped in ``_teardown``) so a concierge
+        does not rebuild its tool bridge every turn. A built backend carries the
+        agent's own ToolPolicy (planner opt-ins, narrowed profile), as the BYOK
+        build below does, so a forced run keeps the tools the agent opted into.
+
+        With BYOK the backend is built fresh for this run, like the BYOK path
+        below, and a failed build raises: running the turn on the platform's
+        pydantic_ai would spend our credentials on a turn the caller's key was
+        meant to pay for. Also raises when no pydantic_ai backend can be built:
+        the caller must not fall back to the owner's backend, which would drop
+        the lockdown.
+        """
+        from pocketpaw.agents.registry import get_backend_class
+        from pocketpaw.agents.router import AgentRouter
+
+        pai_cls = get_backend_class("pydantic_ai")
+        if pai_cls is None:
+            raise RuntimeError(
+                "A deny-by-default run needs the pydantic_ai backend, which is not installed"
+            )
+        own = instance.backend
+        if isinstance(own, pai_cls) and byok_override is None:
+            return own
+        override = {"agent_backend": "pydantic_ai"}
+        policy = own.get_tool_policy() if hasattr(own, "get_tool_policy") else None
+        if byok_override is not None:
+            return AgentRouter.create_isolated_backend(
+                "pydantic_ai",
+                own.settings,
+                settings_override={**override, **byok_override},
+                policy=policy,
+            )
+        cached = getattr(instance, "deny_by_default_backend", None)
+        if cached is None:
+            cached = AgentRouter.create_isolated_backend(
+                "pydantic_ai", own.settings, settings_override=override, policy=policy
+            )
+            instance.deny_by_default_backend = cached
+        return cached
+
     async def _teardown(self, instance: AgentInstance) -> None:
         """Gracefully shutdown an agent instance."""
         try:
             await instance.backend.stop()
         except Exception:
             pass
+        # The pydantic_ai backend a deny-by-default run was forced onto holds
+        # its own MCP exit stack, which only ``stop()`` releases.
+        if instance.deny_by_default_backend is not None:
+            try:
+                await instance.deny_by_default_backend.stop()
+            except Exception:
+                pass
         if instance.soul_manager:
             try:
                 await instance.soul_manager.shutdown()

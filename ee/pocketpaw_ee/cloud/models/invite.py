@@ -10,6 +10,12 @@ and leave ``token`` as None.
 nullable ``context`` field so an invite can carry admin-provided onboarding
 hints (``focus`` + ``profile_pic``) for a later VIP-onboarding flow. Fully
 optional — pre-existing invite rows read back with ``context=None``.
+
+2026-09-30 (fix/livekit-call-security): ``MeetingInvite.allowed_emails`` holds a
+guest invite's email allow-list, which used to live only inside the
+``display_name`` JSON and was returned by the public validate endpoint. Legacy
+rows keep their list in ``display_name`` and read back with ``allowed_emails=[]``;
+``livekit/invites.py`` falls back to parsing it.
 """
 
 from __future__ import annotations
@@ -109,6 +115,9 @@ class MeetingInvite(Document):
     token_hash: Indexed(str, unique=True) | None = None  # type: ignore[valid-type]
     created_by: str  # user_id
     display_name: str = ""  # human label shown in the invite list
+    # Lowercased guest emails allowed to accept; empty = anyone with the link.
+    # Never returned by the public validate endpoint.
+    allowed_emails: list[str] = Field(default_factory=list)
     max_uses: int = 0  # 0 = unlimited
     use_count: int = 0
     guest_identities: list[str] = Field(default_factory=list)

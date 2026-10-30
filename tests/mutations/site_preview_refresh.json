@@ -38,8 +38,8 @@
   {
     "label": "preview refresh: a cross-tenant site id is photographed instead of 404ing",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    site = await _load(workspace_id, site_id)\n\n    url = (getattr(site, \"url\", \"\") or \"\").strip()",
-    "replace": "    site = await _SiteDoc.find_one({\"_id\": ObjectId(site_id)})\n    if site is None:\n        raise NotFound(\"site\", site_id)\n\n    url = (getattr(site, \"url\", \"\") or \"\").strip()",
+    "find": "    site = await _load(workspace_id, site_id)\n\n    target = await capture_target(site)",
+    "replace": "    site = await _SiteDoc.find_one({\"_id\": ObjectId(site_id)})\n    if site is None:\n        raise NotFound(\"site\", site_id)\n\n    target = await capture_target(site)",
     "tests": [
       "tests/ee/sites/test_preview_refresh.py"
     ]

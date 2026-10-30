@@ -334,8 +334,9 @@ class LedgerRow(BaseModel):
     # The OutcomeStatus value ("solved" / "partial" / "not_solved" / "unknown")
     # when this row carries a verdict. None on every kind that isn't a verdict.
     outcome: str | None = None
-    # Attributed value in minor units, when it is genuinely known (a cart total,
-    # a checkout). Deliberately RAW — whether the owner's "value" is order value,
+    # Attributed value in ISO 4217 minor units of ``currency`` (the name is
+    # historical), when it is genuinely known (a cart total, a checkout).
+    # Deliberately RAW — whether the owner's "value" is order value,
     # fee, or margin is an outcome-metering question, and baking one answer in
     # here would make the other two unrecoverable.
     value_cents: int | None = None
