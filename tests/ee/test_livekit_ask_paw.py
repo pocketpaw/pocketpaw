@@ -201,12 +201,18 @@ def grounding():
     store = MagicMock()
     store.list_facts_in_workspace = AsyncMock(return_value=facts)
     post = AsyncMock(return_value="m1")
+    room = AsyncMock(return_value={"participants": [{"identity": "u1"}, {"identity": "call-bot"}]})
+    chat = AsyncMock(return_value=[])
+    names = AsyncMock(return_value={})
     with (
         patch("pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope", kb),
         patch("pocketpaw_ee.cloud.memory.mongo_store.MongoMemoryStore", return_value=store),
         patch("pocketpaw_ee.cloud.livekit.service.post_call_bot_message", post),
+        patch("pocketpaw_ee.cloud.livekit.service.get_room_info", room),
+        patch("pocketpaw_ee.cloud.chat.message_service.list_recent_for_group", chat),
+        patch("pocketpaw_ee.cloud.auth.service.resolve_display_names", names),
     ):
-        yield SimpleNamespace(kb=kb, store=store, post=post)
+        yield SimpleNamespace(kb=kb, store=store, post=post, room=room, chat=chat, names=names)
 
 
 async def _commands(pubsub) -> list[dict]:
@@ -1049,7 +1055,12 @@ async def test_kb_gets_a_longer_budget_than_the_other_sources(redis, grounding) 
             question="?",
             ask_id="a1",
         )
-    assert budgets == {"live transcript": 1.5, "knowledge base": 3.0, "memory facts": 1.5}
+    assert budgets == {
+        "live transcript": 1.5,
+        "knowledge base": 3.0,
+        "memory facts": 1.5,
+        "group chat": 1.5,
+    }
 
 
 async def _ask(redis, question: str) -> tuple[str, str]:
@@ -1114,3 +1125,54 @@ async def test_a_real_question_is_looked_up_as_asked(redis, grounding) -> None:
     await _ask(redis, "When is the launch date?")
 
     assert grounding.kb.await_args.args[1] == "When is the launch date?"
+
+
+def _msg(content: str, sender: str = "u2", sender_type: str = "user", **extra) -> SimpleNamespace:
+    base = {"sender_name": None, "agent": None}
+    base.update(extra)
+    return SimpleNamespace(content=content, sender=sender, sender_type=sender_type, **base)
+
+
+async def test_recent_group_chat_reaches_the_prompt_with_names(redis, grounding) -> None:
+    grounding.chat.return_value = [
+        _msg("Can we move the demo to Thursday?", sender="u2"),
+        _msg(
+            "Thursday works, I'll update the deck.",
+            sender="a9",
+            sender_type="agent",
+            sender_name="Scout",
+        ),
+        _msg("   "),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    system, user = await _ask(redis, "hi")
+
+    assert grounding.chat.await_args.args[0] == GROUP
+    assert "<group-chat>" in user
+    assert "Sam: Can we move the demo to Thursday?" in user
+    assert "Scout: Thursday works, I'll update the deck." in user
+    assert "recent group chat" in " ".join(system.split()).lower()
+
+
+async def test_group_chat_is_left_out_while_a_guest_is_in_the_call(redis, grounding) -> None:
+    grounding.room.return_value = {
+        "participants": [{"identity": "u1"}, {"identity": "guest-4f2a"}, {"identity": "call-bot"}]
+    }
+    grounding.chat.return_value = [_msg("Members-only pricing: 40% off for Acme.")]
+
+    _, user = await _ask(redis, "hi")
+
+    grounding.chat.assert_not_awaited()
+    assert "Acme" not in user
+    assert "<group-chat>\n(none)\n</group-chat>" in user
+
+
+async def test_group_chat_is_left_out_when_the_room_cannot_be_checked(redis, grounding) -> None:
+    grounding.room.side_effect = RuntimeError("livekit down")
+    grounding.chat.return_value = [_msg("Members-only note.")]
+
+    _, user = await _ask(redis, "hi")
+
+    grounding.chat.assert_not_awaited()
+    assert "Members-only note." not in user
