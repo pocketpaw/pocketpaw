@@ -1,29 +1,24 @@
 # Discover — the source registry.
 #
-# Created 2026-10-01 (feat/discover-index). A source is a product that publishes
-# into Discover (site templates first). It names the ``kinds`` its listings may
-# carry and a ``use(workspace_id, user_id, source_id, name)`` that makes the
-# caller their own copy and returns the source's result dict. Registration is
-# by name and idempotent: registering a name again replaces it.
-# ``register_builtin_sources`` runs from ``mount_cloud``.
+# A source is a product that publishes into Discover (site templates, studio
+# templates). It names the ``kinds`` its listings may carry and a
+# ``use(workspace_id, user_id, source_id, name)`` that makes the caller their
+# own copy and returns the source's result dict. Registration is by name and
+# idempotent: registering a name again replaces it. ``register_builtin_sources``
+# runs from ``mount_cloud``.
 #
-# Updated 2026-10-02 (feat/discover-index, hardening): optional
-# ``set_hidden(source_id, hidden)`` so a Discover hide / unhide reaches the
-# source item (site templates: ``service_admin.set_hidden_from_discover``);
-# ``hide_at_source`` calls it when the source has one.
+# Optional hooks: ``set_hidden(source_id, hidden)`` lets a Discover hide / unhide
+# reach the source item (``hide_at_source`` calls it when present);
+# ``get_public`` / ``iter_public`` make the index source-generic. Both return
+# rows already mapped to listing fields plus ``id`` / ``public`` / ``hidden``
+# (see ``DiscoverSource``).
 #
-# Updated 2026-10-02 (feat/discover-source-contract): optional ``get_public`` /
-# ``iter_public`` make the index source-generic. Both return rows already
-# mapped to listing fields plus ``id`` / ``public`` / ``hidden`` (see
-# ``DiscoverSource``); the site-template mapping (``name`` -> ``title``) and its
-# reindex-time ``live_url`` refresh moved here from ``service_admin``.
-#
-# Updated 2026-10-02 (feat/studio-templates): the ``studio_template`` source
-# (kinds image / video / music). Its rows come from
-# ``studio_templates.service_admin`` already in listing shape (absolute media
-# URLs, ``media_kind`` / ``media_url``). Its ``use`` returns the template's
-# ``{recipe, uses_input_images}`` and creates nothing: the caller runs the
-# recipe in Studio themselves.
+# Site templates map ``name`` -> ``title`` and ``remixed_from_template_id`` ->
+# ``remixed_from_source_id`` (the template the source site was made from), and
+# carry ``tags`` / ``show_creator``; the reindex re-reads each one's
+# ``live_url``. Studio template rows come from ``studio_templates.service_admin``
+# already in listing shape; its ``use`` returns the template's
+# ``{recipe, uses_input_images}`` and creates nothing.
 
 from __future__ import annotations
 
@@ -43,7 +38,8 @@ class DiscoverSource:
 
     ``get_public(source_id)`` / ``iter_public()`` return Discover rows: the
     ``UpsertListingRequest`` fields (workspace, owner, kind, title, description,
-    audiences, preview_image_url, live_url) plus ``id`` (the source id),
+    audiences, preview_image_url, live_url, and optionally tags, show_creator,
+    remixed_from_source_id, media_kind, media_url) plus ``id`` (the source id),
     ``public`` (belongs in the index) and ``hidden`` (its listing must stay
     hidden). ``get_public`` returns ``None`` for a missing item; ``iter_public``
     yields every public item, hidden ones included. A source without them can't
@@ -106,6 +102,9 @@ def _site_template_row(row: dict[str, Any]) -> dict[str, Any]:
         "audiences": row["audiences"],
         "preview_image_url": row["preview_image_url"],
         "live_url": row["live_url"],
+        "tags": row.get("tags") or [],
+        "show_creator": bool(row.get("show_creator")),
+        "remixed_from_source_id": row.get("remixed_from_template_id"),
     }
 
 

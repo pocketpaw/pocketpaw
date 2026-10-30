@@ -15,8 +15,18 @@
 # is partial (strings only) and they don't collide (tests/conftest.py forwards
 # the partial filter to mongomock).
 #
-# ``workspace``, ``owner``, ``reports``, ``hidden`` and ``source_id`` never reach
-# the public wire (``discover.dto.PublicListingResponse`` is an allow-list).
+# The source also owns ``tags`` (``_core.tags`` dialect), ``show_creator`` (the
+# owner opted in to their name on the public card) and ``remixed_from_source_id``
+# (the item, in the same source, this one was made from).
+#
+# ``withdrawn`` is a tombstone: when the source item goes private or is deleted
+# the row is kept, its source content blanked, so its ``slug`` stays reserved (no
+# stranger inherits a shared link) and a re-publish revives the SAME row, id and
+# slug. Every public and staff read skips withdrawn rows.
+#
+# ``workspace``, ``owner``, ``reports``, ``hidden``, ``source_id`` and
+# ``remixed_from_source_id`` never reach the public wire
+# (``discover.dto.PublicListingResponse`` is an allow-list).
 # Index ``(hidden, _id desc)`` serves the public list's filter + newest-first sort.
 #
 # Only ``ee.cloud.discover.service`` / ``service_admin`` import this doc
@@ -47,6 +57,10 @@ class DiscoverListing(TimestampedDocument):
     live_url: str | None = None
     media_kind: str | None = None
     media_url: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    show_creator: bool = False
+    remixed_from_source_id: str | None = None
+    withdrawn: bool = False
     slug: str | None = None
     featured: bool = False
     hidden: bool = False
@@ -67,4 +81,5 @@ class DiscoverListing(TimestampedDocument):
             IndexModel([("hidden", 1), ("_id", -1)]),
             IndexModel([("kind", 1)]),
             IndexModel([("audiences", 1)]),
+            IndexModel([("tags", 1)]),
         ]

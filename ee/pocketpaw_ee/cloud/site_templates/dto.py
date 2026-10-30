@@ -7,15 +7,19 @@
 # template does not reveal who made it or where. ``preview_image_url`` is a
 # public-rail https URL or ``None``, safe to show to any viewer.
 #
-# Updated 2026-10-01 (feat/discover-index): save and PATCH accept ``kind`` and
-# ``audiences``; the response carries ``kind``, ``audiences`` and ``live_url``.
+# Save and PATCH take the Discover fields ``kind``, ``audiences``, ``tags``
+# (normalised by ``_core.tags.normalize_tags``: at most 8, each 1-32 of
+# ``[a-z0-9-]``) and ``show_creator`` (put the owner's display name on the
+# public Discover card); the response carries them plus ``live_url``.
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from pocketpaw_ee.cloud._core.tags import normalize_tags
 
 Visibility = Literal["private", "workspace", "public"]
 Kind = Literal["site", "tool", "game"]
@@ -38,6 +42,13 @@ class SaveSiteTemplateRequest(BaseModel):
     visibility: Visibility = "private"
     kind: Kind = "site"
     audiences: list[Audience] = Field(default_factory=list, max_length=4)
+    tags: list[str] = Field(default_factory=list)
+    show_creator: bool = False
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _tags(cls, value: list[str] | None) -> list[str]:
+        return normalize_tags(value)
 
 
 class PatchSiteTemplateRequest(BaseModel):
@@ -50,6 +61,13 @@ class PatchSiteTemplateRequest(BaseModel):
     visibility: Visibility | None = None
     kind: Kind | None = None
     audiences: list[Audience] | None = Field(default=None, max_length=4)
+    tags: list[str] | None = None
+    show_creator: bool | None = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _tags(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else normalize_tags(value)
 
 
 class ListSiteTemplatesRequest(BaseModel):
@@ -105,6 +123,8 @@ class SiteTemplateResponse(BaseModel):
     kind: str = "site"
     audiences: list[str] = Field(default_factory=list)
     live_url: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    show_creator: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
