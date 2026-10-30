@@ -1178,37 +1178,6 @@ async def test_group_chat_is_left_out_when_the_room_cannot_be_checked(redis, gro
     assert "Members-only note." not in system
 
 
-async def test_paws_own_lines_are_labelled_as_its_own_not_as_the_call(redis) -> None:
-    key = f"livekit:transcript:{GROUP}"
-    await redis.rpush(key, json.dumps({"speaker": "Ann", "text": "Pricing ships Friday.", "ts": 1}))
-    await redis.rpush(
-        key, json.dumps({"identity": "call-bot", "speaker": "Paw", "text": "Hi there!", "ts": 2})
-    )
-
-    text = await assistant.read_live_transcript(GROUP)
-
-    assert "Ann: Pricing ships Friday." in text
-    assert "Paw (you, earlier): Hi there!" in text
-    assert "\nPaw: Hi there!" not in text
-
-
-async def test_paws_chat_replies_are_labelled_as_its_own(redis, grounding) -> None:
-    grounding.chat.return_value = [
-        _msg("Pricing ships Friday.", sender="u2"),
-        _msg(
-            "**Q (Admin):** hi\n**Paw:** Hi there! We discussed workflow.",
-            sender="__livekit_call_bot__",
-            sender_name="Paw",
-        ),
-    ]
-    grounding.names.return_value = {"u2": "Sam"}
-
-    system, _ = await _ask(redis, "what did we decide")
-
-    assert "Sam: Pricing ships Friday." in system
-    assert "Paw (you, earlier): **Q (Admin):** hi **Paw:** Hi there!" in system
-
-
 async def test_one_long_chat_message_does_not_push_out_the_older_ones(redis, grounding) -> None:
     grounding.chat.return_value = [
         _msg("Older decision: demo moves to Thursday.", sender="u2"),
@@ -1224,14 +1193,6 @@ async def test_one_long_chat_message_does_not_push_out_the_older_ones(redis, gro
     assert "x" * 1000 not in system
 
 
-async def test_the_prompt_says_paws_own_lines_are_not_evidence(redis, grounding) -> None:
-    system, _ = await _ask(redis, "what deadline are we discussing")
-    flat = " ".join(system.split()).lower()
-
-    assert "paw (you, earlier)" in flat
-    assert "not evidence of what anyone said" in flat
-
-
 async def test_the_prompt_greets_only_a_bare_greeting(redis, grounding) -> None:
     system, _ = await _ask(redis, "what deadline are we discussing")
     flat = " ".join(system.split()).lower()
@@ -1240,72 +1201,11 @@ async def test_the_prompt_greets_only_a_bare_greeting(redis, grounding) -> None:
     assert "do not open with a greeting" in flat
 
 
-async def test_only_paws_latest_answer_stays_in_the_call_context(redis) -> None:
-    key = f"livekit:transcript:{GROUP}"
-    for speaker, text in [
-        ("Paw", "I don't have that information."),
-        ("Paw", "Sorry."),
-        ("Ann", "Pricing ships Friday."),
-        ("Paw", "Got it, Friday."),
-        ("Paw", "Anything else?"),
-    ]:
-        await redis.rpush(key, json.dumps({"speaker": speaker, "text": text, "ts": 1}))
-
-    text = await assistant.read_live_transcript(GROUP)
-
-    assert "I don't have that information." not in text and "Sorry." not in text
-    assert "Ann: Pricing ships Friday." in text
-    assert "Paw (you, earlier): Got it, Friday." in text
-    assert "Paw (you, earlier): Anything else?" in text
-
-
-async def test_group_chat_keeps_people_and_only_paws_latest_reply(redis, grounding) -> None:
-    bot = "__livekit_call_bot__"
-    grounding.chat.return_value = [
-        _msg("**Q (Admin):** hi\n**Paw:** I don't have that.", sender=bot, sender_name="Paw"),
-        _msg("Ship the Hunts README today.", sender="u2"),
-        _msg("📋 **Meeting Notes** [Paw]: Sorry.", sender=bot, sender_name="Meeting Notes"),
-        _msg("​", sender="u2"),
-        _msg("**Q (Admin):** status?\n**Paw:** README ships today.", sender=bot, sender_name="Paw"),
-    ]
-    grounding.names.return_value = {"u2": "Sam"}
-
-    system, _ = await _ask(redis, "what was the last message")
-
-    assert grounding.chat.await_args.kwargs["limit"] == 40
-    assert "Sam: Ship the Hunts README today." in system
-    assert "Meeting Notes" not in system
-    assert "I don't have that." not in system
-    assert "**Paw:** README ships today." in system
-    assert "Sam: ​" not in system
-
-
 async def test_the_prompt_says_the_chat_is_oldest_first(redis, grounding) -> None:
     system, _ = await _ask(redis, "what was the last message")
     flat = " ".join(system.split()).lower()
 
     assert "oldest first" in flat and "last line is the newest message" in flat
-
-
-async def test_in_a_typed_only_call_only_paws_newest_answer_is_kept(redis) -> None:
-    key = f"livekit:transcript:{GROUP}"
-    for ts, text in [
-        (100.0, "I don't have that information."),
-        (130.0, "I can't answer that."),
-        (131.5, "Sorry."),
-        (160.0, "The README ships today."),
-        (163.0, "Sam owns it."),
-    ]:
-        await redis.rpush(
-            key, json.dumps({"identity": "call-bot", "speaker": "Paw", "text": text, "ts": ts})
-        )
-
-    text = await assistant.read_live_transcript(GROUP)
-
-    assert "I don't have that information." not in text
-    assert "I can't answer that." not in text and "Sorry." not in text
-    assert "Paw (you, earlier): The README ships today." in text
-    assert "Paw (you, earlier): Sam owns it." in text
 
 
 async def test_context_rides_in_the_system_prompt_and_the_user_turn_is_the_question(
@@ -1322,3 +1222,47 @@ async def test_context_rides_in_the_system_prompt_and_the_user_turn_is_the_quest
     assert system.startswith(assistant.ASK_PAW_PROMPT)
     assert "<call-context>" in system and "Sam: Pricing ships Friday." in system
     assert "<group-chat>" in system and "<workspace-knowledge>" in system
+
+
+async def test_paws_own_lines_never_reach_the_call_context(redis) -> None:
+    key = f"livekit:transcript:{GROUP}"
+    for seg in [
+        {"identity": "call-bot", "speaker": "Paw", "text": "I don't have that.", "ts": 1},
+        {"identity": "u2", "speaker": "Ann", "text": "Pricing ships Friday.", "ts": 2},
+        {"identity": "call-bot", "speaker": "Paw", "text": "Got it, Friday.", "ts": 3},
+    ]:
+        await redis.rpush(key, json.dumps(seg))
+
+    text = await assistant.read_live_transcript(GROUP)
+
+    assert "Ann: Pricing ships Friday." in text
+    assert "I don't have that." not in text and "Got it, Friday." not in text
+
+
+async def test_a_typed_only_call_has_no_call_lines_at_all(redis) -> None:
+    await redis.rpush(
+        f"livekit:transcript:{GROUP}",
+        json.dumps({"identity": "call-bot", "speaker": "Paw", "text": "Sorry.", "ts": 1}),
+    )
+
+    assert await assistant.read_live_transcript(GROUP) == ""
+
+
+async def test_group_chat_keeps_people_and_none_of_the_call_bots_posts(redis, grounding) -> None:
+    bot = "__livekit_call_bot__"
+    grounding.chat.return_value = [
+        _msg("**Q (Admin):** hi\n**Paw:** I don't have that.", sender=bot, sender_name="Paw"),
+        _msg("Ship the Hunts README today.", sender="u2"),
+        _msg("📋 **Meeting Notes** [Paw]: Sorry.", sender=bot, sender_name="Meeting Notes"),
+        _msg("\u200b", sender="u2"),
+        _msg("**Q (Admin):** status?\n**Paw:** README ships today.", sender=bot, sender_name="Paw"),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    system, _ = await _ask(redis, "what was the last message")
+
+    assert grounding.chat.await_args.kwargs["limit"] == 40
+    assert "Sam: Ship the Hunts README today." in system
+    assert "Meeting Notes" not in system
+    assert "I don't have that." not in system and "README ships today." not in system
+    assert "Sam: \u200b" not in system

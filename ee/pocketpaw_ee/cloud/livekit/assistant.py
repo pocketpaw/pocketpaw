@@ -76,8 +76,6 @@ _MIN_QUERY_TERMS = 2
 _CHAT_MESSAGES = 40
 _CHAT_MAX_CHARS = 3000
 _CHAT_MESSAGE_MAX_CHARS = 400
-_PAW_EARLIER = "Paw (you, earlier)"
-_ANSWER_GAP_SECONDS = 10.0
 _INVISIBLE = re.compile("[\u200b-\u200f\u2060\ufeff]")
 _FALLBACK_QUERY_LINES = 3
 _SHARED_MEMORY_USER_IDS = (None, "", "default")
@@ -372,32 +370,15 @@ async def read_live_transcript(group_id: str, max_chars: int = 12000) -> str:
 
     lines: list[str] = []
     budget = max_chars
-    seen_paw = past_latest_answer = False
-    last_paw_ts: float | None = None
     for raw in reversed(raw_segments or []):
         try:
             seg = json.loads(raw)
         except ValueError:
             continue
         text = str(seg.get("text") or "").strip()
-        if not text:
+        if not text or seg.get("identity") == BOT_IDENTITY or seg.get("speaker") == PAW_SPEAKER:
             continue
         speaker = seg.get("speaker") or "Someone"
-        if seg.get("identity") == BOT_IDENTITY or speaker == PAW_SPEAKER:
-            ts = _float_or_none(seg.get("ts"))
-            if (
-                last_paw_ts is not None
-                and ts is not None
-                and last_paw_ts - ts > _ANSWER_GAP_SECONDS
-            ):
-                past_latest_answer = True
-            if past_latest_answer:
-                continue
-            seen_paw = True
-            last_paw_ts = ts if ts is not None else last_paw_ts
-            speaker = _PAW_EARLIER
-        elif seen_paw:
-            past_latest_answer = True
         line = f"{speaker}: {text}"
         if len(line) + 1 > budget:
             break
@@ -411,13 +392,6 @@ async def read_live_transcript(group_id: str, max_chars: int = 12000) -> str:
     if lines:
         parts.append("Recent conversation:\n" + "\n".join(lines))
     return "\n\n".join(parts)
-
-
-def _float_or_none(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 async def _kb_context(workspace_id: str, question: str) -> str:
@@ -466,11 +440,9 @@ async def _memory_facts(workspace_id: str, question: str) -> list[str]:
 
 
 async def _group_chat(group_id: str) -> str:
-    """People's recent group chat, newest last, plus Paw's latest reply.
+    """People's recent group chat, newest last, or nothing while a guest is in the call.
 
-    The call bot's meeting-notes posts and Paw's older replies are left out, so Paw
-    is not handed its own output as if people had said it. Nothing while a guest
-    is in the call.
+    The call bot's own posts (Paw's Q&A records and meeting notes) are left out.
     """
     from pocketpaw_ee.cloud.auth.service import resolve_display_names
     from pocketpaw_ee.cloud.chat import message_service
@@ -488,17 +460,13 @@ async def _group_chat(group_id: str) -> str:
 
     lines: list[str] = []
     budget = _CHAT_MAX_CHARS
-    kept_paw_reply = False
     for m in reversed(messages):
         text = _one_line(_INVISIBLE.sub("", m.content or ""))[:_CHAT_MESSAGE_MAX_CHARS]
         if not text:
             continue
         if m.sender == CALL_BOT_USER_ID:
-            if m.sender_name != PAW_SPEAKER or kept_paw_reply:
-                continue
-            kept_paw_reply = True
-            name = _PAW_EARLIER
-        elif m.sender_type == "agent":
+            continue
+        if m.sender_type == "agent":
             name = m.sender_name or m.agent or "An agent"
         else:
             name = m.sender_name or names.get(m.sender or "") or "A member"
