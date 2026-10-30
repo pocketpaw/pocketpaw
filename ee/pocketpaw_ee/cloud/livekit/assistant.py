@@ -42,6 +42,8 @@ from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import CallAssistantState
 from pocketpaw_ee.cloud.livekit.agent import (
     _REDIS_PROGRESSIVE_KEY,
+    BOT_IDENTITY,
+    PAW_SPEAKER,
     REDIS_ASK_DONE_KEY,
     REDIS_ASK_QUESTION_KEY,
     REDIS_BOT_CMD_CHANNEL,
@@ -73,6 +75,7 @@ _MEMORY_TOP_K = 8
 _MIN_QUERY_TERMS = 2
 _CHAT_MESSAGES = 20
 _CHAT_MAX_CHARS = 3000
+_PAW_EARLIER = "Paw (you, earlier)"
 _FALLBACK_QUERY_LINES = 3
 _SHARED_MEMORY_USER_IDS = (None, "", "default")
 
@@ -374,7 +377,10 @@ async def read_live_transcript(group_id: str, max_chars: int = 12000) -> str:
         text = str(seg.get("text") or "").strip()
         if not text:
             continue
-        line = f"{seg.get('speaker') or 'Someone'}: {text}"
+        speaker = seg.get("speaker") or "Someone"
+        if seg.get("identity") == BOT_IDENTITY or speaker == PAW_SPEAKER:
+            speaker = _PAW_EARLIER
+        line = f"{speaker}: {text}"
         if len(line) + 1 > budget:
             break
         budget -= len(line) + 1
@@ -438,7 +444,7 @@ async def _group_chat(group_id: str) -> str:
     """The group's recent chat, newest last, or nothing while a guest is in the call."""
     from pocketpaw_ee.cloud.auth.service import resolve_display_names
     from pocketpaw_ee.cloud.chat import message_service
-    from pocketpaw_ee.cloud.livekit.service import get_room_info
+    from pocketpaw_ee.cloud.livekit.service import CALL_BOT_USER_ID, get_room_info
 
     room = await get_room_info(group_id)
     if room is None or any(
@@ -456,7 +462,9 @@ async def _group_chat(group_id: str) -> str:
         text = _one_line(m.content or "")
         if not text:
             continue
-        if m.sender_type == "agent":
+        if m.sender == CALL_BOT_USER_ID and m.sender_name == PAW_SPEAKER:
+            name = _PAW_EARLIER
+        elif m.sender_type == "agent":
             name = m.sender_name or m.agent or "An agent"
         else:
             name = m.sender_name or names.get(m.sender or "") or "A member"

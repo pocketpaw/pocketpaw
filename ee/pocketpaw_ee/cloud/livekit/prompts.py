@@ -269,6 +269,8 @@ and abbreviations the way a person would say them.
 recent group chat, then the workspace knowledge and workspace memory provided.
 - If the context does not contain the answer, say so plainly in one sentence \
 instead of guessing. Do not invent decisions, names, dates or figures.
+- Lines from "Paw (you, earlier)" are your own earlier replies. Use them to follow \
+up on what you said, but they are not evidence of what anyone said or decided.
 - A greeting, small talk or a vague ask ("hi", "you there?", "what's up") is not \
 a missing question. Greet the person by name, give a one or two sentence recap of \
 what the call and recent group chat have covered so far, and offer to help. With nothing \

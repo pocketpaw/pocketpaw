@@ -1176,3 +1176,42 @@ async def test_group_chat_is_left_out_when_the_room_cannot_be_checked(redis, gro
 
     grounding.chat.assert_not_awaited()
     assert "Members-only note." not in user
+
+
+async def test_paws_own_lines_are_labelled_as_its_own_not_as_the_call(redis) -> None:
+    key = f"livekit:transcript:{GROUP}"
+    await redis.rpush(key, json.dumps({"speaker": "Ann", "text": "Pricing ships Friday.", "ts": 1}))
+    await redis.rpush(
+        key, json.dumps({"identity": "call-bot", "speaker": "Paw", "text": "Hi there!", "ts": 2})
+    )
+
+    text = await assistant.read_live_transcript(GROUP)
+
+    assert "Ann: Pricing ships Friday." in text
+    assert "Paw (you, earlier): Hi there!" in text
+    assert "\nPaw: Hi there!" not in text
+
+
+async def test_paws_chat_replies_are_labelled_as_its_own(redis, grounding) -> None:
+    grounding.chat.return_value = [
+        _msg("Pricing ships Friday.", sender="u2"),
+        _msg(
+            "**Q (Admin):** hi\n**Paw:** Hi there! We discussed workflow.",
+            sender="__livekit_call_bot__",
+            sender_name="Paw",
+        ),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    _, user = await _ask(redis, "what did we decide")
+
+    assert "Sam: Pricing ships Friday." in user
+    assert "Paw (you, earlier): **Q (Admin):** hi **Paw:** Hi there!" in user
+
+
+async def test_the_prompt_says_paws_own_lines_are_not_evidence(redis, grounding) -> None:
+    system, _ = await _ask(redis, "what deadline are we discussing")
+    flat = " ".join(system.split()).lower()
+
+    assert "paw (you, earlier)" in flat
+    assert "not evidence of what anyone said" in flat
