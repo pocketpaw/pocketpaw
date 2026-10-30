@@ -1215,3 +1215,11 @@ async def test_the_prompt_says_paws_own_lines_are_not_evidence(redis, grounding)
 
     assert "paw (you, earlier)" in flat
     assert "not evidence of what anyone said" in flat
+
+
+async def test_the_prompt_greets_only_a_bare_greeting(redis, grounding) -> None:
+    system, _ = await _ask(redis, "what deadline are we discussing")
+    flat = " ".join(system.split()).lower()
+
+    assert "only when the whole message is a greeting" in flat
+    assert "do not open with a greeting" in flat
