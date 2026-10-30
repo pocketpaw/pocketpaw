@@ -327,6 +327,7 @@ from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea
+from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile
 from pocketpaw_ee.cloud.models.social_pulse import SocialPulse
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
@@ -740,6 +741,7 @@ def get_all_documents():
         SocialProfile,
         SocialIdea,
         SocialPulse,
+        SocialPostizOrg,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,
