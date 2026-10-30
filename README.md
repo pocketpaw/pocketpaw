@@ -305,7 +305,7 @@ PocketPaw uses a secondary LLM (**Guardian AI**) to review every tool call befor
 * **Self-audit Daemon** with append-only audit logs.
 
 > [!TIP]
-> Full details and configuration options are available in the [Security Documentation](./docs/SECURITY.md) or on the [official website](https://pocketpaw.xyz/security).
+> Full details and configuration options are available in the [Security Documentation](./docs/security/index.mdx) or on the [official website](https://pocketpaw.xyz/security).
 
 <details>
 <summary>Detailed security architecture</summary>

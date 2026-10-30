@@ -406,3 +406,8 @@ addopts = "--ignore=tests/cloud --ignore=tests/e2e"
 markers = [
     "enforce_scope: opt a test out of the global _TESTING_FULL_ACCESS bypass so require_scope fails closed as in production",
 ]
+
+[tool.uv]
+# hatchling 1.30+ refuses to build the soul-protocol 0.3.1 sdist (duplicate
+# force-include path). Drop this once main moves to a soul-protocol with a wheel.
+build-constraint-dependencies = ["hatchling<1.30"]
