@@ -213,6 +213,8 @@ class _AttrDict:
         self._source = source
 
     def __getattr__(self, key: str):
+        if key == "id":
+            return self._source.get("id") or self._source.get("_id")
         return self._source.get(key)
 
 
