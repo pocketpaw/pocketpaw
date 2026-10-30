@@ -18,7 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from daytona import (
@@ -29,6 +30,7 @@ from daytona import (
     ExecuteResponse,
     FileUpload,
     Image,
+    ListSandboxesQuery,
     PtySize,
     Resources,
 )
@@ -39,6 +41,15 @@ from pocketpaw_ee.cloud.daytona.config import daytona_api_key, daytona_api_url
 from pocketpaw_ee.cloud.daytona.image import resolve_sandbox_image
 
 logger = logging.getLogger(__name__)
+
+#: ``timeout`` for ``AsyncDaytona.create``. The SDK default (60s) is shorter than a cold
+#: server-side build of a dynamic ``Image`` (52s measured in prod, with no headroom), and
+#: a create abandoned mid-build leaves Daytona's cached build of that image failed for
+#: every later create (``BUILD_FAILED: context canceled``). 15 minutes is far past any
+#: image build yet still bounds a create that hangs on Daytona's side, which matters for
+#: callers with no deadline of their own (workspace VMs, Code Mode). A build-lane cancel
+#: goes through ``admission.create_admitted``, which lets the create finish first.
+CREATE_TIMEOUT_SECONDS = 15 * 60
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -59,6 +70,7 @@ class SandboxInfo:
     region_id: str = ""
     created_at: str = ""
     last_activity_at: str = ""
+    labels: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -160,7 +172,10 @@ class DaytonaClient:
         cpu: int = 2,
         memory: int = 4,
         disk: int = 10,
-        auto_stop_interval: int = 3600,
+        auto_stop_interval: int = 30,
+        auto_archive_interval: int | None = None,
+        auto_delete_interval: int | None = None,
+        labels: dict[str, str] | None = None,
     ) -> SandboxInfo:
         """Create a new sandbox using the SDK.
 
@@ -183,7 +198,19 @@ class DaytonaClient:
             cpu: Number of CPUs.
             memory: Memory in GB.
             disk: Disk size in GB.
-            auto_stop_interval: Seconds of inactivity before auto-stop.
+            auto_stop_interval: MINUTES of inactivity before the VM auto-stops.
+                (The SDK counts these in minutes, NOT seconds. This default was
+                once 3600, i.e. 60 HOURS of an idle VM holding the org's memory
+                limit. 0 disables auto-stop.) Every caller passes its own value;
+                the default only protects a new caller that forgets.
+            auto_archive_interval: MINUTES after a stop before the VM is
+                auto-archived. ``None`` leaves the SDK default in place.
+            auto_delete_interval: MINUTES after a stop before the VM is
+                auto-deleted (``0`` = delete immediately on stop, ``-1`` =
+                never). ``None`` leaves the SDK default in place.
+            labels: Daytona labels stamped on the sandbox (``paw_lane``,
+                ``paw_job``, ...), so it can be found by label later. ``None``
+                sends none.
         """
         daytona = await self._ensure_daytona()
 
@@ -204,16 +231,26 @@ class DaytonaClient:
             disk,
         )
 
-        params = CreateSandboxFromImageParams(
-            name=name,
-            image=resolved_image,
-            resources=Resources(cpu=cpu, memory=memory, disk=disk),
-            auto_stop_interval=auto_stop_interval,
-        )
+        create_kwargs: dict[str, Any] = {
+            "name": name,
+            "image": resolved_image,
+            "resources": Resources(cpu=cpu, memory=memory, disk=disk),
+            "auto_stop_interval": auto_stop_interval,
+        }
+        # Only set the archive/delete lifecycle knobs when a caller opts in — a
+        # None leaves the SDK's own default in place (so existing callers keep
+        # their behaviour; the Web Cursor path passes explicit values).
+        if auto_archive_interval is not None:
+            create_kwargs["auto_archive_interval"] = auto_archive_interval
+        if auto_delete_interval is not None:
+            create_kwargs["auto_delete_interval"] = auto_delete_interval
+        if labels:
+            create_kwargs["labels"] = dict(labels)
+        params = CreateSandboxFromImageParams(**create_kwargs)
         if language:
             params.language = language
 
-        sandbox = await daytona.create(params)
+        sandbox = await daytona.create(params, timeout=CREATE_TIMEOUT_SECONDS)
         sb = await self._parse_sandbox(sandbox)
         logger.info("Sandbox created: id=%s name=%s state=%s", sb.id, sb.name, sb.state)
         return sb
@@ -224,18 +261,29 @@ class DaytonaClient:
         sandbox = await daytona.get(sandbox_id)
         return await self._parse_sandbox(sandbox)
 
-    async def list_sandboxes(self) -> list[SandboxInfo]:
-        """List all sandboxes via the SDK."""
+    async def list_sandboxes(self, labels: dict[str, str] | None = None) -> list[SandboxInfo]:
+        """List sandboxes via the SDK; ``labels`` filters server-side when given."""
         daytona = await self._ensure_daytona()
+        query = ListSandboxesQuery(labels=dict(labels)) if labels else None
         results = []
-        async for sb in daytona.list():
+        async for sb in daytona.list(query):
             results.append(await self._parse_sandbox(sb))
         return results
 
-    async def find_sandbox_by_name(self, name: str) -> SandboxInfo | None:
-        """Find a sandbox by name using the SDK."""
+    async def list_sandboxes_by_prefix(
+        self, prefix: str, *, created_before: datetime | None = None
+    ) -> list[SandboxInfo]:
+        """Sandboxes whose name starts with ``prefix`` (server-side, case-insensitive),
+        optionally only those created before ``created_before``. Callers re-check the
+        exact prefix."""
         daytona = await self._ensure_daytona()
-        async for sb in daytona.list():
+        query = ListSandboxesQuery(name=prefix, created_at_before=created_before)
+        return [await self._parse_sandbox(sb) async for sb in daytona.list(query)]
+
+    async def find_sandbox_by_name(self, name: str) -> SandboxInfo | None:
+        """Find a sandbox by its exact name (the server filters by name prefix)."""
+        daytona = await self._ensure_daytona()
+        async for sb in daytona.list(ListSandboxesQuery(name=name)):
             if sb.name == name:
                 return await self._parse_sandbox(sb)
         return None
@@ -256,6 +304,20 @@ class DaytonaClient:
         """Stop a sandbox."""
         sb = await self.get_sandbox_instance(sandbox_id)
         await sb.stop()
+
+    async def set_sandbox_lifecycle(
+        self,
+        sandbox_id: str,
+        *,
+        auto_stop_interval: int,
+        auto_archive_interval: int,
+        auto_delete_interval: int,
+    ) -> None:
+        """Re-apply the idle lifecycle (all MINUTES) to an existing sandbox."""
+        sb = await self.get_sandbox_instance(sandbox_id)
+        await sb.set_autostop_interval(auto_stop_interval)
+        await sb.set_auto_archive_interval(auto_archive_interval)
+        await sb.set_auto_delete_interval(auto_delete_interval)
 
     async def wait_for_sandbox(
         self,
@@ -364,6 +426,18 @@ class DaytonaClient:
         fs = await self.get_fs(sandbox_id)
         await fs.delete_file(path, recursive=recursive)
 
+    async def move_file(self, sandbox_id: str, src: str, dst: str) -> None:
+        """Move or rename a file/dir in the sandbox (rename == move).
+
+        Delegates to the SDK filesystem ``move_files(source, destination)``. The
+        parent directory of *dst* must already exist — inside the Web Cursor jail
+        the destination's parent is the project dir (or an existing subdir), so a
+        sibling rename always satisfies that. *src* and *dst* are absolute in-VM
+        paths already jailed by the caller.
+        """
+        fs = await self.get_fs(sandbox_id)
+        await fs.move_files(src, dst)
+
     async def get_work_dir(self, sandbox_id: str) -> str:
         """Get the sandbox's work directory path."""
         sb = await self.get_sandbox_instance(sandbox_id)
@@ -450,11 +524,13 @@ class DaytonaClient:
             state=sandbox.state.value if hasattr(sandbox.state, "value") else str(sandbox.state),
             organization_id=sandbox.organization_id,
             cpu=getattr(sandbox, "cpu", 1) or 1,
-            memory=getattr(sandbox, "memory", 2) or 2,
+            # 0 = unknown, never guessed: idle-VM eviction counts freed memory from it.
+            memory=getattr(sandbox, "memory", 0) or 0,
             disk=getattr(sandbox, "disk", 10) or 10,
             region_id=getattr(sandbox, "region_id", ""),
             created_at=getattr(sandbox, "created_at", ""),
             last_activity_at=getattr(sandbox, "last_activity_at", ""),
+            labels=dict(getattr(sandbox, "labels", None) or {}),
         )
 
 

@@ -69,6 +69,7 @@ from pocketpaw_ee.cloud.pocket_proposals import POCKET_CREATE_PARAM_KEY  # noqa:
 from pocketpaw_ee.instinct.router import router  # noqa: E402
 
 from pocketpaw.instinct.store import InstinctStore  # noqa: E402
+from tests.conftest import aseed_gated_action, seed_gated_action  # noqa: E402
 
 TRIGGER = {"type": "agent", "source": "claude", "reason": "proposal edit test"}
 
@@ -216,9 +217,9 @@ def _make_client(edit_store: InstinctStore, user: _FakeUser, monkeypatch) -> Tes
 
 def _propose_rule_action(client: TestClient, *, workspace_id: str, name: str = "rule") -> str:
     """Seed a PENDING Action carrying an ``_instinct_rule`` blob over HTTP, return its id."""
-    resp = client.post(
-        "/instinct/actions",
-        json={
+    resp = seed_gated_action(
+        client,
+        {
             "pocket_id": workspace_id,
             "title": f"governed rule {name}",
             "trigger": TRIGGER,
@@ -233,9 +234,9 @@ def _propose_pocket_action(
     client: TestClient, *, workspace_id: str, name: str = "Discovered data"
 ) -> str:
     """Seed a PENDING Action carrying a ``_pocket_create`` blob over HTTP, return its id."""
-    resp = client.post(
-        "/instinct/actions",
-        json={
+    resp = seed_gated_action(
+        client,
+        {
             "pocket_id": workspace_id,
             "title": f"starter pocket {name}",
             "trigger": TRIGGER,
@@ -248,9 +249,9 @@ def _propose_pocket_action(
 
 def _propose_fabric_action(client: TestClient, *, workspace_id: str) -> str:
     """Seed a PENDING Action carrying a ``_fabric_objects`` blob over HTTP, return its id."""
-    resp = client.post(
-        "/instinct/actions",
-        json={
+    resp = seed_gated_action(
+        client,
+        {
             "pocket_id": workspace_id,
             "title": "fabric ontology",
             "trigger": TRIGGER,
@@ -526,9 +527,9 @@ async def test_patch_emits_human_corrected_edited_without_completed(
             # Seed a rule action carrying a non-null correlation_id so the emit fires.
             blob = _rule_blob("ws-A")
             blob["correlation_id"] = "11111111-1111-1111-1111-111111111111"
-            seed = await client.post(
-                "/instinct/actions",
-                json={
+            seed = await aseed_gated_action(
+                client,
+                {
                     "pocket_id": "ws-A",
                     "title": "governed rule emit",
                     "trigger": TRIGGER,

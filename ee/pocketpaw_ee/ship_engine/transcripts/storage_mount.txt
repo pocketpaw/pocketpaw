@@ -1,0 +1,7 @@
+# transcript: `dokku storage:mount demo demo-data --container-dir /data` — mounts the entry.
+EXIT: 0
+--- stdout ---
+-----> Mounting demo-data into demo at /data
+       Bind mount added: /var/lib/dokku/data/storage/demo-data:/data
+       Restart the app to apply: dokku ps:restart demo
+--- stderr ---

@@ -164,7 +164,7 @@ async def test_touch_emits_session_updated(recording_bus) -> None:
     doc_stub.find_one = AsyncMock(return_value=session)
 
     with patch("pocketpaw_ee.cloud.sessions.service._SessionDoc", new=doc_stub):
-        await sessions_service.touch("websocket_abc")
+        await sessions_service.touch("websocket_abc", "u1")
 
     events = [e for e in recording_bus.events if isinstance(e, SessionUpdated)]
     assert len(events) == 1
@@ -181,6 +181,32 @@ async def test_touch_no_emit_when_session_missing(recording_bus) -> None:
     doc_stub.find_one = AsyncMock(return_value=None)
 
     with patch("pocketpaw_ee.cloud.sessions.service._SessionDoc", new=doc_stub):
-        await sessions_service.touch("missing")
+        await sessions_service.touch("missing", "u1")
 
+    assert not [e for e in recording_bus.events if isinstance(e, SessionUpdated)]
+
+
+async def test_touch_refuses_a_non_owner_and_emits_nothing(recording_bus) -> None:
+    # The write is what matters, but so is the event: SessionUpdated carries
+    # the owner's id and lands on the owner's realtime feed, so an accepted
+    # cross-owner touch would also inject into a stream the caller cannot read.
+    from pocketpaw_ee.cloud.shared.errors import Forbidden
+
+    session = MagicMock(
+        id="s_oid",
+        sessionId="websocket_abc",
+        owner="u1",
+        lastActivity=datetime.now(UTC),
+        messageCount=0,
+        save=AsyncMock(),
+    )
+    doc_stub = MagicMock()
+    doc_stub.find_one = AsyncMock(return_value=session)
+
+    with patch("pocketpaw_ee.cloud.sessions.service._SessionDoc", new=doc_stub):
+        with pytest.raises(Forbidden):
+            await sessions_service.touch("websocket_abc", "u2")
+
+    session.save.assert_not_awaited()
+    assert session.messageCount == 0
     assert not [e for e in recording_bus.events if isinstance(e, SessionUpdated)]

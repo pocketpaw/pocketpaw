@@ -1,32 +1,33 @@
-# ee/pocketpaw_ee/cloud/mandates/dto.py
-# Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
+# ee/pocketpaw_ee/cloud/mandates/dto.py — MANDATE request/response schemas.
 #
-# Request/Response schemas for the MANDATE primitive. Separate Request and
-# Response models per the cloud entity rule (never reuse one model for both
-# directions). The Request models are the ``body`` the service ``model_validate``s
-# at entry; the Response models are the wire dicts the service returns.
-#
-# Updated: 2026-06-11 (slice 2 — patrols) — added FeedbackRequest /
-# SightingResponse / SightingsListResponse for the feedback-intake patrol and
-# the sightings read.
-# Updated: 2026-06-11 (slice 4 — plan gate) — added ShiftResponse for the
-# manual-shift trigger.
-# Updated: 2026-06-11 (slice 5 — pawprints) — added PawprintResponse /
-# PawprintsListResponse for the past-tense event feed.
-# Updated: 2026-06-11 (feat/belt-autopilot) — added AutopilotRequest (the
-# start/stop body) + AutopilotState (the persisted on/users wire object) and
-# wired ``autopilot`` onto the detail + summary responses.
+# Separate Request and Response models per the cloud entity rule (never reuse one
+# model for both directions). Request models are the ``body`` the service
+# ``model_validate``s at entry; Response models are the wire dicts the service
+# returns. ``command_refusal`` is the factory's argv[0] allowlist for charter
+# checks/recipes (the develop station re-checks it before exec). Covers mandate
+# create/read (charter incl. checks + recipes and the line's Claude ``model``, the
+# ``upstream`` patrol's pinned-dependency watch list, and the crew roster), the
+# narrow charter patch (model + two budget caps), the crew route, feedback
+# intake + sightings, the shift trigger, plan resolution, pawprints, the
+# autopilot toggle, and the digest query.
 
 from __future__ import annotations
 
+import os
+import re
+import shlex
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pocketpaw_ee.cloud.mandates.domain import (
     Cadence,
+    CharterModel,
+    CrewRole,
+    CrewSetup,
     KpiDirection,
     MandateStatus,
+    RunKind,
     ShiftState,
 )
 
@@ -43,11 +44,40 @@ class KpiRequest(BaseModel):
 
 class BudgetRequest(BaseModel):
     max_tasks_per_shift: int = Field(default=3, ge=1, le=20)
+    # Tasks in flight on the line at once (runs and plan-gate tasks); unset =
+    # ``max_tasks_per_shift``.
+    max_in_flight: int | None = Field(default=None, ge=1, le=20)
     gate_minutes_per_week: int = Field(default=15, ge=0)
 
 
 class SurfaceRequest(BaseModel):
     repo_id: str = Field(min_length=1)
+
+
+_GITHUB_REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+class UpstreamPinRequest(BaseModel):
+    """One ``upstream`` patrol watch: a GitHub ``owner/name`` and the TOML file
+    (relative to the bound repo) that pins its ``rev``. ``repo`` lands in a
+    ``gh api`` URL path, so it is held to the owner/name charset."""
+
+    repo: str
+    pin_file: str = Field(min_length=1)
+
+    @field_validator("repo")
+    @classmethod
+    def _repo_shape(cls, v: str) -> str:
+        if not _GITHUB_REPO.match(v) or ".." in v:
+            raise ValueError("repo must be a GitHub owner/name")
+        return v
+
+    @field_validator("pin_file")
+    @classmethod
+    def _pin_file_relative(cls, v: str) -> str:
+        if v.startswith(("/", "\\")) or ".." in v.replace("\\", "/").split("/"):
+            raise ValueError("pin_file must be a path inside the bound repo")
+        return v
 
 
 class CharterRequest(BaseModel):
@@ -57,6 +87,148 @@ class CharterRequest(BaseModel):
     boundaries: list[str] = Field(default_factory=list)
     budget: BudgetRequest = Field(default_factory=BudgetRequest)
     cadence: Cadence = "weekly"
+    # Factory hooks — argv strings (shlex-split, never a shell). ``checks`` must
+    # pass before a headless diff is attached; ``recipes`` are named
+    # deterministic commands a plan task can run instead of an LLM develop.
+    # Each argv[0] must be an operator-allowed command (``command_refusal``).
+    checks: list[str] = Field(default_factory=list)
+    recipes: dict[str, str] = Field(default_factory=dict)
+    # The GitHub ``issues`` patrol takes an open issue carrying one of these.
+    issue_labels: list[str] = Field(default_factory=list, max_length=20)
+    # ``feature-lead``: one lead run per line of free feature issues, no foreman, no
+    # human plan gate (``lead_planner``). ``task`` keeps the foreman.
+    run_kind: RunKind = "task"
+    # The Claude model the line's cloud sessions start on; unset = the CLI default.
+    model: CharterModel | None = None
+    # A lead line plans no ``p3`` issue (out of the beta).
+    beta_only: bool = False
+
+    @field_validator("checks")
+    @classmethod
+    def _checks_parse(cls, v: list[str]) -> list[str]:
+        for cmd in v:
+            _require_argv(cmd)
+        return v
+
+    @field_validator("recipes")
+    @classmethod
+    def _recipes_parse(cls, v: dict[str, str]) -> dict[str, str]:
+        for name, cmd in v.items():
+            if not name.strip():
+                raise ValueError("recipe names must be non-empty")
+            _require_argv(cmd)
+        return v
+
+
+class PatchBudgetRequest(BaseModel):
+    """The two budget caps ``PATCH .../charter`` may change; an omitted one stays.
+    ``max_in_flight: null`` clears it (reads as ``max_tasks_per_shift``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_tasks_per_shift: int | None = Field(default=None, ge=1, le=20)
+    max_in_flight: int | None = Field(default=None, ge=1, le=20)
+
+    @field_validator("max_tasks_per_shift")
+    @classmethod
+    def _shift_cap_set(cls, v: int | None) -> int:
+        if v is None:
+            raise ValueError("max_tasks_per_shift cannot be cleared")
+        return v
+
+
+class PatchCharterRequest(BaseModel):
+    """Body for ``PATCH /belt/mandates/{id}/charter``: the line's ``model``,
+    two budget caps and ``beta_only``, nothing else. Only the fields sent change
+    (``model: null`` clears it); an empty body or any other field is refused."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: CharterModel | None = None
+    budget: PatchBudgetRequest | None = None
+    beta_only: bool = False
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> PatchCharterRequest:
+        if not self.model_fields_set or (
+            self.model_fields_set == {"budget"}
+            and (self.budget is None or not self.budget.model_fields_set)
+        ):
+            raise ValueError("nothing to change: send model, budget caps and/or beta_only")
+        return self
+
+
+def _require_argv(cmd: str) -> None:
+    """A check/recipe command must split into a non-empty argv whose program
+    the operator allows."""
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as exc:
+        raise ValueError(f"command {cmd!r} does not parse: {exc}") from None
+    if not argv:
+        raise ValueError("commands must be non-empty")
+    refusal = command_refusal(argv[0])
+    if refusal:
+        raise ValueError(refusal)
+
+
+# Programs a charter check/recipe may start, by basename. No shells, ``env``,
+# ``sudo``, downloaders, or ``git`` (a check-run git would honour hooks and
+# config the agent can plant). ``belt`` is Pulley's block CLI (``bun link`` in a
+# pulley checkout puts it on PATH). Operators override the whole list with
+# ``POCKETPAW_FACTORY_ALLOWED_COMMANDS`` (comma-separated basenames).
+_DEFAULT_ALLOWED_COMMANDS = "uv,uvx,bun,bunx,belt,node,npm,pnpm,python,python3,pytest,cargo,make,go"
+
+
+def command_refusal(program: str) -> str | None:
+    """Why ``program`` (a charter command's argv[0]) may not run, or ``None``.
+
+    Read per call so an operator's env change applies. A bare name or an
+    absolute path is judged by its basename; a relative path (``./x``,
+    ``node_modules/.bin/x``) is always refused — it resolves inside the
+    agent-editable worktree. The develop station re-checks right before exec."""
+    raw = os.environ.get("POCKETPAW_FACTORY_ALLOWED_COMMANDS") or _DEFAULT_ALLOWED_COMMANDS
+    allowed = {c.strip() for c in raw.split(",") if c.strip()}
+    if "/" in program and not program.startswith("/"):
+        return f"command {program!r} is a relative path; use an allowed command name"
+    name = program.rsplit("/", 1)[-1]
+    if name not in allowed:
+        return (
+            f"command {name!r} is not allowed (allowed: {', '.join(sorted(allowed))}; "
+            "operators set POCKETPAW_FACTORY_ALLOWED_COMMANDS)"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Crew roster — cloud Agents seated on a mandate
+# ---------------------------------------------------------------------------
+
+
+class CrewMemberRequest(BaseModel):
+    """One crew seat: an Agent in this workspace, its role, how many develops
+    it may run at once, and an optional Claude setup (unset = the factory env).
+    The service checks the caller can read the agent."""
+
+    agent_id: str = Field(min_length=1, max_length=64)
+    role: CrewRole = "dev"
+    concurrency: int = Field(default=1, ge=1, le=8)
+    setup: CrewSetup | None = None
+
+
+def _unique_agents(v: list[CrewMemberRequest]) -> list[CrewMemberRequest]:
+    ids = [m.agent_id for m in v]
+    if len(ids) != len(set(ids)):
+        raise ValueError("an agent can hold only one seat on a crew")
+    return v
+
+
+class SetCrewRequest(BaseModel):
+    """Body for ``PUT /belt/mandates/{id}/crew`` — the whole roster, replaced."""
+
+    crew: list[CrewMemberRequest] = Field(default_factory=list, max_length=20)
+
+    _unique = field_validator("crew")(_unique_agents)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +246,12 @@ class CreateMandateRequest(BaseModel):
     charter: CharterRequest
     soul_path: str | None = None
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
+    # The ``upstream`` patrol's watch list (enable it with "upstream" in patrols).
+    upstream: list[UpstreamPinRequest] = Field(default_factory=list)
+    # The crew roster (empty = the factory's env defaults run every task).
+    crew: list[CrewMemberRequest] = Field(default_factory=list, max_length=20)
+
+    _unique_crew = field_validator("crew")(_unique_agents)
 
 
 class AutopilotState(BaseModel):
@@ -131,6 +309,8 @@ class ShiftSummaryResponse(BaseModel):
     state: ShiftState
     plan_action_id: str | None = None
     created_at: datetime
+    approved_by: str | None = None
+    policy: dict | None = None
 
 
 class MandateDetailResponse(BaseModel):
@@ -144,6 +324,8 @@ class MandateDetailResponse(BaseModel):
     soul_path: str | None = None
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
     autopilot: AutopilotState = Field(default_factory=AutopilotState)
+    upstream: list[UpstreamPinRequest] = Field(default_factory=list)
+    crew: list[CrewMemberRequest] = Field(default_factory=list)
     recent_shifts: list[ShiftSummaryResponse] = Field(default_factory=list)
     sightings_by_patrol: dict[str, int] = Field(default_factory=dict)
     created_at: datetime
@@ -246,6 +428,18 @@ class ResolvePlanRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Digest — the workspace's morning report
+# ---------------------------------------------------------------------------
+
+
+class DigestRequest(BaseModel):
+    """Query for ``GET /belt/mandates/digest``. ``since`` is an ISO-8601
+    instant (a naive value reads as UTC); omitted means 24 hours ago."""
+
+    since: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
 # Pawprints (slice 5) — past-tense event feed
 # ---------------------------------------------------------------------------
 
@@ -278,21 +472,28 @@ __all__ = [
     "AutopilotState",
     "BudgetRequest",
     "CharterRequest",
+    "command_refusal",
     "CreateMandateRequest",
+    "CrewMemberRequest",
+    "DigestRequest",
     "FeedbackRequest",
     "KpiRequest",
     "MandateDetailResponse",
     "MandateHealth",
     "MandateListResponse",
     "MandateSummaryResponse",
+    "PatchBudgetRequest",
+    "PatchCharterRequest",
     "PlanDecision",
     "PawprintResponse",
     "PawprintsListResponse",
     "ResolvePlanRequest",
     "ShiftResponse",
+    "SetCrewRequest",
     "ShiftSummaryResponse",
     "SightingResponse",
     "SightingsListResponse",
     "SurfaceRequest",
     "TeachingFeedbackRequest",
+    "UpstreamPinRequest",
 ]

@@ -1,0 +1,101 @@
+[
+  {
+    "label": "signalled deaths (SIGKILL/SIGTERM) stop being recognised, so a container OOM is reported to the user as their build failing",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "_INFRA_EXIT_CODES = frozenset({_EXIT_SIGKILL, _EXIT_SIGTERM})",
+    "replace": "_INFRA_EXIT_CODES = frozenset()",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "the in-sandbox timeout exit code is no longer recognised, so a timeout is reported as a build failure with no retry",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "_EXIT_TIMEOUT = 124",
+    "replace": "_EXIT_TIMEOUT = -999",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "bool exit codes are coerced instead of rejected, so build_exit=False deploys an unbuilt site [re-anchored 2026-08-11: verify_artifact's _readable_size carries the identical guard line, so the one-line anchor became ambiguous and would have aborted this whole plan]",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if isinstance(value, bool) or not isinstance(value, int):\n        return None\n    return value\n",
+    "replace": "    if not isinstance(value, int):\n        return None\n    return value\n",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "an unknown sentinel schema is trusted instead of refused, so field meanings are guessed at",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if parsed.get(\"schema\") != SENTINEL_SCHEMA:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "the empty-artifact check is removed, so a build that emits nothing deploys a blank site with every step reporting success",
+    "find": "    if artifact_bytes <= 0:",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "the timeout is sized on build alone, dropping the cold install that this lane pays on every build",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    scaled = math.ceil((install + build) * safety_factor)",
+    "replace": "    scaled = math.ceil(build * safety_factor)",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "the timeout floor is dropped, so a small measurement produces a budget below the known cold-install cost",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    return max(floor_seconds, scaled)",
+    "replace": "    return scaled",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "the project-root guard is removed, so html tars '.' and silently ships a node_modules-laden artifact",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "    if rel == \".\":",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "the trap is registered AFTER the install, so a failing install writes no sentinel and is misclassified as infrastructure loss",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "trap write_result EXIT\n\ncd \"$PROJECT\" || exit 1",
+    "replace": "cd \"$PROJECT\" || exit 1",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "the per-engine timeout override is ignored, so svelte inherits react's budget even though its toolchain install is ~3x larger",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        _TIMEOUT_ENV_PER_ENGINE.format(engine=normalize_engine(engine).upper()),",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  },
+  {
+    "label": "a non-positive timeout env value is accepted, so PAW_SITES_BUILD_TIMEOUT_SEC=0 disables the wedge detector entirely",
+    "file": "ee/pocketpaw_ee/sites/daytona_build.py",
+    "find": "        if value > 0:\n            return value",
+    "replace": "        return value",
+    "tests": [
+      "tests/ee/sites/test_daytona_build.py"
+    ]
+  }
+]

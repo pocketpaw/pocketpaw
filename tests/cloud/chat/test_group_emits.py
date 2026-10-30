@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Tests that group_service emits realtime events via the bus.
 
 Each public group_service mutation must fire the appropriate Event class
@@ -15,17 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pocketpaw_ee.cloud.chat import group_service
-from pocketpaw_ee.cloud.chat.schemas import (
-    AddGroupAgentRequest,
-    CreateGroupRequest,
-    UpdateGroupAgentRequest,
-    UpdateGroupRequest,
-)
-from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
-from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
-from pocketpaw_ee.cloud.models.group import GroupAgent as _GroupAgentDoc
-from pocketpaw_ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud._core.realtime.events import (
     GroupAgentAdded,
     GroupAgentRemoved,
     GroupAgentUpdated,
@@ -36,6 +28,16 @@ from pocketpaw_ee.cloud.realtime.events import (
     GroupMemberRole,
     GroupUpdated,
 )
+from pocketpaw_ee.cloud.chat import group_service
+from pocketpaw_ee.cloud.chat.schemas import (
+    AddGroupAgentRequest,
+    CreateGroupRequest,
+    UpdateGroupAgentRequest,
+    UpdateGroupRequest,
+)
+from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
+from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+from pocketpaw_ee.cloud.models.group import GroupAgent as _GroupAgentDoc
 
 
 async def _empty_lookups(_groups):
@@ -161,7 +163,7 @@ async def test_join_group_emits_member_added_and_invalidates_cache(
 ):
     group = await _make_group(owner="u1", type="public", members=["u1"])
 
-    await group_service.join_group(str(group.id), "u2")
+    await group_service.join_group(str(group.id), "u2", "w1")
 
     events = [e for e in recording_bus.events if isinstance(e, GroupMemberAdded)]
     assert len(events) == 1
@@ -177,7 +179,7 @@ async def test_join_group_emits_member_added_and_invalidates_cache(
 async def test_join_group_no_emit_when_already_member(mongo_db, recording_bus, resolver_mock):
     group = await _make_group(owner="u1", type="public", members=["u1", "u2"])
 
-    await group_service.join_group(str(group.id), "u2")
+    await group_service.join_group(str(group.id), "u2", "w1")
 
     assert not [e for e in recording_bus.events if isinstance(e, GroupMemberAdded)]
     resolver_mock.invalidate_group.assert_not_called()
@@ -518,7 +520,7 @@ async def test_join_group_allows_channel_type(
     """Channels should be self-joinable just like public groups."""
     group = await _make_group(owner="u1", type="channel", members=["u1"])
 
-    await group_service.join_group(str(group.id), "u2")
+    await group_service.join_group(str(group.id), "u2", "w1")
 
     events = [e for e in recording_bus.events if isinstance(e, GroupMemberAdded)]
     assert len(events) == 1
@@ -535,4 +537,4 @@ async def test_join_group_still_rejects_private(mongo_db, recording_bus):
     group = await _make_group(owner="u1", type="private", members=["u1"])
 
     with pytest.raises(Forbidden):
-        await group_service.join_group(str(group.id), "u2")
+        await group_service.join_group(str(group.id), "u2", "w1")

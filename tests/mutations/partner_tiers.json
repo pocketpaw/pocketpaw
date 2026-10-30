@@ -1,0 +1,228 @@
+[
+  {
+    "label": "silver needs 11 active sites, not 10",
+    "file": "ee/pocketpaw_ee/cloud/partners/_calc.py",
+    "find": "    Tier(\"silver\", 10, 1_000, 3_000),",
+    "replace": "    Tier(\"silver\", 11, 1_000, 3_000),",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_tier_boundaries_and_next_tier",
+      "tests/cloud/partners/test_partner_tiers.py::test_the_tenth_active_site_lifts_to_silver_and_the_next_sale_is_discounted"
+    ]
+  },
+  {
+    "label": "silver gets no wholesale discount",
+    "file": "ee/pocketpaw_ee/cloud/partners/_calc.py",
+    "find": "    Tier(\"silver\", 10, 1_000, 3_000),",
+    "replace": "    Tier(\"silver\", 10, 0, 3_000),",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_discounts_floor_the_whole_usd_price",
+      "tests/cloud/partners/test_partner_tiers.py::test_the_tenth_active_site_lifts_to_silver_and_the_next_sale_is_discounted"
+    ]
+  },
+  {
+    "label": "silver earns the bronze commission",
+    "file": "ee/pocketpaw_ee/cloud/partners/_calc.py",
+    "find": "    Tier(\"silver\", 10, 1_000, 3_000),",
+    "replace": "    Tier(\"silver\", 10, 1_000, 2_500),",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_commission_rates_by_tier_and_founding",
+      "tests/cloud/partners/test_partner_tiers.py::test_a_client_payment_lifts_the_tier_and_the_next_one_earns_30"
+    ]
+  },
+  {
+    "label": "the discounted price rounds up, not down",
+    "file": "ee/pocketpaw_ee/cloud/partners/_calc.py",
+    "find": "    return int(price_usd) * (10_000 - wholesale_discount_bps(tier)) // 10_000",
+    "replace": "    return -(-int(price_usd) * (10_000 - wholesale_discount_bps(tier)) // 10_000)",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_discounts_floor_the_whole_usd_price"
+    ]
+  },
+  {
+    "label": "a founding partner falls back to the tier rate inside the window",
+    "file": "ee/pocketpaw_ee/cloud/partners/_calc.py",
+    "find": "        return max(FOUNDING_RATE_BPS, rate)",
+    "replace": "        return rate",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_commission_rates_by_tier_and_founding",
+      "tests/cloud/partners/test_partner_tiers.py::test_a_founding_partner_keeps_40_within_24_months_at_any_tier"
+    ]
+  },
+  {
+    "label": "the first-site reward drifts",
+    "file": "ee/pocketpaw_ee/cloud/partners/_calc.py",
+    "find": "MILESTONES: tuple[tuple[int, int], ...] = ((1, 200),",
+    "replace": "MILESTONES: tuple[tuple[int, int], ...] = ((1, 250),",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_milestones_reached_on_lifetime_sites",
+      "tests/cloud/partners/test_partner_tiers.py::test_milestones_are_granted_once_on_lifetime_distinct_sites"
+    ]
+  },
+  {
+    "label": "the sale and renewal charge ignore the tier discount",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    return site_plans.partner_price_usd(tier.key, profile.billing_country, profile.tier)",
+    "replace": "    return site_plans.partner_price_usd(tier.key, profile.billing_country)",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_the_tenth_active_site_lifts_to_silver_and_the_next_sale_is_discounted",
+      "tests/cloud/partners/test_partner_tiers.py::test_a_renewal_charges_the_tier_price_and_keeps_it_without_a_profile"
+    ]
+  },
+  {
+    "label": "the offers ignore the tier discount",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "                    tier.key, profile.billing_country, profile.tier\n",
+    "replace": "                    tier.key, profile.billing_country\n",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_the_tenth_active_site_lifts_to_silver_and_the_next_sale_is_discounted"
+    ]
+  },
+  {
+    "label": "a removed partner's discounted price no longer renews",
+    "file": "ee/pocketpaw_ee/cloud/billing/site_plans.py",
+    "find": "        for t in _calc.TIERS\n",
+    "replace": "        for t in _calc.TIERS[:1]\n",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_a_renewal_charges_the_tier_price_and_keeps_it_without_a_profile"
+    ]
+  },
+  {
+    "label": "the commission ignores the partner's tier",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "            tier=profile.tier if profile is not None else \"bronze\",",
+    "replace": "            tier=\"bronze\",",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_a_client_payment_lifts_the_tier_and_the_next_one_earns_30"
+    ]
+  },
+  {
+    "label": "a paid client payment never refreshes the standing",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        await partners_service.refresh_standing(doc.workspace)",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_a_client_payment_lifts_the_tier_and_the_next_one_earns_30",
+      "tests/cloud/partners/test_partner_tiers.py::test_a_refunded_sale_never_re_grants_or_claws_back_a_milestone"
+    ]
+  },
+  {
+    "label": "a sale never refreshes the standing",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "    await refresh_standing(workspace_id)\n",
+    "replace": "    pass\n",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_the_tenth_active_site_lifts_to_silver_and_the_next_sale_is_discounted"
+    ]
+  },
+  {
+    "label": "the tier drops outside the monthly review",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "        tier = earned if up or allow_downgrade else profile.tier",
+    "replace": "        tier = earned",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_a_lapse_keeps_the_tier_until_the_monthly_review",
+      "tests/cloud/partners/test_partner_tiers.py::test_an_operator_tier_stands_until_a_recompute_moves_it"
+    ]
+  },
+  {
+    "label": "the review never lowers a tier",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "        tier = earned if up or allow_downgrade else profile.tier",
+    "replace": "        tier = earned if up else profile.tier",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_a_lapse_keeps_the_tier_until_the_monthly_review",
+      "tests/cloud/partners/test_partner_tiers.py::test_an_operator_tier_stands_until_a_recompute_moves_it"
+    ]
+  },
+  {
+    "label": "the review runs on every tick, not monthly",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "                    {\"partner.tier_reviewed_at\": {\"$lt\": month_start}},",
+    "replace": "                    {\"partner.tier_reviewed_at\": {\"$ne\": None}},",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_a_lapse_keeps_the_tier_until_the_monthly_review"
+    ]
+  },
+  {
+    "label": "the review stamp is never written",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "                reviewed_at=(now or datetime.now(UTC)) if allow_downgrade else None,",
+    "replace": "                reviewed_at=None,",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_a_lapse_keeps_the_tier_until_the_monthly_review"
+    ]
+  },
+  {
+    "label": "the review kill switch is ignored",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "    if not _tier_sweep_enabled():\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_a_lapse_keeps_the_tier_until_the_monthly_review"
+    ]
+  },
+  {
+    "label": "suspended partners are reviewed",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "                \"partner.status\": \"active\",\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_the_review_skips_inactive_partners_and_other_workspaces"
+    ]
+  },
+  {
+    "label": "the tier write is not compare-and-set",
+    "file": "ee/pocketpaw_ee/cloud/workspace/service.py",
+    "find": "        {\"_id\": oid, \"deleted_at\": None, \"partner.tier\": expected}, {\"$set\": fields}",
+    "replace": "        {\"_id\": oid, \"deleted_at\": None}, {\"$set\": fields}",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_the_tier_write_is_compare_and_set"
+    ]
+  },
+  {
+    "label": "a milestone is granted again on every refresh",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "            idempotency_key=_reward_key(workspace_id, sites),",
+    "replace": "            idempotency_key=f\"{_reward_key(workspace_id, sites)}:{uuid4().hex}\",",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_milestones_are_granted_once_on_lifetime_distinct_sites",
+      "tests/cloud/partners/test_partner_tiers.py::test_a_refunded_sale_never_re_grants_or_claws_back_a_milestone"
+    ]
+  },
+  {
+    "label": "monthly-rung debits count as partner sales",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "        if e.amount_delta_micro < 0 and e.ref.get(\"plan_tier\") in rungs",
+    "replace": "        if e.amount_delta_micro < 0",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_milestones_are_granted_once_on_lifetime_distinct_sites"
+    ]
+  },
+  {
+    "label": "client-paid sales do not count toward lifetime",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "        for e in await _entries(workspace_id, PARTNER_COMMISSION_CAUSE)",
+    "replace": "        for e in await _entries(workspace_id)",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_a_refunded_sale_never_re_grants_or_claws_back_a_milestone"
+    ]
+  },
+  {
+    "label": "an operator PUT wipes the tier review stamp",
+    "file": "ee/pocketpaw_ee/cloud/platform/partners.py",
+    "find": "        data[\"tier_reviewed_at\"] = current.tier_reviewed_at",
+    "replace": "        pass",
+    "tests": [
+      "tests/cloud/partners/test_partners.py::test_http_operator_sets_then_clears_a_partner_with_audit"
+    ]
+  },
+  {
+    "label": "/me reports the bronze commission at any tier",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "            commission_pct=_calc.tier_commission_bps(profile.tier) / 100,",
+    "replace": "            commission_pct=_calc.tier_commission_bps(\"bronze\") / 100,",
+    "tests": [
+      "tests/cloud/partners/test_partner_tiers.py::test_the_tenth_active_site_lifts_to_silver_and_the_next_sale_is_discounted"
+    ]
+  }
+]

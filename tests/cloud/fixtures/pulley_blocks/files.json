@@ -1,0 +1,145 @@
+{
+  "$comment": "pulley/registry/blocks/files/manifest.json — created 2026-08-13 (T-14): the files core block. Uploads, stored objects, and attachments other blocks hang off their own entities. Built directly on the T-10b manifest surfaces rather than on paste-in recipes: `endpoints` mounts the three HTTP routes, `routes[].load` feeds the attachments page its server data, and `providesAdapters` ships the S3 StoragePort adapter the app selects with PULLEY_PORT_STORAGE=s3. DEPENDS ON auth (files_file.owner_id is a foreign key into auth_user) but NOT on org — organization_id is a soft scope column with no FK, so the block installs cleanly in a single-tenant app. DATABASE_URL is declared with flags identical to auth's, which the resolver treats as a shared variable (a warning) rather than a conflict. Shared package ranges are byte-identical to auth's because the installer refuses incompatible 0.x caret keys. THE SECURITY INVARIANT, stated here because the manifest is what a reviewer reads first: every serve and presign path forces Content-Disposition: attachment for every MIME type outside server/mime.ts's five-entry inline allow-list — serving user-uploaded HTML or SVG inline from the storage origin is stored XSS.",
+  "name": "files",
+  "version": "0.1.0",
+  "description": "Uploads, stored files on a swappable storage port, and attachments other blocks hang off their own entities.",
+  "kind": "core",
+  "deps": {
+    "auth": "^0.1.0"
+  },
+  "provides": [
+    "files.upload",
+    "files.attachment"
+  ],
+  "tablePrefix": "files_",
+  "packages": {
+    "@aws-sdk/client-s3": "^3.1102.0",
+    "@aws-sdk/s3-request-presigner": "^3.1102.0",
+    "@uppy/core": "^5.2.0",
+    "@uppy/dashboard": "^5.1.1",
+    "@uppy/xhr-upload": "^5.2.0",
+    "drizzle-orm": "^0.45.2",
+    "pg": "^8.22.0"
+  },
+  "devPackages": {
+    "@types/pg": "^8.20.4"
+  },
+  "framework": {
+    "@sveltejs/kit": ">=2.15.0"
+  },
+  "routes": [
+    {
+      "path": "/files",
+      "page": "FilesPage",
+      "load": "filesLoad.ts"
+    }
+  ],
+  "endpoints": [
+    {
+      "path": "/api/files/uploads",
+      "module": "uploadsApi.ts"
+    },
+    {
+      "path": "/api/files/uploads/[id]",
+      "module": "uploadApi.ts"
+    },
+    {
+      "path": "/api/files/[id]",
+      "module": "fileApi.ts"
+    }
+  ],
+  "nav": [
+    {
+      "slot": "main",
+      "label": "Files",
+      "icon": "paper-clip",
+      "href": "/files",
+      "order": 50
+    }
+  ],
+  "env": [
+    {
+      "name": "DATABASE_URL",
+      "required": true,
+      "description": "Postgres connection string the files tables live in. Same database as the auth block — files_file holds a foreign key into auth_user.",
+      "secret": true
+    },
+    {
+      "name": "FILES_MAX_UPLOAD_BYTES",
+      "required": false,
+      "description": "Largest accepted upload, in bytes. Defaults to 26214400 (25 MiB). The whole body is buffered in memory while it is written to storage, so raise this deliberately.",
+      "secret": false
+    },
+    {
+      "name": "FILES_SERVE_MODE",
+      "required": false,
+      "description": "How downloads are delivered: \"stream\" (default — the app writes the response and owns every header, works with every adapter) or \"redirect\" (302 to a presigned URL; only for adapters that sign real http(s) URLs, never local-disk).",
+      "secret": false
+    },
+    {
+      "name": "FILES_PRESIGN_TTL_SECONDS",
+      "required": false,
+      "description": "Lifetime of a presigned download URL in redirect mode. Defaults to 300. Must be a positive integer of at most 604800 — S3 will not sign longer.",
+      "secret": false
+    },
+    {
+      "name": "FILES_S3_BUCKET",
+      "required": false,
+      "description": "Bucket the s3 adapter stores objects in. Required only when PULLEY_PORT_STORAGE=s3; the adapter refuses to start without it.",
+      "secret": false
+    },
+    {
+      "name": "FILES_S3_REGION",
+      "required": false,
+      "description": "Region for the s3 adapter (e.g. us-east-1; \"auto\" for Cloudflare R2). Required only when PULLEY_PORT_STORAGE=s3.",
+      "secret": false
+    },
+    {
+      "name": "FILES_S3_ENDPOINT",
+      "required": false,
+      "description": "Custom S3-compatible endpoint for R2, MinIO or Ceph. Unset = real AWS S3.",
+      "secret": false
+    },
+    {
+      "name": "FILES_S3_FORCE_PATH_STYLE",
+      "required": false,
+      "description": "Set to \"true\" for gateways that need path-style addressing (MinIO). AWS and R2 do not.",
+      "secret": false
+    },
+    {
+      "name": "FILES_S3_ACCESS_KEY_ID",
+      "required": false,
+      "description": "Static access key for the s3 adapter. Leave BOTH key variables unset to use the AWS default provider chain (instance role, IRSA); setting exactly one is refused as a typo.",
+      "secret": true
+    },
+    {
+      "name": "FILES_S3_SECRET_ACCESS_KEY",
+      "required": false,
+      "description": "Secret key paired with FILES_S3_ACCESS_KEY_ID.",
+      "secret": true
+    }
+  ],
+  "perms": [
+    "files.attach",
+    "files.delete",
+    "files.read",
+    "files.upload"
+  ],
+  "ports": [
+    "storage"
+  ],
+  "providesAdapters": [
+    {
+      "port": "storage",
+      "name": "s3",
+      "module": "adapters/s3.ts"
+    }
+  ],
+  "events": {
+    "emits": [
+      "files.uploaded",
+      "files.deleted"
+    ]
+  },
+  "skill": "SKILL.md"
+}

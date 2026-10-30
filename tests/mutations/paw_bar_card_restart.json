@@ -1,0 +1,81 @@
+[
+  {
+    "label": "restart rule off: a mid-string ```pawbar-card closes the card again",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                if self._card_id and self._in_str:\n",
+    "replace": "                if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_restart.py::test_the_abandoned_card_is_dropped_as_restarted_never_invalid",
+      "tests/cloud/test_paw_bar_card_restart.py::test_the_restarted_heart_card_ends_as_one_final_with_the_whole_second_body"
+    ]
+  },
+  {
+    "label": "string tracking off: the body never reads as mid-string, so no restart",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        self._track_strings(piece)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_restart.py::test_the_abandoned_card_is_dropped_as_restarted_never_invalid"
+    ]
+  },
+  {
+    "label": "restart reported as invalid",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "\"card.rejected\", {\"card_id\": self._card_id, \"reason\": \"restarted\"}",
+    "replace": "\"card.rejected\", {\"card_id\": self._card_id, \"reason\": \"invalid\"}",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_restart.py::test_the_abandoned_card_is_dropped_as_restarted_never_invalid",
+      "tests/cloud/test_paw_bar_card_restart.py::test_the_restarted_heart_card_ends_as_one_final_with_the_whole_second_body"
+    ]
+  },
+  {
+    "label": "no hold: a restart marker split across chunks closes the card",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                        if len(head) < len(_CARD_LANG):\n                            self._buf = text[j:]\n                            break\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_restart.py::test_the_abandoned_card_is_dropped_as_restarted_never_invalid",
+      "tests/cloud/test_paw_bar_card_restart.py::test_a_restarted_card_never_leaks_the_spec_into_the_text",
+      "tests/cloud/test_paw_bar_card_restart.py::test_a_fence_mid_string_that_is_not_a_restart_still_closes_the_card"
+    ]
+  },
+  {
+    "label": "streamed reopen off: pawbar-card after a closed card leaks as text",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "self._mode, data, self._reopen = \"text\", after, True",
+    "replace": "self._mode, data, self._reopen = \"text\", after, False",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_restart.py::test_a_complete_card_left_open_then_restarted_reopens_as_a_new_card",
+      "tests/cloud/test_paw_bar_card_restart.py::test_a_held_reopen_at_the_end_of_the_stream_is_dropped_not_shown"
+    ]
+  },
+  {
+    "label": "held fence reopen off: a pawbar site shows the second card as text",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                self._reopen = self._tag == _CARD_LANG\n",
+    "replace": "                self._reopen = False\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_restart.py::test_a_restarted_card_on_a_pawbar_site_shows_only_the_second_card"
+    ]
+  },
+  {
+    "label": "bare spec strip off: a {\"ui\": line reaches the text",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "                if k != -1:\n",
+    "replace": "                if False:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_restart.py::test_a_bare_spec_line_in_the_text_is_stripped_to_its_fence",
+      "tests/cloud/test_paw_bar_card_restart.py::test_a_bare_spec_at_the_very_start_is_stripped"
+    ]
+  },
+  {
+    "label": "close() shows a held reopen prefix",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "if self._mode == \"text\" and not (self._reopen or self._spec) else \"\"",
+    "replace": "if self._mode == \"text\" else \"\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_card_restart.py::test_a_held_reopen_at_the_end_of_the_stream_is_dropped_not_shown",
+      "tests/cloud/test_paw_bar_card_restart.py::test_a_bare_spec_at_the_very_start_is_stripped"
+    ]
+  }
+]

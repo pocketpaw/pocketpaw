@@ -1,0 +1,65 @@
+[
+  {
+    "label": "read the workspace from a header again, the shipped bug",
+    "file": "src/pocketpaw/api/v1/cloud_projects.py",
+    "find": "    workspace_id = getattr(request.state, \"workspace_id\", None)\n    if workspace_id:",
+    "replace": "    workspace_id = request.headers.get(\"X-Workspace-Id\") or getattr(\n        request.state, \"workspace_id\", None\n    )\n    if workspace_id:",
+    "tests": [
+      "tests/v1/test_cloud_projects_tenancy.py"
+    ]
+  },
+  {
+    "label": "fall back to a default workspace instead of refusing",
+    "file": "src/pocketpaw/api/v1/cloud_projects.py",
+    "find": "    raise HTTPException(status_code=401, detail=\"Unauthorized\")",
+    "replace": "    return _LOCAL_WORKSPACE, _USER_SEGMENT",
+    "tests": [
+      "tests/v1/test_cloud_projects_tenancy.py"
+    ]
+  },
+  {
+    "label": "let the header win over the resolved session",
+    "file": "src/pocketpaw/api/v1/cloud_projects.py",
+    "find": "        return str(workspace_id), _USER_SEGMENT",
+    "replace": "        return str(request.headers.get(\"X-Workspace-Id\") or workspace_id), _USER_SEGMENT",
+    "tests": [
+      "tests/v1/test_cloud_projects_tenancy.py"
+    ]
+  },
+  {
+    "label": "drop the dependency from the list route",
+    "file": "src/pocketpaw/api/v1/cloud_projects.py",
+    "find": "async def list_cloud_projects(\n    scope: tuple[str, str] = Depends(resolve_project_scope),\n) -> list[dict]:",
+    "replace": "async def list_cloud_projects(\n    scope: tuple[str, str] = (\"default\", \"local\"),\n) -> list[dict]:",
+    "tests": [
+      "tests/v1/test_cloud_projects_tenancy.py"
+    ]
+  },
+  {
+    "label": "stop stamping the session workspace in the EE bridge",
+    "file": "ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py",
+    "find": "        request.state.workspace_id = getattr(user, \"active_workspace\", None)",
+    "replace": "        request.state.workspace_id = None",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_tenant_stamp.py"
+    ]
+  },
+  {
+    "label": "fold the tenant stamp into the superuser branch",
+    "file": "ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py",
+    "find": "        request.state.workspace_id = getattr(user, \"active_workspace\", None)\n        request.state.user_id = str(getattr(user, \"id\", \"\") or \"\") or None\n",
+    "replace": "        if getattr(user, \"is_superuser\", False):\n            request.state.workspace_id = getattr(user, \"active_workspace\", None)\n            request.state.user_id = str(getattr(user, \"id\", \"\") or \"\") or None\n",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_tenant_stamp.py"
+    ]
+  },
+  {
+    "label": "stamp the tenant from a request header",
+    "file": "ee/pocketpaw_ee/cloud/_core/ee_auth_bridge.py",
+    "find": "        request.state.workspace_id = getattr(user, \"active_workspace\", None)",
+    "replace": "        request.state.workspace_id = request.headers.get(\n            \"X-Workspace-Id\"\n        ) or getattr(user, \"active_workspace\", None)",
+    "tests": [
+      "tests/cloud/auth/test_ee_auth_bridge_tenant_stamp.py"
+    ]
+  }
+]

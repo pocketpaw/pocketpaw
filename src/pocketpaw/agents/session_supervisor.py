@@ -1,5 +1,13 @@
 """Session Supervisor — agent-session lifecycle across COLD/WARM tiers (SS-4).
 
+Updated 2026-09-01 (feat/scale-concurrency-knobs): ``get_session_supervisor`` now
+builds the singleton with ``max_warm_per_tenant`` / ``max_warm_global`` from settings
+(``POCKETPAW_SESSION_WARM_MAX_PER_TENANT`` / ``..._GLOBAL``, defaults 8 / 64 — the
+values already in force). Constructor defaults are untouched, so this module stays
+fully unit-testable with fakes and no ambient config; only the app's shared instance
+reads settings, via a function-local import that keeps this module config-free at
+import time. Both quotas are PER-PROCESS.
+
 Created 2026-06-30 (feat/session-supervisor SS-4): the policy / lifecycle engine
 that owns one ``SessionRuntime`` per ``(workspace_id, session_id)`` and decides,
 for each turn, whether to reuse a live warm slot (WARM) or take a fresh launch
@@ -504,8 +512,21 @@ _supervisor: SessionSupervisor | None = None
 
 
 def get_session_supervisor() -> SessionSupervisor:
-    """Get or create the global session supervisor."""
+    """Get or create the global session supervisor.
+
+    The two warm-slot quotas are resolved from settings here, not as constructor
+    defaults: the tests construct ``SessionSupervisor(...)`` directly with fakes and
+    must stay independent of ambient config, while the ONE instance the app runs on
+    needs to be tunable per deploy. Import is function-local, mirroring
+    ``pool.get_agent_pool`` — this module is otherwise config-free by design.
+    """
     global _supervisor
     if _supervisor is None:
-        _supervisor = SessionSupervisor()
+        from pocketpaw.config import Settings
+
+        settings = Settings.load()
+        _supervisor = SessionSupervisor(
+            max_warm_per_tenant=settings.session_warm_max_per_tenant,
+            max_warm_global=settings.session_warm_max_global,
+        )
     return _supervisor

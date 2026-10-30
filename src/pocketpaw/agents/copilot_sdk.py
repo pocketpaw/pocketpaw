@@ -7,6 +7,14 @@ tool use, and session management.
 Built-in tools: shell, file operations, git, web search.
 
 Requires: `copilot` CLI on PATH + `pip install github-copilot-sdk`.
+
+Updated 2026-09-02 (fix/metering-partial-usage-capture) — the ``token_usage``
+event reports the RUN total instead of one API call's. ``assistant.usage`` is
+emitted PER LLM API CALL — the SDK's own payload carries ``apiCallId``,
+``duration`` and ``ttft_ms``, which only mean anything per call — and one agent
+turn makes several. Every consumer reads a payload as the run's running total,
+so the per-call numbers are accumulated here. The counters are locals in
+``run``: one backend instance serves every run on its agent.
 """
 
 import asyncio
@@ -255,9 +263,19 @@ class CopilotSDKBackend(BaseAgentBackend):
             queue: asyncio.Queue[AgentEvent | None] = asyncio.Queue()
             _streamed_via_deltas = False  # Track if we got streaming deltas
 
+            # Run-cumulative token counters. ``assistant.usage`` is emitted PER
+            # LLM API CALL — the SDK's own payload carries ``apiCallId``,
+            # ``duration`` and ``ttft_ms``, which only make sense per call — and
+            # an agent turn makes several. Every consumer of ``token_usage``
+            # treats a payload as the run's running total (the cloud run loop
+            # keeps the LATEST one), so the per-call numbers have to be summed
+            # here or a multi-call run bills for one call.
+            _run_input = 0
+            _run_output = 0
+
             def on_event(event: Any) -> None:
                 """Map Copilot SDK events to AgentEvents and enqueue."""
-                nonlocal _streamed_via_deltas
+                nonlocal _streamed_via_deltas, _run_input, _run_output
                 # event.type is an enum; use .value for string comparison
                 event_type = _get_event_type(event)
                 data = getattr(event, "data", event)
@@ -310,13 +328,17 @@ class CopilotSDKBackend(BaseAgentBackend):
                     input_t = getattr(data, "input_tokens", 0) or 0
                     output_t = getattr(data, "output_tokens", 0) or 0
                     if input_t or output_t:
+                        # Accumulate, then report the RUN total — see
+                        # ``_run_input`` above. The SDK types these as floats.
+                        _run_input += int(input_t)
+                        _run_output += int(output_t)
                         queue.put_nowait(
                             AgentEvent(
                                 type="token_usage",
                                 content="",
                                 metadata={
-                                    "input_tokens": input_t,
-                                    "output_tokens": output_t,
+                                    "input_tokens": _run_input,
+                                    "output_tokens": _run_output,
                                     "model": model,
                                     "backend": "copilot_sdk",
                                 },

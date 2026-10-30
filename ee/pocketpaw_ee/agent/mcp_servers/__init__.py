@@ -1,5 +1,15 @@
 """In-process MCP servers exposed to agent backends for cloud features.
 
+Updated: 2026-09-06 (feat/fx-mcp-server) — added ``fx.py`` (``pocketpaw_fx``).
+
+Updated: 2026-09-06 (BR-1, feat/browser-surface-server) — added ``browser.py``
+(``pocketpaw_browser``) to the listing below: the /browser surface's agentic
+browser. Unlike its siblings it is scoped by DENY as well as allow — every
+non-BROWSER surface profile forbids its ids.
+
+Updated: 2026-07-28 (feat/growth-mcp) — added ``growth.py`` (``pocketpaw_growth``)
+to the listing below: the agent-facing /growth surface, read-and-propose only.
+
 Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) — added the server
 surface listing below, plus the two new read-only servers (``fabric.py`` /
 ``instinct.py``). On the claude_agent_sdk backend, registry tools (BaseTool)
@@ -15,12 +25,12 @@ boundary.
 Server surfaces (module → server name → tools):
 
 * ``belt.py`` → ``pocketpaw_belt`` → ``belt_propose_change`` (gated code change)
+* ``browser.py`` → ``pocketpaw_browser`` → ``navigate`` / ``snapshot`` /
+  ``click`` / ``type`` / ``scroll`` / ``screenshot`` / ``close`` (one real
+  browser per workspace; request-level SSRF in the OSS driver, credential
+  fields refused in code, one audit row per action)
 * ``connectors.py`` → ``pocketpaw_connectors`` → connector listing + execution
 * ``decisions.py`` → ``pocketpaw_decisions`` → Decision-Graph queries
-* ``design_systems.py`` → ``pocketpaw_design_systems`` → ``list_design_systems``
-  / ``get_design_system`` (retrieve a bundled DESIGN.md design system — full
-  token scales + prose — from ``pocketpaw.bundled_design_systems``; pure local
-  read, no identity, no network)
 * ``deliver.py`` → ``pocketpaw_deliver`` → ``deliver_artifact`` (land a built
   file/dir in tenant blob storage, return a download URL)
 * ``external_actions.py`` → ``pocketpaw_external_actions`` →
@@ -29,6 +39,17 @@ Server surfaces (module → server name → tools):
 * ``fabric.py`` → ``pocketpaw_fabric`` → ``fabric_query`` / ``fabric_stats``
   (READ-ONLY ontology access, workspace-scoped)
 * ``foresight.py`` → ``pocketpaw_foresight`` → scenario save/run
+* ``growth.py`` → ``pocketpaw_growth`` → the /growth outbound surface:
+  ``growth_list_prospects`` / ``growth_get_prospect`` / ``growth_list_drafts``
+  / ``growth_linkedin_queue`` (reads), ``growth_upsert_prospect`` /
+  ``growth_create_draft`` / ``growth_update_draft`` (authoring writes), and
+  ``growth_propose_send`` / ``growth_propose_send_batch`` (gated). NOTHING here
+  sends and nothing reaches the gate-owned draft statuses ``approved`` /
+  ``sent`` — the agent's reach ends at ``proposed``, a human approves in the
+  Tray, and the dispatch worker sends
+* ``fx.py`` → ``pocketpaw_fx`` → ``search_effects`` / ``get_effect`` /
+  ``list_effect_categories`` (the paw-fx drop-in visual-effects registry read
+  from ``PAW_FX_REGISTRY_DIR``; pure read, no identity)
 * ``icons.py`` → ``pocketpaw_icons`` → ``search_icons`` (free open-source
   icon/SVG search via Iconify for site iconography; pure read, no identity)
 * ``instinct.py`` → ``pocketpaw_instinct`` → ``instinct_pending`` /

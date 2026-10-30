@@ -108,7 +108,7 @@ def _make_client(monkeypatch) -> TestClient:
     # underlying guard helper to a no-op.
     import pocketpaw_ee.cloud._core.deps as deps_module
 
-    monkeypatch.setattr(deps_module, "check_workspace_action", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(deps_module, "check_workspace_action", AsyncMock(return_value=None))
 
     user = _FakeUser("admin-1", "ws-A")
     app = FastAPI()

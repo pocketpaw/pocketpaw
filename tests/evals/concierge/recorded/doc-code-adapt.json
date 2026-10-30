@@ -1,0 +1,10 @@
+{
+  "case_id": "doc-code-adapt",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. MISBEHAVING on purpose: an adapted example; not verbatim, so the filter must replace it.. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "f8fda3ab244be836",
+  "raw_model_output": "Sure:\n```bash\nbrewkit init --site prod --verbose\n```"
+}

@@ -29,11 +29,22 @@
 # cases — ``bill_run`` stamps the run's real ``total_tokens`` on the debit ref
 # (summed from input + output + cached when no explicit total is given, and the
 # explicit backend-supplied total wins when present).
+# Updated 2026-09-02 (fix/metering-dated-pricing): five cases for the meter's new
+# obligations, and every one of them pins a dollar amount rather than a sign.
+# ``_make_run`` gained ``ended_at`` because a run's compute is priced at the
+# moment it RAN, and this sweeper bills afterwards out of a backlog — the first
+# of the new cases bills the same million tokens at $2.00 and at $3.00 purely
+# because they happened on different days. The rest cover the long-context tier,
+# the inclusive-prompt reconstruction, and the split of ``unpriced`` out of
+# ``none`` so a bill we failed to send stops reading as nothing to bill.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from pocketpaw_ee.cloud.credits import service as credits
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.metering import service as metering
 from pocketpaw_ee.cloud.metering.domain import RateCard
 from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
@@ -54,8 +65,15 @@ async def _make_run(
     status: str = "completed",
     usage: dict | None = None,
     billed: bool = False,
+    ended_at: datetime | None = None,
 ) -> ChatRunDoc:
-    """Insert a terminal ChatRunDoc carrying the given usage dict."""
+    """Insert a terminal ChatRunDoc carrying the given usage dict.
+
+    ``ended_at`` pins WHEN the run happened, which is what its compute is priced
+    at. Left ``None`` the doc falls back to ``createdAt`` (now), which is right
+    for a run that just finished and wrong for every backlogged one - the whole
+    reason the meter takes a timestamp.
+    """
     doc = ChatRunDoc(
         run_id=run_id,
         workspace=workspace,
@@ -69,6 +87,7 @@ async def _make_run(
         status=status,  # type: ignore[arg-type]
         usage=usage if usage is not None else {},
         billed=billed,
+        **({"ended_at": ended_at} if ended_at is not None else {}),
     )
     await doc.insert()
     return doc
@@ -97,7 +116,7 @@ async def test_reported_cost_debits_expected_credits(mongo_db):
     entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == WS).to_list()
     spend = [e for e in entries if e.idempotency_key == "run:run-1"]
     assert len(spend) == 1
-    assert spend[0].amount_delta == -10
+    assert spend[0].amount_delta_micro == credits_to_micro(-10)
     assert spend[0].cause == "compute_spend"
     assert spend[0].ref.get("run_id") == "run-1"
 
@@ -132,7 +151,11 @@ async def test_estimate_fallback_when_no_reported_cost(mongo_db, reported):
     assert result.cost_source == "estimated"
     assert result.credits_charged > 0
     assert result.credits_charged == 3
-    assert await credits.balance(WS) == before - result.credits_charged
+    # The wallet moved by the EXACT charge, which is 3.125 credits here — not the
+    # 3 that ``credits_charged`` shows after truncation. Asserting against the
+    # displayed figure would pass only while every cost happened to land on a whole
+    # credit, which is exactly the assumption the micro unit removed.
+    assert await credits.balance_micro(WS) == credits_to_micro(before) - result.micro_charged
 
 
 # ---------------------------------------------------------------------------
@@ -335,3 +358,262 @@ async def test_bill_run_prefers_explicit_total_tokens(mongo_db):
     ).to_list()
     assert len(spend) == 1
     assert spend[0].ref.get("total_tokens") == 999
+
+
+# ---------------------------------------------------------------------------
+# Prices are effective-dated, and this meter runs late (2026-09-02).
+# ---------------------------------------------------------------------------
+
+
+async def test_a_backlogged_run_bills_at_the_rate_it_actually_ran_at(mongo_db):
+    """The crux of the dated-pricing fix, in the one place it costs money.
+
+    ``claude-sonnet-5`` was $2.00/MTok through 2026-08-31 and $3.00 from
+    2026-09-01. This sweeper bills AFTER the run, 200 at a tick, so a backlog
+    spans hours or days. Pricing at ``now()`` bills August's run at September's
+    rate - a 50% overcharge that looks like a correct bill from every angle
+    except the date.
+    """
+    await credits.grant(WS, 100_000, cause="top_up", idempotency_key="seed-dated")
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0, "model": "claude-sonnet-5"}
+
+    before = await _make_run(
+        run_id="run-dated-before",
+        usage=usage,
+        ended_at=datetime(2026, 8, 30, 12, 0, tzinfo=UTC),
+    )
+    after = await _make_run(
+        run_id="run-dated-after",
+        usage=usage,
+        ended_at=datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
+    )
+
+    old_bill = await metering.bill_run(before, rate_card=RATE)
+    new_bill = await metering.bill_run(after, rate_card=RATE)
+
+    # $2.00 and $3.00 for the same million tokens, because they ran on different
+    # days. round(2.00 * 250) = 500 credits; round(3.00 * 250) = 750.
+    assert old_bill.cost_usd == 2.00
+    assert old_bill.credits_charged == 500
+    assert new_bill.cost_usd == 3.00
+    assert new_bill.credits_charged == 750
+
+
+async def test_a_cached_anthropic_payload_is_read_as_an_inclusive_prompt(mongo_db):
+    """The payload ``pydantic_ai`` writes carries the UNCACHED remainder in
+    ``input_tokens`` with the cache lines beside it, so the meter has to add
+    them back before pricing. Reading the remainder as the total subtracts the
+    cache twice and undercounts every cached turn.
+
+    10k inclusive prompt (1k fresh + 8k read + 1k write) and 1k out on
+    ``claude-sonnet-5``: 0.003 + 0.0024 + 0.00375 + 0.015 = $0.02415.
+    round(0.02415 * 250) = 6 credits.
+    """
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed-cached")
+    run = await _make_run(
+        run_id="run-cached",
+        usage={
+            "input_tokens": 1_000,
+            "output_tokens": 1_000,
+            "cached_input_tokens": 8_000,
+            "cache_read_tokens": 8_000,
+            "cache_write_tokens": 1_000,
+            "model": "claude-sonnet-5",
+        },
+        ended_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+    result = await metering.bill_run(run, rate_card=RATE)
+
+    assert result.cost_source == "estimated"
+    assert result.cost_usd == 0.02415
+    assert result.credits_charged == 6
+
+
+async def test_an_unpriced_model_is_its_own_source_and_not_silence(mongo_db):
+    """C4. A run that consumed real tokens on a model nothing can price used to
+    be indistinguishable from a run with no usage at all: both billed 0, both
+    logged at DEBUG, both reported ``source="none"``. One of those is nothing to
+    bill and the other is a bill we are failing to send."""
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed-unpriced")
+    run = await _make_run(
+        run_id="run-unpriced",
+        usage={
+            "input_tokens": 50_000,
+            "output_tokens": 5_000,
+            "model": "some-other-vendor-model",
+        },
+        ended_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    empty = await _make_run(
+        run_id="run-empty-usage",
+        usage={},
+        ended_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+    unpriced = await metering.bill_run(run, rate_card=RATE)
+    nothing = await metering.bill_run(empty, rate_card=RATE)
+
+    assert unpriced.cost_source == "unpriced"
+    assert unpriced.credits_charged == 0
+    assert nothing.cost_source == "none"
+    # Both still marked billed - the sweep must not re-visit either forever.
+    for run_id in ("run-unpriced", "run-empty-usage"):
+        doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == run_id)
+        assert doc is not None and doc.billed is True
+
+
+async def test_the_sweep_names_the_models_it_could_not_price(mongo_db, caplog):
+    """An unpriced run bills 0 credits, which writes no ledger row, so the tick
+    is the last place the fact exists. One warning per tick naming the distinct
+    models - not one per run, or a backlog on a single bad id reads as two
+    hundred problems."""
+    import logging
+
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed-sweep-unpriced")
+    for i in range(3):
+        await _make_run(
+            run_id=f"run-sweep-unpriced-{i}",
+            usage={
+                "input_tokens": 1_000,
+                "output_tokens": 100,
+                "model": "some-other-vendor-model",
+            },
+            ended_at=datetime(2026, 9, 1, tzinfo=UTC),
+        )
+
+    with caplog.at_level(logging.WARNING):
+        await sweep_unbilled_runs(rate_card=RATE, mode="off")
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    tick_lines = [m for m in warnings if "could price them" in m]
+    assert len(tick_lines) == 1, warnings
+    assert "some-other-vendor-model" in tick_lines[0]
+
+
+async def test_a_long_context_run_bills_the_long_context_tier(mongo_db):
+    """C6. ``claude-sonnet-4-5`` is $3.00/MTok up to 200k prompt tokens and
+    $6.00 above. A single flat rate per model cannot express that, so every long
+    prompt billed at half price. 250k in / 0 out = $1.50 -> 375 credits."""
+    await credits.grant(WS, 100_000, cause="top_up", idempotency_key="seed-longctx")
+    run = await _make_run(
+        run_id="run-longctx",
+        usage={"input_tokens": 250_000, "output_tokens": 0, "model": "claude-sonnet-4-5"},
+        ended_at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+
+    result = await metering.bill_run(run, rate_card=RATE)
+
+    assert result.cost_usd == 1.50
+    assert result.credits_charged == 375
+
+
+# ===========================================================================
+# BILL AT COMPLETION — the wallet should not be a sweep interval behind.
+# ===========================================================================
+
+
+async def test_bill_run_now_charges_without_waiting_for_a_sweep(mongo_db):
+    # The point of the whole thing: a finished run is charged immediately, so a
+    # customer who opens billing straight after chatting sees their own message.
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-now", usage={"total_cost_usd": 0.04})
+
+    result = await metering.bill_run_now("r-now")
+
+    assert result is not None
+    assert result.debited is True
+    assert result.credits_charged == 10  # round(0.04 * 250)
+    assert await credits.balance(WS) == 990
+
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == "r-now")
+    assert doc.billed is True
+
+
+async def test_the_sweeper_does_not_charge_again_for_a_run_billed_at_completion(mongo_db):
+    """The money invariant. Completion billing is an optimisation ON TOP of the
+    sweep, not a replacement, so both running must still charge exactly once."""
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-once", usage={"total_cost_usd": 0.04})
+
+    await metering.bill_run_now("r-once")
+    assert await credits.balance(WS) == 990
+
+    # The sweep reaches it later and must move nothing.
+    swept = await sweep_unbilled_runs(rate_card=RATE)
+    assert swept == 0
+    assert await credits.balance(WS) == 990
+
+    entries = await CreditLedgerEntry.find(
+        CreditLedgerEntry.workspace == WS,
+        CreditLedgerEntry.idempotency_key == "run:r-once",
+    ).to_list()
+    assert len(entries) == 1
+
+
+async def test_an_already_billed_run_is_left_alone(mongo_db):
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-done", usage={"total_cost_usd": 0.04}, billed=True)
+
+    assert await metering.bill_run_now("r-done") is None
+    assert await credits.balance(WS) == 1000
+
+
+async def test_a_run_still_in_flight_is_left_to_the_sweep(mongo_db):
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-running", status="running", usage={"total_cost_usd": 0.04})
+
+    assert await metering.bill_run_now("r-running") is None
+    assert await credits.balance(WS) == 1000
+
+
+async def test_a_missing_run_is_not_an_error(mongo_db):
+    # A crash between the terminal write and this call leaves nothing to bill.
+    assert await metering.bill_run_now("r-nope") is None
+
+
+async def test_live_mode_gates_completion_billing_off(mongo_db, monkeypatch):
+    """The single-meter guarantee has to hold at completion too, not just on the
+    tick. Otherwise flipping to ``live`` would silently double-charge every run:
+    LiteLLM from proxy spend, and this from the run doc."""
+    import pocketpaw_ee.cloud.llm_provisioning.service as provisioning
+
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-live", usage={"total_cost_usd": 0.04})
+    monkeypatch.setattr(provisioning, "spend_mode", lambda: "live")
+
+    assert await metering.bill_run_now("r-live") is None
+    assert await credits.balance(WS) == 1000
+
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == "r-live")
+    assert doc.billed is False, "live mode must not flip the flag either"
+
+
+async def test_a_billing_failure_never_propagates_into_the_run(mongo_db, monkeypatch):
+    """A run that already succeeded must not be failed by its own accounting.
+    Swallowing here is safe precisely because the sweeper retries."""
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-boom", usage={"total_cost_usd": 0.04})
+
+    async def _explode(*a, **k):
+        raise RuntimeError("ledger unreachable (simulated)")
+
+    monkeypatch.setattr(metering, "bill_run", _explode)
+
+    assert await metering.bill_run_now("r-boom") is None  # no raise
+
+    # Still unbilled, so the sweep will pick it up.
+    doc = await ChatRunDoc.find_one(ChatRunDoc.run_id == "r-boom")
+    assert doc.billed is False
+
+
+async def test_a_run_missed_at_completion_is_still_swept(mongo_db):
+    # Completion billing is best-effort; the sweeper remains the backstop and
+    # must still charge a run that never reached bill_run_now.
+    await credits.grant(WS, 1000, cause="top_up", idempotency_key="seed")
+    await _make_run(run_id="r-missed", usage={"total_cost_usd": 0.04})
+
+    swept = await sweep_unbilled_runs(rate_card=RATE)
+
+    assert swept == 1
+    assert await credits.balance(WS) == 990

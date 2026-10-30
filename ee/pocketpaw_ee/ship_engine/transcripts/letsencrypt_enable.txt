@@ -1,0 +1,13 @@
+# transcript: `dokku letsencrypt:enable demo` — successful ACME issuance.
+EXIT: 0
+--- stdout ---
+=====> Enabling letsencrypt for demo
+-----> Enabling ACME proxy for demo...
+-----> Getting letsencrypt certificate for demo via HTTP-01
+-----> Certificate retrieved successfully.
+-----> Installing let's encrypt certificates
+-----> Configuring SSL for demo.paw.example...(using built-in template)
+-----> Enabling HTTPS redirect
+-----> Disabling ACME proxy for demo...
+       done
+--- stderr ---

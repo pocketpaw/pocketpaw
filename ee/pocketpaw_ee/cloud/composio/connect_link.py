@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from pocketpaw.config import Settings
+from pocketpaw.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ def maybe_emit_connect_link(
     Gated by ``settings.composio_connect_link_inline``; when False, this
     is a no-op and the agent's response surfaces the raw URL string.
     """
-    s = settings or Settings.load()
+    s = settings or get_settings()
     if not s.composio_connect_link_inline:
         return False
 

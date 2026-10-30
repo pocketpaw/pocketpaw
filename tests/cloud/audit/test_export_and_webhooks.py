@@ -1,3 +1,7 @@
+# 2026-10-01 (CN-2): delivery tests run through an httpx MockTransport + stubbed
+#   DNS instead of a mocked client .post, and pin the DNS-rebind fix: delivery
+#   connects to the validated IP (Host + SNI = hostname), never a rebound one.
+#   Create refuses credential-bearing / over-long URLs the pinned path refuses.
 """Wave 3 Task 15 — CSV export + SIEM webhook delivery."""
 
 from __future__ import annotations
@@ -9,7 +13,7 @@ import io
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 # ruff: noqa: I001, E402
 # Why: importing ``models.user`` BEFORE the other cloud imports primes the
@@ -202,6 +206,38 @@ async def test_post_webhook_rejects_private_address(admin_client: AsyncClient, u
     assert resp.json()["error"]["code"] == "webhooks.private_address"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:pass@siem.example.com/in",
+        "https://token@siem.example.com/in",
+    ],
+    ids=["user-pass", "token"],
+)
+async def test_post_webhook_rejects_urls_delivery_would_refuse(
+    admin_client: AsyncClient, url: str
+) -> None:
+    """Credentials in the URL and over-long URLs are refused by the pinned
+    delivery path, so they must be refused at create time too, not accepted
+    and then silently disabled on the first event."""
+    resp = await admin_client.post(
+        f"/api/v1/workspaces/{WS}/audit/webhooks",
+        json={"url": url},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "webhooks.invalid_url"
+
+
+async def test_url_safety_rejects_over_long_url() -> None:
+    """The create DTO already caps the URL at 2048 (422); the service check
+    holds the same line for any other caller, matching the pinned fetcher."""
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+
+    with pytest.raises(Forbidden) as exc:
+        await audit_webhooks._validate_url_safety("https://siem.example.com/" + "a" * 2048)
+    assert exc.value.code == "webhooks.invalid_url"
+
+
 async def test_delivery_disables_webhook_if_url_flips_private(
     admin_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -313,45 +349,69 @@ def _make_event() -> _AuditEventDoc:
     )
 
 
-class _FakeResponse:
-    def __init__(self, status_code: int = 200) -> None:
-        self.status_code = status_code
+_PUBLIC_IP = "93.184.216.34"
 
 
-def _patch_httpx(mock_post: AsyncMock):
-    client = MagicMock()
-    client.post = mock_post
+def _patch_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    handler,
+    resolve=None,
+) -> list[httpx.Request]:
+    """Route every httpx client through a MockTransport and stub DNS.
 
-    class _CtxClient:
-        async def __aenter__(self_inner):
-            return client
+    Patches ``httpx.AsyncClient`` itself, so it catches whatever client the
+    delivery path builds (a plain client or the pinned SafeFetcher's). The
+    returned list collects every request that reached the "network".
+    """
+    seen: list[httpx.Request] = []
 
-        async def __aexit__(self_inner, *a):
-            return None
+    def _record(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return handler(request)
 
-    return patch.object(httpx, "AsyncClient", lambda *a, **kw: _CtxClient())
+    real_client = httpx.AsyncClient
+
+    class _MockClient(real_client):  # type: ignore[misc, valid-type]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = httpx.MockTransport(_record)
+            super().__init__(*args, **kwargs)
+
+    async def _public(_host: str) -> list[str]:
+        return [_PUBLIC_IP]
+
+    monkeypatch.setattr(httpx, "AsyncClient", _MockClient)
+    monkeypatch.setattr(audit_webhooks, "_resolve_addresses", resolve or _public)
+    return seen
 
 
-async def test_deliver_signs_payload_with_timestamp_prefix() -> None:
-    secret = "topsecret"
+def _status(code: int):
+    return lambda _request: httpx.Response(code)
+
+
+async def _insert_hook(secret: str = "s", **extra: Any) -> _AuditWebhookDoc:
     hook = _AuditWebhookDoc(
         workspace=WS,
         url="https://siem.example.com/in",
         secret=secret,
         created_by="admin",
+        **extra,
     )
     await hook.insert()
+    return hook
+
+
+async def test_deliver_signs_payload_with_timestamp_prefix(monkeypatch) -> None:
+    secret = "topsecret"
+    hook = await _insert_hook(secret)
     event = _make_event()
     await event.insert()
 
-    mock_post = AsyncMock(return_value=_FakeResponse(200))
-    with _patch_httpx(mock_post):
-        await audit_webhooks.deliver(event)
+    seen = _patch_transport(monkeypatch, _status(200))
+    await audit_webhooks.deliver(event)
 
-    assert mock_post.await_count == 1
-    call = mock_post.await_args
-    headers = call.kwargs["headers"]
-    body = call.kwargs["content"]
+    assert len(seen) == 1
+    headers = seen[0].headers
+    body = seen[0].content.decode()
     ts = headers["X-Paw-Audit-Timestamp"]
     expected = hmac.new(
         secret.encode(),
@@ -359,6 +419,7 @@ async def test_deliver_signs_payload_with_timestamp_prefix() -> None:
         hashlib.sha256,
     ).hexdigest()
     assert headers["X-Paw-Audit-Signature"] == f"sha256={expected}"
+    assert headers["Content-Type"] == "application/json"
 
     reloaded = await _AuditWebhookDoc.get(hook.id)
     assert reloaded.last_status == 200
@@ -366,20 +427,66 @@ async def test_deliver_signs_payload_with_timestamp_prefix() -> None:
     assert reloaded.last_error is None
 
 
-async def test_deliver_records_failure_on_500() -> None:
-    hook = _AuditWebhookDoc(
-        workspace=WS,
-        url="https://siem.example.com/in",
-        secret="s",
-        created_by="admin",
-    )
-    await hook.insert()
+async def test_deliver_connects_to_the_validated_ip(monkeypatch) -> None:
+    """The POST is pinned: it goes to the IP the SSRF check passed, with the
+    real hostname in the Host header and as the TLS SNI name. httpx is never
+    handed the hostname to resolve on its own."""
+    await _insert_hook()
     event = _make_event()
     await event.insert()
 
-    mock_post = AsyncMock(return_value=_FakeResponse(500))
-    with _patch_httpx(mock_post):
-        await audit_webhooks.deliver(event)
+    seen = _patch_transport(monkeypatch, _status(200))
+    await audit_webhooks.deliver(event)
+
+    assert len(seen) == 1
+    request = seen[0]
+    assert request.url.host == _PUBLIC_IP
+    assert request.url.path == "/in"
+    assert request.headers["Host"] == "siem.example.com"
+    assert request.extensions.get("sni_hostname") == "siem.example.com"
+
+
+async def test_deliver_dns_rebind_never_connects_to_private_ip(monkeypatch) -> None:
+    """DNS rebinding: the hostname answers public for the SSRF check, then
+    private for every later lookup. Delivery must never reach the private
+    address, and must never hand httpx the bare hostname (which would let it
+    re-resolve to the rebound IP at connect time)."""
+    hook = await _insert_hook()
+    event = _make_event()
+    await event.insert()
+
+    calls = {"n": 0}
+
+    async def _rebinding(_host: str) -> list[str]:
+        calls["n"] += 1
+        return [_PUBLIC_IP] if calls["n"] == 1 else ["10.0.0.5"]
+
+    seen = _patch_transport(monkeypatch, _status(200), resolve=_rebinding)
+    await audit_webhooks.deliver(event)
+
+    assert seen == []  # refused before any socket
+
+    import ipaddress
+
+    for request in seen:
+        try:
+            target = ipaddress.ip_address(request.url.host)
+        except ValueError:
+            pytest.fail(f"httpx was handed hostname {request.url.host!r} to resolve itself")
+        assert target.is_global, f"connected to non-public {target}"
+
+    reloaded = await _AuditWebhookDoc.get(hook.id)
+    assert reloaded.enabled is False
+    assert reloaded.last_error and "unsafe url" in reloaded.last_error
+
+
+async def test_deliver_records_failure_on_500(monkeypatch) -> None:
+    hook = await _insert_hook()
+    event = _make_event()
+    await event.insert()
+
+    _patch_transport(monkeypatch, _status(500))
+    await audit_webhooks.deliver(event)
 
     reloaded = await _AuditWebhookDoc.get(hook.id)
     assert reloaded.failure_count == 1
@@ -388,53 +495,52 @@ async def test_deliver_records_failure_on_500() -> None:
     assert reloaded.enabled is True
 
 
-async def test_deliver_auto_disables_after_10_failures() -> None:
-    hook = _AuditWebhookDoc(
-        workspace=WS,
-        url="https://siem.example.com/in",
-        secret="s",
-        created_by="admin",
-        failure_count=9,
-    )
-    await hook.insert()
+async def test_deliver_records_failure_on_transport_error(monkeypatch) -> None:
+    hook = await _insert_hook()
     event = _make_event()
     await event.insert()
 
-    mock_post = AsyncMock(return_value=_FakeResponse(500))
-    with _patch_httpx(mock_post):
-        await audit_webhooks.deliver(event)
+    def _boom(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    _patch_transport(monkeypatch, _boom)
+    await audit_webhooks.deliver(event)
+
+    reloaded = await _AuditWebhookDoc.get(hook.id)
+    assert reloaded.failure_count == 1
+    assert reloaded.last_status is None
+    assert reloaded.last_error
+    assert reloaded.enabled is True
+
+
+async def test_deliver_auto_disables_after_10_failures(monkeypatch) -> None:
+    hook = await _insert_hook(failure_count=9)
+    event = _make_event()
+    await event.insert()
+
+    _patch_transport(monkeypatch, _status(500))
+    await audit_webhooks.deliver(event)
 
     reloaded = await _AuditWebhookDoc.get(hook.id)
     assert reloaded.failure_count == 10
     assert reloaded.enabled is False
 
 
-async def test_replay_protection_signature_differs_at_different_times() -> None:
-    hook = _AuditWebhookDoc(
-        workspace=WS,
-        url="https://siem.example.com/in",
-        secret="s",
-        created_by="admin",
-    )
-    await hook.insert()
+async def test_replay_protection_signature_differs_at_different_times(monkeypatch) -> None:
+    await _insert_hook()
     event = _make_event()
     await event.insert()
 
-    sigs: list[str] = []
-    bodies: list[str] = []
-
-    async def _capture(url, content, headers, timeout):  # noqa: ARG001
-        sigs.append(headers["X-Paw-Audit-Signature"])
-        bodies.append(content)
-        return _FakeResponse(200)
-
-    mock_post = AsyncMock(side_effect=_capture)
-    with _patch_httpx(mock_post), patch("pocketpaw_ee.cloud.audit.webhooks.time") as t:
+    seen = _patch_transport(monkeypatch, _status(200))
+    with patch("pocketpaw_ee.cloud.audit.webhooks.time") as t:
         t.time.return_value = 1_000_000
         await audit_webhooks.deliver(event)
         t.time.return_value = 1_000_500
         await audit_webhooks.deliver(event)
 
+    bodies = [r.content for r in seen]
+    sigs = [r.headers["X-Paw-Audit-Signature"] for r in seen]
+    assert len(seen) == 2
     assert bodies[0] == bodies[1]
     assert sigs[0] != sigs[1]
 

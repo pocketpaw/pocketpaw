@@ -17,7 +17,11 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.memory.protocol import MemoryEntry, MemoryType
+from pocketpaw.memory.protocol import (
+    DEFAULT_SESSION_HISTORY_LIMIT,
+    MemoryEntry,
+    MemoryType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -417,15 +421,24 @@ class Mem0MemoryStore:
                 self.user_id = old_uid
         return await self._get_filtered(memory_type, None, limit)
 
-    async def get_session(self, session_key: str) -> list[MemoryEntry]:
-        """Get session history for a specific session."""
+    async def get_session(
+        self, session_key: str, limit: int | None = DEFAULT_SESSION_HISTORY_LIMIT
+    ) -> list[MemoryEntry]:
+        """Get session history for a specific session, oldest first.
+
+        This adapter already had a hard 1000 ceiling of its own, so it was
+        never the unbounded one. It takes the parameter to keep every
+        MemoryStoreProtocol implementation interchangeable — a caller that
+        passes ``limit`` must not get a different contract depending on which
+        backend is configured.
+        """
         self._ensure_initialized()
 
         try:
             result = await self._run_sync(
                 self._memory.get_all,
                 run_id=session_key,
-                limit=1000,
+                limit=1000 if limit is None else min(limit, 1000),
             )
 
             entries = []
@@ -436,6 +449,11 @@ class Mem0MemoryStore:
 
             # Sort by creation time
             entries.sort(key=lambda e: e.created_at)
+            # mem0's own `limit` is not documented to return the NEWEST rows,
+            # so the tail is taken after sorting rather than trusted from the
+            # query. Tail, not head — the head is the oldest.
+            if limit is not None:
+                entries = entries[-limit:]
             return entries
 
         except Exception as e:

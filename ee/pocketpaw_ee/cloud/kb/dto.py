@@ -1,3 +1,7 @@
+# dto.py — Wire DTOs for the knowledge base REST API.
+# Updated: 2026-08-04 — Living-wiki API: added ReingestRequest and
+# ReingestUploadRequest for the new POST /knowledge/reingest and
+# POST /knowledge/reingest-upload routes.
 """Wire DTOs for the knowledge base REST API.
 
 Renamed from ``schemas.py`` to ``dto.py`` in Phase 6b for naming
@@ -32,3 +36,17 @@ class IngestUrlRequest(BaseModel):
 
 class LintRequest(BaseModel):
     scope: str | None = None
+
+
+class ReingestRequest(BaseModel):
+    """POST /knowledge/reingest — re-run an article's raw doc through the funnel."""
+
+    article_id: str = Field(min_length=1)
+    scope: str | None = None  # None = caller's active workspace
+
+
+class ReingestUploadRequest(BaseModel):
+    """POST /knowledge/reingest-upload — extract + ingest one uploaded file."""
+
+    upload_id: str = Field(min_length=1)
+    scope: str | None = None  # None = caller's active workspace

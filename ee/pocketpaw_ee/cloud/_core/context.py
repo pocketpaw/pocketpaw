@@ -16,10 +16,32 @@ Updates:
     back to the standard JWT auth path when any check fails. Used by the
     foresight router; the dev-grade bypass tightens to a short-lived
     signed JWT in a follow-up PR.
+  - 2026-07-14 (Paw Bar concierge seam, T1): added ``ScopeKind.CONCIERGE``
+    — the scope a public, origin-bound Paw Bar embed key resolves into
+    (``site_keys.resolve_site_key``) — and a trailing ``pocket_id`` field on
+    ``RequestContext``. The concierge is bound to a Site's ``pocket_id`` (its
+    KB scope downstream is ``pocket:<pocket_id>``), which the workspace/user
+    axes don't carry, so the resolved envelope needs its own slot. The field
+    is optional (default ``None``) and trailing, so every existing keyword
+    construction is unaffected — no caller passes it yet.
+  - 2026-10-01 (CN-2): deleted the ee ``require_scope``. It let every JWT
+    caller through (``ctx.scopes is None``) and had no production importers;
+    the fail-closed ``pocketpaw.api.deps.require_scope`` is the one scope gate.
+  - 2026-10-03 (fix/paw-key-scopes): ``request_context`` now enforces a
+    workspace ``paw_`` key's scopes. ``_API_KEY_SCOPES`` maps the route family
+    (first path segment after ``/api/v1``) plus method to one scope from
+    ``auth.scopes.AVAILABLE_SCOPES``: GET/HEAD (and the POST reads in
+    ``_API_KEY_POST_READS``) need ``<resource>.read``, anything else needs the
+    write scope. An unmapped family, or a write on a resource with no write
+    scope, is a 403 for every key. JWT/cookie and the loopback variant are not
+    gated. Until now a ``chat.read`` key could call any route built on this
+    dependency (tasks, cycles, websandbox credentials, ...).
 """
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -46,6 +68,12 @@ class ScopeKind(StrEnum):
     GROUP = "group"
     DM = "dm"
     NONE = "none"
+    # A public, origin-bound Paw Bar embed key (Site.signed_key) resolves into
+    # this scope via ``auth.site_keys.resolve_site_key``. It is NOT a signed-in
+    # user session: the credential is world-visible (embedded in a foreign
+    # site's HTML), so the request's authority is the resolved Site's
+    # ``scopes`` + ``workspace`` + ``pocket_id``, never full workspace access.
+    CONCIERGE = "concierge"
 
 
 @dataclass(frozen=True)
@@ -65,9 +93,16 @@ class RequestContext:
         started_at: Timezone-aware UTC timestamp recorded at dependency
             resolution time. Used by the timing middleware and downstream
             log correlation.
-        scopes: ``None`` for JWT/cookie auth (full access). A concrete
-            list when the caller authed with an API key — ``require_scope``
-            checks against this list.
+        scopes: ``None`` for JWT/cookie auth. A concrete list when the caller
+            authed with a workspace API key (``paw_``). ``request_context``
+            has already checked the route against it (see
+            ``_API_KEY_SCOPES``) before the context is returned.
+        pocket_id: The pocket a scope is bound to, when the scope carries one.
+            ``None`` for the workspace/user-axis scopes (WORKSPACE, SESSION,
+            NONE, …). Set by ``site_keys.resolve_site_key`` for a CONCIERGE
+            request — the Site the embed key belongs to is published from a
+            pocket, and the concierge's KB read is scoped to it
+            (``pocket:<pocket_id>``). Trailing + defaulted so it is additive.
     """
 
     user_id: str
@@ -76,6 +111,7 @@ class RequestContext:
     scope: ScopeKind
     started_at: datetime
     scopes: list[str] | None = field(default=None)
+    pocket_id: str | None = field(default=None)
 
 
 def _bearer_token(request: Request) -> str | None:
@@ -85,6 +121,40 @@ def _bearer_token(request: Request) -> str | None:
     return None
 
 
+# paw_ key scope gate. Route family -> (read scope, write scope or None).
+# Families not listed here are refused to every API key.
+_API_KEY_SCOPES: dict[str, tuple[str, str | None]] = {
+    "chat": ("chat.read", "chat.send"),
+    "files": ("files.read", "files.write"),
+    "knowledge": ("knowledge.read", "knowledge.write"),
+    "kb": ("knowledge.read", "knowledge.write"),
+    "agents": ("agents.read", "agents.write"),
+    "workspaces": ("workspace.read", None),
+    "audit": ("audit.read", None),
+}
+# POST routes that only read (search bodies too big for a query string).
+_API_KEY_POST_READS = frozenset({"/files/search", "/kb/search"})
+_READ_METHODS = frozenset({"GET", "HEAD"})
+
+
+def _check_api_key_scope(request: Request, scopes: list[str]) -> None:
+    """Raise ``Forbidden`` unless the key's scopes cover this route."""
+    path = request.url.path.removeprefix("/api/v1")
+    family = path.lstrip("/").split("/", 1)[0]
+    mapped = _API_KEY_SCOPES.get(family)
+    is_read = request.method in _READ_METHODS or (
+        request.method == "POST" and path.rstrip("/") in _API_KEY_POST_READS
+    )
+    needed = None if mapped is None else mapped[0] if is_read else mapped[1]
+    if needed is None:
+        raise Forbidden(
+            "api_key.route_not_allowed",
+            f"No API key scope allows {request.method} {request.url.path}",
+        )
+    if needed not in scopes:
+        raise Forbidden("api_key.missing_scope", f"API key missing required scope: {needed}")
+
+
 async def request_context(
     request: Request,
     user: Annotated[User | None, Depends(current_optional_user)] = None,
@@ -92,7 +162,8 @@ async def request_context(
     """Build a `RequestContext` from the authenticated user or API key.
 
     Branches:
-      - ``Authorization: Bearer paw_<...>`` → resolve via API-key service.
+      - ``Authorization: Bearer paw_<...>`` → resolve via API-key service,
+        then check the route against the key's scopes (403 if not covered).
       - Otherwise → resolve via the existing fastapi-users JWT/cookie dep.
     """
     request_id = request.headers.get("x-request-id") or uuid4().hex
@@ -104,6 +175,7 @@ async def request_context(
         if resolved is None:
             raise HTTPException(status_code=401, detail="invalid_api_key")
         user_id, workspace_id, scopes = resolved
+        _check_api_key_scope(request, scopes)
         await _maybe_emit_api_key_use(bearer, workspace_id, user_id)
         return RequestContext(
             user_id=user_id,
@@ -135,10 +207,17 @@ WORKSPACE_HEADER: str = "X-PocketPaw-Workspace-Id"
 USER_HEADER: str = "X-PocketPaw-User-Id"
 
 # Hostnames / IPs the bypass trusts. The dashboard always binds to one of
-# these; outbound traffic from the chat agent inherits the same host. A
-# real attacker either has to forge ``X-Forwarded-For`` upstream of the
-# ASGI server (uvicorn doesn't honor the header by default) or land code
-# execution on the host, in which case the bypass isn't the weakest link.
+# these; outbound traffic from the chat agent inherits the same host.
+#
+# This comment used to claim that uvicorn ignores forwarded headers unless
+# configured. That is WRONG, and it was load-bearing for how safe this looked.
+# uvicorn's Config defaults ``proxy_headers=True``; what bounds it is
+# ``forwarded_allow_ips``, which defaults to ``127.0.0.1`` — and
+# ``_core/rate_limit.py`` already records that ours is unset. So a proxy on the
+# same host both terminates as loopback AND can set the forwarded header.
+#
+# That is why this trio is now refused outright in multi-tenant cloud
+# (``_header_bypass_allowed_here``) rather than relying on the peer address.
 _LOOPBACK_HOSTS: frozenset[str] = frozenset(
     {
         "127.0.0.1",
@@ -149,6 +228,49 @@ _LOOPBACK_HOSTS: frozenset[str] = frozenset(
         "::ffff:127.0.0.1",
     }
 )
+
+
+logger = logging.getLogger(__name__)
+
+_ALLOW_HEADER_BYPASS_ENV = "POCKETPAW_INTERNAL_HEADER_CONTEXT_ENABLED"
+
+
+def _header_bypass_allowed_here() -> bool:
+    """False when this deployment holds more than one tenant.
+
+    Mirrors ``pockets/router.py:_bypass_allowed_here`` (PR #2126) deliberately,
+    including the failure direction: if the signal cannot be read we refuse,
+    because opening the bypass is the dangerous answer.
+
+    A local desktop install has no cloud DB and is unaffected — which matters,
+    since that is the deployment where this bypass is how the local chat agent
+    reaches its own backend.
+    """
+    if os.environ.get(_ALLOW_HEADER_BYPASS_ENV, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        logger.warning(
+            "%s is set — the internal header context is accepted in a "
+            "multi-tenant deployment. X-PocketPaw-Workspace-Id is then the whole "
+            "of the tenancy check for every route that uses it.",
+            _ALLOW_HEADER_BYPASS_ENV,
+        )
+        return True
+    try:
+        from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
+
+        if is_multi_tenant_cloud():
+            return False
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Could not determine whether this deployment is multi-tenant; "
+            "refusing the internal header context (fail-closed)."
+        )
+        return False
+    return True
 
 
 def _is_loopback_client(request: Request) -> bool:
@@ -178,8 +300,22 @@ def _try_loopback_context(request: Request) -> RequestContext | None:
     closes the loophole where a chained process on the same host could
     forge the headers; until then, the loopback host check is the only
     boundary between the local chat agent and full workspace access.
+
+    **Refused entirely in multi-tenant cloud since 2026-09-11.** The sentence
+    above is precise about what this is worth, and behind a reverse proxy on the
+    same host it is worth nothing — ``request.client.host`` resolves to the
+    proxy, so every external client presents as loopback and the header trio is
+    the whole of the tenancy. This dependency is bound on all 24 foresight
+    routes, and it has one FEWER factor than ``pockets/router.py``'s equivalent,
+    which also requires a ``compare_digest`` against a process-local secret and
+    was still judged insufficient in PR #2126. Same gate as that PR, same
+    reason: ``is_multi_tenant_cloud()`` is not a thing an operator has to
+    remember to set on the deployment that gains a second tenant.
     """
     if request.headers.get(INTERNAL_HEADER, "").strip().lower() != "true":
+        return None
+
+    if not _header_bypass_allowed_here():
         return None
 
     if not _is_loopback_client(request):
@@ -292,23 +428,6 @@ async def _maybe_emit_api_key_use(token: str, workspace_id: str, user_id: str) -
         pass
 
 
-def require_scope(scope: str):
-    """Build a FastAPI dep that enforces a scope on the resolved context.
-
-    JWT-authed callers (``ctx.scopes is None``) always pass — they hold
-    full session credentials. API-key callers must have the scope present.
-    """
-
-    async def _dep(ctx: Annotated[RequestContext, Depends(request_context)]) -> RequestContext:
-        if ctx.scopes is None:
-            return ctx
-        if scope not in ctx.scopes:
-            raise HTTPException(status_code=403, detail=f"missing_scope:{scope}")
-        return ctx
-
-    return _dep
-
-
 __all__ = [
     "INTERNAL_HEADER",
     "RequestContext",
@@ -317,5 +436,4 @@ __all__ = [
     "WORKSPACE_HEADER",
     "loopback_or_request_context",
     "request_context",
-    "require_scope",
 ]

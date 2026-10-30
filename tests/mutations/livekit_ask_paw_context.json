@@ -1,0 +1,57 @@
+[
+  {
+    "label": "group chat ignores guests in the call",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "startswith(\"guest-\")",
+    "replace": "startswith(\"no-such-prefix-\")",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py::test_group_chat_is_left_out_while_a_guest_is_in_the_call"
+    ]
+  },
+  {
+    "label": "group chat fails open when the room check errors",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "    room = await get_room_info(group_id)\n",
+    "replace": "    try:\n        room = await get_room_info(group_id)\n    except Exception:\n        room = {}\n",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py::test_group_chat_is_left_out_when_the_room_cannot_be_checked"
+    ]
+  },
+  {
+    "label": "short question is searched without the call lines",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "    if len(_terms(question)) >= _MIN_QUERY_TERMS:\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py::test_a_question_with_no_search_terms_looks_up_the_latest_call_lines"
+    ]
+  },
+  {
+    "label": "one long chat message is kept whole",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "[:_CHAT_MESSAGE_MAX_CHARS]",
+    "replace": "",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py::test_one_long_chat_message_does_not_push_out_the_older_ones"
+    ]
+  },
+  {
+    "label": "Paw's own spoken lines reach the call context",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "        if not text or seg.get(\"identity\") == BOT_IDENTITY or seg.get(\"speaker\") == PAW_SPEAKER:\n",
+    "replace": "        if not text:\n",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py::test_paws_own_lines_never_reach_the_call_context",
+      "tests/ee/test_livekit_ask_paw.py::test_a_typed_only_call_has_no_call_lines_at_all"
+    ]
+  },
+  {
+    "label": "the call bot's posts reach the group chat",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "        if m.sender == CALL_BOT_USER_ID:\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py::test_group_chat_keeps_people_and_none_of_the_call_bots_posts"
+    ]
+  }
+]

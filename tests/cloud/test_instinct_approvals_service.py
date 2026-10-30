@@ -229,3 +229,57 @@ async def test_auto_approve_requires_workspace_and_user() -> None:
         await approvals_service.auto_approve(
             "w1", "", _create_body(), trust_score=0.95, triager_reasoning="r"
         )
+
+
+# ---------------------------------------------------------------------------
+# Guardian-block notification (fix/notif-push-convergence, 2026-08-11)
+#
+# ``create_approval`` used to emit ``instinct.approval.created`` and nothing
+# else — a push listener subscribed to that event directly, so a blocked user
+# got an OS ping but the in-app bell never showed the block. Push has since
+# converged on ``notification.new``, so the row below is what reaches BOTH.
+# ---------------------------------------------------------------------------
+
+
+async def test_create_writes_a_notification_for_the_requester() -> None:
+    from pocketpaw_ee.cloud.notifications import service as notifications_service
+
+    out = await approvals_service.create_approval("w1", "u1", _create_body())
+
+    notes = await notifications_service.list_for_user("u1")
+    assert len(notes) == 1
+    note = notes[0]
+    assert note.kind == "instinct_approval"
+    assert note.workspace_id == "w1"
+    assert note.recipient_id == "u1"
+    assert "do_thing" in note.body
+    assert note.source is not None
+    assert (note.source.type, note.source.id) == ("instinct_approval", out["id"])
+
+
+async def test_create_emits_notification_new_so_push_rides_it(recording_bus) -> None:
+    from pocketpaw_ee.cloud._core.realtime.events import NotificationNew
+
+    out = await approvals_service.create_approval("w1", "u1", _create_body())
+
+    new = [e for e in recording_bus.events if isinstance(e, NotificationNew)]
+    assert len(new) == 1
+    # The push handler reads recipient + workspace straight off this payload.
+    assert new[0].data["user_id"] == "u1"
+    assert new[0].data["workspace_id"] == "w1"
+    assert new[0].data["kind"] == "instinct_approval"
+    assert new[0].data["source_id"] == out["id"]
+
+
+async def test_notification_failure_does_not_break_approval_creation(monkeypatch) -> None:
+    # The gate depends on the approval row; a dead notification path must not
+    # take it down with it.
+    from pocketpaw_ee.cloud.notifications import service as notifications_service
+
+    async def boom(**_kwargs):
+        raise RuntimeError("notifications down")
+
+    monkeypatch.setattr(notifications_service, "create", boom)
+
+    out = await approvals_service.create_approval("w1", "u1", _create_body())
+    assert out["status"] == "pending"

@@ -46,6 +46,9 @@
 #   * the write primitive is the SHIPPED ``ingest_records`` — this module does
 #     NOT call raw ``define_type`` / ``create_object`` / ``link``, so it inherits
 #     the proven workspace-scoped, provenance-stamped, idempotent upsert.
+#
+# Updated: 2026-10-01 (CN-5) — the Action-blob back-write goes through
+#   ``InstinctStore.update_parameters`` instead of raw SQL on ``instinct_actions``.
 
 from __future__ import annotations
 
@@ -84,16 +87,13 @@ async def _persist_outcome(
 ) -> None:
     """Back-write the write outcome onto the persisted ``_fabric_objects`` blob.
 
-    Direct SQL update — the same pattern the external-action executor's
+    Store-API write — the same pattern the external-action executor's
     ``_persist_outcome`` uses. The blob's ``outcome`` carries the counts +
     timestamp so a reader (audit, a re-invocation idempotency check) sees the
     result structurally. Best-effort: a write failure leaves the blob without the
     structured outcome but the free-text ``mark_executed`` / ``mark_failed``
     outcome still records it.
     """
-    import json as _json
-
-    import aiosqlite
 
     try:
         action = await store.get_action(action_id)
@@ -107,13 +107,7 @@ async def _persist_outcome(
         blob["outcome"] = {"status": status, "executed_at": executed_at, **summary}
         params[FABRIC_OBJECTS_PARAM_KEY] = blob
 
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
+        await store.update_parameters(action_id, params)
     except Exception:  # noqa: BLE001 — back-write is best-effort
         logger.warning(
             "fabric_objects: failed to persist outcome onto action %s — the "

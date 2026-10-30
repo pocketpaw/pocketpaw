@@ -21,6 +21,7 @@ sitting alongside the two that shipped before it:
 | Pocket write | `_pocket_write` | `pockets/instinct_bridge.propose_pocket_write` | `pockets/instinct_bridge.execute_approved_write` |
 | Code change (Belt) | `_code_change` | `agent/mcp_servers/belt.py` | `cloud/belt/executor.execute_approved_change` |
 | **External action** | **`_external_action`** | **`external_actions.propose.propose_external_action`** | **`external_actions.executor.execute_approved_external_action`** |
+| Ship action | `_ship_action` | `ship.propose.propose_ship_action` | `ship.executor.execute_approved_ship_action` |
 
 Instinct is the approval gate: an agent **proposes**, a human **approves or
 rejects** in The Tray, and every decision is audit-trailed as a Decision-Graph

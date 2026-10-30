@@ -12,6 +12,10 @@
 # — also re-export ``compose_entity_profile``, the pure helper that folds an
 # entity pocket's ``surface_profile`` override over a base profile so the chat
 # run can resolve an ENTITY-AWARE profile once per run.
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — also re-export
+# ``SurfacePreamble``, the {text, cache_key} pair every handler now returns.
+# It is public because the key is a contract a handler author has to satisfy,
+# not an internal of the dispatcher.
 
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from pocketpaw_ee.cloud.surface.domain import (
     SurfaceContext,
     SurfaceKind,
     SurfaceMeta,
+    SurfacePreamble,
     SurfaceProfile,
 )
 from pocketpaw_ee.cloud.surface.service import (
@@ -31,6 +36,7 @@ __all__ = [
     "SurfaceContext",
     "SurfaceKind",
     "SurfaceMeta",
+    "SurfacePreamble",
     "SurfaceProfile",
     "resolve_surface_context",
     "resolve_profile",

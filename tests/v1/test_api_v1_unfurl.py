@@ -7,6 +7,13 @@
 #   public IP and swapping IPPinningTransport's inner transport for an
 #   httpx.MockTransport so the real safe_get_streamed (streaming, content-type
 #   check, byte cap, final-URL tracking) is exercised end to end.
+# 2026-09-26 (feat/unfurl-richer-previews) — TestRicherPreviews: crawler
+#   User-Agent sent, 4xx pages -> 502, theme_color (hex only), large_image
+#   from twitter:card / og:image:width, itemprop/image_src image fallbacks,
+#   whitespace collapse + length caps.
+# 2026-09-26 (fix/unfurl-any-member) — TestUnfurlAuth: a signed-in cloud member
+#   (user_id set, no superuser full_access) gets 200; anonymous and an API key
+#   without files:read get 403; an API key with files:read gets 200.
 
 from __future__ import annotations
 
@@ -418,3 +425,155 @@ class TestUnfurlCache:
         assert r1.json() == r2.json()
         # Transport was hit exactly once — the second call served from cache.
         assert state["calls"] == 1
+
+
+def _unfurl_with(client, handler, url="https://example.com/p"):
+    """GET /unfurl with DNS pinned public and the transport mocked."""
+    mock_transport = httpx.MockTransport(handler)
+    with (
+        patch(
+            "pocketpaw.security.safe_fetch._resolve_public_ip",
+            AsyncMock(return_value="93.184.216.34"),
+        ),
+        patch(
+            "pocketpaw.security.safe_fetch.httpx.AsyncHTTPTransport",
+            return_value=mock_transport,
+        ),
+    ):
+        return client.get("/api/v1/unfurl", params={"url": url})
+
+
+def _page(head: str) -> str:
+    return f"<!doctype html><html><head>{head}</head><body></body></html>"
+
+
+class TestRicherPreviews:
+    def test_sends_crawler_user_agent(self, client):
+        seen: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["ua"] = request.headers.get("user-agent", "")
+            return httpx.Response(
+                200, headers={"content-type": "text/html"}, content=FULL_OG_HTML.encode()
+            )
+
+        resp = _unfurl_with(client, handler)
+        assert resp.status_code == 200
+        assert "PocketPawBot" in seen["ua"]
+        assert "facebookexternalhit" in seen["ua"]
+
+    @pytest.mark.parametrize("status", [403, 404, 500])
+    def test_error_status_page_is_fetch_failed(self, client, status):
+        handler, _ = _mock_transport_returning(TITLE_ONLY_HTML, status_code=status)
+        resp = _unfurl_with(client, handler)
+        assert resp.status_code == 502
+        assert resp.json()["detail"] == "fetch_failed"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("#5865F2", "#5865f2"),
+            ("#fff", "#fff"),
+            ("red", None),
+            ("#12345", None),
+            ("#fff;background:url(x)", None),
+        ],
+    )
+    def test_theme_color_hex_only(self, client, value, expected):
+        html = _page(
+            f'<meta property="og:title" content="T"><meta name="theme-color" content="{value}">'
+        )
+        handler, _ = _mock_transport_returning(html)
+        assert _unfurl_with(client, handler).json()["theme_color"] == expected
+
+    @pytest.mark.parametrize(
+        ("extra", "expected"),
+        [
+            ('<meta name="twitter:card" content="summary_large_image">', True),
+            ('<meta name="twitter:card" content="summary">', False),
+            ('<meta property="og:image:width" content="200">', False),
+            ('<meta property="og:image:width" content="1200">', True),
+            ("", True),
+        ],
+    )
+    def test_large_image(self, client, extra, expected):
+        html = _page(f'<meta property="og:image" content="/i.png">{extra}')
+        handler, _ = _mock_transport_returning(html)
+        assert _unfurl_with(client, handler).json()["large_image"] is expected
+
+    def test_large_image_null_without_image(self, client):
+        handler, _ = _mock_transport_returning(TITLE_ONLY_HTML)
+        data = _unfurl_with(client, handler).json()
+        assert data["image"] is None
+        assert data["large_image"] is None
+
+    def test_itemprop_image_fallback(self, client):
+        html = _page('<meta itemprop="image" content="/logo.png"><title>G</title>')
+        handler, _ = _mock_transport_returning(html)
+        assert _unfurl_with(client, handler).json()["image"] == "https://example.com/logo.png"
+
+    def test_link_image_src_fallback(self, client):
+        html = _page('<link rel="image_src" href="https://cdn.example.com/s.jpg"><title>S</title>')
+        handler, _ = _mock_transport_returning(html)
+        assert _unfurl_with(client, handler).json()["image"] == "https://cdn.example.com/s.jpg"
+
+    def test_whitespace_collapsed_and_capped(self, client):
+        long_desc = "word " * 400
+        html = _page(
+            '<meta property="og:title" content="  Hello\t\t   world  ">'
+            f'<meta property="og:description" content="{long_desc}">'
+        )
+        handler, _ = _mock_transport_returning(html)
+        data = _unfurl_with(client, handler).json()
+        assert data["title"] == "Hello world"
+        assert len(data["description"]) <= 600
+        assert data["description"].endswith("…")
+
+
+def _app_with_state(**state):
+    """App whose middleware stamps request.state the way the auth layers do."""
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _stamp(request, call_next):
+        for k, v in state.items():
+            setattr(request.state, k, v)
+        return await call_next(request)
+
+    app.include_router(router, prefix="/api/v1")
+    return TestClient(app)
+
+
+@pytest.mark.enforce_scope
+class TestUnfurlAuth:
+    """Link previews must work for every signed-in workspace member, not just
+    platform superusers. The EE auth bridge sets ``user_id`` for any user whose
+    JWT verifies, but ``full_access`` only for superusers."""
+
+    def test_signed_in_cloud_member_is_allowed(self):
+        c = _app_with_state(user_id="u1", workspace_id="w1")
+        handler, _ = _mock_transport_returning(FULL_OG_HTML)
+        resp = _unfurl_with(c, handler)
+        assert resp.status_code == 200
+        assert resp.json()["title"] == "The Title"
+
+    def test_anonymous_caller_is_refused(self):
+        c = _app_with_state()
+        resp = c.get("/api/v1/unfurl", params={"url": "https://example.com/p"})
+        assert resp.status_code == 403
+
+    def test_api_key_without_scope_is_refused(self):
+        class _Key:
+            scopes = ["memory:read"]
+
+        c = _app_with_state(api_key=_Key())
+        resp = c.get("/api/v1/unfurl", params={"url": "https://example.com/p"})
+        assert resp.status_code == 403
+
+    def test_api_key_with_files_read_is_allowed(self):
+        class _Key:
+            scopes = ["files:read"]
+
+        c = _app_with_state(api_key=_Key())
+        handler, _ = _mock_transport_returning(FULL_OG_HTML)
+        assert _unfurl_with(c, handler).status_code == 200

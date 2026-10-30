@@ -15,20 +15,29 @@
 # Original: The user-facing activity feed mirrors the audit surface but
 # uses the in-process activity buffer (channel events, agent activity)
 # rather than the persisted audit log.
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` keyed on a digest of what was rendered. This is the most
+# genuinely live surface of the set — a feed that grows as the workspace is
+# used — and there is no revision to point at, so the key moves whenever the
+# recent events do. That means the digest DOES churn here, which is the honest
+# answer rather than a cost to engineer away: the preamble really is different,
+# and a backend holding an agent built with the old one really is holding a
+# stale prompt. It still holds still across two turns in a quiet workspace.
 
 from __future__ import annotations
 
 import logging
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
-from pocketpaw_ee.cloud.surface.handlers._helpers import truncate_preamble
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import content_key, truncate_preamble
 
 logger = logging.getLogger(__name__)
 
 LIST_LIMIT = 10
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the activity surface preamble."""
     events, scoped = await _load_activity(workspace_id)
     parts = [
@@ -47,7 +56,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     else:
         rows = [_format_event(e) for e in events[:LIST_LIMIT]]
         parts.append("<activity-list>\n" + "\n".join(rows) + "\n</activity-list>")
-    return truncate_preamble("\n".join(parts))
+    text = truncate_preamble("\n".join(parts))
+    return SurfacePreamble(text=text, cache_key=content_key("activity", text))
 
 
 async def _load_activity(workspace_id: str) -> tuple[list, bool]:

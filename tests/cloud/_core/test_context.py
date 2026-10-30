@@ -10,6 +10,8 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
 
+from tests.cloud.conftest import override_cloud_user
+
 
 class TestScopeKind:
     def test_known_values(self) -> None:
@@ -66,29 +68,22 @@ class TestRequestContext:
 class _FakeUser:
     """Minimal stand-in for ee.cloud.models.user.User."""
 
-    def __init__(self, id: str, active_workspace: str | None) -> None:
+    def __init__(self, id: str, active_workspace: str | None, is_active: bool = True) -> None:
         self.id = id
         self.active_workspace = active_workspace
+        self.is_active = is_active
 
 
 @pytest.fixture
 def app_with_context_route() -> FastAPI:
     """Build a tiny FastAPI app that exposes RequestContext via the dep.
 
-    Uses FastAPI's `dependency_overrides` (not monkeypatch) so the
-    swap reaches the dependency reference captured by the inner
-    `Depends(current_active_user)` inside `request_context`. Patching
-    the module attribute would not.
+    Uses FastAPI's `dependency_overrides` (not monkeypatch) so the swap
+    reaches the `Depends(current_optional_user)` captured inside
+    `request_context`. Patching the module attribute would not.
     """
-    from pocketpaw_ee.cloud.auth import current_active_user
-
-    fake_user = _FakeUser(id="user-1", active_workspace="ws-42")
-
-    async def _fake_current_active_user() -> _FakeUser:
-        return fake_user
-
     app = FastAPI()
-    app.dependency_overrides[current_active_user] = _fake_current_active_user
+    override_cloud_user(app, _FakeUser(id="user-1", active_workspace="ws-42"))
 
     @app.get("/_test/ctx")
     async def show_ctx(ctx: RequestContext = Depends(request_context)) -> dict:
@@ -125,3 +120,12 @@ def test_request_context_dep_generates_request_id_when_header_missing(
     # No header → some 32-hex-char request id was generated
     assert isinstance(body["request_id"], str)
     assert len(body["request_id"]) == 32
+
+
+def test_request_context_dep_rejects_inactive_user(app_with_context_route: FastAPI) -> None:
+    """A deactivated account must not get a context, even with a valid session."""
+    override_cloud_user(
+        app_with_context_route, _FakeUser(id="user-1", active_workspace="ws-42", is_active=False)
+    )
+    resp = TestClient(app_with_context_route).get("/_test/ctx")
+    assert resp.status_code == 401

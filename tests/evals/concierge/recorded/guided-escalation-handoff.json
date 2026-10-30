@@ -1,0 +1,10 @@
+{
+  "case_id": "guided-escalation-handoff",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model. well-behaved handoff route for a visitor who asked for a person. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "ece685de3e05e844",
+  "raw_model_output": "Sure. Tap \"Talk to a person\" below and someone from the team will get back to you."
+}

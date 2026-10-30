@@ -30,6 +30,7 @@ import pytest
 from pocketpaw_ee.cloud._core.errors import InsufficientCredits, QuotaExceeded
 from pocketpaw_ee.cloud.credits import guards
 from pocketpaw_ee.cloud.credits import service as credits
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
 from pocketpaw_ee.cloud.models.workspace import Workspace
 
@@ -43,7 +44,9 @@ pytestmark = pytest.mark.asyncio
 
 def _enforce(monkeypatch, *, on: bool) -> None:
     """Point the guard's ``get_settings`` at a stub carrying the flag posture."""
-    monkeypatch.setattr(guards, "get_settings", lambda: SimpleNamespace(billing_enforced=on))
+    monkeypatch.setattr(
+        guards, "get_settings", lambda: SimpleNamespace(billing_enforced=on, credits_enforced=False)
+    )
 
 
 async def _make_workspace(plan: str, *, slug: str) -> str:
@@ -62,8 +65,8 @@ async def _seed_spend(ws: str, amount: int, *, idem: str) -> None:
     entry = CreditLedgerEntry(
         workspace=ws,
         kind="spend",
-        amount_delta=-amount,
-        balance_after=0,
+        amount_delta_micro=credits_to_micro(-amount),
+        balance_after_micro=0,
         applied=True,
         conditional=False,
         cause="compute_spend",

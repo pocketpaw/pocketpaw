@@ -1,0 +1,29 @@
+[
+  {
+    "label": "the site_id resolution is gone, so a send from the loading builder is dispatched as a CREATE and mints a duplicate site",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "    if not meta.pocket_id and meta.site_id:\r\n        resolved = await _site_pocket_id(workspace_id, meta.site_id)\r\n        if resolved is None:\r\n            text = _unidentified_site_preamble(meta)\r\n            return SurfacePreamble(text=text, cache_key=content_key(\"sites\", text))\r\n        # Rebound onto the meta so every sub-builder below reads one pocket id\r\n        # rather than each learning about the resolution separately.\r\n        meta = replace(meta, pocket_id=resolved)\r\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  },
+  {
+    "label": "an unresolvable site_id falls back to the create preamble — the original bug with an extra step",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        if resolved is None:\r\n            text = _unidentified_site_preamble(meta)\r\n            return SurfacePreamble(text=text, cache_key=content_key(\"sites\", text))\r\n",
+    "replace": "        if resolved is None:\r\n            text = _create_preamble(meta)\r\n            return SurfacePreamble(text=text, cache_key=content_key(\"sites\", text))\r\n",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py"
+    ]
+  },
+  {
+    "label": "the new-site create step stops forbidding a second start_site_from_template, so a follow-up change in the same conversation mints a second site",
+    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
+    "find": "        \"`write_site_files` on the SAME pocket_id, never a second \"",
+    "replace": "        \"`write_site_files` on the SAME pocket_id, or a fresh \"",
+    "tests": [
+      "tests/cloud/surface/test_sites_handler.py::test_every_create_branch_forbids_the_re_create"
+    ]
+  }
+]

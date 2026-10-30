@@ -11,6 +11,14 @@ raised by ``AgentPool.get`` when an admin has soft-disabled an agent (the
 ``disabled`` flag on the cloud Agent doc). Distinct from ``AgentNotFound`` so
 dispatch sites can tell "no such agent" apart from "revoked, finish in-flight
 runs only" and surface a clean "agent unavailable" instead of a 500.
+
+Updated: 2026-07-18 (feat/herdr-runtime-adapter, HR-1) — added
+``HerdrUnavailable``, raised by ``HerdrRuntime`` (the flagged, fail-open
+adapter for the ``herdr`` terminal multiplexer) whenever herdr cannot service
+a call: the ``herdr_runtime_enabled`` flag is off, the ``herdr`` binary is
+missing, or a herdr command fails at runtime (server down, socket error, or a
+JSON error-envelope). Callers MUST catch it and degrade to today's non-herdr
+behaviour — the adapter never crashes PocketPaw when herdr is absent.
 """
 
 from __future__ import annotations
@@ -48,3 +56,24 @@ class AgentBackendUnavailable(AgentRuntimeError):
     def __init__(self, backend: str) -> None:
         super().__init__(f"agent backend not available: {backend}")
         self.backend = backend
+
+
+class HerdrUnavailable(AgentRuntimeError):
+    """The herdr terminal-multiplexer runtime cannot service this call.
+
+    Raised by ``HerdrRuntime`` (``pocketpaw.agents.herdr_runtime``) when herdr
+    is not usable: the ``herdr_runtime_enabled`` flag is off, the ``herdr``
+    binary is not installed, or a herdr command fails at runtime (server not
+    running, socket error, timeout, or a JSON error-envelope such as
+    ``{"error": {"code": ..., "message": ...}}``).
+
+    This is the adapter's single fail-open signal — callers MUST catch it and
+    degrade to today's non-herdr behaviour rather than let it propagate. The
+    adapter never crashes PocketPaw when herdr is absent (same discipline as
+    the Fable advisor). Guard cheaply with ``HerdrRuntime.available`` before a
+    call to avoid the exception path entirely.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"herdr runtime unavailable: {reason}")
+        self.reason = reason

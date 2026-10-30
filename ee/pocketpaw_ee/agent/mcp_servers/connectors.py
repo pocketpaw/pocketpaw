@@ -59,6 +59,9 @@
 #   chokepoint contracts stay 0-broken. (``propose.py`` itself statically imports
 #   no Beanie document class — it lazy-imports ``pocketpaw.stores`` /
 #   ``pocketpaw.instinct.models`` internally.)
+# Updated: 2026-10-01 (CN-5) — ``_audit_connector_execute`` writes through the
+#   shared ``_audit`` sink helpers instead of hand-rolling both audit writes;
+#   the stored rows keep their exact shape (pinned by test_audit_shape.py).
 """Agent-side MCP surface for executing a chat's reachable connectors.
 
 Tools registered:
@@ -92,6 +95,8 @@ import logging
 from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
+
+from ._audit import log_runtime_sink, record_workspace_sink
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +160,8 @@ def _identity() -> tuple[str | None, str | None, str | None]:
 # Audit helpers for connector tool execution (chat agent tools path).
 # Added: 2026-06-22 — the MCP connector_execute / sense_execute handlers
 #   call ``connectors.service.execute`` directly, which has NO audit
-#   instrumentation. These helpers write a runtime audit event (SQLite via
+#   instrumentation. These helpers write (via the shared ``_audit`` sinks) a
+#   runtime audit event (SQLite via
 #   get_audit_logger) AND a workspace audit event (MongoDB via
 #   audit_service.record) so agent connector activity shows up in the
 #   activity feed under the "tool" category. Failures are logged and
@@ -180,56 +186,40 @@ def _audit_connector_execute(
     rich detail). Never raises.
     """
     actor_id = user_id or "agent"
-
-    # 1. Runtime audit via get_audit_logger
-    try:
-        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
-
-        severity = AuditSeverity.INFO if ok else AuditSeverity.WARNING
-        get_audit_logger().log(
-            AuditEvent.create(
-                severity=severity,
-                actor=actor_id,
-                action="connector.execute",
-                target=connector_name,
-                status=status,
-                category="pocket_tool_run",
-                workspace_id=workspace_id,
-                connector_action=action,
-                pocket_id=pocket_id or "",
-                via_sense=via_sense or "",
-            )
-        )
-    except Exception:  # noqa: BLE001 — audit must never break the tool
-        logger.warning("connector-execute runtime audit failed", exc_info=True)
-
-    # 2. Workspace audit via audit_service.record (fire-and-forget)
-    try:
-        import asyncio
-
-        from pocketpaw_ee.cloud.audit import service as _audit_service
-
-        target_id = f"{connector_name}.{action}"
-        asyncio.ensure_future(
-            _audit_service.record(
-                workspace_id=workspace_id,
-                actor_id=actor_id,
-                action="workspace.agent.tool_executed",
-                target_type="connector",
-                target_id=target_id,
-                metadata={
-                    "connector": connector_name,
-                    "connector_action": action,
-                    "pocket_id": pocket_id or "",
-                    "status": status,
-                    "ok": ok,
-                    "via_sense": via_sense or "",
-                    "source": "chat_page",
-                },
-            )
-        )
-    except Exception:  # noqa: BLE001 — audit must never break the tool
-        logger.warning("connector-execute workspace-audit record failed", exc_info=True)
+    # The two sinks carry different rows (runtime target = connector, workspace
+    # target = connector.action, no ``category`` key), so call each sink directly
+    # rather than ``_record_audit_event``, which shares target + metadata.
+    log_runtime_sink(
+        actor_id=actor_id,
+        runtime_action="connector.execute",
+        target=connector_name,
+        status=status,
+        ok=ok,
+        category="pocket_tool_run",
+        workspace_id=workspace_id,
+        context={
+            "connector_action": action,
+            "pocket_id": pocket_id or "",
+            "via_sense": via_sense or "",
+        },
+        label="connector.execute",
+    )
+    record_workspace_sink(
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+        action="workspace.agent.tool_executed",
+        target_type="connector",
+        target_id=f"{connector_name}.{action}",
+        metadata={
+            "connector": connector_name,
+            "connector_action": action,
+            "pocket_id": pocket_id or "",
+            "status": status,
+            "ok": ok,
+            "via_sense": via_sense or "",
+            "source": "chat_page",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

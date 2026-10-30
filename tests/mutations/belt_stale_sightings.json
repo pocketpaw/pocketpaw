@@ -1,0 +1,265 @@
+[
+  {
+    "label": "a patrol-resolved sighting still blocks a re-sighting",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "blocking = [s for s in existing if not (s.resolved_by_run or \"\").startswith(\"patrol:\")]",
+    "replace": "blocking = existing",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_reopened_issue_is_sighted_again"
+    ]
+  },
+  {
+    "label": "a closed issue resolves with the left-line reason",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "out.append({\"patrol\": \"issues\", \"resolve\": source, \"reason\": \"issue-closed\"})",
+    "replace": "out.append({\"patrol\": \"issues\", \"resolve\": source, \"reason\": \"issue-left-line\"})",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_closed_issue_resolves_its_sighting"
+    ]
+  },
+  {
+    "label": "a hand-filed sighting resolves when its issue leaves the line",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if not reason or (reason == \"issue-left-line\" and s.patrol != \"issues\"):",
+    "replace": "if not reason:",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_an_issue_relabelled_off_the_line_resolves_with_its_own_reason"
+    ]
+  },
+  {
+    "label": "an open issue past the list limit that keeps its label resolves",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "        if not wanted & labels:\n",
+    "replace": "        if True:\n",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_an_issue_relabelled_off_the_line_resolves_with_its_own_reason"
+    ]
+  },
+  {
+    "label": "a failed issue view resolves the sighting as closed",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "            if not state:\n                continue\n",
+    "replace": "            if False:\n                continue\n",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_gh_failure_resolves_nothing"
+    ]
+  },
+  {
+    "label": "a failed issue list still resolves the sightings it cannot see",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "            (err or \"\")[-200:],\n        )\n        return []",
+    "replace": "            (err or \"\")[-200:],\n        )\n        return await _departures(slug, wanted, {}, sighted or [], gh)",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_gh_failure_resolves_nothing"
+    ]
+  },
+  {
+    "label": "issue views are not capped per pass",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "if budget[0] < 1 or any(",
+    "replace": "if False or any(",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_issue_views_are_capped_and_cached_per_tick"
+    ]
+  },
+  {
+    "label": "issue views are not cached for the tick",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "    if hit is not None and time.monotonic() - hit[0] < _GH_ROWS_TTL:\n        return hit[1]\n    if budget",
+    "replace": "    if budget",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_issue_views_are_capped_and_cached_per_tick"
+    ]
+  },
+  {
+    "label": "the backlog keeps a closed issue",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "open_docs = [s for s in open_docs if str(s.evidence.get(\"source\") or \"\") not in closed]",
+    "replace": "open_docs = list(open_docs)",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_the_foreman_backlog_skips_closed_and_blocked_issues"
+    ]
+  },
+  {
+    "label": "the foreman is shown blocked sightings",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "free = [o for o in backlog[\"open\"] if not o[\"in_flight\"] and not o[\"blocked\"]]",
+    "replace": "free = [o for o in backlog[\"open\"] if not o[\"in_flight\"]]",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_the_foreman_backlog_skips_closed_and_blocked_issues"
+    ]
+  },
+  {
+    "label": "the due check counts blocked work",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "work = [o for o in backlog[\"open\"] if not o[\"in_flight\"] and not o[\"blocked\"]]",
+    "replace": "work = [o for o in backlog[\"open\"] if not o[\"in_flight\"]]",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_line_whose_only_work_is_blocked_is_not_due"
+    ]
+  },
+  {
+    "label": "the dependency check reads the sighted text, not the live body",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "body = bodies.get(n) if slug == bound else None",
+    "replace": "body = \"\" if slug == bound else None",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_the_foreman_backlog_skips_closed_and_blocked_issues"
+    ]
+  },
+  {
+    "label": "Depends on needs a colon",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "depends\\s+on\\b[\\s*_:]*(.*)$",
+    "replace": "depends\\s+on\\b[\\s*_]*:(.*)$",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_each_depends_on_form_blocks_while_its_issue_is_open"
+    ]
+  },
+  {
+    "label": "a cross-repo ref reads as the issue's own repo",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "else m[1] or m[2] or slug",
+    "replace": "else m[1] or slug",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_each_depends_on_form_blocks_while_its_issue_is_open"
+    ]
+  },
+  {
+    "label": "a Depends on heading loses the list under a blank line",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "        if not _DEPENDS_REF.search(head[1]):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_each_depends_on_form_blocks_while_its_issue_is_open"
+    ]
+  },
+  {
+    "label": "the Depends on section runs past the next heading",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "if not nxt.strip() or _SECTION_END.match(nxt.strip()) or _DEPENDS_HEAD.match(nxt):",
+    "replace": "if not nxt.strip() or _DEPENDS_HEAD.match(nxt):",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_each_depends_on_form_blocks_while_its_issue_is_open"
+    ]
+  },
+  {
+    "label": "an unknown dependency state counts as closed",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "if state not in (\"closed\", \"merged\"):",
+    "replace": "if state == \"open\":",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_gh_failure_counts_as_blocked"
+    ]
+  },
+  {
+    "label": "an unreadable issue body blocks nothing",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "blocked[source] = [\"?\"]",
+    "replace": "pass",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_gh_failure_counts_as_blocked"
+    ]
+  },
+  {
+    "label": "Depends on: none with a note reads the note's refs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "        if re.match(r\"none\\b\", _NOTE.split(head[1], 1)[0].strip(\" *_.\"), re.IGNORECASE):\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency",
+      "tests/cloud/test_belt_stale_sightings.py::test_depends_on_none_with_a_note_is_not_blocked"
+    ]
+  },
+  {
+    "label": "a ref in the Depends on note counts",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "        section = [_NOTE.split(_BULLET.sub(\"\", s), 1)[0] for s in section]\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency",
+      "tests/cloud/test_belt_stale_sightings.py::test_depends_on_a_ref_with_a_note_blocks_on_the_ref_only"
+    ]
+  },
+  {
+    "label": "a list bullet reads as the note dash",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "_NOTE.split(_BULLET.sub(\"\", s), 1)[0]",
+    "replace": "_NOTE.split(s, 1)[0]",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
+    ]
+  },
+  {
+    "label": "the note starts at any parenthesis, cutting a link's URL",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "_PAREN = re.compile(r\"\\s\\(([^)]*)\\)?\")",
+    "replace": "_PAREN = re.compile(r\"\\(([^)]*)\\)?\")",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
+    ]
+  },
+  {
+    "label": "a dash note still counts its refs",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "_NOTE = re.compile(r\"\\s-\\s\")",
+    "replace": "_NOTE = re.compile(r\"\\s-\\s-\")",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
+    ]
+  },
+  {
+    "label": "a parenthetical note's ref counts beside a ref outside it",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "found = list(_DEPENDS_REF.finditer(_PAREN.sub(\" \", item)))",
+    "replace": "found = list(_DEPENDS_REF.finditer(item))",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_depends_on_note_names_no_dependency"
+    ]
+  },
+  {
+    "label": "a ref only inside parentheses is dropped",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "for m in found or _DEPENDS_REF.finditer(\" \".join(_PAREN.findall(item))):",
+    "replace": "for m in found:",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_every_ref_on_a_depends_on_line_counts"
+    ]
+  },
+  {
+    "label": "the line stops at its first item",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "for item in _ITEM.split(\"\\n\".join(section)):",
+    "replace": "for item in _ITEM.split(\"\\n\".join(section))[:1]:",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_every_ref_on_a_depends_on_line_counts"
+    ]
+  },
+  {
+    "label": "core#N reads as the issue's own repo",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "_core_repo(slug) if m[2] == \"core\" else ",
+    "replace": "",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_every_ref_on_a_depends_on_line_counts"
+    ]
+  },
+  {
+    "label": "the GraphQL batch is skipped: refs past the state list fall to the view budget",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "states = {**states, **await _ref_states(bound, unlisted, runner)}",
+    "replace": "states = {**states}",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_dependencies_past_the_state_list_are_read_in_one_batch"
+    ]
+  },
+  {
+    "label": "a batch state of open reads as closed",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "out[int(key[1:])] = state",
+    "replace": "out[int(key[1:])] = \"closed\"",
+    "tests": [
+      "tests/cloud/test_belt_stale_sightings.py::test_a_dependency_the_batch_says_is_open_still_blocks"
+    ]
+  }
+]

@@ -1,7 +1,7 @@
 # Tests for ee/cloud require_plan_feature FastAPI dependency.
 # Created: 2026-05-07
 # Covers plan-tier gating for sites (go+), the Fabric ontology fabric flag
-# (enterprise-only), and instinct (enterprise-only).
+# (enterprise-only), and instinct (EVERY tier — see the 2026-09-01 note below).
 # Patches workspace_service.get_workspace_plan so no DB is needed.
 # Updated 2026-06-25 (feat/consumer-plan-ladder): rekeyed the plan strings from
 #   {team, business, enterprise} to the consumer ladder {free, go, pro, pro_max,
@@ -10,6 +10,13 @@
 #   was split. Sites/Leads now gate on a NEW ``sites`` flag (go+) — go is ALLOWED,
 #   free is DENIED. The ``fabric`` flag is now the Fabric ONTOLOGY gate and is
 #   ENTERPRISE-ONLY — pro/pro_max are DENIED, enterprise is ALLOWED.
+# Updated 2026-09-01 (fix/instinct-is-a-gate-not-a-tier): the two instinct DENIAL
+#   tests became ALLOW tests across every tier. They were pinning a gate that was
+#   half-open — ~20 modules write Instinct proposals without checking the flag,
+#   and only the router that approves them carried it, so free/go/pro/pro_max
+#   accumulated proposals nobody could act on. A workspace OWNER could not publish
+#   a site for this reason: the builder self-approves through the Instinct API and
+#   got ``plan.feature_denied`` no matter the role. Approving remains ADMIN.
 
 from __future__ import annotations
 
@@ -160,32 +167,48 @@ class TestFabricOntologyFeatureGate:
 
 
 class TestInstinctFeatureGate:
-    """require_plan_feature("instinct") allows enterprise, blocks every paid consumer tier."""
+    """require_plan_feature("instinct") allows EVERY tier — it is a gate, not a tier.
 
-    def test_member_on_enterprise_plan_can_access_instinct(self, patch_plan):
-        """Enterprise plan includes instinct."""
-        patch_plan("enterprise")
+    Instinct is the approval layer agents propose through, not a capability a
+    workspace buys. Pricing it above the tiers that run agents left those tiers
+    creating proposals nobody could read, approve, or reject: ~20 modules WRITE
+    Instinct actions and almost none check this flag, while the single router
+    that reads and approves them carried the gate. The reported symptom was a
+    workspace OWNER unable to publish a site — the builder's Publish button
+    self-approves through ``instinct/actions/pending`` + ``/approve``, and both
+    403'd with ``plan.feature_denied`` regardless of role.
+
+    Approving is still ADMIN (``guards/actions.py``); only the BILLING gate moved.
+    """
+
+    @pytest.mark.parametrize("plan", ["free", "go", "pro", "pro_max", "enterprise"])
+    def test_every_tier_can_reach_instinct(self, patch_plan, plan):
+        """The approval gate exists on every tier, including the free floor.
+
+        MUTATION: drop ``"instinct"`` from any tier in ``PLAN_FEATURES`` and that
+        tier's parametrization fails with 403 ``plan.feature_denied``.
+        """
+        patch_plan(plan)
         client = TestClient(_build_app("instinct"), raise_server_exceptions=False)
         resp = client.get("/guarded")
-        assert resp.status_code == 200
+        assert resp.status_code == 200, f"{plan} must reach the approval gate"
 
-    def test_admin_on_pro_max_plan_is_denied_instinct(self, patch_plan):
-        """Pro Max plan does not include instinct; must return 403."""
-        patch_plan("pro_max")
-        client = TestClient(_build_app("instinct"), raise_server_exceptions=False)
-        resp = client.get("/guarded")
-        assert resp.status_code == 403
-        body = resp.json()
-        assert body["error"]["code"] == "plan.feature_denied"
+    def test_the_free_floor_that_runs_agents_also_gets_the_gate(self, patch_plan):
+        """The floor carries ``sessions``, so agents ACT there.
 
-    def test_go_plan_is_denied_instinct(self, patch_plan):
-        """Go plan does not include instinct; must return 403."""
-        patch_plan("go")
-        client = TestClient(_build_app("instinct"), raise_server_exceptions=False)
-        resp = client.get("/guarded")
-        assert resp.status_code == 403
-        body = resp.json()
-        assert body["error"]["code"] == "plan.feature_denied"
+        This is the coherence rule the tier list has to keep: any tier that can
+        run an agent can produce a proposal, and a proposal nobody can approve is
+        worse than no gate at all. Pinned separately from the parametrized case
+        because it is the reasoning, not just the value.
+        """
+        from pocketpaw_ee.guards.abac import PLAN_FEATURES
+
+        for plan, features in PLAN_FEATURES.items():
+            if "sessions" in features:
+                assert "instinct" in features, (
+                    f"{plan!r} runs agent sessions but cannot reach the approval "
+                    "gate — its proposals would strand unapprovable"
+                )
 
 
 # ---------------------------------------------------------------------------

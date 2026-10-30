@@ -10,6 +10,12 @@ and leave ``token`` as None.
 nullable ``context`` field so an invite can carry admin-provided onboarding
 hints (``focus`` + ``profile_pic``) for a later VIP-onboarding flow. Fully
 optional — pre-existing invite rows read back with ``context=None``.
+
+2026-09-30 (fix/livekit-call-security): ``MeetingInvite.allowed_emails`` holds a
+guest invite's email allow-list, which used to live only inside the
+``display_name`` JSON and was returned by the public validate endpoint. Legacy
+rows keep their list in ``display_name`` and read back with ``allowed_emails=[]``;
+``livekit/invites.py`` falls back to parsing it.
 """
 
 from __future__ import annotations
@@ -82,4 +88,58 @@ class Invite(Document):
             # days in the past — gives the application a 7-day grace beyond
             # the 7-day invite expiry for late accepts / audit, then GC's.
             IndexModel([("expires_at", 1)], expireAfterSeconds=86400 * 14),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Meeting Invite — shareable links to join a LiveKit call as a guest
+# ---------------------------------------------------------------------------
+
+
+def _meeting_invite_default_expiry() -> datetime:
+    return datetime.now(UTC) + timedelta(hours=24)
+
+
+class MeetingInvite(Document):
+    """A shareable invite link that lets external guests join a LiveKit call.
+
+    The plaintext token lives only in the shared URL. ``token_hash`` is
+    ``sha256(plaintext)`` — the authoritative lookup key. Guests join with a
+    temporary ``guest-`` prefixed identity and a LiveKit access token that
+    expires after the call window.
+    """
+
+    workspace: Indexed(str)  # type: ignore[valid-type]
+    group_id: Indexed(str)  # type: ignore[valid-type]
+    room_name: str
+    token_hash: Indexed(str, unique=True) | None = None  # type: ignore[valid-type]
+    created_by: str  # user_id
+    display_name: str = ""  # human label shown in the invite list
+    # Lowercased guest emails allowed to accept; empty = anyone with the link.
+    # Never returned by the public validate endpoint.
+    allowed_emails: list[str] = Field(default_factory=list)
+    max_uses: int = 0  # 0 = unlimited
+    use_count: int = 0
+    guest_identities: list[str] = Field(default_factory=list)
+    revoked: bool = False
+    expires_at: datetime = Field(default_factory=_meeting_invite_default_expiry)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @property
+    def expired(self) -> bool:
+        exp = self.expires_at
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=UTC)
+        return datetime.now(UTC) > exp
+
+    @property
+    def exhausted(self) -> bool:
+        """True when max_uses > 0 and use_count >= max_uses."""
+        return self.max_uses > 0 and self.use_count >= self.max_uses
+
+    class Settings:
+        name = "meeting_invites"
+        indexes = [
+            IndexModel([("expires_at", 1)], expireAfterSeconds=86400 * 14),
+            [("group_id", 1), ("revoked", 1)],
         ]

@@ -1,5 +1,15 @@
 # pocket_widget.py — Pocket-with-widget-focus-modal-open preamble.
 #
+# Updated: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` keyed on a digest of the text it rendered, which here
+# means the pocket summary AND the focus block together. Opening a different
+# widget on an unchanged pocket therefore moves the key — right, because the
+# preamble says which widget the user is looking at — and so does any pocket
+# change the summary shows. When the base is returned unchanged (no focus
+# block, or the tenancy guard dropped it) the pocket handler's own preamble
+# and key are passed straight through, which is why the two handlers can share
+# a key: they rendered the same bytes.
+#
 # Updated: 2026-05-24 — Added workspace_id tenancy guard. The base
 # preamble already delegates to ``pocket_handler.build_preamble`` which
 # now rejects cross-workspace pocket_ids — but the focus block (widget /
@@ -20,14 +30,14 @@ from __future__ import annotations
 
 import logging
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers import pocket as pocket_handler
-from pocketpaw_ee.cloud.surface.handlers._helpers import truncate_preamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import content_key, truncate_preamble
 
 logger = logging.getLogger(__name__)
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Pocket preamble plus a one-line focus marker for the open widget."""
     base = await pocket_handler.build_preamble(workspace_id, user_id, meta)
     focus_block = _focus_block(meta)
@@ -39,7 +49,10 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     # no workspace-B identifiers leak into a workspace-A chat context.
     if meta.pocket_id and not await _pocket_in_workspace(meta.pocket_id, user_id, workspace_id):
         return base
-    return truncate_preamble(f"{base}\n{focus_block}")
+    # Digest the composed text: it covers the pocket summary the base rendered
+    # AND the focus pointers added here, so either moving moves the key.
+    text = truncate_preamble(f"{base.text}\n{focus_block}")
+    return SurfacePreamble(text=text, cache_key=content_key("pocket_widget", text))
 
 
 async def _pocket_in_workspace(pocket_id: str, user_id: str, workspace_id: str) -> bool:

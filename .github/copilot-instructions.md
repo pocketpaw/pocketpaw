@@ -35,6 +35,7 @@ async def fetch_data(url: str) -> str:
         resp = await client.get(url)
     return resp.text
 
+
 # ❌ wrong — blocks the event loop
 def fetch_data(url: str) -> str:
     return requests.get(url).text
@@ -59,12 +60,14 @@ Key protocols:
 # ✅ correct — implement the protocol
 from pocketpaw.agents.backend import AgentBackend
 
+
 class MyBackend:
-    async def run(self, prompt: str, **kwargs) -> AsyncIterator[AgentEvent]:
-        ...
+    async def run(self, prompt: str, **kwargs) -> AsyncIterator[AgentEvent]: ...
+
 
 # ❌ wrong — inheriting from the concrete class couples you to internals
 from pocketpaw.agents.claude_sdk import ClaudeAgentBackend
+
 
 class MyBackend(ClaudeAgentBackend):  # noqa: don't do this
     ...
@@ -79,9 +82,9 @@ Every backend that implements `AgentBackend` must yield `AgentEvent` objects wit
 ```python
 @dataclass
 class AgentEvent:
-    type: str      # see valid values below
-    content: str   # text payload (may be empty string)
-    metadata: dict # arbitrary extra data
+    type: str  # see valid values below
+    content: str  # text payload (may be empty string)
+    metadata: dict  # arbitrary extra data
 ```
 
 **Valid `type` values** (do not invent new ones without updating `backend.py`):
@@ -192,6 +195,7 @@ async def my_function():
     settings = get_settings()
     token = settings.my_new_token
 
+
 # ❌ wrong — evaluated at import time, breaks test isolation
 settings = get_settings()
 TOKEN = settings.my_new_token
@@ -222,6 +226,7 @@ Channel-specific env vars follow the pattern `POCKETPAW_<CHANNEL>_<FIELD>` (e.g.
 ```python
 # Example: mocking an optional SDK
 from unittest.mock import AsyncMock, patch
+
 
 async def test_my_backend_streams_done_event():
     with patch("pocketpaw.agents.my_module.my_sdk") as mock_sdk:

@@ -37,6 +37,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from pocketpaw.sites_capture import contact_form
+
 # Anchor ids the navbar / CTAs / footer link to. The wrapping section/card
 # carries the id because marketing widgets have none of their own.
 _ANCHOR_SERVICES = "services"
@@ -217,61 +219,62 @@ def _cta_band(content: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Per-field placeholder overrides from the ``content`` copy object, keyed by
+# canonical field name. Copy is the LLM's to supply; the field set and the POST
+# names are not (see ``_lead_form_card``).
+_PLACEHOLDER_KEYS: dict[str, tuple[str, str]] = {
+    contact_form.FULL_NAME: ("contact", "name_placeholder"),
+    contact_form.EMAIL: ("contact", "email"),
+    contact_form.PHONE: ("contact", "phone"),
+    contact_form.MESSAGE: ("root", "message_placeholder"),
+}
+
+
+def _placeholder(content: dict[str, Any], spec: contact_form.ContactField) -> str:
+    """The copy-supplied placeholder for a field, falling back to the schema's."""
+    where, key = _PLACEHOLDER_KEYS.get(spec.name, ("root", ""))
+    source = content if where == "root" else (content.get(where) or {})
+    return _s(source.get(key) if key else None, spec.placeholder)
+
+
 def _lead_form_card(content: dict[str, Any]) -> dict[str, Any]:
     """The FLAT lead-capture form (SSR rule 1).
 
     Flat ``input`` / ``textarea`` / ``button{type:submit}`` placed directly in a
     ``card`` — NEVER a ``form`` or ``newsletter`` widget (those emit a nested
     ``<form>`` that the browser drops inside the site template's outer form, so
-    the visitor's submit silently captures nothing). Each input carries a real
-    ``name`` so the native POST maps the lead. The default
-    ``name``/``email``/``phone``/``message`` field set matches the Site service's
-    seeded ``event_mapping``, so a lead lands with no manual config.
+    the visitor's submit silently captures nothing).
+
+    Updated 2026-08-13: the fields are now GENERATED from
+    ``sites_capture.contact_form.CONTACT_FIELDS`` — the same declaration the Site
+    service derives its seeded ``event_mapping`` from. They used to be four
+    hand-written literals whose docstring claimed they matched that mapping. They
+    did not: this emitted ``name="name"`` and the mapping read
+    ``{{ payload.full_name }}``, so the visitor's name was projected away and every
+    lead from this path landed with an empty name. Two hand-written lists in two
+    packages will drift; one declaration cannot.
     """
-    contact = content.get("contact") or {}
     title = _s(content.get("form_title"), "Get in touch")
+    fields: list[dict[str, Any]] = []
+    for spec in contact_form.CONTACT_FIELDS:
+        props: dict[str, Any] = {
+            # The POST name IS the canonical field name — that identity is the
+            # whole point of deriving from the schema.
+            "name": spec.name,
+            "label": spec.label,
+            "placeholder": _placeholder(content, spec),
+        }
+        if spec.required:
+            props["required"] = True
+        if not spec.multiline and spec.input_type != "text":
+            props["type"] = spec.input_type
+        fields.append({"type": "textarea" if spec.multiline else "input", "props": props})
+
     return {
         "type": "card",
         "props": {"id": _ANCHOR_BOOK, "title": title},
         "children": [
-            {
-                "type": "input",
-                "props": {
-                    "name": "name",
-                    "label": "Your name",
-                    "placeholder": _s(contact.get("name_placeholder"), "Jane Doe"),
-                    "required": True,
-                },
-            },
-            {
-                "type": "input",
-                "props": {
-                    "name": "email",
-                    "label": "Email",
-                    "type": "email",
-                    "placeholder": _s(contact.get("email"), "you@email.com"),
-                    "required": True,
-                },
-            },
-            {
-                "type": "input",
-                "props": {
-                    "name": "phone",
-                    "label": "Phone",
-                    "type": "tel",
-                    "placeholder": _s(contact.get("phone"), "(555) 010-1234"),
-                },
-            },
-            {
-                "type": "textarea",
-                "props": {
-                    "name": "message",
-                    "label": "How can we help?",
-                    "placeholder": _s(
-                        content.get("message_placeholder"), "Tell us what you need..."
-                    ),
-                },
-            },
+            *fields,
             {
                 "type": "button",
                 "props": {

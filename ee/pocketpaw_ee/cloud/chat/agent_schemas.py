@@ -51,6 +51,17 @@
 #   existing smart-routing / ``claude_sdk_model`` logic — behavior byte-identical.
 #   It rides ``RunSpec.model_override`` → ``ScopeContext`` → ``AgentPool.run`` to
 #   the Claude SDK backend, where it wins over ALL other model sources.
+# Changes: 2026-08-21 (fix/uncap-chat-message-content) — ``content`` LOST its
+#   ``max_length=10_000``. The cap dated to this file's first commit and was a
+#   scaffolded default, not a sized decision — the runtime API has always taken
+#   100_000 on the identical field. 10k characters is roughly 2.5k tokens, well
+#   under a site-authoring prompt, and the composer has no matching client-side
+#   guard, so the cap only ever surfaced as a raw pydantic ``string_too_long``
+#   422 after the user had already written the thing. ``min_length=1`` stays.
+#   With no app-level ceiling the effective one is MongoDB's 16MB BSON document
+#   limit at insert (a 500, not a 422); no proxy body cap exists in the deploy
+#   config. ``model`` keeps its own ``max_length=100`` — that one guards a
+#   subprocess launch arg and is a real gate.
 """Request and SSE-event payload schemas for the enterprise agent chat endpoint.
 
 The endpoint lives at ``POST /cloud/chat/{scope}/{scope_id}/agent`` and streams
@@ -70,7 +81,7 @@ from pydantic import BaseModel, Field, field_validator
 class CloudAgentChatRequest(BaseModel):
     """Body of ``POST /cloud/chat/{scope}/{scope_id}/agent``."""
 
-    content: str = Field(min_length=1, max_length=10_000)
+    content: str = Field(min_length=1)
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     reply_to: str | None = None
     mentions: list[dict[str, Any]] = Field(default_factory=list)
@@ -100,6 +111,20 @@ class CloudAgentChatRequest(BaseModel):
     # Argument string for ``intent="skill:<name>"`` (empty when the skill
     # was invoked bare). Reserved — not consumed by the backend yet.
     skill_args: str | None = None
+    # Per-send TOOL SWITCH (2026-09-11). ``False`` runs the turn with no tool
+    # surface at all; ``None`` (every existing client) is today's behaviour.
+    #
+    # Two reasons a user reaches for it, both observed on the Otherhand kiosk:
+    # a gateway profile that refuses the ``tools`` field outright and 400s the
+    # whole turn, and a weaker model that fixates on a tool instead of doing the
+    # work. On this surface the cost is small and the saving is not — the page
+    # is written with ``page-ops`` in ordinary text, so a tool-less turn still
+    # draws; what it loses is the agent's ability to generate an illustration.
+    #
+    # It is also the biggest token lever the surface has: the upstream prompt
+    # cache does not cover tool schemas, so a run carrying a tool surface reads
+    # zero cached tokens on every turn.
+    tools: bool | None = None
     # Surface-aware context hint (RFC: universal surface context).
     # ``surface`` is the SurfaceKind enum value the client computed from
     # ``$page.route.id`` ("home", "pockets", "pocket", "mission_control",
@@ -138,6 +163,13 @@ class CloudAgentChatRequest(BaseModel):
     # malformed id fails as a 422 instead of reaching the process spawn. The
     # pattern's ``+`` also rejects the empty string.
     model: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9._:/-]+$")
+    # Studio Flow build context — the /studio Flow canvas the user is on when
+    # they ask the agent to scaffold a graph. ``flow_context.flow_id`` is the
+    # flow project id the build belongs to; the executor injects it into the
+    # agent's system prompt (ACTIVE FLOW ID) so ``build_studio_flow`` passes it
+    # and the MCP handler persists the graph into THAT project. ``None`` (every
+    # non-studio surface) leaves the run byte-identical.
+    flow_context: dict[str, Any] | None = None
 
     @field_validator("intent")
     @classmethod

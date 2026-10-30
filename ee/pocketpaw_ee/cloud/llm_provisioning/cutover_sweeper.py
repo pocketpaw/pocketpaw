@@ -14,6 +14,13 @@
 #                  ledger (the BC-3 sweep is gated OFF in ``metering.sweeper`` when
 #                  the mode is live, so exactly one meter charges).
 #
+# Every non-off tick ALSO runs an attribution-coverage check: how many of the
+# window's proxy spend rows belong to no swept workspace. It debits nothing and
+# cannot fail the sweep. It is here because the failure it watches for is the one
+# this sweep cannot see from the inside — when chat spend was attributed to nobody,
+# every per-tenant read succeeded and this job logged a confident
+# ``3/3 tenants -> 0 credits`` for as long as it was left on.
+#
 # Runs on the SAME schedule as the BC-3 metering sweep — the in-process 5-minute
 # heartbeat (``ee.extensions._sweeper_loop``) and the Tier 2 worker boot
 # (``chat.runs.worker._startup``). Mirrors that sweep's shape: tenant-agnostic
@@ -31,6 +38,24 @@
 # tenant never wedges the whole sweep — the same isolation the BC-3 sweep uses.
 #
 # Created 2026-06-26 (feat/litellm-billing-cutover, WU-F): new entity.
+# Updated 2026-09-04 (fix/litellm-spend-leaks): the summary carries ``untagged``
+# beside ``unattributed``. A proxy logs traffic of its own (its admin dashboard, its
+# health check) that no workspace can claim, so ``unattributed`` never reaches zero
+# on a live deployment — a gate written against it can only ever be ignored, which
+# is what happened. ``untagged`` is the part that is genuinely ours and unbilled.
+# Updated 2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): the sweep now
+#   iterates ``list_sweepable_workspaces`` — provisioned tenants UNION the
+#   workspaces the proxy has customer spend for. It iterated provisioned tenants
+#   alone, and on the deployment where this was caught those two sets did not
+#   overlap at all: three tenants with keys and no spend, three customers with
+#   spend and no keys. Every tick logged ``3/3 tenants -> 0 credits`` and every
+#   chat dollar was free. The coverage remainder is also split now, because it
+#   read as "nobody sent a ``user`` field" while the rows were tagged fine.
+# Updated 2026-09-02 (feat/proxy-spend-ingest-by-customer): added the
+#   attribution-coverage check to both the shadow and live branches, and put
+#   ``unattributed`` in the summary dict so a caller sees it without reading logs.
+#   In shadow it is the go/no-go signal — flipping to live while rows are
+#   unattributed converts a reporting gap into free service.
 
 from __future__ import annotations
 
@@ -64,14 +89,52 @@ async def run_cutover_sweep(*, mode: str | None = None) -> dict[str, int]:
     sweep (it is retried next tick).
     """
     resolved = mode if mode is not None else provisioning_service.spend_mode()
-    summary = {"tenants": 0, "processed": 0, "failed": 0, "gaps": 0, "credits": 0}
+    summary = {
+        "tenants": 0,
+        "processed": 0,
+        "failed": 0,
+        "gaps": 0,
+        "credits": 0,
+        # Spend rows in the trailing window that no swept workspace claims. Zero is
+        # the healthy value; anything else is served-and-unbilled compute.
+        "unattributed": 0,
+        # The half of ``unattributed`` that names a workspace the sweep skipped —
+        # reported apart because it is a different bug with a different fix, and
+        # because the two were one number for the hours it took to tell them apart.
+        "unswept": 0,
+        # The part of ``unattributed`` that is genuinely OURS and unbilled: a real
+        # caller that reached the proxy without naming a workspace. This is the
+        # number to watch, not ``unattributed`` — a proxy always logs some traffic
+        # of its own (its admin dashboard, its health check) that no workspace can
+        # claim, so ``unattributed`` never reaches zero on a live deployment and a
+        # gate written against it can only ever be ignored.
+        "untagged": 0,
+    }
 
     if resolved == "off":
         # Nothing to do — BC-3 bills as today.
         return summary
 
-    workspaces = await provisioning_service.list_provisioned_workspaces()
+    # Every workspace with spend, not just every workspace with a KEY. Chat sends
+    # the deployment key and names its workspace in the request body, so a tenant
+    # can spend forever without ever appearing in the provisioning table — and did:
+    # the swept set and the spending set were completely disjoint in production
+    # while this read ``list_provisioned_workspaces``.
+    workspaces = await provisioning_service.list_sweepable_workspaces()
     summary["tenants"] = len(workspaces)
+
+    # BEFORE the empty-tenant early return, deliberately. A deployment with no
+    # provisioned tenants and real proxy traffic is the loudest version of the
+    # failure this check exists for, and returning first would be the one case
+    # where it says nothing.
+    coverage_until = datetime.now(UTC)
+    coverage = await provisioning_service.spend_attribution_coverage(
+        workspaces, since=coverage_until - _SHADOW_WINDOW, until=coverage_until
+    )
+    summary["unattributed"] = coverage.unattributed_rows
+    summary["unswept"] = coverage.unswept_rows
+    summary["untagged"] = coverage.untagged_rows
+
     if not workspaces:
         return summary
 
@@ -120,11 +183,17 @@ async def run_cutover_sweep(*, mode: str | None = None) -> dict[str, int]:
                 )
         logger.info(
             "run_cutover_sweep[live]: ingested spend for %d/%d tenants -> %d credits, "
-            "%d failed (LiteLLM is the sole meter; BC-3 gated off)",
+            "%d failed, %d row(s) in the trailing window claimed by no tenant — %d of "
+            "them a real caller that named nobody and %d naming a workspace nobody "
+            "swept; the rest is the proxy's own traffic "
+            "(LiteLLM is the sole meter; BC-3 gated off)",
             summary["processed"],
             summary["tenants"],
             summary["credits"],
             summary["failed"],
+            summary["unattributed"],
+            summary["untagged"],
+            summary["unswept"],
         )
         return summary
 

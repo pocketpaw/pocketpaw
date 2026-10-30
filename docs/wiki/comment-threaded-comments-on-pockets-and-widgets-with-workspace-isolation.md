@@ -64,9 +64,7 @@ This module exists separately because commenting is a **cross-cutting concern** 
 ```python
 class Settings:
     name = "comments"  # Collection name in MongoDB
-    indexes = [
-        [(("target.pocket_id", 1), ("created_at", -1))]
-    ]
+    indexes = [[(("target.pocket_id", 1), ("created_at", -1))]]
 ```
 
 The compound index on `(target.pocket_id, created_at)` optimizes the common query pattern: "fetch all comments for pocket X, sorted newest first." The descending order on `created_at` avoids additional sorting overhead.

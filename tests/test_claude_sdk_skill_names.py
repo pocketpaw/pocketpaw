@@ -59,3 +59,32 @@ def test_cache_key_folds_in_plugin_digest_so_warm_client_can_be_reused() -> None
     assert key_a == key_a2, "same skill set → same key, so the warm client is reused"
     assert key_a != key_b, "different skill set → different key, so the client rebuilds"
     assert key_a != key_none, "a skill run must not collide with a non-skill run"
+
+
+# --- P1: the surface allowlist is authoritative over the bundled plugin ---
+# Added 2026-07-25 (feat/bundled-skills-per-surface). The bundled skills ship
+# as a local plugin loaded via SDK ``plugins=``, which is INDEPENDENT of
+# ``skill_names`` — so a surface could not withhold ``pocketpaw-create-pocket``
+# by naming a narrower set (see surface_registry.py's _CODE_SKILL_DENY note).
+# Gating the wholesale load on an EMPTY skill_names makes the per-surface
+# allowlist real: name skills and you get exactly those, name none and you get
+# the full bundled set (unchanged for general chat).
+
+
+def test_bundled_plugin_withheld_when_surface_names_skills() -> None:
+    """A surface that names skills does NOT also get the whole bundled set."""
+    assert not ClaudeSDKBackend._should_load_bundled_plugin(
+        enabled=True, skill_names=frozenset({"code-react"})
+    ), "naming a skill subset must suppress the wholesale bundled plugin"
+
+
+def test_bundled_plugin_loads_when_no_skill_names() -> None:
+    """Back-compat: no named skills → the full bundled set still loads."""
+    assert ClaudeSDKBackend._should_load_bundled_plugin(enabled=True, skill_names=frozenset()), (
+        "general chat must keep the full bundled set"
+    )
+
+
+def test_bundled_plugin_respects_the_settings_toggle() -> None:
+    """``sdk_load_bundled_skills=False`` still wins over everything."""
+    assert not ClaudeSDKBackend._should_load_bundled_plugin(enabled=False, skill_names=frozenset())

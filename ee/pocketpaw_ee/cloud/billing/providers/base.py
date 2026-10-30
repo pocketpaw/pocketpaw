@@ -8,6 +8,10 @@
 # The billing service depends only on this ABC, so swapping Dodo for Razorpay (or
 # running both) never touches the service.
 #
+# Updated 2026-10-02 (feat/partners-commissions, PH-13 review): ``create_one_time``
+# takes ``pin_currency`` — a partner client pay link pins its charge currency
+# (``billing_currency``) so the payment matches the link exactly. Top-ups unchanged.
+#
 # Every method speaks in the framework-free ``domain`` value objects
 # (``OneTimeCheckout`` / ``GatewayEvent`` / ``SubscriptionCheckout`` /
 # ``SubscriptionEvent``), never a vendor SDK type — that is the whole point of the
@@ -18,11 +22,25 @@
 # Created 2026-06-24 (integration/billing-credits, BC-2): new module.
 # Updated 2026-06-24 (security): name the bad-signature exception in the port
 #   docstring — ``BadRequest`` (400), not ``ValidationError`` (422).
+# Updated 2026-10-02 (feat/partners-inr-topup, PH-4): ``create_one_time`` takes a
+#   ``currency`` ("USD" default, or "INR"); for INR the amount is paise.
 # Updated 2026-06-24 (BC-7): added the subscription surface —
 #   ``create_subscription`` + ``cancel_subscription``, and documented that
 #   ``verify_and_parse_webhook`` now also returns a ``SubscriptionEvent`` for a
 #   verified subscription.* delivery.
-
+#
+# Updated 2026-08-26 (feat/site-plans-as-addons): ``change_plan`` gained a
+#   REQUIRED ``addons`` argument carrying the subscription's COMPLETE add-on cart.
+#   Required, not defaulted, because the gateway treats the list as declarative —
+#   omitting it removes every add-on the subscription holds. A default would make
+#   the destructive case the quiet one, and the destruction is invisible until the
+#   next invoice.
+#
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning, M1):
+#   ``verify_and_parse_webhook`` may now also return a ``ReversalEvent`` — the
+#   normalized ``refund.*`` / ``dispute.*`` delivery. No new port METHOD: a
+#   reversal arrives on the same signed webhook every other family does, so it
+#   is a third return shape rather than a fourth gateway call.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -30,6 +48,7 @@ from abc import ABC, abstractmethod
 from pocketpaw_ee.cloud.billing.domain import (
     GatewayEvent,
     OneTimeCheckout,
+    ReversalEvent,
     SubscriptionCheckout,
     SubscriptionEvent,
 )
@@ -50,11 +69,14 @@ class IPaymentsProvider(ABC):
         workspace_id: str,
         customer_email: str | None,
         metadata: dict,
+        currency: str = "USD",
+        pin_currency: bool = False,
     ) -> OneTimeCheckout:
         """Create a one-time payment and return its hosted checkout.
 
-        ``amount_credits`` is integer credits (1 credit == $0.01). The provider
-        converts to the gateway's money amount, attaches ``metadata`` (which MUST
+        ``amount_credits`` is the charge in ``currency``'s lowest denomination:
+        integer credits for USD (1 credit == $0.01 == 1 cent), paise for INR.
+        The provider charges it in ``currency``, attaches ``metadata`` (which MUST
         carry ``workspace_id`` so the webhook can route the grant), and returns
         the hosted ``checkout_url`` plus the ``gateway_ref``.
         """
@@ -66,7 +88,7 @@ class IPaymentsProvider(ABC):
         *,
         payload: bytes,
         headers: dict[str, str],
-    ) -> GatewayEvent | SubscriptionEvent:
+    ) -> GatewayEvent | SubscriptionEvent | ReversalEvent:
         """VERIFY the webhook signature, then parse it into a normalized event.
 
         The signature is checked FIRST, against the RAW ``payload`` bytes. On a
@@ -76,9 +98,14 @@ class IPaymentsProvider(ABC):
         after verification passes is the body parsed and normalized. ``event_id``
         is the gateway's unique delivery id (the idempotency key the grant uses).
 
-        Returns a ``GatewayEvent`` for a one-time payment delivery (``payment.*``)
-        or a ``SubscriptionEvent`` for a recurring-subscription delivery
-        (``subscription.*``). The service routes on the returned type.
+        Returns a ``GatewayEvent`` for a one-time payment delivery (``payment.*``),
+        a ``SubscriptionEvent`` for a recurring-subscription delivery
+        (``subscription.*``), or a ``ReversalEvent`` for money going back out
+        (``refund.*`` / ``dispute.*``). The service routes on the returned type.
+
+        A reversal needs its own shape rather than a ``GatewayEvent`` because a
+        dispute carries no metadata: there is no ``workspace_id`` on the wire, so
+        the payment it is against is the only route back to a wallet.
         """
         raise NotImplementedError
 
@@ -125,5 +152,45 @@ class IPaymentsProvider(ABC):
         subscription should not raise a hard error. The entitlement revert
         (``Workspace.plan`` → free) is driven by the resulting cancellation
         webhook, NOT here, so this method only tells the gateway to stop billing.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def change_plan(
+        self,
+        *,
+        subscription_id: str,
+        product_id: str,
+        plan_key: str,
+        addons: list[dict],
+    ) -> None:
+        """Move an EXISTING gateway subscription onto a different product, and set
+        its COMPLETE add-on cart.
+
+        ``addons`` IS NOT OPTIONAL AND IS NOT A DELTA. The gateway treats the
+        add-on list as declarative: what you send becomes the whole cart, and
+        sending nothing REMOVES every add-on the subscription holds. Dodo's own
+        wording is "leaving this empty would remove any existing addons". So a
+        caller that only means to move the plan must still pass the full cart it
+        wants preserved, and ``[]`` must be written deliberately rather than
+        reached by omission. It is a required keyword for exactly that reason — a
+        default would make the destructive case the quiet one, and the destruction
+        is invisible until the next invoice.
+
+        Each entry is ``{"addon_id": str, "quantity": int}``.
+
+        The alternative — cancel the old subscription and create a new one — is
+        wrong in both directions for a term subscription: the buyer forfeits the
+        remainder of a period they already paid for, and if the new checkout is
+        abandoned after the old sub is cancelled they are left on nothing. This is
+        the atomic move, with the gateway handling proration.
+
+        ``subscription_id`` MUST be the authoritative gateway subscription id, not
+        a checkout SESSION id — a session id names a checkout, not a subscription,
+        and the gateway will reject it.
+
+        Returns None; success is the absence of an exception. Callers persist the
+        new tier THEMSELVES on return — the resulting ``plan_changed`` webhook is
+        acked without action, so nothing else will record it.
         """
         raise NotImplementedError

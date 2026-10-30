@@ -1,0 +1,6 @@
+# transcript: `dokku checks:enable demo` — turns on zero-downtime deploy checks.
+EXIT: 0
+--- stdout ---
+-----> Enabling zero-downtime for app's processes
+       Enabling zero-downtime for proc type: web
+--- stderr ---

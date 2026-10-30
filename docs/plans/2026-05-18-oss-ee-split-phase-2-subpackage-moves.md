@@ -116,8 +116,14 @@ from pathlib import Path
 SUB = sys.argv[1]
 EXCLUDE = {".venv", ".git", "__pycache__", "dist", "build", "node_modules"}
 PATTERNS = [
-    (re.compile(rf"^(\s*)from pocketpaw_ee\.{SUB}(\b)", re.MULTILINE), rf"\1from pocketpaw.{SUB}\2"),
-    (re.compile(rf"^(\s*)import pocketpaw_ee\.{SUB}(\b)", re.MULTILINE), rf"\1import pocketpaw.{SUB}\2"),
+    (
+        re.compile(rf"^(\s*)from pocketpaw_ee\.{SUB}(\b)", re.MULTILINE),
+        rf"\1from pocketpaw.{SUB}\2",
+    ),
+    (
+        re.compile(rf"^(\s*)import pocketpaw_ee\.{SUB}(\b)", re.MULTILINE),
+        rf"\1import pocketpaw.{SUB}\2",
+    ),
 ]
 changed = 0
 for py in Path(".").rglob("*.py"):

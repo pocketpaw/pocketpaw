@@ -18,6 +18,9 @@ spec in workspace A can never surface workspace B's objects. The store is the
 local SQLite Fabric DB (``~/.pocketpaw/fabric.db`` via ``get_fabric_store``),
 NOT Mongo, so the "every Mongo read scopes by workspace" rule is satisfied here
 by the SQLite tenant scope instead — same invariant, different store.
+
+The Mongo sources read raw projected BSON, never hydrated documents, so each
+substitutes the model defaults for a missing key itself.
 """
 
 from __future__ import annotations
@@ -44,7 +47,21 @@ async def _workspace_pockets(ctx: ResolveCtx, args: dict[str, Any]) -> list[dict
             ctx.user_id,
         )
         return []
-    docs = await _PocketDoc.find(
+    # Projected deliberately. This resolver only ever returns the five fields
+    # below, but it used to hydrate whole Pocket documents to get them — and a
+    # Pocket carries ``rippleSpec``, every widget's ``spec``, and for a
+    # Svelte-track pocket a ``source`` map holding the full text of every
+    # source file. Those run to hundreds of kilobytes each.
+    #
+    # It matters more than a single query's cost because of where this sits:
+    # it fires once per ``workspace.pockets`` marker while resolving a spec,
+    # and the pocket list resolves every pocket, so an unprojected read here
+    # is O(N^2) bytes off the wire for one GET /pockets.
+    #
+    # ``get_pymongo_collection``, NOT ``get_motor_collection`` — the latter is
+    # beanie 1.x and this is on 2.1.0. Same trap documented at
+    # pockets/service.py:3168.
+    cursor = _PocketDoc.get_pymongo_collection().find(
         {
             "workspace": ctx.workspace_id,
             "$or": [
@@ -52,17 +69,24 @@ async def _workspace_pockets(ctx: ResolveCtx, args: dict[str, Any]) -> list[dict
                 {"shared_with": ctx.user_id},
                 {"visibility": "workspace"},
             ],
-        }
-    ).to_list()
+        },
+        {"_id": 1, "name": 1, "type": 1, "icon": 1, "color": 1},
+    )
+    # The fallbacks mirror the Pocket model's own defaults (models/pocket.py:
+    # type="custom", icon="", color=""). Hydrating the document used to apply
+    # those for free; reading raw BSON does not, so a document written before
+    # a field existed would come back None where it used to come back "".
+    # That matters downstream — widgets like people-picker call string methods
+    # on these — so a missing key must stay an empty string, not None.
     return [
         {
-            "id": str(d.id),
-            "name": d.name,
-            "type": d.type,
-            "icon": d.icon,
-            "color": d.color,
+            "id": str(row["_id"]),
+            "name": row.get("name", ""),
+            "type": row.get("type", "custom"),
+            "icon": row.get("icon", ""),
+            "color": row.get("color", ""),
         }
-        for d in docs
+        async for row in cursor
     ]
 
 
@@ -93,26 +117,34 @@ async def _list_workspace_members(workspace_id: str) -> list[dict[str, Any]]:
         except Exception:
             logger.debug("ripple_resolver: skipping non-ObjectId user_id %r", uid)
 
-    users = await User.find({"_id": {"$in": object_ids}}).to_list()
-    by_id = {str(u.id): u for u in users}
+    # Projected to the fields rendered below. A full User carries auth state,
+    # settings and every membership; hydrating one per member was most of this
+    # source's cost. Raw BSON, so the model defaults ("" for name/avatar) are
+    # substituted by hand.
+    cursor = User.get_pymongo_collection().find(
+        {"_id": {"$in": object_ids}},
+        {"full_name": 1, "email": 1, "avatar": 1, "workspaces.workspace": 1, "workspaces.role": 1},
+    )
+    by_id = {str(row["_id"]): row async for row in cursor}
 
     out: list[dict[str, Any]] = []
     for uid in member_ids:
-        user = by_id.get(uid)
-        if user is None:
+        row = by_id.get(uid)
+        if row is None:
             continue
         role = "member"
-        for membership in getattr(user, "workspaces", []) or []:
-            if getattr(membership, "workspace", None) == workspace_id:
-                role = getattr(membership, "role", "member") or "member"
+        for membership in row.get("workspaces") or []:
+            if membership.get("workspace") == workspace_id:
+                role = membership.get("role") or "member"
                 break
-        name = (user.full_name or "").strip() or (user.email or "").split("@")[0]
+        email = row.get("email") or ""
+        name = (row.get("full_name") or "").strip() or email.split("@")[0]
         out.append(
             {
                 "id": uid,
                 "name": name,
-                "email": user.email,
-                "avatar": user.avatar or "",
+                "email": email,
+                "avatar": row.get("avatar") or "",
                 "role": role,
             }
         )

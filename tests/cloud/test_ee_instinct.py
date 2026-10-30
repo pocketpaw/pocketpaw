@@ -126,11 +126,14 @@ def test_app(tmp_path: Path, monkeypatch):
     """
     fake_user = _FakeUser()
 
-    # instinct is an enterprise-tier feature in PLAN_FEATURES; team and
-    # non-enterprise plans don't include it, so the require_plan_feature guard
-    # only passes at enterprise. Mirror the AsyncMock pattern from
-    # tests/cloud/test_plan_feature_gate.py so the patch reaches the same
-    # module attribute the guard reads from.
+    # ``instinct`` is on EVERY tier in PLAN_FEATURES since
+    # fix/instinct-is-a-gate-not-a-tier — it is the agent approval gate, not a
+    # capability a workspace buys — so this stub no longer has to say
+    # "enterprise" for the require_plan_feature guard to pass. It still does,
+    # because these tests are about the ROUTER's own RBAC and tenancy asserts and
+    # pinning one plan keeps the plan ladder out of their failure modes. Mirror
+    # the AsyncMock pattern from tests/cloud/test_plan_feature_gate.py so the
+    # patch reaches the same module attribute the guard reads from.
     import pocketpaw_ee.cloud.workspace.service as ws_svc
 
     monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="enterprise"))

@@ -1,267 +1,30 @@
-# ee/pocketpaw_ee/cloud/foresight/service.py
-# Updated: 2026-06-10 (W4c — scope instinct reads to workspace) — closes the
-# residual cross-tenant read surface W4a left open on the foresight caller side.
-# The Foresight → Instinct fan-out + listing both touched the (shared, global)
-# instinct store WITHOUT a ``workspace_id``:
-#   - ``_fan_to_instinct_proposal`` now stamps ``domain_pd.workspace_id`` on the
-#     spawned ``store.propose`` row, and its dedupe read
-#     (``_existing_dedupe_keys``) is scoped to that same workspace — so the
-#     idempotence check only ever sees this tenant's rows (plus legacy NULL),
-#     never another tenant's foresight rows that happen to share the synthetic
-#     ``foresight:run:<id>`` pocket namespace.
-#   - ``list_instinct_proposals_for_run`` now threads the caller's
-#     ``ctx.workspace_id`` (already resolved by ``_require_workspace`` + the
-#     ``_fetch_in_workspace`` 404-collapse guard) into ``store.list_actions``,
-#     so the read is workspace-scoped at the SQL layer as defense-in-depth, not
-#     just gated by the run-level workspace check.
-# ``workspace_id`` crosses to the OSS instinct store as a PLAIN str; this is a
-# read FILTER only (W4a semantics) and never touches the W2b audit hash chain.
-# Updated: 2026-05-26 (feat/foresight-v10-insights-llm) — RFC 08 v1.0.
-# LLM-driven insights synthesizer + per-workspace synthesizer toggle:
-#   - ``get_insights(ctx)`` extended — reads the workspace's
-#     ``insights_synthesizer`` config ("pattern" | "llm", default
-#     "pattern") and either delegates to the v0.5 pattern synthesizer
-#     (unchanged) OR to the new LLM synthesizer
-#     (``ee.foresight.insights_llm.synthesize_insights_llm``). LLM
-#     failures (timeout, malformed output, rate-limit) fall back to the
-#     pattern synthesizer + log a structured warning so the wire
-#     response never 5xxs. Wire shape (``InsightsResponse``) unchanged.
-#   - New ``get_insights_config(ctx)`` / ``set_insights_config(ctx,
-#     body)`` — sibling endpoint to the threshold pair. Reads / writes
-#     the per-workspace synthesizer choice. Emits
-#     ``foresight.insights_config.updated`` on effective change; no-op
-#     write stays quiet.
-#   - Lazy engine import for ``insights_llm`` (same pattern as the v0.5
-#     synthesizer) — preserves the cloud→engine import-linter contract.
-#   - Cost discipline: LLM mode is opt-in only. Default stays "pattern"
-#     (deterministic, free). Workspaces with no config doc see the
-#     pattern path; only an explicit PUT flips the toggle.
-# Updated: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — RFC
-# 08 v1.0 wave 3. ``create_scenario_run`` now honors the optional
-# ``custom_scenario_id`` field on the POST body:
-#   - When set, the service loads the workspace's saved YAML scenario
-#     via :func:`ee.cloud.foresight.scenarios.load_workspace_scenario`,
-#     parses it into a :class:`ScenarioConfig` via
-#     ``ScenarioConfig.from_yaml``, and uses THAT config for the run
-#     instead of the inline ``personas`` + ``sub_type`` + ``n_ticks``
-#     fields on the body. Body fields stay on the persisted
-#     ``request`` blob for audit but the engine reads the saved YAML.
-#   - When both ``custom_scenario_id`` and ``sub_type`` are present,
-#     ``custom_scenario_id`` wins (the saved YAML's sub_type drives
-#     the engine).
-#   - Unknown / cross-tenant ids surface as 422
-#     ``foresight.custom_scenario_not_found``.
-# Updated: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) — RFC
-# 08 v1.0 PR 10. Per-workspace onboarding-gate threshold override:
-#   - New ``get_threshold(ctx)`` — returns the resolved
-#     :class:`ForesightThresholdResponse` (current / default /
-#     is_overridden / updated_at) for the caller's workspace. Reads the
-#     ``ForesightWorkspaceConfig`` doc (creates none); collapses absent
-#     overrides to the default. Tenancy: 403 when no workspace; 404
-#     never (the doc is per-workspace and read is intrinsically scoped).
-#   - New ``set_threshold(ctx, body)`` — upserts the workspace's
-#     override. ``body.threshold=None`` clears the override (sets the
-#     doc field to ``None``); a float ∈ [0.5, 0.95] sets it. Emits
-#     ``foresight.threshold.updated`` whenever the effective value
-#     changes; a no-op write (same value) does NOT emit.
-#   - ``get_onboarding_gate(ctx)`` now reads the workspace's effective
-#     threshold via the new ``_resolve_workspace_threshold`` helper
-#     instead of the hardcoded ``GATE_DEFAULT_THRESHOLD``. Backward
-#     compat: a workspace with no override still sees 0.65 echoed back.
-#   - ``create_backtest(ctx, body)`` now resolves the workspace floor
-#     before validating the per-run threshold — a workspace that has
-#     tightened to 0.80 cannot accept a per-run threshold of 0.70 even
-#     though the global default is 0.65. The 422 message reports the
-#     effective floor so the operator sees the right number.
-#   - The ``_score_backtest`` -> ``ThresholdDecision`` path is
-#     unchanged: the caller (``create_backtest``) already passes the
-#     resolved threshold through, so the backtest scores against the
-#     workspace-effective value automatically. Verified by the new
-#     ``test_create_backtest_uses_workspace_override`` test.
-#   - The aggregator (``ee.foresight.aggregator``) layer never sees the
-#     workspace doc; the cloud service reads + resolves the override at
-#     the entry point and threads the resulting float through. The
-#     import-linter contract (cloud → engine forbidden) is preserved.
-# Updated: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) —
-# RFC 08 v1.0 — three changes:
-#   1. New ``get_live_snapshot(ctx, run_id)`` — backs
-#      ``GET /api/v1/foresight/runs/{id}/live-snapshot``. Reads the
-#      run doc + projection list, derives the actual tier mix from
-#      ``run.result.tier_distribution``, samples up to 10 projections
-#      deterministically, and runs the three anomaly detectors from
-#      ``ee.cloud.foresight.live_snapshot``. Cross-tenant 404 via
-#      ``_fetch_in_workspace`` (same collapsing rule as the other
-#      run-scoped reads).
-#   2. ``gate_decision`` Pydantic sub-model integration —
-#      ``_compose_gate_decision`` builds a :class:`GateDecision` from
-#      the aggregator's :class:`ThresholdDecision.as_wire_dict()` plus
-#      a derived ``reason`` and ISO-8601 ``evaluated_at``. The two
-#      backtest response mappers (``_to_backtest_response`` /
-#      ``_to_backtest_list_item``) now hand back the structured model
-#      so the wire shape is strict-validated. Backward-compat —
-#      Pydantic's ``model_dump()`` produces the legacy dict shape any
-#      caller already keys on.
-#   3. ``precedent_seed`` POST plumbing — ``_run_engine_inline`` now
-#      threads ``body.precedent_seed`` / ``body.precedent_seeds`` into
-#      both the engine ``ScenarioConfig`` AND the cloud-side
-#      ``NoOpDecisionGraphRef`` so the persisted
-#      ``ForesightProjectedDecision.forward_precedent_decision_id``
-#      gets a synthetic, deterministic id whenever the operator opts
-#      in. The engine YAML's existing seed support (PR #1235) is
-#      preserved — body seeds simply layer onto the same machinery.
-# Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) —
-# RFC 08 v1.0 PR 10 — calibration buffer migration to Mongo:
-#   - New ``emit_prediction_record(ctx, payload)`` — engine callback
-#     mirrors each per-(anchor × tick) projection into the
-#     ``foresight_prediction_records`` collection. Idempotent on
-#     (workspace, run_id, tick_id, anchor_id, persona_id).
-#   - New ``pair_prediction(ctx, record_id, observed_outcome,
-#     pair_delta)`` — flips an existing record to ``paired=True`` and
-#     stamps ``observed_at`` / ``observed_outcome`` / ``pair_delta``.
-#   - ``_run_engine_inline`` now wires ``on_prediction_record``
-#     alongside the existing ``on_projected_decision`` closure so the
-#     same engine pass persists BOTH collections (no extra engine work
-#     — the prediction-record path is a side-mirror of the projected-
-#     decision path).
-#   - ``_score_backtest`` now persists paired PredictionRecords for
-#     each backtest anchor before scoring, so the §11.5 rolling-accuracy
-#     read sees real data instead of the v0.5 ``ForesightBacktest.gate_decision.observed``
-#     proxy.
-#   - ``get_aggregate_rollup`` REWRITTEN — reads PredictionRecord docs
-#     (paired=True, captured_at in window), buckets by day for the
-#     rolling series, derives confidence drift from per-record
-#     ``confidence`` mean comparison, derives modal distribution from
-#     ``prediction.modal_outcome`` counts. Same response shape as PR
-#     #1241 (the wire contract is locked).
-#   - ``get_insights`` REWRITTEN — reads PredictionRecord docs (no
-#     proxy) and composes the synthesizer bundle. Per-persona
-#     calibration now comes from real captured records instead of
-#     ForesightProjectedDecision.confidence; per-anchor outlier
-#     detection has the real data it needs once a workspace runs
-#     enough backtests. Same response shape.
+# ee/pocketpaw_ee/cloud/foresight/service.py: Foresight cloud business logic.
 #
-#   v0.5 → v1.0 behaviour delta: identical wire contract. The
-#   aggregate + insights endpoints return the same JSON shape; only
-#   the data source flipped from proxy reads to real PredictionRecord
-#   reads. Empty-workspace paths still collapse to zeros + empty
-#   arrays.
-# Updated: 2026-05-25 (feat/foresight-v15-scenarios-aggregate-insights) —
-# RFC 08 §11.2 / §11.5 / §11.6 backing service functions:
-#   - ``list_scenarios(ctx)`` — enumerates the bundled YAML templates
-#     at ``ee/pocketpaw_ee/foresight/scenarios/*.yaml``. Loader is
-#     cached at module import (a touch on disk reloads via the
-#     ``_SCENARIOS_CATALOG`` sentinel) and never touches the engine
-#     persona / LLM / substrate dependencies — only ``yaml.safe_load``.
-#   - ``get_aggregate_rollup(ctx, window_days)`` — derives the rolling
-#     accuracy series + confidence drift + modal-outcome distribution
-#     from the workspace's persisted ``ForesightBacktest`` +
-#     ``ForesightProjectedDecision`` docs. Empty workspaces collapse
-#     to zeros + empty arrays (never 404). Window capped at 90;
-#     above 90 → 422 ``foresight.invalid_window``.
-#   - ``get_insights(ctx)`` — composes the SynthesizerInput from the
-#     same aggregate inputs (rolling series, drift, modal dist, latest
-#     backtest gate, per-persona calibration proxy, tier-distribution
-#     deltas) and calls ``ee.foresight.insights.synthesize_insights``
-#     for the five v0.1 pattern rules. Cap 20.
-#   v0.1 NOTE: PR 4's CalibrationPair persistence didn't land — the
-#   aggregate + insights paths read backtest summaries + projected
-#   decisions as proxies. Documented in the PR body; v1.0 swaps to a
-#   real PredictionRecord collection once the calibration buffer
-#   migrates to Mongo.
-# Updated: 2026-05-25 (feat/foresight-v08-approval-loop) — PR 8 §14.4 wire:
-#   - ``emit_projected_decision`` now accepts an optional
-#     ``forward_precedent_decision_id`` kwarg and persists it on the
-#     ``ForesightProjectedDecision`` doc instead of hardcoding ``None``.
-#     The cloud-side closure in ``_run_engine_inline`` resolves the id
-#     via ``ee.foresight.decision_graph_ref.NoOpDecisionGraphRef`` (PR
-#     #1235 §14.4) so the persisted doc matches the engine's
-#     ``RunResult.projected_decisions`` shape one-to-one. The cloud
-#     body does not yet expose ``precedent_seed`` so the ref is seeded
-#     empty by default — every lookup returns ``None`` and behaviour
-#     is unchanged until either a body extension lands or RFC 07's
-#     real Decision Graph implementation replaces the NoOp ref.
-# Updated: 2026-05-25 (feat/foresight-v08-approval-loop) — PR 8 / RFC 08 §8:
-#   - ``CreateScenarioRequest.route_to_instinct`` threads through
-#     ``_run_engine_inline`` into the per-tick callback. When the flag
-#     is true, ``emit_projected_decision`` also fans the projection
-#     into the Instinct approval queue via
-#     ``ee.foresight.instinct_bridge.projected_decision_to_instinct_proposal``
-#     + the global ``InstinctStore`` (lazy import — the engine layer
-#     stays clean of cloud, and the cloud module never grew a static
-#     ``pocketpaw.instinct`` dep). The fan-out is idempotent: before
-#     proposing, the service scans existing Instinct rows scoped to
-#     the run's synthetic ``pocket_id`` and skips when an Action with
-#     the same dedupe key already exists. Backtests never opt in —
-#     ``create_backtest`` builds its scenario body with
-#     ``route_to_instinct=False`` explicitly.
-#   - Added ``list_instinct_proposals_for_run(ctx, run_id, limit, offset)``
-#     — the GET endpoint reader. Returns the Instinct rows whose
-#     ``parameters._foresight.run_id`` matches the run, scoped to
-#     the caller's workspace via the same ``_fetch_in_workspace``
-#     404-collapse rule the projection-list endpoint uses.
-# Updated: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) — PR 5:
-#   - Added the RFC §7.7 per-anchor projection fanout. The engine call
-#     (``_run_engine_inline``) now accepts a ``run_id`` + an injected
-#     per-tick callback. The callback (``emit_projected_decision``) is
-#     the engine → cloud direction: defined here in cloud, passed by
-#     closure into the engine's ``run_scenario`` so the import-linter's
-#     "engine never imports cloud" contract holds. Every (anchor × tick)
-#     bucket gets one ForesightProjectedDecision document plus a
-#     ``ForesightProjectedDecisionEmitted`` event so the Live panel can
-#     render the timeline without polling.
-#   - Added ``list_projected_decisions(ctx, run_id, anchor_id=None,
-#     limit=50, offset=0)`` — the GET endpoint reader. Tenancy + run
-#     scoping enforced via the ``_fetch_in_workspace`` helper that
-#     already collapses unknown runs / cross-tenant ids into 404; the
-#     ``anchor_id`` filter is the additional optional clause. v0.5
-#     keeps the cursor offset-based.
-# Updated: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4:
-#   - Added retroactive backtest API (``create_backtest`` /
-#     ``get_backtest`` / ``list_backtests``) and the onboarding gate
-#     reader (``get_onboarding_gate``). Backtests live in their own
-#     ``foresight_backtests`` collection (sibling of ``foresight_runs``);
-#     only this service module imports the document, per import-linter.
-#   - The engine helper is shared between scenarios and backtests via
-#     ``_run_engine_inline``; backtests additionally pair the engine's
-#     projected outcomes against the operator-supplied actual outcomes
-#     (RFC §10) and run the aggregator (``aggregate_pairs`` +
-#     ``accuracy_meets_threshold``) to compute the gate decision.
-#   - Default gate threshold is ``GATE_DEFAULT_THRESHOLD = 0.65`` (captain
-#     locked for v0.1 — v1.0 reads a workspace-config override). The DTO
-#     accepts a per-run override but only above the default — relaxing
-#     the bar below the workspace default is rejected as a 422 so an
-#     overeager operator can't trivially open the gate.
-# Created: 2026-05-25 (feat/foresight-v07-cloud-mount) — RFC 08 PR 7.
+# Sole writer of the Foresight Beanie documents (scenario runs, backtests,
+# projected decisions, prediction records, threshold and insights config).
+# Module-level ``async def`` functions taking ``RequestContext`` first; each
+# validates its body at entry, scopes every read to ``ctx.workspace_id`` and
+# emits on every state-changing write.
 #
-# Foresight cloud service — business logic for scenario runs + backtests.
-# Sole owner of writes to the ``ForesightRun`` + ``ForesightBacktest``
-# Beanie documents per the cloud rule #2; module-level ``async def``
-# functions per rule #5; ``RequestContext`` first; validate-at-entry;
-# emit on every state-mutating write.
+# * Runs: ``create_scenario_run`` (inline personas or a saved
+#   ``custom_scenario_id``) and ``create_backtest`` drive the engine inline and
+#   persist queued, running, then complete or failed; an engine failure is stored
+#   on the doc, never raised. Both refuse an unpaid early-access workspace first
+#   (``credits.guards.assert_early_access_allowed``, 403
+#   ``early_access.not_available``); the check sits here so REST and the chat
+#   agent's ``run_scenario`` tool share it.
+# * Gate: ``get_onboarding_gate`` and the per-workspace threshold pair score
+#   backtests against a floor no override can relax.
+# * Decisions and calibration: projected decisions fan out to Instinct
+#   proposals scoped to the workspace; prediction records pair with observed
+#   outcomes in Mongo.
+# * Read models: scenario catalog, aggregate rollup, live snapshot, and
+#   ``get_insights``, which uses the pattern synthesizer unless the workspace
+#   switched to the LLM one. The LLM path falls back to pattern rows on any
+#   failure, and is skipped for an unpaid early-access workspace.
 #
-# Public API:
-#   - ``create_scenario_run(ctx, body)`` — POST /foresight/scenarios
-#   - ``get_scenario_run(ctx, run_id)`` — GET /foresight/runs/{id}
-#   - ``list_scenario_runs(ctx)`` — GET /foresight/runs
-#   - ``create_backtest(ctx, body)`` — POST /foresight/backtests
-#   - ``get_backtest(ctx, backtest_id)`` — GET /foresight/backtests/{id}
-#   - ``list_backtests(ctx)`` — GET /foresight/backtests
-#   - ``get_onboarding_gate(ctx)`` — GET /foresight/onboarding/gate
-#
-# The engine call itself (``run_scenario`` from the foresight runtime)
-# stays synchronous inside ``create_scenario_run`` — PR 7 keeps the v0.1
-# request/response contract (run completes before POST returns) so
-# existing tests + the smoke loop are undisturbed. v1.0 fans the run
-# out to a background task and the POST returns immediately with
-# ``status="queued"``.
-#
-# Engine import is lazy: the cloud surface stays clean of any
-# ``ee.foresight.{persona,llm,scenarios}`` imports until the moment the
-# service actually runs a scenario, so importing the cloud module never
-# drags in CAMEL or the OASIS substrate (those land via PR 2's
-# ``pocketpaw-ee[foresight]`` optional extra). The aggregator
-# (``ee.foresight.aggregator``) is similarly lazy — imported inside
-# ``_score_backtest`` rather than at module top.
+# Engine, aggregator and LLM imports stay lazy so importing this module never
+# loads the simulation substrate (the import-linter contract).
 
 from __future__ import annotations
 
@@ -290,6 +53,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     ForesightThresholdUpdated,
 )
 from pocketpaw_ee.cloud._core.time import iso_utc
+from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed, early_access_denial
 from pocketpaw_ee.cloud.foresight.domain import (
     AggregateRollup,
     BacktestRun,
@@ -737,6 +501,10 @@ async def create_scenario_run(
     """
     body = CreateScenarioRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
+    # Runs spend off the credit ledger: refused for an unpaid early-access
+    # workspace before any doc row or engine call. Here, not on the router, so
+    # the chat agent's run_scenario tool hits the same check.
+    await assert_early_access_allowed(workspace_id)
 
     # Lazy import inside the engine helper; constructing the config also
     # validates engine-side rules (sub_type, n_ticks, personas) so we
@@ -1395,6 +1163,7 @@ async def create_backtest(ctx: RequestContext, body: CreateBacktestRequest) -> B
     """
     body = CreateBacktestRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
+    await assert_early_access_allowed(workspace_id)
     workspace_floor = await _resolve_workspace_threshold(workspace_id)
     threshold = _resolve_threshold(body.threshold, floor=workspace_floor)
 
@@ -3039,7 +2808,9 @@ async def get_insights(ctx: RequestContext) -> InsightsResponse:
     # untoggled workspace + the LLM-empty fallback path; only a
     # non-empty LLM run flips this to "llm".
     actual_source: Literal["pattern", "llm"] = "pattern"
-    if config_view.synthesizer == "llm":
+    # An unpaid early-access workspace reads the pattern rows: the LLM
+    # synthesizer is off-ledger spend.
+    if config_view.synthesizer == "llm" and await early_access_denial(workspace_id) is None:
         # Try LLM. On ANY failure (timeout, malformed output, rate
         # limit, missing backend) fall back to the pattern synthesizer
         # so the wire response stays valid. The LLM helper itself

@@ -17,6 +17,14 @@
 #   * a missing static-build dir raises a clean ValidationError before any subprocess.
 #
 # Created: 2026-06-25 (feat/sites-workers-deploy-mode).
+#
+# Updated 2026-09-02 (SA-1 — the visitor counter): the two assets-only tests asserting
+# ``"main" not in cfg`` were REPLACED, not removed. The assets-only config now names
+# the generated pageview counter as ``main``, so the old assertion is false — but the
+# bug it guarded (a ``main`` pointing at a ``_worker.js`` no static build produces,
+# which fails the deploy outright) is still real, and each test now asserts that
+# directly. The counter's own behaviour, and the ``run_worker_first`` rules that keep
+# it from being billed on every subresource, live in test_sites_analytics_counter.py.
 
 from __future__ import annotations
 
@@ -29,7 +37,7 @@ import pytest
 pytest.importorskip("pocketpaw_ee")
 
 from pocketpaw_ee.cloud._core.errors import Internal, ValidationError
-from pocketpaw_ee.sites import workers_deploy
+from pocketpaw_ee.sites import analytics_worker, workers_deploy
 
 
 class _FakeProc:
@@ -103,16 +111,30 @@ def test_sanitize_empty_falls_back():
 
 @pytest.mark.asyncio
 async def test_deploy_writes_assetsignore_and_wrangler_jsonc(tmp_path, monkeypatch):
+    """The proven recipe, pinned on a site that does NOT count (SA-3).
+
+    ``analytics_entitled=False`` is the subject rather than a detail: this test guards
+    the config that was proven live, and after SA-3 a counting ripple publish moves
+    ``main`` to the shim. The un-counted shape is the one that has to stay byte for
+    byte, because it is what the kill switch and the free tier both fall back to."""
     project = _build_project(tmp_path)
     site_id = "507f1f77bcf86cd799439011"
     proc = _FakeProc(0, b"https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev\n", b"")
     _patch_subprocess(monkeypatch, proc)
 
-    url = await workers_deploy.deploy_workers(site_id, project)
+    url = await workers_deploy.deploy_workers(site_id, project, analytics_entitled=False)
 
-    # .assetsignore — EXACTLY the three recipe lines, in order.
+    # .assetsignore — the three recipe lines, then both counter filenames. The counters
+    # are named on every publish, counting or not, so a delete that fails still leaves
+    # the per-publish salt out of the upload.
     assetsignore = Path(project, ".svelte-kit/cloudflare/.assetsignore").read_text()
-    assert assetsignore.splitlines() == ["_worker.js", "_routes.json", "_headers"]
+    assert assetsignore.splitlines() == [
+        "_worker.js",
+        "_routes.json",
+        "_headers",
+        analytics_worker.ENTRY_FILENAME,
+        analytics_worker.SHIM_FILENAME,
+    ]
 
     # wrangler.jsonc — the clean static config (parse it; it is JSON-compatible).
     cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
@@ -185,11 +207,18 @@ def _build_html_project(tmp_path: Path) -> str:
 
 
 @pytest.mark.asyncio
-async def test_html_deploy_is_assets_only_no_main(tmp_path, monkeypatch):
-    """An html site is a raw static tree with NO server worker, so its wrangler
-    config is assets-only: no ``main`` (there is no ``_worker.js``), no
-    ``nodejs_compat`` (nothing runs the node runtime), and ``assets.directory`` is
-    the project root itself (``static_output_rel("html") == "."``)."""
+async def test_html_deploy_names_no_svelte_worker(tmp_path, monkeypatch):
+    """An html site is a raw static tree with NO server worker, so its wrangler config
+    takes the assets-only shape: no ``nodejs_compat`` (nothing runs the node runtime),
+    no D1, and ``assets.directory`` is the project root itself
+    (``static_output_rel("html") == "."``).
+
+    SA-1 CHANGED WHAT THIS TEST CAN CLAIM. The config now DOES carry a ``main`` — the
+    generated pageview counter — so the old assertion (``"main" not in cfg``) has been
+    replaced rather than deleted. The fact it was protecting survives intact and is
+    the one asserted here: ``main`` must never name a ``_worker.js`` the build does not
+    produce, which is the RX-1 failure this branch exists to prevent. The counter's own
+    shape is covered in ``test_sites_analytics_counter.py``."""
     project = _build_html_project(tmp_path)
     site_id = "507f1f77bcf86cd799439011"
     proc = _FakeProc(0, b"https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev\n", b"")
@@ -197,12 +226,13 @@ async def test_html_deploy_is_assets_only_no_main(tmp_path, monkeypatch):
 
     url = await workers_deploy.deploy_workers(site_id, project, engine="html")
 
-    cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
+    raw = Path(project, "wrangler.jsonc").read_text()
+    cfg = json.loads(raw)
     assert cfg["name"] == f"paw-site-{site_id}"
     assert cfg["workers_dev"] is True
-    assert cfg["assets"] == {"directory": "."}
-    # The assets-only shape drops every server-worker key.
-    assert "main" not in cfg
+    assert cfg["assets"]["directory"] == "."
+    assert "_worker.js" not in raw
+    assert ".svelte-kit" not in raw
     assert "compatibility_flags" not in cfg
     assert "d1_databases" not in cfg
     assert url == "https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev"
@@ -242,16 +272,127 @@ async def test_html_deploy_passes_config_flag(tmp_path, monkeypatch):
     assert captured["cwd"] == project
 
 
+# ── react engine: builds, yet still assets-only (RX-1) ───────────────────────
+#
+# The section that exists because "runs a Node build" stopped implying "emits a
+# server entry". A react project has a package.json and a real Vite build, so under
+# the old ``needs_node_build`` condition it would have taken the SvelteKit branch —
+# writing ``main: "dist/_worker.js"`` for a file no react build produces, which
+# wrangler rejects. The deploy shape now reads ``emits_server_worker``.
+
+
+def _build_react_project(tmp_path: Path) -> str:
+    """Create a minimal BUILT react project: the Vite client output at ``dist/``
+    (``static_output_rel("react")``) holding the PRERENDERED index.html, plus the
+    project-root package.json a react project genuinely carries — the file whose
+    presence would tempt a deploy path into assuming a server worker exists.
+
+    Deliberately writes NO ``_worker.js`` anywhere: that is the fact under test."""
+    (tmp_path / "package.json").write_text('{"name":"paw-site-x","private":true}')
+    out = tmp_path / "dist"
+    (out / "assets").mkdir(parents=True)
+    (out / "index.html").write_text("<!doctype html><div id=root><main><h1>hi</h1></main></div>")
+    (out / "assets" / "index-abc.css").write_text("h1{color:#111}")
+    return str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_react_deploy_takes_the_assets_only_shape(tmp_path, monkeypatch):
+    """A react site builds to a PRERENDERED static tree with no server worker, so its
+    wrangler config takes the assets-only shape — despite the engine needing a full
+    Node build.
+
+    This is the assertion that separates the two capabilities. It used to read
+    ``"main" not in cfg``; SA-1 puts the pageview counter on this branch too, so the
+    claim is now the precise one: ``main`` is OUR generated entry at the project root
+    and never a ``dist/_worker.js`` that react does not write, which is what wrangler
+    would fail the deploy on."""
+    project = _build_react_project(tmp_path)
+    site_id = "507f1f77bcf86cd799439011"
+    proc = _FakeProc(0, b"https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    url = await workers_deploy.deploy_workers(site_id, project, engine="react")
+
+    cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
+    assert cfg["name"] == f"paw-site-{site_id}"
+    assert cfg["workers_dev"] is True
+    # Vite's client output, NOT the SvelteKit adapter path.
+    assert cfg["assets"]["directory"] == "dist"
+    assert cfg["main"] == "_paw_analytics.js"
+    assert Path(project, cfg["main"]).is_file()
+    assert "compatibility_flags" not in cfg
+    assert "d1_databases" not in cfg
+    assert url == "https://paw-site-507f1f77bcf86cd799439011.acct.workers.dev"
+
+
+@pytest.mark.asyncio
+async def test_react_deploy_never_names_a_worker_entry(tmp_path, monkeypatch):
+    """Belt-and-braces on the same fact, stated as the failure it prevents: nothing
+    in the emitted config may reference a ``_worker.js`` on the react track."""
+    project = _build_react_project(tmp_path)
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project, engine="react")
+
+    raw = Path(project, "wrangler.jsonc").read_text()
+    assert "_worker.js" not in raw
+    assert ".svelte-kit" not in raw
+
+
+@pytest.mark.asyncio
+async def test_react_assetsignore_lands_in_dist_and_excludes_itself(tmp_path, monkeypatch):
+    """``.assetsignore`` is written INSIDE the asset dir on every engine, so on react
+    it lands in ``dist/`` — where wrangler would otherwise serve it as a public
+    asset. It must exclude itself, and must NOT list the Pages worker entry (there is
+    no ``_worker.js`` to hide on this track)."""
+    project = _build_react_project(tmp_path)
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    _patch_subprocess(monkeypatch, proc)
+
+    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project, engine="react")
+
+    assetsignore = Path(project, "dist", ".assetsignore").read_text().splitlines()
+    assert ".assetsignore" in assetsignore
+    assert "_worker.js" not in assetsignore
+    # The prerendered page is still there to serve — the deploy scaffold did not
+    # clobber the build output.
+    assert Path(project, "dist", "index.html").read_text().startswith("<!doctype html>")
+
+
+@pytest.mark.asyncio
+async def test_react_deploy_without_a_build_fails_cleanly(tmp_path, monkeypatch):
+    """react needs its build to have RUN — unlike html, generate alone leaves no
+    servable tree. A missing ``dist/`` must raise the clean ValidationError before
+    any subprocess, not produce a config pointing at a directory that isn't there."""
+    (tmp_path / "package.json").write_text('{"name":"paw-site-x"}')
+    proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
+    captured = _patch_subprocess(monkeypatch, proc)
+
+    with pytest.raises(ValidationError):
+        await workers_deploy.deploy_workers(
+            "507f1f77bcf86cd799439011", str(tmp_path), engine="react"
+        )
+    assert captured.get("argv") is None
+
+
 @pytest.mark.asyncio
 async def test_static_svelte_config_unchanged_by_engine_default(tmp_path, monkeypatch):
     """Regression guard: the default engine (ripple/svelte) keeps the exact
     server-worker config — ``main`` + ``nodejs_compat`` + the ``.svelte-kit/cloudflare``
-    asset dir — byte-for-byte, so HE-4 does not touch the proven path."""
+    asset dir — byte-for-byte, so HE-4 does not touch the proven path.
+
+    Pinned on an UN-COUNTED publish since SA-3, which is what the guard was always
+    about: HE-4 must not change the shape, and the counting shape is a deliberate
+    change made somewhere else and asserted somewhere else."""
     project = _build_project(tmp_path)
     proc = _FakeProc(0, b"https://x.y.workers.dev\n", b"")
     _patch_subprocess(monkeypatch, proc)
 
-    await workers_deploy.deploy_workers("507f1f77bcf86cd799439011", project)
+    await workers_deploy.deploy_workers(
+        "507f1f77bcf86cd799439011", project, analytics_entitled=False
+    )
 
     cfg = json.loads(Path(project, "wrangler.jsonc").read_text())
     assert cfg["main"] == ".svelte-kit/cloudflare/_worker.js"
@@ -259,7 +400,7 @@ async def test_static_svelte_config_unchanged_by_engine_default(tmp_path, monkey
     assert cfg["assets"] == {"binding": "ASSETS", "directory": ".svelte-kit/cloudflare"}
     # The svelte/ripple .assetsignore still drops the Pages worker entry.
     assetsignore = Path(project, ".svelte-kit/cloudflare/.assetsignore").read_text().splitlines()
-    assert assetsignore == ["_worker.js", "_routes.json", "_headers"]
+    assert assetsignore[:3] == ["_worker.js", "_routes.json", "_headers"]
 
 
 @pytest.mark.asyncio

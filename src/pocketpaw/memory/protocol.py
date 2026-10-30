@@ -1,10 +1,22 @@
 # Memory storage protocol - defines the interface for swappable backends.
 # Created: 2026-02-02 - Memory System
+# Updated: 2026-09-04 (fix/bound-growing-queries, backend-perf M2) - get_session
+#   takes a `limit` and is bounded by default. It previously read every message
+#   a session had ever accumulated, from the agent loop, the sessions API and
+#   the dashboard alike.
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Protocol
+
+#: Messages returned by ``get_session`` when the caller does not say otherwise.
+#:
+#: Generous on purpose. This is a ceiling on an unbounded read, not a display
+#: window — the display paths apply their own, smaller limit on top (50 for the
+#: chat transcript). A number in the hundreds keeps every realistic session
+#: whole while refusing to load the pathological one.
+DEFAULT_SESSION_HISTORY_LIMIT = 500
 
 
 class MemoryType(StrEnum):
@@ -69,8 +81,28 @@ class MemoryStoreProtocol(Protocol):
         """Get all memories of a specific type."""
         ...
 
-    async def get_session(self, session_key: str) -> list[MemoryEntry]:
-        """Get session history for a specific session."""
+    async def get_session(
+        self, session_key: str, limit: int | None = DEFAULT_SESSION_HISTORY_LIMIT
+    ) -> list[MemoryEntry]:
+        """Get session history for a specific session, oldest first.
+
+        Bounded by default. This used to read every message a session had ever
+        accumulated, on a call made from the agent loop, the sessions API and
+        the dashboard alike — so a session with 10,000 turns loaded all 10,000
+        into memory each time.
+
+        ``limit`` selects the NEWEST ``limit`` messages and still returns them
+        oldest-first. Newest, not oldest: taking the first N of an ascending
+        sort is the exact defect fixed in #2075, where the chat history window
+        rehydrated the first fifty messages a scope ever had and the agent
+        answered as if the last hour had not happened. The cheap-looking
+        ``.sort(asc).limit(n)`` is the wrong shape here, every time.
+
+        ``limit=None`` restores the unbounded read. Two callers genuinely need
+        it — see ``MemoryManager.get_session_history_page``, which pages
+        BACKWARD through older messages, and ``get_compacted_history``, whose
+        summarization input must not change silently.
+        """
         ...
 
     async def clear_session(self, session_key: str) -> int:

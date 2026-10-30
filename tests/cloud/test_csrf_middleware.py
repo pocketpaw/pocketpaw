@@ -232,3 +232,69 @@ def test_logout_failure_does_not_clear_paw_csrf() -> None:
     set_cookie = res.headers.get("set-cookie", "")
     # No Set-Cookie for paw_csrf at all when logout failed.
     assert CSRF_COOKIE_NAME not in set_cookie
+
+
+# ---------------------------------------------------------------------------
+# Non-ASCII tokens and look-alike exempt paths
+# ---------------------------------------------------------------------------
+
+
+def _raw_cookie_post(client: TestClient, path: str, csrf_cookie: bytes, header: bytes | None):
+    """Raw bytes so non-ASCII values reach the server (httpx refuses non-ASCII str)."""
+    headers = {"cookie": b"paw_auth=fake-jwt; " + CSRF_COOKIE_NAME.encode() + b"=" + csrf_cookie}
+    if header is not None:
+        headers[CSRF_HEADER_NAME] = header
+    return client.post(path, headers=headers)
+
+
+def test_a_non_ascii_token_that_matches_passes(client: TestClient) -> None:
+    res = _raw_cookie_post(client, "/api/v1/widgets", "tök€n".encode(), "tök€n".encode())
+    assert res.status_code == 200
+
+
+def test_a_non_ascii_token_mismatch_is_a_403_not_a_500(client: TestClient) -> None:
+    res = _raw_cookie_post(client, "/api/v1/widgets", "tök€n".encode(), "tøk€n".encode())
+    assert res.status_code == 403
+    assert res.json() == {"detail": "csrf_invalid"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/auth/login",
+        "/api/v1/auth/login/",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/bearer/login",
+        "/api/v1/auth/bearer/logout",
+        "/api/v1/auth/csrf",
+        "/api/v1/auth/register",
+        "/api/v1/auth/mfa/challenge",
+        "/api/v1/auth/forgot-password",
+        "/api/v1/auth/reset-password",
+        "/api/v1/auth/request-verify-token",
+        "/api/v1/auth/verify",
+        "/api/v1/auth/sso/callback",
+        "/health",
+        "/health/live",
+    ],
+)
+def test_real_exempt_paths_stay_exempt(path: str) -> None:
+    from pocketpaw_ee.cloud._core.csrf import _path_is_exempt
+
+    assert _path_is_exempt(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/auth/verify-anything",
+        "/api/v1/auth/login-x",
+        "/api/v1/auth/registered",
+        "/healthX",
+        "/api/v1/auth/mfa/challenge-other",
+    ],
+)
+def test_a_look_alike_path_is_csrf_checked(client: TestClient, path: str) -> None:
+    # CSRF rejects before routing, so no route is needed: 403, never 404.
+    res = _raw_cookie_post(client, path, b"a-token", None)
+    assert res.status_code == 403

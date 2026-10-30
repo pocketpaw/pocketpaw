@@ -1,0 +1,58 @@
+[
+  {
+    "label": "paid and non-free workspaces count toward the unpaid burn",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "    match = _spend_match(since) | {\"workspace\": {\"$nin\": [*paid, *non_free]}}\n",
+    "replace": "    match = _spend_match(since)\n",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_series_cap_share_meter_and_controls"]
+  },
+  {
+    "label": "guest rows count as signups",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "\"_id\", {\"_id\": {\"$gte\": ObjectId.from_datetime(since)}, \"is_guest\": {\"$ne\": True}}\n",
+    "replace": "\"_id\", {\"_id\": {\"$gte\": ObjectId.from_datetime(since)}}\n",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_series_cap_share_meter_and_controls"]
+  },
+  {
+    "label": "a wallet at exactly zero counts as funded",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "\"balance_micro\": {\"$gt\": 0}",
+    "replace": "\"balance_micro\": {\"$gte\": 0}",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_series_cap_share_meter_and_controls"]
+  },
+  {
+    "label": "burned micro-credits round down, undercounting the burn",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "counts[day][\"credits_burned\"] = metering_service.credits_ceil(micro)",
+    "replace": "counts[day][\"credits_burned\"] = micro // 1_000_000",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_series_cap_share_meter_and_controls"]
+  },
+  {
+    "label": "the route drops its platform.stats.read guard",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "    operator: Annotated[User, Depends(require_platform(\"platform.stats.read\"))],\n    days: Annotated[int, Query(ge=1, le=90)] = 14,\n",
+    "replace": "    operator: Annotated[User, Depends(lambda: None)],\n    days: Annotated[int, Query(ge=1, le=90)] = 14,\n",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_refused_without_platform_stats_read"]
+  },
+  {
+    "label": "a workspace with no plan field drops out of the unpaid burn",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "\"_id\", {\"plan\": {\"$in\": paid_tiers}}",
+    "replace": "\"_id\", {\"plan\": {\"$ne\": \"free\"}}",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_series_cap_share_meter_and_controls"]
+  },
+  {
+    "label": "a retired plan outside the catalog counts as paid",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "\"_id\", {\"plan\": {\"$in\": paid_tiers}}",
+    "replace": "\"_id\", {\"plan\": {\"$nin\": [None, \"free\"]}}",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_series_cap_share_meter_and_controls"]
+  },
+  {
+    "label": "a failed meter read sinks the whole response",
+    "file": "ee/pocketpaw_ee/cloud/platform/stats.py",
+    "find": "    except Exception as exc:  # noqa: BLE001 - one broken block must not sink the page\n        logger.exception(\"platform.stats.early_access: meter read failed\")\n        errors.append(f\"today: {exc}\")\n",
+    "replace": "    except KeyError as exc:\n        errors.append(f\"today: {exc}\")\n",
+    "tests": ["tests/cloud/platform/test_platform_early_access_stats.py::test_meter_failure_degrades_to_null_today"]
+  }
+]

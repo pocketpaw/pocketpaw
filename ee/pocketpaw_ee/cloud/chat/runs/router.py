@@ -1,6 +1,26 @@
-"""Run streaming + control endpoints.
+"""Run streaming + control endpoints. The stream's tail, heartbeat and
+lifetime cap live in ``transport.sse_tail`` (shared with the Belt run feed);
+this route authorizes, picks the cursor and serves the history fallback: a
+terminal run whose stream expired gets one synthetic frame, an ``error`` carrying
+``doc.error`` for a failed run with no reply, else a ``stream_end``.
 
 Changes:
+- 2026-09-27 (fix/run-stream-session-readers) — the stream admits a reader of
+  the run's thread, not only the run's author. Pocket and Paw Site threads are
+  readable by everyone who may read the pocket (#2244), so a teammate opening a
+  thread mid-turn saw the history but 404'd on the live reply. ``_authorize``
+  keeps its author-only rule for stop; ``_authorize_read`` adds the thread
+  readers from ``sessions_service.can_read_session`` for session-scoped runs.
+- 2026-09-04 (fix/unblock-event-loop, backend-perf M7) — the stream loop has a
+  maximum lifetime. It previously had none: the only exits were a terminal
+  event or a failed ``yield`` (which is how a client disconnect is noticed).
+  A run that never writes its terminal frame therefore heartbeated forever,
+  and the ``stream_exists`` fallback below does not catch that case — it only
+  fires when the events key is GONE, whereas a worker OOM-killed mid-run
+  leaves the key present and unfinished. Each abandoned subscription costs a
+  live asyncio task plus a Redis connection blocked in 15s slices, on a client
+  pool with no configured cap. The ceiling is derived from the run's own
+  ``POCKETPAW_CLOUD_RUN_JOB_TIMEOUT`` so the two cannot drift apart.
 - 2026-06-10 (sov/w3a-igw — per-run token metering) — the history-replay
   ``stream_end`` frame (served when a terminal run's live stream has expired) now
   carries the persisted ``doc.usage`` so a reconnecting client still gets the
@@ -9,8 +29,8 @@ Changes:
 
 from __future__ import annotations
 
-import json
 import logging
+import time
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, Query
@@ -18,18 +38,15 @@ from fastapi.responses import StreamingResponse
 
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.chat.runs import service as run_service
+from pocketpaw_ee.cloud.chat.runs.domain import stream_max_lifetime_seconds
 from pocketpaw_ee.cloud.chat.runs.dto import StopRunResponse
-from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
+from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport, sse_frame, sse_tail
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Cloud Agent Chat"], dependencies=[Depends(require_license)])
-
-
-def _sse(entry_id: str, event: str, data: dict) -> bytes:
-    return f"id: {entry_id}\nevent: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
 async def _authorize(run_id: str, workspace_id: str, user_id: str):
@@ -42,6 +59,24 @@ async def _authorize(run_id: str, workspace_id: str, user_id: str):
     return doc
 
 
+async def _authorize_read(run_id: str, workspace_id: str, user_id: str):
+    # The author, or anyone who may read the thread the run belongs to. Only
+    # session-scoped runs have a thread to share; the rest stay author-only.
+    # Every refusal is the same NotFound as ``_authorize``.
+    from pocketpaw_ee.cloud.sessions import service as sessions_service
+
+    doc = await run_service.get_run(run_id)
+    if doc.workspace != workspace_id:
+        raise NotFound("chat_run", run_id)
+    if doc.user_id == user_id:
+        return doc
+    if doc.context_type == "session" and await sessions_service.can_read_session(
+        doc.scope_id, user_id
+    ):
+        return doc
+    raise NotFound("chat_run", run_id)
+
+
 @router.get("/cloud/chat/runs/{run_id}/stream")
 async def get_run_stream(
     run_id: str,
@@ -49,7 +84,7 @@ async def get_run_stream(
     user_id: str = Depends(current_user_id),
     workspace_id: str = Depends(current_workspace_id),
 ) -> StreamingResponse:
-    doc = await _authorize(run_id, workspace_id, user_id)
+    doc = await _authorize_read(run_id, workspace_id, user_id)
     transport = get_stream_transport()
 
     async def gen() -> AsyncIterator[bytes]:
@@ -60,7 +95,20 @@ async def get_run_stream(
         # hasn't XADD'd its first event yet.
         is_terminal = doc.status not in ("queued", "running")
         if is_terminal and not await transport.stream_exists(run_id):
-            yield _sse(
+            # A failed run with no reply replays its error: a bare stream_end
+            # reads as success and the client shows nothing.
+            if doc.status == "failed" and not doc.assistant_message_id:
+                yield sse_frame(
+                    "0-0",
+                    "error",
+                    {
+                        "code": "run.failed",
+                        "message": doc.error or "This reply failed. Send your message again.",
+                        "from_history": True,
+                    },
+                )
+                return
+            yield sse_frame(
                 "0-0",
                 "stream_end",
                 {
@@ -74,17 +122,13 @@ async def get_run_stream(
                 },
             )
             return
-        while True:
-            saw_terminal = False
-            async for ev in transport.read_events(run_id, after=cursor, block_ms=15000):
-                cursor = ev.entry_id
-                yield _sse(ev.entry_id, ev.event, ev.data)
-                if ev.is_terminal:
-                    saw_terminal = True
-            if saw_terminal:
-                return
-            # heartbeat so proxies keep the connection open
-            yield b": ping\n\n"
+        # Hard ceiling on this subscription (see ``sse_tail``): a run whose
+        # terminal event never arrives (the worker was OOM-killed AFTER the
+        # events key existed, so the ``stream_exists`` fallback above does not
+        # trigger) would otherwise heartbeat forever.
+        deadline = time.monotonic() + stream_max_lifetime_seconds()
+        async for chunk in sse_tail(transport, run_id, cursor, deadline):
+            yield chunk
 
     return StreamingResponse(
         gen(),

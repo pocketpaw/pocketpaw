@@ -1,69 +1,82 @@
-# ee/pocketpaw_ee/sites/cloudflare_client.py — async Cloudflare API client for
-# the Sites control plane. Four surfaces:
-#   * Workers for Platforms — PUT a user Worker into our dispatch namespace
-#     (one synchronous call per site; live on 200; no per-account script cap).
-#   * Cloudflare for SaaS — create a custom hostname, return the single CNAME
-#     the client pastes, poll validation + TLS status.
-#   * D1 provisioning (DP0-1) — create a per-tenant D1 database and return its
-#     real uuid, so a Dynamic Paw Site's data plane can be stood up; see
-#     create_database.
-#   * D1 (DS-3) — query a dynamic site's per-tenant D1 over the HTTP API so the
-#     control plane can READ its data (the operator data-view); see query_d1.
-# httpx-based; account id + token come from settings (env), not per-tenant rows
-# in v1. Non-2xx raises a CloudError so the standard envelope applies.
+# ee/pocketpaw_ee/sites/cloudflare_client.py: async Cloudflare HTTP API client for
+# the Sites control plane. httpx-based, injectable transport for tests; account id
+# and token come from settings (env), never from tenant rows. Surfaces:
+#   * Workers for Platforms: ``put_worker`` uploads a user Worker into our dispatch
+#     namespace (live on 200) and ``delete_worker`` removes it. ``put_worker`` and
+#     ``upload_assets`` take a ``target``: ``dispatch`` (default, the namespace) or
+#     ``account`` (a regular account-level script at ``/workers/scripts/{name}``,
+#     the interim home of ``project`` bundles while the account has no WfP). Only
+#     the URL differs; the wire shapes are the same. ``put_worker`` has
+#     three wire shapes: the legacy single-module PUT (no bindings), the legacy
+#     one-module multipart with bindings (dynamic sites, fixed ``index.mjs`` and
+#     ``2024-09-23``), and the multi-module bundle form (``modules=``) used by
+#     ``bundle_deploy`` for ``paw-build.json`` builds: metadata + one part per
+#     module, with compat flags, an ``assets`` block and the optional
+#     ``placement`` / ``observability`` / ``limits`` blocks ``bundle_deploy``
+#     decides (``worker_settings``). The legacy shapes are byte-for-byte unchanged.
+#   * Static assets: ``upload_assets`` runs the dispatch assets-upload-session,
+#     uploads the requested buckets (base64 multipart, session JWT as Bearer, never
+#     the account token) and returns the completion JWT for ``put_worker``. Asset
+#     hashes are salted per tenant so one tenant cannot probe another's files in
+#     the namespace-shared asset store.
+#   * Account-level Workers (the ``workers`` deploy mode): ``delete_account_script``,
+#     ``list_account_scripts``, ``enable_workers_dev`` (the script's workers.dev
+#     toggle, which an API upload leaves off) and ``workers_dev_subdomain`` (the
+#     account's ``<sub>.workers.dev``). Wrangler-built sites deploy through
+#     ``workers_deploy.py``, project bundles through ``put_worker(target="account")``.
+#     ``Site.deploy_target`` decides which delete applies.
+#   * Cloudflare for SaaS: custom hostnames (create, poll, delete). The CNAME target
+#     is configured (``PAW_CF_CNAME_TARGET``), never derived from the zone id, and
+#     create refuses when it is unset. No ``custom_metadata``: it is entitlement-gated.
+#   * Worker routes: ``<hostname>/*`` -> the site's Worker, updated in place on rename.
+#   * D1: ``create_database``, ``find_database`` (exact name, crash recovery),
+#     ``delete_database``, ``query_d1`` and ``query_d1_batch`` (parameterized, never
+#     interpolated SQL), ``d1_info`` (``version``: Time Travel needs ``production``),
+#     ``d1_bookmark`` / ``d1_restore`` (Time Travel: the bookmark at or before a
+#     moment; an in-place restore that answers the ``previous_bookmark`` undoing it;
+#     a moment before the database's history, code 7400, is a 422
+#     ``sites.data_restore_out_of_window``),
+#     ``export_d1_sql`` (the D1 export API: poll with the bookmark,
+#     then fetch the signed URL with a client that carries NO token, since the URL is
+#     another host). ``create_database`` adds the operator's
+#     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``) and, opt-in,
+#     ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication: auto``); NEW databases only.
+#   * KV and R2 for ``binding_provisioner``: namespaces (find by title, create,
+#     delete) and buckets (exists, create, delete, expire-all lifecycle). A non-empty
+#     bucket delete reports False and teardown sets the expire-all rule; it does NOT
+#     empty the bucket through the object API, deliberately (a day of grace).
+#   * R2 objects and KV keys for the Sites Data dashboard: ``r2_list`` / ``r2_get``
+#     (a stream, ``R2Object``) / ``r2_put`` / ``r2_delete`` and ``kv_list_keys`` /
+#     ``kv_get`` (``KvValue``: capped bytes, full size, UTF-8 text) / ``kv_metadata``
+#     / ``kv_put`` (raw, or multipart value + metadata) / ``kv_delete``. R2 keys go in
+#     the path with "/" literal (``_r2_key_path``), KV keys fully percent-encoded
+#     (``_kv_key_path``); a "." / ".." segment is refused before any request in both,
+#     because httpx collapses dot segments and would send the call to another URL
+#     (``objects/../..`` is the bucket itself). Downloads ask for ``identity`` and
+#     stream raw bytes, so Content-Length is the stored size.
+#   * Browser Rendering: ``capture_screenshot`` returns image bytes (url or html);
+#     ``browser_run_cdp`` gives the Browser Run CDP socket + auth for play-tests.
+#   * Analytics Engine: ``query_analytics_sql`` sends raw SQL and reads a body with
+#     no ``success`` key, so it deliberately does not use ``_unwrap`` on success.
 #
-# Secret handling: the CF API token lives only in the in-memory Authorization
-# header — never logged, never written to disk. All errors fail closed (raise
-# ValidationError), so a failed CF call never silently reports success.
-# Created: 2026-05-30 (feat/paw-sites-backend, Task 2.2).
-#
-# Updated 2026-07-08 (DP0-1 — D1 provisioning for Dynamic Paw Sites Phase 0):
-# added create_database(). It POSTs to the Cloudflare D1 create endpoint
-# (POST /accounts/{acct}/d1/database) with a ``{"name": <name>}`` body and returns
-# the new database's real uuid (``result.uuid`` in the envelope). It mirrors the
-# existing client style exactly: the CF token in the in-memory Authorization header
-# only, and fail-closed via the shared ``_unwrap`` (a non-2xx or success:false
-# raises ValidationError). This is the FIRST step of the durable provision job: the
-# returned uuid is persisted immediately so a retry reuses the same D1 instead of
-# orphaning a second one.
-#
-# Updated 2026-06-20 (DS-3 — control-plane read of a dynamic site's D1): added
-# query_d1(). It POSTs to the Cloudflare D1 query endpoint
-# (POST /accounts/{acct}/d1/database/{db_id}/query) with a PARAMETERIZED
-# {sql, params} body and returns the rows from the FIRST statement's
-# ``result[0].results``. It mirrors the existing client style exactly: injectable
-# transport, the CF token in the in-memory Authorization header only, and
-# fail-closed via the shared ``_unwrap`` (a non-2xx or success:false raises
-# ValidationError). It NEVER interpolates SQL — the table identifier is validated
-# against the site's known objects by the service BEFORE it reaches here, and all
-# values bind through ``params``. The service layer (DS-3) owns that validation;
-# this method is a thin, SQL-agnostic transport.
-# Updated 2026-06-20 (DS-2 — dynamic-site D1 bindings): ``put_worker`` gained an
-# optional ``bindings`` param. A DYNAMIC Paw Site is backed by a per-tenant
-# Cloudflare D1; its deployed Worker needs a D1 binding to reach that DB. When
-# bindings are supplied, the upload switches to the Workers multipart/form-data
-# contract — a ``metadata`` JSON part (main_module + bindings + compatibility_date)
-# plus the module file part referenced by its filename. When NO bindings are
-# supplied (a static site), it keeps the prior single-module upload byte-for-byte,
-# so the static path never regresses. The fail-closed + in-memory-token handling
-# is identical on both paths.
-# Updated 2026-06-24 (BC-10 — resell Cloudflare features by site-plan tier):
-# ``create_custom_hostname`` gained an optional ``features`` param (the
-# ``cloudflare_features`` set from the site's plan tier — e.g. ``{"waf",
-# "edge_cache", ...}``). When features are present, the custom-hostname request
-# carries the corresponding premium SSL/settings fields via ``_ssl_for_features``
-# (a pure feature-set → CF ``ssl`` payload map) plus a ``custom_metadata`` block
-# recording the resold feature set, so a HIGHER tier provisions paid security
-# (WAF / strict TLS / edge cache) at hostname-create time. When ``features`` is
-# None/empty (the BASE tier), the request is the prior basic
-# ``{"method": "http", "type": "dv"}`` ssl payload byte-for-byte, so a basic-tier
-# site never regresses. The mapping is intentionally MINIMAL + documented (a real
-# CF account tunes the exact toggles); the contract is "feature set in → those
-# CF fields out", asserted with a mocked transport.
-
+# Invariants: the token lives only in the in-memory Authorization header, never in
+# logs or on disk. Every call fails closed: a non-2xx or ``success: false`` raises
+# ValidationError carrying Cloudflare's own error codes (``_error_detail``). Deletes
+# treat a 404 as already done so a resumed teardown never fails on a finished step.
 from __future__ import annotations
 
+import asyncio
+import base64
+import hashlib
 import json
+import logging
+import mimetypes
+import os
+import posixpath
+from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -71,6 +84,88 @@ from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.domain import CustomHostname, HostnameStatus
 
 _CF_API = "https://api.cloudflare.com/client/v4"
+
+logger = logging.getLogger(__name__)
+
+# Where a NEW site D1 puts its primary. Unset lets Cloudflare choose (near the API
+# host that issued the create). Values are the create endpoint's
+# ``primary_location_hint`` enum:
+# https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/create/
+D1_LOCATION_HINT_ENV = "PAW_SITES_D1_LOCATION_HINT"
+D1_LOCATION_HINTS = frozenset({"wnam", "enam", "weur", "eeur", "apac", "oc"})
+# Opt-in: create new site D1s with read replication on (``mode: auto``). Replicas
+# only serve queries a Worker sends through the Sessions API; everything else (and
+# every REST query, so our migrations) still goes to the primary.
+# https://developers.cloudflare.com/d1/best-practices/read-replication/
+D1_READ_REPLICATION_ENV = "PAW_SITES_D1_READ_REPLICATION"
+
+# Where ``put_worker`` / ``upload_assets`` send a script. ``dispatch`` is our WfP
+# namespace; ``account`` is a regular account-level script (no dispatch isolation).
+DISPATCH_TARGET = "dispatch"
+ACCOUNT_TARGET = "account"
+SCRIPT_TARGETS = (DISPATCH_TARGET, ACCOUNT_TARGET)
+
+# How much of an error body to carry into the raised message. Cloudflare's own
+# messages are short sentences; the cap exists so a proxy's HTML error page cannot
+# paste a whole document into a toast.
+_ERROR_DETAIL_MAX = 300
+
+
+def d1_create_options() -> dict:
+    """Extra D1 create-body fields from env: ``primary_location_hint`` when
+    ``PAW_SITES_D1_LOCATION_HINT`` names a valid hint (an unknown value is logged and
+    left out, so Cloudflare chooses), and ``read_replication: {"mode": "auto"}`` when
+    ``PAW_SITES_D1_READ_REPLICATION`` is truthy. A hint is a preference, not a
+    guarantee (https://developers.cloudflare.com/d1/configuration/data-location/)."""
+    out: dict = {}
+    hint = (os.environ.get(D1_LOCATION_HINT_ENV) or "").strip().lower()
+    if hint in D1_LOCATION_HINTS:
+        out["primary_location_hint"] = hint
+    elif hint:
+        logger.warning(
+            "sites: unknown %s=%r; letting Cloudflare choose", D1_LOCATION_HINT_ENV, hint
+        )
+    replication = (os.environ.get(D1_READ_REPLICATION_ENV) or "").strip().lower()
+    if replication in {"1", "true", "yes", "on"}:
+        out["read_replication"] = {"mode": "auto"}
+    return out
+
+
+def _error_detail(resp: httpx.Response) -> str:
+    """The reason Cloudflare gave, as one line.
+
+    Cloudflare answers failures with ``{"success": false, "errors": [{code,
+    message}, ...]}``. EVERY entry is joined, not just the first: on a refusal the
+    second is often the actionable one — the first names the endpoint, the second
+    names the missing entitlement. Codes ride along because Cloudflare's docs are
+    indexed by them, so a number an operator can paste into a search is worth more
+    than the sentence next to it.
+
+    Falls back to the raw body, then to nothing, so a non-JSON reply (an edge HTML
+    error page) degrades to the status code the caller already has rather than
+    turning a diagnosis into a second exception. The response body is never a
+    secret: it is Cloudflare's description of OUR request, and the token only ever
+    lives in a request header.
+    """
+    try:
+        body = resp.json()
+    except (json.JSONDecodeError, ValueError):
+        text = (resp.text or "").strip()
+        return text[:_ERROR_DETAIL_MAX] if text else "no error detail"
+
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if not errors:
+        return "no error detail"
+
+    parts: list[str] = []
+    for err in errors:
+        if not isinstance(err, dict):
+            parts.append(str(err))
+            continue
+        code, message = err.get("code"), str(err.get("message", "")).strip()
+        parts.append(f"{message} (code {code})" if code and message else message or f"code {code}")
+    return "; ".join(p for p in parts if p)[:_ERROR_DETAIL_MAX] or "no error detail"
+
 
 # Filename the module part is uploaded under (and named by ``main_module`` in the
 # metadata). The Workers multipart upload references modules by filename; the
@@ -81,6 +176,69 @@ _MAIN_MODULE = "index.mjs"
 # date the generator bakes into the (otherwise-ignored-on-direct-API-upload)
 # wrangler.toml so the runtime semantics are identical to a wrangler deploy.
 _COMPATIBILITY_DATE = "2024-09-23"
+
+# Multi-module uploads. Content-Type tells the runtime how to load each part:
+# https://developers.cloudflare.com/workers/configuration/multipart-upload-metadata/
+_MODULE_CONTENT_TYPES: dict[str, str] = {
+    ".js": "application/javascript+module",
+    ".mjs": "application/javascript+module",
+    ".cjs": "application/javascript",
+    ".wasm": "application/wasm",
+    ".json": "application/json",
+    ".txt": "text/plain",
+    ".html": "text/plain",
+    ".md": "text/plain",
+    ".sql": "text/plain",
+}
+
+
+def module_content_type(name: str) -> str:
+    """The part Content-Type for a Worker module, by extension. Anything unknown is
+    uploaded as data (``application/octet-stream``), which imports as an ArrayBuffer."""
+    ext = posixpath.splitext(name)[1].lower()
+    return _MODULE_CONTENT_TYPES.get(ext, "application/octet-stream")
+
+
+@dataclass(frozen=True)
+class WorkerModule:
+    """One module part of a multi-module upload. ``name`` is the part name and the
+    specifier other modules import it by: a relative posix path (``chunks/a.js``)."""
+
+    name: str
+    content: bytes
+    content_type: str
+
+
+@dataclass(frozen=True)
+class WorkerUpload:
+    """What a bundle-form ``put_worker`` reports back. ``migration_tag`` is the
+    script's Durable Object migration tag after the upload, None when it has none."""
+
+    migration_tag: str | None = None
+
+
+def asset_hash(content: bytes, path: str, salt: str) -> str:
+    """The 32-hex asset hash Cloudflare keys uploads on, salted per tenant.
+
+    Assets in a dispatch namespace are deduplicated by this hash across every script
+    in it, so an unsalted content hash would let one tenant learn whether another
+    already uploaded a given file. Salting with the tenant key keeps dedupe inside the
+    tenant and makes cross-tenant probing impossible (the salt is applied here, on our
+    side, never by the author). The extension is mixed in, as wrangler does, because
+    the same bytes served as ``.js`` and ``.txt`` are different assets."""
+    ext = posixpath.splitext(path)[1].lower()
+    h = hashlib.sha256()
+    h.update(salt.encode("utf-8"))
+    h.update(b"\0")
+    h.update(content)
+    h.update(b"\0")
+    h.update(ext.encode("utf-8"))
+    return h.hexdigest()[:32]
+
+
+def _asset_part_type(path: str) -> str:
+    return mimetypes.guess_type(path)[0] or "application/octet-stream"
+
 
 # BC-10: the basic (no-feature) custom-hostname SSL payload — the prior default,
 # kept byte-for-byte so a base-tier site never regresses.
@@ -107,12 +265,20 @@ _FEATURE_SSL_SETTINGS: dict[str, dict] = {
 def _ssl_for_features(features: set[str] | None) -> dict:
     """Build the custom-hostname ``ssl`` payload for a tier's resold features.
 
-    No features (base tier) → the prior basic ``{"method": "http", "type": "dv"}``
-    payload, unchanged. With features, the basic payload gains an ``ssl.settings``
-    block that is the UNION of every known feature's fragment (``_FEATURE_SSL_SETTINGS``)
-    plus a ``custom_metadata`` recording the full resold feature set (sorted, so the
-    wire payload is deterministic). A feature with no ssl fragment still lands on
-    ``custom_metadata`` — the tier is visible even when it provisions no toggle.
+    No features (base tier) → the basic ``{"method": "http", "type": "dv"}`` payload.
+    With features, it gains an ``ssl.settings`` block that is the UNION of every known
+    feature's fragment (``_FEATURE_SSL_SETTINGS``). A feature with no fragment
+    contributes nothing, which is the honest answer: nothing about the hostname
+    changes for it.
+
+    **No ``custom_metadata``.** BC-10 recorded the resold feature set there so a tier
+    was auditable on Cloudflare's side. Per-hostname metadata is not generally
+    available — Cloudflare's own doc says "only certain customers have access to this
+    feature… contact your account team" — so on an ordinary zone that block turned the
+    create into a 403/1413. The effect was that custom domains worked on FREE sites and
+    failed on PAID ones. The 2026-06-25 resale research had already marked these SKUs
+    DEFER; this restores that decision. The tier is recorded on the Site document,
+    which is where anything in this codebase actually reads it from.
     """
     if not features:
         return dict(_BASIC_SSL)
@@ -122,9 +288,6 @@ def _ssl_for_features(features: set[str] | None) -> dict:
     ssl: dict = dict(_BASIC_SSL)
     if settings:
         ssl["settings"] = settings
-    # Record the resold feature set on the hostname so the tier is auditable on
-    # the CF side (sorted → deterministic wire payload).
-    ssl["custom_metadata"] = {"resold_features": ",".join(sorted(features))}
     return ssl
 
 
@@ -138,6 +301,58 @@ def _map_status(cf_status: str, ssl_status: str) -> HostnameStatus:
     return HostnameStatus.ERROR
 
 
+def _dot_segment(key: str) -> bool:
+    return any(seg in (".", "..") for seg in key.split("/"))
+
+
+def _r2_key_path(key: str) -> str:
+    """``key`` as the path tail of an R2 object URL: "/" kept literal (R2 reads a
+    %2F as part of the name), everything else percent-encoded. ValidationError for
+    an empty key or a "." / ".." segment, which httpx would resolve away."""
+    if not key or _dot_segment(key):
+        raise ValidationError("sites.data_bad_file_key", "That file name can't be used.")
+    return quote(key, safe="/")
+
+
+def _kv_key_path(key: str) -> str:
+    """``key`` as one percent-encoded path segment ("/" included). ValidationError
+    for "" or any "/"-separated "." / ".." segment (the same rule as R2 keys)."""
+    if key == "" or _dot_segment(key):
+        raise ValidationError("sites.data_bad_kv_key", "That key name can't be used.")
+    return quote(key, safe="")
+
+
+@dataclass
+class R2Object:
+    """An open R2 download. ``iter_bytes`` streams the body and closes the connection
+    when done; call ``aclose`` to abandon it unread."""
+
+    content_type: str
+    size: int | None
+    etag: str
+    _resp: httpx.Response
+    _client: httpx.AsyncClient
+
+    async def iter_bytes(self) -> AsyncIterator[bytes]:
+        try:
+            async for chunk in self._resp.aiter_raw():
+                yield chunk
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        await self._resp.aclose()
+        await self._client.aclose()
+
+
+@dataclass(frozen=True)
+class KvValue:
+    data: bytes  # at most ``max_bytes`` of the value
+    size: int  # the whole value's size
+    truncated: bool  # ``data`` is only the start of the value
+    text: str | None  # ``data`` decoded as UTF-8, when whole and valid
+
+
 class CloudflareClient:
     def __init__(
         self,
@@ -146,35 +361,81 @@ class CloudflareClient:
         api_token: str,
         zone_id: str,
         dispatch_namespace: str,
+        cname_target: str = "",
         _transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._account_id = account_id
         self._zone_id = zone_id
         self._namespace = dispatch_namespace
+        # The name a customer pastes into their own registrar. MUST be a proxied
+        # record on our zone (see the module header); defaults empty so a caller that
+        # has not configured one fails loudly at create time rather than silently
+        # handing out something that does not resolve.
+        self._cname_target = cname_target.strip()
         self._headers = {"Authorization": f"Bearer {api_token}"}
         self._transport = _transport  # tests inject a MockTransport
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(headers=self._headers, transport=self._transport, timeout=30.0)
 
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    def browser_run_cdp(self, *, keep_alive_ms: int) -> tuple[str, dict[str, str]]:
+        """The Browser Run CDP socket and the headers to open it with, for
+        ``connect_over_cdp``. Connecting acquires a fresh remote browser that lives
+        ``keep_alive_ms`` (clamped to Cloudflare's 10000-1200000) unless closed
+        first. Same token and permission (Browser Rendering - Edit) as
+        ``capture_screenshot``; the token rides only in the returned header."""
+        keep = max(10_000, min(int(keep_alive_ms), 1_200_000))
+        url = (
+            f"wss://api.cloudflare.com/client/v4/accounts/{self._account_id}"
+            f"/browser-run/devtools/browser?keep_alive={keep}"
+        )
+        return url, dict(self._headers)
+
     @staticmethod
     def _unwrap(resp: httpx.Response) -> dict:
         if resp.status_code // 100 != 2:
-            raise ValidationError("sites.cloudflare_error", f"Cloudflare API {resp.status_code}")
+            # Cloudflare names the reason in the body on a refusal, and this branch
+            # used to drop it: it raised the bare status and never looked, while the
+            # body-reading branch below can only run on a 2xx. So the one useful
+            # sentence was discarded on exactly the responses that needed it — a 403
+            # on custom_hostnames reached the operator as "Cloudflare API 403", which
+            # is true of a token missing the SSL-and-Certificates edit scope, a token
+            # with no access to the zone, and a zone without Cloudflare for SaaS,
+            # three problems with three different fixes.
+            raise ValidationError(
+                "sites.cloudflare_error",
+                f"Cloudflare API {resp.status_code}: {_error_detail(resp)}",
+            )
         body = resp.json()
         if not body.get("success", False):
-            errs = body.get("errors") or [{"message": "unknown"}]
-            raise ValidationError("sites.cloudflare_error", str(errs[0].get("message")))
+            raise ValidationError("sites.cloudflare_error", _error_detail(resp))
         return body.get("result", {})
 
     async def put_worker(
         self,
         *,
         script_name: str,
-        bundle: bytes,
+        bundle: bytes = b"",
         bindings: list[dict] | None = None,
-    ) -> bool:
+        modules: Sequence[WorkerModule] | None = None,
+        main_module: str | None = None,
+        compatibility_date: str | None = None,
+        compatibility_flags: Sequence[str] | None = None,
+        assets: dict | None = None,
+        target: str = DISPATCH_TARGET,
+        placement: Mapping[str, Any] | None = None,
+        observability: Mapping[str, Any] | None = None,
+        limits: Mapping[str, Any] | None = None,
+        migrations: Mapping[str, Any] | None = None,
+    ) -> bool | WorkerUpload:
         """Upload a user Worker into the dispatch namespace. Live on 200.
+
+        ``target="account"`` sends the same upload to a regular account-level script
+        (``PUT /accounts/{id}/workers/scripts/{name}``) instead, see ``_script_url``.
 
         ``bindings`` (DS-2) carries the Worker's runtime bindings — for a dynamic
         Paw Site, a D1 binding ``{"type": "d1", "name": "DB", "id": <database_id>}``
@@ -192,11 +453,43 @@ class CloudflareClient:
         plus the module file part referenced by that filename. The
         dispatch-namespace script upload uses the same multipart contract as a
         normal Worker upload (metadata part named ``metadata``, module parts keyed
-        by filename)."""
-        url = (
-            f"{_CF_API}/accounts/{self._account_id}"
-            f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
-        )
+        by filename).
+
+        ``modules`` selects the bundle form instead (``paw-build.json`` deploys):
+        ``bundle`` must then be empty, and the metadata carries ``main_module``,
+        ``bindings``, ``compatibility_date``, ``compatibility_flags`` and, when given,
+        ``assets`` (``{"jwt": <completion jwt>, "config": {...}}``), followed by one
+        part per module named by its path. An empty ``modules`` with ``assets`` is an
+        assets-only Worker (no ``main_module``). ``placement``, ``observability`` and
+        ``limits`` (bundle form only) go into the metadata as given, and so does
+        ``migrations`` (Durable Object tagged migrations, ``{old_tag?, new_tag, steps}``).
+        The bundle form returns a ``WorkerUpload`` carrying the response's
+        ``migration_tag``; the single-module form returns True. Callers vet every value
+        first; this method only checks the shape is self-consistent."""
+        if modules is not None:
+            return await self._put_worker_bundle(
+                script_name=script_name,
+                bundle=bundle,
+                modules=modules,
+                main_module=main_module,
+                bindings=bindings or [],
+                compatibility_date=compatibility_date,
+                compatibility_flags=compatibility_flags or [],
+                assets=assets,
+                target=target,
+                settings={
+                    "placement": placement,
+                    "observability": observability,
+                    "limits": limits,
+                    "migrations": migrations,
+                },
+            )
+        if placement or observability or limits or migrations:
+            raise ValidationError(
+                "sites.bundle_shape",
+                "placement, observability, limits and migrations need the bundle form",
+            )
+        url = self._script_url(script_name, target)
         async with self._client() as client:
             if bindings:
                 metadata = {
@@ -226,6 +519,262 @@ class CloudflareClient:
         self._unwrap(resp)
         return True
 
+    def _script_url(self, script_name: str, target: str = DISPATCH_TARGET) -> str:
+        """The script's API URL for ``target``. ``account`` is the regular Worker
+        upload (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/),
+        ``dispatch`` the same contract inside our WfP namespace."""
+        if target == ACCOUNT_TARGET:
+            return f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}"
+        if target != DISPATCH_TARGET:
+            raise ValidationError("sites.bundle_shape", f"unknown script target {target!r}")
+        return (
+            f"{_CF_API}/accounts/{self._account_id}"
+            f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
+        )
+
+    async def _put_worker_bundle(
+        self,
+        *,
+        script_name: str,
+        bundle: bytes,
+        modules: Sequence[WorkerModule],
+        main_module: str | None,
+        bindings: list[dict],
+        compatibility_date: str | None,
+        compatibility_flags: Sequence[str],
+        assets: dict | None,
+        target: str = DISPATCH_TARGET,
+        settings: Mapping[str, Mapping[str, Any] | None] | None = None,
+    ) -> WorkerUpload:
+        if bundle:
+            raise ValidationError(
+                "sites.bundle_shape", "put_worker takes either bundle or modules, not both"
+            )
+        if not compatibility_date:
+            raise ValidationError(
+                "sites.bundle_shape", "a bundle upload needs a compatibility date"
+            )
+        names = [m.name for m in modules]
+        if len(set(names)) != len(names):
+            raise ValidationError("sites.bundle_shape", "two modules share a part name")
+        if modules and main_module not in names:
+            raise ValidationError(
+                "sites.bundle_shape", f"main module {main_module!r} is not one of the modules"
+            )
+        if not modules and not assets:
+            raise ValidationError("sites.bundle_shape", "a bundle needs modules or assets")
+
+        metadata: dict = {}
+        if modules:
+            metadata["main_module"] = main_module
+        metadata["bindings"] = list(bindings)
+        metadata["compatibility_date"] = compatibility_date
+        metadata["compatibility_flags"] = list(compatibility_flags)
+        if assets:
+            metadata["assets"] = assets
+        for key, value in (settings or {}).items():
+            if value:
+                metadata[key] = dict(value)
+        files: list[tuple[str, tuple[str | None, bytes | str, str]]] = [
+            ("metadata", (None, json.dumps(metadata), "application/json"))
+        ]
+        files.extend((m.name, (m.name, m.content, m.content_type)) for m in modules)
+        async with self._client() as client:
+            resp = await client.put(self._script_url(script_name, target), files=files)
+        result = self._unwrap(resp)
+        tag = result.get("migration_tag") if isinstance(result, dict) else None
+        return WorkerUpload(migration_tag=str(tag) if tag else None)
+
+    async def upload_assets(
+        self,
+        *,
+        script_name: str,
+        assets: Mapping[str, bytes],
+        salt: str,
+        target: str = DISPATCH_TARGET,
+    ) -> str:
+        """Upload a script's static assets and return the completion JWT.
+
+        ``target`` picks the session URL the same way ``put_worker`` does. The
+        account-level flow is the same three steps
+        (https://developers.cloudflare.com/workers/static-assets/direct-upload/).
+
+        ``assets`` maps the served path (``/index.html``) to its bytes. The three
+        steps are Cloudflare's documented WfP static-assets flow
+        (https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/configuration/static-assets/):
+
+        1. POST ``.../scripts/{name}/assets-upload-session`` with the manifest
+           ``{path: {hash, size}}``. Cloudflare answers with a session JWT and the
+           ``buckets`` of hashes it does not already hold.
+        2. POST each bucket to ``/workers/assets/upload?base64=true`` as multipart,
+           one base64 part per hash, authorised by the SESSION JWT (the account token
+           is deliberately not sent there).
+        3. The last bucket's response carries the completion JWT. When nothing needs
+           uploading the session JWT already is the completion JWT.
+
+        The JWTs live about an hour, so call this right before ``put_worker``."""
+        if not salt:
+            raise ValidationError("sites.assets_unsalted", "asset uploads need a tenant salt")
+        if not assets:
+            raise ValidationError("sites.bundle_shape", "no assets to upload")
+        manifest: dict[str, dict] = {}
+        by_hash: dict[str, tuple[str, bytes]] = {}
+        for raw_path, content in assets.items():
+            path = "/" + raw_path.lstrip("/")
+            digest = asset_hash(content, path, salt)
+            manifest[path] = {"hash": digest, "size": len(content)}
+            by_hash.setdefault(digest, (path, content))
+
+        upload_url = f"{_CF_API}/accounts/{self._account_id}/workers/assets/upload?base64=true"
+        async with self._client() as client:
+            session_resp = await client.post(
+                f"{self._script_url(script_name, target)}/assets-upload-session",
+                json={"manifest": manifest},
+            )
+            session = self._unwrap(session_resp) or {}
+            session_jwt = session.get("jwt")
+            if not session_jwt:
+                raise ValidationError(
+                    "sites.cloudflare_error", "assets upload session returned no token"
+                )
+            buckets = [b for b in session.get("buckets") or [] if b]
+            completion = "" if buckets else session_jwt
+            for bucket in buckets:
+                files = []
+                for digest in bucket:
+                    if digest not in by_hash:
+                        raise ValidationError(
+                            "sites.cloudflare_error",
+                            f"Cloudflare asked for an asset hash we never sent ({digest})",
+                        )
+                    path, content = by_hash[digest]
+                    files.append(
+                        (digest, (digest, base64.b64encode(content), _asset_part_type(path)))
+                    )
+                upload_resp = await client.post(
+                    upload_url,
+                    files=files,
+                    headers={"Authorization": f"Bearer {session_jwt}"},
+                )
+                result = self._unwrap(upload_resp) or {}
+                completion = result.get("jwt") or completion
+        if not completion:
+            raise ValidationError(
+                "sites.cloudflare_error", "assets upload finished without a completion token"
+            )
+        return completion
+
+    async def delete_worker(self, script_name: str, *, force: bool = False) -> None:
+        """Remove a user Worker from the dispatch namespace. Idempotent on a 404.
+
+        The inverse of ``put_worker``, and the step in a site teardown that actually
+        stops the page being served: the custom hostname and its route only decide
+        HOW a request reaches this script, so removing them leaves the site reachable
+        on its dispatch address. Nothing deleted a Worker before this existed, which
+        is why a site published under ``wfp`` kept serving after every other trace of
+        it was gone.
+
+        A 404 is SUCCESS, for the same reason it is in ``delete_custom_hostname``:
+        the goal is "this script is not in the namespace", and something already gone
+        satisfies it. Raising there would make a resumed teardown fail on the step it
+        had already completed — turning a recoverable partial teardown into a
+        permanent orphan, which is precisely what this method exists to prevent.
+
+        ``force`` deletes a script that has Durable Object namespaces, and the
+        namespaces with it (``?force=true``)."""
+        url = (
+            f"{_CF_API}/accounts/{self._account_id}"
+            f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
+        )
+        async with self._client() as client:
+            resp = await client.delete(url, params={"force": "true"} if force else None)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    async def delete_account_script(self, script_name: str, *, force: bool = False) -> None:
+        """Remove an ACCOUNT-LEVEL Worker script (the ``workers`` deploy mode).
+
+        Sibling of ``delete_worker``, and the difference is the deploy mode, not the
+        caller's preference. ``wfp`` sites live in the dispatch namespace; ``workers``
+        sites were deployed by a ``bunx wrangler deploy`` subprocess to an
+        account-level script at a different API path. Read ``Site.deploy_target`` to
+        choose — it records what the last successful deploy actually did, and its own
+        field comment lists the several ways the configured mode and the deployed
+        reality drift apart.
+
+        Deliberately NOT implemented as ``wrangler delete``. The subprocess would need
+        a project directory that teardown does not have (the artifact may already be
+        purged), and a subprocess seam can only be honestly proven against the real
+        binary. One HTTP call has neither problem.
+
+        Idempotent on a 404, same reasoning as every other delete here. ``force`` as in
+        ``delete_worker``."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}"
+        async with self._client() as client:
+            resp = await client.delete(url, params={"force": "true"} if force else None)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    async def list_durable_object_namespaces(self) -> list[dict]:
+        """Every Durable Object namespace on the account (``id``, ``name``, ``script``,
+        ``class``, ``use_sqlite``).
+
+        ``GET /accounts/{id}/workers/durable_objects/namespaces``
+        (https://developers.cloudflare.com/api/resources/durable_objects/subresources/namespaces/methods/list/).
+        Fails closed like every other call here; pages are bounded."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/durable_objects/namespaces"
+        out: list[dict] = []
+        async with self._client() as client:
+            for page in range(1, 51):
+                resp = await client.get(url, params={"page": page, "per_page": 1000})
+                rows = self._unwrap(resp)
+                rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+                out.extend(rows)
+                if len(rows) < 1000:
+                    break
+        return out
+
+    async def enable_workers_dev(self, script_name: str) -> None:
+        """Serve an ACCOUNT-LEVEL script on ``<script>.<sub>.workers.dev``.
+
+        ``POST /accounts/{id}/workers/scripts/{name}/subdomain`` with
+        ``{"enabled": true, "previews_enabled": false}``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/subdomain/methods/create/).
+        Wrangler does this for ``workers_dev: true``; a script uploaded through the API
+        needs it said explicitly. Idempotent, so every publish sends it."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}/subdomain"
+        async with self._client() as client:
+            resp = await client.post(url, json={"enabled": True, "previews_enabled": False})
+        self._unwrap(resp)
+
+    async def workers_dev_subdomain(self) -> str:
+        """The account's workers.dev subdomain (the ``<sub>`` in
+        ``<script>.<sub>.workers.dev``), or ``""`` when the account has none.
+
+        ``GET /accounts/{id}/workers/subdomain``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/subdomains/methods/get/)."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/subdomain"
+        async with self._client() as client:
+            resp = await client.get(url)
+        result = self._unwrap(resp)
+        return str(result.get("subdomain") or "") if isinstance(result, dict) else ""
+
+    async def list_account_scripts(self) -> list[str]:
+        """Names of every ACCOUNT-LEVEL Worker script (the ``workers`` deploy mode).
+
+        ``GET /accounts/{id}/workers/scripts``. Each result's ``id`` is the script name,
+        which on workers.dev is also the subdomain. Read before a new site claims a
+        Worker name, so it never lands on a script it does not own. Fails closed like
+        every other call here (a non-2xx raises); the caller decides to fail open."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts"
+        async with self._client() as client:
+            resp = await client.get(url)
+        result = self._unwrap(resp)
+        rows = result if isinstance(result, list) else []
+        return [str(r["id"]) for r in rows if isinstance(r, dict) and r.get("id")]
+
     async def create_custom_hostname(
         self, hostname: str, *, features: set[str] | None = None
     ) -> CustomHostname:
@@ -233,12 +782,23 @@ class CloudflareClient:
 
         ``features`` (BC-10) is the site plan tier's ``cloudflare_features`` set.
         When present, the create request carries the premium ``ssl`` payload built
-        by ``_ssl_for_features`` (strict-TLS / HTTP-2 toggles for WAF / edge-cache
-        + a ``custom_metadata`` recording the resold set), so a HIGHER-tier site
-        provisions paid security at hostname-create time. When None/empty (the BASE
-        tier), the request is the prior basic DV ``ssl`` payload, unchanged — a
-        base-tier site never regresses.
+        by ``_ssl_for_features`` (strict-TLS / HTTP-2 toggles for WAF / edge-cache).
+        When None/empty (the BASE tier), the request is the basic DV ``ssl`` payload.
+
+        **Refuses without a configured CNAME target.** The returned ``cname_target``
+        is the single instruction the customer acts on, and this used to construct
+        ``{zone_id}.cdn.cloudflare.net`` — a name with no DNS records at all. A
+        hostname created against a dead target can never validate, and nothing
+        downstream can tell the customer why, so an unconfigured target is refused
+        here instead of producing a hostname that is guaranteed to fail. Cloudflare
+        wants a proxied record on our own zone; only the operator knows which one.
         """
+        if not self._cname_target:
+            raise ValidationError(
+                "sites.cloudflare_unconfigured",
+                "Custom domains need a CNAME target configured (PAW_CF_CNAME_TARGET) "
+                "— a proxied hostname on the Paw zone for customers to point at.",
+            )
         url = f"{_CF_API}/zones/{self._zone_id}/custom_hostnames"
         async with self._client() as client:
             resp = await client.post(
@@ -252,7 +812,7 @@ class CloudflareClient:
             status=_map_status(
                 result.get("status", ""), (result.get("ssl") or {}).get("status", "")
             ),
-            cname_target=f"{self._zone_id}.cdn.cloudflare.net",
+            cname_target=self._cname_target,
         )
 
     async def get_hostname_status(self, hostname_id: str) -> HostnameStatus:
@@ -261,6 +821,79 @@ class CloudflareClient:
             resp = await client.get(url)
         result = self._unwrap(resp)
         return _map_status(result.get("status", ""), (result.get("ssl") or {}).get("status", ""))
+
+    async def delete_custom_hostname(self, hostname_id: str) -> None:
+        """Remove a custom hostname from the zone. Idempotent on a 404.
+
+        There was no delete path at all before this, which is why a removed site left
+        its hostnames on the zone counting against quota and pointing at a Worker that
+        no longer existed. A 404 is treated as SUCCESS: the goal is "this hostname is
+        not on the zone", and something already gone satisfies it. Raising there would
+        make a half-finished teardown permanently un-finishable, which is the exact
+        orphan-accumulation this method exists to stop."""
+        url = f"{_CF_API}/zones/{self._zone_id}/custom_hostnames/{hostname_id}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    async def create_worker_route(self, *, pattern: str, script: str) -> str:
+        """Bind a URL pattern on our zone to a Worker, and return the route id.
+
+        This is what makes a custom hostname reach a particular site. Cloudflare for
+        SaaS gets the request into our zone; a route scoped to that exact hostname
+        (``myportfolio.com/*``) is what decides which Worker answers it. One route per
+        custom domain, written by the control plane at add time — see the module
+        header for why there is no dispatcher.
+
+        ``POST`` creates; ``PUT`` on this collection is update-by-id and needs a route
+        id we do not have yet. The zone allows 1,000 routes, which is far past the
+        per-account Worker limit this deploy mode runs into first.
+
+        The id is read with ``result["id"]``, NOT ``.get("id", "")``. A response with no
+        id would otherwise return "" while the route exists on the zone: the caller
+        stores an empty ``cf_route_id``, reports success, and teardown — which deletes
+        BY id — can never remove it. That is the orphan the id is stored to prevent, so
+        an id-less success is a failure and must raise like one. ``create_custom_hostname``
+        already indexes its id directly; this now matches."""
+        url = f"{_CF_API}/zones/{self._zone_id}/workers/routes"
+        async with self._client() as client:
+            resp = await client.post(url, json={"pattern": pattern, "script": script})
+        result = self._unwrap(resp)
+        try:
+            return result["id"]
+        except (KeyError, TypeError) as exc:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                "Cloudflare accepted the Worker route but returned no id — it cannot "
+                "be recorded, and an unrecorded route cannot be removed later.",
+            ) from exc
+
+    async def update_worker_route(self, route_id: str, *, pattern: str, script: str) -> None:
+        """Point an existing Worker route at ``script``, keeping its id and pattern.
+
+        ``PUT /zones/{zone}/workers/routes/{id}``. The rename apply step uses it to move
+        a custom domain from a site's old Worker to its new one. A second ``POST`` with
+        the same pattern is a 10020 duplicate-route error, and delete-then-create would
+        leave the domain serving nothing in between. Fails closed like every call here:
+        a non-2xx (including a 404 for a route that is gone) raises, because the caller
+        has to know which routes actually moved in order to roll them back."""
+        url = f"{_CF_API}/zones/{self._zone_id}/workers/routes/{route_id}"
+        async with self._client() as client:
+            resp = await client.put(url, json={"pattern": pattern, "script": script})
+        self._unwrap(resp)
+
+    async def delete_worker_route(self, route_id: str) -> None:
+        """Remove a Worker route. Idempotent on a 404, for the same reason
+        ``delete_custom_hostname`` is: a teardown that cannot complete leaves exactly
+        the orphan it was called to remove."""
+        url = f"{_CF_API}/zones/{self._zone_id}/workers/routes/{route_id}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
 
     async def create_database(self, name: str) -> str:
         """Create a Cloudflare D1 database and return its real uuid (DP0-1).
@@ -271,14 +904,478 @@ class CloudflareClient:
         uuid string — the id every later step (migrate, the Worker's D1 binding,
         the generated wrangler.toml ``database_id``) keys on.
 
+        The body also carries ``d1_create_options()``: the operator's location hint
+        and the opt-in read replication. Both only apply to the database being
+        created; an existing database keeps where it is.
+
         Fail-closed: a non-2xx or a ``success: false`` envelope raises
         ValidationError via ``_unwrap``, so a failed create never silently returns
         an empty/garbage id."""
         url = f"{_CF_API}/accounts/{self._account_id}/d1/database"
         async with self._client() as client:
-            resp = await client.post(url, json={"name": name})
+            resp = await client.post(url, json={"name": name, **d1_create_options()})
         result = self._unwrap(resp)
         return result["uuid"]
+
+    async def delete_database(self, database_id: str) -> None:
+        """Destroy a per-tenant D1 database. Idempotent on a 404. IRREVERSIBLE.
+
+        The inverse of ``create_database``, and the only step in a site teardown that
+        destroys CUSTOMER DATA rather than infrastructure — a dynamic site's D1 holds
+        its bookings, submissions and orders alongside ``_paw_migrations`` /
+        ``_paw_handoffs`` / ``_paw_outbox``. There is no Cloudflare-side undelete and
+        no retention window, so the export that the delete cascade takes BEFORE
+        reaching this step is the only copy that survives it. Do not call this outside
+        that cascade, and do not reorder it ahead of the export.
+
+        Keyed on the database uuid rather than the name because the uuid is what
+        ``Site.d1_database_id`` stores and what the Worker binding points at; a name
+        lookup would be a second way to identify the same database, and the two can
+        disagree once a site is renamed.
+
+        A 404 is SUCCESS — the database is gone, which is the goal. A resumed teardown
+        re-running this step must not fail on it."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    async def find_database(self, name: str) -> str | None:
+        """The uuid of the D1 database named exactly ``name``, or None.
+
+        The provisioner's crash-recovery read, like ``find_kv_namespace``: a database
+        created on a publish that died before the Site doc was saved is found here
+        instead of created twice. ``name`` on the list endpoint is a search, so rows
+        are matched exactly; the loop is bounded."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database"
+        async with self._client() as client:
+            for page in range(1, 51):
+                resp = await client.get(url, params={"name": name, "page": page, "per_page": 100})
+                rows = self._unwrap(resp)
+                rows = rows if isinstance(rows, list) else []
+                for row in rows:
+                    if isinstance(row, dict) and row.get("name") == name and row.get("uuid"):
+                        return str(row["uuid"])
+                if len(rows) < 100:
+                    return None
+        return None
+
+    # -- KV namespaces (binding_provisioner) ----------------------------------
+    # https://developers.cloudflare.com/api/resources/kv/subresources/namespaces/
+
+    async def find_kv_namespace(self, title: str) -> str | None:
+        """The id of the namespace titled ``title``, or None.
+
+        The provisioner's crash-recovery read: a namespace created on an attempt that
+        died before the site doc was saved is found here instead of duplicated.
+        ``per_page`` max is 1000 and an account holds at most 1,000 namespaces, so
+        one page normally covers it; the loop is bounded anyway."""
+        url = f"{_CF_API}/accounts/{self._account_id}/storage/kv/namespaces"
+        async with self._client() as client:
+            for page in range(1, 51):
+                resp = await client.get(url, params={"page": page, "per_page": 1000})
+                rows = self._unwrap(resp)
+                rows = rows if isinstance(rows, list) else []
+                for row in rows:
+                    if isinstance(row, dict) and row.get("title") == title and row.get("id"):
+                        return str(row["id"])
+                if len(rows) < 1000:
+                    break
+        return None
+
+    async def create_kv_namespace(self, title: str) -> str:
+        """Create a KV namespace and return its id. Fails closed like every create."""
+        url = f"{_CF_API}/accounts/{self._account_id}/storage/kv/namespaces"
+        async with self._client() as client:
+            resp = await client.post(url, json={"title": title})
+        return str(self._unwrap(resp)["id"])
+
+    async def delete_kv_namespace(self, namespace_id: str) -> None:
+        """Delete a KV namespace and its data. Idempotent on a 404."""
+        url = f"{_CF_API}/accounts/{self._account_id}/storage/kv/namespaces/{namespace_id}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    # -- R2 buckets (binding_provisioner) -------------------------------------
+    # https://developers.cloudflare.com/api/resources/r2/subresources/buckets/
+
+    def _bucket_url(self, name: str) -> str:
+        return f"{_CF_API}/accounts/{self._account_id}/r2/buckets/{name}"
+
+    async def r2_bucket_exists(self, name: str) -> bool:
+        """True when the bucket is in our account (GET bucket), False on a 404."""
+        async with self._client() as client:
+            resp = await client.get(self._bucket_url(name))
+        if resp.status_code == 404:
+            return False
+        self._unwrap(resp)
+        return True
+
+    async def create_r2_bucket(self, name: str) -> str:
+        """Create an R2 bucket and return its name."""
+        url = f"{_CF_API}/accounts/{self._account_id}/r2/buckets"
+        async with self._client() as client:
+            resp = await client.post(url, json={"name": name})
+        result = self._unwrap(resp)
+        return str(result.get("name") or name) if isinstance(result, dict) else name
+
+    async def delete_r2_bucket(self, name: str) -> bool:
+        """Delete an R2 bucket. True when it is gone (a 404 included), False when
+        Cloudflare refused because it still holds objects.
+
+        Cloudflare only deletes an empty bucket. The REST API can list and delete
+        objects (``r2_list`` / ``r2_delete``), but teardown deliberately doesn't empty
+        a bucket here: the caller sets the expire-all lifecycle rule instead, which
+        leaves a day of grace on the draft-discard path. A 409 is the not-empty
+        answer; any other failure raises."""
+        async with self._client() as client:
+            resp = await client.delete(self._bucket_url(name))
+        if resp.status_code == 404:
+            return True
+        if resp.status_code == 409:
+            return False
+        self._unwrap(resp)
+        return True
+
+    async def expire_r2_bucket_objects(self, name: str, *, max_age_seconds: int = 86400) -> None:
+        """Replace the bucket's lifecycle rules with one that deletes every object
+        (and aborts every multipart upload) older than ``max_age_seconds``, so a
+        bucket that refused deletion empties itself and a later delete succeeds."""
+        age = {"type": "Age", "maxAge": max_age_seconds}
+        body = {
+            "rules": [
+                {
+                    "id": "paw-teardown-expire-all",
+                    "enabled": True,
+                    "conditions": {"prefix": ""},
+                    "deleteObjectsTransition": {"condition": age},
+                    "abortMultipartUploadsTransition": {"condition": age},
+                }
+            ]
+        }
+        async with self._client() as client:
+            resp = await client.put(f"{self._bucket_url(name)}/lifecycle", json=body)
+        self._unwrap(resp)
+
+    # -- R2 objects (Sites Data dashboard) ------------------------------------
+    # https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/
+
+    def _object_url(self, bucket: str, key: str) -> str:
+        return f"{self._bucket_url(bucket)}/objects/{_r2_key_path(key)}"
+
+    async def r2_list(
+        self,
+        bucket: str,
+        *,
+        prefix: str = "",
+        delimiter: str | None = "/",
+        cursor: str | None = None,
+        per_page: int = 200,
+    ) -> dict:
+        """One page of objects under ``prefix``: ``{objects: [{key, size, etag,
+        last_modified, content_type}], folders: [full prefixes ending "/"], cursor
+        (None on the last page), truncated}``. ``delimiter=None`` lists keys flat."""
+        params: dict[str, Any] = {}
+        if prefix:
+            params["prefix"] = prefix
+        if delimiter:
+            params["delimiter"] = delimiter
+        if cursor:
+            params["cursor"] = cursor
+        params["per_page"] = max(1, min(int(per_page), 1000))
+        async with self._client() as client:
+            resp = await client.get(f"{self._bucket_url(bucket)}/objects", params=params)
+        rows = self._unwrap(resp)
+        info = resp.json().get("result_info") or {}
+        objects = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or not isinstance(row.get("key"), str):
+                continue
+            meta = row.get("http_metadata")
+            meta = meta if isinstance(meta, dict) else {}
+            try:
+                size = int(row.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            objects.append(
+                {
+                    "key": row["key"],
+                    "size": size,
+                    "etag": str(row.get("etag") or ""),
+                    "last_modified": row.get("last_modified"),
+                    "content_type": str(meta.get("contentType") or ""),
+                }
+            )
+        folders = [f for f in (info.get("delimited") or []) if isinstance(f, str)]
+        truncated = bool(info.get("is_truncated"))
+        next_cursor = info.get("cursor") if truncated else None
+        return {
+            "objects": objects,
+            "folders": folders,
+            "cursor": str(next_cursor) if next_cursor else None,
+            "truncated": truncated,
+        }
+
+    async def r2_get(self, bucket: str, key: str) -> R2Object | None:
+        """Open a download of one object (None when there is none). The body is not
+        read here: iterate ``R2Object.iter_bytes`` or call ``aclose``."""
+        url = self._object_url(bucket, key)
+        client = self._client()
+        try:
+            request = client.build_request("GET", url, headers={"Accept-Encoding": "identity"})
+            resp = await client.send(request, stream=True)
+        except BaseException:
+            await client.aclose()
+            raise
+        if resp.status_code // 100 != 2:
+            try:
+                await resp.aread()
+            finally:
+                await resp.aclose()
+                await client.aclose()
+            if resp.status_code == 404:
+                return None
+            self._unwrap(resp)
+        length = resp.headers.get("content-length", "")
+        return R2Object(
+            content_type=resp.headers.get("content-type", ""),
+            size=int(length) if length.isdigit() else None,
+            etag=resp.headers.get("etag", "").strip('"'),
+            _resp=resp,
+            _client=client,
+        )
+
+    async def r2_put(
+        self,
+        bucket: str,
+        key: str,
+        body: bytes | AsyncIterable[bytes],
+        *,
+        content_type: str,
+        size: int | None = None,
+    ) -> dict:
+        """Write one object with ``content_type``. A streamed ``body`` needs its
+        ``size``, sent as Content-Length (never a chunked body). Returns ``{key, size,
+        etag, uploaded}`` (Cloudflare answers ``size`` as a string)."""
+        headers = {"Content-Type": content_type}
+        if not isinstance(body, bytes | bytearray):
+            if size is None:
+                raise ValueError("r2_put: a streamed body needs its size")
+            headers["Content-Length"] = str(size)
+        url = self._object_url(bucket, key)
+        async with httpx.AsyncClient(
+            headers=self._headers, transport=self._transport, timeout=120.0
+        ) as client:
+            resp = await client.put(url, content=body, headers=headers)
+        result = self._unwrap(resp)
+        result = result if isinstance(result, dict) else {}
+        try:
+            stored = int(result.get("size") or size or 0)
+        except (TypeError, ValueError):
+            stored = size or 0
+        return {
+            "key": str(result.get("key") or key),
+            "size": stored,
+            "etag": str(result.get("etag") or ""),
+            "uploaded": result.get("uploaded"),
+        }
+
+    async def r2_delete(self, bucket: str, key: str) -> None:
+        """Delete one object. Idempotent on a 404."""
+        url = self._object_url(bucket, key)
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    # -- KV keys (Sites Data dashboard) ---------------------------------------
+
+    def _kv_url(self, namespace_id: str) -> str:
+        return f"{_CF_API}/accounts/{self._account_id}/storage/kv/namespaces/{namespace_id}"
+
+    async def kv_list_keys(
+        self, namespace_id: str, *, prefix: str = "", cursor: str | None = None, limit: int = 200
+    ) -> dict:
+        """One page of keys: ``{keys: [{name, expiration, metadata}], cursor}`` (cursor
+        None on the last page). ``limit`` is clamped to Cloudflare's 10-1000."""
+        params: dict[str, Any] = {}
+        if prefix:
+            params["prefix"] = prefix
+        if cursor:
+            params["cursor"] = cursor
+        params["limit"] = max(10, min(int(limit), 1000))
+        async with self._client() as client:
+            resp = await client.get(f"{self._kv_url(namespace_id)}/keys", params=params)
+        rows = self._unwrap(resp)
+        info = resp.json().get("result_info") or {}
+        keys = [
+            {
+                "name": row["name"],
+                "expiration": row.get("expiration"),
+                "metadata": row.get("metadata"),
+            }
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict) and isinstance(row.get("name"), str)
+        ]
+        next_cursor = info.get("cursor")
+        return {"keys": keys, "cursor": str(next_cursor) if next_cursor else None}
+
+    async def kv_get(
+        self, namespace_id: str, key: str, *, max_bytes: int | None = None
+    ) -> KvValue | None:
+        """A key's value (None when there is none). Reads the whole value to learn its
+        size but keeps at most ``max_bytes`` of it."""
+        url = f"{self._kv_url(namespace_id)}/values/{_kv_key_path(key)}"
+        kept = bytearray()
+        size = 0
+        async with self._client() as client, client.stream("GET", url) as resp:
+            if resp.status_code // 100 != 2:
+                await resp.aread()
+                if resp.status_code == 404:
+                    return None
+                self._unwrap(resp)
+            async for chunk in resp.aiter_bytes():
+                size += len(chunk)
+                room = len(chunk) if max_bytes is None else max_bytes - len(kept)
+                if room > 0:
+                    kept += chunk[:room]
+        truncated = len(kept) < size
+        text: str | None = None
+        if not truncated:
+            try:
+                text = bytes(kept).decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+        return KvValue(data=bytes(kept), size=size, truncated=truncated, text=text)
+
+    async def kv_metadata(self, namespace_id: str, key: str) -> Any:
+        """A key's metadata (None when the key or its metadata is missing)."""
+        url = f"{self._kv_url(namespace_id)}/metadata/{_kv_key_path(key)}"
+        async with self._client() as client:
+            resp = await client.get(url)
+        if resp.status_code == 404:
+            return None
+        result = self._unwrap(resp)
+        return result if result != {} else None
+
+    async def kv_put(
+        self,
+        namespace_id: str,
+        key: str,
+        value: bytes,
+        *,
+        metadata: Any = None,
+        expiration_ttl: int | None = None,
+    ) -> None:
+        """Write a key: the raw value, or a multipart ``value`` + ``metadata`` (JSON)
+        when ``metadata`` is given. A write replaces the key's value, metadata and
+        expiry together. ``expiration_ttl`` (seconds, >= 60) rides in the query."""
+        url = f"{self._kv_url(namespace_id)}/values/{_kv_key_path(key)}"
+        params = {"expiration_ttl": int(expiration_ttl)} if expiration_ttl else None
+        async with self._client() as client:
+            if metadata is None:
+                resp = await client.put(
+                    url,
+                    params=params,
+                    content=value,
+                    headers={"Content-Type": "application/octet-stream"},
+                )
+            else:
+                resp = await client.put(
+                    url,
+                    params=params,
+                    files={
+                        "value": (None, value),
+                        "metadata": (None, json.dumps(metadata), "application/json"),
+                    },
+                )
+        self._unwrap(resp)
+
+    async def kv_delete(self, namespace_id: str, key: str) -> None:
+        """Delete a key. Idempotent on a 404."""
+        url = f"{self._kv_url(namespace_id)}/values/{_kv_key_path(key)}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    async def capture_screenshot(
+        self,
+        *,
+        url: str = "",
+        html: str = "",
+        viewport: dict | None = None,
+        goto_options: dict | None = None,
+        screenshot_options: dict | None = None,
+        wait_for_timeout: int = 0,
+    ) -> bytes:
+        """Screenshot a page and return the raw image bytes (SC-1, SC-2).
+
+        POSTs to the Browser Rendering screenshot endpoint
+        (POST /accounts/{acct}/browser-rendering/screenshot). The endpoint takes
+        EITHER ``url`` (render the page at that address — a deployed site, SC-1) or
+        ``html`` (render this markup directly — a DRAFT, which by definition has no
+        address, SC-2); exactly one is required, and passing both or neither is a
+        caller bug, so it raises here rather than letting Cloudflare answer 400.
+
+        An ``html`` body renders at ``about:blank``, so NOTHING relative in it
+        resolves — the markup has to arrive self-contained (see
+        ``sites.draft_markup``). The three option dicts ride through untouched as
+        ``viewport`` (width / height / deviceScaleFactor), ``gotoOptions``
+        (waitUntil / timeout) and ``screenshotOptions`` (fullPage / type / ...).
+        Omitted options are left off the body entirely so Cloudflare's own
+        defaults apply (a 1920x1080 viewport, a full-quality png).
+        ``wait_for_timeout`` (ms) becomes ``waitForTimeout``, the pause after the
+        page loads and before the shutter; 0 leaves it off.
+
+        ``screenshot_options`` is passed through rather than assembled here on
+        purpose — but note the one combination Cloudflare rejects: ``quality`` is
+        incompatible with the DEFAULT png and returns 400. A caller that wants
+        ``quality`` must also set ``type`` to ``"jpeg"`` or ``"webp"``.
+
+        Unlike every other method here the SUCCESS path is not the JSON envelope:
+        a rendered screenshot comes back as the image itself, so a 2xx with an
+        ``image/*`` content type returns ``resp.content`` directly. Everything
+        else fails closed — a non-2xx goes through the shared ``_unwrap`` (the
+        standard ValidationError), and a 2xx that is not an image (an error
+        envelope, an empty body) raises too, so an HTML error page can never be
+        persisted as a site's preview image."""
+        if bool(url) == bool(html):
+            raise ValidationError(
+                "sites.cloudflare_error",
+                "Browser Rendering needs exactly one of url or html.",
+            )
+        api_url = f"{_CF_API}/accounts/{self._account_id}/browser-rendering/screenshot"
+        payload: dict = {"url": url} if url else {"html": html}
+        if screenshot_options:
+            payload["screenshotOptions"] = screenshot_options
+        if viewport:
+            payload["viewport"] = viewport
+        if goto_options:
+            payload["gotoOptions"] = goto_options
+        if wait_for_timeout > 0:
+            payload["waitForTimeout"] = wait_for_timeout
+        async with self._client() as client:
+            resp = await client.post(api_url, json=payload)
+        content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if resp.status_code // 100 == 2 and content_type.startswith("image/") and resp.content:
+            return resp.content
+        if resp.status_code // 100 != 2:
+            # Non-2xx: the shared envelope check raises the standard error. It
+            # never reaches ``resp.json()`` on this branch, so a non-JSON error
+            # page still surfaces as a clean ValidationError.
+            self._unwrap(resp)
+        raise ValidationError(
+            "sites.cloudflare_error",
+            f"Browser Rendering returned no image (content-type {content_type or 'unknown'!r})",
+        )
 
     async def query_d1(
         self, *, database_id: str, sql: str, params: list | None = None
@@ -320,3 +1417,333 @@ class CloudflareClient:
             raise ValidationError("sites.cloudflare_error", "D1 query statement failed")
         rows = first.get("results")
         return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+    async def query_d1_batch(
+        self, *, database_id: str, statements: Sequence[tuple[str, list]]
+    ) -> list[list[dict]]:
+        """Run several parameterized statements as ONE D1 batch and return each
+        statement's rows, in order.
+
+        Uses the query endpoint's ``batch`` body (``[{sql, params}, ...]``) so a
+        project migration and the row that records it travel together. Same SQL
+        rules as ``query_d1``: this never builds SQL, values ride ``params``.
+
+        Fail-closed: a non-2xx or ``success: false`` envelope raises through
+        ``_unwrap`` (with Cloudflare's own reason), and so does any statement that
+        reports ``success: false``, naming its position in the batch."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}/query"
+        body = {"batch": [{"sql": sql, "params": list(params or [])} for sql, params in statements]}
+        async with self._client() as client:
+            resp = await client.post(url, json=body)
+        result = self._unwrap(resp)
+        outcomes = result if isinstance(result, list) else []
+        rows: list[list[dict]] = []
+        for index, outcome in enumerate(outcomes):
+            outcome = outcome if isinstance(outcome, dict) else {}
+            if outcome.get("success") is False:
+                raise ValidationError(
+                    "sites.cloudflare_error",
+                    f"D1 batch statement {index + 1} of {len(statements)} failed",
+                )
+            found = outcome.get("results")
+            found = found if isinstance(found, list) else []
+            rows.append([r for r in found if isinstance(r, dict)])
+        return rows
+
+    async def query_d1_raw(self, *, database_id: str, sql: str, params: list | None = None) -> dict:
+        """Run ONE statement through D1's ``raw`` endpoint and return ``{columns, rows,
+        changes}``: the column names in order (repeats kept), each row as a list, and
+        ``meta.changes``. The Data dashboard's SQL console reads this way so a result
+        with no rows still names its columns and two columns of one name both survive.
+
+        Same rules as ``query_d1``: the caller passes one fully-formed statement and
+        every value rides ``params``. A failed statement raises ValidationError
+        ``sites.cloudflare_error`` carrying D1's own message."""
+        url = f"{self._d1_url(database_id)}/raw"
+        async with self._client() as client:
+            resp = await client.post(url, json={"sql": sql, "params": params or []})
+        result = self._unwrap(resp)
+        statements = result if isinstance(result, list) else []
+        first = statements[0] if statements and isinstance(statements[0], dict) else {}
+        if first.get("success") is False:
+            raise ValidationError(
+                "sites.cloudflare_error", str(first.get("error") or "D1 query statement failed")
+            )
+        results = first.get("results") if isinstance(first.get("results"), dict) else {}
+        columns = results.get("columns") if isinstance(results.get("columns"), list) else []
+        rows = results.get("rows") if isinstance(results.get("rows"), list) else []
+        meta = first.get("meta") if isinstance(first.get("meta"), dict) else {}
+        changes = meta.get("changes")
+        return {
+            "columns": [str(c) for c in columns],
+            "rows": [r for r in rows if isinstance(r, list)],
+            "changes": changes if isinstance(changes, int) and not isinstance(changes, bool) else 0,
+        }
+
+    def _d1_url(self, database_id: str) -> str:
+        return f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}"
+
+    @staticmethod
+    def _time_travel_unwrap(resp: httpx.Response) -> Any:
+        """``_unwrap``, except that Cloudflare's code 7400 ("Provided timestamp is
+        too old": before the database existed, or past retention) is the caller's
+        choice of moment, so it is a 422 ``sites.data_restore_out_of_window``."""
+        if resp.status_code == 400:
+            try:
+                errors = (resp.json() or {}).get("errors") or []
+            except (json.JSONDecodeError, ValueError, AttributeError):
+                errors = []
+            if any(isinstance(e, dict) and e.get("code") == 7400 for e in errors):
+                raise ValidationError(
+                    "sites.data_restore_out_of_window",
+                    "That time is before this database's history begins.",
+                )
+        return CloudflareClient._unwrap(resp)
+
+    async def d1_info(self, database_id: str) -> dict:
+        """The database's details (``GET /d1/database/{id}``): ``version``
+        (``production`` or ``alpha``; Time Travel needs ``production``),
+        ``file_size``, ``name`` …"""
+        async with self._client() as client:
+            resp = await client.get(self._d1_url(database_id))
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def d1_bookmark(self, database_id: str, timestamp: str | None = None) -> str:
+        """The Time Travel bookmark nearest at or before ``timestamp`` (ISO 8601 / RFC
+        3339), or of the database's current state when None.
+        ``GET /d1/database/{id}/time_travel/bookmark``."""
+        params = {"timestamp": timestamp} if timestamp else None
+        async with self._client() as client:
+            resp = await client.get(
+                f"{self._d1_url(database_id)}/time_travel/bookmark", params=params
+            )
+        result = self._time_travel_unwrap(resp)
+        bookmark = result.get("bookmark") if isinstance(result, dict) else None
+        if not isinstance(bookmark, str) or not bookmark:
+            raise ValidationError("sites.cloudflare_error", "D1 returned no bookmark")
+        return bookmark
+
+    async def d1_restore(
+        self, database_id: str, *, bookmark: str | None = None, timestamp: str | None = None
+    ) -> dict:
+        """Restore the database IN PLACE to ``bookmark`` or ``timestamp`` (exactly
+        one). Destructive: it cancels in-flight queries. Returns ``{bookmark,
+        previous_bookmark, message}``; restoring to ``previous_bookmark`` undoes it.
+        ``POST /d1/database/{id}/time_travel/restore``."""
+        if bool(bookmark) == bool(timestamp):
+            raise ValidationError(
+                "sites.cloudflare_error", "A D1 restore needs exactly one of bookmark or timestamp."
+            )
+        params = {"bookmark": bookmark} if bookmark else {"timestamp": timestamp}
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._d1_url(database_id)}/time_travel/restore", params=params
+            )
+        result = self._time_travel_unwrap(resp)
+        result = result if isinstance(result, dict) else {}
+        previous = result.get("previous_bookmark")
+        if not isinstance(previous, str) or not previous:
+            raise ValidationError("sites.cloudflare_error", "D1 restore returned no bookmark")
+        return {
+            "bookmark": str(result.get("bookmark") or ""),
+            "previous_bookmark": previous,
+            "message": str(result.get("message") or ""),
+        }
+
+    async def export_d1_sql(
+        self, database_id: str, *, poll_interval: float = 2.0, max_polls: int = 150
+    ) -> str:
+        """The whole database as SQL text (schema and rows), via the D1 export API.
+
+        ``POST /accounts/{acct}/d1/database/{id}/export`` with ``output_format:
+        polling``; re-POSTs with ``current_bookmark`` until ``status`` is
+        ``complete`` (its ``result.signed_url`` is the dump, valid an hour) or
+        ``error``. The database serves no queries while it exports, and stopping the
+        polls cancels the export. https://developers.cloudflare.com/api/resources/d1/
+        subresources/database/methods/export/
+
+        Raises ValidationError ``sites.d1_export_failed`` on an export error, on a
+        poll budget spent (default about five minutes), or on a download URL that is
+        not https. The signed URL is fetched WITHOUT the account token."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}/export"
+        body: dict[str, Any] = {"output_format": "polling"}
+        result: dict = {}
+        async with self._client() as client:
+            for attempt in range(max(1, max_polls)):
+                result = self._unwrap(await client.post(url, json=body)) or {}
+                status = result.get("status")
+                if status == "complete":
+                    break
+                if status == "error" or result.get("success") is False:
+                    raise ValidationError(
+                        "sites.d1_export_failed",
+                        f"Cloudflare could not export the database: "
+                        f"{str(result.get('error') or 'unknown error')[:_ERROR_DETAIL_MAX]}",
+                    )
+                bookmark = result.get("at_bookmark")
+                if bookmark:
+                    body["current_bookmark"] = bookmark
+                if attempt + 1 < max_polls:
+                    await asyncio.sleep(poll_interval)
+            else:
+                raise ValidationError(
+                    "sites.d1_export_failed", "The database export did not finish in time."
+                )
+        signed = str((result.get("result") or {}).get("signed_url") or "")
+        if not signed.startswith("https://"):
+            raise ValidationError(
+                "sites.d1_export_failed", "Cloudflare returned no usable export download."
+            )
+        # A separate client on purpose: the signed URL is a storage host, and the
+        # account token must never be sent anywhere but the Cloudflare API.
+        async with httpx.AsyncClient(transport=self._transport, timeout=120.0) as raw:
+            resp = await raw.get(signed)
+        if resp.status_code // 100 != 2:
+            raise ValidationError(
+                "sites.d1_export_failed",
+                f"Downloading the database export failed ({resp.status_code}).",
+            )
+        return resp.text
+
+    async def get_script_migration_tag(self, script_name: str, *, target: str) -> str | None:
+        """The Durable Object migration tag last applied to the script, or None (no
+        script, or no migration). Account target: the script's row in
+        ``GET /workers/scripts`` (``migration_tag``,
+        https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/list/).
+        Dispatch target: ``GET .../dispatch/namespaces/{ns}/scripts/{name}`` and its
+        ``script.migration_tag``. Fails closed on anything but a 2xx or a 404."""
+        if target == ACCOUNT_TARGET:
+            async with self._client() as client:
+                resp = await client.get(f"{_CF_API}/accounts/{self._account_id}/workers/scripts")
+            rows = self._unwrap(resp)
+            for row in rows if isinstance(rows, list) else []:
+                if isinstance(row, dict) and row.get("id") == script_name:
+                    return str(row.get("migration_tag") or "") or None
+            return None
+        async with self._client() as client:
+            resp = await client.get(self._script_url(script_name, target))
+        if resp.status_code == 404:
+            return None
+        result = self._unwrap(resp)
+        script = result.get("script") if isinstance(result, dict) else None
+        info = script if isinstance(script, dict) else result
+        return str((info or {}).get("migration_tag") or "") or None
+
+    async def get_script_settings(self, script_name: str, *, target: str) -> dict:
+        """The live script's settings (bindings, compat, ...):
+        ``GET .../scripts/{name}/settings`` on ``target``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/get/)."""
+        async with self._client() as client:
+            resp = await client.get(f"{self._script_url(script_name, target)}/settings")
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def patch_script_settings(
+        self, script_name: str, settings: Mapping[str, Any], *, target: str
+    ) -> dict:
+        """``PATCH .../scripts/{name}/settings`` with ``settings`` as the multipart
+        ``settings`` part. No code upload, so the running version keeps its code
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/script_and_version_settings/methods/edit/).
+        Callers send the FULL bindings list (``durable_objects.set_platform_vars_live``)."""
+        files = {"settings": (None, json.dumps(dict(settings)), "application/json")}
+        async with self._client() as client:
+            resp = await client.patch(
+                f"{self._script_url(script_name, target)}/settings", files=files
+            )
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def query_graphql(self, query: str, variables: Mapping[str, Any]) -> dict:
+        """Run one GraphQL Analytics query and return its ``data``.
+
+        ``POST /client/v4/graphql`` with ``{query, variables}``
+        (https://developers.cloudflare.com/analytics/graphql-api/). Values travel as
+        variables, never interpolated. The body is ``{data, errors}``, not the
+        success envelope. Fails closed: a non-2xx, a non-JSON body, any ``errors`` or
+        a missing ``data`` raises ``sites.cloudflare_error``."""
+        async with self._client() as client:
+            resp = await client.post(
+                f"{_CF_API}/graphql", json={"query": query, "variables": dict(variables)}
+            )
+        if resp.status_code // 100 != 2:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                f"Cloudflare GraphQL {resp.status_code}: {_error_detail(resp)}",
+            )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ValidationError("sites.cloudflare_error", "GraphQL answered non-JSON") from exc
+        errors = body.get("errors") if isinstance(body, dict) else None
+        data = body.get("data") if isinstance(body, dict) else None
+        if errors or not isinstance(data, dict):
+            first = errors[0].get("message", "") if errors and isinstance(errors[0], dict) else ""
+            raise ValidationError(
+                "sites.cloudflare_error", f"Cloudflare GraphQL error: {first or 'no data'}"[:300]
+            )
+        return data
+
+    async def query_analytics_sql(self, sql: str) -> list[dict]:
+        """Run ONE SQL query against Workers Analytics Engine and return its rows
+        (SA-4 — the read half of Paw Sites visitor analytics).
+
+        POSTs to ``/accounts/{acct}/analytics_engine/sql``. Two things about this
+        endpoint are unlike every other method on this client, and both are load-
+        bearing rather than trivia:
+
+        * **The body is RAW SQL, not JSON.** Cloudflare's own example is
+          ``curl ... --data "SELECT ..."``. There is no parameter binding, so the
+          caller MUST NOT interpolate anything a user controls into the statement.
+          ``sites.service`` builds the only statements that reach here, and the one
+          value it substitutes is a site id it has already round-tripped through
+          ``ObjectId`` — 24 hex characters, checked again at the call site.
+        * **The response is NOT the Cloudflare success envelope.** A query answers
+          ``{"meta": [...], "data": [...], "rows": N}`` with no ``success`` key at
+          all, so ``_unwrap`` cannot read it: that helper raises on a body whose
+          ``success`` is absent, which would turn every SUCCESSFUL query into a
+          Cloudflare error. Only the failure branch is shared, through
+          ``_error_detail``.
+
+        Returns the ``data`` rows as a list of dicts. An empty ``data`` is a real,
+        legitimate answer — the query matched nothing — and is returned as ``[]``.
+
+        FAIL-CLOSED, and here that is the whole requirement rather than a habit. A
+        non-2xx, a body that is not JSON, and a 2xx whose ``data`` is missing or not
+        a list all raise ValidationError. The alternative — returning ``[]`` — would
+        render a customer's dashboard as "0 visitors" when the truth is "the read
+        failed", and a panel that reports an outage as a quiet week is worse than one
+        that reports nothing at all.
+
+        The API token needs ``Account Analytics Read``, which is a DIFFERENT
+        permission from the Workers and SSL scopes the deploy paths use. A token
+        without it answers 403, and ``_error_detail`` puts Cloudflare's own sentence
+        (and its code) in the raised message so the missing scope is diagnosable
+        rather than a bare status."""
+        url = f"{_CF_API}/accounts/{self._account_id}/analytics_engine/sql"
+        async with self._client() as client:
+            resp = await client.post(
+                url, content=sql.encode("utf-8"), headers={"Content-Type": "text/plain"}
+            )
+        if resp.status_code // 100 != 2:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                f"Analytics Engine SQL {resp.status_code}: {_error_detail(resp)}",
+            )
+        try:
+            body = resp.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValidationError(
+                "sites.cloudflare_error",
+                "Analytics Engine returned a non-JSON body for a SQL query.",
+            ) from exc
+        rows = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(rows, list):
+            # A 2xx with no ``data`` array is a contract break, not an empty result:
+            # an empty result IS a ``data`` of ``[]``. Reporting it as no rows would
+            # manufacture the zeros this method exists to never manufacture.
+            raise ValidationError(
+                "sites.cloudflare_error",
+                "Analytics Engine returned no data array for a SQL query.",
+            )
+        return [r for r in rows if isinstance(r, dict)]

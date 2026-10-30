@@ -6,15 +6,22 @@ every project VM comes ready to run code without manual setup.
 Default image includes:
   - Python 3.12 + pip + venv + UV
   - GCC / G++ / build-essential (for C, C++, Rust compilation)
-  - Node.js 20 LTS + npm
+  - Node.js 22 LTS + npm
+  - bun >= 1.2 (required by the Paw Sites source-lane build)
   - Docker CE + Compose plugin
   - Git, curl, wget, and other common CLI utilities
 
 The image can be overridden with the ``DAYTONA_SANDBOX_IMAGE`` env var
-(e.g. ``DAYTONA_SANDBOX_IMAGE=node:20``), or set to ``"standard"`` to
+(e.g. ``DAYTONA_SANDBOX_IMAGE=node:22``), or set to ``"standard"`` to
 explicitly use the pre-built environment below.
 
-Added: 2026-06-25
+Daytona builds this image server-side on create and caches the result by
+dockerfile. A build that is cancelled mid-way (its box deleted while still
+building) is cached as ``BUILD_FAILED: context canceled``, and every later
+create of the same dockerfile then fails in well under a second, with no
+snapshot in the dashboard to delete. The last layer carries ``PAW_IMAGE_REV``
+for that case: bump ``PAW_DAYTONA_IMAGE_REV`` (or ``IMAGE_REV``) and the next
+create builds a fresh image.
 """
 
 from __future__ import annotations
@@ -31,13 +38,22 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _ENV_IMAGE = "DAYTONA_SANDBOX_IMAGE"
+_ENV_IMAGE_REV = "PAW_DAYTONA_IMAGE_REV"
+
+#: Bumped when Daytona has cached a failed build of the image (see module header).
+IMAGE_REV = "2"
+
+
+def image_rev() -> str:
+    """``PAW_DAYTONA_IMAGE_REV`` when set, else :data:`IMAGE_REV`."""
+    return os.environ.get(_ENV_IMAGE_REV, "").strip() or IMAGE_REV
 
 
 def sandbox_image_override() -> str | None:
     """Return the image string from the env var, or ``None``.
 
     The env var ``DAYTONA_SANDBOX_IMAGE`` can be set to:
-      - A regular Docker image reference (e.g. ``"node:20"``,
+      - A regular Docker image reference (e.g. ``"node:22"``,
         ``"python:3.12-slim"``) — used as-is.
       - ``"standard"`` or ``"default"`` — explicitly uses the
         pre-built Paw development image defined here.
@@ -63,7 +79,9 @@ def build_paw_dev_image() -> Image:
     via the ``Image.debian_slim()`` factory.
 
     Adds:
-      * Node.js 20 LTS (via NodeSource)
+      * Node.js 22 LTS (via NodeSource)
+      * bun >= 1.2 (the Paw Sites source-lane build runs ``bun install`` +
+        ``bun run build``; see the block below for why npm is not a substitute)
       * Docker CE + docker-compose-plugin
       * UV (fast Python package installer, from Astral)
       * Git, curl, wget, unzip, and other CLI essentials
@@ -79,11 +97,32 @@ def build_paw_dev_image() -> Image:
             "apt-get update && apt-get install -y --no-install-recommends "
             "git curl wget ca-certificates gnupg lsb-release unzip",
         )
-        # ── Node.js 20 LTS ──────────────────────────────────────────
+        # ── Node.js 22 LTS ──────────────────────────────────────────
         .run_commands(
-            "curl -fsSL https://deb.nodesource.com/setup_20.x | bash -",
+            "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
             "apt-get install -y nodejs",
             "corepack enable",
+        )
+        # ── bun (Paw Sites source-lane builds) ──────────────────────
+        # REQUIRED, not a convenience: the sites build pipeline is bun-shaped
+        # (``bun install`` + ``bun run build`` in ``sites/generator_client.py``),
+        # and ``corepack`` shims yarn/pnpm only — it does NOT provide bun.
+        #
+        # WHY NOT SUBSTITUTE npm, which is already here: every lockfile in the
+        # workspace is the TEXT format (bun >= 1.2), and npm ignores a
+        # ``bun.lock`` entirely and resolves independently. That would forfeit
+        # pinned resolution and make a sandbox build's dependency tree differ
+        # from the local builder's — the exact artifact parity the offload lane
+        # exists to establish. So bun goes in the image.
+        #
+        # Pinned to a MINIMUM (>= 1.2) rather than an exact version because the
+        # text lockfile format is the hard requirement; ``BUN_INSTALL`` +
+        # ``/usr/local/bin`` symlink puts it on PATH for non-login shells, which
+        # is how ``execute_command`` runs.
+        .run_commands(
+            "curl -fsSL https://bun.sh/install | BUN_INSTALL=/opt/bun bash",
+            "ln -sf /opt/bun/bin/bun /usr/local/bin/bun",
+            "bun --version",
         )
         # ── Docker CE (Docker-in-Docker style) ──────────────────────
         .run_commands(
@@ -106,6 +145,8 @@ def build_paw_dev_image() -> Image:
             "apt-get clean && rm -rf /var/lib/apt/lists/*",
         )
         .workdir("/home/daytona")
+        # Last on purpose: a rev bump changes only this layer (see module header).
+        .env({"PAW_IMAGE_REV": image_rev()})
     )
 
     logger.debug("Built Paw dev image dockerfile:\n%s", img.dockerfile())

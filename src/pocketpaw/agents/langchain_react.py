@@ -20,6 +20,20 @@ tenant — and the prefix wins over ``llm_provider`` (regression-guarded in
 test_langchain_react_backend.py). The warning names the required override
 (``deep_agents_model=ollama:<model>``) so the operator is told their
 config still hits the cloud.
+
+Change (2026-08-01, fix/agent-system-prompt-per-run): the agent cache key now
+carries a digest of ``instructions``. It was the model name ALONE, so one
+compiled graph — built with the first turn's system prompt — served every
+session on that instance forever. A new chat therefore opened already knowing
+the previous session's surface, open pocket and recalled memories. Same fix as
+the parent backend; ``pydantic_ai`` solves it per-run instead.
+
+Change (2026-08-03, PA-6 / feat/prompt-assembler-seam): that digest is now the
+assembler's ``stable_digest`` when the caller has one, and the text hash only
+when it does not. The parent's ``_prompt_identity`` owns both and the reasoning;
+this file keeps its own ``_get_or_create_agent`` because the key here is a
+different shape — no skills, no memory, no pocket flag, since
+``create_react_agent`` takes none of them.
 """
 
 from __future__ import annotations
@@ -32,6 +46,7 @@ from pocketpaw.agents.deep_agents import (
     DeepAgentsBackend,
     _patch_litellm_message_serializer,
     _patch_openai_message_serializer,
+    _prompt_identity,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,11 +132,26 @@ class LangchainReactBackend(DeepAgentsBackend):
         )
 
     def _get_or_create_agent(
-        self, model: Any, instructions: str, mcp_tools: list | None = None
+        self,
+        model: Any,
+        instructions: str,
+        mcp_tools: list | None = None,
+        *,
+        system_prompt_digest: str = "",
     ) -> Any:
         from langgraph.prebuilt import create_react_agent
 
-        model_key = (self.settings.deep_agents_model,)
+        # The prompt identity is in the key for the same reason as the parent's
+        # (see ``DeepAgentsBackend._get_or_create_agent``): ``instructions`` is
+        # baked into the compiled graph as ``prompt=`` while ``AgentPool`` keeps
+        # ONE instance per agent across every session, so a key that ignores the
+        # prompt serves the next session the previous session's system prompt.
+        # This key was the narrowest of the three — the MODEL NAME alone — so it
+        # never rebuilt for anything else either.
+        model_key = (
+            self.settings.deep_agents_model,
+            _prompt_identity(instructions, system_prompt_digest),
+        )
         if self._cached_agent is not None and self._cached_model_key == model_key:
             return self._cached_agent
 

@@ -81,7 +81,17 @@ async def test_projection_folds_branch_merge_discard(beanie_test_db, versions_jo
 
     proj = _rebuild(versions_journal)
     actions = [e.action for e in proj.history(scope_type="pocket", scope_id=POCKET)]
-    assert actions == ["created", "branched", "merged", "created", "discarded"]
+    # The "superseded" sits between the two creates: the second write_draft
+    # replaced the first draft head, which is a state change the history owes
+    # the reader an entry for.
+    assert actions == [
+        "created",
+        "branched",
+        "merged",
+        "created",
+        "superseded",
+        "discarded",
+    ]
 
 
 async def test_projection_is_scope_keyed(beanie_test_db, versions_journal):
@@ -99,7 +109,8 @@ async def test_projection_is_scope_keyed(beanie_test_db, versions_journal):
     proj = _rebuild(versions_journal)
     a = proj.history(scope_type="pocket", scope_id="pocket-A")
     b = proj.history(scope_type="pocket", scope_id="pocket-B")
-    assert len(a) == 2
+    # A: created, created, plus the supersede the second write left on the first.
+    assert [e.action for e in a] == ["created", "created", "superseded"]
     assert len(b) == 1
     assert all(e.scope_id == "pocket-A" for e in a)
 
@@ -114,11 +125,17 @@ async def test_projection_history_is_tenant_filtered(beanie_test_db, versions_jo
     )
 
     proj = _rebuild(versions_journal)
-    # Unfiltered sees both; tenant-filtered sees only its own.
-    assert len(proj.history(scope_type="pocket", scope_id=POCKET)) == 2
+    # Unfiltered sees all three: a create per tenant, plus the supersede the
+    # ws-2 write left on the ws-1 row.
+    assert len(proj.history(scope_type="pocket", scope_id=POCKET)) == 3
+    # The supersede is filed under the tenant that OWNS the superseded row, not
+    # the one whose write caused it — so ws-1 sees what happened to its version
+    # and ws-2 never learns the row exists.
     ws1 = proj.history(scope_type="pocket", scope_id=POCKET, workspace_id="ws-1")
-    assert len(ws1) == 1
-    assert ws1[0].workspace_id == "ws-1"
+    assert [e.action for e in ws1] == ["created", "superseded"]
+    assert all(e.workspace_id == "ws-1" for e in ws1)
+    ws2 = proj.history(scope_type="pocket", scope_id=POCKET, workspace_id="ws-2")
+    assert [e.action for e in ws2] == ["created"]
 
 
 async def test_projection_apply_is_idempotent(beanie_test_db, versions_journal):
@@ -139,6 +156,33 @@ async def test_projection_apply_is_idempotent(beanie_test_db, versions_journal):
         proj.apply(entry)
     second = len(proj.history(scope_type="pocket", scope_id=POCKET))
     assert first == second == 2
+
+
+async def test_projection_records_the_supersede(beanie_test_db, versions_journal):
+    """A draft replaced by a later edit shows up in the event history.
+
+    The allowlist drops any action it does not name, so before
+    ``artifact.version.superseded`` existed the timeline went straight from
+    "created v1" to "created v2" with no account of what happened to v1 — the
+    row had quietly changed status and the history could not say why. The
+    ``superseded_by`` fields are what let a reader walk the chain forward.
+    """
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"n": 1}
+    )
+    v2 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"n": 2}
+    )
+
+    proj = VersionProjection()
+    proj.rebuild(versions_journal.replay_from(0))
+    timeline = proj.history(scope_type="pocket", scope_id=POCKET)
+
+    assert [e.action for e in timeline] == ["created", "created", "superseded"]
+    supersede = timeline[-1]
+    assert supersede.version_id == str(v1.id)
+    assert supersede.version_no == 1
+    assert supersede.payload["superseded_by_version_no"] == v2.version_no
 
 
 async def test_projection_drops_non_version_events(versions_journal):

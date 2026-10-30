@@ -1,0 +1,564 @@
+# tests/cloud/studio/test_router.py — /studio HTTP layer.
+#
+# A FastAPI app mounts the studio router with the license + workspace deps
+# waived; the SERVICE is the seam (the router is a thin adapter). Asserts:
+#   * GET /studio/models         → StudioModelsResponse envelope.
+#   * GET /studio/styles         → StudioStylesResponse envelope.
+#   * GET /studio/generations    → GenerationsResponse, scoped to the workspace;
+#                                  ?source= / ?pocket_id= reach the service.
+#   * POST /studio/generate      → a Generation; bad input → 400; video → 501;
+#                                  proxy failure → 502.
+#   * GET /studio/generations/{id} → one generation, 404 on a miss.
+#   * POST /studio/edit          → a Generation; unknown op → 501; bad input →
+#                                 400; fal upstream failure → 502.
+#   * POST /studio/suggest-prompt → PromptSuggestion from the {sentence} body.
+#   * license gate               → no override, require_license denies.
+
+from __future__ import annotations
+
+import pocketpaw_ee.cloud.studio.service as studio_service
+import pytest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from pocketpaw_ee.catalog.litellm_client import CatalogUpstreamError
+from pocketpaw_ee.cloud._core.deps import current_workspace_id
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.studio import schemas
+from pocketpaw_ee.cloud.studio.router import router as studio_router
+
+
+def _generation(**overrides) -> schemas.Generation:
+    return schemas.Generation(
+        id="gen_abc",
+        prompt="a red bicycle",
+        status="succeeded",
+        kind="image",
+        model="fal_ai/fal-ai/flux/schnell",
+        params=schemas.GenerationParams(
+            kind="image",
+            model="fal_ai/fal-ai/flux/schnell",
+            aspectRatio="1:1",
+            count=1,
+            styleId="cinematic",
+        ),
+        assets=[schemas.GeneratedAsset(id="asset_1", url="/api/v1/media/x.png", mime="image/png")],
+        createdAt=1700000000000,
+        **overrides,
+    )
+
+
+@pytest.fixture
+def client() -> TestClient:
+    app = FastAPI()
+    app.include_router(studio_router, prefix="/api/v1")
+    app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[current_workspace_id] = lambda: "ws-1"
+    return TestClient(app, raise_server_exceptions=False)
+
+
+# ── catalog reads ────────────────────────────────────────────────────────────
+
+
+def test_list_models_returns_envelope(client, monkeypatch):
+    async def _list():
+        return [
+            schemas.StudioModel(
+                id="fal_ai/fal-ai/flux/schnell",
+                label="Flux Schnell",
+                kind="image",
+                provider="fal_ai",
+                aspectRatios=["1:1", "16:9"],
+                maxCount=1,
+                supportsNegativePrompt=False,
+                default=True,
+            )
+        ]
+
+    monkeypatch.setattr(studio_service, "list_models", _list)
+    resp = client.get("/api/v1/studio/models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["models"][0]["id"] == "fal_ai/fal-ai/flux/schnell"
+    assert body["models"][0]["default"] is True
+
+
+def test_list_models_upstream_failure_is_502(client, monkeypatch):
+    async def _boom():
+        raise CatalogUpstreamError("proxy down")
+
+    monkeypatch.setattr(studio_service, "list_models", _boom)
+    resp = client.get("/api/v1/studio/models")
+    assert resp.status_code == 502
+
+
+def test_list_styles_returns_envelope(client):
+    resp = client.get("/api/v1/studio/styles")
+    assert resp.status_code == 200
+    body = resp.json()
+    ids = [s["id"] for s in body["styles"]]
+    assert ids[0] == "none"
+    assert "cinematic" in ids
+
+
+# ── generations ──────────────────────────────────────────────────────────────
+
+
+def test_list_generations_is_workspace_scoped(client, monkeypatch):
+    seen: dict = {}
+
+    async def _list(workspace_id, *, source=None, pocket_id=None):
+        seen.update(workspace=workspace_id, source=source, pocket_id=pocket_id)
+        return [_generation()]
+
+    monkeypatch.setattr(studio_service, "list_generations", _list)
+    resp = client.get("/api/v1/studio/generations")
+    assert resp.status_code == 200
+    assert resp.json()["generations"][0]["id"] == "gen_abc"
+    # The service got the caller's active workspace, not a global list, and no
+    # filter the caller did not ask for.
+    assert seen == {"workspace": "ws-1", "source": None, "pocket_id": None}
+
+
+def test_list_generations_passes_source_and_pocket_filters(client, monkeypatch):
+    """The Sites builder asks for what a site agent made for one site; the filter
+    has to reach the service, or it gets the whole workspace's history.
+
+    MUTATION: call ``service.list_generations(workspace_id)`` without the filters.
+    """
+    seen: dict = {}
+
+    async def _list(workspace_id, *, source=None, pocket_id=None):
+        seen.update(workspace=workspace_id, source=source, pocket_id=pocket_id)
+        return []
+
+    monkeypatch.setattr(studio_service, "list_generations", _list)
+    resp = client.get("/api/v1/studio/generations?source=sites&pocket_id=pk-1")
+    assert resp.status_code == 200
+    assert seen == {"workspace": "ws-1", "source": "sites", "pocket_id": "pk-1"}
+
+
+def test_post_generate_returns_generation(client, monkeypatch):
+    async def _gen(req, *, workspace_id):
+        assert req.prompt == "a red bicycle"
+        assert workspace_id == "ws-1"
+        return _generation()
+
+    monkeypatch.setattr(studio_service, "generate", _gen)
+    resp = client.post(
+        "/api/v1/studio/generate",
+        json={
+            "prompt": "a red bicycle",
+            "kind": "image",
+            "model": "fal_ai/fal-ai/flux/schnell",
+            "aspectRatio": "1:1",
+            "count": 1,
+            "styleId": "cinematic",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == "gen_abc"
+    assert body["status"] == "succeeded"
+
+
+def test_post_generate_bad_input_is_400(client, monkeypatch):
+    async def _gen(req, *, workspace_id):
+        raise ValueError("prompt is required")
+
+    monkeypatch.setattr(studio_service, "generate", _gen)
+    resp = client.post(
+        "/api/v1/studio/generate",
+        json={"prompt": "", "kind": "image", "model": "m", "aspectRatio": "1:1"},
+    )
+    assert resp.status_code == 400
+    assert "prompt is required" in resp.json()["detail"]
+
+
+def test_post_generate_video_is_501(client, monkeypatch):
+    async def _gen(req, *, workspace_id):
+        raise studio_service.StudioNotSupported("video not configured")
+
+    monkeypatch.setattr(studio_service, "generate", _gen)
+    resp = client.post(
+        "/api/v1/studio/generate",
+        json={"prompt": "a clip", "kind": "video", "model": "m", "aspectRatio": "16:9"},
+    )
+    assert resp.status_code == 501
+
+
+def test_post_generate_proxy_failure_is_502(client, monkeypatch):
+    async def _gen(req, *, workspace_id):
+        raise studio_service.StudioUpstreamError("no quota")
+
+    monkeypatch.setattr(studio_service, "generate", _gen)
+    resp = client.post(
+        "/api/v1/studio/generate",
+        json={"prompt": "x", "kind": "image", "model": "m", "aspectRatio": "1:1"},
+    )
+    assert resp.status_code == 502
+
+
+def test_get_generation_found(client, monkeypatch):
+    async def _get(workspace_id, gen_id):
+        assert gen_id == "gen_abc"
+        assert workspace_id == "ws-1"
+        return _generation()
+
+    monkeypatch.setattr(studio_service, "get_generation", _get)
+    resp = client.get("/api/v1/studio/generations/gen_abc")
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "gen_abc"
+
+
+def test_get_generation_not_found_is_404(client, monkeypatch):
+    async def _missing(workspace_id, gen_id):
+        return None
+
+    monkeypatch.setattr(studio_service, "get_generation", _missing)
+    resp = client.get("/api/v1/studio/generations/nope")
+    assert resp.status_code == 404
+
+
+# ── edit + suggest ───────────────────────────────────────────────────────────
+
+
+def test_post_edit_returns_generation(client, monkeypatch):
+    async def _edit(req, *, workspace_id):
+        assert req.op == "upscale"
+        assert req.sourceUrl == "/api/v1/media/x.png"
+        assert workspace_id == "ws-1"
+        return _generation()
+
+    monkeypatch.setattr(studio_service, "edit", _edit)
+    resp = client.post(
+        "/api/v1/studio/edit",
+        json={"op": "upscale", "sourceUrl": "/api/v1/media/x.png", "factor": 4},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "gen_abc"
+    assert resp.json()["status"] == "succeeded"
+
+
+def test_post_edit_unknown_op_is_501(client, monkeypatch):
+    async def _edit(req, *, workspace_id):
+        raise studio_service.StudioNotSupported("Edit op 'warp' is not supported")
+
+    monkeypatch.setattr(studio_service, "edit", _edit)
+    resp = client.post(
+        "/api/v1/studio/edit",
+        json={"op": "warp", "sourceUrl": "/api/v1/media/x.png"},
+    )
+    assert resp.status_code == 501
+
+
+def test_post_edit_bad_input_is_400(client, monkeypatch):
+    async def _edit(req, *, workspace_id):
+        raise ValueError("sourceUrl is required for an edit")
+
+    monkeypatch.setattr(studio_service, "edit", _edit)
+    resp = client.post(
+        "/api/v1/studio/edit",
+        json={"op": "upscale", "sourceUrl": ""},
+    )
+    assert resp.status_code == 400
+    assert "sourceUrl is required" in resp.json()["detail"]
+
+
+def test_post_edit_upstream_failure_is_502(client, monkeypatch):
+    async def _edit(req, *, workspace_id):
+        raise studio_service.StudioUpstreamError("fal edit failed: timeout")
+
+    monkeypatch.setattr(studio_service, "edit", _edit)
+    resp = client.post(
+        "/api/v1/studio/edit",
+        json={"op": "remove-bg", "sourceUrl": "/api/v1/media/x.png"},
+    )
+    assert resp.status_code == 502
+    assert "Image edit failed" in resp.json()["detail"]
+
+
+def test_post_video_elements_returns_generation(client, monkeypatch):
+    async def _elements(req, *, workspace_id):
+        assert req.prompt == "add a cow"
+        assert req.inputImageUrls == ["/api/v1/media/a.png", "/api/v1/media/b.png"]
+        assert req.videoUrl == "/api/v1/media/src.mp4"
+        assert req.sourceDurationSec == 4.5
+        assert workspace_id == "ws-1"
+        return _generation()
+
+    monkeypatch.setattr(studio_service, "generate_video_elements", _elements)
+    resp = client.post(
+        "/api/v1/studio/video-elements",
+        json={
+            "prompt": "add a cow",
+            "videoUrl": "/api/v1/media/src.mp4",
+            "inputImageUrls": ["/api/v1/media/a.png", "/api/v1/media/b.png"],
+            "sourceDurationSec": 4.5,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "gen_abc"
+    assert resp.json()["status"] == "succeeded"
+
+
+def test_post_video_elements_bad_input_is_400(client, monkeypatch):
+    async def _elements(req, *, workspace_id):
+        raise ValueError("source video must be 30 seconds or less")
+
+    monkeypatch.setattr(studio_service, "generate_video_elements", _elements)
+    resp = client.post(
+        "/api/v1/studio/video-elements",
+        json={"prompt": "x", "sourceDurationSec": 31},
+    )
+    assert resp.status_code == 400
+    assert "30 seconds" in resp.json()["detail"]
+
+
+def test_post_video_elements_upstream_failure_is_502(client, monkeypatch):
+    async def _elements(req, *, workspace_id):
+        raise studio_service.StudioUpstreamError("fal elements failed: timeout")
+
+    monkeypatch.setattr(studio_service, "generate_video_elements", _elements)
+    resp = client.post(
+        "/api/v1/studio/video-elements",
+        json={"prompt": "x"},
+    )
+    assert resp.status_code == 502
+    assert "Video edit failed" in resp.json()["detail"]
+
+
+def test_post_video_motion_control_returns_generation(client, monkeypatch):
+    async def _motion(req, *, workspace_id):
+        assert req.imageUrl == "/api/v1/media/char.png"
+        assert req.videoUrl == "https://cdn.test/motion.mp4"
+        assert req.characterOrientation == "video"
+        assert workspace_id == "ws-1"
+        return _generation()
+
+    monkeypatch.setattr(studio_service, "generate_video_motion", _motion)
+    resp = client.post(
+        "/api/v1/studio/video-motion-control",
+        json={
+            "imageUrl": "/api/v1/media/char.png",
+            "videoUrl": "https://cdn.test/motion.mp4",
+            "characterOrientation": "video",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "gen_abc"
+    assert resp.json()["status"] == "succeeded"
+
+
+def test_post_video_motion_control_bad_input_is_400(client, monkeypatch):
+    async def _motion(req, *, workspace_id):
+        raise ValueError("a character image is required for motion control")
+
+    monkeypatch.setattr(studio_service, "generate_video_motion", _motion)
+    resp = client.post(
+        "/api/v1/studio/video-motion-control",
+        json={"imageUrl": "", "videoUrl": "https://cdn.test/motion.mp4"},
+    )
+    assert resp.status_code == 400
+    assert "character image" in resp.json()["detail"]
+
+
+def test_post_video_motion_control_upstream_failure_is_502(client, monkeypatch):
+    async def _motion(req, *, workspace_id):
+        raise studio_service.StudioUpstreamError("fal motion-control failed: timeout")
+
+    monkeypatch.setattr(studio_service, "generate_video_motion", _motion)
+    resp = client.post(
+        "/api/v1/studio/video-motion-control",
+        json={"imageUrl": "/api/v1/media/char.png", "videoUrl": "https://cdn.test/motion.mp4"},
+    )
+    assert resp.status_code == 502
+    assert "Motion control failed" in resp.json()["detail"]
+
+
+def test_post_music_returns_generation(client, monkeypatch):
+    async def _music(req, *, workspace_id):
+        assert req.prompt == "a tense thriller score"
+        assert req.model == "fal-ai/elevenlabs/music"
+        assert req.instrumental is True
+        assert req.durationSec == 60
+        assert workspace_id == "ws-1"
+        return _generation()
+
+    monkeypatch.setattr(studio_service, "generate_music", _music)
+    resp = client.post(
+        "/api/v1/studio/music",
+        json={
+            "prompt": "a tense thriller score",
+            "model": "fal-ai/elevenlabs/music",
+            "instrumental": True,
+            "durationSec": 60,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == "gen_abc"
+    assert resp.json()["status"] == "succeeded"
+
+
+def test_post_music_bad_input_is_400(client, monkeypatch):
+    async def _music(req, *, workspace_id):
+        raise ValueError("prompt is required for music generation")
+
+    monkeypatch.setattr(studio_service, "generate_music", _music)
+    resp = client.post("/api/v1/studio/music", json={"prompt": ""})
+    assert resp.status_code == 400
+    assert "prompt is required" in resp.json()["detail"]
+
+
+def test_post_music_upstream_failure_is_502(client, monkeypatch):
+    async def _music(req, *, workspace_id):
+        raise studio_service.StudioUpstreamError("fal music failed: timeout")
+
+    monkeypatch.setattr(studio_service, "generate_music", _music)
+    resp = client.post("/api/v1/studio/music", json={"prompt": "x"})
+    assert resp.status_code == 502
+    assert "Music generation failed" in resp.json()["detail"]
+
+
+def test_post_suggest_prompt(client):
+    resp = client.post("/api/v1/studio/suggest-prompt", json={"sentence": "a lighthouse"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "image"
+    assert "a lighthouse" in body["prompt"]
+
+
+def test_license_gate_403_when_denied(monkeypatch):
+    """The router-level license dep is real: when require_license denies, every
+    /studio call answers 403 before the handler runs."""
+
+    async def _deny():
+        raise HTTPException(status_code=403, detail="Enterprise license is missing or invalid")
+
+    app = FastAPI()
+    app.include_router(studio_router, prefix="/api/v1")
+    app.dependency_overrides[current_workspace_id] = lambda: "ws-1"
+    app.dependency_overrides[require_license] = _deny
+    resp = TestClient(app, raise_server_exceptions=False).get("/api/v1/studio/models")
+    assert resp.status_code == 403
+
+
+# ── Flow projects ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def flow_env(tmp_path, monkeypatch):
+    """Point the service's flow-project JSONL at a tmp dir so the CRUD round-trip
+    (real service, real file) never touches the developer's ~/.pocketpaw."""
+    projects = tmp_path / "studio" / "flow-projects.jsonl"
+    projects.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(studio_service, "_projects_path", lambda: projects)
+    return projects
+
+
+def _flow_node(node_id="text_1"):
+    return {
+        "id": node_id,
+        "type": "text",
+        "position": {"x": 40, "y": 120},
+        "data": {"status": "idle", "text": "hello"},
+    }
+
+
+def test_flow_projects_crud_roundtrip(client, flow_env):
+    """GET list → PUT (upsert create) → GET shows it → PUT (update) → DELETE.
+    Runs the REAL service + JSONL persistence through the router seam."""
+    # Fresh workspace: empty list.
+    resp = client.get("/api/v1/studio/flow-projects")
+    assert resp.status_code == 200
+    assert resp.json() == {"projects": []}
+
+    # PUT creates (upsert) a project.
+    resp = client.put(
+        "/api/v1/studio/flow-projects/proj_1",
+        json={"name": "Posters", "nodes": [_flow_node()], "edges": []},
+    )
+    assert resp.status_code == 200
+    created = resp.json()
+    assert created["id"] == "proj_1"
+    assert created["name"] == "Posters"
+    assert created["nodes"][0]["data"]["text"] == "hello"
+
+    # GET lists it (wire keys camelCase, opaque node payload preserved).
+    resp = client.get("/api/v1/studio/flow-projects")
+    assert resp.status_code == 200
+    listed = resp.json()["projects"]
+    assert [p["id"] for p in listed] == ["proj_1"]
+
+    # PUT updates in place; name preserved when omitted.
+    resp = client.put(
+        "/api/v1/studio/flow-projects/proj_1",
+        json={
+            "name": None,
+            "nodes": [_flow_node("text_2")],
+            "edges": [
+                {
+                    "id": "e-1",
+                    "source": "text_2",
+                    "target": "img_1",
+                    "sourceHandle": None,
+                    "targetHandle": None,
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Posters"
+    assert resp.json()["nodes"][0]["id"] == "text_2"
+    assert resp.json()["edges"][0]["source"] == "text_2"
+
+    # DELETE removes it; a second delete is 404.
+    assert client.delete("/api/v1/studio/flow-projects/proj_1").status_code == 204
+    assert client.get("/api/v1/studio/flow-projects").json()["projects"] == []
+    assert client.delete("/api/v1/studio/flow-projects/proj_1").status_code == 404
+
+
+# ── Editor timelines ─────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def timeline_env(tmp_path, monkeypatch):
+    path = tmp_path / "studio" / "timelines.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(studio_service, "_timelines_path", lambda: path)
+    return path
+
+
+def test_timelines_crud_roundtrip(client, timeline_env):
+    """GET list → PUT (upsert) → GET → DELETE, through the real service. The doc
+    is opaque: whatever the client sent comes back byte-for-byte."""
+    assert client.get("/api/v1/studio/timelines").json() == {"projects": []}
+
+    doc = {"version": 1, "id": "tl_1", "name": "Reel", "tracks": [], "updatedAt": 100}
+    resp = client.put(
+        "/api/v1/studio/timelines/tl_1",
+        json={"name": "Reel", "updatedAt": 100, "doc": doc},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["doc"] == doc
+    assert resp.json()["updatedAt"] == 100
+
+    listed = client.get("/api/v1/studio/timelines").json()["projects"]
+    assert [p["id"] for p in listed] == ["tl_1"]
+
+    assert client.delete("/api/v1/studio/timelines/tl_1").status_code == 204
+    assert client.delete("/api/v1/studio/timelines/tl_1").status_code == 404
+
+
+def test_timeline_stale_write_is_409(client, timeline_env):
+    """The staleness guard reaches the wire: an older edit clock is refused, and
+    the stored doc is the newer one."""
+    client.put(
+        "/api/v1/studio/timelines/tl_1",
+        json={"name": "Reel", "updatedAt": 500, "doc": {"name": "new"}},
+    )
+    resp = client.put(
+        "/api/v1/studio/timelines/tl_1",
+        json={"name": "Reel", "updatedAt": 400, "doc": {"name": "stale"}},
+    )
+    assert resp.status_code == 409
+    assert client.get("/api/v1/studio/timelines").json()["projects"][0]["doc"]["name"] == "new"

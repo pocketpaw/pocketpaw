@@ -8,6 +8,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.cloud.uploads.conftest import install_workspace_caller
+
 PNG = b"\x89PNG\r\n\x1a\n" + b"body"
 
 
@@ -56,6 +58,8 @@ def folder_client(tmp_path: Path, beanie_upload_db, monkeypatch):
 
     app.dependency_overrides[current_user_id] = _user_dep
     app.dependency_overrides[current_workspace_id] = _workspace_dep
+    # Without this the write routes 401 before their own ACL runs.
+    install_workspace_caller(app)
 
     app.include_router(uploads_module.router, prefix="/api/v1")
     client = TestClient(app)

@@ -1,229 +1,80 @@
-"""Agent-run core — the loop the executor invokes for every chat run.
+"""Agent-run core: the loop the executor invokes for every chat run.
 
-Changes:
-- 2026-07-11 (ART-1) — ``execute_run`` binds a per-run delivered-artifact
-  collector (``collect_delivered_artifacts``) around the run and, at persist
-  time, drains it into one ``{type:"artifact", meta}`` attachment on the
-  assistant message plus one ``artifact`` SSE event apiece (in delivery order,
-  mirroring the ripple event). A non-cancelled run that delivered artifacts but
-  produced no closing text no longer early-returns — it routes through the
-  persist path so the attachments + events are never dropped (the files already
-  landed in blob storage). ``deliver_artifact`` (``mcp_servers/deliver.py``)
-  feeds the collector via ``record_delivered_artifact`` on each success.
-- 2026-07-08 (CS-13, feat/per-send-model-override) — ``execute_run`` copies
-  ``spec.model_override`` onto the rebuilt ``ctx`` and ``_drive_agent_loop``
-  forwards it into ``pool.run`` as ``model_override`` ONLY when set (the same
-  withhold-when-empty idiom as the surface kwargs). It reaches the Claude SDK
-  backend, where it wins over smart-routing / ``claude_sdk_model``. ``None``
-  (older clients / no picker) is byte-identical to today.
-- 2026-06-28 (feat/aiam-agent-revoke, AW-4) — ``_drive_agent_loop`` catches
-  ``AgentDisabled`` from ``pool.get`` explicitly and yields a clean
-  ``agent.unavailable`` error instead of letting it fall through to the generic
-  ``agent.load_failed`` 500-style path. A soft-disabled agent surfaces a tidy
-  "currently unavailable" message to the chat client.
-- 2026-06-30 (fix/warm-noop-benign-error) — WARM hot-process reuse was a NO-OP
-  live: a benign backend ``error`` event flipped ``sup_run_failed`` True, so the
-  ``finally`` called ``mark_crashed`` and tore down the session's warm ``claude``
-  client EVERY turn — turn 2 never reused turn 1's slot. The real ``claude_sdk``
-  yields ``error`` THEN ``done`` for a non-fatal ResultMessage ``is_error`` (a turn
-  that still produced a response; the leased client stays healthy), but the error
-  branch ``break``-ed and flagged a crash before seeing the ``done``. Fixed: on the
-  supervised path the error branch now RECORDS the error (``sup_saw_error``) and
-  keeps consuming instead of breaking; ``sup_run_failed`` is decided at stream-end
-  — a trailing error followed by ``done`` (``sup_completed_ok``) keeps the slot
-  warm, while an ``error`` with no successful completion is still a genuine crash
-  that demotes the runtime to COLD (so the next turn cold-resumes from the store).
-  The legacy (flag-OFF) path keeps its original break-and-stop behavior byte-for-byte.
-- 2026-06-30 (feat/warm-reuse WH-3) — the supervised block now keeps a session's
-  ``claude`` client WARM across turns. When ``acquire`` returns a live, eligible
-  warm slot (``warm_reuse`` + ``slot``), the executor LEASES it to the backend
-  via ``run_kwargs["warm_client"]`` so turn 2+ drives the existing subprocess
-  directly (no re-materialize, no reconnect). On such a warm-reuse turn it
-  WITHHOLDS the resume id from the ``SessionHandle`` (``cli_session_id=None``,
-  store still threaded): the backend's warm-reuse path is gated on
-  ``not resume_active``, and the live client already holds THIS session's
-  conversation, so threading resume would silently demote warm reuse to a cold
-  re-materialize. On every other supervised turn (turn 1, a reaped/COLD runtime,
-  crash recovery) the resume id is threaded exactly as SS-5 did (cold-resume).
-  The executor ALSO always hands the backend an ``on_client_built`` callback that
-  binds the freshly-built client back to the supervisor (``bind_warm_slot`` with a
-  ``LeasedClient``) so the NEXT turn can reuse it; it is a no-op on a warm-reuse
-  turn and rebinds the new slot on a key-drift (model/tools changed) turn. Flag
-  OFF is byte-for-byte unchanged: neither ``warm_client`` nor ``on_client_built``
-  is added. (Known follow-up: a leased turn that carries ``skill_names``
-  materializes a per-run skills dir that is cleaned at backend ``cleanup()``, not
-  at the supervisor's per-leased-client teardown — a benign retention gap, no run
-  correctness impact; the clean fix spans the WH-1/WH-2 surface.)
-- 2026-06-30 (feat/billing-quota-enforcement, chunk 3) — ``execute_run`` now
-  enforces the UNIVERSAL monthly-credit-quota gate at run-start. A new
-  ``_reject_if_over_credit_quota`` helper (the credit-spend sibling of the ART-3
-  ``_reject_if_over_jail_quota``) is called right AFTER the jail-quota gate —
-  after ``resolve_scope_context`` validates ``ctx.workspace_id`` and BEFORE the
-  prewarm / mark-running / agent spin-up. It is flag-gated on
-  ``get_settings().billing_enforced`` (a no-op otherwise — OSS / self-host),
-  calls ``credits.service.check_quota`` (the pure, flag-free assertion), and on
-  ``QuotaExceeded`` rejects the run the SAME clean way the jail-quota reject
-  does: a terminal ``error`` stream frame (``code=credits.quota_exceeded``) +
-  ``mark_terminal(failed)`` + an early return WITHOUT invoking the agent (no
-  model call — the no-overspend money guarantee). This is the universal cap that
-  covers the worker/executor path; the chat HTTP route ALSO fast-rejects in
-  ``agent_router`` so its synchronous caller gets a clean 402 with no DB trace.
-- 2026-07-08 (feat/billing-enforce-gate) — ``_reject_if_over_credit_quota`` now
-  delegates to the shared ``credits.guards.reject_if_over_billing`` so every
-  agent-run seam (this executor, the group/DM bridge, the /files agent ops, the
-  planner) blocks an over-budget tenant identically. The shared helper runs BOTH
-  credit assertions, so the worker/executor leg now ALSO rejects an empty wallet
-  (``check_balance``, 402 credits.insufficient) — previously it caught only the
-  monthly-ceiling case.
-- 2026-06-30 (feat/session-supervisor SS-5) — ``_drive_agent_loop`` now drives
-  every supervised agent turn through the ``SessionSupervisor`` + the durable
-  ``(workspace, session, agent) -> cli_session_id`` mapping (SS-3
-  ``runtime_service``) + the per-tenant ``MongoSessionStore`` (SS-2), gated
-  behind ``POCKETPAW_SESSION_SUPERVISOR`` (default OFF). When ON: it resolves the
-  stable session identity (``workspace_id`` / ``scope_id`` as the per-conversation
-  key / ``target_agent_id``), recovers any prior native ``cli_session_id`` from
-  the durable mapping, calls ``supervisor.acquire(...)``, builds a
-  ``SessionHandle(cli_session_id=acq.cli_session_id, session_store=MongoSessionStore(ws))``
-  and threads it as ``session_handle=`` into ``pool.run`` so the agent RESUMES
-  its native CLI session (durable across restart, tenant-isolated) instead of
-  replaying Mongo history. The run is bracketed with
-  ``mark_run_start`` / ``mark_run_end`` (the latter in ``finally``); the turn-1
-  ``("session_id", {...})`` event the claude_sdk backend emits is consumed
-  internally (NOT yielded to the SSE transport) and persisted via
-  ``runtime_service.set_cli_session_id`` + ``supervisor.record_cli_session_id``;
-  a crash (pool.run raised, or a backend ``error`` event) flips the runtime to
-  COLD via ``mark_crashed``. v1 does NOT bind a live warm slot (WARM hot-process
-  reuse is a documented fast-follow) — every supervised turn resumes from the
-  store. When OFF, ``sup_acq`` stays ``None``, no supervisor/store/mapping call
-  fires, and ``pool.run`` is invoked WITHOUT a ``session_handle`` — byte-for-byte
-  the legacy path.
-- 2026-06-27 (fix/cloud-artifacts-reland) — ``execute_run`` now wraps the run
-  lifecycle (the prewarm ``create_task`` + the main agent loop) in
-  ``mark_cloud_chat_run`` so the per-tenant cwd jail's fail-closed
-  (``agent_jail.resolve_agent_cwd``) fires ONLY for an actual cloud chat
-  dispatch — not for any workspace-less run in a cloud-connected process. The
-  marker is set BEFORE the prewarm ``create_task`` (``asyncio.create_task``
-  copies the context, carrying it into the prewarm task) and BEFORE the two
-  ``attach_agent_identity`` binds, so a run that reaches the backend WITHOUT
-  binding identity still trips the guard. Fixes the dev-CI regression where the
-  jail hard-failed direct claude_sdk backend tests + a broad ee set once a cloud
-  test left ``is_multi_tenant_cloud()`` True in the process.
-- 2026-06-26 (ART-2) — ``_prewarm_session`` now binds the run's identity
-  (``attach_agent_identity`` with the same ``session_mongo_id`` / ``pocket_id``
-  the stream path uses) around its ``pool.prewarm`` call, then detaches in a
-  ``finally``. The per-tenant cwd jail resolves the agent's working directory
-  from those ContextVars; since prewarm is fired in its own ``create_task``
-  context BEFORE the stream binds identity, without this the cloud cwd resolver
-  would fail closed during warm-up (swallowed) and every cloud session would
-  lose the turn-1 warm. Binding here makes prewarm warm the SAME per-session
-  jail turn 1 will use.
-- 2026-06-25 (fix/worker-trusts-spec-workspace) — ``execute_run`` now threads
-  the authenticated ``spec.workspace_id`` into ``resolve_scope_context`` via the
-  new ``expected_workspace_id`` kwarg, then raises a clean
-  ``CloudError("scope.no_workspace")`` if the resolved ``ctx.workspace_id`` is
-  STILL empty — instead of letting ``_drive_agent_loop`` attach an empty
-  identity. The worker used to re-derive tenancy from the scope doc alone and
-  discard the trusted, route-validated spec workspace; when the doc's
-  ``workspace`` field was empty the identity contextvar became ``""`` and the
-  sites-create MCP tool raised "requires workspace and user context (call from a
-  cloud chat session)". The resolver now falls back to the trusted spec
-  workspace (and rejects a spec that disagrees with a non-empty doc workspace —
-  the cross-tenant guard); this seam adds the loud, scope-specific failure.
-- 2026-06-13 (feat/claude-sdk-prewarm) — ``execute_run`` now fires
-  ``_prewarm_session(ctx)`` as a fire-and-forget ``asyncio.create_task`` right
-  after the entity-aware profile is resolved, so the agent's Claude CLI
-  subprocess warms CONCURRENTLY with the remaining pre-turn work (knowledge
-  context, soul recall, SSE setup, prompt assembly) and turn 1 reuses it instead
-  of paying the ~12s cold ``connect()``. ``_prewarm_session`` resolves the SAME
-  inputs ``_drive_agent_loop`` will (instructions, the entity-aware
-  deny/allow/skills/override, session_key) and calls ``AgentPool.prewarm`` so the
-  prewarmed client's cache key matches the first turn's. It is gated to
-  smart-routing-OFF (the model is message-derived when routing is on, so a
-  message-less prewarm could warm the wrong tier and churn) and swallows every
-  error. Skill sessions on smart-routing-ON deployments keep today's cold turn-1.
-- 2026-06-10 (sov/w3a-igw — per-run token metering) — real token usage is now
-  threaded through the run instead of being dropped. Every backend emits a
-  ``token_usage`` ``AgentEvent`` (input / output / cached token counts +
-  total_cost_usd + model + backend), but ``_drive_agent_loop`` had no handler for
-  it, so it was silently discarded and the ``stream_end`` frame's ``usage`` was a
-  hardcoded ``{}``. ``_drive_agent_loop`` now surfaces ``token_usage`` as a
-  ``("token_usage", {...})`` tuple; ``execute_run`` keeps the LATEST one, writes it
-  to the stream, folds it into BOTH ``stream_end`` frames (success + cancelled /
-  empty-text), and persists it onto ``ChatRunDoc.usage`` via
-  ``mark_completed`` / ``mark_terminal`` (the durable metering sink for
-  outcome-based pricing). Empty for backends / runs that report nothing, so
-  existing runs are unchanged.
-- 2026-06-08 (feat/connector-mcp-execution / keystone) — the per-stream
-  identity binding now also passes ``pocket_id=ctx.pocket_id`` into
-  ``attach_agent_identity``, publishing the room's ``Pocket._id`` on the new
-  ``agent_service._active_pocket_id`` ContextVar. The connector-execution MCP
-  server reads it to scope ``list_connector_actions`` / ``connector_execute``
-  to the current pocket. ``None`` for non-pocket (DM/group) threads.
-- 2026-05-31 (RFC 13 M0 — inline-spec contract unification). The inline
-  Ripple extractor now treats the ``ui-spec`` fence + ``{version, ui}`` envelope
-  as the canonical path — the same contract the prompt (``pocketpaw.ripple._inline``)
-  tells the agent to emit and the one paw-enterprise ``MarkdownRenderer`` tokenizes
-  as a ``ui-spec`` segment. The legacy ``json`` fence + ``{widgets, lifecycle}``
-  shape is still accepted via a transitional branch so in-flight conversations
-  don't break; that branch is deprecated and slated for removal once no active
-  conversation references the old shape (cutover window is RFC 13 open question #6).
-- 2026-06-05 (feat/sites-svelte-engine) — ``_drive_agent_loop`` now
-  resolves the per-request ``SurfaceProfile`` and threads its
-  ``deny_mcp_tool_ids`` (a plain ``frozenset[str]``) into ``AgentPool.run`` →
-  ``ClaudeSDKBackend.run``, which subtracts the denied ids from the SDK
-  allowlist before launch. This replaces the deleted prompt-sniffing tool gate
-  in ``claude_sdk.py``: the /sites svelte-create surface forbids the two
-  ripple-create tools via typed policy (resolved from ``meta``) instead of the
-  backend string-matching ``engine="svelte"`` in the system prompt. The set is
-  empty for every other surface, so the call is a no-op outside /sites
-  svelte-create.
-- 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
-  the per-run ``SurfaceProfile`` is now ENTITY-AWARE and resolved ONCE per run.
-  ``execute_run`` calls ``_resolve_entity_profile(ctx)`` right after it resolves
-  ``ctx.surface_context``: it takes the pure surface-kind base
-  (``resolve_profile``), and — when the chat is bound to a pocket-entity
-  (``meta.pocket_id`` set) whose pocket carries a ``surface_profile`` override —
-  loads that pocket TENANT-SCOPED (cloud Rule 7) and folds the override OVER the
-  base via ``compose_entity_profile`` (ripple entity-wins-if-set; deny / allow /
-  skill UNION; system-message entity-wins). The result is stashed on
-  ``ctx.resolved_profile``. BOTH profile consumers now read that pre-resolved
-  object instead of each calling ``resolve_profile``: ``build_behavior_instructions``
-  (ripple-omit, stays sync) and ``_drive_agent_loop`` (tool-deny + tool-allow).
-- 2026-06-07 (feat/entity-pocket-profile-field) — ``_drive_agent_loop`` also
-  reads ``ctx.resolved_profile.skill_names`` and ``.system_message_override`` and
-  forwards them as plain data into ``AgentPool.run`` (withhold-when-empty/None):
-  ``skill_names`` drives per-run skill materialization (SDK plugin) +
-  non-SDK skill filtering; ``system_message_override`` swaps the agent's base
-  system message while keeping the instruction / soul-memory / knowledge layers.
-  Net effect: ``ripple_mode``, ``deny_mcp_tool_ids``, ``allowed_sdk_tools``,
-  ``skill_names`` and ``system_message_override`` are all PER-ENTITY immediately.
-  ``meta.pocket_id`` unset OR no ``pocket.surface_profile`` → resolved profile
-  equals the surface base → behavior byte-identical to today (zero regression).
-  ``resolve_profile`` itself stays PURE/no-I/O; all entity I/O lives in the
-  once-per-run async ``_resolve_entity_profile``.
-- 2026-06-08 (feat/agent-plugin-fields, M2) — the AGENT now carries its own
-  skill set, folded into the per-run skill materialization so it applies on
-  EVERY run the agent does, regardless of surface. ``_agent_skill_set(instance)``
-  reads the agent's ``skill_refs`` (direct) UNION the skills of its enabled
-  ``plugins`` (resolved via the OSS ``PluginInstaller`` registry — plain read,
-  no clone, try/except → empty on failure so a missing registry never breaks a
-  run). ``_drive_agent_loop`` UNIONs that set into ``surface_skills`` BEFORE the
-  withhold-when-empty forward — including on the legacy ``resolved_profile is
-  None`` path — so agent skills materialize even on non-entity / non-profile
-  runs. The union still crosses into ``AgentPool.run`` as a plain
-  ``frozenset[str]`` (no EE symbol crosses into OSS). Per-agent MCP is DEFERRED.
+``execute_run(spec)`` rebuilds the scope context, runs the run-start gates (jail
+quota, daily turn cap via ``metering.service.try_spend``, guest budget, credit
+quota, own-key rules), wins ``queued -> running`` (a run the sweeper already
+interrupted is dropped), then drives ``_drive_agent_loop`` and appends every
+frame to the run's stream transport while a heartbeat stamps the run doc.
+
+The agent runs under ``warm_session_key_for(ctx)``, so members never share a warm
+CLI process. ``_prewarm_session`` connects under that key's turn slot and
+``_drive_agent_loop`` fills it with this turn's ``TurnBinding`` (identity,
+pocket, Paw Bar run, timeline, craft projections, SSE queue, artifacts) before
+``pool.run``, because in-process MCP tools keep the context they connected in.
+
+``_drive_agent_loop`` resolves the entity-aware ``SurfaceProfile``, BYOK, model
+override, preamble and attachments, calls ``AgentPool.run`` and maps backend
+events to SSE frames: chunks, thinking, tool chips, plan updates, ripple /
+artifact / studio frames, editor envelopes (``_EDITOR_ENVELOPE_MARKERS``:
+timeline and ``craft_edit``), ``open_surface``, usage. Provider failures a user
+can act on (busy, out of credit, token limit, malformed output) become plain
+sentences (``_backend_error_frame``), as does an unreachable provider; other
+diagnostics reach chat scrubbed of secrets and addresses; raw text stays in logs.
+
+Behind ``POCKETPAW_SESSION_SUPERVISOR`` it resumes the agent's native CLI
+session and can lease a warm client.
+
+A platform-funded free run (``ctx.free_run_bounds``, set by ``execute_run``
+after the gates from ``credits.guards.free_run_bounds``) is forced onto
+pydantic_ai with ``free_run_max_turns`` and a token limit its wallet pays for at
+the forced backend's model price; it skips the prewarm and the supervisor, and
+any stored key is withheld because the turn was gated and is billed as platform.
+Before anything is built, every model in ``guards.free_run_models`` must pass
+``guards.free_model_denial`` or the run ends with ``model.not_allowed``, and
+then ``guards.reserve_free_run`` must fit the run under the daily early-access
+ceiling or it ends with ``early_access.paused``.
+
+A host cancel while the worker is shutting down (``_core.shutdown``) requeues a
+run that called no tools for one retry (``MAX_RUN_ATTEMPTS``): back to ``queued``,
+a non-terminal ``retrying`` frame, no partial Message. arq re-runs the job on the
+next worker and ``execute_run(retry=True)`` skips the gates that spend (guest
+turn, daily turns, early-access reservation), which attempt 1 already paid.
+
+A run that ends with nothing to show (blank text and only stream_start,
+thinking, token_usage or chunk frames, no artifact, no question) is failed with
+``run.empty_reply``, so an accepted run always ends in a reply or a visible error.
+Every other terminal path persists the streamed text as an assistant ``Message`` with
+its steps, records token usage (latest-wins), and sets the stream TTL. A
+completed run that asked an ``ask_user`` question (either backend spelling,
+``ASK_USER_TOOL_NAMES``) stores it on the Message as ``ask_user``; an ask-only
+turn still writes a row, with the question as its text. A looping
+reply (``RepetitionGuard``) is stopped and kept to one copy: completed with a
+notice when its tools did work, failed otherwise. A concierge run never trains
+the agent's soul; a Sites run neither trains it nor reads its recall (each Sites
+chat is about one site). Invariants: the cancel check keeps its held chunk in
+``full_text`` without appending it; ``mark_cloud_chat_run`` and the artifact
+collector are bound before the prewarm task exists; the host-cancel cleanup is
+shielded and drained before DB close; a supervised turn that ends without
+``done`` demotes its session; every step of the backend's generator (and its
+time-bounded final ``aclose``) runs in one Context, so spans attach cleanly and
+the sink/turn/supervisor bookkeeping is never skipped; the generator is closed
+before any terminal write, so a cancelled run is torn down when its status says so.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import json
 import logging
 import os
 import re
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
@@ -234,33 +85,70 @@ from pocketpaw.agents.errors import AgentDisabled  # type: ignore[import-untyped
 from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
     get_agent_pool,
 )
+from pocketpaw.agents.repetition_guard import (  # type: ignore[import-untyped]
+    REPETITION_STOPPED_CODE,
+    REPETITION_STOPPED_MESSAGE,
+    RepetitionGuard,
+)
 from pocketpaw.agents.session_supervisor import (  # type: ignore[import-untyped]
     get_session_supervisor,
 )
+from pocketpaw.observability import baggage  # type: ignore[import-untyped]
+from pocketpaw_ee.agent.mcp_servers.ask import (
+    ASK_USER_TOOL_ID,
+    ASK_USER_TOOL_NAMES,
+    ask_user_payload,
+)
+from pocketpaw_ee.cloud._core import shutdown
 from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.agent_sessions import runtime_service
 from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
 from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
+    TurnBinding,
     attach_agent_identity,
     attach_sse_event_sink,
+    bind_craft,
+    bind_pawbar_run,
+    bind_timeline,
+    bind_turn,
     build_behavior_instructions,
     build_knowledge_context,
+    chat_turn_widgets,
     collect_delivered_artifacts,
+    current_delivered_artifacts,
     detach_agent_identity,
     detach_sse_event_sink,
+    enter_turn_slot,
+    exit_turn_slot,
     mark_cloud_chat_run,
     push_sse_event,
+    register_stream_sink,
+    resolve_turn_images,
+    resolve_user_content,
     session_key_for,
+    unbind_craft,
+    unbind_pawbar_run,
+    unbind_timeline,
+    unbind_turn,
+    unregister_stream_sink,
+    warm_session_key_for,
 )
 from pocketpaw_ee.cloud.chat.agent_service import (
     resolve_scope_context as resolve_scope_context,
 )
 from pocketpaw_ee.cloud.chat.runs import service as run_service
-from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
+from pocketpaw_ee.cloud.chat.runs.domain import (
+    MAX_RUN_ATTEMPTS,
+    RunSpec,
+    queued_stream_ttl_seconds,
+)
+from pocketpaw_ee.cloud.chat.runs.steps import StepRecorder
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.shared.errors import CloudError
+from pocketpaw_ee.cloud.shared.plan_normalizer import PlanTracker
+from pocketpaw_ee.cloud.shared.tool_narration import narrate_tool_use
 from pocketpaw_ee.cloud.surface import (
     SurfaceKind,
     SurfaceMeta,
@@ -324,8 +212,390 @@ def _looks_like_legacy_ripple_spec(candidate: Any) -> bool:
     return isinstance(candidate, dict) and ("lifecycle" in candidate or "widgets" in candidate)
 
 
+# A provider that is rate-limiting or overloaded: 429, Anthropic's 529, or the
+# words for them. Deliberately narrower than ``failover.classify_lane_failure``,
+# which also matches auth (401/403) and outage text; the LiteLLM 401 rewrite in
+# the pydantic_ai backend must keep reaching the user unchanged. Word boundaries
+# so a token count like "14290" does not read as a 429.
+_PROVIDER_BUSY_RE = re.compile(
+    r"\b(?:429|529)\b|rate[ _-]?limit|too many requests|too_many_requests|overloaded",
+    re.IGNORECASE,
+)
+PROVIDER_BUSY_CODE = "agent.provider_busy"
+PROVIDER_BUSY_MESSAGE = "The AI provider is busy right now, try again in a moment."
+
+
+# The other provider and model failures a user can act on. Each maps to a plain
+# sentence that says what happened and what to do; the raw provider text stays in
+# the logs and on the run doc, never in the chat.
+#
+# Order matters. Diagnostics an operator must read first (auth, unknown model,
+# bad base URL, connection refused, unsupported parameter, and the run-limit
+# text that names the setting to raise) pass through raw and win over
+# everything, which also keeps the LiteLLM 401 rewrite (it embeds the original
+# error) intact. Then token limit beats out of credit (a token count can contain
+# "402"), and out of credit beats busy (OpenAI reports an empty balance as a 429).
+# The provider is unreachable or misconfigured on the operator's side: the
+# LiteLLM 401 rewrite, a bad base URL, a refused connection, a DNS failure. On
+# the cloud the provider config is the operator's, so a tenant gets a plain
+# sentence and never the proxy address or the ``POCKETPAW_*`` setting names.
+_PROVIDER_SETUP_RE = re.compile(
+    r"LiteLLM proxy rejected|base[ _-]?url|connection (?:refused|error|reset)"
+    r"|connecterror|failed to establish|name or service not known|getaddrinfo"
+    r"|nodename nor servname|temporary failure in name resolution",
+    re.IGNORECASE,
+)
+# A status code only counts next to a status word, so "128,404 tokens" is not a 404.
+_STATUS_CTX = r"(?:status[ _]?code\W{0,3}|\bhttp\W{0,3}|\berror\W{0,3}|\bcode\W{0,3})"
+_PASSTHROUGH_RE = re.compile(
+    _STATUS_CTX + r"40[134]\b|\b40[134]\W{0,3}(?:unauthori[sz]ed|forbidden|not found)"
+    r"|authenticat|unauthori[sz]ed"
+    r"|invalid[ _-]?api[ _-]?key|incorrect api key|api[ _-]?key (?:is )?(?:missing|invalid|not)"
+    r"|permission[ _-]denied|model[ _-]?not[ _-]?found|not_found_error|does not exist"
+    r"|unknown model|no such model|request_limit|total_tokens_limit"
+    r"|unsupported (?:parameter|value)|unrecognized (?:request )?argument"
+    r"|extra inputs are not permitted",
+    re.IGNORECASE,
+)
+_TOKEN_LIMIT_RE = re.compile(
+    r"token limit|context[ _-]length|maximum context|context window|prompt is too long"
+    r"|max_tokens",
+    re.IGNORECASE,
+)
+_OUT_OF_CREDIT_RE = re.compile(
+    r"(?:status[ _]?code\W{0,3}|\bhttp\W{0,3}|\berror\W{0,3}|\bcode\W{0,3})402\b"
+    r"|\b402\W{0,3}payment required|insufficient[ _-]?(?:balance|credit|funds|quota)"
+    r"|payment required|credit balance is too low|exceeded your current quota",
+    re.IGNORECASE,
+)
+_MALFORMED_OUTPUT_RE = re.compile(
+    r"validation errors? for|pydantic_core|ValidationError|Field required"
+    r"|UnexpectedModelBehavior|Exceeded maximum retries",
+)
+
+OUT_OF_CREDIT_CODE = "agent.provider_out_of_credit"
+OUT_OF_CREDIT_MESSAGE = (
+    "This model has run out of credit. Pick a different model from the model menu "
+    "and send your message again."
+)
+TOKEN_LIMIT_CODE = "agent.token_limit"
+TOKEN_LIMIT_MESSAGE = (
+    "This reply ran past the model's length limit before it finished. Try a shorter "
+    "message or ask for a smaller change, or switch to a model with a larger limit."
+)
+MALFORMED_OUTPUT_CODE = "agent.malformed_output"
+MALFORMED_OUTPUT_MESSAGE = (
+    "The model sent back something this app could not read, so the reply stopped. "
+    "Try again, and switch model if it keeps happening."
+)
+INTERNAL_ERROR_MESSAGE = "Something went wrong on our side, so the reply stopped. Try again."
+# A run that ended with nothing to show: no text, no tool work, no artifact, no
+# question. It used to complete silently with no Message, which left the user's
+# message unanswered in history with no error anywhere.
+EMPTY_REPLY_CODE = "run.empty_reply"
+EMPTY_REPLY_MESSAGE = "The agent stopped without replying. Send your message again."
+# Frames that show nothing on their own. A run whose frames were all of these
+# (and whose text is blank) ended without a reply.
+_PASSIVE_EVENTS = frozenset({"stream_start", "thinking", "token_usage", "chunk"})
+PROVIDER_SETUP_CODE = "agent.provider_unreachable"
+PROVIDER_SETUP_MESSAGE = (
+    "The AI provider isn't reachable or isn't set up right. An admin needs to check "
+    "the model settings."
+)
+
+# Exceptions raised by a provider SDK or an agent backend, by defining module.
+# Only these are read for provider wording on the crash path; an exception from
+# our own code (a Beanie or Pydantic ValidationError in a store) is internal.
+_PROVIDER_EXC_MODULES = (
+    "pydantic_ai",
+    "litellm",
+    "openai",
+    "anthropic",
+    "google",
+    "mistralai",
+    "groq",
+    "cohere",
+    "claude_agent_sdk",
+    "pocketpaw.agents",
+    "pocketpaw.llm",
+)
+
+
+_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s'\"<>)\]]+", re.IGNORECASE)
+_HOST_PORT_RE = re.compile(
+    r"\b(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d{2,5}\b",
+    re.IGNORECASE,
+)
+_IP_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+_ENV_NAME_RE = re.compile(r"\bPOCKETPAW_[A-Z0-9_]+\b")
+
+
+def _scrub_for_chat(text: str) -> str:
+    """Make raw error text safe to show a tenant.
+
+    Secrets go through ``redact_output`` (API keys, bearer tokens, ``api_key=``).
+    URLs, host:port pairs, IPs and ``POCKETPAW_*`` setting names are operator
+    config on the cloud, so they are replaced too. The run doc keeps the raw text.
+    """
+    from pocketpaw.security.redact import redact_output  # type: ignore[import-untyped]
+
+    text = redact_output(text)
+    text = _URL_RE.sub("[url]", text)
+    text = _HOST_PORT_RE.sub("[host]", text)
+    text = _IP_RE.sub("[host]", text)
+    return _ENV_NAME_RE.sub("[setting]", text)
+
+
+def _classify_error(message: str) -> dict[str, str]:
+    """The chat ``error`` frame for raw provider/backend error text.
+
+    Setup failures get a plain admin-facing sentence. Operator diagnostics in
+    ``_PASSTHROUGH_RE`` (auth, unknown model, run-limit settings, unsupported
+    parameters) keep their wording because the wording is the fix, scrubbed of
+    secrets and internal addresses. Known user-facing failures (token limit, out
+    of credit, busy, malformed output) get plain sentences. Anything else passes
+    through scrubbed as ``agent.backend_error``.
+    """
+    if _PROVIDER_SETUP_RE.search(message):
+        return {"code": PROVIDER_SETUP_CODE, "message": PROVIDER_SETUP_MESSAGE}
+    if not _PASSTHROUGH_RE.search(message):
+        if _TOKEN_LIMIT_RE.search(message):
+            return {"code": TOKEN_LIMIT_CODE, "message": TOKEN_LIMIT_MESSAGE}
+        if _OUT_OF_CREDIT_RE.search(message):
+            return {"code": OUT_OF_CREDIT_CODE, "message": OUT_OF_CREDIT_MESSAGE}
+        if _PROVIDER_BUSY_RE.search(message):
+            return {"code": PROVIDER_BUSY_CODE, "message": PROVIDER_BUSY_MESSAGE}
+        if _MALFORMED_OUTPUT_RE.search(message):
+            return {"code": MALFORMED_OUTPUT_CODE, "message": MALFORMED_OUTPUT_MESSAGE}
+    return {"code": "agent.backend_error", "message": _scrub_for_chat(message)}
+
+
+def _backend_error_frame(message: str) -> dict[str, str]:
+    """The ``error`` frame for a backend-yielded error (see ``_classify_error``).
+
+    The caller keeps the raw text in the logs and on the run doc.
+    """
+    return _classify_error(message)
+
+
+# A run its own limit stopped: the Claude SDK's turn cap (``_result_error_text``) or a
+# limited pydantic_ai run's usage limit (``_explain_error``, the bounded free run).
+_RUN_LIMIT_STOP_RE = re.compile(r"tool-turn limit|usage limit for one run", re.IGNORECASE)
+
+
+async def _app_build_stop_note(ctx: ScopeContext, message: str) -> str | None:
+    """What a /sites app build cut off by its run limit still owes the user.
+
+    The agent cannot speak after the limit stops it, so without this the user sees
+    only "stopped after reaching the tool-turn limit" and no sign the app is half
+    built. Reads PLAN.md as the run left it and names the next unticked milestone;
+    None for any other error, surface or a finished plan."""
+    if not _RUN_LIMIT_STOP_RE.search(message or ""):
+        return None
+    milestone = _sites_next_milestone(await _sites_refine_pocket(ctx))
+    if milestone is None:
+        return None
+    return (
+        "The app is not finished: PLAN.md still has unticked milestones, next is "
+        f'{milestone}. Send "continue" and I will carry on from there.'
+    )
+
+
+def _is_provider_exception(exc: BaseException) -> bool:
+    for cls in type(exc).__mro__:
+        module = getattr(cls, "__module__", "") or ""
+        if module.startswith(_PROVIDER_EXC_MODULES):
+            return True
+    return False
+
+
+def _is_validation_error(exc: BaseException) -> bool:
+    return any(cls.__name__ == "ValidationError" for cls in type(exc).__mro__)
+
+
+def _crash_error_frame(exc: Exception) -> dict[str, str]:
+    """The ``error`` frame for a run that crashed.
+
+    Provider/backend exceptions are classified like a backend error. Our own
+    validation errors (a store or model rejecting data) are internal: a generic
+    sentence, never their field-by-field text. Everything else keeps the
+    ``agent.run_failed`` text it always had, scrubbed. The raw text goes on the
+    run doc.
+    """
+    text = str(exc)
+    if _is_provider_exception(exc):
+        frame = _classify_error(text)
+        if frame["code"] != "agent.backend_error":
+            return frame
+    elif _is_validation_error(exc):
+        return {"code": "agent.run_failed", "message": INTERNAL_ERROR_MESSAGE}
+    return {"code": "agent.run_failed", "message": _scrub_for_chat(text)}
+
+
 def _stream_ttl() -> int:
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
+
+
+# How often a live run stamps ``last_heartbeat_at``. The stale-run sweeper's
+# cutoff is 10 minutes, so 30s leaves a wide margin for a slow Mongo write or a
+# busy event loop before a healthy run could look dead.
+_DEFAULT_HEARTBEAT_SECONDS = 30.0
+# Upper bound on each teardown wait in ``_drive_agent_loop`` (draining the
+# cancelled steps, closing the backend generator).
+_ACLOSE_TIMEOUT_SECONDS = 5.0
+
+
+async def _settle_bounded(task: asyncio.Future[Any], what: str) -> bool:
+    """Wait for teardown ``task`` up to ``_ACLOSE_TIMEOUT_SECONDS``, shielded.
+
+    A timeout or error cancels ``task`` and is logged at debug. Returns True when
+    the caller was cancelled during the wait: the caller holds that cancel, runs
+    the rest of its cleanup, then re-raises it.
+    """
+    try:
+        await asyncio.wait_for(asyncio.shield(task), _ACLOSE_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        logger.debug("cancelled while %s", what, exc_info=True)
+        return True
+    except BaseException:
+        task.cancel()
+        logger.debug("%s failed or timed out", what, exc_info=True)
+    return False
+
+
+def _heartbeat_seconds() -> float:
+    """Resolve the heartbeat interval from ``POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS``.
+
+    Fail-soft like the other run knobs: an unparseable or non-positive value
+    logs and falls back to the default instead of crashing the run or spinning
+    a zero-interval write loop against Mongo.
+    """
+    raw = os.environ.get("POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS", "").strip()
+    if not raw:
+        return _DEFAULT_HEARTBEAT_SECONDS
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning(
+            "POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS=%r is not a number; using %ss",
+            raw,
+            _DEFAULT_HEARTBEAT_SECONDS,
+        )
+        return _DEFAULT_HEARTBEAT_SECONDS
+    if not val > 0:  # also rejects nan
+        logger.warning(
+            "POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS=%s is not positive; using %ss",
+            raw,
+            _DEFAULT_HEARTBEAT_SECONDS,
+        )
+        return _DEFAULT_HEARTBEAT_SECONDS
+    return val
+
+
+async def _heartbeat_loop(run_id: str, interval: float) -> None:
+    """Stamp the run's liveness every ``interval`` seconds until cancelled.
+
+    A failed write is logged and the loop keeps going: one missed beat is
+    harmless against a 10-minute cutoff, and killing the run over a transient
+    Mongo blip would be the very failure this exists to prevent.
+
+    It does stop once the run is no longer ``running``. Nothing else ends it if
+    ``execute_run`` leaves by a path that never reaches the stop in its
+    ``finally``, and a loop that outlives its run keeps nothing alive but the
+    task itself — the conditional write already refuses to revive the doc.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            if not await run_service.touch_heartbeat(run_id):
+                return
+        except Exception:
+            logger.warning("run heartbeat write failed for %s", run_id, exc_info=True)
+
+
+async def _stop_heartbeat(task: asyncio.Task[None]) -> None:
+    """Cancel the heartbeat and wait for it to finish, without raising.
+
+    ``asyncio.wait`` rather than ``await task``: the task ends in
+    CancelledError, and swallowing that with an ``except`` would also swallow a
+    cancel aimed at THIS task. ``wait`` returns the finished task instead of
+    raising its exception, and still propagates our own cancellation.
+    """
+    task.cancel()
+    await asyncio.wait({task})
+
+
+# Shielded host-cancel cleanups still running in the background. When arq
+# cancels a run (job_timeout, shutdown) the cleanup that writes the partial reply
+# and the terminal status outlives the cancelled task; the worker's shutdown has
+# to wait for these before it closes the database they are writing to.
+_pending_cleanups: set[asyncio.Future[Any]] = set()
+
+
+def _track_cleanup(task: asyncio.Future[Any]) -> None:
+    _pending_cleanups.add(task)
+    task.add_done_callback(_pending_cleanups.discard)
+
+
+async def drain_pending_cleanups(timeout: float) -> None:
+    """Wait up to ``timeout`` seconds for in-flight shielded cleanups. Never raises.
+
+    Called by the worker before ``close_cloud_db()``. A cleanup still running
+    after the timeout is abandoned (logged): shutdown must stay bounded, and a
+    cleanup that cannot finish in that window was not going to.
+    """
+    pending = {t for t in _pending_cleanups if not t.done()}
+    if not pending:
+        return
+    try:
+        _done, still_pending = await asyncio.wait(pending, timeout=timeout)
+    except Exception:  # noqa: BLE001 — shutdown must never fail here
+        logger.warning("drain_pending_cleanups: wait failed", exc_info=True)
+        return
+    if still_pending:
+        logger.warning(
+            "drain_pending_cleanups: %d run cleanup(s) still running after %ss",
+            len(still_pending),
+            timeout,
+        )
+
+
+def _usage_int(value: Any) -> int:
+    """Coerce one usage count to a non-negative int, tolerating None / strings."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+def _usage_total(usage: dict[str, Any] | None) -> int:
+    """Total tokens a ``token_usage`` payload represents.
+
+    Deliberately the SAME definition as ``metering.service._total_tokens``:
+    prefer an explicit ``total_tokens`` the backend supplied, otherwise sum
+    input + output + cached_input. This function decides which payload gets
+    KEPT and that one gets BILLED, so it has to rank payloads the way the biller
+    measures them — two definitions that drifted would let a payload the meter
+    considers larger lose to one it considers smaller.
+
+    Spelled out here rather than imported so this hot streaming path stays
+    decoupled from the metering package; ``test_run_core_token_usage.py`` pins
+    the two against each other so the copy cannot drift.
+
+    A payload carrying none of those keys totals 0 — which is the honest answer
+    for a payload that reports no volume, and it makes the floor a no-op for
+    metadata-only payloads rather than a trap.
+    """
+    usage = usage or {}
+    explicit = _usage_int(usage.get("total_tokens"))
+    if explicit > 0:
+        return explicit
+    return (
+        _usage_int(usage.get("input_tokens"))
+        + _usage_int(usage.get("output_tokens"))
+        + _usage_int(usage.get("cached_input_tokens"))
+    )
 
 
 # Default-OFF flag (feat/session-supervisor SS-5). When truthy, the live executor
@@ -335,15 +605,18 @@ def _stream_ttl() -> int:
 # prompt. OFF (the default) leaves ``pool.run`` byte-for-byte the legacy path.
 _SUPERVISOR_TRUTHY = {"1", "true", "yes", "on"}
 
-# The interactive ask_user tool id (source of truth:
-# ``ee/pocketpaw_ee/agent/mcp_servers/ask.py`` ``ASK_USER_TOOL_ID``). Spelled as
-# a literal so this hot streaming path stays decoupled from the agent-tool
-# module — the same reason surface_registry spells its deny-list ids literally.
-# A ``tool_use`` for this id becomes an ``ask_user_question`` stream frame
-# (question + options) the client renders as clickable option chips, instead of
-# a generic ``tool_start``. It restores the interactive question UI on surfaces
-# where inline Ripple is off (notably /sites svelte-create).
-_ASK_USER_TOOL_ID = "mcp__pocketpaw_ask__ask_user"
+# The interactive ask_user tool id, from ``ee/pocketpaw_ee/agent/mcp_servers/ask.py``
+# (a dependency-free module: json + logging only, so importing it here costs the
+# hot streaming path nothing). A ``tool_use`` for this id becomes an
+# ``ask_user_question`` stream frame (question + options) the client renders as
+# clickable option chips, instead of a generic ``tool_start``. It restores the
+# interactive question UI on surfaces where inline Ripple is off (notably /sites
+# svelte-create). ``ask_user_payload`` is the frame's gate: the claude_sdk
+# ``input_pending`` placeholder and any call the tool would reject emit nothing.
+_ASK_USER_TOOL_ID = ASK_USER_TOOL_ID
+# The SDK id plus pydantic_ai's bridged ``pocketpaw_ask_ask_user``: a call under
+# either name becomes the same frame.
+_ASK_USER_TOOL_NAMES = ASK_USER_TOOL_NAMES
 
 
 def _session_supervisor_enabled() -> bool:
@@ -405,6 +678,79 @@ async def _load_entity_profile_override(workspace_id: str, pocket_id: str) -> di
         return override if isinstance(override, dict) else None
 
 
+async def _sites_refine_pocket(ctx: ScopeContext) -> Any | None:
+    """The source pocket of a /sites REFINE, tenant-scoped (it must be in the run's
+    workspace), or None: another surface, no ``pocket_id``, a foreign or missing
+    pocket, or a failed read."""
+    sc = ctx.surface_context
+    if sc is None or sc.kind is not SurfaceKind.SITES or not sc.meta.pocket_id:
+        return None
+    try:
+        from beanie import PydanticObjectId
+
+        from pocketpaw_ee.cloud.models.pocket import Pocket
+
+        pocket = await Pocket.get(PydanticObjectId(sc.meta.pocket_id))
+    except Exception:
+        logger.debug("sites refine pocket read failed for %s", sc.meta.pocket_id, exc_info=True)
+        return None
+    if pocket is None or str(getattr(pocket, "workspace", "")) != str(ctx.workspace_id):
+        return None
+    return pocket
+
+
+def _sites_refine_meta(ctx: ScopeContext, pocket: Any | None) -> SurfaceMeta:
+    """The surface meta, with a /sites REFINE's ``engine`` set to the source pocket's.
+
+    ``meta.engine`` is a create-time hint the refine chat never stamps, so the sites
+    profile cannot tell a ripple refine from an html / svelte / react one without
+    this read — and only the latter can drop the inline ripple prompt. ``pocket`` is
+    ``_sites_refine_pocket``'s; None keeps the meta as is, which keeps ripple ON:
+    the safe default.
+    """
+    assert ctx.surface_context is not None
+    meta = ctx.surface_context.meta
+    if pocket is None:
+        return meta
+    try:
+        from pocketpaw_ee.sites.engines import normalize_engine
+
+        return replace(meta, engine=normalize_engine(getattr(pocket, "engine", None)))
+    except Exception:
+        logger.debug("sites refine engine read failed for %s", meta.pocket_id, exc_info=True)
+        return meta
+
+
+def _sites_next_milestone(pocket: Any | None) -> str | None:
+    """The next unticked milestone in a PROJECT site's PLAN.md, or None (not a project,
+    no PLAN.md, or every milestone ticked)."""
+    if pocket is None or getattr(pocket, "engine", None) != "project":
+        return None
+    try:
+        from pocketpaw_ee.sites.app_plan import next_milestone_in
+
+        source = getattr(pocket, "source", None)
+        return next_milestone_in(source if isinstance(source, dict) else None)
+    except Exception:
+        logger.debug("PLAN.md read failed", exc_info=True)
+        return None
+
+
+def _app_build_turn_cap(base: SurfaceProfile, pocket: Any | None) -> SurfaceProfile:
+    """Lift the tool-turn cap for a /sites project turn whose PLAN.md has unticked
+    milestones: the agent builds every one of them in this turn (the
+    ``sites-app-plan`` skill), each with a build, previews and a play-test. Such a
+    turn always carries the override: ``sites_app_build_max_turns`` is 0 (the
+    default, no cap) or an operator's N > 0 (see ``SurfaceProfile.max_turns``).
+    pydantic_ai applies a free run's ``max_requests`` after it, so a free run keeps
+    ``free_run_max_turns``. Every other turn is unchanged (no override)."""
+    if _sites_next_milestone(pocket) is None:
+        return base
+    from pocketpaw.config import get_settings  # type: ignore[import-untyped]
+
+    return replace(base, max_turns=get_settings().sites_app_build_max_turns)
+
+
 async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
     """Resolve the ENTITY-AWARE ``SurfaceProfile`` for this run (once).
 
@@ -423,7 +769,11 @@ async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
         # profile (ripple on, no deny) — match it exactly.
         return resolve_profile(SurfaceKind.GENERIC, SurfaceMeta())
 
-    base = resolve_profile(ctx.surface_context.kind, ctx.surface_context.meta)
+    refine_pocket = await _sites_refine_pocket(ctx)
+    meta = _sites_refine_meta(ctx, refine_pocket)
+    base = resolve_profile(ctx.surface_context.kind, meta)
+    base = _app_build_turn_cap(base, refine_pocket)
+    base = await _deny_tools_that_would_only_refuse(ctx, base)
     pocket_id = ctx.surface_context.meta.pocket_id
     if not pocket_id:
         return base
@@ -431,11 +781,135 @@ async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
     return compose_entity_profile(base, override)
 
 
+#: The Otherhand drawing tools, as the bare names ``_expand_tool_ids`` resolves.
+_ILLUSTRATION_TOOLS: frozenset[str] = frozenset({"illustrate", "image_generate"})
+
+
+async def _deny_tools_that_would_only_refuse(
+    ctx: ScopeContext, base: SurfaceProfile
+) -> SurfaceProfile:
+    """Withdraw the drawing tools from a caller who cannot use them.
+
+    Observed 2026-09-11 on the live kiosk: a guest asked for a butterfly, the
+    agent called ``illustrate``, the tool refused ("needs an account"), and the
+    agent called it again — SIXTEEN times across 27 seconds, ending in a reply
+    that apologised sixteen times in one paragraph. The refusal text says "do
+    not try again this turn" and the bridge returns it rather than raising, so
+    nothing forces a stop; a weaker model simply keeps trying.
+
+    The wording was never the fix. A tool that will refuse every call is a tool
+    the agent should not have, so it is withdrawn before the run instead. The
+    turn then does the thing the page actually needs — ``page-ops`` are written
+    in ordinary text, not through a tool — and says nothing about a pen it was
+    never offered.
+
+    Only on this surface. Every other one carries neither tool, so asking
+    elsewhere would add a database read to every run in the product.
+
+    Costs one extra ``find_one`` on a turn that CAN illustrate, because the tool
+    asks the same module again when it fires. Cheaper than the alternative,
+    which is two copies of a money rule.
+    """
+    if ctx.surface_context is None or ctx.surface_context.kind is not SurfaceKind.OTHER_HAND:
+        return base
+    try:
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.other_hand import illustration_credentials as creds
+
+        grant = await creds.resolve(
+            ctx.workspace_id,
+            is_guest=await guest_budget.load_guest(ctx.user_id) is not None,
+        )
+    except Exception:  # noqa: BLE001 — a tool surface must not fail a turn
+        logger.debug("other-hand: could not resolve illustration access", exc_info=True)
+        return base
+    if not isinstance(grant, creds.IllustrationRefusal):
+        return base
+    return replace(
+        base,
+        deny_mcp_tool_ids=frozenset(base.deny_mcp_tool_ids) | _ILLUSTRATION_TOOLS,
+    )
+
+
+def _pawbar_run_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
+    """Build the per-stream Paw Bar tool context for a CONCIERGE run, or None.
+
+    A concierge run whose widget declares actions carries them on
+    ``surface_context.meta.pawbar_actions`` (threaded there by ``concierge_chat``).
+    Return ``{"widget_id", "actions", "handoff"}`` so the ``pawbar_actions`` MCP
+    server can build one tool per verb, plus the built-in escape hatch, and its
+    handlers can resolve the widget.
+
+    ``handoff`` (owner inbox, slice 3) is True for ANY concierge run bound to a
+    widget, declared actions or not: a visitor's request to talk to a person is
+    always honored, and a site that sells nothing needs that at least as much as
+    one that does. It is the reason this returns a context where it used to
+    return None. Every non-concierge run still returns ``None`` — the server
+    builds NO tools, so their tool surface is unchanged."""
+    sc = ctx.surface_context
+    if sc is None:
+        return None
+    actions = list(getattr(sc.meta, "pawbar_actions", None) or [])
+    widget_id = getattr(sc.meta, "widget_id", "") or ""
+    # The escape hatch needs a widget to escalate against; the concierge kind is
+    # what makes this a public visitor conversation rather than an owner's chat.
+    handoff = bool(widget_id) and sc.kind is SurfaceKind.CONCIERGE
+    if not actions and not handoff:
+        return None
+    return {"widget_id": widget_id, "actions": actions, "handoff": handoff}
+
+
+def _timeline_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
+    """The open /studio/editor timeline, or None.
+
+    The editor page stamps its projection onto ``surface_meta.timeline`` on every
+    send. Binding it lets the timeline MCP tools validate ids against the exact
+    projection the preamble showed the agent — validating against anything else
+    would accept an id the agent was never told about, or reject one it was.
+    """
+    sc = ctx.surface_context
+    if sc is None:
+        return None
+    timeline = getattr(sc.meta, "timeline", None)
+    return timeline if isinstance(timeline, dict) else None
+
+
+def _craft_from_ctx(ctx: ScopeContext) -> dict[str, Any] | None:
+    """The open craft studio projections as ``{app: projection}``, or None.
+
+    Same contract as ``_timeline_from_ctx``: the page stamps ``surface_meta.<app>``
+    (vector / photo / design) on every send, and binding it lets ``edit_<app>``
+    validate ids against what the agent saw.
+    """
+    from pocketpaw_ee.agent.mcp_servers.craft_ops import APPS
+
+    sc = ctx.surface_context
+    if sc is None:
+        return None
+    craft = {app: proj for app in APPS if isinstance(proj := getattr(sc.meta, app, None), dict)}
+    return craft or None
+
+
 async def _persist_assistant_message(
-    ctx: ScopeContext, content: str, attachments: list[dict[str, Any]]
+    ctx: ScopeContext,
+    content: str,
+    attachments: list[dict[str, Any]],
+    *,
+    run_status: str | None = None,
+    steps: list[dict[str, Any]] | None = None,
+    steps_omitted: int = 0,
+    ask_user: dict[str, Any] | None = None,
 ) -> Any:
     from pocketpaw_ee.cloud.chat import message_service
 
+    # ``run_status``, the steps and the ask only ride when set, so a plain
+    # completed reply's call is byte-identical to before.
+    extra: dict[str, Any] = {"run_status": run_status} if run_status else {}
+    if steps or steps_omitted:
+        extra["steps"] = steps or []
+        extra["steps_omitted"] = steps_omitted
+    if ask_user:
+        extra["ask_user"] = ask_user
     return await message_service.persist_assistant_message_for_scope(
         kind=ctx.kind.value,
         scope_id=ctx.scope_id,
@@ -445,6 +919,7 @@ async def _persist_assistant_message(
         target_agent_id=ctx.target_agent_id,
         content=content,
         attachments=attachments,
+        **extra,
     )
 
 
@@ -454,6 +929,7 @@ async def _broadcast_message_new(
     content: str,
     attachments: list[dict[str, Any]],
     created_at: datetime,
+    run_status: str | None = None,
 ) -> None:
     # Include the caller so OS chat panels (which render off chatRoomsStore
     # via WS `message.new`) see the agent reply land without a refresh. The
@@ -471,6 +947,10 @@ async def _broadcast_message_new(
         "attachments": attachments,
         "created_at": created_at.isoformat(),
     }
+    # A cut-off reply says so on the wire, so a live client can mark it the way
+    # a history reload does. Absent on complete replies: payload unchanged.
+    if run_status:
+        data["run_status"] = run_status
     if xproc.is_worker():
         await xproc.publish_ws_envelope(
             scope_id=ctx.scope_id,
@@ -634,12 +1114,128 @@ async def _maybe_handle_specialist_response(
         )
 
 
+def _studio_flow_payload(output: Any) -> dict[str, Any] | None:
+    """Extract the ``build_studio_flow`` result from a tool_result's output.
+
+    Mirrors the OSS ``agents/loop.py::_publish_studio_flow_event``: the MCP
+    handler returns ``{"studio_flow": {goal, nodes, edges, flow_id}}`` — the
+    full node/edge graph for the /studio Flow canvas. ``tool_result`` fans to
+    the client as a truncated 200-char chip, far too small for a graph, so we
+    detect the marker envelope here and emit a DEDICATED ``studio_flow`` SSE
+    frame (the same shape the paw-enterprise ``onStudioServerEvent`` handler
+    reads: ``{spec, flow_id}``). Returns None when the output is not a studio
+    flow build (every other tool_result passes through untouched).
+    """
+    text = output if isinstance(output, str) else ""
+    if isinstance(output, dict) and isinstance(output.get("result"), str):
+        text = output["result"]
+    if not isinstance(text, str) or '"studio_flow"' not in text:
+        return None
+    data = _first_json_object(text)
+    if isinstance(data, dict):
+        spec = data.get("studio_flow")
+        if not isinstance(spec, dict):
+            return None
+        payload: dict[str, Any] = {"spec": spec}
+        spec_fid = spec.get("flow_id")
+        if spec_fid:
+            payload["flow_id"] = str(spec_fid)
+        logger.info(
+            "studio_flow event detected: nodes=%d edges=%d goal=%r flow_id=%r",
+            len(spec.get("nodes") or []),
+            len(spec.get("edges") or []),
+            spec.get("goal"),
+            payload.get("flow_id"),
+        )
+        return payload
+    return None
+
+
+def _first_json_object(text: str) -> Any:
+    """The first balanced ``{...}`` in a string, parsed. None when there isn't one.
+
+    Brace-counting rather than find/rfind because the payload contains JSON
+    strings that themselves contain braces, and it has to skip escapes.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except (json.JSONDecodeError, ValueError):
+                    return None
+    return None
+
+
+# Studio editor tool envelopes promoted to their own SSE frame (event name =
+# marker): /studio/editor's timeline tools and the craft studios' edit_<app>.
+_EDITOR_ENVELOPE_MARKERS = ("timeline_edit", "timeline_export", "motion_graphic", "craft_edit")
+
+
+def _timeline_payload(output: Any, marker: str) -> dict[str, Any] | None:
+    """Extract a studio editor envelope (``timeline_edit`` / ``craft_edit`` / ...).
+
+    Same job as ``_studio_flow_payload`` and the same reason: ``tool_result``
+    fans to the client as a 200-char chip, which a 50-op batch does not fit in.
+    The editor tools return their payload in a marker envelope and this promotes
+    it to a dedicated SSE frame the /studio/editor route applies.
+
+    Reuses that function's brace scanner rather than re-deriving it — the parse
+    has to survive a JSON string containing braces, which a naive find/rfind
+    does not.
+    """
+    text = output if isinstance(output, str) else ""
+    if isinstance(output, dict) and isinstance(output.get("result"), str):
+        text = output["result"]
+    if not isinstance(text, str) or f'"{marker}"' not in text:
+        return None
+    data = _first_json_object(text)
+    if not isinstance(data, dict):
+        return None
+    payload = data.get(marker)
+    return payload if isinstance(payload, dict) else None
+
+
 _DEFAULT_TITLES = ("", "New Chat", "Chat")
 _TITLE_PLACEHOLDER_LIMIT = 60
 
 
 def _truncate_for_title(message: str) -> str:
-    raw = (message or "").strip().replace("\n", " ").replace("\r", " ")
+    """One-line excerpt of the user's message, used as the placeholder title.
+
+    Strips any client context preamble first (2026-07-22). This placeholder is
+    written to Mongo and pushed over SSE *before* Haiku runs, so it is what the
+    user actually sees in the sidebar — titling the raw wire content named every
+    home-started chat "[Home page snapshot] Time of day: afternoon…". Shares the
+    strip helper with the Haiku path so both agree where the user's words start.
+    """
+    from pocketpaw.memory.titler import (  # type: ignore[import-untyped]
+        strip_context_preamble,
+    )
+
+    cleaned = strip_context_preamble(message or "")
+    raw = cleaned.strip().replace("\n", " ").replace("\r", " ")
     one_line = " ".join(raw.split())
     if len(one_line) > _TITLE_PLACEHOLDER_LIMIT:
         return one_line[:_TITLE_PLACEHOLDER_LIMIT].rstrip() + "…"
@@ -666,10 +1262,13 @@ async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None
             )
 
     try:
-        from pocketpaw.config import Settings  # type: ignore[import-untyped]
+        from pocketpaw.config import get_settings  # type: ignore[import-untyped]
         from pocketpaw.memory.titler import generate_title  # type: ignore[import-untyped]
 
-        settings = Settings.load()
+        # get_settings(), not Settings.load(): the latter re-parses the whole
+        # pydantic-settings model from .env at ~115 ms a call (measured
+        # 2026-08-04). This is a read of config on the per-run title path.
+        settings = get_settings()
         title = await generate_title(
             first_message,
             model=settings.chat_title_model,
@@ -689,8 +1288,13 @@ async def _generate_session_title(ctx: ScopeContext, first_message: str) -> None
         )
 
 
-async def _mark_running(run_id: str) -> None:
-    await run_service.mark_running(run_id)
+async def _mark_running(run_id: str) -> bool | None:
+    """Claim the run (``queued -> running``). False when it was no longer queued.
+
+    Kept as a thin seam because tests patch it; a patched no-op returns None,
+    which ``execute_run`` treats as "proceed". Only an explicit False aborts.
+    """
+    return await run_service.mark_running(run_id)
 
 
 def _new_run_id() -> str:
@@ -707,13 +1311,16 @@ def _extract_ripple_attachment(full_text: str) -> tuple[str, dict[str, Any] | No
     in-flight conversations keep rendering — that branch ages out per RFC 13 open
     question #6. On either path, the spec is normalized through
     ``normalize_ripple_spec`` and the fence is stripped from the message body.
-    A truncated / unparseable fence leaves the text untouched and returns no
+    A ``ui-spec`` body that is not JSON gets the card gate's JSON repair once
+    (``_repair_fence_json``); one it cannot fix leaves the text untouched and returns no
     attachment (the frontend's ``ui-spec-error`` segment surfaces it).
     """
     # Canonical path: ``ui-spec`` fence + {version, ui}.
     match = RIPPLE_UISPEC_RE.search(full_text)
     if match is not None:
         candidate = _parse_fence_json(match.group(1))
+        if candidate is None:
+            candidate = _repair_fence_json(match.group(1))
         if _looks_like_ripple_spec(candidate):
             return _normalize_and_strip(full_text, match, candidate)
         # A ui-spec fence that doesn't parse / isn't a spec falls through; we do
@@ -745,10 +1352,64 @@ def _parse_fence_json(raw: str) -> Any:
         return None
 
 
+def _repair_fence_json(raw: str) -> Any:
+    """A ``ui-spec`` body that is not JSON, parsed after the shared card gate's
+    JSON repair (missing or surplus closers, a small slip; ``card_spec._repaired``
+    on ``CHAT_PROFILE``), else None. Never raises."""
+    try:
+        from pocketpaw_ee.paw_bar.card_spec import _repaired
+        from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
+
+        fixed = _repaired(raw, CHAT_PROFILE)
+        if fixed is None:
+            return None
+        logger.info("ripple_chat_card.repaired", extra={"json_repaired": True})
+        return json.loads(fixed)
+    except Exception:
+        logger.debug("Ripple fence repair failed", exc_info=True)
+        return None
+
+
+def _gate_chat_card(spec: dict[str, Any]) -> dict[str, Any]:
+    """``spec`` after the Paw Bar card gate on ``CHAT_PROFILE`` (one gate, no
+    second copy). Passed: its ``ui`` with the gate's flat-prop lift and alias
+    renames applied (``card_spec._lift_flat_props``), every other key kept.
+    Refused: unchanged, with one ``ripple_chat_card.refused`` line; nothing is
+    dropped before launch. ``render_card``'s own output is never shipped: it
+    keeps only ``ui``/``state`` and its store fill strips a comparison's prices.
+    Any error returns ``spec`` unchanged. Never raises."""
+    if not isinstance(spec.get("ui"), dict):
+        return spec  # the deprecated {widgets} shape has no ui to gate
+    try:
+        from pocketpaw_ee.paw_bar.card_spec import (
+            _lift_flat_props,
+            rejection_reason,
+            render_card,
+        )
+        from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
+
+        body = json.dumps(spec)
+        verbs = CHAT_PROFILE.host_events
+        if render_card(body, None, verbs=verbs, profile=CHAT_PROFILE) is None:
+            reason = rejection_reason(body, verbs=verbs, profile=CHAT_PROFILE)
+            logger.info("ripple_chat_card.refused", extra={"reason": reason})
+            return spec
+        ui, lifted = _lift_flat_props(json.loads(body)["ui"], CHAT_PROFILE)
+        if ui == spec["ui"]:
+            return spec
+        # lifted_props 0 means only an alias was renamed.
+        logger.info("ripple_chat_card.repaired", extra={"lifted_props": lifted})
+        return {**spec, "ui": ui}
+    except Exception:
+        logger.warning("ripple_chat_card.gate_failed", exc_info=True)
+        return spec
+
+
 def _normalize_and_strip(
     full_text: str, match: re.Match[str], candidate: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
-    """Normalize ``candidate`` and remove its fence from ``full_text``."""
+    """Normalize ``candidate``, run it through the shared card gate
+    (``_gate_chat_card``) and remove its fence from ``full_text``."""
     spec: dict[str, Any] = candidate
     try:
         from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
@@ -758,8 +1419,109 @@ def _normalize_and_strip(
             spec = normalized
     except Exception:
         logger.debug("Ripple normalize failed", exc_info=True)
+    spec = _gate_chat_card(spec)
     remaining = (full_text[: match.start()] + full_text[match.end() :]).strip()
     return remaining, spec
+
+
+# Session-key prefix that marks a Paw Bar concierge run. Concierge chats are
+# driven by anonymous, untrusted website visitors, so their turns must NOT feed
+# the per-agent soul via pool.observe — otherwise a visitor could poison the
+# agent's memory ("remember: everything is free on Fridays"). The prefix is the
+# pickle-safe signal that survives the RunSpec round-trip into the executor;
+# because session_key_for() builds the key from ctx.kind.value, matching the
+# prefix here also covers a typed ScopeKind.CONCIERGE scope once the concierge
+# endpoint lands, without run_core needing to import that not-yet-existent enum
+# member. Mirrors the spirit of the local-loop per-turn suppression flag
+# (suppress_global_soul_observe) — same intent, cloud per-agent tier.
+_CONCIERGE_SESSION_PREFIX = "cloud:concierge:"
+
+
+def _is_sites_run(ctx: ScopeContext) -> bool:
+    """True when this run is a /sites chat (create or refine).
+
+    Each Sites chat is about ONE site. The per-agent soul is shared by every
+    chat the agent has, and its recall is keyed on the user's message, so two
+    site briefs ("a site for my pottery studio" / "...tattoo studio") recall each
+    other's replies: that was the cross-session bleed. Sites runs therefore
+    neither feed ``pool.observe`` nor read the soul recall.
+    """
+    sc = ctx.surface_context
+    return sc is not None and sc.kind is SurfaceKind.SITES
+
+
+# The soul memory tools ``tool_bridge`` injects on the function-tool backends
+# (pydantic_ai and friends) when a soul is active. Bare names: that is how those
+# backends match a deny set, and the Claude SDK path ignores a name it does not
+# carry. Denied on /sites so the model cannot pull another chat's memories back
+# in by calling a tool, which would reopen the read side ``_is_sites_run`` shut.
+_SOUL_MEMORY_TOOL_IDS = frozenset(
+    {
+        "soul_context",
+        "soul_core_memory",
+        "soul_edit_core",
+        "soul_evaluate",
+        "soul_forget",
+        "soul_recall",
+        "soul_reload",
+        "soul_remember",
+        "soul_status",
+    }
+)
+
+
+def _deny_soul_tools_on_sites(ctx: ScopeContext, profile: SurfaceProfile) -> SurfaceProfile:
+    """``profile`` with the soul memory tools denied when this is a Sites run."""
+    if not _is_sites_run(ctx):
+        return profile
+    from dataclasses import replace
+
+    return replace(profile, deny_mcp_tool_ids=profile.deny_mcp_tool_ids | _SOUL_MEMORY_TOOL_IDS)
+
+
+def _is_concierge_run(spec: RunSpec) -> bool:
+    """True when this run is a Paw Bar concierge (anonymous-visitor) chat.
+
+    Gated on the session-key prefix rather than a typed scope check because
+    ``spec.session_key`` is the signal guaranteed to reach the executor across
+    the arq pickle boundary, and it manifests the concierge scope directly
+    (the key is derived from ``ctx.kind.value``). A future quarantine-via-Instinct
+    path can supersede this outright suppression.
+    """
+    return (spec.session_key or "").startswith(_CONCIERGE_SESSION_PREFIX)
+
+
+def _chunk_text(event_data: dict[str, Any]) -> str:
+    """The assistant text one ``chunk`` event carries, or "".
+
+    Two call sites accumulate it now — the normal path and the cancel break —
+    and they must agree on what counts as text, because a disagreement is
+    invisible: it shows up as a reply that is subtly short, never as an error.
+    """
+    content = event_data.get("content", "")
+    return content if isinstance(content, str) else ""
+
+
+def _ask_user_record(run_id: str, frame: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The ``MessageAskUser`` dict for a run's last ``ask_user_question`` frame.
+
+    The frame already passed ``ask_user_payload`` in ``_drive_agent_loop``, so
+    question and options are trimmed and capped. The run id is the ask id: the
+    tool asks one question per turn and the client shows the latest. Single
+    choice only today, so ``multi_select`` is ``False``.
+    """
+    if not frame:
+        return None
+    question = frame.get("question")
+    options = frame.get("options")
+    if not isinstance(question, str) or not isinstance(options, list) or not options:
+        return None
+    return {
+        "id": run_id,
+        "question": question,
+        "options": [str(o) for o in options],
+        "multi_select": False,
+    }
 
 
 async def _persist_and_complete(
@@ -768,15 +1530,25 @@ async def _persist_and_complete(
     full_text: str,
     attachments: list[dict[str, Any]],
     usage: dict[str, Any] | None = None,
+    ask_user: dict[str, Any] | None = None,
+    **step_fields: Any,
 ) -> str:
     """Persist the assistant message, mark the run completed, broadcast.
+
+    ``step_fields`` is ``StepRecorder.persist_kwargs()``: ``steps`` /
+    ``steps_omitted`` when the run recorded any, else empty.
+
+    ``ask_user`` is the run's pending question (``_ask_user_record``), stored on
+    the Message so the option chips survive a reload.
 
     ``usage`` (W3a) is the per-run token-metering dict assembled from the
     backend's ``token_usage`` event; it is persisted onto the run doc so each
     completed run carries its real prompt / completion / cached token counts.
     ``None`` / empty leaves the stored usage untouched (legacy / no-usage runs).
     """
-    msg = await _persist_assistant_message(ctx, full_text, attachments)
+    msg = await _persist_assistant_message(
+        ctx, full_text, attachments, ask_user=ask_user, **step_fields
+    )
     assistant_id = str(msg.id)
     await run_service.mark_completed(
         spec.run_id,
@@ -788,15 +1560,77 @@ async def _persist_and_complete(
         ctx, assistant_id, full_text, attachments, created_at=msg.createdAt
     )
 
-    try:
-        pool = get_agent_pool()
-        await pool.observe(ctx.target_agent_id, spec.content, full_text)
-    except Exception:
-        logger.warning(
-            "pool.observe failed for agent %s — per-agent soul not updated",
-            ctx.target_agent_id,
-            exc_info=True,
+    if _is_concierge_run(spec):
+        logger.debug(
+            "skipping pool.observe for concierge run %s — anonymous visitor input "
+            "must not train the per-agent soul",
+            spec.run_id,
         )
+    elif _is_sites_run(ctx):
+        logger.debug(
+            "skipping pool.observe for sites run %s: a site's brief must not "
+            "reach the agent's other chats",
+            spec.run_id,
+        )
+    else:
+        try:
+            pool = get_agent_pool()
+            await pool.observe(ctx.target_agent_id, spec.content, full_text)
+        except Exception:
+            logger.warning(
+                "pool.observe failed for agent %s — per-agent soul not updated",
+                ctx.target_agent_id,
+                exc_info=True,
+            )
+    return assistant_id
+
+
+async def _persist_partial_reply(
+    spec: RunSpec, ctx: ScopeContext, full_text: str, status: str, **step_fields: Any
+) -> str | None:
+    """Persist a non-completed run's streamed text as an assistant Message.
+
+    Returns the Message id, or None when nothing was written. Best-effort end to
+    end: the caller is already on a failure path and must still reach its
+    terminal write and stream frame, so every error is logged and swallowed.
+
+    Nothing is written for blank text (the client's error row covers a run that
+    said nothing) or for a concierge run, whose transcript is the run doc itself
+    and whose ``Message`` write is a deliberate no-op. The partial is NOT fed to
+    ``pool.observe``: the soul should learn from answers, not from fragments.
+    """
+    if not full_text.strip() or _is_concierge_run(spec):
+        return None
+    try:
+        msg = await _persist_assistant_message(ctx, full_text, [], run_status=status, **step_fields)
+    except Exception:
+        logger.exception("persisting the %s partial reply failed for %s", status, spec.run_id)
+        return None
+    # Date the partial to the turn it answered, not to the moment it was saved.
+    # Sending a new message cancels the running turn and writes that message
+    # before the worker notices (up to a cancel-poll later), so a partial dated
+    # "now" sorted AFTER the question that superseded it, in the UI and in the
+    # agent's own history. The run's start is the same instant the stranded-reply
+    # path used for these replies before they became Messages.
+    try:
+        run = await run_service.get_run(spec.run_id)
+        answered_at = run.started_at or run.createdAt
+        if answered_at is not None:
+            await (
+                type(msg)
+                .get_pymongo_collection()
+                .update_one({"_id": msg.id}, {"$set": {"createdAt": answered_at}})
+            )
+            msg.createdAt = answered_at
+    except Exception:
+        logger.warning("re-dating the partial reply failed for %s", spec.run_id, exc_info=True)
+    assistant_id = str(msg.id)
+    try:
+        await _broadcast_message_new(
+            ctx, assistant_id, full_text, [], created_at=msg.createdAt, run_status=status
+        )
+    except Exception:
+        logger.debug("message.new broadcast failed for partial %s", spec.run_id, exc_info=True)
     return assistant_id
 
 
@@ -833,7 +1667,39 @@ def _agent_skill_set(instance: Any) -> frozenset[str]:
     return direct | plugin_skills
 
 
-async def _prewarm_session(ctx: ScopeContext) -> None:
+def _agent_tool_policy(instance: Any) -> tuple[bool, frozenset[str]]:
+    """Resolve the agent's EXCLUSIVE tool policy from its raw config (CX-2).
+
+    Returns ``(exclusive, tools)``:
+    - ``exclusive`` is ``True`` ONLY when the agent config's
+      ``tool_mode == "exclusive"``. An explicit signal — a non-empty ``tools``
+      list does NOT by itself make an agent exclusive.
+    - ``tools`` is the frozenset of the agent's declared MCP tool ids, returned
+      only on the exclusive path (empty otherwise). The caller uses it as the
+      run's ``allow_mcp_tool_ids`` — which, paired with the CX-1
+      ``exclusive_mcp_tools`` cap, suppresses the universal pocket/widget/atlas
+      grant and OVERRIDES any surface allow-list. Additive agents (the default)
+      return ``(False, frozenset())`` so the legacy grant-union path is untouched.
+
+    ``instance.config`` is the raw config dict on the pooled instance; guarded
+    for dict-or-object exactly like ``backend`` is read at the run seam.
+    """
+    config = getattr(instance, "config", None) or {}
+    if isinstance(config, dict):
+        mode = config.get("tool_mode", "additive")
+        tools = config.get("tools", []) or []
+    else:
+        mode = getattr(config, "tool_mode", "additive")
+        tools = getattr(config, "tools", []) or []
+    if mode != "exclusive":
+        return (False, frozenset())
+    return (True, frozenset(tools))
+
+
+async def _prewarm_session(
+    ctx: ScopeContext,
+    flow_context: dict[str, Any] | None = None,
+) -> None:
     """Eagerly warm the agent's CLI subprocess for this run's session BEFORE the
     first model turn (feat/claude-sdk-prewarm).
 
@@ -855,17 +1721,30 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
     ``AgentPool.prewarm`` + the backend's ``prewarm``), so a failed prewarm just
     leaves turn 1 to pay the cold connect it would have paid anyway.
 
+    It takes no history: turn 1 sends the whole conversation in its query text
+    (``<turn-context>``), so the prewarmed client needs none.
+
     LIMITATION: skipped when smart routing is ON, because the model is then
     classified from the message (which we don't have yet) — prewarming a guessed
     tier could warm the wrong subprocess and cause evict-churn. Those deployments
     keep today's cold turn-1.
     """
     try:
-        from pocketpaw.config import Settings
+        from pocketpaw.config import get_settings
 
         # Smart routing makes the model message-dependent → can't match the
         # turn-1 cache key from a message-less prewarm. Skip to avoid churn.
-        if Settings.load().smart_routing_enabled:
+        # get_settings(): a cached flag read, not a fresh parse. See above.
+        if get_settings().smart_routing_enabled:
+            return
+        # A deny-by-default run (the concierge) is always served by pydantic_ai
+        # (``AgentPool._deny_by_default_backend``), which has no subprocess to
+        # warm. Warming the bound agent's own backend would start a client the
+        # turn never uses.
+        if getattr(ctx.resolved_profile, "exclusive_tools", False):
+            return
+        # Same for a bounded free run, which is forced onto pydantic_ai.
+        if getattr(ctx, "free_run_bounds", None) is not None:
             return
 
         pool = get_agent_pool()
@@ -882,6 +1761,19 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
 
         # Mirror _drive_agent_loop's resolution EXACTLY so the cache key matches.
         behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
+        # Mirror the studio-flow-context injection below so the prewarmed
+        # client's cache key MATCHES turn 1's (a mismatch would evict it).
+        if isinstance(flow_context, dict) and flow_context.get("flow_id"):
+            _fid = str(flow_context["flow_id"])
+            behavior_instructions = (
+                f"{behavior_instructions}\n\n[studio flow context]\n"
+                f"You are building a Studio Flow on the desktop canvas.\n"
+                f"ACTIVE FLOW ID: {_fid}\n"
+                f"ACTIVE FLOW NAME: "
+                f"{str(flow_context.get('project_name') or 'Untitled flow')}\n"
+                f'Call build_studio_flow with flow_id="{_fid}" so the graph '
+                f"saves into that flow project. Do NOT invent a different id."
+            )
         surface_deny: frozenset[str] = frozenset()
         surface_allow: frozenset[str] = frozenset()
         surface_allow_mcp: frozenset[str] | None = None
@@ -894,6 +1786,15 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             surface_sys_override = ctx.resolved_profile.system_message_override
             surface_skills = ctx.resolved_profile.skill_names or frozenset()
         surface_skills = surface_skills | _agent_skill_set(instance)
+        # CX-2 — mirror _drive_agent_loop's exclusive-tool resolution EXACTLY so
+        # the prewarmed client's options (and thus its cache key) MATCH turn 1's.
+        # An exclusive agent caps its MCP surface, which changes ``allowed_tools``
+        # (part of the client cache key); without mirroring it here the prewarm
+        # would warm an UNCAPPED client that turn 1 discards — a wasted warm.
+        # Additive agents (the default) leave both values unchanged.
+        prewarm_exclusive, prewarm_tools = _agent_tool_policy(instance)
+        if prewarm_exclusive:
+            surface_allow_mcp = prewarm_tools
 
         # Bind this run's tenancy for the warm-up so the prewarmed subprocess
         # connects with the SAME per-tenant cwd jail the first turn will resolve
@@ -911,21 +1812,281 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             session_mongo_id=session_mongo_id,
             pocket_id=ctx.pocket_id,
         )
+        # C1 — bind the concierge action context so the warm subprocess builds the
+        # same pawbar_actions tool set turn 1 will resolve (None for every other run).
+        pawbar_token = bind_pawbar_run(_pawbar_run_from_ctx(ctx))
+        timeline_token = bind_timeline(_timeline_from_ctx(ctx))
+        craft_token = bind_craft(_craft_from_ctx(ctx))
+        # The warm client's MCP tools keep the context they are connected in, so
+        # connect them under the session's turn slot: each turn then fills it
+        # with its own identity/collector (``bind_turn`` in _drive_agent_loop).
+        warm_key = warm_session_key_for(ctx)
+        slot_token = enter_turn_slot(warm_key)
         try:
             await pool.prewarm(
                 ctx.target_agent_id,
-                session_key_for(ctx),
+                warm_key,
                 instructions=behavior_instructions,
                 deny_mcp_tool_ids=surface_deny,
                 allow_sdk_tools=surface_allow,
                 allow_mcp_tool_ids=surface_allow_mcp,
                 system_message_override=surface_sys_override,
                 skill_names=surface_skills,
+                exclusive_mcp_tools=prewarm_exclusive,
+                # PA-2 — mirror _drive_agent_loop's surface threading. The
+                # preamble sits ABOVE the volatile markers the warm-client key
+                # cuts at, so unlike ``knowledge_context`` it is part of the
+                # hashed prefix: omitting it here would warm a client whose
+                # prefix turn 1 does not match, and turn 1 would evict the very
+                # client this call paid to build. ``execute_run`` resolves
+                # ``ctx.surface_context`` before firing this, so it is in hand.
+                surface_preamble=(
+                    ctx.surface_context.preamble or "" if ctx.surface_context else ""
+                ),
+                surface_cache_key=(
+                    ctx.surface_context.preamble_cache_key if ctx.surface_context else None
+                ),
+                # The turn's model pick and tool switch are part of the client's
+                # cache key; without them a picker / tools-off turn evicted the
+                # prewarmed client and paid a second cold connect.
+                model_override=ctx.model_override or None,
+                tools_enabled=ctx.tools_enabled is not False,
+                # The turn-cap override (0 = no cap) is fixed at connect(), so it is
+                # in the key too. ``is not None``: a 0 must reach the prewarm.
+                **(
+                    {"max_turns": ctx.resolved_profile.max_turns}
+                    if getattr(ctx.resolved_profile, "max_turns", None) is not None
+                    else {}
+                ),
             )
         finally:
+            exit_turn_slot(slot_token)
+            unbind_craft(craft_token)
+            unbind_timeline(timeline_token)
+            unbind_pawbar_run(pawbar_token)
             detach_agent_identity(identity_tokens)
     except Exception as exc:  # noqa: BLE001 — prewarm must NEVER break a run
         logger.debug("prewarm_session skipped (swallowed): %s", exc)
+
+
+#: How long a per-send model check may hold up a turn. The catalog client's own
+#: timeout is 15s per read and it makes two, so an unreachable proxy could add
+#: half a minute to a turn that is going to run fine. A check that times out is
+#: a check that did not happen, which is the fail-open case below.
+_MODEL_CHECK_TIMEOUT_SECONDS = 5.0
+
+
+async def _model_is_unknown_to_gateway(model_id: str) -> bool:
+    """True only when we POSITIVELY know the gateway does not serve ``model_id``.
+
+    The per-send model is validated at the edge by a regex and nothing else, and
+    the composer's picker is three hardcoded presets plus a free-text field, so
+    without this a workspace names any model string it likes and the platform
+    key pays for whatever the gateway is willing to route.
+
+    The catalog is the right list to check against because it is the UNION of
+    what the proxy describes (``/model/info``) and what it routes
+    (``/v1/models``) — never narrower than the routable set. So an id missing
+    from it is an id the gateway would refuse anyway, and refusing here turns an
+    opaque upstream 400 into a typed error the composer can show.
+
+    It is deliberately NOT an entitlement check. Every model the gateway serves
+    is in the catalog, so this does not stop a workspace from picking an
+    expensive one; it stops free text. A per-plan allowlist is the thing that
+    puts a ceiling on cost, and this is the seam it plugs into.
+
+    Fail-open in two directions, both of which would otherwise make the picker a
+    dead control on a healthy deployment:
+
+    * the catalog is unreachable — ``/model/info`` is an admin route and can be
+      gated or down while chat routing is fine. Matches what
+      ``resolve_turn_credentials`` does with its own failure a few lines below.
+    * the catalog came back EMPTY — indistinguishable from "unknown id" on a
+      per-id lookup, and rejecting every send is far worse than the cost
+      exposure being checked for.
+    """
+    from pocketpaw_ee.catalog import service as catalog_service
+
+    try:
+        entries = await asyncio.wait_for(
+            catalog_service.list_models(), timeout=_MODEL_CHECK_TIMEOUT_SECONDS
+        )
+    except Exception:
+        logger.warning(
+            "model catalog unavailable — per-send model %r runs unchecked this turn",
+            model_id,
+            exc_info=True,
+        )
+        return False
+    if not entries:
+        logger.warning(
+            "model catalog is empty — per-send model %r runs unchecked this turn", model_id
+        )
+        return False
+    return not any(entry.id == model_id for entry in entries)
+
+
+#: How much of one turn's attachments we are willing to put on the wire. A page
+#: snapshot is tens of kilobytes; a high-resolution mark crop can be much more,
+#: and every byte is billed to whoever is paying for the turn.
+_MAX_TURN_IMAGE_BYTES = 6 * 1024 * 1024
+_MAX_TURN_IMAGES = 3
+#: How big ONE image may be. The turn budget above answers a different
+#: question — what the whole turn costs — and a single 5MB page snapshot
+#: passes it with room to spare, then gets rejected upstream, which the user
+#: sees as a failed turn with nothing useful said. Anthropic documents 5MB per
+#: image; OpenAI and Gemini allow more, so this is the safe floor across
+#: providers and deliberately NOT provider-conditional.
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+_IMAGE_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def _read_turn_images(ctx: ScopeContext) -> tuple[tuple[bytes, str], ...]:
+    """Read the images the surface handler declared, for THIS turn.
+
+    Reading happens here, in the cloud, and not in the agent backend, for one
+    reason: this is the layer that knows which directory belongs to the tenant
+    asking. The paths come back from the client, which echoes what the snapshot
+    endpoint returned — so they are not secret, and a hostile client can name
+    any string it likes. Every path is therefore resolved and confirmed to sit
+    inside THIS workspace's jail before a byte is read. The OSS backend then
+    receives bytes it cannot use to reach anything.
+
+    Never raises. A missing file, an unreadable one, an oversized one, or one
+    outside the jail is skipped with a warning: the preamble still names the
+    path, so a backend that reads files itself is unaffected, and a turn that
+    loses its picture is far better than a turn that fails.
+    """
+    surface = ctx.surface_context
+    paths = getattr(surface, "preamble_images", ()) if surface else ()
+    if not paths:
+        return ()
+    from pocketpaw_ee.cloud.agent_jail import workspace_jail_root
+
+    try:
+        jail = (workspace_jail_root() / str(ctx.workspace_id)).resolve()
+    except Exception:
+        logger.warning("could not resolve the workspace jail; sending no images this turn")
+        return ()
+
+    out: list[tuple[bytes, str]] = []
+    budget = _MAX_TURN_IMAGE_BYTES
+    for raw in paths[:_MAX_TURN_IMAGES]:
+        try:
+            path = Path(raw).resolve()
+        except Exception:
+            logger.warning("surface image path could not be resolved; skipping it")
+            continue
+        if not path.is_relative_to(jail):
+            # The one case worth a loud line: a path pointing outside the
+            # tenant's own scratch dir is either a bug or an attempt.
+            logger.warning("surface image path is outside the workspace jail; refusing to read it")
+            continue
+        media_type = _IMAGE_MEDIA_TYPES.get(path.suffix.lower())
+        if media_type is None:
+            logger.warning("surface image %s is not an image type we send; skipping", path.suffix)
+            continue
+        try:
+            size = path.stat().st_size
+            if size == 0 or size > budget:
+                logger.warning("surface image is empty or over the turn budget; skipping it")
+                continue
+            if size > _MAX_IMAGE_BYTES:
+                logger.warning(
+                    "surface image is %d bytes, over the %d-byte per-image limit; skipping it",
+                    size,
+                    _MAX_IMAGE_BYTES,
+                )
+                continue
+            out.append((path.read_bytes(), media_type))
+            budget -= size
+        except OSError:
+            logger.warning("surface image could not be read; skipping it", exc_info=True)
+    return tuple(out)
+
+
+def _forced_pydantic_ai_model(instance: Any, backend_name: str | None, override: str | None) -> str:
+    """The model a run forced onto pydantic_ai will use, for pricing.
+
+    An agent already on pydantic_ai keeps its per-send model, else its own
+    ``pydantic_ai_model`` (``route_model`` put the agent's model there). Any
+    other agent runs on a pydantic_ai backend built from its settings, whose
+    ``pydantic_ai_model`` is the deployment default, and the pool drops the
+    per-send model. Falls back to the deployment setting.
+    """
+    from pocketpaw.config import get_settings
+
+    if backend_name == "pydantic_ai" and override:
+        return override
+    settings = getattr(getattr(instance, "backend", None), "settings", None)
+    return getattr(settings, "pydantic_ai_model", None) or get_settings().pydantic_ai_model
+
+
+def _turn_model(instance: Any, backend_name: str | None, run_kwargs: dict[str, Any]) -> str:
+    """Best guess at the model this turn runs on, for the out-of-credit mark.
+
+    A free run uses whatever pydantic_ai will run. Otherwise the per-send pick,
+    else the agent's own ``model``, else (pydantic_ai only, the cloud default)
+    the backend's ``pydantic_ai_model``. Empty when none is known; the mark is
+    then skipped.
+    """
+    override = run_kwargs.get("model_override")
+    try:
+        if run_kwargs.get("force_pydantic_ai"):
+            # A free run: the pool keeps the per-send model only on pydantic_ai.
+            return _forced_pydantic_ai_model(instance, backend_name, override)
+        if override:
+            return str(override)
+        config = getattr(instance, "config", None)
+        if isinstance(config, dict) and config.get("model"):
+            return str(config["model"])
+        if backend_name == "pydantic_ai":
+            return _forced_pydantic_ai_model(instance, backend_name, None)
+    except Exception:
+        logger.debug("turn model lookup failed", exc_info=True)
+    return ""
+
+
+async def _auto_model_fallback(workspace_id: str, default_model: str) -> str | None:
+    """The model an Auto turn should run when its default is out of credit.
+
+    None (run the default) unless this workspace has an out-of-credit mark on
+    ``default_model``. Then the first ``free_model_allowlist`` entry that is not
+    marked and that the gateway serves (an exact catalog id). The allowlist is
+    the operator's own ordered list of cheap, priced models, so the swap never
+    picks an expensive or unpriced one. None when no such model is left or
+    anything here fails: the default then runs as before.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw_ee.catalog import availability
+    from pocketpaw_ee.catalog import service as catalog_service
+
+    try:
+        marks = await availability.read_marks(workspace_id)
+        if not default_model or not availability.is_marked(default_model, marks):
+            return None
+        served = {e.id.lower(): e.id for e in await catalog_service.list_models(modality="chat")}
+        # The default is marked, so the ``is_marked`` check also skips it.
+        for candidate in get_settings().free_model_allowlist:
+            cid = served.get(candidate.lower())
+            if not cid or availability.is_marked(cid, marks):
+                continue
+            logger.info(
+                "auto model skips out-of-credit %s for %s (ws=%s)",
+                default_model,
+                cid,
+                workspace_id,
+            )
+            return cid
+    except Exception:
+        logger.debug("auto model fallback lookup failed", exc_info=True)
+    return None
 
 
 async def _drive_agent_loop(
@@ -937,8 +2098,18 @@ async def _drive_agent_loop(
     history: list[dict[str, str]] | None,
     is_cancelled: Any,
     emit_stream_start: bool,
+    flow_context: dict[str, Any] | None = None,
+    surface: str | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Drive ``AgentPool.run`` and yield ``(event_name, event_data)`` tuples."""
+    # A files-only send arrives as the composer's invisible sentinel — a turn
+    # that persists and renders correctly but says nothing to the model, while
+    # the attachment's text sits in the knowledge channel looking like
+    # reference material. Resolve it HERE, before anything downstream reads it:
+    # the knowledge context uses this string as its KB query, the session
+    # titler names the thread from it, and the pool hands it to the model as
+    # the user's turn. A turn with real text passes through untouched.
+    user_content = resolve_user_content(user_content, attachments_in)
     pool = get_agent_pool()
     try:
         instance = await pool.get(ctx.target_agent_id)
@@ -973,6 +2144,7 @@ async def _drive_agent_loop(
         user_message=user_content,
         attachments=attachments_in,
         mentions=mentions_in,
+        surface=surface,
     )
     # Bail early if /agent/stop was called while knowledge context was
     # being built (another blocking point before the cancel-check loop).
@@ -982,11 +2154,85 @@ async def _drive_agent_loop(
     backend_name = (
         instance.config.get("backend", "claude_agent_sdk") if hasattr(instance, "config") else None
     )
-    behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
+    # A bounded free run is served by pydantic_ai (see the free-run block below),
+    # so its prompt must not name tools only the agent's own backend has.
+    prompt_backend = "pydantic_ai" if getattr(ctx, "free_run_bounds", None) else backend_name
+    behavior_instructions = build_behavior_instructions(ctx, backend_name=prompt_backend)
+    # The chat card prompt's per-turn widget picks ride knowledge_context, below
+    # the cache cut, so the keyed instructions layer stays the same every turn.
+    turn_widgets = chat_turn_widgets(behavior_instructions, user_content, history or ())
+    if turn_widgets:
+        knowledge_context = (
+            f"{knowledge_context}\n\n{turn_widgets}" if knowledge_context else turn_widgets
+        )
+
+    # Uploaded files are INLINED, and the backend with file tools has to be
+    # told so as a RULE. ``_build_attachments_block`` already says it inside
+    # the ``<uploaded-files>`` block, but that block rides ``knowledge_context``
+    # — the channel ``build_behavior_instructions`` documents as the one that
+    # "reads as reference data and the model often ignores".
+    #
+    # ``pydantic_ai`` is dispatch-only, so the inlined text is the only copy it
+    # could read and it answers fine. ``claude_sdk`` grants Read/Glob/Grep/Bash
+    # and runs the CLI in a real ``cwd`` jail, so asked "what does the file I
+    # uploaded say?" it globbed an empty directory and replied that no file was
+    # provided — with the extracted text sitting in its own system prompt.
+    # ``resolve_user_content`` does not cover this turn either: it substitutes
+    # guidance only for an EMPTY message and passes typed text through
+    # byte-identically, and the turn that broke was typed.
+    #
+    # COST, ACCEPTED DELIBERATELY. ``instructions`` is a KEYED prompt layer, and
+    # ``_prewarm_session`` mirrors it to match turn 1's cache key. Prewarm runs
+    # before any message exists, so it cannot know about attachments, and an
+    # attachment turn therefore misses the prewarmed client and rebuilds the
+    # subprocess. That is bounded: this text is CONSTANT (it names no file), so
+    # a session settles into at most two keys — with and without attachments —
+    # not one per upload. One rebuild on the turn someone uploads a document is
+    # a better trade than that document being denied.
+    if attachments_in:
+        behavior_instructions = (
+            f"{behavior_instructions}\n\n[uploaded files]\n"
+            "The user attached file(s) to this turn. Their extracted text is "
+            "inlined in the <uploaded-files> block of your context and that is "
+            "the whole of what was uploaded. The files are not on the "
+            "filesystem and have no path in your working directory: do NOT use "
+            "Read, Glob, Grep or Bash to hunt for them, and do NOT reply that "
+            "no file was provided or that you cannot see it. Answer from the "
+            "inlined text. For a file uploaded on an EARLIER turn (not inlined "
+            "here), call list_uploads to find it and read_upload to read it."
+        )
+
+    # Studio Flow build context — tell the agent WHICH flow project this
+    # request belongs to so its build_studio_flow call carries the id the
+    # /studio canvas owns (flow_context.flow_id threaded from the chat
+    # request). The MCP handler then persists the graph under that id, the
+    # SSE studio_flow event echoes it, and the canvas saves into the same
+    # project. Without this the agent forks a random flow the user never
+    # asked about (mirrors the OSS AgentLoop's system-prompt injection).
+    if isinstance(flow_context, dict) and flow_context.get("flow_id"):
+        _fid = str(flow_context["flow_id"])
+        _fname = str(flow_context.get("project_name") or "Untitled flow")
+        behavior_instructions = (
+            f"{behavior_instructions}\n\n[studio flow context]\n"
+            f"You are building a Studio Flow on the desktop canvas.\n"
+            f"ACTIVE FLOW ID: {_fid}\n"
+            f"ACTIVE FLOW NAME: {_fname}\n"
+            f'Call build_studio_flow with flow_id="{_fid}" so the graph '
+            f"saves into that flow project. Do NOT invent a different id."
+        )
+
+    # HTN-5: one id for the whole invocation. It was previously minted inline in
+    # the ``stream_start`` payload, so it existed only when ``emit_stream_start``
+    # was true and nothing else could refer to it. Hoisting it changes no wire
+    # value — ``stream_start`` still carries exactly this — but gives the plan
+    # frames below a ``run_id`` the client already holds, matching the group/DM
+    # bridge where ``run_id`` equals the id on ``agent.stream_start``.
+    stream_run_id = _new_run_id()
+    plan_tracker = PlanTracker(run_id=stream_run_id)
 
     if emit_stream_start:
         stream_start_payload: dict[str, Any] = {
-            "run_id": _new_run_id(),
+            "run_id": stream_run_id,
             "agent_id": ctx.target_agent_id,
             "agent_name": getattr(instance, "agent_name", ""),
             "scope": ctx.kind.value,
@@ -1009,6 +2255,20 @@ async def _drive_agent_loop(
         # plain DM/group threads — the connector tools then say "no pocket".
         pocket_id=ctx.pocket_id,
     )
+    # C1 — bind this run's concierge action context (None for every non-concierge
+    # or no-actions run). The pawbar_actions MCP server + tool handlers read it;
+    # reset in the same finally as the identity tokens so it never leaks.
+    pawbar_run = _pawbar_run_from_ctx(ctx)
+    pawbar_token = bind_pawbar_run(pawbar_run)
+    # Same lifetime as the pawbar context: bound here, reset in the same finally.
+    timeline = _timeline_from_ctx(ctx)
+    timeline_token = bind_timeline(timeline)
+    craft = _craft_from_ctx(ctx)
+    craft_token = bind_craft(craft)
+    # This turn's values for the warm client's in-process MCP tools, which read
+    # the session's turn slot rather than the context they were connected in.
+    # Bound inside the try (a process-level slot must not outlive a raise).
+    turn_handle = None
 
     if not history and ctx.session_id:
         asyncio.create_task(_generate_session_title(ctx, user_content))
@@ -1024,6 +2284,7 @@ async def _drive_agent_loop(
 
     handled_pocket_ids: set[str] = set()
     next_event_task: asyncio.Task[Any] | None = None
+    agent_iter: Any = None
     next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] | None = None
     # Supervised native-resume bookkeeping (feat/session-supervisor SS-5).
     # Pre-init OUTSIDE the ``try`` so the ``finally`` / ``except`` can always
@@ -1054,7 +2315,36 @@ async def _drive_agent_loop(
     sup_session_id = ctx.scope_id
     sup_agent_id = ctx.target_agent_id
     try:
-        session_key = session_key_for(ctx)
+        # Publish the same queue under this session's id, so a caller that
+        # cannot see the sink ContextVar can still find the stream. Code Mode's
+        # file tools are exactly that caller: they run in the POOLED SDK
+        # client's task, created during _prewarm_session before this function
+        # binds anything, so they inherit a context with identity bound (ART-2
+        # added the prewarm bind at ~1054) and no sink.
+        #
+        # Registered INSIDE the try, not beside attach_sse_event_sink above:
+        # everything between them — attach_agent_identity in particular, which
+        # rejects an unbound identity by design — can raise, and this entry is
+        # a process-level dict rather than a ContextVar, so a leak here would
+        # outlive the task and hand a dead queue to the next turn.
+        register_stream_sink(session_mongo_id, side_channel_queue, ctx.workspace_id)
+        # Per-member warm key: two users of one pocket/session never share a
+        # warm CLI process (history still loads under ``session_key_for``).
+        session_key = warm_session_key_for(ctx)
+        turn_handle = bind_turn(
+            session_key,
+            TurnBinding(
+                workspace_id=ctx.workspace_id,
+                user_id=ctx.user_id,
+                session_mongo_id=session_mongo_id,
+                pocket_id=ctx.pocket_id,
+                pawbar_run=pawbar_run,
+                timeline=timeline,
+                craft=craft,
+                sse_sink=side_channel_queue,
+                artifacts=current_delivered_artifacts(),
+            ),
+        )
         # Read the per-run tool policy from the PRE-RESOLVED, ENTITY-AWARE
         # profile (entity-rooms chunk ①). ``ctx.resolved_profile`` was resolved
         # once in ``execute_run`` — the surface base composed with the
@@ -1091,15 +2381,67 @@ async def _drive_agent_loop(
         # including the legacy ``resolved_profile is None`` path (no entity / no
         # profile). Still a plain ``frozenset[str]`` crossing into the OSS pool.
         surface_skills = surface_skills | _agent_skill_set(instance)
+        # PA-2 — the surface the user is looking at, as its own prompt layer.
+        # The preamble used to arrive folded into ``knowledge_context`` (see
+        # ``build_dynamic_context``, which no longer prepends it); it now rides
+        # ``pool.run`` beside the key its handler produced, so the assembled
+        # prompt's digest moves when the user navigates or the pocket they are
+        # looking at is edited. Both cross the EE→OSS boundary as plain data —
+        # a ``str`` and a ``str | None`` — exactly like ``deny_mcp_tool_ids``.
+        # ``surface_context is None`` (older clients, non-surface paths) leaves
+        # both at their no-surface defaults and the layer renders nothing.
+        surface_preamble = ""
+        surface_cache_key: str | None = None
+        if ctx.surface_context is not None:
+            surface_preamble = ctx.surface_context.preamble or ""
+            surface_cache_key = ctx.surface_context.preamble_cache_key
         run_kwargs: dict[str, Any] = dict(
             history=history,
             knowledge_context=knowledge_context,
             instructions=behavior_instructions,
             deny_mcp_tool_ids=surface_deny,
             allow_sdk_tools=surface_allow,
+            surface_preamble=surface_preamble,
+            surface_cache_key=surface_cache_key,
         )
+        if _is_sites_run(ctx):
+            # UX-8: no cross-session soul recall in a Sites chat (see
+            # ``_is_sites_run``). Withheld otherwise, so other runs are unchanged.
+            run_kwargs["soul_recall"] = False
         if surface_allow_mcp is not None:
             run_kwargs["allow_mcp_tool_ids"] = surface_allow_mcp
+        # A surface's tool-turn override (``_app_build_turn_cap``; 0 = no cap).
+        # Withheld only when None; the pool forwards it only to a backend that
+        # declares it.
+        surface_max_turns = getattr(ctx.resolved_profile, "max_turns", None)
+        if surface_max_turns is not None:
+            run_kwargs["max_turns"] = surface_max_turns
+        # CX-2 — per-agent EXCLUSIVE tool policy. When the RESOLVED agent declares
+        # ``tool_mode="exclusive"``, its OWN ``tools`` become the MCP allow-list and
+        # the CX-1 ``exclusive_mcp_tools`` cap fires: the universal grant
+        # (pocket/widget/atlas + the ALWAYS_ALLOWED escape) is suppressed and the
+        # agent's declared ids OVERRIDE any surface ``allow_mcp_tool_ids`` set just
+        # above — agent-exclusive wins over the surface. ``exclusive_mcp_tools``
+        # rides the SAME withhold-when-empty contract as ``model_override`` /
+        # ``skill_names``: the key is added ONLY on the exclusive branch, so the 7
+        # non-Claude backends never receive a kwarg their narrower signature
+        # rejects. Additive agents (the default) touch nothing → the run is
+        # byte-identical to today, grant path intact.
+        agent_exclusive, agent_tools = _agent_tool_policy(instance)
+        if agent_exclusive:
+            run_kwargs["exclusive_mcp_tools"] = True
+            run_kwargs["allow_mcp_tool_ids"] = agent_tools
+        # A deny-by-default SURFACE (the public concierge): the run is offered
+        # ONLY its allow set. ``exclusive_mcp_tools`` caps the MCP side on both
+        # backends (no universal grant, no always-allowed servers);
+        # ``exclusive_tools`` also removes the bridged PocketPaw builtins, which
+        # only the pydantic_ai backend offers and which no MCP allow set reaches.
+        # The pool forwards ``exclusive_tools`` only to a backend that declares
+        # it. Agent-exclusive precedence above is unchanged: an exclusive bound
+        # agent's own tool list is still the allow set.
+        if getattr(ctx.resolved_profile, "exclusive_tools", False):
+            run_kwargs["exclusive_mcp_tools"] = True
+            run_kwargs["exclusive_tools"] = True
         # Forward the override only when the entity actually set one — withholding
         # keeps the prompt assembly untouched on every other run.
         if surface_sys_override is not None:
@@ -1110,12 +2452,256 @@ async def _drive_agent_loop(
         if surface_skills:
             run_kwargs["skill_names"] = surface_skills
         # CS-13 — per-send model override. Same withhold-when-empty idiom as the
-        # kwargs above: only the Claude SDK backend accepts ``model_override``
-        # (the 7 other backends keep the narrower signature), so it is forwarded
-        # ONLY when the client actually chose a model for this turn. ``None`` =
-        # legacy path, byte-identical to today.
+        # kwargs above: the Claude SDK and pydantic_ai backends accept
+        # ``model_override`` (2026-09-10 — the cloud default is pydantic_ai, so
+        # before that a composer model picker was a dead control there), the
+        # rest keep the narrower signature, so it is forwarded ONLY when the
+        # client actually chose a model for this turn. ``None`` = legacy path,
+        # byte-identical to today.
+        # The id itself is checked against the gateway's own model list before
+        # it is forwarded — the edge validates a SHAPE (a regex and a length),
+        # which says nothing about whether the model exists or whether we serve
+        # it. See ``_model_is_unknown_to_gateway`` for why this rejects only
+        # what we positively know is not served.
+        # The catalog check itself is DEFERRED until the credentials below are
+        # resolved — it belongs to a platform turn only, and until we know who
+        # pays we cannot know whether it applies. ``run_kwargs`` is not consumed
+        # until ``pool.run`` far below, so setting this here and judging it
+        # later is safe.
         if ctx.model_override:
             run_kwargs["model_override"] = ctx.model_override
+        # Per-send tool switch. Same withhold-when-empty idiom: only an explicit
+        # False is a request, so a client that never sends the field (every
+        # older one) produces a byte-identical run.
+        if ctx.tools_enabled is False:
+            run_kwargs["tools_enabled"] = False
+        # --- Images this turn should LOOK at (feat/other-hand-vision) ----------
+        # The surface handler said which files its preamble is talking about;
+        # read them here, where the tenant's jail is known, and hand the pool
+        # bytes. Withhold-when-empty, so every surface that declares none takes
+        # the identical string path it always has.
+        preamble_images = _read_turn_images(ctx)
+        if preamble_images:
+            run_kwargs["images"] = preamble_images
+        # --- Images the USER attached to this turn -----------------------------
+        # A separate channel from ``images`` above, and separate on purpose: the
+        # pictures above are a snapshot the SURFACE chose to show, replaced every
+        # turn; these are files the user deliberately attached, carried as bytes
+        # the model is SHOWN rather than text scraped off them. Resolved here
+        # (not inside build_knowledge_context) because the knowledge context is a
+        # string and an image is not — the two travel to the backend by different
+        # channels and only meet in the request. Same withhold-when-empty idiom:
+        # a turn with no attachments sends nothing extra and is byte-identical to
+        # before.
+        attached_images = await resolve_turn_images(ctx, attachments_in)
+        if attached_images:
+            run_kwargs["image_attachments"] = attached_images
+        # --- BYOK per-turn credentials (feat/byok-guest-backend, 2026-09-01) ----
+        # Resolve whose credential pays for THIS turn — the call the byok
+        # service's own header always said the turn path makes, wired at last.
+        # Applies to EVERY user with a stored workspace key (this un-inerts the
+        # /agents BYOK field), not just guests. Three outcomes:
+        #   * byok + model matches the key's provider -> thread ``byok_api_key``
+        #     into ``pool.run`` (the pool swaps in an ISOLATED backend; the
+        #     credential-bleed trap is closed there and by the pydantic_ai
+        #     fingerprint cache key).
+        #   * byok + model mismatch -> a CLEAR terminal error
+        #     (byok.model_provider_mismatch), never an upstream 401 that reads
+        #     as the product being broken.
+        #   * platform -> unchanged behaviour, EXCEPT for a guest: guests have
+        #     no platform fallback (the captain's "no keyless turns" v1 rule) —
+        #     a guest whose stored key vanished or stopped decrypting gets
+        #     ``guest_key_required``, never a silently platform-billed turn.
+        # A resolver crash degrades to platform for non-guests (matching
+        # ``resolve_turn_credentials``'s own philosophy) but NEVER silently for
+        # guests. The key itself is never logged — only source/provider are.
+        #
+        # ``execute_run`` already resolved who pays, before its credit gate, and
+        # left the answer on ``ctx.turn_credentials``. Spend that answer: the
+        # gate let this turn through on it, and a second resolution could
+        # disagree. Only a caller that did not resolve (None) resolves here.
+        from pocketpaw_ee.cloud.byok import service as byok_service
+
+        try:
+            byok_creds = getattr(ctx, "turn_credentials", None)
+            if byok_creds is None:
+                byok_creds = await byok_service.resolve_turn_credentials(ctx.workspace_id)
+        except byok_service.GatewayEgressRejected as exc:
+            # The stored gateway address no longer passes the egress guard —
+            # it resolves somewhere this server must not dial (2026-09-11,
+            # review B2). Caught BEFORE the broad handler below on purpose:
+            # that one degrades to platform credentials, which here would run
+            # the tenant's turn on OUR key every time their address is bad.
+            # Refuse the turn and say why; the user fixes the address.
+            logger.warning(
+                "byok: gateway address rejected by the egress guard for workspace=%s — "
+                "refusing the turn",
+                ctx.workspace_id,
+            )
+            yield (
+                "error",
+                {"code": "byok.base_url_rejected", "message": exc.message},
+            )
+            return
+        except Exception:
+            logger.exception(
+                "byok: resolve_turn_credentials failed for workspace=%s — "
+                "using platform credentials this turn",
+                ctx.workspace_id,
+            )
+            byok_creds = byok_service.TurnCredentials(source="platform")
+        # The per-send model, judged now that we know WHOSE gateway runs it.
+        #
+        # The catalog is OUR gateway's model list. It is the right guard for a
+        # platform turn: without it a workspace names free text and our key pays
+        # for whatever gets routed. It is the WRONG list for a BYOK turn, which
+        # never touches our gateway — a live kiosk turn on `gpt-5.6-luna` was
+        # refused with "isn't a model this workspace can run" while the gateway
+        # serving it was perfectly healthy (2026-09-13).
+        #
+        # Keyed on ``byok_creds.source``, the SAME value that decides which key
+        # pays, so the two can never disagree. An earlier fix asked a second,
+        # weaker question — "is a key stored?" — and drifted from this one: a
+        # stored key that no longer decrypts reports configured, degrades to
+        # platform a few lines above, and would have skipped this check while
+        # spending our credential on free text.
+        #
+        # A BYOK turn is not left unchecked; ``provider_allows_model`` below is
+        # the check that belongs to it.
+        # ``ctx.credential_source`` (set by ``execute_run``) wins when present:
+        # a stored key on a backend that ignores it runs on our gateway, so the
+        # catalog applies to it.
+        #
+        # A Claude id on the Claude SDK backend is not judged by the catalog
+        # either: that backend reaches Claude by its own route, and the catalog
+        # lists no Anthropic model at all, so every Claude pick there was refused
+        # (2026-10-29). Any other id on that backend is still checked.
+        if (
+            ctx.model_override
+            and not (
+                backend_name == "claude_agent_sdk" and ctx.model_override.startswith("claude-")
+            )
+            and (getattr(ctx, "credential_source", None) or byok_creds.source) != "byok"
+            and await _model_is_unknown_to_gateway(ctx.model_override)
+        ):
+            yield (
+                "error",
+                {
+                    "code": "model.not_available",
+                    "message": (
+                        f"'{ctx.model_override}' isn't a model this workspace can "
+                        "run. Pick one from the model menu."
+                    ),
+                },
+            )
+            return
+        if byok_creds.source == "byok" and byok_creds.api_key:
+            agent_model = (
+                str(instance.config.get("model") or "") if hasattr(instance, "config") else ""
+            )
+            turn_model = ctx.model_override or agent_model
+            if not byok_service.provider_allows_model(byok_creds.provider, turn_model):
+                yield (
+                    "error",
+                    {
+                        "code": "byok.model_provider_mismatch",
+                        "message": (
+                            f"Your stored {byok_creds.provider} key can't run the model "
+                            f"'{turn_model}'. Pick a {byok_creds.provider} model or "
+                            "update your key."
+                        ),
+                    },
+                )
+                return
+            run_kwargs["byok_api_key"] = byok_creds.api_key
+            # What to substitute, when the answer is more than one key. A
+            # gateway key also carries the address and the model id; the pool
+            # falls back to the key alone when this is empty, so anthropic keys
+            # take exactly the path they took before (2026-09-09).
+            override = byok_service.build_settings_override(byok_creds)
+            if override:
+                run_kwargs["byok_settings_override"] = override
+        else:
+            from pocketpaw_ee.cloud.auth import guest_budget
+
+            try:
+                _guest = await guest_budget.load_guest(ctx.user_id)
+            except Exception:
+                logger.warning(
+                    "guest lookup failed for user=%s — refusing keyless turn (fail closed)",
+                    ctx.user_id,
+                    exc_info=True,
+                )
+                _guest = True  # type: ignore[assignment] — any truthy value refuses below
+            if _guest is not None:
+                yield (
+                    "error",
+                    {
+                        "code": "guest_key_required",
+                        "message": (
+                            "Your API key is missing or no longer usable. "
+                            "Re-enter it to keep going."
+                        ),
+                    },
+                )
+                return
+            # Kiosk: an ACCOUNT must bring its own key too (2026-09-12).
+            #
+            # A sibling of the guest rule above, not a widening of it. The
+            # guest rule is unconditional and permanent; this one is
+            # flag-gated, scoped to ONE surface, and since 2026-09-13 scoped to
+            # the FREE plan — a paying member runs on the platform
+            # subscription. Two rules, two codes: a guest is told to create an
+            # account, an account is told to add a key, and telling a logged-in
+            # user to sign up again is a dead end that reads as a broken
+            # product.
+            #
+            # The surface comes from ``ctx.surface_context``, resolved
+            # SERVER-side after scope resolution — not from the request body.
+            # A client-supplied surface would make a surface-scoped gate
+            # opt-out by omission. This is the enforcement seam; the router's
+            # fast-reject is UX only.
+            if await _requires_own_key(ctx):
+                from pocketpaw_ee.cloud._core.errors import ByokKeyRequired
+
+                _exc = ByokKeyRequired()
+                yield ("error", {"code": _exc.code, "message": _exc.message})
+                return
+        # --- Free-run bounds (early access) -------------------------------------
+        # An unpaid platform-funded run: pydantic_ai whatever the agent says, at
+        # most ``free_run_max_turns`` model requests, and a token limit the
+        # wallet can pay for at the price of the model that backend will run
+        # (the per-send model only survives on an agent already on pydantic_ai;
+        # the pool drops it otherwise). A stored key is withheld: this turn was
+        # gated and is billed as platform, so it runs on our gateway, bounded.
+        # Auto (no per-send pick) on a provider this workspace just saw run out
+        # of credit: run the next served model on the free allowlist instead.
+        # Only on pydantic_ai, the backend that honours ``model_override`` under
+        # a free run too, and never on the workspace's own key.
+        if (
+            not ctx.model_override
+            and "byok_api_key" not in run_kwargs
+            and backend_name == "pydantic_ai"
+        ):
+            auto_alt = await _auto_model_fallback(
+                ctx.workspace_id, _turn_model(instance, backend_name, run_kwargs)
+            )
+            if auto_alt:
+                run_kwargs["model_override"] = auto_alt
+        free_run_bounds = getattr(ctx, "free_run_bounds", None)
+        if free_run_bounds is not None:
+            from pocketpaw_ee.cloud.credits import guards
+
+            run_kwargs.pop("byok_api_key", None)
+            run_kwargs.pop("byok_settings_override", None)
+            run_kwargs["force_pydantic_ai"] = True
+            run_kwargs["max_requests"] = free_run_bounds.max_turns
+            turn_model = _forced_pydantic_ai_model(
+                instance, backend_name, run_kwargs.get("model_override")
+            )
+            token_limit = guards.free_run_token_limit(free_run_bounds.balance_micro, turn_model)
+            if token_limit is not None:
+                run_kwargs["total_tokens_limit"] = token_limit
         # --- Supervised native-resume wiring (feat/session-supervisor SS-5) -----
         # Flag-gated (default OFF). When ON, route this turn through the
         # SessionSupervisor: recover any prior native ``cli_session_id`` from the
@@ -1129,7 +2715,23 @@ async def _drive_agent_loop(
         # ``(workspace, project_key, session_id)`` key from its ``SessionKey`` at
         # append/load time. Any failure degrades to the legacy path for THIS turn
         # (no handle threaded) — a supervisor hiccup never breaks a run.
-        if _session_supervisor_enabled() and sup_workspace_id and sup_session_id and sup_agent_id:
+        # BYOK turns SKIP the supervisor entirely (feat/byok-guest-backend):
+        # a leased warm client was built on PLATFORM credentials, and
+        # ``on_client_built`` would bind an isolated BYOK client as the shared
+        # warm slot for later platform turns — either direction is the warm-
+        # client credential-bleed this workspace has shipped before. Degrading
+        # a BYOK turn to cold-start is the safe trade; the pool's isolated
+        # backend is the real guarantee.
+        if (
+            _session_supervisor_enabled()
+            and sup_workspace_id
+            and sup_session_id
+            and sup_agent_id
+            and "byok_api_key" not in run_kwargs
+            # A bounded free run is served by pydantic_ai, which has no CLI
+            # session to resume and no warm client to lease.
+            and free_run_bounds is None
+        ):
             try:
                 prior_cli = await runtime_service.get_cli_session_id(
                     sup_workspace_id, sup_session_id, sup_agent_id
@@ -1193,6 +2795,15 @@ async def _drive_agent_loop(
                 run_kwargs.pop("session_handle", None)
                 run_kwargs.pop("warm_client", None)
                 run_kwargs.pop("on_client_built", None)
+        # Every step of ``agent_iter`` runs in this ONE Context, copied after the
+        # turn's bindings are set. Each step is its own task, and a task otherwise
+        # runs in a fresh copy, so a span the backend holds across ``yield``
+        # (logfire's ``invoke_agent``) would attach in one copy and fail to detach
+        # in another.
+        step_ctx = contextvars.copy_context()
+        # What ran and who paid, for the out-of-credit mark (``_note_availability``).
+        ctx.turn_model = _turn_model(instance, backend_name, run_kwargs)
+        ctx.turn_byok = "byok_api_key" in run_kwargs
         agent_iter = pool.run(
             ctx.target_agent_id,
             user_content,
@@ -1203,7 +2814,7 @@ async def _drive_agent_loop(
         async def _next_event() -> Any:
             return await agent_iter.__anext__()
 
-        next_event_task = asyncio.create_task(_next_event())
+        next_event_task = asyncio.create_task(_next_event(), context=step_ctx)
         next_queue_task = asyncio.create_task(side_channel_queue.get())
         while True:
             if await is_cancelled():
@@ -1241,7 +2852,7 @@ async def _drive_agent_loop(
                 sup_completed_ok = True
                 next_event_task = None
                 break
-            next_event_task = asyncio.create_task(_next_event())
+            next_event_task = asyncio.create_task(_next_event(), context=step_ctx)
             if etype == "message":
                 yield (
                     "chunk",
@@ -1265,22 +2876,57 @@ async def _drive_agent_loop(
                         tool_input = econtent
                     elif isinstance(econtent, str):
                         name = econtent
-                if name == _ASK_USER_TOOL_ID:
+                if name in _ASK_USER_TOOL_NAMES:
                     # Interactive question: emit an ``ask_user_question`` frame the
-                    # client renders as clickable option chips (service.ts ->
-                    # chatStore.setAskUser -> AssistantMessage chips), NOT a generic
+                    # client renders as clickable option chips, NOT a generic
                     # tool_start. The agent ends its turn after asking; the user's
-                    # click returns as the next message.
-                    ask_input = tool_input if isinstance(tool_input, dict) else {}
-                    yield (
-                        "ask_user_question",
-                        {
-                            "question": ask_input.get("question", ""),
-                            "options": ask_input.get("options", []),
-                        },
-                    )
+                    # click returns as the next message. claude_sdk announces each
+                    # call twice, first as an ``input_pending`` placeholder with
+                    # ``input={}``; only the real call carries the question. A
+                    # call the tool rejects gets no frame, so the UI never shows
+                    # a question the agent was told failed.
+                    pending = isinstance(meta, dict) and meta.get("input_pending") is True
+                    ask_frame = None if pending else ask_user_payload(tool_input)
+                    if ask_frame is not None:
+                        yield ("ask_user_question", ask_frame)
                 else:
-                    yield ("tool_start", {"tool": name, "input": tool_input})
+                    # HTN-5: a plan tool is not a tool chip. Same normalizer and
+                    # same per-run tracker as the group/DM bridge — only the
+                    # transport differs, because this surface has no group to
+                    # fan out to (see the module docstring) and the client
+                    # streaming the run IS the audience. Same fail-open rule:
+                    # arguments that don't normalize fall through to the chip.
+                    observation = plan_tracker.observe(name, tool_input)
+                    if observation.recognized:
+                        # ``payload is None`` means the plan didn't change; the
+                        # tool fires at the start and end of every step, and
+                        # emitting nothing is what keeps the panel from flickering.
+                        if observation.payload is not None:
+                            yield (
+                                "plan_updated",
+                                {
+                                    "agent_id": ctx.target_agent_id,
+                                    "agent_name": getattr(instance, "agent_name", ""),
+                                    **observation.payload,
+                                },
+                            )
+                    else:
+                        # HTN-11: the same phrase the group/DM bridge sends, from
+                        # the same function, so one tool cannot read as English on
+                        # one surface and as a raw name on the other. Additive:
+                        # a tool with no phrasing emits no field and the client
+                        # keeps rendering ``tool``.
+                        frame: dict[str, Any] = {"tool": name, "input": tool_input}
+                        # A provisional announcement (claude_sdk names the tool
+                        # before its arguments stream; see agents/protocol.py).
+                        # Forwarded so the step recorder keeps ONE step per call;
+                        # absent when not provisional, so other frames are as before.
+                        if isinstance(meta, dict) and meta.get("input_pending") is True:
+                            frame["input_pending"] = True
+                        narration = narrate_tool_use(name, tool_input, instance)
+                        if narration:
+                            frame["narration"] = narration
+                        yield ("tool_start", frame)
             elif etype == "tool_result":
                 meta = getattr(event, "metadata", None) or {}
                 name = ""
@@ -1297,9 +2943,45 @@ async def _drive_agent_loop(
                     output=output,
                     handled_pocket_ids=handled_pocket_ids,
                 )
+                # Detect build_studio_flow tool output and fan the full graph as
+                # a dedicated studio_flow SSE frame (tool_result truncates to
+                # 200 chars — too small for a node graph). Mirrors the OSS
+                # loop's _publish_studio_flow_event so the /studio canvas
+                # materialises the agent's build live on the EE chat path too.
+                _sf_payload = _studio_flow_payload(output)
+                if _sf_payload is not None:
+                    yield ("studio_flow", _sf_payload)
+                # Same treatment for the /studio/editor tools: the op batch is
+                # far past the tool_result chip's 200 chars, and the browser tab
+                # holding the document is the only thing that can apply it.
+                for _marker in _EDITOR_ENVELOPE_MARKERS:
+                    _tl_payload = _timeline_payload(output, _marker)
+                    if _tl_payload is not None:
+                        yield (_marker, _tl_payload)
+                # The agent asked to open an app surface. Promoted ONLY from the
+                # open_surface tool's own result: a web page or file the agent
+                # reads can carry a well-formed marker with a valid route, so
+                # "the text parses" is a prompt-injection path to opening a
+                # surface with attacker-chosen params. An unresolved name ("",
+                # or a backend fallback like "mcp_server") fails closed. The
+                # payload is then re-validated, never trusted as-is.
+                from pocketpaw_ee.agent.mcp_servers.surfaces import (
+                    OPEN_SURFACE_TOOL_NAMES,
+                    validate_open_surface,
+                )
+
+                _os_payload = (
+                    _timeline_payload(output, "open_surface")
+                    if name in OPEN_SURFACE_TOOL_NAMES
+                    else None
+                )
+                if _os_payload is not None:
+                    _os_clean, _ = validate_open_surface(_os_payload)
+                    if _os_clean is not None:
+                        yield ("open_surface", _os_clean)
                 # The ask_user ack is internal (the question UI already rendered
                 # from the tool_use); don't surface a tool_result chip for it.
-                if name != _ASK_USER_TOOL_ID:
+                if name not in _ASK_USER_TOOL_NAMES:
                     yield ("tool_result", {"tool": name, "output": output})
             elif etype == "token_usage":
                 # Real per-run token metering (W3a). The backend (claude_sdk and
@@ -1360,7 +3042,12 @@ async def _drive_agent_loop(
                     ctx.target_agent_id,
                     message[:200],
                 )
-                yield ("error", {"code": "agent.backend_error", "message": message})
+                ctx.backend_error_detail = message
+                frame = _backend_error_frame(message)
+                note = await _app_build_stop_note(ctx, message)
+                if note:
+                    frame = {**frame, "message": f"{frame['message']} {note}"}
+                yield ("error", frame)
                 if sup_acq is not None:
                     # Supervised: a backend ``error`` event is NOT automatically a
                     # crash. The leased ``claude`` client can stay alive and healthy
@@ -1402,10 +3089,49 @@ async def _drive_agent_loop(
         pending = [t for t in (next_event_task, next_queue_task) if t is not None and not t.done()]
         for t in pending:
             t.cancel()
+        # Both waits are bounded and shielded: a step that ignores its cancel, a
+        # wedged close or a second cancel must not skip the bookkeeping below
+        # (busy counter, sinks). A held cancel is re-raised last.
+        close_cancelled = False
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            close_cancelled = await _settle_bounded(
+                asyncio.gather(*pending, return_exceptions=True), "draining the pending steps"
+            )
+        # A cancel can land before the pending step ever ran, leaving the backend
+        # suspended mid-turn; close it in the steps' Context, not from a GC finalizer.
+        if agent_iter is not None:
+            close_task = asyncio.create_task(agent_iter.aclose(), context=step_ctx)
+            if await _settle_bounded(close_task, "closing the agent generator"):
+                close_cancelled = True
         try:
             detach_sse_event_sink(sink_token)
+        except Exception:
+            pass
+        # Must not outlive the sink: a stale entry is a queue nobody drains, so
+        # the next turn would park for the full delegate budget instead of
+        # refusing at once.
+        try:
+            # Identity-checked: nothing serializes runs per session, so a
+            # second concurrent run on the same session may already own the
+            # entry. Popping it here would break the run still streaming.
+            unregister_stream_sink(session_mongo_id, side_channel_queue)
+        except Exception:
+            pass
+        if turn_handle is not None:
+            try:
+                unbind_turn(turn_handle)
+            except Exception:
+                pass
+        try:
+            unbind_craft(craft_token)
+        except Exception:
+            pass
+        try:
+            unbind_timeline(timeline_token)
+        except Exception:
+            pass
+        try:
+            unbind_pawbar_run(pawbar_token)
         except Exception:
             pass
         try:
@@ -1416,6 +3142,12 @@ async def _drive_agent_loop(
         # runtime to COLD (``mark_crashed`` keeps the cli_session_id so the next
         # turn still resumes from the store). Best-effort: bookkeeping must never
         # break teardown. No-op on the legacy path (``sup_acq is None``).
+        # A turn that never saw ``done`` is demoted too, whatever ended it: a user
+        # stop, a host cancel or a consumer that closed the stream. The leased
+        # client is still writing that reply, and the next turn would read its
+        # tail as its own answer.
+        if sup_acq is not None and not sup_completed_ok:
+            sup_run_failed = True
         if sup_acq is not None:
             try:
                 _sup = get_session_supervisor()
@@ -1424,6 +3156,8 @@ async def _drive_agent_loop(
                 _sup.mark_run_end(sup_acq.runtime)
             except Exception:
                 logger.debug("session-supervisor run-end bookkeeping failed", exc_info=True)
+        if close_cancelled:
+            raise asyncio.CancelledError
 
 
 async def _iter_agent_events(
@@ -1435,7 +3169,9 @@ async def _iter_agent_events(
     async def _is_cancelled() -> bool:
         return await transport.is_cancelled(spec.run_id)
 
-    async for ev in _drive_agent_loop(
+    # ``aclosing`` so closing THIS generator closes the loop under it at once;
+    # an ``async for`` alone would leave the inner one to the GC finalizer.
+    loop_events = _drive_agent_loop(
         ctx,
         user_content=spec.content,
         attachments_in=list(spec.attachments) if spec.attachments else None,
@@ -1443,8 +3179,34 @@ async def _iter_agent_events(
         history=list(spec.history),
         is_cancelled=_is_cancelled,
         emit_stream_start=True,
-    ):
-        yield ev
+        # The surface decides whether an attached image/video may be republished
+        # to the PUBLIC asset bucket (sites only — see _build_attachments_block).
+        # Threaded explicitly rather than sniffed off ctx: publishing a user's
+        # chat attachment to a world-readable URL is not a default anyone should
+        # inherit by accident.
+        surface=spec.surface,
+        # Studio Flow build context (flow_id / project_name) so the agent's
+        # prompt carries the ACTIVE FLOW ID and build_studio_flow persists into
+        # the flow project the user is on. None on every non-studio run.
+        flow_context=spec.flow_context,
+    )
+    async with contextlib.aclosing(loop_events):
+        async for ev in loop_events:
+            yield ev
+
+
+async def _close_agent_events(agent_events: Any, run_id: str) -> None:
+    """``aclose`` the agent event generator; best-effort, a no-op once it ended.
+
+    ``_drive_agent_loop`` bounds its own teardown waits, so this cannot hang on
+    a wedged backend close."""
+    aclose = getattr(agent_events, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:
+        logger.warning("closing the agent event stream failed for %s", run_id, exc_info=True)
 
 
 async def _handle_interrupted_cleanup(
@@ -1452,6 +3214,8 @@ async def _handle_interrupted_cleanup(
     ctx: ScopeContext,
     full_text: str,
     transport: Any,
+    usage: dict[str, Any] | None = None,
+    recorder: StepRecorder | None = None,
 ) -> None:
     """Best-effort finalisation when ``execute_run`` is cancelled by the host.
 
@@ -1459,16 +3223,31 @@ async def _handle_interrupted_cleanup(
     block the others — every action is independently best-effort. The
     caller wraps THIS in ``asyncio.shield`` so a second cancel arriving
     during the cleanup can't abort it mid-flight.
+
+    ``usage`` carries whatever the backend had reported by the time the host
+    cancelled. It used not to be a parameter at all, so a worker shutdown wrote
+    a terminal doc with no counts and the sweeper billed the run zero — the
+    third of the three terminal states that could never carry usage.
+
+    The streamed text is persisted as a cut-off assistant Message first, so a
+    run arq killed at ``job_timeout`` still shows its reply after a refresh,
+    with the steps ``recorder`` holds (an open call becomes ``missing_result``).
     """
     try:
         await _broadcast_agent_typing(ctx, active=False)
     except Exception:
         logger.debug("agent.typing(active=False) broadcast failed", exc_info=True)
+    if await _requeue_if_retryable(spec, transport, recorder):
+        return
+    step_fields = recorder.persist_kwargs() if recorder is not None else {}
+    assistant_id = await _persist_partial_reply(spec, ctx, full_text, "interrupted", **step_fields)
     try:
         await run_service.mark_terminal(
             spec.run_id,
             status="interrupted",
             partial_text=full_text,
+            usage=usage or None,
+            assistant_message_id=assistant_id,
         )
     except Exception:
         logger.exception("mark_terminal(interrupted) failed for %s", spec.run_id)
@@ -1477,6 +3256,50 @@ async def _handle_interrupted_cleanup(
         await transport.set_ttl(spec.run_id, _stream_ttl())
     except Exception:
         logger.debug("interrupted stream write failed", exc_info=True)
+
+
+RETRYING_MESSAGE = "The service restarted mid-reply. Starting your reply again."
+
+
+async def _requeue_if_retryable(
+    spec: RunSpec, transport: Any, recorder: StepRecorder | None
+) -> bool:
+    """Requeue a run the WORKER cancelled while shutting down. True when requeued.
+
+    Only a shutdown qualifies (no flag means arq's own job_timeout fired, and a
+    retry would time out again), only a run that called no tools (re-running a
+    tool could repeat its side effect), and only while attempts remain. The
+    ``retrying`` frame is not terminal, so a connected client keeps listening and
+    can drop the text it already shows: the retry streams the reply from the top.
+    """
+    if not shutdown.is_stopping() or (recorder is not None and recorder.called_tools):
+        return False
+    try:
+        attempt = await run_service.requeue_for_retry(spec.run_id, max_attempts=MAX_RUN_ATTEMPTS)
+    except Exception:
+        logger.exception("requeue_for_retry failed for %s", spec.run_id)
+        return False
+    if attempt is None:
+        return False
+    logger.info(
+        "execute_run %s: worker shutting down; requeued as attempt %d", spec.run_id, attempt
+    )
+    try:
+        await transport.append_event(
+            spec.run_id,
+            "retrying",
+            {
+                "run_id": spec.run_id,
+                "reason": "system_restart",
+                "attempt": attempt,
+                "message": RETRYING_MESSAGE,
+            },
+        )
+        # Bound the key until the retry's own terminal write refreshes it.
+        await transport.set_ttl(spec.run_id, queued_stream_ttl_seconds())
+    except Exception:
+        logger.debug("retrying stream write failed", exc_info=True)
+    return True
 
 
 async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
@@ -1493,7 +3316,9 @@ async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport
     """
     from pocketpaw_ee.cloud import agent_jail
 
-    quota_error = agent_jail.check_workspace_jail_quota(ctx.workspace_id)
+    # A sync ``os.scandir`` walk of the whole jail: 0.3-3 s on a big one, so it
+    # runs in a thread rather than stalling every other run on this loop.
+    quota_error = await asyncio.to_thread(agent_jail.check_workspace_jail_quota, ctx.workspace_id)
     if not quota_error:
         return False
     logger.warning("run %s rejected — agent jail over quota: %s", spec.run_id, quota_error)
@@ -1514,6 +3339,141 @@ async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport
     return True
 
 
+async def _reject_if_over_daily_turns(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """Per-workspace daily agent-run ceiling (feat/abuse-budgets).
+
+    The always-on sibling of ``_reject_if_over_credit_quota``. That gate is the
+    priced ceiling and is a no-op unless ``billing_enforced`` or
+    ``credits_enforced``, both of which default off, so on a deployment that
+    has not configured billing nothing bounds
+    what one signed-up account can spend on models. Guests have had a daily
+    turn cap since ``guest_budget``; this is its signed-up equivalent, and it
+    is deliberately NOT flag-gated.
+
+    Sits with the other run-start gates so it covers every path into the
+    executor (HTTP, WebSocket, queued, resumed) and fires BEFORE prewarm,
+    mark-running and any model call. Only this seam increments, so a turn costs
+    exactly one. Rejection uses the same shape as its neighbours: a terminal
+    ``error`` frame, ``mark_terminal(failed)``, then the stream TTL.
+
+    Returns ``True`` when the run was rejected.
+    """
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.metering.domain import DailyMeter
+
+    cap = metering.workspace_turns_cap()
+    if await metering.try_spend(
+        subject_type="workspace",
+        subject_id=ctx.workspace_id,
+        meter=DailyMeter.WORKSPACE_TURNS,
+        cap=cap,
+        # Fails OPEN: the run persists to the same Mongo, so a database that
+        # cannot serve this counter cannot serve the run either.
+        fail_open=True,
+    ):
+        return False
+
+    from pocketpaw_ee.cloud._core.errors import DailyTurnLimitError
+
+    exc = DailyTurnLimitError(cap)
+    logger.warning("run %s rejected — workspace daily turn cap (%d)", spec.run_id, cap)
+    try:
+        await transport.append_event(
+            spec.run_id, "error", {"code": exc.code, "message": exc.message}
+        )
+    except Exception:
+        logger.debug("turn-cap error frame append failed for %s", spec.run_id, exc_info=True)
+    try:
+        await run_service.mark_terminal(spec.run_id, status="failed", error=exc.message)
+    except Exception:
+        logger.exception("mark_terminal(failed) failed for turn-capped run %s", spec.run_id)
+    try:
+        await transport.set_ttl(spec.run_id, _stream_ttl())
+    except Exception:
+        logger.debug("turn-cap stream ttl set failed for %s", spec.run_id, exc_info=True)
+    return True
+
+
+async def _requires_own_key(ctx: ScopeContext) -> bool:
+    """Must THIS turn pay with the user's own key, having found none?
+
+    The ENFORCEMENT seam. Thin on purpose: the rule itself lives in
+    ``chat.kiosk_byok.requires_own_key`` because the router asks the same
+    question first, and a term added here alone would have the router refuse a
+    paying member the executor was about to let through.
+
+    What is local to this seam is the CONTEXT it asks with: ``ctx`` here was
+    resolved SERVER-side, so the surface cannot be omitted by a client the way
+    it can at the router. That is the whole reason this call survives.
+
+    Guests never reach here — the branch above already refused them, with
+    their own code. Callers reach this only after credential resolution came
+    back ``platform``.
+
+    Async since 2026-09-13: the rule now reads the workspace's plan.
+    """
+    from pocketpaw_ee.cloud.chat import kiosk_byok
+
+    return await kiosk_byok.requires_own_key(ctx)
+
+
+async def _resolve_payer_or_refuse(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """Decide who pays for this run before the credit gate. True if refused.
+
+    Stores the credentials on ``ctx.turn_credentials`` (``_drive_agent_loop``
+    spends them) and the billing answer on ``ctx.credential_source``, which the
+    credit gate reads and the run doc records (``bill_run`` debits 0 for
+    ``byok``). The billing answer is ``byok`` only when the agent's backend
+    really spends the key (``credits.guards.billing_source``); a stored key on
+    any other backend is gated and charged as platform. A resolver failure
+    degrades to platform inside ``credits.guards.resolve_payer``, so the run is
+    gated and charged, never free.
+
+    A gateway address the egress guard rejects is refused here, with the same
+    ``byok.base_url_rejected`` code the loop uses, rather than gated as
+    platform: the turn must not run on our key, and a wallet refusal would
+    tell a BYOK user to buy credits for a broken address. Same rejection shape
+    as the neighbouring gates. The stamp is best-effort; an unstamped doc
+    keeps its ``platform`` default and is charged.
+    """
+    from pocketpaw_ee.cloud.byok.service import GatewayEgressRejected
+    from pocketpaw_ee.cloud.credits import guards
+
+    try:
+        ctx.turn_credentials = await guards.resolve_payer(ctx.workspace_id)
+    except GatewayEgressRejected as exc:
+        logger.warning(
+            "run %s rejected: gateway address refused by the egress guard for workspace=%s",
+            spec.run_id,
+            ctx.workspace_id,
+        )
+        try:
+            await transport.append_event(
+                spec.run_id, "error", {"code": exc.code, "message": exc.message}
+            )
+        except Exception:
+            logger.debug("egress error frame append failed for %s", spec.run_id, exc_info=True)
+        try:
+            await run_service.mark_terminal(spec.run_id, status="failed", error=exc.message)
+        except Exception:
+            logger.exception("mark_terminal(failed) failed for egress-refused run %s", spec.run_id)
+        try:
+            await transport.set_ttl(spec.run_id, _stream_ttl())
+        except Exception:
+            logger.debug("egress stream ttl set failed for %s", spec.run_id, exc_info=True)
+        return True
+    ctx.credential_source = await guards.billing_source(
+        ctx.turn_credentials,
+        ctx.target_agent_id,
+        exclusive_tools=bool(getattr(ctx.resolved_profile, "exclusive_tools", False)),
+    )
+    try:
+        await run_service.set_credential_source(spec.run_id, ctx.credential_source)
+    except Exception:
+        logger.warning("credential_source stamp failed for %s", spec.run_id, exc_info=True)
+    return False
+
+
 async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
     """Universal run-start BILLING gate on the worker/executor path.
 
@@ -1527,7 +3487,7 @@ async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transpo
 
     Delegates to the shared ``credits.guards.reject_if_over_billing`` so every
     agent-run seam blocks identically. That helper is flag-gated (a no-op unless
-    ``billing_enforced``) and runs BOTH credit assertions: ``check_balance``
+    ``billing_enforced`` or ``credits_enforced``) and runs BOTH credit assertions: ``check_balance``
     (wallet <= 0 -> 402 credits.insufficient) AND ``check_quota`` (month-to-date
     spend >= the effective monthly ceiling -> 402 credits.quota_exceeded, itself a
     no-op for an uncapped Enterprise plan). Before this delegation the worker leg
@@ -1543,14 +3503,60 @@ async def _reject_if_over_credit_quota(spec: RunSpec, ctx: ScopeContext, transpo
         run_id=spec.run_id,
         transport=transport,
         log_label=spec.run_id,
+        source=getattr(ctx, "credential_source", None) or "platform",
     )
 
 
-async def execute_run(spec: RunSpec) -> None:
+async def _reject_if_guest_over_limit(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """Guest daily-turn gate on the worker/executor path (feat/byok-guest-backend).
+
+    The guest sibling of ``_reject_if_over_credit_quota``: delegates to
+    ``auth.guest_gates.reject_if_guest_over_limit``, which is a no-op for
+    non-guest users, performs the ONE atomic increment-then-compare spend for
+    guests, refuses a guest with no usable stored key (``guest_key_required``
+    — the captain's no-keyless-turns rule), and on rejection emits the same
+    terminal ``error`` frame + ``mark_terminal(failed)`` + TTL shape the
+    billing reject emits. Returns True when the run was rejected.
+    """
+    from pocketpaw_ee.cloud.auth import guest_gates
+
+    return await guest_gates.reject_if_guest_over_limit(
+        ctx.user_id,
+        ctx.workspace_id,
+        run_id=spec.run_id,
+        transport=transport,
+    )
+
+
+async def _note_availability(ctx: ScopeContext, error_code: str | None) -> None:
+    """Keep the model picker's out-of-credit marks in step with this run.
+
+    An ``agent.provider_out_of_credit`` failure marks the turn's provider (or,
+    on the workspace's own key, every model) for this workspace; any run that
+    finished without an error clears it. Other failures say nothing about
+    credit and leave the marks alone. Best effort: never raises.
+    """
+    from pocketpaw_ee.catalog import availability
+
+    model = getattr(ctx, "turn_model", None) or ""
+    byok = bool(getattr(ctx, "turn_byok", False))
+    try:
+        if error_code == OUT_OF_CREDIT_CODE:
+            await availability.record_out_of_credit(ctx.workspace_id, model, byok=byok)
+        elif error_code is None and (model or byok):
+            await availability.clear(ctx.workspace_id, model, byok=byok)
+    except Exception:
+        logger.debug("model availability update failed", exc_info=True)
+
+
+async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
     A stream that produced no text is treated like ``cancelled`` for
-    persistence purposes (no assistant message created).
+    persistence purposes (no assistant message created). ``retry`` marks the
+    automatic second attempt of a run a worker shutdown requeued: the run-start
+    gates that SPEND (guest turn, daily turns, early-access reservation) already
+    charged attempt 1, so they are skipped; the check-only gates still run.
     """
     transport = get_stream_transport()
     # Thread the authenticated, route-validated workspace from the spec into
@@ -1568,6 +3574,9 @@ async def execute_run(spec: RunSpec) -> None:
         user_id=spec.user_id,
         agent_id_hint=spec.agent_id,
         expected_workspace_id=spec.workspace_id,
+        # CX-3: on /code the resolver routes an unhinted turn to the dedicated
+        # code agent (exclusive file-tool policy). No-op on every other surface.
+        surface=spec.surface,
     )
     # Even with the spec fallback, a doc + spec that BOTH lack a usable workspace
     # must fail cleanly here — never attach an empty identity downstream (the
@@ -1586,6 +3595,7 @@ async def execute_run(spec: RunSpec) -> None:
     # model choice reaches ``_drive_agent_loop`` only via this copy. ``None`` (older
     # clients) leaves the backend's own model selection untouched.
     ctx.model_override = spec.model_override
+    ctx.tools_enabled = spec.tools_enabled
 
     # Mirror agent_router._ensure_scope_session so _drive_agent_loop's
     # title-gen guard (`if not history and ctx.session_id`) actually fires
@@ -1628,7 +3638,7 @@ async def execute_run(spec: RunSpec) -> None:
     # ripple-omit + _drive_agent_loop tool-deny/allow) read ctx.resolved_profile
     # instead of re-resolving. Never raises — a missing/foreign pocket degrades
     # to the surface base (today's behavior).
-    ctx.resolved_profile = await _resolve_entity_profile(ctx)
+    ctx.resolved_profile = _deny_soul_tools_on_sites(ctx, await _resolve_entity_profile(ctx))
 
     # ART-3: reject a run whose workspace agent-jail is over quota BEFORE the
     # prewarm + mark-running + agent spin-up, so a tenant that filled its scratch
@@ -1644,10 +3654,62 @@ async def execute_run(spec: RunSpec) -> None:
     # reject above is (terminal ``error`` frame + ``mark_terminal(failed)``, then
     # an early return WITHOUT running the agent — the no-overspend money
     # guarantee). Flag-gated inside the helper: a no-op unless
-    # ``billing_enforced`` is on, so OSS / self-host is unaffected and IN-FLIGHT
-    # runs (already past this point) are never killed.
+    # ``billing_enforced`` or ``credits_enforced`` is on, so OSS / self-host is
+    # unaffected and IN-FLIGHT runs (already past this point) are never killed.
+    # Who pays is resolved first: a run on the workspace's own key is not gated
+    # by the wallet and is billed 0.
+    if await _resolve_payer_or_refuse(spec, ctx, transport):
+        return
     if await _reject_if_over_credit_quota(spec, ctx, transport):
         return
+
+    # Guest turn gate (feat/byok-guest-backend) — the SINGLE atomic spend
+    # against the guest's daily turn budget, sitting beside the jail/credit
+    # gates for the same reason they sit here: BEFORE prewarm, mark-running and
+    # any model work, covering every path into the executor (HTTP, WS, queued).
+    # The chat HTTP route also fast-rejects check-only in ``agent_router`` so
+    # the browser gets a clean pre-stream 402; only THIS seam increments, so a
+    # turn costs exactly one. No-op for non-guest users; fail-CLOSED for
+    # guests (an unreadable counter refuses the run).
+    if not retry and await _reject_if_guest_over_limit(spec, ctx, transport):
+        return
+
+    # Workspace daily turn ceiling (feat/abuse-budgets) — the always-on abuse
+    # bound, sitting LAST of the four run-start gates so a more specific and
+    # more actionable rejection wins: over jail quota, out of credit, or a
+    # guest over their allowance all say something the user can act on, where
+    # this one only says "come back tomorrow". No-op when the cap is 0;
+    # fail-CLOSED on an unreadable counter, which costs nothing because the run
+    # persists to the same database.
+    if not retry and await _reject_if_over_daily_turns(spec, ctx, transport):
+        return
+
+    # Free-run bounds, read after every gate passed so the wallet is the one
+    # this run starts on. None for a paid workspace, a BYOK run, or while
+    # neither credits_enforced nor billing_enforced is on.
+    from pocketpaw_ee.cloud.credits import guards as _guards
+
+    ctx.free_run_bounds = await _guards.free_run_bounds(
+        ctx.workspace_id, getattr(ctx, "credential_source", None) or "platform"
+    )
+    # Such a run may only use an allowlisted, priced model: the one asked for
+    # and the one the forced pydantic_ai backend really runs on. Refused here,
+    # before the pool builds anything.
+    if ctx.free_run_bounds is not None:
+        for model in await _guards.free_run_models(ctx.target_agent_id, ctx.model_override):
+            refusal = _guards.free_model_denial(model)
+            if refusal is not None:
+                await _guards.refuse_run(spec.run_id, refusal, transport=transport)
+                return
+        # Last gate: reserve this run's estimate on the platform-wide daily
+        # early-access ceiling. ``bill_run`` reconciles it, so a run that ends
+        # before the model call gives it all back. A retry still holds attempt
+        # 1's reservation (nothing billed the requeued run), so it takes none.
+        if not retry:
+            refusal = await _guards.reserve_free_run(spec.run_id, ctx.free_run_bounds)
+            if refusal is not None:
+                await _guards.refuse_run(spec.run_id, refusal, transport=transport)
+                return
 
     # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's
     # fail-closed (fix/cloud-artifacts-reland). ``agent_jail.resolve_agent_cwd``
@@ -1668,7 +3730,16 @@ async def execute_run(spec: RunSpec) -> None:
     # descendant SDK task) appends onto the SAME list this task drains at persist
     # time. The ``as`` target stays in scope after the block, so the post-loop
     # persist below can still read it once the ContextVar is reset.
-    with mark_cloud_chat_run(), collect_delivered_artifacts() as delivered_artifacts:
+    # paw-lens attribution: every span this run opens (prewarm task included,
+    # create_task copies the context) carries the run's workspace and agent.
+    # ``target_agent_id``, not ``spec.agent_id``: the spec's id is only a hint
+    # the scope resolver may override (e.g. /code routes to the code agent), and
+    # ``target_agent_id`` is the agent the pool actually runs.
+    with (
+        mark_cloud_chat_run(),
+        collect_delivered_artifacts() as delivered_artifacts,
+        baggage(**{"paw.workspace_id": ctx.workspace_id, "paw.agent.id": ctx.target_agent_id}),
+    ):
         # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
         # subprocess for this session NOW — concurrently with the remaining pre-turn
         # work below (mark-running, typing broadcast, and inside _drive_agent_loop:
@@ -1677,15 +3748,35 @@ async def execute_run(spec: RunSpec) -> None:
         # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
         # forget: _prewarm_session swallows every error, so it can never delay or
         # break this run; the task is intentionally not awaited.
-        asyncio.create_task(_prewarm_session(ctx))
+        asyncio.create_task(_prewarm_session(ctx, flow_context=spec.flow_context))
 
-        await _mark_running(spec.run_id)
-        await _broadcast_agent_typing(ctx, active=True)
+        # A False here means the run is no longer queued: the stale-run sweeper
+        # interrupted it while it waited in arq, and its client already has the
+        # terminal frame. Driving it now would spend tokens on a reply nobody
+        # is listening for, and flip the doc back out of ``interrupted``.
+        if await _mark_running(spec.run_id) is False:
+            logger.info("execute_run %s: run is no longer queued; not driving it", spec.run_id)
+            return
+        # Liveness for the stale-run sweeper; stopped in the loop's finally.
+        heartbeat = asyncio.create_task(_heartbeat_loop(spec.run_id, _heartbeat_seconds()))
+        # Best-effort like every other typing broadcast. It rides Redis in worker
+        # mode, and it sits between the heartbeat starting and the ``try`` whose
+        # ``finally`` stops it: letting it raise here ended the run with no
+        # terminal write while the heartbeat kept the doc looking alive, a
+        # phantom ``active_run`` the sweeper could never clear.
+        try:
+            await _broadcast_agent_typing(ctx, active=True)
+        except Exception:
+            logger.debug("agent.typing(active=True) broadcast failed", exc_info=True)
 
         full_text = ""
+        # The thinking blocks and tool calls this run streams, for the Message.
+        recorder = StepRecorder()
         cancelled = False
         error: Exception | None = None
         backend_error_message: str | None = None
+        # The ``code`` of the error frame the chat got, for ``_note_availability``.
+        error_code: str | None = None
         # Per-run token metering (W3a). The backend yields a ``token_usage`` event
         # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
         # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
@@ -1693,18 +3784,95 @@ async def execute_run(spec: RunSpec) -> None:
         # ``stream_end`` frame and the persisted run doc carry actual counts instead
         # of the old hardcoded ``{}``.
         usage: dict[str, Any] = {}
+        repetition = RepetitionGuard()
+        tool_work_done = False
+        # The latest ``ask_user_question`` frame, stored on the Message so the
+        # option chips survive a reload.
+        ask_frame: dict[str, Any] | None = None
+        # Whether any frame other than ``_PASSIVE_EVENTS`` reached the client.
+        acted = False
+        agent_events = _iter_agent_events(spec, ctx)
         try:
-            async for event_name, event_data in _iter_agent_events(spec, ctx):
+            async for event_name, event_data in agent_events:
                 if await transport.is_cancelled(spec.run_id):
+                    # Keep the text this event carries before leaving. The check
+                    # runs BEFORE the event is handled, so a bare break discards
+                    # a chunk the model already produced and already charged for
+                    # — and with the flag set before the loop opened, it discards
+                    # all of them, which is how a cancelled run reached
+                    # ``mark_terminal`` with an empty ``partial_text``.
+                    #
+                    # Not appended to the transport on purpose: the client asked
+                    # the stream to stop, and it stops at the same event it
+                    # always did. Only the durable record gains the text.
+                    if event_name == "chunk":
+                        full_text += _chunk_text(event_data)
                     cancelled = True
                     break
                 if event_name == "chunk":
-                    content = event_data.get("content", "")
-                    if isinstance(content, str):
-                        full_text += content
+                    chunk_text = _chunk_text(event_data)
+                    full_text += chunk_text
+                    if repetition.feed(chunk_text):
+                        # UX-4: the model is looping on one sentence or paragraph.
+                        # Stop reading (the ``finally`` closes the backend) and keep
+                        # one copy of the loop. The tripping chunk is never
+                        # forwarded. A run whose tools already did work ends
+                        # COMPLETED with the notice appended, so that work is not
+                        # reported as a failure; a text-only run ends failed with
+                        # the notice as its error.
+                        logger.warning(
+                            "execute_run %s: reply repeated itself, stopping it", spec.run_id
+                        )
+                        full_text = repetition.kept_text(full_text)
+                        if tool_work_done:
+                            notice = {
+                                "content": f"\n\n{REPETITION_STOPPED_MESSAGE}",
+                                "type": "text",
+                            }
+                            full_text += notice["content"]
+                            recorder.observe("chunk", notice)
+                            await transport.append_event(spec.run_id, "chunk", notice)
+                            break
+                        stop_frame = {
+                            "code": REPETITION_STOPPED_CODE,
+                            "message": REPETITION_STOPPED_MESSAGE,
+                        }
+                        recorder.observe("error", stop_frame)
+                        await transport.append_event(spec.run_id, "error", stop_frame)
+                        backend_error_message = REPETITION_STOPPED_MESSAGE
+                        break
+                elif event_name in ("tool_start", "tool_result"):
+                    # Text on either side of a tool call is not one run of text.
+                    repetition.break_run()
+                    if event_name == "tool_result":
+                        tool_work_done = True
+                elif event_name == "ask_user_question":
+                    if isinstance(event_data, dict):
+                        ask_frame = event_data
                 elif event_name == "token_usage":
                     if isinstance(event_data, dict) and event_data:
-                        usage = event_data
+                        # LATEST-WINS, FLOORED. Every backend reports a
+                        # RUN-CUMULATIVE payload — ``pydantic_ai`` accumulates
+                        # into one ``RunUsage``, ``deep_agents`` and
+                        # ``claude_sdk`` each report a run total, and
+                        # ``codex_cli`` accumulates its per-turn events — so
+                        # taking the latest is right and SUMMING would bill the
+                        # conversation once per turn.
+                        #
+                        # The floor is what makes latest-wins safe: a payload
+                        # smaller than the one already held can only be a
+                        # regression (a backend that went back to per-turn
+                        # reporting), and a regression must not be able to
+                        # silently halve a bill. ``>=`` and not ``>`` so an
+                        # equal-volume payload still replaces — that keeps a
+                        # later payload's better metadata (a resolved model
+                        # name) and means two zero-token payloads behave as
+                        # plain latest-wins rather than pinning the first.
+                        if _usage_total(event_data) >= _usage_total(usage):
+                            usage = event_data
+                if event_name not in _PASSIVE_EVENTS:
+                    acted = True
+                recorder.observe(event_name, event_data)
                 await transport.append_event(spec.run_id, event_name, event_data)
                 if event_name == "error":
                     # ``_drive_agent_loop`` already broke out after yielding this.
@@ -1712,6 +3880,7 @@ async def execute_run(spec: RunSpec) -> None:
                     # writing and route to the failed-mark path below so the doc
                     # doesn't get flipped to ``completed`` by the empty-text branch.
                     backend_error_message = str(event_data.get("message") or "")
+                    error_code = str(event_data.get("code") or "")
                     break
         except asyncio.CancelledError:
             # The task itself was cancelled (worker shutdown, host signal). Run
@@ -1722,8 +3891,15 @@ async def execute_run(spec: RunSpec) -> None:
             # cancel (SIGKILL grace window) can't abort mark_terminal mid-flight
             # and strand the doc in ``running`` with no terminal stream frame.
             logger.info("execute_run %s cancelled by host", spec.run_id)
+            # An explicit task (not a bare coroutine to shield) so the worker's
+            # shutdown can find it: the cleanup outlives this cancelled task, and
+            # ``drain_pending_cleanups`` waits on it before the DB is closed.
+            cleanup = asyncio.ensure_future(
+                _handle_interrupted_cleanup(spec, ctx, full_text, transport, usage, recorder)
+            )
+            _track_cleanup(cleanup)
             try:
-                await asyncio.shield(_handle_interrupted_cleanup(spec, ctx, full_text, transport))
+                await asyncio.shield(cleanup)
             except asyncio.CancelledError:
                 # The outer await is cancelled but the shielded inner task
                 # continues running to completion in the background. That's
@@ -1736,11 +3912,19 @@ async def execute_run(spec: RunSpec) -> None:
         except Exception as exc:
             error = exc
             logger.exception("execute_run %s crashed", spec.run_id)
-            await transport.append_event(
-                spec.run_id,
-                "error",
-                {"code": "agent.run_failed", "message": str(exc)},
-            )
+            crash_frame = _crash_error_frame(exc)
+            error_code = crash_frame["code"]
+            await transport.append_event(spec.run_id, "error", crash_frame)
+        finally:
+            # A ``break`` (user stop, backend error frame) leaves the generator
+            # suspended; close it here so the backend and its bookkeeping in
+            # ``_drive_agent_loop``'s ``finally`` are torn down before the
+            # terminal write a superseding turn waits on, not whenever the GC
+            # finalizer gets to it.
+            try:
+                await _close_agent_events(agent_events, spec.run_id)
+            finally:
+                await _stop_heartbeat(heartbeat)
 
     # Check cancellation AFTER the agent loop. _drive_agent_loop now checks the
     # cancel flag internally (via _iter_agent_events -> real _is_cancelled callback
@@ -1753,6 +3937,28 @@ async def execute_run(spec: RunSpec) -> None:
     if await transport.is_cancelled(spec.run_id):
         cancelled = True
 
+    ask_record = _ask_user_record(spec.run_id, ask_frame)
+    # An accepted run must end with a reply or a visible error. One with nothing
+    # to show (a backend torn down under it, a stream that closed early) takes
+    # the failed path with a frame the client renders. A turn that sent any
+    # other frame (a tool call, a surface, a studio flow), delivered an artifact
+    # or asked a question did something, so it still completes below.
+    if (
+        not cancelled
+        and error is None
+        and backend_error_message is None
+        and not full_text.strip()
+        and not delivered_artifacts
+        and ask_record is None
+        and not acted
+    ):
+        logger.warning("execute_run %s: ended without a reply; failing it", spec.run_id)
+        backend_error_message = EMPTY_REPLY_MESSAGE
+        error_code = EMPTY_REPLY_CODE
+        await transport.append_event(
+            spec.run_id, "error", {"code": EMPTY_REPLY_CODE, "message": EMPTY_REPLY_MESSAGE}
+        )
+
     # Drop the typing indicator before persist so a slow Mongo write
     # doesn't leave it stuck on. Only reached on non-cancelled paths;
     # the cancelled path handles typing-off inside the cleanup helper.
@@ -1761,30 +3967,56 @@ async def execute_run(spec: RunSpec) -> None:
     except Exception:
         logger.debug("agent.typing(active=False) broadcast failed", exc_info=True)
 
+    if not cancelled:
+        await _note_availability(ctx, error_code)
+
     if error is not None or backend_error_message is not None:
-        err_msg = str(error) if error is not None else (backend_error_message or "")
+        # The run doc keeps the provider's own words; the chat got the plain one.
+        err_msg = (
+            str(error)
+            if error is not None
+            else (getattr(ctx, "backend_error_detail", None) or backend_error_message or "")
+        )
+        partial_id = await _persist_partial_reply(
+            spec, ctx, full_text, "failed", **recorder.persist_kwargs()
+        )
         try:
+            # ``usage=`` was omitted here, so a run that crashed after the model
+            # had already answered persisted no counts and swept through
+            # ``bill_run`` at $0 however much context it had paid for.
+            # ``metering/sweeper.py`` bills all four terminal states on purpose
+            # ("a partial run consumed tokens too") — three of them simply had
+            # nothing to bill.
             await run_service.mark_terminal(
                 spec.run_id,
                 status="failed",
                 partial_text=full_text,
                 error=err_msg,
+                usage=usage or None,
+                assistant_message_id=partial_id,
             )
         except Exception:
             logger.exception("mark_terminal(failed) failed for %s", spec.run_id)
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
 
-    if cancelled or (not full_text.strip() and not delivered_artifacts):
-        # Empty-text non-cancelled runs still complete cleanly — without this,
-        # the doc would sit in ``running`` until the 10-minute sweeper marked
-        # it ``interrupted``, surfacing a phantom active_run to the frontend.
+    if cancelled or (not full_text.strip() and not delivered_artifacts and ask_record is None):
+        # A cancelled run, or a tool-only run with no closing text (an empty run
+        # that did nothing already failed above), ends here; the doc must still
+        # leave ``running`` or the sweeper reports a phantom active_run.
         # ART-1 exception: a non-cancelled run that DELIVERED artifacts but
         # produced no closing text must NOT early-return — the files landed in
         # blob storage, so it falls through to the persist path below to record
         # the ``{type:"artifact"}`` attachments + emit their SSE events (empty
         # message text is fine). A cancelled run keeps the early return regardless
-        # (no assistant message on a cancel).
+        # (a cancel persists only the text already streamed, as a cut-off reply).
+        partial_id = (
+            await _persist_partial_reply(
+                spec, ctx, full_text, "cancelled", **recorder.persist_kwargs()
+            )
+            if cancelled
+            else None
+        )
         try:
             if cancelled:
                 await run_service.mark_terminal(
@@ -1792,6 +4024,7 @@ async def execute_run(spec: RunSpec) -> None:
                     status="cancelled",
                     partial_text=full_text,
                     usage=usage or None,
+                    assistant_message_id=partial_id,
                 )
             else:
                 await run_service.mark_completed(
@@ -1809,7 +4042,7 @@ async def execute_run(spec: RunSpec) -> None:
         await transport.append_event(
             spec.run_id,
             "stream_end",
-            {"assistant_message_id": None, "usage": usage, "cancelled": cancelled},
+            {"assistant_message_id": partial_id, "usage": usage, "cancelled": cancelled},
         )
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
@@ -1820,6 +4053,10 @@ async def execute_run(spec: RunSpec) -> None:
         attachments.append({"type": "ripple", "meta": ripple_spec})
         full_text = remaining_text
         await transport.append_event(spec.run_id, "ripple", {"spec": ripple_spec})
+        # Log-only card quality line, off the reply path; never changes the card.
+        from pocketpaw_ee.cloud.ripple_validator import log_chat_spec_quality
+
+        asyncio.create_task(log_chat_spec_quality(ripple_spec, run_id=spec.run_id))
 
     # ART-1: drain the per-run delivered-artifact collector. Each successful
     # ``deliver_artifact`` call appended one ``{file_id, name, mime, size}`` meta;
@@ -1830,7 +4067,18 @@ async def execute_run(spec: RunSpec) -> None:
         attachments.append({"type": "artifact", "meta": meta})
         await transport.append_event(spec.run_id, "artifact", meta)
 
-    assistant_id = await _persist_and_complete(spec, ctx, full_text, attachments, usage=usage)
+    # An ask-only turn (the agent called ask_user and said nothing else) still
+    # writes a row, with the question as its text: the chips need a row to
+    # render on after a reload, and the agent's history needs its question.
+    # The ask only rides when set, so a plain reply's call is unchanged.
+    persist_fields = recorder.persist_kwargs()
+    if ask_record is not None:
+        persist_fields["ask_user"] = ask_record
+        if not full_text.strip():
+            full_text = ask_record["question"]
+    assistant_id = await _persist_and_complete(
+        spec, ctx, full_text, attachments, usage=usage, **persist_fields
+    )
     await transport.append_event(
         spec.run_id,
         "stream_end",

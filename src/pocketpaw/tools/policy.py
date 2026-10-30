@@ -16,6 +16,15 @@ Updated: 2026-05-21 — Added ``is_mcp_server_explicitly_allowed`` so built-in
   policy into allow-list mode, silently disabling every other tool. Also
   added ``OPT_IN_MCP_SERVERS`` — the single source of truth for which
   in-process servers are opt-in, imported by AgentPool and ClaudeSDKBackend.
+  ``SURFACE_SCOPED_MCP_SERVERS`` is the per-surface twin: servers registered
+  only when the run's chat surface grants them.
+
+Updated: 2026-08-15 (HTN-2) — a policy carries the ``ToolRegistry`` built under
+  it (``_bridged_registry``), so a caller holding an agent can reach that
+  agent's OWN live tool instances. Humanized tool narration reads a tool's
+  declared phrase off the instance the registry holds rather than constructing
+  the tool. The policy is the anchor because its lifetime is already the
+  agent's; see the field's comment for why a module-level map would leak.
 
 Inspired by OpenClaw's tool-policy.ts.
 """
@@ -24,6 +33,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +122,46 @@ TOOL_PROFILES: dict[str, dict] = {
 # ``ee/pocketpaw_ee/agent/mcp_servers/planner.py`` for the split.
 OPT_IN_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_planner"})
 
+# In-process MCP servers registered ONLY on a run whose chat surface grants
+# them: the run's ``allow_sdk_tools`` (``SurfaceProfile.allowed_sdk_tools``)
+# names at least one of the server's tool ids. Per-SURFACE, where
+# ``OPT_IN_MCP_SERVERS`` is per-AGENT. Every other run neither registers the
+# server nor offers its tools, so a single-page toolset costs the other chats
+# nothing. ``pocketpaw_lens`` (agent-health reads) is granted by the
+# ``agent_health`` surface.
+SURFACE_SCOPED_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_lens"})
+
+
+def _mcp_server_name(tool_id: str) -> str:
+    parts = tool_id.split("__")
+    return parts[1] if len(parts) >= 2 and parts[0] == "mcp" else ""
+
+
+def ungranted_surface_servers(granted_tool_ids: frozenset[str]) -> frozenset[str]:
+    """The surface-scoped servers ``granted_tool_ids`` does not grant."""
+    granted = {_mcp_server_name(t) for t in granted_tool_ids}
+    return SURFACE_SCOPED_MCP_SERVERS - granted
+
+
+def surface_scoped_tool_deny(granted_tool_ids: frozenset[str]) -> frozenset[str]:
+    """Tool ids of every surface-scoped server this run's surface does not grant.
+
+    Read from the ``pocketpaw.mcp_servers`` providers' ``tool_ids()``, so a
+    backend can subtract them through its existing deny path. Empty when every
+    scoped server is granted or none is installed (OSS)."""
+    off = ungranted_surface_servers(granted_tool_ids)
+    if not off:
+        return frozenset()
+    from pocketpaw._registry import providers
+
+    ids: set[str] = set()
+    for provider in providers("pocketpaw.mcp_servers"):
+        try:
+            ids.update(t for t in provider.tool_ids() if _mcp_server_name(t) in off)
+        except Exception:  # noqa: BLE001 — a broken provider is skipped, as in the backends
+            continue
+    return frozenset(ids)
+
 
 class ToolPolicy:
     """Evaluates whether a tool is allowed based on profile + allow/deny lists."""
@@ -137,6 +187,21 @@ class ToolPolicy:
         # Pre-resolve for fast lookups
         self._allowed_set = self._resolve()
         self._denied_set = self._expand_names(self._deny_raw)
+
+        # The ToolRegistry built under this policy, attached by
+        # ``agents.tool_bridge._build_tool_registry`` and read back through
+        # ``agents.tool_bridge.narration_registry_for``. Declared here so it is
+        # a field of the object rather than an attribute that appears from
+        # another module, and typed loosely because ``ToolRegistry`` imports
+        # this module — naming the type here would be a cycle.
+        #
+        # This is where the registry's LIFETIME comes from: it is exactly this
+        # policy's, which is the agent's. The pool evicts an idle
+        # ``AgentInstance``, the backend and its policy go, and the registry and
+        # its tool instances go with them. Holding it in a module-level map
+        # instead would leak — the registry references this policy, so a
+        # weak-keyed entry would keep its own key alive forever.
+        self._bridged_registry: Any = None
 
     # ------------------------------------------------------------------
     # Public API

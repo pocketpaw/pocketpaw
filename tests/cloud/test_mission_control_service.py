@@ -144,7 +144,7 @@ def _patch_store_and_pockets(monkeypatch, store: InstinctStore):
     monkeypatch.setattr(mc_service, "get_instinct_store", lambda *a, **k: store)
     monkeypatch.setattr(
         mc_service.pockets_service,
-        "list_pockets",
+        "visible_pocket_refs",
         AsyncMock(return_value=[{"_id": "p1"}, {"_id": "p2"}]),
     )
     monkeypatch.setattr(
@@ -213,7 +213,7 @@ class TestListWorkItems:
         # Restrict visible pockets to p1 only.
         monkeypatch.setattr(
             mc_service.pockets_service,
-            "list_pockets",
+            "visible_pocket_refs",
             AsyncMock(return_value=[{"_id": "p1"}]),
         )
         await store.propose("p1", "visible", "", "", _trigger())
@@ -225,7 +225,9 @@ class TestListWorkItems:
     async def test_returns_empty_when_workspace_has_no_pockets(
         self, monkeypatch, store: InstinctStore
     ) -> None:
-        monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            mc_service.pockets_service, "visible_pocket_refs", AsyncMock(return_value=[])
+        )
         await store.propose("p1", "would surface", "", "", _trigger())
         out = await mc_service.agent_list_work_items(_ctx(), {})
         assert out == []
@@ -288,7 +290,9 @@ class TestListWorkItems:
         # Pocket-less tasks must surface even when the workspace has no
         # visible pockets at all (Tasks are workspace-scoped, not
         # pocket-scoped).
-        monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            mc_service.pockets_service, "visible_pocket_refs", AsyncMock(return_value=[])
+        )
         out2 = await mc_service.agent_list_work_items(_ctx(), {})
         assert "Drafted from the modal" in [it.title for it in out2]
 
@@ -515,7 +519,9 @@ class TestWorkspaceScopedNudges:
     ) -> None:
         # The old code skipped the whole instinct block when the workspace
         # had zero visible pockets — workspace-scoped nudges vanished too.
-        monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            mc_service.pockets_service, "visible_pocket_refs", AsyncMock(return_value=[])
+        )
         a = await store.propose(
             "w1",
             "External action — pocketless workspace",
@@ -690,7 +696,7 @@ class TestBulkApproveService:
     ) -> None:
         monkeypatch.setattr(
             mc_service.pockets_service,
-            "list_pockets",
+            "visible_pocket_refs",
             AsyncMock(return_value=[{"_id": "p1"}]),
         )
         a = await store.propose("p1", "A", "", "", _trigger())

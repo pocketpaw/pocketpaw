@@ -82,7 +82,7 @@ async def test_add_domain_passes_business_tier_features(mongo_db):
     """A business-tier site (resells WAF + edge_cache) → create_custom_hostname
     is called WITH that feature set."""
     ws = "ws_business"
-    site_id = await _seed_site(workspace_id=ws, plan_tier="business")
+    site_id = await _seed_site(workspace_id=ws, plan_tier="staff")
     cf = _RecordingCF()
 
     await sites_service.add_domain(
@@ -94,7 +94,7 @@ async def test_add_domain_passes_business_tier_features(mongo_db):
 
     assert len(cf.create_calls) == 1
     passed = cf.create_calls[0]["features"]
-    expected = site_plans.get_site_plan("business").cloudflare_features
+    expected = site_plans.get_site_plan("staff").cloudflare_features
     assert passed == set(expected)
     # The premium security features ride along.
     assert "waf" in passed
@@ -110,7 +110,7 @@ async def test_add_domain_basic_tier_passes_no_features(mongo_db):
     """A basic-tier site resells no Cloudflare features → create_custom_hostname is
     called with an EMPTY feature set (the basic path)."""
     ws = "ws_basic"
-    site_id = await _seed_site(workspace_id=ws, plan_tier="basic")
+    site_id = await _seed_site(workspace_id=ws, plan_tier="free")
     cf = _RecordingCF()
 
     await sites_service.add_domain(
@@ -140,12 +140,41 @@ async def test_add_domain_unset_tier_passes_no_features(mongo_db):
     assert cf.create_calls[0]["features"] == set()
 
 
+@pytest.mark.parametrize("org_key", ["studio", "agency"])
+async def test_add_domain_provisions_nothing_for_a_retired_org_key_on_a_site(mongo_db, org_key):
+    """An ORG key on a site's ``plan_tier`` provisions no Cloudflare features.
+
+    ``studio`` and ``agency`` were org flats that resold the full Cloudflare set,
+    retired on 2026-09-06. A Site document written before then can still hold one,
+    and provisioning off it would hand a single site the WAF and edge-cache
+    controls an org used to buy across its whole estate — which Cloudflare bills
+    us for. Both the scope check that used to refuse them and the unknown-key path
+    that refuses them now give the same answer: nothing premium.
+
+    Breaks on: ``add_domain`` going back to ``site_plans.get_site_plan``.
+    """
+    assert site_plans.get_site_plan(org_key) is None, "the key must stay unresolvable"
+
+    ws = f"ws_{org_key}"
+    site_id = await _seed_site(workspace_id=ws, plan_tier=org_key)
+    cf = _RecordingCF()
+
+    await sites_service.add_domain(
+        workspace_id=ws,
+        site_id=site_id,
+        hostname=f"www.{org_key}.com",
+        _cloudflare=cf,
+    )
+
+    assert cf.create_calls[0]["features"] == set()
+
+
 # ---------------------------------------------------------------------------
 # Criterion 3 — the tier → feature mapping is honored exactly, end to end.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("tier", ["basic", "pro", "business"])
+@pytest.mark.parametrize("tier", ["free", "site", "staff"])
 async def test_add_domain_honors_exact_tier_feature_mapping(mongo_db, tier):
     """For every tier the features add_domain passes equal that tier's catalog
     cloudflare_features — no more, no less."""
@@ -169,6 +198,10 @@ def _cf_client(handler) -> CloudflareClient:
         api_token="tok_1",
         zone_id="zone_1",
         dispatch_namespace="paw-sites",
+        # Required since 2026-08-12: the target is the one thing a customer pastes, so
+        # an unconfigured one is refused rather than derived into a name with no DNS
+        # records. Any value does here — these tests are about the ssl payload.
+        cname_target="sites.pawzone.test",
         _transport=httpx.MockTransport(handler),
     )
 
@@ -194,7 +227,18 @@ def _hostname_ok_response(request: httpx.Request, seen: dict) -> httpx.Response:
 @pytest.mark.asyncio
 async def test_create_custom_hostname_premium_features_inject_ssl_settings():
     """With premium features the CF request body carries an ``ssl.settings`` block
-    (strict TLS for waf, http2 for edge_cache) + records the resold feature set."""
+    (strict TLS for waf, http2 for edge_cache).
+
+    The ``custom_metadata`` half of BC-10 is GONE, and this test used to require it.
+    Per-hostname metadata is not generally available — Cloudflare's own doc says "only
+    certain customers have access to this feature… contact your account team" — so
+    sending it 403s (1413) on an ordinary zone. The effect in production was that
+    custom domains worked on FREE sites and failed on PAID ones, because only a tier
+    with ``cloudflare_features`` attached the block. The 2026-06-25 resale research had
+    already marked these SKUs DEFER; asserting the block here is what kept the
+    contradiction alive. The entitlement-free ``ssl.settings`` half is unchanged and is
+    still checked exactly.
+    """
     seen: dict = {}
     client = _cf_client(lambda req: _hostname_ok_response(req, seen))
 
@@ -210,8 +254,8 @@ async def test_create_custom_hostname_premium_features_inject_ssl_settings():
     assert ssl["settings"]["min_tls_version"] == "1.2"
     assert ssl["settings"]["tls_1_3"] == "on"
     assert ssl["settings"]["http2"] == "on"
-    # The resold set is recorded on the hostname (sorted, deterministic).
-    assert ssl["custom_metadata"]["resold_features"] == ("analytics,custom_domain,edge_cache,waf")
+    # And nothing entitlement-gated rides along, on any tier.
+    assert "custom_metadata" not in ssl
 
 
 @pytest.mark.asyncio
@@ -245,16 +289,23 @@ def test_get_billing_site_plans_returns_catalog_with_cf_features(site_plans_clie
     assert resp.status_code == 200
     body = resp.json()
     rows = {row["key"]: row for row in body["site_plans"]}
-    assert set(rows.keys()) == {"basic", "pro", "business"}
+    # The whole catalog, which is three per-site rungs since the org flats were
+    # retired on 2026-09-06.
+    assert set(rows.keys()) == {"free", "site", "staff"}
+    # Each row still says which scope it is. Every shipped tier is per-site now,
+    # so the field is the client's guard against a future tier it must not offer
+    # rather than a live distinction.
+    assert rows["site"]["scope"] == "site"
+    assert all(row["scope"] == "site" for row in rows.values())
 
-    # Each tier carries its annual price + sorted cloudflare_features.
-    assert rows["basic"]["annual_price_usd"] == 0
-    assert rows["basic"]["cloudflare_features"] == []
-    assert "custom_domain" in rows["pro"]["cloudflare_features"]
-    biz_features = rows["business"]["cloudflare_features"]
+    # Each tier carries its monthly price + sorted cloudflare_features.
+    assert rows["free"]["monthly_price_usd"] == 0
+    assert rows["free"]["cloudflare_features"] == []
+    assert "custom_domain" in rows["site"]["cloudflare_features"]
+    biz_features = rows["staff"]["cloudflare_features"]
     assert "waf" in biz_features
     assert "edge_cache" in biz_features
     # Features arrive as a SORTED JSON array (deterministic wire payload).
     assert biz_features == sorted(biz_features)
     # The catalog matches the source-of-truth site_plans exactly.
-    assert set(biz_features) == set(site_plans.get_site_plan("business").cloudflare_features)
+    assert set(biz_features) == set(site_plans.get_site_plan("staff").cloudflare_features)

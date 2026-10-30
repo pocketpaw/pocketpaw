@@ -1,0 +1,47 @@
+[
+  {
+    "label": "perf: is_enabled goes back to the uncached Settings.load()",
+    "file": "ee/pocketpaw_ee/cloud/composio/service.py",
+    "find": "    s = settings or get_settings()\n    return bool(s.composio_api_key and s.composio_enterprise_id)",
+    "replace": "    s = settings or Settings.load()\n    return bool(s.composio_api_key and s.composio_enterprise_id)",
+    "tests": [
+      "tests/cloud/chat/test_prompt_assembly_cost.py"
+    ]
+  },
+  {
+    "label": "perf: the KB timeout is removed",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "            text = await asyncio.wait_for(\n                KnowledgeService.search_context_for_scope(scope, query, limit=3),\n                timeout=_KB_SEARCH_TIMEOUT_SECONDS,\n            )",
+    "replace": "            text = await KnowledgeService.search_context_for_scope(scope, query, limit=3)",
+    "tests": [
+      "tests/cloud/chat/test_kb_block_bounded.py"
+    ]
+  },
+  {
+    "label": "perf: the KB timeout is tuned down to a real budget",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "_KB_SEARCH_TIMEOUT_SECONDS = 1.5",
+    "replace": "_KB_SEARCH_TIMEOUT_SECONDS = 0.05",
+    "tests": [
+      "tests/cloud/chat/test_kb_block_bounded.py"
+    ]
+  },
+  {
+    "label": "perf: the KB scopes go back to a serial loop",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "    results = await asyncio.gather(*(_one(s) for s in scopes))\n    snippets: list[tuple[str, str]] = [r for r in results if r is not None]",
+    "replace": "    snippets: list[tuple[str, str]] = [r for r in [await _one(s) for s in scopes] if r is not None]",
+    "tests": [
+      "tests/cloud/chat/test_kb_block_bounded.py"
+    ]
+  },
+  {
+    "label": "perf: a raising scope sinks the whole block",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "        except Exception:\n            logger.warning(\"knowledge search failed for scope %s\", scope, exc_info=True)\n            return None",
+    "replace": "        except TypeError:\n            logger.warning(\"knowledge search failed for scope %s\", scope, exc_info=True)\n            return None",
+    "tests": [
+      "tests/cloud/chat/test_kb_block_bounded.py"
+    ]
+  }
+]

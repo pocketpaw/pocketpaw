@@ -1,63 +1,29 @@
-# ee/pocketpaw_ee/sites/workers_deploy.py — deploy a STATIC Paw Site as a regular
-# Cloudflare Worker on the FREE tier (workers.dev) via `wrangler deploy`.
+# ee/pocketpaw_ee/sites/workers_deploy.py — deploy a Paw Site as a regular
+# Cloudflare Worker on workers.dev via ``wrangler deploy`` (no WfP namespace).
 #
-# Created: 2026-06-25 (feat/sites-workers-deploy-mode) — the "workers" deploy mode.
+# ``deploy_workers`` writes the deploy scaffold into an already-built project and
+# runs wrangler (``PAW_CF_WRANGLER_CMD``, default ``bunx wrangler@4.101.0``) with
+# an explicit ``--config wrangler.jsonc``. Two config shapes, chosen from the
+# artifact on disk (``engines.resolve_*``), never from the engine name alone:
+#   * ASSETS-ONLY (html ".", react "dist", static svelte "build"): no server entry.
+#     With the pageview counter, ``main`` is the generated analytics entry plus a
+#     ``run_worker_first`` page allow-list; without it, the bare assets config.
+#   * SERVER-WORKER (ripple, dynamic svelte at ``.svelte-kit/cloudflare``): ``main``
+#     is SvelteKit's ``_worker.js``, or a generated shim that wraps it when counting.
 #
-# Updated 2026-07-12 (feat/sites-html-assets-only-deploy, HE-4) — the deploy is now
-# ENGINE-AWARE. An ``engine="html"`` site deploys as an ASSETS-ONLY Worker: the
-# generator emits a raw static tree (``static_output_rel("html") == "."``, no
-# ``_worker.js``), so the emitted ``wrangler.jsonc`` drops ``main`` + ``nodejs_compat``
-# and just serves ``assets.directory: "."`` — a legal no-``main`` Worker that ships
-# ZERO bytes of JavaScript for a form-less brochure. Because the asset dir is the
-# project ROOT (which also holds ``wrangler.jsonc``), html writes a config-excluding
-# ``.assetsignore`` (``wrangler.jsonc`` + ``.assetsignore``) so wrangler does not serve
-# the config as a public asset — wrangler only auto-excludes its config when the asset
-# dir is a SUBDIR (Cloudflare static-assets docs). ripple/svelte keep the exact
-# SvelteKit-worker config + the ``_worker.js`` ``.assetsignore`` (the default engine is
-# ``"ripple"``, so every existing caller is byte-for-byte unchanged).
-#
-# This is the third deploy target for a Paw Site, beside the LOCAL static server
-# (local_server.deploy_local — dev/smoke) and Workers-for-Platforms
-# (cloudflare_client.put_worker — the multi-tenant dispatch namespace). The
-# "workers" mode publishes a static site as an ordinary Worker on a free
-# workers.dev subdomain, which needs NO WfP dispatch namespace, NO D1, NO Queue —
-# just a Cloudflare account token. It is the cheapest path to a real public URL and
-# the one PROVEN live by the manual recipe this module automates.
-#
-# THE RECIPE (verified live — a real paw site serves on workers.dev with exactly
-# this). After the generator emits ``<project>/.svelte-kit/cloudflare/`` (the
-# adapter-cloudflare static output: ``_worker.js`` + the ``_app/...`` asset tree),
-# two files make it deployable to workers.dev with wrangler 4.x:
-#   1. ``<project>/.svelte-kit/cloudflare/.assetsignore`` — REQUIRED. wrangler 4.x
-#      HARD-ERRORS ("Uploading a Pages _worker.js file as an asset") if the worker
-#      entry sits inside the asset dir without it, and adapter-cloudflare does NOT
-#      emit it. Contents are exactly the three lines ``_worker.js`` / ``_routes.json``
-#      / ``_headers``.
-#   2. ``<project>/wrangler.jsonc`` — the clean static config: ``main`` →
-#      ``.svelte-kit/cloudflare/_worker.js``, ``assets.directory`` → the SAME dir,
-#      ``workers_dev: true``, ``nodejs_compat``. We do NOT reuse the generator's own
-#      ``wrangler.toml`` (it stamps an UNDERSCORE name variant + D1/Queue bindings
-#      for the dynamic path — invalid for a clean static worker).
-# Deploy: ``bunx wrangler@4.101.0 deploy`` with ``CLOUDFLARE_API_TOKEN`` +
-# ``CLOUDFLARE_ACCOUNT_ID`` in the env. wrangler prints the deployed
-# ``https://<name>.<account-subdomain>.workers.dev`` URL on stdout; we parse it
-# (falling back to constructing it from PAW_CF_WORKERS_SUBDOMAIN if the parse fails).
-#
-# HARD RULES from the live test:
-#   * Worker/subdomain names MUST match ``^[a-z0-9][a-z0-9-]*$`` (lowercase,
-#     hyphens; NO underscores). The site_id is a 24-hex ObjectId (already
-#     lowercase-safe), so the name is ``paw-site-<site_id>``. ``_sanitize`` guards a
-#     non-conforming id so a bad id can never produce an invalid name.
-#   * STATIC sites ONLY. A DYNAMIC site (pattern=="dynamic", or a spec carrying
-#     live bindings) needs a per-tenant D1 + Queues provisioned — that is Phase 2.
-#     In workers mode a dynamic site raises a clean ``ValidationError`` rather than
-#     deploying a broken site that can't reach its data.
-#
-# The wrangler invocation is overridable via PAW_CF_WRANGLER_CMD (default
-# ``bunx wrangler@4.101.0``) so it is pinnable, ``shlex.split`` like
-# PAW_SITES_GEN_CMD. The subprocess style mirrors generator_client.py
-# (``asyncio.create_subprocess_exec``, captured stdout/stderr, non-zero → raise
-# with the stderr tail).
+# Invariants:
+#   * ``.assetsignore`` always names the config, itself and BOTH counter files.
+#     The counter embeds a per-publish salt; an unignored one is a privacy leak.
+#   * A stale counter is deleted when this publish does not count; the delete may
+#     fail softly only because ``.assetsignore`` is written first.
+#   * Worker names match ``^[a-z0-9][a-z0-9-]*$``; ``site_worker_name(doc)`` is the
+#     one answer for deploy, routes and delete. D1 names stay keyed on the site id.
+#   * ``ai_ready`` (optional) writes robots.txt, sitemap.xml, llms.txt, markdown
+#     copies, ``_headers`` Link rules, JSON-LD and the IndexNow key into the asset
+#     dir, and pings IndexNow only after wrangler exits 0. Neither step can fail a
+#     publish. ``_headers`` is read by wrangler as config and never served.
+#   * Dynamic sites need their D1 bound (``d1_database_id``) and come through the
+#     provision lane, which deploys with counting off.
 
 from __future__ import annotations
 
@@ -66,11 +32,19 @@ import json
 import logging
 import os
 import re
+import secrets
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import Internal, ValidationError
+from pocketpaw_ee.sites import ai_ready as ai_ready_mod
+from pocketpaw_ee.sites import analytics_worker
 from pocketpaw_ee.sites._wrangler import wrangler_argv as _wrangler_argv
-from pocketpaw_ee.sites.engines import needs_node_build, static_output_rel
+from pocketpaw_ee.sites.engines import (
+    resolve_emits_server_worker,
+    resolve_static_output_rel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,20 +55,63 @@ logger = logging.getLogger(__name__)
 # to ``"."`` for html (whose raw static tree IS the project dir).
 _CF_OUTPUT_REL = ".svelte-kit/cloudflare"
 
-# The REQUIRED .assetsignore contents for a ripple/svelte (server-worker) deploy —
-# exact three lines, no trailing blank. Drops the Pages-style worker/routing/header
-# files so wrangler 4.x does not try to upload the worker entry as a static asset
-# (which it HARD-ERRORS on). adapter-cloudflare does not emit this file, so the
-# deploy step writes it.
-_ASSETSIGNORE_LINES = ("_worker.js", "_routes.json", "_headers")
+# BOTH generated counters, named in EVERY .assetsignore this module writes, on both
+# branches, whether or not this publish counts. One constant rather than a line in each
+# list, so the two can never disagree about which files are deploy scaffold.
+#
+# The unconditional part is what makes the stale-counter delete in ``_write_deploy_files``
+# safe to swallow: the delete may fail (a lock, a read-only file), and a file left on
+# disk is still excluded from the upload. Whichever counter this publish did not write
+# is a per-publish hash salt with no config naming it, and wrangler would otherwise
+# upload it as an ordinary static asset — see the privacy note in ``analytics_worker``.
+#
+# On the ASSETS-ONLY branch that exclusion is load-bearing: an html site's asset dir IS
+# the project root, so a leftover counter sits inside the served tree. On the
+# SERVER-WORKER branch both counters live at the project root while the asset dir is
+# ``.svelte-kit/cloudflare``, so nothing there could be uploaded anyway and the lines
+# are belt-and-braces. They are written all the same, because "the counters are named
+# on every publish" is an invariant worth being able to state without a caveat, and a
+# name that matches no file is a no-op.
+_COUNTER_FILENAMES = (
+    analytics_worker.ENTRY_FILENAME,
+    analytics_worker.SHIM_FILENAME,
+)
 
-# The .assetsignore contents for an html deploy. An html site's ``assets.directory``
-# is the project ROOT (``static_output_rel("html") == "."``), which also holds the
-# deploy scaffold — ``wrangler.jsonc`` and this ``.assetsignore`` — so wrangler would
-# otherwise upload the config file as a public asset (it only auto-excludes the config
-# when the asset dir is a SUBDIR, per the Cloudflare static-assets docs). There is no
-# ``_worker.js`` on this path; the exclusion is the config files, not a server entry.
-_HTML_ASSETSIGNORE_LINES = ("wrangler.jsonc", ".assetsignore")
+# The REQUIRED .assetsignore contents for a ripple/svelte (server-worker) deploy. Drops
+# the Pages-style worker/routing/header files so wrangler 4.x does not try to upload the
+# worker entry as a static asset (which it HARD-ERRORS on). adapter-cloudflare does not
+# emit this file, so the deploy step writes it. SA-3 appends the counter filenames above.
+_ASSETSIGNORE_LINES = ("_worker.js", "_routes.json", "_headers") + _COUNTER_FILENAMES
+
+# The .assetsignore contents for an ASSETS-ONLY deploy (html, react — anything with
+# no ``_worker.js``). An html site's ``assets.directory`` is the project ROOT
+# (``static_output_rel("html") == "."``), which also holds the deploy scaffold —
+# ``wrangler.jsonc`` and this ``.assetsignore`` — so wrangler would otherwise upload
+# the config file as a public asset (it only auto-excludes the config when the asset
+# dir is a SUBDIR, per the Cloudflare static-assets docs). There is no ``_worker.js``
+# on these paths; the exclusion is the config files, not a server entry.
+#
+# react's asset dir IS a subdir (``dist``), so wrangler already excludes the config —
+# but ``.assetsignore`` itself is written INSIDE the asset dir on every engine, and
+# excluding it is what stops it being served. Naming a ``wrangler.jsonc`` that isn't
+# in ``dist/`` is a harmless no-op, so both engines share one list rather than
+# maintaining a near-identical second one.
+#
+# SA-1 added the generated counter entry, and that third line is the one with teeth.
+# The entry carries the per-publish salt the visitor hash is built on; served as a
+# public asset it hands out the salt, and the hash stops being irreversible. Removing
+# this line does not break a deploy — it breaks the privacy claim, silently.
+#
+# SA-2 — that line is written on EVERY assets-only publish, including the ones that
+# deploy no counter at all. Naming a file that is not there is a no-op (the same
+# reason both engines share this one list), and the case it covers is real: a site
+# that publishes paid and then free reuses the working dir, so a leftover entry can
+# still be sitting in it. ``_write_deploy_files`` deletes that leftover; this line is
+# what stands if the delete ever stops happening.
+_ASSETS_ONLY_ASSETSIGNORE_LINES = (
+    "wrangler.jsonc",
+    ".assetsignore",
+) + _COUNTER_FILENAMES
 
 # wrangler reads the worker name + name-segment of the workers.dev URL from
 # ``wrangler.jsonc``'s ``name``. It must match this (lowercase alnum + hyphen,
@@ -133,31 +150,84 @@ _D1_BINDING_NAME = "DB"
 _CONFIG_FILENAME = "wrangler.jsonc"
 
 
-def _worker_name(site_id: str) -> str:
+def worker_name(site_id: str) -> str:
     """The worker / workers.dev subdomain name for a site: ``paw-site-<site_id>``,
     sanitized so it always matches ``^[a-z0-9][a-z0-9-]*$`` (CF rejects underscores
     + uppercase). The ``paw-site-`` prefix starts with a letter, so the leading-char
-    rule holds regardless of the (sanitized) id."""
+    rule holds regardless of the (sanitized) id.
+
+    PUBLIC since 2026-08-12 (was ``_worker_name``): the custom-domain lane needs the
+    same answer to point a Worker route at a site, and a second copy of this rule
+    living in the service layer would drift from the one the deploy actually uses.
+    A route naming a script that does not exist is rejected by Cloudflare, so the two
+    must agree exactly."""
     return f"paw-site-{_sanitize(site_id)}"
 
 
-def _wrangler_jsonc(name: str, engine: str = "ripple", d1_database_id: str | None = None) -> str:
+def site_worker_name(doc: Any) -> str:
+    """The Worker script name THIS site is deployed under — the one answer every
+    caller that means "this site's Worker" (deploy, custom-domain routes, the delete
+    cascade) must share, since Cloudflare rejects a route naming a script that does
+    not exist and a delete aimed at the wrong name 404s, which reads as success.
+
+    ``Site.worker_name`` when the row stores one; otherwise the legacy derivation
+    ``worker_name(str(doc.id))``, so every row written before the field existed
+    resolves to exactly the name it was deployed under. ``getattr`` rather than an
+    attribute read so a duck-typed row without the field takes the legacy answer.
+
+    Not for the Workers-for-Platforms lane: a WfP script is named by the bare site id
+    (``put_worker(script_name=site_id)``) and the dispatch worker routes on that id."""
+    return getattr(doc, "worker_name", None) or worker_name(str(doc.id))
+
+
+# Back-compat alias — the private name predates the route lane and is still what the
+# deploy path reads below.
+_worker_name = worker_name
+
+
+def _wrangler_jsonc(
+    name: str,
+    engine: str = "ripple",
+    d1_database_id: str | None = None,
+    *,
+    project_dir: str | os.PathLike[str],
+    count_pageviews: bool = True,
+    d1_database_name: str | None = None,
+) -> str:
     """The clean wrangler config for a workers.dev deploy (the proven recipe).
 
-    HE-4 — the config is ENGINE-AWARE:
+    HE-4 — the config is ENGINE-AWARE. RX-1 — it keys on whether a server entry was
+    emitted, NOT on ``needs_node_build``. SL-1 — it now asks that of the ARTIFACT
+    (``resolve_emits_server_worker``) rather than of the engine name, because a static
+    svelte site emits no worker while a dynamic one does:
 
-    * html (``not needs_node_build``) → an ASSETS-ONLY Worker. The generator emits a
-      raw static tree (no ``_worker.js``), so the config drops ``main`` and
-      ``nodejs_compat`` and just serves ``assets.directory`` (``static_output_rel`` →
-      ``"."``, the project root). An assets-only Worker with no ``main`` is legal —
-      ``assets.directory`` is the only required key — and it ships ZERO bytes of
-      JavaScript for a form-less brochure.
-    * ripple / svelte (``needs_node_build``) → the SvelteKit Cloudflare worker,
-      UNCHANGED. ``main`` points at the worker entry adapter-cloudflare emits INSIDE
-      the asset dir (``static_output_rel`` → ``.svelte-kit/cloudflare``), and
-      ``assets.directory`` points at that SAME dir (the ``.assetsignore`` we write
-      keeps wrangler from uploading the worker entry as an asset). ``nodejs_compat``
-      is what the SvelteKit worker needs at runtime.
+    * html / react / STATIC svelte (no worker emitted) → an ASSETS-ONLY Worker. The
+      build output is a static tree with no ``_worker.js``, so the config carries no
+      ``nodejs_compat`` and serves ``assets.directory`` (``"."`` for html, ``"dist"``
+      for react, ``build`` for static svelte). SA-1 — it carries a ``main`` WHEN THE
+      SITE COUNTS: the generated pageview counter, plus the ``ASSETS`` binding it
+      serves through, the analytics dataset binding, and the ``run_worker_first``
+      allow-list that keeps stylesheets, scripts, fonts and images off the Worker.
+      The counter is not the SvelteKit worker under another name; ``main`` still
+      never points into the build output.
+    * ripple / DYNAMIC svelte (worker emitted) → the SvelteKit Cloudflare worker.
+      ``assets.directory`` points at the adapter's output dir
+      (``.svelte-kit/cloudflare``), which is also where the worker entry sits (the
+      ``.assetsignore`` we write keeps wrangler from uploading it as an asset).
+      ``nodejs_compat`` is what the SvelteKit worker needs at runtime. SA-3 — WHEN THE
+      SITE COUNTS, ``main`` moves to the generated SHIM at the project root, which
+      imports that worker and delegates to it; ``nodejs_compat``, the ``ASSETS``
+      binding and any D1 binding are carried through unchanged, and the config also
+      gains the dataset binding and the ``run_worker_first`` page allow-list. Without
+      those rules the asset router would serve every prerendered page itself and the
+      shim would never run — see the header.
+
+    Why the predicate changed: until react, "runs a Node build" and "emits a server
+    entry" were the same set, so ``needs_node_build`` read correctly here by
+    coincidence. react runs a full Vite build and prerenders to a purely static
+    ``dist/`` — asking the build question would have written ``main:
+    "dist/_worker.js"`` for a file that is never generated, and wrangler fails the
+    deploy on a missing ``main``.
 
     ``workers_dev: true`` publishes to the free ``<name>.<subdomain>.workers.dev`` URL.
 
@@ -166,6 +236,21 @@ def _wrangler_jsonc(name: str, engine: str = "ripple", d1_database_id: str | Non
     remote functions reach their per-tenant database on the FREE tier. Dynamic html is
     out of scope (it has no server runtime), so an html config never carries a binding.
 
+    ``count_pageviews`` (SA-2) picks between the two shapes on EITHER branch (SA-3 —
+    it used to reach only the assets-only one): True is the counting config above,
+    False is the PRE-ANALYTICS config byte for byte. It is the
+    already-resolved answer — the site's plan ANDed with the operator kill switch, via
+    ``analytics_worker.counting_enabled`` in ``_write_deploy_files`` — and NOT a
+    question this function re-asks, so there is exactly one place that decides.
+
+    It DEFAULTS TO TRUE, which is worth naming rather than leaving to be discovered.
+    This is a private config builder whose only production caller passes an explicitly
+    resolved value; the default keeps the direct-call tests (and the SA-1 shape they
+    pin) reading as the subject rather than the exception. The gate that actually
+    protects revenue is at the publish seam, and it is asserted end-to-end there — a
+    default here can never be what decides whether a free site counts, because the one
+    caller always passes.
+
     Deliberately still NO Queue bindings. The generator's own wrangler.toml declares
     ``LEADS_QUEUE`` / ``WRITEBACK_QUEUE`` producers, but Cloudflare Queues is a paid
     feature and those queues are not created on this path — declaring a producer for
@@ -173,29 +258,124 @@ def _wrangler_jsonc(name: str, engine: str = "ripple", d1_database_id: str | Non
     gracefully on a missing binding (``api/submit`` forwards straight to the capture
     API; ``writeback.ts`` warns and skips), so omitting them costs durability
     buffering, never a dropped lead."""
-    output_rel = static_output_rel(engine)
-    # html: an assets-only Worker — no server script, so no ``main`` / ``nodejs_compat``
-    # and no D1 (dynamic html is out of scope). Just serve the static tree.
-    if not needs_node_build(engine):
+    # SL-1 — ``project_dir`` is REQUIRED and keyword-only rather than defaulted. Both
+    # facts below are now properties of the emitted artifact, not of the engine string
+    # (a static svelte site has no worker and a different output dir), so a default
+    # would let a caller silently get the pre-SL-1 answer. Keyword-only because it is
+    # not the subject of this function — the name is — and a positional would read as
+    # the output path rather than the project root.
+    output_rel = resolve_static_output_rel(project_dir, engine)
+    # html / react — and, since SL-1, a STATIC svelte site: an assets-only Worker. The
+    # build emitted no server script, so still no ``nodejs_compat`` and no D1 (nothing
+    # here runs a site's own server code). SA-1 puts the pageview counter in front of
+    # the static tree: ``main`` is OUR generated entry at the project root, never
+    # anything from the build output.
+    #
+    # ``run_worker_first`` is the cost floor and is not optional — without it the
+    # asset router would send every request, subresources included, through the
+    # Worker. ``analytics_worker`` owns the rules and the reasoning; the ``ASSETS``
+    # binding is what the entry serves the page through once it has counted.
+    #
+    # SA-2 — ``count_pageviews`` selects between the two shapes, and the FALSE one is
+    # written to be the pre-analytics config EXACTLY: no ``main``, no dataset binding,
+    # no routing rules, and an ``assets`` block of nothing but ``directory``. Not even
+    # the ``ASSETS`` binding, which SA-1 added — a free site's config has no entry to
+    # bind it for, and a spare binding is a difference a byte-for-byte comparison
+    # would find. The two shapes are built as separate literals rather than one dict
+    # with keys popped off it, because "which keys does the un-analytics config have"
+    # is then something a reader can see rather than replay.
+    if not resolve_emits_server_worker(project_dir, engine):
+        if not count_pageviews:
+            return (
+                json.dumps(
+                    {
+                        "name": name,
+                        "compatibility_date": "2024-09-23",
+                        "workers_dev": True,
+                        "assets": {"directory": output_rel},
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
         config: dict[str, object] = {
             "name": name,
+            "main": analytics_worker.ENTRY_FILENAME,
             "compatibility_date": "2024-09-23",
             "workers_dev": True,
-            "assets": {"directory": output_rel},
+            "assets": {
+                "binding": "ASSETS",
+                "directory": output_rel,
+                "run_worker_first": analytics_worker.run_worker_first_rules(
+                    Path(project_dir, output_rel)
+                ),
+            },
+            "analytics_engine_datasets": [
+                {
+                    "binding": analytics_worker.DATASET_BINDING,
+                    "dataset": analytics_worker.dataset_name(),
+                }
+            ],
         }
         return json.dumps(config, indent=2) + "\n"
 
-    config = {
-        "name": name,
-        "main": f"{output_rel}/_worker.js",
-        "compatibility_date": "2024-09-23",
-        "compatibility_flags": ["nodejs_compat"],
-        "workers_dev": True,
-        "assets": {"binding": "ASSETS", "directory": output_rel},
-    }
+    # SA-3 — the server-worker branch counts too, and the counting shape is this same
+    # config with ``main`` MOVED: the generated shim at the project root, which imports
+    # ``<output_rel>/_worker.js`` and delegates to it. Everything the SvelteKit worker
+    # needs at runtime rides along untouched — ``nodejs_compat``, the ``ASSETS`` binding
+    # it reads prerendered pages and static files through, and (below) the D1 binding a
+    # dynamic site's remote functions reach their database by. Losing any of those would
+    # trade a working dynamic site for a counted broken one.
+    #
+    # ``run_worker_first`` IS NOT OPTIONAL HERE EITHER, for the opposite reason to the
+    # assets-only branch. There it stops the Worker being invoked for subresources; here
+    # it is what causes the Worker to be invoked for pages AT ALL. With a ``main`` and no
+    # rules the asset router serves any request whose asset exists — which for a ripple
+    # site is every prerendered page — and only falls through to the Worker when none
+    # matches. The shim would have seen SSR routes and nothing else, and counted almost
+    # nothing while looking deployed. The rules are the same page allow-list, over the
+    # same builder, so the cost floor is unchanged: subresources still route to the
+    # free asset path.
+    if not count_pageviews:
+        config = {
+            "name": name,
+            "main": f"{output_rel}/_worker.js",
+            "compatibility_date": "2024-09-23",
+            "compatibility_flags": ["nodejs_compat"],
+            "workers_dev": True,
+            "assets": {"binding": "ASSETS", "directory": output_rel},
+        }
+    else:
+        config = {
+            "name": name,
+            "main": analytics_worker.SHIM_FILENAME,
+            "compatibility_date": "2024-09-23",
+            "compatibility_flags": ["nodejs_compat"],
+            "workers_dev": True,
+            "assets": {
+                "binding": "ASSETS",
+                "directory": output_rel,
+                "run_worker_first": analytics_worker.run_worker_first_rules(
+                    Path(project_dir, output_rel)
+                ),
+            },
+            "analytics_engine_datasets": [
+                {
+                    "binding": analytics_worker.DATASET_BINDING,
+                    "dataset": analytics_worker.dataset_name(),
+                }
+            ],
+        }
     if d1_database_id:
         config["d1_databases"] = [
-            {"binding": _D1_BINDING_NAME, "database_name": name, "database_id": d1_database_id}
+            {
+                "binding": _D1_BINDING_NAME,
+                # The DATABASE's name, not the Worker's. They were one value while the
+                # Worker name was derived from the site id; VS-1 stores the Worker
+                # name, and the database is still created as ``paw-site-<id>``.
+                "database_name": d1_database_name or name,
+                "database_id": d1_database_id,
+            }
         ]
     return json.dumps(config, indent=2) + "\n"
 
@@ -219,32 +399,158 @@ def _parse_deploy_url(stdout: str, *, name: str) -> str:
     m = _WORKERS_DEV_URL_RE.search(stdout)
     if m:
         return m.group(0).rstrip(".,)\"'")
+    host = _workers_dev_host(name)
+    return f"https://{host}" if host else ""
+
+
+def _workers_dev_host(name: str) -> str:
+    """``<name>.<PAW_CF_WORKERS_SUBDOMAIN>.workers.dev``, or "" when the account
+    subdomain is not configured."""
     subdomain = os.environ.get("PAW_CF_WORKERS_SUBDOMAIN", "").strip()
-    if subdomain:
-        return f"https://{name}.{subdomain}.workers.dev"
-    return ""
+    return f"{name}.{subdomain}.workers.dev" if subdomain else ""
+
+
+def _read_page(path: Path) -> tuple[str, str]:
+    """A page's text and the codec it decoded with (latin-1 round-trips any bytes,
+    the same fallback ``badge.inject_into_tree`` uses for imported pages)."""
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return raw.decode("latin-1"), "latin-1"
+
+
+def _write_ai_ready_files(
+    out_dir: Path, inputs: ai_ready_mod.AiReadyInputs, host: str
+) -> list[str]:
+    """Write the AI-ready files (robots.txt, sitemap.xml, llms.txt, markdown copies,
+    ``_headers`` Link rules, JSON-LD, IndexNow key) into the asset dir and return the
+    page URLs to ping IndexNow with.
+
+    Every file lands INSIDE the asset dir and none is named in either
+    ``.assetsignore`` list, so wrangler uploads it. ``_headers`` is the exception by
+    design: wrangler reads it from the asset dir as routing config and never serves
+    it (it is ignored by default and parsed separately), on both branches.
+
+    An author's own robots.txt / sitemap.xml / llms.txt (no PocketPaw marker) is
+    KEPT and logged rather than overwritten: an imported site that ships its own
+    crawler policy made that call on purpose. Our own copy from an earlier publish
+    carries the marker and is replaced. ``_headers`` is merged, never overwritten —
+    adapter-cloudflare writes its own cache rules there."""
+    pages: list[ai_ready_mod.Page] = []
+    codecs: dict[str, str] = {}
+    for path in sorted(out_dir.rglob("*")):
+        if path.suffix.lower() not in (".html", ".htm") or not path.is_file():
+            continue
+        rel = path.relative_to(out_dir).as_posix()
+        if ai_ready_mod.page_route(rel) is None:
+            continue
+        text, codec = _read_page(path)
+        pages.append(ai_ready_mod.Page(rel, text))
+        codecs[rel] = codec
+    lastmod = datetime.now(UTC).date().isoformat()
+    files = ai_ready_mod.build_ai_ready_files(host, pages, inputs, lastmod)
+    for rel, data in files.items():
+        target = out_dir / rel
+        if rel in ("robots.txt", "sitemap.xml", "llms.txt") and target.is_file():
+            if ai_ready_mod.MARKER not in target.read_text(errors="replace"):
+                logger.info("sites.ai_ready: keeping the site's own %s", rel)
+                continue
+        if rel in codecs:
+            data = data.decode("utf-8").encode(codecs[rel])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    routes = sorted(r for r in (ai_ready_mod.page_route(p.rel_path) for p in pages) if r)
+    headers_path = out_dir / "_headers"
+    existing = headers_path.read_text() if headers_path.is_file() else ""
+    headers_path.write_text(
+        ai_ready_mod.merge_headers(existing, ai_ready_mod.build_headers_block(routes))
+    )
+    return ai_ready_mod.page_urls(host, pages)
 
 
 def _write_deploy_files(
-    project_dir: str, name: str, engine: str = "ripple", d1_database_id: str | None = None
+    project_dir: str,
+    name: str,
+    engine: str = "ripple",
+    d1_database_id: str | None = None,
+    *,
+    site_id: str = "",
+    analytics_entitled: bool = True,
+    d1_database_name: str | None = None,
 ) -> None:
     """Write the recipe files into the project: an ``.assetsignore`` inside the asset
-    dir + the clean ``wrangler.jsonc`` at the project root. Both are overwritten on a
-    re-publish so a stale config can never linger.
+    dir + the clean ``wrangler.jsonc`` at the project root, and — on the assets-only
+    branch — the generated pageview counter the config names as ``main``. All are
+    overwritten on a re-publish so a stale config or a stale counter can never linger.
 
-    HE-4 — engine-aware. The asset dir is ``static_output_rel(engine)``
-    (``.svelte-kit/cloudflare`` for ripple/svelte, ``"."`` for html). The
-    ``.assetsignore`` differs by engine:
+    HE-4 — engine-aware. SL-1 — ARTIFACT-aware: the asset dir is
+    ``resolve_static_output_rel(project_dir, engine)`` (``.svelte-kit/cloudflare`` for
+    ripple and dynamic svelte, ``build`` for static svelte, ``"."`` for html, ``"dist"``
+    for react). The ``.assetsignore`` differs by whether a server entry was actually
+    emitted (RX-1 — not ``needs_node_build``; SL-1 — resolved, not predicted):
 
-    * ripple/svelte → drops the Pages worker entry (``_worker.js`` + friends) so
-      wrangler does not upload the server entry as a static asset.
-    * html → the asset dir IS the project root, which also holds ``wrangler.jsonc`` +
-      ``.assetsignore``, so it drops THOSE (the deploy scaffold) — otherwise wrangler
-      serves the config file as a public asset.
+    * ripple / dynamic svelte → drops the Pages worker entry (``_worker.js`` + friends)
+      so wrangler does not upload the server entry as a static asset.
+    * html / react / static svelte → there is no server entry to hide; what must not be
+      served is the
+      deploy scaffold itself (``wrangler.jsonc`` + ``.assetsignore``). For html the
+      asset dir IS the project root, so both files sit in it; for react only
+      ``.assetsignore`` does, and naming the other is a harmless no-op.
 
     ``d1_database_id`` adds the dynamic site's D1 binding to the emitted config
-    (ripple/svelte only)."""
-    output_rel = static_output_rel(engine)
+    (ripple/svelte only).
+
+    ``site_id`` is what the counter stamps as the Analytics Engine index — the ONE
+    index a data point may carry, and therefore the only thing the dataset can be
+    queried by. Keyword-only, because it is not this function's subject (the project
+    dir is) and a fourth positional string beside ``name``, ``engine`` and the D1 id
+    would be read wrong at a glance. It defaults to empty for the server-worker
+    branch, which writes no counter at all. The counter is written REGARDLESS of
+    whether the id is empty: skipping it would leave the emitted ``main`` pointing at
+    a file that is not there, and wrangler fails a deploy on a missing ``main``. An
+    empty id costs unqueryable rows; the only caller always has a real one.
+
+    ``analytics_entitled`` (SA-2) is the SITE's half of the counting decision, as
+    resolved by ``entitlements.site_analytics_entitled`` at the publish seam. The
+    operator kill switch is the other half and is read here, not passed, because it is
+    global and per-publish: ``analytics_worker.counting_enabled`` ANDs the two, and its
+    answer decides BOTH what the config names as ``main`` and which counter file exists
+    on disk. Those two must move together — a config naming an absent ``main`` fails
+    the deploy, and a counter with no config naming it is a salt served as a static
+    asset.
+
+    SA-3 — the answer now reaches BOTH branches, and the two write different files.
+    Assets-only writes ``analytics_worker.ENTRY_FILENAME``, which serves the page
+    through ``ASSETS`` after counting. Server-worker writes
+    ``analytics_worker.SHIM_FILENAME``, which imports the worker adapter-cloudflare
+    emitted and delegates to it — the adapter's ``_worker.js`` is never touched, since
+    the adapter rewrites it on every build. Whichever this publish did not write is
+    deleted, because a working dir is reused across publishes and across a change of
+    build shape.
+
+    WHEN COUNTING IS OFF THE ENTRY IS DELETED rather than merely not written, and that
+    is not tidiness. A publish reuses the pocket's working dir, so a site that
+    published paid and then publishes free still has the earlier entry on disk. The
+    free config names no ``main``, so wrangler would upload that leftover as an
+    ordinary asset and hand out the per-publish salt from a config that mentions
+    nothing. The ``.assetsignore`` names the entry on EVERY assets-only publish,
+    counting or not, as the second line of defence behind the delete.
+
+    THE DELETE CANNOT FAIL A PUBLISH. It is wrapped, because ``missing_ok`` covers
+    only the missing file and a locked or read-only one raises. Nothing in the
+    analytics path may cost a site its publish, and the ``.assetsignore`` line above
+    is what makes swallowing safe rather than merely convenient. The counter WRITE on
+    the other branch is deliberately NOT wrapped: the config is about to name that
+    file as ``main``, and wrangler fails a deploy on a missing ``main``, so a swallow
+    there would trade a clear error for a confusing one."""
+    # SL-1 — RESOLVED against the artifact, not predicted from the engine name. A
+    # static svelte site builds on adapter-static: its output is ``build`` and it emits
+    # no ``_worker.js``, so it must deploy assets-only exactly as react does. Answering
+    # either question from ``engine`` alone would point ``main`` at a nonexistent
+    # ``build/_worker.js`` AND pick the server-entry .assetsignore — a failed deploy,
+    # which is the same class of bug RX-1 added ``emits_server_worker`` to prevent.
+    output_rel = resolve_static_output_rel(project_dir, engine)
     out_dir = Path(project_dir, output_rel)
     if not out_dir.is_dir():
         # The static output must exist before this runs — generator.build() emits it.
@@ -253,9 +559,85 @@ def _write_deploy_files(
             "sites.workers_no_build",
             "The static build output is missing — the site must be built before a workers deploy.",
         )
-    ignore_lines = _ASSETSIGNORE_LINES if needs_node_build(engine) else _HTML_ASSETSIGNORE_LINES
+    emits_worker = resolve_emits_server_worker(project_dir, engine)
+    ignore_lines = _ASSETSIGNORE_LINES if emits_worker else _ASSETS_ONLY_ASSETSIGNORE_LINES
     (out_dir / ".assetsignore").write_text("\n".join(ignore_lines) + "\n")
-    Path(project_dir, _CONFIG_FILENAME).write_text(_wrangler_jsonc(name, engine, d1_database_id))
+    # SA-2 — the whole counting decision, resolved once and read twice below so the
+    # config and the file on disk can never disagree. SA-3 — it no longer excludes the
+    # server-worker branch: that branch now gets a SHIM IN FRONT OF SvelteKit's worker
+    # rather than a counter in place of it, so the plan is the only thing that decides.
+    count_pageviews = analytics_worker.counting_enabled(entitled=analytics_entitled)
+    # WHICH counter, and therefore which file is stale. The assets-only entry serves the
+    # page itself through ``ASSETS``; the shim imports the worker the adapter emitted
+    # and delegates to it. Neither can stand in for the other — the shim cannot even
+    # load in a project with no ``_worker.js``, and the entry would drop a dynamic
+    # site's server rendering entirely — so exactly one is written and the other is
+    # removed below.
+    counter_path = Path(
+        project_dir,
+        analytics_worker.SHIM_FILENAME if emits_worker else analytics_worker.ENTRY_FILENAME,
+    )
+    if count_pageviews:
+        # The counter the config names as ``main``. Written BEFORE the config so a
+        # crash between the two leaves a project with no config rather than one naming
+        # an entry that isn't there. The salt is minted here, fresh per publish — see
+        # the privacy note in ``analytics_worker`` — and once, so both generators stamp
+        # the same one and neither call can quietly get its own.
+        secret = secrets.token_hex(16)
+        counter_path.write_text(
+            analytics_worker.build_shim_js(site_id=site_id, secret=secret, output_rel=output_rel)
+            if emits_worker
+            else analytics_worker.build_entry_js(site_id=site_id, secret=secret),
+            encoding="utf-8",
+        )
+    # EVERYTHING THIS PUBLISH DID NOT WRITE. Two leftovers are possible in a working dir
+    # that publishes over and over: the counter from a paid publish that is now free,
+    # and the OTHER branch's counter from before this site's build changed shape (an
+    # engine change, or a svelte site that stopped emitting a server entry). Neither is
+    # named by the config about to be written, so each is a per-publish salt that
+    # wrangler would upload as an ordinary static asset.
+    #
+    # FAILURE-SOFT, and this is the one delete on the publish path so it is worth
+    # saying why it may swallow. ``missing_ok`` covers only the missing file; a
+    # read-only file, a Windows lock held by another process, and a directory
+    # sitting where the counter should be all raise ``PermissionError`` — and an
+    # unwrapped raise here fails the whole publish of a site that is otherwise
+    # perfectly fine, over analytics the site may not even be using.
+    #
+    # Swallowing is safe ONLY because of the ``.assetsignore`` above: it names BOTH
+    # counter filenames on every publish, and it is written BEFORE this runs. So a
+    # delete that fails leaves the file on disk and still excluded from the upload,
+    # which is the whole point of keeping those lines unconditional. Move the
+    # ``.assetsignore`` write after this block and the swallow stops being safe.
+    #
+    # The counter WRITE above is deliberately NOT wrapped: the config is about to name
+    # that file as ``main``, and wrangler fails a deploy on a missing ``main``, so a
+    # swallow there would trade a clear error for a confusing one.
+    for stale_path in (
+        Path(project_dir, analytics_worker.ENTRY_FILENAME),
+        Path(project_dir, analytics_worker.SHIM_FILENAME),
+    ):
+        if count_pageviews and stale_path == counter_path:
+            continue
+        try:
+            stale_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "sites.workers: could not remove the stale analytics entry at %s — "
+                "publishing anyway; .assetsignore still excludes it from the upload",
+                stale_path,
+                exc_info=True,
+            )
+    Path(project_dir, _CONFIG_FILENAME).write_text(
+        _wrangler_jsonc(
+            name,
+            engine,
+            d1_database_id,
+            project_dir=project_dir,
+            count_pageviews=count_pageviews,
+            d1_database_name=d1_database_name,
+        )
+    )
 
 
 def _cf_env() -> dict[str, str]:
@@ -267,9 +649,23 @@ def _cf_env() -> dict[str, str]:
 
 
 async def deploy_workers(
-    site_id: str, project_dir: str, *, engine: str = "ripple", d1_database_id: str | None = None
+    site_id: str,
+    project_dir: str,
+    *,
+    engine: str = "ripple",
+    d1_database_id: str | None = None,
+    analytics_entitled: bool = True,
+    worker_name: str | None = None,
+    ai_ready: ai_ready_mod.AiReadyInputs | None = None,
 ) -> str:
     """Deploy a Paw Site as a regular Worker on the free workers.dev tier.
+
+    AV-1 — ``ai_ready`` (None = unchanged legacy behaviour) writes the AI-ready
+    files into the asset dir before the deploy (see ``ai_ready.py``) and pings
+    IndexNow after a SUCCESSFUL deploy only. Skipped when
+    ``POCKETPAW_SITES_AI_READY`` is off, or when no host can be resolved (no live
+    custom domain passed and ``PAW_CF_WORKERS_SUBDOMAIN`` unset) since sitemap and
+    robots need absolute URLs. Neither the files nor the ping can fail a publish.
 
     Writes the recipe files (``.assetsignore`` + ``wrangler.jsonc``) into the
     already-built project, then runs ``wrangler deploy`` (PAW_CF_WRANGLER_CMD, default
@@ -277,12 +673,38 @@ async def deploy_workers(
     ``https://<name>.<subdomain>.workers.dev`` URL (parsed from wrangler's stdout,
     falling back to constructing it from PAW_CF_WORKERS_SUBDOMAIN).
 
-    HE-4 — ``engine`` selects the config shape. html deploys as an ASSETS-ONLY Worker
-    (no ``main`` / ``_worker.js``, ``assets.directory == "."``, and an ``.assetsignore``
-    that keeps the config out of the served tree); ripple/svelte deploy the SvelteKit
-    Cloudflare worker unchanged. The default (``"ripple"``) preserves the exact prior
-    behaviour for every existing caller — svelte resolves to the same
-    ``.svelte-kit/cloudflare`` output.
+    HE-4 / RX-1 — ``engine`` selects the config shape, via ``emits_server_worker``.
+    html and react deploy as an ASSETS-ONLY Worker (no ``_worker.js``, an
+    ``assets.directory`` of ``"."`` and ``"dist"`` respectively, and an
+    ``.assetsignore`` that keeps the deploy scaffold out of the served tree);
+    ripple/svelte deploy the SvelteKit Cloudflare worker unchanged. The default
+    (``"ripple"``) preserves the exact prior behaviour for every existing caller —
+    svelte resolves to the same ``.svelte-kit/cloudflare`` output.
+
+    SA-1 — the assets-only shape now also writes the generated pageview counter and
+    names it as ``main``. ``site_id`` is the Analytics Engine index it stamps, which
+    is what makes a site's traffic queryable; the ``run_worker_first`` allow-list in
+    the emitted config is what keeps that counter off every request that is not a
+    page.
+
+    SA-3 — the server-worker shape counts too. ``main`` becomes a generated SHIM that
+    imports adapter-cloudflare's ``_worker.js``, wraps its ``fetch`` and delegates;
+    ``nodejs_compat``, the ``ASSETS`` binding and any D1 binding ride along unchanged,
+    so a dynamic site still reaches its database. That config carries the page
+    allow-list too, for the opposite reason to the assets-only one: without it the
+    asset router would serve every prerendered page itself and the shim would never be
+    invoked.
+
+    SA-2 — ``analytics_entitled`` says whether THIS site's plan buys the counter, as
+    resolved at the publish seam by ``entitlements.site_analytics_entitled``. False
+    deploys the pre-analytics config: no ``main``, no dataset binding, no routing
+    rules, no entry on disk. The operator kill switch
+    (``PAW_SITES_ANALYTICS_DISABLED``) is ANDed in one layer down and produces the
+    same shape for every site, entitled or not.
+
+    It defaults to True for the same reason ``_wrangler_jsonc``'s does, and with the
+    same caveat: this is the mechanism, the gate is at the publish seam, and the
+    publish seam always passes an explicitly resolved value.
 
     ``d1_database_id`` (DYNAMIC ripple/svelte sites) binds the site's per-tenant D1 as
     ``DB``, so a dynamic site can serve its live data WITHOUT a Workers-for-Platforms
@@ -290,16 +712,48 @@ async def deploy_workers(
     provision job does both before calling this.
 
     The project MUST already carry the engine's static output
-    (``static_output_rel(engine)`` — generator.build() emits it before this is called).
+    (``resolve_static_output_rel(project_dir, engine)`` — generator.build() emits it
+    before this is called, which is what makes resolving it off disk possible).
     On a non-zero wrangler exit this raises ``Internal`` with the stderr tail so the
-    failure surfaces as a clean 5xx envelope, not an opaque crash."""
-    name = _worker_name(site_id)
-    if not _WORKER_NAME_RE.match(name):  # defensive — _worker_name always sanitizes
+    failure surfaces as a clean 5xx envelope, not an opaque crash.
+
+    VS-1 — ``worker_name`` is the Worker script name to deploy under, which callers
+    resolve with ``site_worker_name(doc)``. None keeps the legacy derivation from
+    ``site_id`` (the parameter shadows the module function, hence the ``_worker_name``
+    alias below). The URL fallback and the ``wrangler.jsonc`` ``name`` both follow it;
+    the D1 ``database_name`` and the counter's site index stay keyed on ``site_id``."""
+    name = worker_name or _worker_name(site_id)
+    # Defensive for the derived name (_worker_name sanitizes); a real guard for a
+    # stored one, which nothing here sanitizes.
+    if not _WORKER_NAME_RE.match(name):
         raise ValidationError(
             "sites.workers_bad_name",
-            f"Computed an invalid worker name from site id {site_id!r}.",
+            f"Invalid worker name {name!r} for site id {site_id!r}.",
         )
-    _write_deploy_files(project_dir, name, engine, d1_database_id)
+    _write_deploy_files(
+        project_dir,
+        name,
+        engine,
+        d1_database_id,
+        site_id=site_id,
+        analytics_entitled=analytics_entitled,
+        # The D1 was created and migrated under the site-id-derived name, whatever the
+        # Worker is called. Today the two are the same string.
+        d1_database_name=_worker_name(site_id),
+    )
+    ai_host, ai_urls = "", []
+    if ai_ready is not None and ai_ready_mod.enabled():
+        ai_host = ai_ready.host or _workers_dev_host(name)
+        if not ai_host:
+            logger.warning(
+                "sites.ai_ready: no public host for %s yet; skipping AI-ready files", name
+            )
+        else:
+            try:
+                out_dir = Path(project_dir, resolve_static_output_rel(project_dir, engine))
+                ai_urls = _write_ai_ready_files(out_dir, ai_ready, ai_host)
+            except Exception:  # noqa: BLE001 — a site going live beats its sitemap
+                logger.warning("sites.ai_ready: could not write AI-ready files", exc_info=True)
 
     # ``--config`` is REQUIRED, not cosmetic: a dynamic project dir also holds the
     # generator's wrangler.toml (whose queue producers reference queues that do not
@@ -339,7 +793,9 @@ async def deploy_workers(
         )
     url = _parse_deploy_url(stdout, name=name)
     logger.info("sites.workers: deployed %s -> %s", name, url or "(url unresolved)")
+    if ai_urls and ai_ready is not None:
+        await ai_ready_mod.ping_indexnow(ai_host, ai_ready.indexnow_key, ai_urls)
     return url
 
 
-__all__ = ["deploy_workers"]
+__all__ = ["deploy_workers", "site_worker_name", "worker_name"]

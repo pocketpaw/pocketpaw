@@ -16,6 +16,12 @@
 # Created 2026-06-26 (integration/model-catalog-v2, MCG-8).
 # Updated 2026-06-29 (feat/billing-usage-endpoint): added user_daily_activity tests
 #   (scoping params, pagination merge, empty-key raise, master-key bearer).
+# Updated 2026-09-02 (feat/proxy-spend-ingest-by-customer): added the
+#   spend_logs_by_end_user / spend_log_count tests — the CUSTOMER-scoped read over
+#   /spend/logs/v2. It is the only read that can see a chat run's cost, because
+#   chat authenticates with the deployment master key rather than a tenant's
+#   virtual key, so the per-key read above returns nothing for it however much it
+#   cost.
 
 from __future__ import annotations
 
@@ -230,3 +236,150 @@ async def test_non_2xx_raises_admin_error_with_detail():
         await client.generate_key(key_alias="ws-w1")
     assert "401" in str(exc.value)
     assert "Invalid master key" in str(exc.value)
+
+
+# ===========================================================================
+# The CUSTOMER-scoped read. Chat's only attribution.
+# ===========================================================================
+
+
+async def test_spend_by_end_user_scopes_and_bounds_the_read():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"request_id": "r1", "spend": 0.04, "startTime": "2026-09-02T10:00:00"}],
+                "total": 1,
+                "page": 1,
+                "page_size": 100,
+                "total_pages": 1,
+            },
+        )
+
+    client = _client(handler, api_key="sk-master")
+    out = await client.spend_logs_by_end_user(
+        end_user="ws_alpha",
+        start_date="2026-09-02 00:00:00",
+        end_date="2026-09-02 12:00:00",
+    )
+
+    assert [r["request_id"] for r in out] == ["r1"]
+    assert "/spend/logs/v2" in captured["url"]
+    assert "end_user=ws_alpha" in captured["url"]
+    # Both dates ride along. The proxy 400s without them, so there is no
+    # unbounded form of this call to fall into by accident.
+    assert "start_date=" in captured["url"]
+    assert "end_date=" in captured["url"]
+    # Oldest first, so stopping early leaves a contiguous prefix rather than a
+    # hole in the middle of the window.
+    assert "sort_order=asc" in captured["url"]
+
+
+async def test_spend_by_end_user_walks_every_page():
+    """A busy tenant's window does not fit one page, and the proxy caps page_size
+    at 100. A single-page read would under-bill silently — the rows it never
+    fetched look exactly like rows that do not exist."""
+    pages = {
+        "1": [{"request_id": "r1", "spend": 0.01}, {"request_id": "r2", "spend": 0.01}],
+        "2": [{"request_id": "r3", "spend": 0.01}],
+    }
+    seen_pages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = request.url.params.get("page", "1")
+        seen_pages.append(page)
+        return httpx.Response(200, json={"data": pages.get(page, []), "total": 3})
+
+    client = _client(handler)
+    out = await client.spend_logs_by_end_user(
+        end_user="ws_alpha",
+        start_date="2026-09-02 00:00:00",
+        end_date="2026-09-02 12:00:00",
+        page_size=2,
+    )
+
+    assert [r["request_id"] for r in out] == ["r1", "r2", "r3"]
+    assert seen_pages == ["1", "2"]
+
+
+async def test_spend_by_end_user_stops_on_an_empty_page():
+    """Defensive against a proxy that overstates ``total``. Without this the walk
+    spins to its page ceiling on every sweep for a tenant with no spend."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"data": [], "total": 999})
+
+    client = _client(handler)
+    out = await client.spend_logs_by_end_user(
+        end_user="ws_alpha", start_date="2026-09-02 00:00:00", end_date="2026-09-02 12:00:00"
+    )
+
+    assert out == []
+    assert len(calls) == 1
+
+
+async def test_spend_by_end_user_requires_an_end_user():
+    # Unscoped, this returns every tenant's spend and the caller would bill one
+    # workspace for all of it.
+    client = _client(lambda r: httpx.Response(200, json={"data": [], "total": 0}))
+    with pytest.raises(LiteLLMAdminError):
+        await client.spend_logs_by_end_user(
+            end_user="", start_date="2026-09-02 00:00:00", end_date="2026-09-02 12:00:00"
+        )
+
+
+async def test_spend_log_count_reads_the_total_without_fetching_the_rows():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"data": [{"request_id": "r1"}], "total": 4210})
+
+    client = _client(handler)
+    total = await client.spend_log_count(
+        start_date="2026-09-02 00:00:00", end_date="2026-09-02 12:00:00"
+    )
+
+    assert total == 4210
+    # One row asked for, four thousand reported. The coverage check runs every
+    # sweep, so it must not depend on the size of the window it measures.
+    assert "page_size=1" in captured["url"]
+    # No customer filter — this is the denominator the per-tenant counts are
+    # subtracted from.
+    assert "end_user" not in captured["url"]
+
+
+async def test_spend_log_count_can_scope_to_one_customer():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "end_user=ws_alpha" in str(request.url)
+        return httpx.Response(200, json={"data": [], "total": 7})
+
+    client = _client(handler)
+    assert (
+        await client.spend_log_count(
+            start_date="2026-09-02 00:00:00",
+            end_date="2026-09-02 12:00:00",
+            end_user="ws_alpha",
+        )
+        == 7
+    )
+
+
+async def test_a_missing_total_falls_back_to_the_rows_returned():
+    # A proxy build that omits ``total`` must not make every window read as empty,
+    # which would report full coverage while nothing was attributed.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"request_id": "r1"}, {"request_id": "r2"}]})
+
+    client = _client(handler)
+    assert (
+        await client.spend_log_count(
+            start_date="2026-09-02 00:00:00", end_date="2026-09-02 12:00:00"
+        )
+        == 2
+    )

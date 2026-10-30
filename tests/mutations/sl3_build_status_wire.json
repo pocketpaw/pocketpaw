@@ -1,0 +1,75 @@
+[
+  {
+    "label": "SL-3: the publish/gallery response stops carrying build_status, so it reverts to the DTO default and every client polls a value frozen at 'none' — indistinguishable from a build that never starts, which is the bug this slice fixed",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        build_status=getattr(doc, \"build_status\", \"none\"),",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_build_status_on_the_wire.py::TestTheBuildStateReachesSiteResponse"
+    ]
+  },
+  {
+    "label": "SL-3: the response stops carrying build_reason, so a terminal 'failed' reaches the user with no rung — they cannot tell whether their code broke or we lost the container, and those need opposite responses",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        build_reason=getattr(doc, \"build_reason\", None),",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_build_status_on_the_wire.py::TestTheBuildStateReachesSiteResponse::test_a_failure_carries_the_rung_that_explains_it",
+      "tests/ee/sites/test_build_status_on_the_wire.py::TestTheBuildStateReachesSiteResponse::test_the_two_kinds_of_failure_are_distinguishable_on_the_wire"
+    ]
+  },
+  {
+    "label": "SL-3: the response stops carrying build_job_id, so a client that reloads during a queued build loses its polling handle at the moment the wait is longest — the exact reason the field is persisted rather than transient",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        build_job_id=getattr(doc, \"build_job_id\", None),",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_build_status_on_the_wire.py::TestTheBuildStateReachesSiteResponse::test_a_queued_build_is_visible_with_its_polling_handle"
+    ]
+  },
+  {
+    "label": "SL-3: the server normalises an unrecognised build_status to 'none', breaking the wire contract that a client treats an unknown status as IN-PROGRESS — it would report 'nothing is building' about a live build running under a status this deploy predates",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        build_status=getattr(doc, \"build_status\", \"none\"),\n        build_reason=getattr(doc, \"build_reason\", None),",
+    "replace": "        build_status=getattr(doc, \"build_status\", \"none\")\n        if getattr(doc, \"build_status\", \"none\") in {\"none\", \"queued\", \"building\", \"built\", \"failed\"}\n        else \"none\",\n        build_reason=getattr(doc, \"build_reason\", None),",
+    "tests": [
+      "tests/ee/sites/test_build_status_on_the_wire.py::TestTheBuildStateReachesSiteResponse::test_an_unrecognised_status_is_passed_through_verbatim"
+    ]
+  },
+  {
+    "label": "SL-3: the by-pocket status read stops carrying build_status, so the one GET keyed on a pocket id cannot answer 'is this building' and a badge has to fetch the whole gallery to find out",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        build_status=getattr(doc, \"build_status\", \"none\") if doc is not None else \"none\",",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_build_status_on_the_wire.py::TestTheBuildStateReachesTheByPocketStatus"
+    ]
+  },
+  {
+    "label": "SL-3: the by-pocket read stops carrying build_reason, so a badge can show that a build failed and never why",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        build_reason=getattr(doc, \"build_reason\", None) if doc is not None else None,",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_build_status_on_the_wire.py::TestTheBuildStateReachesTheByPocketStatus::test_a_failure_and_its_rung_are_visible_by_pocket"
+    ]
+  },
+  {
+    "label": "SL-3: a pocket with no Site doc reports build_status None instead of 'none', so a draft that was never published is indistinguishable from a row whose status is missing — a badge then has to guess between 'no build' and 'broken read'",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        build_status=getattr(doc, \"build_status\", \"none\") if doc is not None else \"none\",\n        build_reason=getattr(doc, \"build_reason\", None) if doc is not None else None,",
+    "replace": "        build_status=getattr(doc, \"build_status\", \"none\") if doc is not None else None,\n        build_reason=getattr(doc, \"build_reason\", None) if doc is not None else None,",
+    "tests": [
+      "tests/ee/sites/test_build_status_on_the_wire.py::TestTheBuildStateReachesTheByPocketStatus::test_a_pocket_with_no_site_reads_as_no_build_not_as_null"
+    ]
+  },
+  {
+    "label": "SL-3: build_reason is dropped from SiteResponse, so the field a client reads to explain a failure does not exist on the wire at all",
+    "file": "ee/pocketpaw_ee/sites/dto.py",
+    "find": "    build_reason: str | None = None\n    # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,",
+    "replace": "    # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,",
+    "tests": [
+      "tests/ee/sites/test_build_status_on_the_wire.py::TestTheDtoDeclaresTheContract"
+    ]
+  }
+]

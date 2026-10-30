@@ -12,7 +12,7 @@
 #   * get_draft(...)     — derived pointer: latest draft on a branch.
 #   * get_published(...) — derived pointer: latest published on a branch.
 #   * list_versions(...) — the version log for (scope, branch).
-#   * revert(...)        — STUB. NotImplementedError — TODO(BP-4) owns revert.
+#   * revert(...)        — roll back to a prior snapshot by writing a NEW draft.
 #
 # Pointer storage: DERIVED from the versions collection (no ArtifactRef doc).
 # See models.py header for the why — single source of truth, indexed
@@ -34,7 +34,7 @@
 #                                (the merge gate's approve path calls publish()
 #                                on the target first, then marks the candidate
 #                                merged). Emits artifact.version.merged.
-#   * discard(version_id)      — flip a REJECTED candidate to status="reverted"
+#   * discard(version_id)      — flip a REJECTED candidate to status="discarded"
 #                                so it leaves the draft pointer; the published
 #                                pointer is untouched. Emits artifact.version.
 #                                discarded.
@@ -44,11 +44,11 @@
 # Updated: 2026-06-19 (P2a — discard-all-drafts) — two changes that stop the
 # draft pile accumulating so ONE discard clears the unpublished-changes bar:
 #   * write_draft now SUPERSEDES the prior draft head: when the current branch
-#     head is already status="draft" it is flipped to "reverted" before the new
+#     head is already status="draft" it is flipped to "superseded" before the new
 #     row is inserted, so at most ONE live draft exists per (scope, branch). The
 #     monotonic version_no is preserved (the superseded row stays as history).
-#     A published/merged/reverted head is never superseded.
-#   * discard_all_drafts(scope, workspace, branch) reverts EVERY status="draft"
+#     A published/merged/superseded/discarded head is never superseded.
+#   * discard_all_drafts(scope, workspace, branch) discards EVERY status="draft"
 #     row above the published pointer in one pass (tenant-scoped), back-handling
 #     pockets that already carry a pile of drafts. The Instinct reject path
 #     (instinct_executor.discard_rejected_change) now calls it instead of the
@@ -69,6 +69,20 @@
 #     ordered version timeline an endpoint shows is served by list_versions (the
 #     ArtifactVersion rows ARE the ordered log — see sites/router.py
 #     /history).
+#
+# Updated: 2026-08-21 (feat/version-history-truthful-lifecycle) — the status a
+# row carries is what the site owner reads in the Deploy tab, and three
+# different transitions were all writing "reverted":
+#   * write_draft's supersede (an ordinary edit) — now "superseded", and it now
+#     EMITS artifact.version.superseded, which it never did, so the projection
+#     no longer replays a row that silently stopped being the draft.
+#   * discard / discard_all_drafts (a refusal)   — now "discarded".
+# revert() wrote it in neither case: a revert moves FORWARD, appending a new
+# labelled draft, so the one meaning a reader would assume was the one meaning
+# the word never had. "reverted" is now legacy — read, never written. Rows
+# that already carry it are NOT rewritten (this collection has no migration
+# runner, and guessing intent is not grounds for a write); resolve_legacy_
+# statuses() below reclassifies them on the way out to a reader instead.
 from __future__ import annotations
 
 import logging
@@ -90,6 +104,7 @@ __all__ = [
     "list_versions",
     "mark_merged",
     "publish",
+    "resolve_legacy_statuses",
     "revert",
     "write_draft",
 ]
@@ -188,6 +203,94 @@ def _emit_version_event(
 # ---------------------------------------------------------------------------
 
 
+async def _supersede_draft_head(head: ArtifactVersion | None) -> ArtifactVersion | None:
+    """Flip a DRAFT branch head to ``"superseded"``; return it, or None.
+
+    P2a's invariant is that AT MOST ONE live draft exists per (scope, branch).
+    write_draft held it and ``revert`` did not, because revert hand-rolled its
+    own copy of the insert and the copy was missing this step — so reverting
+    while the owner had unsaved work left TWO rows saying "draft", one of which
+    had been overtaken. Shared by both writers now so they cannot drift again.
+
+    A published / merged / superseded / discarded head is left alone: a new
+    draft on top of a published version is a reviewable change that must keep
+    the published pointer live.
+    """
+    if head is None or head.status != "draft":
+        return None
+    head.status = "superseded"
+    await head.save()
+    return head
+
+
+def _emit_superseded(
+    *,
+    superseded: ArtifactVersion,
+    scope_type: str,
+    scope_id: str,
+    branch: str,
+    author: str | None,
+    by_row: ArtifactVersion,
+) -> None:
+    """Announce that ``superseded`` was replaced by ``by_row``.
+
+    Call AFTER the replacement is inserted, so the event can name it — a reader
+    asking "what happened to v3" wants the answer, not just the fact that
+    something did. The workspace stamped is the SUPERSEDED row's, not the
+    writer's: the event is a fact about that row, and the projection filters
+    history on the stamped workspace.
+    """
+    _emit_version_event(
+        action="artifact.version.superseded",
+        scope_type=scope_type,
+        scope_id=scope_id,
+        workspace_id=superseded.workspace_id,
+        author=author,
+        payload={
+            "version_id": str(superseded.id),
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "branch": branch,
+            "version_no": superseded.version_no,
+            "status": "superseded",
+            "superseded_by_version_id": str(by_row.id),
+            "superseded_by_version_no": by_row.version_no,
+        },
+    )
+
+
+def resolve_legacy_statuses(rows: list[ArtifactVersion]) -> dict[str, str]:
+    """Map every row id → the status a reader should be shown.
+
+    Rows written before 2026-08-21 all say ``"reverted"`` whether an edit
+    replaced them or the owner threw them away, because one word was doing both
+    jobs (see the module header). They are not rewritten — no migration runner
+    exists for this collection, and inferring intent is not grounds for a write —
+    so the ambiguity is resolved on the way out instead, from evidence already in
+    the rows:
+
+      * some later row names this one as its ``parent_version_id`` → the lineage
+        continued through it, which is exactly what a supersede is.
+      * nothing descends from it → the lineage stopped there, which is what
+        being discarded looks like.
+
+    That is an inference, and it is only ever applied to the legacy value. Rows
+    written since carry their own status and are returned untouched, so the
+    guess retires on its own as old rows age out.
+
+    Pure, and single-pass over the rows the caller already loaded — no query.
+    """
+    has_descendant = {r.parent_version_id for r in rows if r.parent_version_id}
+    return {
+        str(r.id): (
+            ("superseded" if str(r.id) in has_descendant else "discarded")
+            if r.status == "reverted"
+            else r.status
+        )
+        for r in rows
+    }
+
+
 async def write_draft(
     *,
     scope_type: str,
@@ -206,25 +309,31 @@ async def write_draft(
     first version). Becomes the working draft (``get_draft`` returns it).
 
     P2a (B) — SUPERSEDE the prior draft head: if the current branch head is
-    already ``status="draft"``, it is flipped to ``"reverted"`` BEFORE the new
+    already ``status="draft"``, it is flipped to ``"superseded"`` BEFORE the new
     row is inserted, so AT MOST ONE live draft exists per (scope, branch). This
     stops the draft pile from accumulating (the cause of "discard needs N
     clicks"): a pocket edited N times leaves one live draft, not N. The
     monotonic ``version_no`` counter is NOT reused — the superseded row stays on
     the append-only log as history, and the new row still gets head.version_no+1
-    so list_versions / lineage are unchanged. A PUBLISHED (or merged/reverted)
-    head is never superseded — a new draft on top of a published version is a
-    reviewable change that must keep the published pointer live.
+    so list_versions / lineage are unchanged. A PUBLISHED (or merged/superseded/
+    discarded) head is never superseded — a new draft on top of a published
+    version is a reviewable change that must keep the published pointer live.
 
-    Emits ``artifact.version.created``.
+    Emits ``artifact.version.created``, plus ``artifact.version.superseded`` for
+    the row it replaced.
+
+    2026-08-21: that supersede used to write ``"reverted"`` and emit NOTHING.
+    Both halves were wrong in the same direction — the timeline renders status
+    verbatim, so every ordinary edit left behind a row claiming the owner had
+    rolled the site back, and the event history had a silent state change where
+    the explanation should have been. ``superseded`` is what actually happened;
+    the event is what lets a reader follow one draft to the next.
     """
     head = await _latest_in_branch(scope_type=scope_type, scope_id=scope_id, branch_name=branch)
     version_no = (head.version_no + 1) if head else 1
 
     # Supersede the prior DRAFT head so only one live draft survives (P2a B).
-    if head is not None and head.status == "draft":
-        head.status = "reverted"
-        await head.save()
+    superseded = await _supersede_draft_head(head)
 
     row = ArtifactVersion(
         scope_type=scope_type,
@@ -257,6 +366,15 @@ async def write_draft(
             "label": label,
         },
     )
+    if superseded is not None:
+        _emit_superseded(
+            superseded=superseded,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            branch=branch,
+            author=author,
+            by_row=row,
+        )
     return row
 
 
@@ -443,9 +561,14 @@ async def discard(
     """Discard a REJECTED branch candidate (BP-3).
 
     The merge gate's REJECT path calls this: it flips the candidate row to
-    ``status="reverted"`` so it no longer reads as the working draft, and leaves
+    ``status="discarded"`` so it no longer reads as the working draft, and leaves
     the PUBLISHED pointer entirely untouched (a rejection must never move what is
     live). This is the minimal, correct discard for BP-3.
+
+    2026-08-21: this wrote ``"reverted"``, which the timeline showed to the site
+    owner. A rejected candidate was never reverted — it was refused — and the
+    same word was simultaneously being written for the wholly different event of
+    an edit replacing a draft. ``discarded`` says which of the two this was.
 
     TODO(BP-4): revert/discard semantics deepen here — BP-4 owns reverting the
     published pointer to a prior snapshot and the Journal history projection.
@@ -459,7 +582,7 @@ async def discard(
     row = await _scoped_row(
         scope_type=scope_type, scope_id=scope_id, workspace_id=workspace_id, version_id=version_id
     )
-    row.status = "reverted"
+    row.status = "discarded"
     await row.save()
     _emit_version_event(
         action="artifact.version.discarded",
@@ -473,7 +596,7 @@ async def discard(
             "scope_id": scope_id,
             "branch": row.branch,
             "version_no": row.version_no,
-            "status": "reverted",
+            "status": "discarded",
         },
     )
     return row
@@ -495,15 +618,21 @@ async def discard_all_drafts(
     bar never cleared → "discard needs N clicks". This flips every
     ``status="draft"`` row with ``version_no`` strictly greater than the published
     pointer's ``version_no`` (or ALL drafts when nothing is published yet) to
-    ``"reverted"`` in a single call, so ONE discard makes ``has_unpublished_changes``
+    ``"discarded"`` in a single call, so ONE discard makes ``has_unpublished_changes``
     false. It also back-handles pockets already carrying a pile of drafts on disk.
+
+    Only LIVE drafts are in scope. A row already ``"superseded"`` by a later edit
+    is not an unpublished change the owner is choosing to throw away, so it keeps
+    saying superseded — the timeline distinguishes "replaced while you worked"
+    from "you discarded this", and collapsing the two is what made the old status
+    unreadable.
 
     The PUBLISHED pointer is left entirely untouched (a discard must never move
     what is live), and the scan is tenant-scoped on ``workspace_id`` (a same-id
-    draft in another workspace is never reverted). Returns the number of drafts
-    reverted (0 when there is nothing above the published pointer — idempotent).
+    draft in another workspace is never touched). Returns the number of drafts
+    discarded (0 when there is nothing above the published pointer — idempotent).
 
-    Emits ``artifact.version.discarded`` per reverted row so the history
+    Emits ``artifact.version.discarded`` per discarded row so the history
     projection records each abandonment.
     """
     published = await get_published(scope_type=scope_type, scope_id=scope_id, branch=branch)
@@ -517,15 +646,15 @@ async def discard_all_drafts(
         ArtifactVersion.status == "draft",
     ).to_list()
 
-    reverted = 0
+    discarded = 0
     for row in drafts:
         if row.version_no <= floor:
             # A draft at/below the published pointer is not an unpublished change
             # (defensive — drafts are normally above; never touch live history).
             continue
-        row.status = "reverted"
+        row.status = "discarded"
         await row.save()
-        reverted += 1
+        discarded += 1
         _emit_version_event(
             action="artifact.version.discarded",
             scope_type=scope_type,
@@ -538,11 +667,11 @@ async def discard_all_drafts(
                 "scope_id": scope_id,
                 "branch": row.branch,
                 "version_no": row.version_no,
-                "status": "reverted",
+                "status": "discarded",
                 "discard_all": True,
             },
         )
-    return reverted
+    return discarded
 
 
 async def revert(
@@ -589,6 +718,10 @@ async def revert(
         scope_type=scope_type, scope_id=scope_id, branch_name=target.branch
     )
     version_no = (head.version_no + 1) if head else 1
+    # A revert is a write like any other, so it takes the draft pointer off
+    # whatever held it. Without this the owner's in-progress draft stayed marked
+    # "draft" alongside the revert draft.
+    superseded = await _supersede_draft_head(head)
 
     new_draft = ArtifactVersion(
         scope_type=scope_type,
@@ -623,6 +756,15 @@ async def revert(
             "label": revert_label,
         },
     )
+    if superseded is not None:
+        _emit_superseded(
+            superseded=superseded,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            branch=target.branch,
+            author=author,
+            by_row=new_draft,
+        )
     return new_draft
 
 

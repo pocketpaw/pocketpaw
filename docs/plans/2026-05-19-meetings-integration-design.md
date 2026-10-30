@@ -114,8 +114,8 @@ Per-workspace per-provider BYO credentials.
 class MeetingProviderCredentials(TimestampedDocument):
     workspace_id: PydanticObjectId
     provider: Literal["google_meet", "zoom"]
-    credentials_ref: str             # ~/.pocketpaw/oauth/workspace-{id}-{provider}.json
-    webhook_secret: str              # we generate this; admin pastes into provider config
+    credentials_ref: str  # ~/.pocketpaw/oauth/workspace-{id}-{provider}.json
+    webhook_secret: str  # we generate this; admin pastes into provider config
     pubsub_subscription: str | None  # Google Meet only — Pub/Sub subscription resource name
     enabled: bool = True
     last_validated_at: datetime | None
@@ -131,8 +131,8 @@ Why a separate doc (not stuffed into `WorkspaceConnector.config`): webhook secre
 class Meeting(TimestampedDocument):
     workspace_id: PydanticObjectId
     provider: Literal["google_meet", "zoom"]
-    provider_meeting_id: str         # Zoom meeting ID or Meet conference_record name
-    provider_space_id: str | None    # Meet space name (spaces/{space}); null for Zoom
+    provider_meeting_id: str  # Zoom meeting ID or Meet conference_record name
+    provider_space_id: str | None  # Meet space name (spaces/{space}); null for Zoom
     title: str | None
     join_url: str
     organizer_email: str | None
@@ -141,9 +141,9 @@ class Meeting(TimestampedDocument):
     actual_start: datetime | None
     actual_end: datetime | None
     status: Literal["scheduled", "in_progress", "ended", "transcript_ready", "failed", "cancelled"]
-    participants: list[dict]         # [{name, email, joined_at, left_at}] — best-effort
+    participants: list[dict]  # [{name, email, joined_at, left_at}] — best-effort
     recording_file_ids: list[PydanticObjectId]  # FK → FileUpload (opt-in per workspace)
-    raw_provider_payload: dict       # last-seen provider response, for debugging
+    raw_provider_payload: dict  # last-seen provider response, for debugging
     created_by_user_id: PydanticObjectId | None  # null = ingested from webhook, not created by us
     # Indexes:
     #   (workspace_id, status)
@@ -156,9 +156,9 @@ class Meeting(TimestampedDocument):
 ```python
 class MeetingTranscript(TimestampedDocument):
     workspace_id: PydanticObjectId
-    meeting_id: PydanticObjectId     # FK → Meeting
+    meeting_id: PydanticObjectId  # FK → Meeting
     provider_transcript_id: str
-    file_id: PydanticObjectId | None # FK → FileUpload (the stored .vtt/.txt blob)
+    file_id: PydanticObjectId | None  # FK → FileUpload (the stored .vtt/.txt blob)
     entry_count: int
     speaker_count: int
     language: str | None
@@ -240,14 +240,14 @@ The 15–30 min Google setup is real. Three mitigations ship alongside phase 1:
 ```python
 # src/pocketpaw/clients/oauth.py — extend PROVIDERS dict
 PROVIDERS["zoom"] = {
-    "auth_url": None,                       # S2S — no browser
+    "auth_url": None,  # S2S — no browser
     "token_url": "https://zoom.us/oauth/token",
-    "grant_type": "account_credentials",    # new code path (~20 LOC)
+    "grant_type": "account_credentials",  # new code path (~20 LOC)
 }
 PROVIDERS["google_meet"] = {
     "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
     "token_url": "https://oauth2.googleapis.com/token",
-    "scopes": [...],                        # see above
+    "scopes": [...],  # see above
 }
 ```
 

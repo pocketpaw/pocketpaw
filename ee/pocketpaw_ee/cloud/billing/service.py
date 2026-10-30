@@ -25,91 +25,48 @@
 # SECURITY: the provider verifies the signature before this module trusts any
 # field. The webhook secret / API key are never logged.
 #
-# CURRENCY: the 1-credit==1-cent mapping is USD-only, so ``handle_webhook`` gates
-# the grant on ``currency == "USD"`` — a verified non-USD success event is acked
-# but never granted (it would otherwise credit 1:1 against the wrong denomination).
+# CURRENCY: the 1-credit==1-cent mapping is USD's, and INR converts through
+# ``_inr_base_credits`` (PH-4), so ``handle_webhook`` gates the GRANT on USD or
+# INR — a verified success in ANY OTHER currency is acked but never granted (it
+# would otherwise credit 1:1 against the wrong denomination).
+# It is still RECORDED, with ``credits_granted=0``: the gate stops us handing over
+# credits, not from keeping the receipt a later reversal has to join through.
 #
-# Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
-# Updated 2026-06-24 (security): enforce USD before granting; correct the
-#   bad-signature docstring (raises ``BadRequest`` → 400, not ``ValidationError``).
-# Updated 2026-06-24 (BC-7, the Subscription primitive): added ``subscribe`` (open
-#   a recurring checkout for a plan tier) and extended ``handle_webhook`` to route
-#   verified ``subscription.*`` deliveries. ``subscription.active`` /
-#   ``subscription.renewed`` grant the tier's monthly allotment ADDITIVELY (unused
-#   credits roll over) keyed on the per-renewal event id; ``subscription.active``
-#   also upgrades ``Workspace.plan``; ``subscription.cancelled`` reverts the plan
-#   to ``free`` WITHOUT clawing back granted credits. The Subscription doc tracks
-#   the gateway lifecycle alongside the per-renewal BC-1 grants.
-# Updated 2026-06-24 (B1 review fix): the capture-event emit (BillingTopupCaptured
-#   / BillingSubscriptionGranted) is now gated on ``credits.grant``'s ``created``
-#   flag, NOT the prior balance-delta heuristic (``new_balance == before +
-#   amount``). Under concurrency a racing grant could shift the balance so a
-#   genuine first grant looked like a replay (emit wrongly suppressed) or a replay
-#   looked genuine (spurious emit). ``grant`` now returns a ``GrantResult``; the
-#   created-flag is the authoritative "this grant actually applied" signal.
-# Updated 2026-06-24 (BC-9, per-site annual plan): the subscription webhook
-#   dispatch now FORKS on a ``site_id`` in the verified event metadata. A delivery
-#   WITH a ``site_id`` is a PER-SITE annual sub (each published site has its own
-#   plan) and routes to ``_handle_site_subscription_event``, which updates the
-#   SITE's ``subscription_status`` / ``annual_renewal_date`` (active/renewed →
-#   active; cancelled → cancelled) via the sites service — it NEVER grants
-#   workspace credits and NEVER changes ``Workspace.plan``. A delivery WITHOUT a
-#   ``site_id`` is the unchanged BC-7 workspace-plan path. Same verified-signature
-#   + idempotency guards apply (the per-site path is reached only AFTER
-#   ``verify_and_parse_webhook`` succeeds).
-# Updated 2026-06-24 (feat/charge-first-sites): the per-site ``subscription.active``
-#   delivery now drives CHARGE-FIRST ACTIVATION. A paid-tier site is published as
-#   PENDING (created but NOT deployed live); on the verified ``subscription.active``
-#   the per-site path calls ``sites_service.activate_site``, which runs the deferred
-#   deploy (generate + smoke-gate + Cloudflare/local deploy) and marks the sub
-#   active — so a paid site goes live ONLY after payment confirms. ``activate_site``
-#   is idempotent (an already-active/deployed site is a no-op), so a replayed
-#   ``active`` does not re-deploy. ``renewed`` just refreshes the renewal date (the
-#   site is already live), ``cancelled`` marks the site cancelled WITHOUT undeploying
-#   it in v1.
-# Updated 2026-06-28 (fix/billing-checkout-sessions): ``subscribe`` now takes an
-#   ``origin`` (the buyer's app origin, read off the /subscribe route's Origin /
-#   Referer header) and threads it through ``_checkout_return_urls`` into the
-#   provider's ``return_url`` / ``cancel_url`` so Dodo returns the buyer to
-#   ``{origin}/settings/billing?checkout=success|cancel`` after pay/cancel (the
-#   prior payment-link checkout had nowhere to send the buyer). Falls back to the
-#   ``dodo_checkout_return_base`` config when no origin is present; omits the
-#   redirect entirely if both are absent. The webhook grant + idempotency are
-#   unchanged — they key on the event body's subscription_id + metadata + event_id.
-# Updated 2026-07-08 (feat/billing-cancel-downgrade): two money-management fixes.
-#   (A) ``cancel`` — wire the previously dead-coded provider ``cancel_subscription``
-#   end to end: load the workspace's ACTIVE Subscription row (the ``(workspace)``
-#   index is NON-unique, so select ``status == "active"`` specifically, never a
-#   naive first-match that could pick a stale cancelled row) and tell the gateway to
-#   stop billing it; 402 ``billing.no_active_subscription`` when there is none. The
-#   entitlement revert stays REACTIVE on the ``subscription.cancelled`` webhook — this
-#   only adds the initiation side (no duplicate plan-revert). (B) ``subscribe`` no
-#   longer double-subscribes: when a workspace ALREADY has an active subscription a
-#   plain ``create_subscription`` opened a SECOND parallel Dodo subscription (double
-#   billing). It now runs a GUARDED cancel-then-create — open the NEW checkout FIRST
-#   (a create failure leaves the current sub untouched, no coverage gap), THEN cancel
-#   the OLD subscription at the gateway (billing stops synchronously, so the two are
-#   never both billing). Webhook ``event_id`` idempotency is untouched. See the
-#   ``subscribe`` body for the native-``change_plan`` follow-up note.
-# Updated 2026-07-09 (fix/cancel-webhook-revert-guard): the ``subscription.cancelled``
-#   plan revert is no longer UNCONDITIONAL. Webhook delivery is unordered /
-#   at-least-once, so a ``cancelled(old_sub)`` retry can land AFTER ``active(new_sub)``
-#   during a plan switch and would previously downgrade a paying customer to free
-#   (nothing self-heals it — only ``subscription.active`` re-sets the plan). The
-#   handler now marks THIS sub cancelled first, then reverts to free ONLY when no
-#   OTHER active Subscription row still owns the workspace; a stale/out-of-order
-#   cancel is logged and skipped. Credits are still never clawed back. See the
-#   ``subscribe`` body for the STILL-OPEN downgrade lag-window (checkout→active
-#   webhook) that only the atomic Dodo ``change_plan`` closes.
+# PAYMENTS CLOSED: while ``payments_open`` is off (early access) nobody can pay.
+# ``require_payments_open`` refuses every checkout we create (top-up, plan
+# subscribe, partner pay link) with 403 ``payments.closed``, and ``handle_webhook``
+# grants nothing for a ``payment.succeeded`` or ``subscription.active|renewed``:
+# it records the payment (``credits_granted=0``), logs at ERROR for a human, and
+# acks 200 so Dodo stops retrying. Grants need ``payments_open`` AND
+# ``dodo_environment == "live_mode"``: Dodo's payload has no mode field, and the
+# webhook secret is per-environment, so the configured environment is the mode.
+# Reversals and downgrades (cancel, dunning) still run, since they only take back.
+#
+# Also owns plan subscriptions (workspace and per-site), reversals + dunning, and
+# partner site-plan pricing. CHECKOUT RETURN: Dodo's return_url / cancel_url point
+# at the public backend hop ``billing.checkout_return``, never at the app page:
+# Razorpay returns the buyer with a cross-site form POST that a SvelteKit server
+# refuses and a static SPA cannot take. ``checkout_return_target`` allowlists the
+# app origin before that hop answers 303.
 
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
+from beanie.operators import In
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from pocketpaw_ee.cloud._core.errors import NoActiveSubscription, ValidationError
+from pocketpaw.config import get_settings  # type: ignore[import-untyped]
+from pocketpaw_ee.cloud._core.errors import (
+    ConflictError,
+    Forbidden,
+    NoActiveSubscription,
+    ValidationError,
+)
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     BillingSubscriptionGranted,
@@ -118,6 +75,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
 from pocketpaw_ee.cloud.billing.domain import (
     GatewayEvent,
+    ReversalEvent,
     SubscriptionEvent,
 )
 from pocketpaw_ee.cloud.billing.providers.base import IPaymentsProvider
@@ -128,8 +86,53 @@ from pocketpaw_ee.cloud.models.subscription import Subscription
 logger = logging.getLogger(__name__)
 
 _GATEWAY = "dodo"
-# Only this event type grants credits. Other event families (payment.failed,
-# payment.processing, refunds, disputes, …) are acknowledged but never grant.
+
+# --- Site plans paid from the credit wallet -------------------------------
+# The value ``Site.billing_rail`` carries when the workspace's own credit wallet
+# bought the month, and the ``cause`` its ledger rows are written under. Exported
+# rather than inlined because THREE modules have to agree on the same two
+# strings: this one (the add-on cart's exclusion, and the debit below), the sites
+# service (which stamps the field on purchase) and the renewal sweep (which finds
+# the rows to re-charge). A fourth spelling of "credits" in any of them is a
+# silent double charge in one direction or a free site in the other.
+CREDITS_BILLING_RAIL = "credits"
+# The other two rails, named here beside the first so all three live in one
+# place. ``ADDON`` is a line on the workspace's Dodo subscription and ``SUBSCRIPTION``
+# a legacy per-site Dodo subscription; neither is sold any more, and both are
+# kept because the sites already on them still renew and still cancel.
+ADDON_BILLING_RAIL = "addon"
+SUBSCRIPTION_BILLING_RAIL = "subscription"
+# The fourth rail, and the only one that never moves money. A workspace plan
+# CARRIES sites — Go 1, Pro 3, Pro Max 10 — and a site filling one of those slots
+# is stamped with this instead of being charged: it holds ``staff`` capabilities
+# with no debit, no ``renewal_date``, and nothing for the renewal sweep to find.
+#
+# It has to be a distinct value rather than an empty rail or a flag, because
+# every seam that decides whether to take money keys on this string. Reusing
+# ``credits`` would put the sweep on a site nobody bought; reusing ``""`` would
+# make it indistinguishable from the pre-cutover Dodo rows, which is precisely
+# the population the sweep must NOT touch.
+PLAN_BILLING_RAIL = "plan"
+# PH-13: the year was paid by the partner's CLIENT through a one-time pay link.
+# Nothing recurs and nothing is debited: the renewal sweep lapses it at its date.
+CLIENT_BILLING_RAIL = "client"
+SITE_PLAN_DEBIT_CAUSE = "site_plan"
+# PH-13 ledger causes for the partner's commission on a client payment, and its
+# clawback. Neither is a spend cause or a top-up.
+PARTNER_COMMISSION_CAUSE = "partner_commission"
+PARTNER_COMMISSION_REVERSAL_CAUSE = "partner_commission_reversal"
+# Informational metadata tag on a client pay link. It never qualifies a payment
+# (the server-side record does); it only makes an UNMATCHED claim fail closed.
+PARTNER_CLIENT_PAYMENT_KIND = "partner_client_payment"
+# A refund or lost dispute this long after the payment no longer claws back.
+_PARTNER_CLAWBACK = timedelta(days=60)
+# 1 credit == 1 cent. The same mapping a USD top-up grant uses (INR converts to
+# US cents first), written once here so the site price never gets converted by hand.
+_CENTS_PER_USD = 100
+# Only this event type grants credits. The other one-time families
+# (payment.failed / payment.processing / …) are acknowledged but never grant.
+# Refunds and disputes do not merely fail to grant — they REVERSE; see
+# ``_REVERSAL_EVENTS`` and ``_handle_reversal_event``.
 _SUCCESS_EVENT = "payment.succeeded"
 
 # BC-7 subscription event families this service ACTS on. Each maps to a precise
@@ -141,6 +144,118 @@ _SUB_CANCELLED = "subscription.cancelled"
 # The two grant-bearing events — each (with a fresh event id) grants the tier's
 # monthly allotment additively. active ALSO upgrades the workspace plan.
 _SUB_GRANT_EVENTS = frozenset({_SUB_ACTIVE, _SUB_RENEWED})
+
+# --- Dunning (M5) ---------------------------------------------------------
+# A failing card arrives as ``subscription.on_hold``, NOT on one of Dodo's
+# ``dunning.*`` events: dunning is a per-business toggle that may be off, it
+# carries no metadata, and it would need a domain shape of its own — while
+# ``subscription.*`` already arrives normalized with the workspace_id we need.
+_SUB_ON_HOLD = "subscription.on_hold"
+_SUB_EXPIRED = "subscription.expired"
+_SUB_FAILED = "subscription.failed"
+# Terminal at the GATEWAY: Dodo has stopped this subscription, so there is
+# nothing left to wait for and the entitlements go at once, with no grace.
+_SUB_TERMINAL_EVENTS = frozenset({_SUB_EXPIRED, _SUB_FAILED})
+
+# ``Subscription.status`` vocabulary. ``active`` / ``cancelled`` predate dunning;
+# ``on_hold`` and ``expired`` arrive with it.
+_STATUS_ACTIVE = "active"
+_STATUS_ON_HOLD = "on_hold"
+_STATUS_EXPIRED = "expired"
+_STATUS_CANCELLED = "cancelled"
+
+# THE PREDICATE SPLIT, and it is the whole reason dunning is not a one-liner.
+#
+# BILLABLE — "the gateway subscription this workspace currently holds". An
+# ``on_hold`` subscription is still a subscription: Dodo is still retrying the
+# card and may still recover it, so opening a second one alongside it is a
+# DOUBLE CHARGE. This is the set ``subscribe``'s guard, ``cancel`` and
+# ``sync_site_addons`` ask for. Narrowing it back to {active} reintroduces the
+# double-billing defect fixed on 2026-07-08 — the moment ``on_hold`` started
+# being written into the status field, a ``status == "active"`` filter stopped
+# seeing the row and the cancel-then-create guard was skipped.
+_BILLABLE_STATUSES = frozenset({_STATUS_ACTIVE, _STATUS_ON_HOLD})
+# PAID UP — "a subscription that is actually collecting". Deliberately narrower,
+# and used only where the question is whether some OTHER subscription is still
+# paying for this workspace: the grace sweep asks that before revoking a plan,
+# and the row it is sweeping is itself ``on_hold``, so the billable set would
+# match the very row in question.
+#
+# ENTITLEMENTS ARE RESOLVED FROM NEITHER SET. ``entitlements.resolve_entitlements``
+# reads ``Workspace.plan``, so THAT field is the paid-up signal, and dunning
+# revokes entitlements by moving it to ``free``. During grace the plan is
+# deliberately left alone — that is what grace means.
+_PAID_UP_STATUSES = frozenset({_STATUS_ACTIVE})
+
+# --- Reversals (M1) -------------------------------------------------------
+# The only two reversal events that move money. The other five ``dispute.*``
+# deliveries are lifecycle: reversing on ``dispute.opened`` would take the
+# credits twice the moment the dispute is later won, and ``refund.failed``
+# reversed nothing at all.
+_REFUND_SUCCEEDED = "refund.succeeded"
+_DISPUTE_LOST = "dispute.lost"
+_REVERSAL_EVENTS = frozenset({_REFUND_SUCCEEDED, _DISPUTE_LOST})
+# The ledger cause a clawback is written under. Deliberately NOT one of the
+# spend causes (``compute_spend`` / ``litellm_spend``): a reversal is money
+# going back out, not usage, so it must never inflate the usage chart or eat the
+# workspace's monthly quota.
+_REVERSAL_CAUSE = "payment_reversal"
+
+# --- INR top-ups (PH-4) ---------------------------------------------------
+# The credits products a top-up checkout can SELL (``create_topup``'s currency).
+# The webhook routes on Dodo's own product id, never on metadata — see
+# ``_topup_base_credits``.
+_GRANT_CURRENCIES = frozenset({"USD", "INR"})
+_TOPUP_CAUSE = "top_up"
+# The separate ledger line a bulk INR prepay earns. NOT ``top_up``: it is not
+# money the partner paid, so it must not count as purchased revenue or raise the
+# monthly ceiling the way a bought top-up does.
+_BULK_BONUS_CAUSE = "bulk_bonus"
+# (minimum INR charge in PAISE, bonus percent), highest tier first. Measured on
+# the gross ``total_amount`` the partner paid. Rs.25,000 -> +10%, Rs.1,00,000 -> +20%.
+_INR_BULK_BONUS: tuple[tuple[int, int], ...] = (
+    (10_000_000, 20),
+    (2_500_000, 10),
+)
+
+
+def _inr_bulk_bonus(paid_paise: int, base_credits: int) -> int:
+    """The bonus credits a ``paid_paise`` INR top-up earns on ``base_credits`` (floor)."""
+    for threshold, pct in _INR_BULK_BONUS:
+        if paid_paise >= threshold:
+            return base_credits * pct // 100
+    return 0
+
+
+# How far Dodo's USD settlement figure may sit from our own FX estimate before
+# we stop trusting it. Outside this band it is far more likely a unit or field
+# mismatch than a real exchange rate, so the FX path grants instead.
+_SETTLEMENT_SANITY_BAND = (0.5, 2.0)
+_FX_SETTLEMENT_DISTRUSTED = "fx_settlement_distrusted"
+
+
+def _inr_base_credits(event: GatewayEvent) -> tuple[int, str, float]:
+    """Credits an INR charge is worth, which figure produced them, and the rate.
+
+    Dodo's USD ``settlement_amount`` wins when present — it is the gateway's own
+    conversion, auditable against the payout, and needs no rate. Otherwise the
+    configured ``fx_inr_per_usd`` converts the paise: credits are US cents, so
+    ``floor(paise / 100 / rate * 100) == paise // rate``.
+
+    A settlement figure outside ``_SETTLEMENT_SANITY_BAND`` of the FX estimate is
+    NOT trusted: the FX path grants, under source ``fx_settlement_distrusted`` so
+    the caller can warn (once, on the delivery that actually grants).
+    """
+    from pocketpaw.config import get_settings
+
+    rate = float(get_settings().fx_inr_per_usd)
+    fx_credits = int(event.amount_credits // rate)
+    if event.settlement_currency.upper() == "USD" and event.settlement_amount > 0:
+        low, high = _SETTLEMENT_SANITY_BAND
+        if low * fx_credits <= event.settlement_amount <= high * fx_credits:
+            return event.settlement_amount, "settlement", rate
+        return fx_credits, _FX_SETTLEMENT_DISTRUSTED, rate
+    return fx_credits, "fx", rate
 
 
 def _default_provider() -> IPaymentsProvider:
@@ -156,6 +271,50 @@ def _default_provider() -> IPaymentsProvider:
 
 
 # ---------------------------------------------------------------------------
+# Payments closed (early access)
+# ---------------------------------------------------------------------------
+
+
+def require_payments_open() -> None:
+    """Refuse to start any purchase while payments are closed (403 ``payments.closed``).
+
+    The client hides upgrade and pricing while ``payments_open`` is off; this is
+    the server half, so calling the API directly opens no checkout either.
+    """
+    if not get_settings().payments_open:
+        raise Forbidden("payments.closed", "Payments are not open yet.")
+
+
+def _webhook_grants_allowed() -> bool:
+    """Whether a verified delivery may grant credits or change a plan.
+
+    Needs payments open AND the live Dodo environment: a test-mode delivery
+    (paid with a public test card) must never mint real credits.
+    """
+    settings = get_settings()
+    return bool(settings.payments_open) and settings.dodo_environment == "live_mode"
+
+
+async def _refuse_closed_delivery(event: GatewayEvent | SubscriptionEvent) -> dict:
+    """Ack a grant-bearing delivery that arrived while payments are closed, granting nothing.
+
+    A ``payment.succeeded`` is recorded with ``credits_granted=0`` (the review
+    record, and what a later refund joins through). Logged at ERROR: money moved
+    at the gateway for something we do not sell yet. 200 so Dodo stops retrying.
+    """
+    if isinstance(event, GatewayEvent) and event.workspace_id:
+        await _record_payment(event)
+    logger.error(
+        "billing.webhook: %s while payments are closed (event_id=%s, workspace=%s); "
+        "recorded, NOTHING granted, no plan change; needs a human review",
+        event.type,
+        event.event_id,
+        event.workspace_id,
+    )
+    return {"ok": True, "granted": False}
+
+
+# ---------------------------------------------------------------------------
 # Checkout
 # ---------------------------------------------------------------------------
 
@@ -167,13 +326,17 @@ async def create_topup(
     *,
     customer_email: str | None = None,
     provider: IPaymentsProvider | None = None,
+    currency: str = "USD",
 ) -> dict:
     """Create a one-time top-up and return ``{"checkout_url": ...}``.
 
-    ``amount_credits`` is integer credits (1 credit == $0.01) and must be a
-    positive integer. ``workspace_id`` is stamped onto the gateway metadata so
-    the success webhook can route the grant back to the right wallet.
+    ``amount_credits`` is the charge in ``currency``'s lowest denomination and
+    must be a positive integer: integer credits for USD (1 credit == $0.01), and
+    PAISE for INR (the credits an INR charge buys are settled by the webhook —
+    see ``_inr_base_credits``). ``workspace_id`` is stamped onto the gateway
+    metadata so the success webhook can route the grant back to the right wallet.
     """
+    require_payments_open()
     # Rule 6 — validate at entry.
     if (
         not isinstance(amount_credits, int)
@@ -183,6 +346,9 @@ async def create_topup(
         raise ValidationError("billing.invalid_amount", "amount_credits must be a positive integer")
     if not workspace_id:
         raise ValidationError("billing.invalid_workspace", "workspace_id is required")
+    currency = (currency or "USD").upper()
+    if currency not in _GRANT_CURRENCIES:
+        raise ValidationError("billing.invalid_currency", "currency must be USD or INR")
 
     prov = provider or _default_provider()
     checkout = await prov.create_one_time(
@@ -190,8 +356,52 @@ async def create_topup(
         workspace_id=workspace_id,
         customer_email=customer_email,
         metadata={"workspace_id": workspace_id, "user_id": user_id or ""},
+        currency=currency,
     )
     return {"checkout_url": checkout.checkout_url}
+
+
+async def create_partner_client_checkout(
+    *,
+    workspace_id: str,
+    user_id: str,
+    site_id: str,
+    amount_minor: int,
+    currency: str,
+    provider: IPaymentsProvider | None = None,
+) -> Any:
+    """Open a one-time pay link a partner's client pays for a site's year (PH-13).
+
+    The SAME ``create_one_time`` path a top-up takes (USD or INR credits product,
+    ``amount_minor`` in the currency's lowest unit). Returns the provider's
+    ``OneTimeCheckout``; its ``gateway_ref`` (Dodo's payment id) is what the
+    webhook matches the payment on, so a checkout without one is refused.
+    """
+    require_payments_open()
+    currency = (currency or "").upper()
+    if currency not in _GRANT_CURRENCIES:
+        raise ValidationError("billing.invalid_currency", "currency must be USD or INR")
+    prov = provider or _default_provider()
+    checkout = await prov.create_one_time(
+        amount_credits=int(amount_minor),
+        workspace_id=workspace_id,
+        customer_email=None,
+        metadata={
+            "workspace_id": workspace_id,
+            "site_id": site_id,
+            "kind": PARTNER_CLIENT_PAYMENT_KIND,
+            "user_id": user_id or "",
+        },
+        currency=currency,
+        # The payment must be charged exactly as the link was made: no adaptive
+        # local-currency pricing, which would turn a $228 link into a EUR charge.
+        pin_currency=True,
+    )
+    if not checkout.gateway_ref:
+        raise ValidationError(
+            "billing.no_payment_id", "The payment provider returned no payment id for the link."
+        )
+    return checkout
 
 
 # ---------------------------------------------------------------------------
@@ -212,49 +422,391 @@ def _dodo_product_for_plan(plan_key: str) -> str | None:
     return tier.dodo_product_id if tier is not None else None
 
 
+#: Path of the public return hop (``billing.checkout_return``), under /api/v1.
+CHECKOUT_RETURN_PATH = "/api/v1/billing/checkout/return"
+#: The outcomes the return hop forwards to the app as ``?checkout=<outcome>``.
+CHECKOUT_OUTCOMES = frozenset({"success", "cancel"})
+#: Schemes an app origin may use: the web app, and the Tauri desktop shell.
+_APP_ORIGIN_SCHEMES = frozenset({"http", "https", "tauri"})
+
+
+def _configured_return_base() -> str:
+    """The operator's ``dodo_checkout_return_base``, no trailing slash ("" if unset)."""
+    return (getattr(get_settings(), "dodo_checkout_return_base", "") or "").strip().rstrip("/")
+
+
 def _checkout_return_urls(origin: str | None) -> tuple[str | None, str | None]:
     """Build (return_url, cancel_url) for the subscription checkout, or (None, None).
 
-    After paying on Dodo the buyer must land back in the app. The base is the
+    After paying on Dodo the buyer must land back in the app. The app base is the
     buyer's ``origin`` (the route reads it from the Origin / Referer header); when
     that is absent we fall back to the ``dodo_checkout_return_base`` config. If
     BOTH are empty we return (None, None) and the provider omits return_url rather
     than crash — a checkout with no redirect still works, the buyer just isn't
     auto-returned.
-    """
-    base = (origin or "").strip()
-    if not base:
-        from pocketpaw.config import get_settings
 
-        base = (getattr(get_settings(), "dodo_checkout_return_base", "") or "").strip()
+    The urls point at the BACKEND return hop, carrying the app base as ``to``, not
+    at the app page: Dodo processes Indian cards through Razorpay, which returns the
+    buyer with a cross-site form POST. A SvelteKit server rejects that on its CSRF
+    origin check and a static SPA / Tauri build has no server to take a POST, so the
+    hop accepts it and answers 303 to ``<to>/settings/billing?checkout=<outcome>``.
+    The outcome rides in the PATH because Dodo appends its own ``status`` query.
+    """
+    from urllib.parse import urlencode
+
+    from pocketpaw_ee.cloud._core.public_url import public_base_url
+
+    base = (origin or "").strip().rstrip("/") or _configured_return_base()
     if not base:
         return None, None
-    base = base.rstrip("/")
+    hop = f"{public_base_url()}{CHECKOUT_RETURN_PATH}"
+    query = urlencode({"to": base})
+    return f"{hop}/success?{query}", f"{hop}/cancel?{query}"
+
+
+def _is_bare_origin(value: str) -> bool:
+    """``scheme://host[:port]`` and nothing else: no userinfo, path, query, fragment."""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return False
     return (
-        f"{base}/settings/billing?checkout=success",
-        f"{base}/settings/billing?checkout=cancel",
+        parts.scheme in _APP_ORIGIN_SCHEMES
+        and bool(parts.netloc)
+        and "@" not in parts.netloc
+        and parts.path == ""
+        and not parts.query
+        and not parts.fragment
     )
 
 
-async def _active_subscription(workspace_id: str) -> Subscription | None:
-    """The workspace's currently-ACTIVE gateway subscription, or None.
+def _trusted_return_origin(to: str | None) -> str | None:
+    """``to`` normalized, if this deployment serves an app there, else None.
+
+    The answer comes from the SAME allowlist CORS enforces (configured origins plus
+    the localhost regex), plus the two bases the operator configured: the
+    ``dodo_checkout_return_base`` fallback and the backend's own public origin (a
+    same-origin dashboard). Anything else is refused, so the hop is never an open
+    redirect.
+    """
+    from pocketpaw.api.cors import allowed_origins, origin_allowed
+    from pocketpaw_ee.cloud._core.public_url import public_base_url
+
+    candidate = (to or "").strip().rstrip("/")
+    if not candidate:
+        return None
+    configured = _configured_return_base()
+    if configured and candidate == configured:
+        return candidate
+    if not _is_bare_origin(candidate):
+        return None
+    if candidate == public_base_url():
+        return candidate
+    try:
+        return candidate if origin_allowed(candidate, allowed_origins()) else None
+    except Exception:  # noqa: BLE001 — a settings failure must not open the redirect
+        logger.warning("could not validate checkout return origin", exc_info=True)
+        return None
+
+
+def checkout_return_target(outcome: str, to: str | None) -> str | None:
+    """Where the return hop sends the buyer: the app billing page, or None.
+
+    ``to`` is used only when it is trusted (``_trusted_return_origin``); otherwise
+    the configured ``dodo_checkout_return_base``. None means neither is usable and
+    the hop renders a plain page instead of redirecting. An unknown ``outcome``
+    still lands on the billing page, just without a ``checkout`` flag, so a forged
+    link can never make the app announce a payment.
+    """
+    base = _trusted_return_origin(to) or _configured_return_base()
+    if not base:
+        return None
+    page = f"{base}/settings/billing"
+    return f"{page}?checkout={outcome}" if outcome in CHECKOUT_OUTCOMES else page
+
+
+async def _subscription_with_status(
+    workspace_id: str, statuses: frozenset[str]
+) -> Subscription | None:
+    """The workspace's most recent subscription in one of ``statuses``, or None.
 
     The ``Subscription`` ``(workspace)`` index is NON-UNIQUE — a workspace
-    accumulates historical rows over its lifetime (a prior tier it switched off, an
-    earlier subscription that was cancelled). So NEVER take a naive first-match:
-    filter on ``status == "active"`` and, if more than one somehow qualifies, take
-    the most-recent (``-createdAt``) for a deterministic pick. Returns None when the
-    workspace has no active subscription (only historical / cancelled rows, or never
-    subscribed).
+    accumulates historical rows over its lifetime (a prior tier it switched off,
+    an earlier subscription that was cancelled). So NEVER take a naive
+    first-match: filter on status and, if more than one qualifies, take the
+    most-recent (``-createdAt``) for a deterministic pick.
+
+    WHICH SET a caller passes is a real decision, not a detail — see
+    ``_BILLABLE_STATUSES`` and ``_PAID_UP_STATUSES``. Asking the narrow question
+    where the wide one belongs is how a workspace ends up on two subscriptions.
     """
     return (
         await Subscription.find(
             Subscription.workspace == workspace_id,
-            Subscription.status == "active",
+            In(Subscription.status, sorted(statuses)),
         )
         .sort("-createdAt")
         .first_or_none()
     )
+
+
+async def _billable_subscription(workspace_id: str) -> Subscription | None:
+    """The gateway subscription this workspace currently HOLDS, or None.
+
+    ``active`` or ``on_hold``. A subscription whose card is failing is still a
+    subscription — Dodo is retrying it and may still recover it — so it must be
+    cancelled before a replacement opens, it must remain cancellable by its
+    owner, and site add-ons still attach to it. Everything that asks "does this
+    workspace already have a subscription?" asks this.
+    """
+    return await _subscription_with_status(workspace_id, _BILLABLE_STATUSES)
+
+
+async def _paid_up_subscription(workspace_id: str) -> Subscription | None:
+    """A subscription that is actually COLLECTING for this workspace, or None.
+
+    Strictly ``active``. Used where the question is whether some OTHER
+    subscription is still paying — the grace sweep asks it before revoking a
+    plan, and it cannot use the billable set there because the row it is
+    sweeping is itself ``on_hold`` and would match.
+    """
+    return await _subscription_with_status(workspace_id, _PAID_UP_STATUSES)
+
+
+async def _subscription_by_gateway_id(subscription_id: str) -> Subscription | None:
+    """The row tracking one gateway subscription, or None. Keyed on the unique
+    ``(gateway, gateway_subscription_id)`` index."""
+    if not subscription_id:
+        return None
+    return await Subscription.find_one(
+        Subscription.gateway == _GATEWAY,
+        Subscription.gateway_subscription_id == subscription_id,
+    )
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Read a stored datetime back as tz-aware UTC.
+
+    BSON carries no timezone, so a datetime that round-trips through Mongo can
+    come back NAIVE while ``datetime.now(UTC)`` is aware, and comparing the two
+    raises TypeError. Every deadline read off a document goes through here.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _dunning_grace_days() -> int:
+    """Days a workspace keeps its plan after a payment fails, from settings."""
+    from pocketpaw.config import get_settings
+
+    return max(int(get_settings().billing_dunning_grace_days), 0)
+
+
+def site_plan_debit_key(
+    site_id: str, tier_key: str, period_start: datetime, *, change: bool = False
+) -> str:
+    """The idempotency key for one site-plan debit from the credit wallet.
+
+    ANCHORED ON A DATE, not a timestamp. The key is what stops the same period
+    being charged twice, so it has to be identical across every call that means
+    "this period" and different across calls that mean different ones. A
+    timestamp is unique per call, which makes a double-submitted purchase two
+    charges; a bare ``site_id`` is identical forever, which makes the second
+    period free.
+
+    The date is UTC and comes from the caller: a PURCHASE passes now, a RENEWAL
+    passes the ``renewal_date`` it is consuming. Those two meet only if a site is
+    bought on the very day an earlier period of the same tier renews, which the
+    purchase path cannot reach (a paying site takes the tier-change branch).
+
+    A TIER CHANGE IS ITS OWN NAMESPACE (``change=True`` appends ``:change``). A
+    change made on a renewal's due date would otherwise share that renewal's key,
+    and whichever ran second would replay as a no-op — an upgrade on renewal day
+    made the whole next period free. Purchases and renewals keep the unsuffixed
+    key so nothing already in the ledger changes meaning.
+
+    The tier is in the key because an upgrade is a genuinely new charge on the
+    same day. The consequence — buying back down to a tier already bought today
+    is free — is the correct reading of a same-day flip-flop rather than a gap.
+    """
+    key = f"site_plan:{site_id}:{tier_key}:{period_start.date().isoformat()}"
+    return f"{key}:change" if change else key
+
+
+async def charge_site_plan_credits(
+    *,
+    workspace_id: str,
+    site_id: str,
+    tier_key: str,
+    amount_usd: int,
+    period_start: datetime,
+    member_id: str | None = None,
+    change: bool = False,
+) -> int:
+    """Debit the workspace credit wallet for a paid site tier.
+
+    ``change=True`` for a TIER CHANGE debit — see ``site_plan_debit_key``.
+
+    ``amount_usd`` IS NOT ALWAYS THE TIER'S STICKER PRICE, which is why the
+    parameter is not called ``monthly_price_usd`` any more. It is a full month on
+    a purchase and on a renewal, and on a mid-period UPGRADE it is only the
+    difference between the new tier and the most expensive one this site has
+    already paid for in the current period. Naming it after the month made the
+    upgrade call site read as though it were buying a second month, which is
+    exactly the overcharge it was written to stop.
+
+    THE RAIL EVERY NEW PAID SITE TAKES. The add-on rail it replaces could only
+    charge a workspace that already held a Dodo subscription, so a workspace
+    without one — every self-hosted deployment, and every workspace that has not
+    bought a plan — had its site created PENDING, its charge refused with
+    ``NoActiveSubscription``, and the site left undeployed with a Billing tab
+    telling the buyer to complete a checkout that was never opened. The wallet is
+    already funded and is already what everything else in the product spends.
+
+    STRICT, not overdraftable: this is a discretionary purchase, not metered
+    compute that has already been consumed. An underfunded wallet raises
+    ``InsufficientCredits`` (402) with ZERO side effects — no ledger row, no
+    balance movement — and the caller leaves the site unpaid and undeployed.
+
+    Returns the new balance in whole credits. A replayed call for the same
+    (site, tier, day) is a no-op that returns the current balance; see
+    ``site_plan_debit_key``.
+
+    Lives here rather than in the sites service so the money stays in the module
+    that owns money: sites asks for a charge, billing decides what a charge is,
+    and only ``credits.service`` touches the ledger.
+    """
+    amount = int(amount_usd) * _CENTS_PER_USD
+    if amount <= 0:
+        raise ValidationError(
+            "billing.site_plan_not_priced",
+            f"Site tier '{tier_key}' has no price to charge.",
+        )
+    return await credits_service.debit(
+        workspace=workspace_id,
+        amount=amount,
+        cause=SITE_PLAN_DEBIT_CAUSE,
+        idempotency_key=site_plan_debit_key(site_id, tier_key, period_start, change=change),
+        member_id=member_id,
+        ref={"site_id": site_id, "plan_tier": tier_key, "kind": "site_plan"},
+        # A purchase, so the wallet must actually cover it. ``allow_negative`` is
+        # for spend that already happened and can only be recorded.
+        allow_negative=False,
+    )
+
+
+async def site_plan_charged(
+    *, workspace_id: str, site_id: str, tier_key: str, period_start: datetime, change: bool = False
+) -> bool:
+    """Has this (site, tier, day) debit already been recorded? A replayed debit is
+    a silent no-op, so a caller that grants a NEW period on the charge asks first.
+    ``change`` picks the namespace, exactly as ``charge_site_plan_credits`` does."""
+    return await credits_service.is_recorded(
+        workspace_id, site_plan_debit_key(site_id, tier_key, period_start, change=change)
+    )
+
+
+def site_plan_change_terms(
+    *,
+    held_tier: Any,
+    new_tier: Any,
+    new_price_usd: int,
+    already_paid_usd: int,
+    paid_through: datetime | None,
+    now: datetime,
+    already_bought_today: bool = False,
+) -> tuple[int, datetime | None]:
+    """What moving a PAYING site from ``held_tier`` to ``new_tier`` costs. PURE.
+
+    Returns ``(amount_usd, new_renewal)``: charge ``amount_usd`` (0 = charge
+    nothing) and, when ``new_renewal`` is not None, start a new period ending
+    then. ``period_paid_usd`` becomes ``new_price_usd`` exactly when
+    ``amount_usd > 0``.
+
+      * SAME period length: pay the gap against ``already_paid_usd`` (a
+        high-water mark for this period), keep the date. A downgrade pays nothing.
+      * A SHORTER period while the longer one is still running (``paid_through``
+        in the future, or unknown): ``sites.period_downgrade_refused``.
+      * Any other period change — and ANY change once ``paid_through`` has
+        passed (the period ended, the sweep has not run yet) — is a FRESH
+        PURCHASE: the full new price and a new period from ``now``. No proration
+        of what is left of the old period.
+        Refused with ``sites.plan_already_bought_today`` when that debit already
+        exists today — the charge would replay as a no-op and the period would
+        restart for nothing.
+
+    The period restarts only together with a charge, never on its own.
+    """
+    held_months = getattr(held_tier, "period_months", 1) if held_tier is not None else 1
+    new_months = new_tier.period_months
+    through = None if paid_through is None else _as_utc(paid_through)
+    # The paid period has already ENDED (the sweep has not got to it yet). There is
+    # nothing left to re-price: any change is a fresh purchase from now, and the
+    # sweep then finds the renewal date moved forward and skips the site. Pricing
+    # the gap here would bill the ended period and then the sweep a whole new one.
+    ended = through is not None and through <= now
+    if new_months == held_months and not ended:
+        return max(new_price_usd - already_paid_usd, 0), None
+    if new_months < held_months and not ended:
+        when = through.date().isoformat() if through is not None else "the end of its period"
+        raise ConflictError(
+            "sites.period_downgrade_refused",
+            f"This site is paid through {when}. Switch plans when it renews. "
+            "Nothing has been charged.",
+        )
+    if already_bought_today:
+        raise ConflictError(
+            "sites.plan_already_bought_today",
+            "This site already bought this plan today. Try again tomorrow. "
+            "Nothing has been charged.",
+        )
+    if new_price_usd <= 0:
+        return 0, None
+    from dateutil.relativedelta import relativedelta
+
+    return new_price_usd, now + relativedelta(months=new_months)
+
+
+# Raised by ``site_plan_price_usd`` when a partner rung has no price it can charge.
+# The renewal sweep LAPSES on it, like a short wallet.
+PARTNER_PRICE_UNKNOWN = "billing.partner_price_unknown"
+
+
+async def site_plan_price_usd(
+    tier: Any, workspace_id: str | None, *, last_paid_usd: int | None = None
+) -> int:
+    """Whole USD for one PERIOD of ``tier``, as charged to ``workspace_id``.
+
+    A monthly rung costs its ``monthly_price_usd`` — byte-identical to before. A
+    partner-only rung is priced per the partner's ``billing_country``. Read the
+    profile directly, not via ``enforcement.load_partner``: that one returns None
+    whenever the global flags enforce.
+
+    NO PROFILE (the partner was removed) never guesses a country. A renewal passes
+    ``last_paid_usd`` (the site's ``period_paid_usd``), and it is kept ONLY when it
+    is one of this tier's real prices. ``period_paid_usd`` is a per-period
+    HIGH-WATER mark, so after a mid-period downgrade it holds the dearer tier's
+    price; renewing at that would overcharge. Anything else raises
+    ``PARTNER_PRICE_UNKNOWN`` and the renewal sweep lapses the site.
+    """
+    if not getattr(tier, "partner_only", False):
+        return int(tier.monthly_price_usd)
+    from pocketpaw_ee.cloud.billing import site_plans
+    from pocketpaw_ee.cloud.partners import service as partners_service
+
+    profile = await partners_service.partner_profile_for_workspace(workspace_id)
+    if profile is None:
+        if last_paid_usd and int(last_paid_usd) in site_plans.partner_prices_usd(tier.key):
+            return int(last_paid_usd)
+        raise ConflictError(
+            PARTNER_PRICE_UNKNOWN,
+            f"Site tier '{tier.key}' is sold by Paw Partners and this workspace has no "
+            "partner profile to price it.",
+        )
+    return site_plans.partner_price_usd(tier.key, profile.billing_country, profile.tier)
 
 
 async def subscribe(
@@ -287,6 +839,7 @@ async def subscribe(
     cancel-then-create — see the body — so a plan switch replaces the old
     subscription instead of stacking on top of it.
     """
+    require_payments_open()
     # Rule 6 — validate at entry.
     if not workspace_id:
         raise ValidationError("billing.invalid_workspace", "workspace_id is required")
@@ -328,7 +881,7 @@ async def subscribe(
     # nothing.
     #
     # KNOWN LIMITATION — DOWNGRADE LAG WINDOW (not fixed here; needs change_plan).
-    # ``_active_subscription`` reads the LOCAL Subscription row, and only the
+    # ``_billable_subscription`` reads the LOCAL Subscription row, and only the
     # ``subscription.active`` webhook writes ``status="active"``. Between checkout
     # COMPLETION (buyer paid) and that ``active`` webhook LANDING, no local active
     # row exists yet, so a fast SECOND switch in that window sees ``existing is None``,
@@ -353,7 +906,7 @@ async def subscribe(
     # service acts on active/renewed/cancelled only today), and a /subscribe
     # response-contract change (change_plan returns no checkout url). Tracked as the
     # billing plan-change follow-up; until it lands the lag window above remains.
-    existing = await _active_subscription(workspace_id)
+    existing = await _billable_subscription(workspace_id)
 
     checkout = await prov.create_subscription(
         plan_key=plan_key,
@@ -387,11 +940,14 @@ async def cancel(
     *,
     provider: IPaymentsProvider | None = None,
 ) -> dict:
-    """Cancel the workspace's ACTIVE recurring subscription at the gateway.
+    """Cancel the workspace's BILLABLE recurring subscription at the gateway.
 
-    Loads the workspace's currently-active ``Subscription`` row and tells the
-    gateway to stop billing it (``provider.cancel_subscription``). Returns
-    ``{"ok": True}``.
+    Loads the workspace's billable ``Subscription`` row and tells the gateway to
+    stop billing it (``provider.cancel_subscription``). Returns ``{"ok": True}``.
+
+    BILLABLE, not strictly active: a subscription in dunning (``on_hold``) is
+    still being charged for and must remain cancellable, or a buyer whose card is
+    failing gets a 402 when they try to stop the retries.
 
     The entitlement revert (``Workspace.plan`` -> free) and the Subscription-row
     status flip are NOT done here — they land REACTIVELY on the verified
@@ -399,14 +955,16 @@ async def cancel(
     upgrade to the ``subscription.active`` webhook; the webhook handler is the sole
     writer of that plan mutation, so cancelling here would duplicate it).
 
-    Raises 402 ``billing.no_active_subscription`` when the workspace has no active
-    subscription — only historical / already-cancelled rows, or never subscribed.
+    Raises 402 ``billing.no_active_subscription`` when the workspace has no
+    billable subscription — only historical / already-cancelled / expired rows,
+    or never subscribed. The error code keeps its wire name; only the predicate
+    behind it widened.
     """
     # Rule 6 — validate at entry.
     if not workspace_id:
         raise ValidationError("billing.invalid_workspace", "workspace_id is required")
 
-    active = await _active_subscription(workspace_id)
+    active = await _billable_subscription(workspace_id)
     if active is None or not active.gateway_subscription_id:
         # An active row with a gateway id is required. A stale cancelled row or no
         # subscription at all is a 402 (not a silent success, and not a naive
@@ -429,6 +987,63 @@ async def cancel(
 # ---------------------------------------------------------------------------
 
 
+def _is_inr_credit_product(event: GatewayEvent) -> bool:
+    """Whether Dodo says this payment bought exactly the INR credits product.
+
+    ``product_ids`` comes off the verified body's ``product_cart``, which Dodo
+    fills from what was actually bought — unlike metadata, the buyer cannot
+    write it. Exactly ONE line of that product, as ``create_one_time`` builds
+    it: a mixed cart would convert the whole total as credits.
+    """
+    from pocketpaw.config import get_settings
+
+    inr_product = str(getattr(get_settings(), "dodo_credit_product_id_inr", None) or "")
+    return bool(inr_product) and event.product_ids == (inr_product,)
+
+
+def _topup_base_credits(event: GatewayEvent) -> tuple[int, dict, bool]:
+    """Decide a verified top-up's BASE grant: ``(credits, conversion_ref, inr_product)``.
+
+    0 credits means "grant nothing" (acked, recorded, logged by event id +
+    currency only — never the amount). NOTHING here reads metadata:
+
+      * the INR credits product (Dodo's ``product_cart``), charged in INR —
+        converted via ``_inr_base_credits`` from the money actually paid, and
+        eligible for the bulk bonus. Charged in anything else: nothing.
+      * any other USD charge — ``total_amount`` cents, exactly as before.
+      * anything else (a USD-product checkout Dodo priced in rupees, a foreign
+        charge) — nothing. The 1-credit==1-cent mapping would credit it against
+        the wrong denomination (a ¥750 charge granting 750 credits == $7.50).
+    """
+    charged = event.currency.upper()
+    if _is_inr_credit_product(event):
+        if charged != "INR":
+            logger.warning(
+                "billing.webhook: INR credits product charged in currency=%s (event_id=%s) — "
+                "not granting",
+                event.currency,
+                event.event_id,
+            )
+            return 0, {}, False
+        base, source, rate = _inr_base_credits(event)
+        if base <= 0:
+            logger.warning(
+                "billing.webhook: INR payment.succeeded converted to 0 credits "
+                "(event_id=%s) — not granting",
+                event.event_id,
+            )
+        return max(base, 0), {"conversion": source, "fx_inr_per_usd": rate}, True
+    if charged == "USD":
+        return event.amount_credits, {}, False
+    logger.warning(
+        "billing.webhook: payment.succeeded in unsupported currency=%s (event_id=%s) — "
+        "not granting",
+        event.currency,
+        event.event_id,
+    )
+    return 0, {}, False
+
+
 async def handle_webhook(
     *,
     payload: bytes,
@@ -443,7 +1058,10 @@ async def handle_webhook(
 
     Routes by event family: a one-time ``payment.*`` delivery parses to a
     ``GatewayEvent`` (top-up grant); a recurring ``subscription.*`` delivery
-    parses to a ``SubscriptionEvent`` (BC-7 renewal grant + plan change).
+    parses to a ``SubscriptionEvent`` (BC-7 renewal grant + plan change, and M5
+    dunning); a ``refund.*`` / ``dispute.*`` delivery parses to a
+    ``ReversalEvent`` (M1 clawback), whose ack carries a ``reversed`` count
+    beside ``granted``.
 
     EXACTLY-ONCE: every grant keys on the webhook ``event_id`` (BC-1's unique
     ``(workspace, idempotency_key)`` index), so a replayed delivery re-grants
@@ -457,88 +1075,210 @@ async def handle_webhook(
     # parsed. A bad signature raises BadRequest here → 400, no grant.
     event = prov.verify_and_parse_webhook(payload=payload, headers=headers)
 
+    # PAYMENTS CLOSED: nothing that grants credits or upgrades a plan applies.
+    if not _webhook_grants_allowed() and (
+        (isinstance(event, GatewayEvent) and event.type == _SUCCESS_EVENT)
+        or (isinstance(event, SubscriptionEvent) and event.type in _SUB_GRANT_EVENTS)
+    ):
+        return await _refuse_closed_delivery(event)
+
     # Route by the normalized event shape. A recurring subscription delivery is a
-    # SubscriptionEvent (BC-7); everything else is the BC-2 one-time GatewayEvent.
+    # SubscriptionEvent (BC-7); money going back out is a ReversalEvent (M1);
+    # everything else is the BC-2 one-time GatewayEvent.
     if isinstance(event, SubscriptionEvent):
         return await _handle_subscription_event(event)
+    if isinstance(event, ReversalEvent):
+        return await _handle_reversal_event(event)
 
-    # Only a success event grants. Everything else (failed / processing / refund
-    # / dispute) is acknowledged so the gateway stops retrying, but never grants.
+    # Only a success event grants. Everything else (failed / processing) is
+    # acknowledged so the gateway stops retrying, but never grants.
     if event.type != _SUCCESS_EVENT:
         logger.info("billing.webhook: ignoring non-success event type=%s", event.type)
+        return {"ok": True, "granted": False}
+
+    # PH-13: a client pay link is matched on Dodo's payment id against the
+    # server-side record — before anything else, and never on metadata.
+    from pocketpaw_ee.sites import service as sites_service
+
+    data = event.raw.get("data") or {}
+    match = await sites_service.find_partner_payment(str(data.get("payment_id") or ""))
+    if match is not None:
+        return await _handle_partner_client_payment(event, *match)
+
+    # A SUBSCRIPTION's charge is not a top-up: the subscription events grant its
+    # allotment. Record it (a refund still joins through it), never grant it.
+    # Affects workspace-plan subscriptions too, which is the point.
+    if data.get("subscription_id"):
+        if event.workspace_id:
+            await _record_payment(event)
+        logger.info(
+            "billing.webhook: payment.succeeded for a subscription (event_id=%s) — recorded, "
+            "not granted as a top-up",
+            event.event_id,
+        )
+        return {"ok": True, "granted": False}
+
+    if (data.get("metadata") or {}).get("kind") == PARTNER_CLIENT_PAYMENT_KIND:
+        # Claims to be a client pay link and matches no record: either forged
+        # metadata or a payment Dodo keyed differently. Fail closed — the money
+        # is the CLIENT's, so it must not land in a wallet as a top-up.
+        if event.workspace_id:
+            await _record_payment(event)
+        logger.error(
+            "billing.webhook: payment.succeeded tagged as a partner client payment matches no "
+            "pay link (event_id=%s) — recorded, NOT granted; needs a human",
+            event.event_id,
+        )
         return {"ok": True, "granted": False}
 
     if not event.workspace_id:
         # A success event with no workspace_id in metadata can't be routed. Ack
         # it (200) so the gateway stops retrying, but record nothing.
+        #
+        # This is the ONE verified success that still writes no row, and the
+        # reason is that there is no tenant to scope it to: ``Payment.workspace``
+        # is the tenant boundary, and a row carrying an empty one is unroutable
+        # for the reversal join it would exist to serve.
         logger.warning(
             "billing.webhook: payment.succeeded carried no workspace_id (event_id=%s) — ignoring",
             event.event_id,
         )
         return {"ok": True, "granted": False}
+
+    # RECORD FIRST, GRANT SECOND (M1a). This call used to sit at the very end of
+    # the function, below every guard, so a payment that was acked WITHOUT
+    # granting left no ``Payment`` row at all — and the population that produced
+    # was exactly the one most likely to demand a refund, the non-USD charges
+    # that take the money and grant nothing. A reversal joins through
+    # ``payment_id`` -> ``gateway_ref``, so no row meant no clawback was even
+    # possible.
+    #
+    # Moving it above the gates also closes a smaller race it was creating on
+    # the happy path: running after the grant left a window where credits
+    # existed with no payment record behind them.
+    #
+    # The row goes in with ``credits_granted=0`` and is stamped with the real
+    # figure once the grant lands. That ordering is deliberate — a crash between
+    # the two leaves us UNDER-recording what we gave, and a reversal that claws
+    # back too little is recoverable in a way that one clawing back credits the
+    # buyer never received is not.
+    await _record_payment(event)
+
     if event.amount_credits <= 0:
         logger.warning(
             "billing.webhook: payment.succeeded had non-positive amount (event_id=%s) — ignoring",
             event.event_id,
         )
         return {"ok": True, "granted": False}
-    # USD-ONLY: the 1-credit==1-cent mapping holds only for USD. A verified
-    # non-USD charge would be credited 1:1 against the wrong denomination (a
-    # ¥750 charge wrongly granting 750 credits == $7.50). Until the gateway
-    # carries an FX-normalized amount, gate the grant on currency == USD; any
-    # other currency is acked (200) so Dodo stops retrying, but grants nothing.
-    if event.currency.upper() != "USD":
-        # Log the event id + currency only — never the amount (PII / money).
-        logger.warning(
-            "billing.webhook: payment.succeeded in non-USD currency=%s (event_id=%s) — "
-            "not granting (USD-only)",
-            event.currency,
-            event.event_id,
-        )
-        return {"ok": True, "granted": False}
+    # Dodo's own product id decides the INR path — never metadata, which a buyer
+    # can forge through a static payment link's ``metadata_*`` params.
+    base, conversion, inr_product = _topup_base_credits(event)
 
     # Grant EXACTLY ONCE — idempotency is keyed on the webhook event id. A replay
     # collides on BC-1's unique (workspace, idempotency_key) index and no-ops.
-    result = await credits_service.grant(
-        workspace=event.workspace_id,
-        amount=event.amount_credits,
-        cause="top_up",
-        idempotency_key=event.event_id,
-        ref={"gateway": _GATEWAY, "event_id": event.event_id},
-    )
-    new_balance = result.balance
-    # A genuine first grant reports ``created=True``; a replay reports False. We
-    # gate the capture emit on this authoritative flag, NOT a balance delta — a
-    # delta heuristic mis-fires under concurrency (a racing grant could mask a
-    # genuine grant as a replay or vice versa).
-    applied = result.created
+    moved = 0
+    new_balance = None
+    base_created = False
+    if base > 0:
+        result = await credits_service.grant(
+            workspace=event.workspace_id,
+            amount=base,
+            cause=_TOPUP_CAUSE,
+            idempotency_key=event.event_id,
+            # The conversion rides on the ledger entry itself, so what ACTUALLY
+            # moved the credits is recorded atomically with them — a redelivery
+            # at a different rate can never rewrite it.
+            ref={"gateway": _GATEWAY, "event_id": event.event_id, **conversion},
+        )
+        new_balance = result.balance
+        # ``created`` is the authoritative "this grant applied" flag — never a
+        # balance delta, which mis-fires under concurrency.
+        base_created = result.created
+        if base_created:
+            moved = base
 
-    # Record the payment (idempotently — the unique gateway+event_id index keeps
-    # a replay from inserting a second row). The ledger entry is the money guard;
-    # this row is the human-facing payment record.
-    await _record_payment(event)
+    # EVERYTHING BELOW READS THE LEDGER, NOT THIS DELIVERY'S ARITHMETIC — and it
+    # runs on every delivery, granting or not. A redelivery recomputes ``base``
+    # at whatever FX rate is configured NOW and its grant no-ops, so trusting
+    # that figure would size the bonus, and stamp the reversal cap, off credits
+    # that never moved (a rate halved between deliveries doubled the cap, and a
+    # full refund then drove the wallet negative by the difference). Only
+    # APPLIED entries count: a half-applied grant must not raise the cap.
+    base_entry = await credits_service.find_by_key(event.workspace_id, event.event_id)
+    base_applied = base_entry.amount_delta if base_entry is not None and base_entry.applied else 0
+    bonus_key = f"{event.event_id}:{_BULK_BONUS_CAUSE}"
+    if inr_product and base_applied > 0:
+        bonus = _inr_bulk_bonus(event.amount_credits, base_applied)
+        if bonus > 0:
+            # Its OWN line and its OWN key, derived from the event id, so it is
+            # exactly-once independently of the base grant: a crash between the
+            # two is healed by the redelivery granting just the missing bonus.
+            bonus_result = await credits_service.grant(
+                workspace=event.workspace_id,
+                amount=bonus,
+                cause=_BULK_BONUS_CAUSE,
+                idempotency_key=bonus_key,
+                ref={"gateway": _GATEWAY, "event_id": event.event_id},
+            )
+            new_balance = bonus_result.balance
+            if bonus_result.created:
+                moved += bonus
+    bonus_entry = await credits_service.find_by_key(event.workspace_id, bonus_key)
+    bonus_applied = (
+        bonus_entry.amount_delta if bonus_entry is not None and bonus_entry.applied else 0
+    )
+    applied = moved > 0
+
+    if base > 0 and base_entry is None:
+        # The grant returned and yet the ledger holds no entry under its key.
+        # Never stamp a cap from this delivery's arithmetic — leave the row as is.
+        logger.error(
+            "billing.webhook: top-up event_id=%s granted but no ledger entry is readable "
+            "under its key — NOT stamping the reversal cap; needs a human",
+            event.event_id,
+        )
+    else:
+        # Stamp what the ledger ACTUALLY holds for this payment — the cap a
+        # reversal claws back against. On every delivery, so a row left at 0 by a
+        # delivery that crashed between recording and granting is healed; the
+        # same figure every time, because it is read rather than computed.
+        ref = (base_entry.ref or {}) if base_entry is not None else {}
+        await _mark_payment_granted(
+            event.event_id,
+            base_applied + bonus_applied,
+            conversion=ref.get("conversion"),
+            fx_inr_per_usd=ref.get("fx_inr_per_usd"),
+        )
 
     if applied:
-        # Rule 9 — emit only on a grant that actually applied (not a replay).
+        if base_created and conversion.get("conversion") == _FX_SETTLEMENT_DISTRUSTED:
+            logger.warning(
+                "billing.webhook: INR top-up event_id=%s carried a USD settlement figure "
+                "outside the sanity band of the FX estimate — granted from the FX rate",
+                event.event_id,
+            )
+        # Rule 9 — emit only on a grant that actually applied (not a replay), and
+        # report only what moved on THIS delivery.
         await emit(
             BillingTopupCaptured(
                 data={
                     "workspace_id": event.workspace_id,
                     "gateway": _GATEWAY,
                     "event_id": event.event_id,
-                    "amount_credits": event.amount_credits,
+                    "amount_credits": moved,
                     "currency": event.currency,
                     "balance_after": new_balance,
                 }
             )
         )
         logger.info(
-            "billing.webhook: granted %d credits to workspace=%s (event_id=%s)",
-            event.amount_credits,
+            "billing.webhook: granted %d credits to workspace=%s (event_id=%s, via %s)",
+            moved,
             event.workspace_id,
             event.event_id,
+            conversion.get("conversion", "usd"),
         )
-    else:
+    elif base > 0:
         logger.info(
             "billing.webhook: replay of event_id=%s — grant was a no-op, balance unchanged",
             event.event_id,
@@ -548,7 +1288,20 @@ async def handle_webhook(
 
 
 async def _record_payment(event: GatewayEvent) -> None:
-    """Upsert the ``Payment`` record for a captured top-up. Idempotent.
+    """Record a VERIFIED ``payment.succeeded``, granted or not. Idempotent.
+
+    Every verified success that carries a routable workspace gets a row —
+    including the ones acked without granting. That is not bookkeeping
+    completeness for its own sake: a reversal has no metadata to route on and
+    joins through ``payment_id`` -> ``gateway_ref``, so a payment with no row is
+    a payment whose refund can never be traced to a wallet.
+
+    ``amount_credits`` is what the buyer PAID. ``credits_granted`` starts at 0
+    and is stamped by ``_mark_payment_granted`` once a grant lands, so a refused
+    payment keeps 0 and a reversal against it correctly takes nothing.
+
+    ``status`` stays the GATEWAY's outcome and is unchanged by any of this: a
+    non-USD charge is genuinely ``succeeded``, it just granted nothing.
 
     A replayed webhook collides on the unique ``(gateway, gateway_event_id)``
     index → ``DuplicateKeyError`` → we treat it as already recorded (no-op).
@@ -559,14 +1312,905 @@ async def _record_payment(event: GatewayEvent) -> None:
         gateway_ref=str((event.raw.get("data") or {}).get("payment_id") or "") or None,
         gateway_event_id=event.event_id,
         amount_credits=event.amount_credits,
+        credits_granted=0,
         currency=event.currency or None,
         status="succeeded",
+        # Audit: Dodo's own settlement figure, as the verified body stated it.
+        settlement_amount=event.settlement_amount or None,
+        settlement_currency=event.settlement_currency or None,
+        subscription_id=str((event.raw.get("data") or {}).get("subscription_id") or "") or None,
     )
     try:
         await doc.insert()
     except DuplicateKeyError:
         # Already recorded by a prior delivery of the same event — no-op.
         return
+
+
+async def _mark_payment_granted(
+    event_id: str,
+    credits_granted: int,
+    *,
+    conversion: str | None = None,
+    fx_inr_per_usd: float | None = None,
+) -> None:
+    """Stamp what a payment actually granted onto its recorded row.
+
+    Separate from ``_record_payment`` because the row is written BEFORE the
+    grant (so it exists even when the grant never happens) while this figure is
+    only known after. Idempotent by construction — it sets a value rather than
+    incrementing one, so a redelivery writes the same number and a delivery that
+    crashed before reaching here is healed by the next one.
+    """
+    fields: dict = {"credits_granted": int(credits_granted)}
+    if conversion is not None:
+        fields["conversion"] = str(conversion)
+    if fx_inr_per_usd is not None:
+        # Read off the base ledger entry, so it is the rate the credits were
+        # actually granted at — the same value on every delivery.
+        fields["fx_inr_per_usd"] = float(fx_inr_per_usd)
+    await Payment.get_pymongo_collection().update_one(
+        {"gateway": _GATEWAY, "gateway_event_id": event_id},
+        {"$set": fields, "$currentDate": {"updatedAt": True}},
+    )
+
+
+def _reversal_ack(reversed_credits: int = 0) -> dict:
+    """The ack shape for a reversal delivery.
+
+    ``granted`` is always False (a reversal never adds credits) and ``reversed``
+    is what actually left the wallet on THIS delivery — 0 for a lifecycle event,
+    an unjoinable payment, or a redelivery.
+    """
+    return {"ok": True, "granted": False, "reversed": int(reversed_credits)}
+
+
+async def _release_reversal_claim(doc: Payment, event: ReversalEvent, amount: int) -> None:
+    """Undo one reversal's claim after its debit raised, so a redelivery can retry.
+
+    GUARDED ON THE LEDGER, for two reasons and not one.
+
+    First, ``credits.debit`` can raise AFTER the money moved: it stamps the entry
+    and emits once the balance ``$inc`` has landed, two awaits past the point of
+    no return. Releasing then hands the remainder back to a later reversal on top
+    of credits already taken — the over-reversal this ordering exists to prevent.
+
+    Second, and less obvious: an entry inserted whose ``$inc`` never landed is a
+    PHANTOM, and ``reconcile`` re-drives every ``applied is False`` entry it
+    finds. Release the claim there and reconcile applies the debit later against
+    a row that no longer records it, so the next reversal can take the same share
+    again. That turns a recoverable phantom into an over-reversal. Do not relax
+    this guard to "only the money-already-moved case" — it covers both.
+
+    "Recorded" is therefore the conservative answer in every ambiguous state:
+    keep the claim, and let the redelivery's identity check classify it.
+
+    Never raises. A release that fails leaves exactly the state a hard kill
+    leaves, which the redelivery already alarms on, and swallowing the original
+    exception to report this one would lose the reason the debit failed.
+    """
+    try:
+        if await credits_service.is_recorded(doc.workspace, event.event_id):
+            return
+        await Payment.get_pymongo_collection().find_one_and_update(
+            {"_id": doc.id, "reversal_event_ids": event.event_id},
+            {
+                "$inc": {"credits_reversed": -amount},
+                "$pull": {"reversal_event_ids": event.event_id},
+                "$currentDate": {"updatedAt": True},
+            },
+        )
+    except Exception:
+        logger.exception(
+            "billing.webhook: could not release the reversal claim for payment=%s "
+            "(event_id=%s) after its debit failed — the row now records %d credits that "
+            "were never taken; the redelivery will alarm",
+            event.payment_id,
+            event.event_id,
+            amount,
+        )
+
+
+async def _handle_reversal_event(event: ReversalEvent) -> dict:
+    """Claw credits back for a VERIFIED reversal (signature already checked).
+
+    Acts on ``refund.succeeded`` and ``dispute.lost``, and on nothing else. The
+    other five ``dispute.*`` deliveries are lifecycle — a dispute that opens may
+    still be won, and reversing when it opens would take the credits twice — and
+    ``refund.failed`` moved no money at all. Those are acked and logged.
+
+    WHY THIS EXISTS UNDER A NO-REFUND POLICY. The decision not to issue refunds
+    governs what WE initiate; it does not govern what arrives. A chargeback is
+    involuntary — ``dispute.lost`` means the issuer has already taken the cash
+    back — and Dodo is merchant of record unless a BYOP route is configured, so
+    Dodo can refund unilaterally to protect its own dispute ratio. The handler is
+    the same code under either policy.
+
+    THE JOIN. A ``Dispute`` carries no metadata, so ``payment_id`` is the only
+    key back to a wallet: it matches ``Payment.gateway_ref``, which is written
+    for every verified success (see ``_record_payment`` — recording the refused
+    ones too is exactly what makes a refunded non-USD charge joinable).
+
+    THE CAP is ``credits_granted`` on that row, less whatever earlier reversals
+    already took. It is doing three jobs at once, which is why this path needs no
+    currency gate and no partial-refund special case of its own:
+
+      * a charge in an unsupported currency (anything but USD / INR) granted
+        nothing, so its cap is 0 and refunding it takes no credits — correct,
+        because we never gave any;
+      * a payment carrying BOTH a refund and a lost dispute (routine, because
+        Verifi RDR resolves disputes by refunding) cannot be clawed twice;
+      * we can never take more credits than we handed out, whatever the gateway
+        says the money was.
+
+    THE AMOUNT is the grant's share of the reversal's own stated figure when the
+    gateway named one in the payment's currency (``granted * refunded // paid``:
+    the stated cents for USD, base + bulk bonus pro rata for INR) — a partial
+    refund returns part of the charge, and taking the whole grant for it would
+    seize credits the buyer still paid for.
+    Otherwise it is the full remaining grant, which is what a completed refund
+    and a lost chargeback both mean.
+
+    UNLESS the gateway said BOTH "this is partial" and nothing we could parse as
+    an amount. Those two claims contradict each other, and defaulting to the full
+    grant there would over-reverse on the strength of a number we could not read.
+    That case takes nothing and logs at ERROR: an under-reversal is recoverable
+    by hand, money taken from a customer who did not owe it is not.
+
+    IDEMPOTENCY is the ledger's, keyed on the webhook event id exactly as the
+    grant path keys on it, so a redelivery collides on BC-1's unique
+    ``(workspace, idempotency_key)`` index and moves nothing.
+
+    THE CLAIM RUNS FIRST, THE DEBIT SECOND, and the order is the whole defence
+    against two DIFFERENT reversals on one payment. The ``$ne`` filter on the
+    event id only ever guarded a redelivery of the SAME event; the cap above is a
+    read-modify-write, so a refund and a lost dispute arriving together both read
+    ``credits_reversed`` before either claimed it and both took the full grant.
+    Claiming first — under a conditional ``credits_reversed <= granted - amount``
+    filter, in the same atomic operator that increments it — borrows the SHAPE of
+    the ledger's insert-first-then-apply discipline: contenders serialise at the
+    write, not after the money has already moved.
+
+    IT DOES NOT BORROW THE HEAL, and that difference is the whole of what follows.
+    ``credits.service`` can insert first because ``reconcile`` re-drives every
+    ``applied is False`` phantom it leaves behind. There is no equivalent for a
+    claimed-but-undebited reversal, and nothing calls ``reconcile`` on a schedule
+    in any case. So this path covers its own crash window twice over:
+
+      * the debit's failure path RELEASES the claim (``_release_reversal_claim``)
+        so the gateway's redelivery re-drives the reversal cleanly. The release is
+        keyed on this event's own id and is skipped when the ledger already
+        records the movement, so it can never hand back a share whose money moved;
+      * a hard kill runs no ``except``, so the claim survives with no debit behind
+        it. The redelivery detects that by identity plus ``is_recorded`` and logs
+        at ERROR instead of reporting the routine outcome — see the check above
+        the cap. It is NOT the only state in which "already applied" would be
+        false: a phantom ledger entry is the other, and this path deliberately
+        reports that one as routine. The difference is that a phantom still has
+        an entry for ``reconcile`` to re-drive, and an orphaned claim has nothing
+        — no other mechanism will ever resolve it, which is why it alarms.
+
+    THE RESIDUAL TRADE is deliberate: a hard kill leaves an under-reversal for a
+    human to settle. The old order healed that case and could over-reverse
+    instead. This module's posture, stated above for the unparseable partial,
+    decides it — an under-reversal is recoverable by hand, money taken from a
+    customer who did not owe it is not.
+
+    THE BALANCE IS ALLOWED TO GO NEGATIVE. ``debit(allow_negative=True)`` never
+    raises, and a negative balance blocks further spend (``check_balance``
+    rejects at <= 0) until it is settled. Writing the shortfall off instead would
+    make disputing profitable.
+
+    KNOWN GAP — a subscription charge cannot be reversed here, and the reason is
+    structural rather than unfinished. The charge's own ``payment.succeeded``
+    writes a ``Payment`` row stamped ``subscription_id`` (never granted), but
+    nothing links it to the grant it paid for — ``subscription.active`` /
+    ``.renewed`` carry no ``payment_id`` — and that grant is the tier's monthly
+    ALLOTMENT, not the cash, so the money on the refund is not the figure to
+    claw back either. Such a delivery is logged at ERROR with the payment id and
+    the subscription and left for a human (so is one that matches no row).
+    Reversing a number nobody can derive would be worse than alarming.
+    """
+    if event.type not in _REVERSAL_EVENTS:
+        logger.info(
+            "billing.webhook: %s is reversal lifecycle (payment=%s, event_id=%s) — "
+            "acked, no money action",
+            event.type,
+            event.payment_id,
+            event.event_id,
+        )
+        return _reversal_ack()
+
+    if not event.payment_id:
+        logger.error(
+            "billing.webhook: %s carried no payment_id (event_id=%s) — nothing to join a "
+            "reversal to; acked without clawing back",
+            event.type,
+            event.event_id,
+        )
+        return _reversal_ack()
+
+    # PH-13: a client pay link's commission and year. Independent of the Payment
+    # row below, which for these payments granted nothing and reverses nothing.
+    await _reverse_partner_commission(event)
+
+    doc = await Payment.find_one(
+        Payment.gateway == _GATEWAY,
+        Payment.gateway_ref == event.payment_id,
+    )
+    if doc is None:
+        logger.error(
+            "billing.webhook: %s for payment=%s (event_id=%s) matches no recorded payment — "
+            "NOT clawing back; needs a human",
+            event.type,
+            event.payment_id,
+            event.event_id,
+        )
+        return _reversal_ack()
+    if doc.subscription_id:
+        # A SUBSCRIPTION's charge: it granted no credits here (the subscription
+        # events grant the tier's allotment), so there is no figure to derive.
+        logger.error(
+            "billing.webhook: %s for payment=%s (event_id=%s) is a charge of subscription=%s "
+            "— NOT clawing back; the allotment it paid for needs a human",
+            event.type,
+            event.payment_id,
+            event.event_id,
+            doc.subscription_id,
+        )
+        return _reversal_ack()
+
+    # HAS THIS DELIVERY ALREADY CLAIMED? Answer it HERE, by identity, before any
+    # arithmetic — the ``remaining <= 0`` return below would otherwise swallow
+    # every redelivery of a FULL reversal and never reach the claim at all.
+    #
+    # Two states reach this line and they are not alike. Since the claim runs
+    # before the debit, a failure between the two leaves a reversal recorded that
+    # never took the credits, and this delivery's own id is already on the row —
+    # so it cannot be told from a routine replay by the row alone. The ledger is
+    # the second fact: ``is_recorded`` asks whether ANY movement exists under
+    # this event id, and the debit keys on exactly that id.
+    #
+    # The window is reachable without a process kill. ``handle_webhook`` is
+    # wrapped in no try/except, so an exception inside the debit is a 500; the
+    # gateway redelivers; the redelivery is acked 200 and it stops retrying. The
+    # release on the debit's own failure path below closes the ordinary case;
+    # this alarm is what covers a hard kill, which no release can.
+    #
+    # TWO HONEST LIMITS. A ledger entry is inserted before the balance moves, so
+    # a crash in that narrow window reads as recorded here and logs routine —
+    # that is ``credits.service``'s own phantom state, whose remedy is
+    # ``reconcile``, run BY HAND. Nothing schedules it, so "reconcile covers it"
+    # means a person has to run it; it is still the right owner for that state,
+    # because the entry exists to be re-driven and a claimed-but-undebited
+    # reversal has nothing at all.
+    #
+    # And a SECOND copy of this event arriving while the first is still mid-debit
+    # can read "not recorded" and alarm spuriously; the window is one round-trip
+    # wide. A false alarm is the right way to be wrong here — it is noisy and
+    # resolves the moment someone reads the ledger, where a missed orphan is
+    # silent, permanent, and costs the customer money. The message below says so
+    # rather than asserting a certainty this check does not have.
+    if event.event_id in (doc.reversal_event_ids or []):
+        if await credits_service.is_recorded(doc.workspace, event.event_id):
+            logger.info(
+                "billing.webhook: %s for payment=%s (event_id=%s) was already applied — "
+                "nothing debited, balance unchanged",
+                event.type,
+                event.payment_id,
+                event.event_id,
+            )
+        else:
+            logger.error(
+                "billing.webhook: %s for payment=%s (event_id=%s) is RECORDED ON THE "
+                "PAYMENT ROW WITH NO LEDGER MOVEMENT BEHIND IT, and this redelivery cannot "
+                "make one — the row already lists this event. Almost certainly the reversal "
+                "died between claiming its share and debiting the wallet, leaving "
+                "workspace=%s holding credits it was refunded for; the row reads "
+                "credits_reversed=%d against granted=%d, and nothing retries it. CHECK THE "
+                "LEDGER BEFORE SETTLING BY HAND: a duplicate delivery of this same event "
+                "still in flight reads identically here for about one round-trip, and its "
+                "debit may land a moment from now",
+                event.type,
+                event.payment_id,
+                event.event_id,
+                doc.workspace,
+                int(doc.credits_reversed or 0),
+                int(doc.amount_credits if doc.credits_granted is None else doc.credits_granted),
+            )
+        return _reversal_ack()
+
+    # A row written before ``credits_granted`` existed carries None. Those rows
+    # were ONLY ever written when the grant applied, so "missing" means "granted
+    # everything that was paid" — reading it as 0 would quietly make every
+    # pre-existing payment un-reversible.
+    granted = doc.amount_credits if doc.credits_granted is None else doc.credits_granted
+    already = int(doc.credits_reversed or 0)
+    remaining = max(int(granted) - already, 0)
+    if remaining <= 0:
+        logger.info(
+            "billing.webhook: %s for payment=%s (event_id=%s) — nothing left to reverse "
+            "(granted=%d, already reversed=%d)",
+            event.type,
+            event.payment_id,
+            event.event_id,
+            int(granted),
+            already,
+        )
+        return _reversal_ack()
+
+    same_currency = bool(event.currency) and event.currency.upper() == (doc.currency or "").upper()
+    paid = int(doc.amount_credits or 0)
+    if event.amount_credits > 0 and same_currency and paid > 0:
+        # PRO RATA of what the payment granted, never the refund's money AS
+        # credits. For USD granted == paid, so this is exactly the stated cents.
+        # For INR the refund is in paise and the grant is base + bulk bonus, so a
+        # full refund takes exactly base + bonus and a partial takes its share of
+        # both. Floor: repeated partials can leave a credit un-reversed, which is
+        # the recoverable direction.
+        amount = min(int(granted) * min(event.amount_credits, paid) // paid, remaining)
+    elif event.is_partial:
+        # A PARTIAL reversal whose amount we could not read. Falling through to
+        # the full remaining grant here would seize credits the buyer still paid
+        # for, on the strength of a number we admit we could not parse. The
+        # gateway has told us two things and they disagree, so we take nothing
+        # and alarm — an under-reversal is recoverable by hand, an over-reversal
+        # is money taken from a customer who did not owe it.
+        logger.error(
+            "billing.webhook: %s for payment=%s (event_id=%s) is PARTIAL but named no usable "
+            "amount in %s — NOT clawing back; reversing the full grant would take credits the "
+            "buyer still paid for. Needs a human",
+            event.type,
+            event.payment_id,
+            event.event_id,
+            doc.currency or "the payment's currency",
+        )
+        return _reversal_ack()
+    else:
+        amount = remaining
+
+    if amount <= 0:
+        # A refund so small its pro-rata share floors to zero credits.
+        logger.info(
+            "billing.webhook: %s for payment=%s (event_id=%s) is worth 0 credits pro rata — "
+            "nothing to reverse",
+            event.type,
+            event.payment_id,
+            event.event_id,
+        )
+        return _reversal_ack()
+
+    # CLAIM the reversal on the payment row BEFORE any money moves. The filter
+    # carries two independent guards:
+    #
+    #   * ``reversal_event_ids: {$ne: ...}`` — the REDELIVERY guard. A second
+    #     copy of THIS event finds its own id already listed and adds nothing.
+    #     Unchanged, and it was never the guard the concurrent case needed.
+    #   * ``credits_reversed <= granted - amount`` — the CONCURRENCY guard. The
+    #     ``remaining`` computed above is a read-modify-write: two DIFFERENT
+    #     deliveries on one payment (a refund AND a lost dispute, routine because
+    #     Verifi RDR resolves disputes by refunding) both read ``already`` before
+    #     either had claimed it, so both were cleared to take the whole grant and
+    #     the running total landed at twice what was handed out — with the wallet
+    #     driven negative and the customer locked out by ``check_balance``. This
+    #     re-checks the cap against the row AS IT IS NOW, inside the same atomic
+    #     operator that increments it, so the loser is turned away instead. It
+    #     needs no second process: the read, the awaited debit and the claim are
+    #     ordered so two deliveries interleave at an ``await`` in ONE event loop.
+    #
+    # A legacy row has no ``credits_reversed`` field at all and ``$lte`` never
+    # matches a missing field, so the ``$exists`` arm lets it through — it reads
+    # as 0, which is under every cap (``amount <= remaining``, so ``cap >= 0``).
+    cap = int(granted) - amount
+    claimed = await Payment.get_pymongo_collection().find_one_and_update(
+        {
+            "_id": doc.id,
+            "reversal_event_ids": {"$ne": event.event_id},
+            "$or": [
+                {"credits_reversed": {"$lte": cap}},
+                {"credits_reversed": {"$exists": False}},
+            ],
+        },
+        {
+            "$inc": {"credits_reversed": amount},
+            "$push": {"reversal_event_ids": event.event_id},
+            "$currentDate": {"updatedAt": True},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if claimed is None:
+        # WHICH guard turned it away? A redelivery is routine and silent. Losing
+        # the CAP to a concurrent reversal is the alarm: nothing anywhere
+        # compares the running total against the grant after the fact, so an
+        # attempted over-reversal would otherwise be invisible right up until
+        # ``check_balance`` locks the customer out of a wallet they never
+        # overdrew. It is also the signal that two reversals landed on one
+        # payment, which a human wants to see whatever the outcome.
+        current = await Payment.get_pymongo_collection().find_one({"_id": doc.id})
+        if event.event_id in ((current or {}).get("reversal_event_ids") or []):
+            logger.info(
+                "billing.webhook: %s for payment=%s (event_id=%s) was already applied — "
+                "nothing debited, balance unchanged",
+                event.type,
+                event.payment_id,
+                event.event_id,
+            )
+        else:
+            logger.error(
+                "billing.webhook: %s for payment=%s (event_id=%s) would have reversed %d "
+                "credits past the grant — REFUSED before debiting. granted=%d, already "
+                "reversed=%d (was %d when this delivery read it): a concurrent reversal on "
+                "the same payment claimed the remainder first",
+                event.type,
+                event.payment_id,
+                event.event_id,
+                amount,
+                int(granted),
+                int((current or {}).get("credits_reversed") or 0),
+                already,
+            )
+        return _reversal_ack()
+
+    try:
+        balance = await credits_service.debit(
+            workspace=doc.workspace,
+            amount=amount,
+            cause=_REVERSAL_CAUSE,
+            idempotency_key=event.event_id,
+            allow_negative=True,
+            ref={
+                "gateway": _GATEWAY,
+                "event_id": event.event_id,
+                "payment_id": event.payment_id,
+                "reason": event.type,
+            },
+        )
+    except Exception:
+        # RELEASE the claim just made, so the gateway's redelivery re-drives this
+        # reversal from scratch instead of finding its own id on the row and
+        # being refused forever. Both halves of the release are keyed on THIS
+        # event's id, so it can never free a claim some other reversal made.
+        await _release_reversal_claim(doc, event, amount)
+        raise
+
+    logger.warning(
+        "billing.webhook: %s reversed %d credits from workspace=%s (payment=%s, event_id=%s) — "
+        "balance now %d",
+        event.type,
+        amount,
+        doc.workspace,
+        event.payment_id,
+        event.event_id,
+        balance,
+    )
+    return _reversal_ack(amount)
+
+
+# ---------------------------------------------------------------------------
+# Client-paid partner sites (PH-13)
+# ---------------------------------------------------------------------------
+
+
+def _int_field(data: dict, key: str) -> int:
+    value = data.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _credit_product_for(currency: str) -> str:
+    """The credits product a pay link in ``currency`` sells (what Dodo must report)."""
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    name = "dodo_credit_product_id_inr" if currency.upper() == "INR" else "dodo_credit_product_id"
+    return str(getattr(settings, name, None) or "")
+
+
+def _partner_paid_usd_cents(event: GatewayEvent) -> int | None:
+    """US cents the client paid, NET OF TAX, or None for an unsupported currency.
+
+    USD: ``total_amount - tax``. INR: the same paise net of tax, converted by the
+    PH-4 helper (Dodo's USD settlement net of ``settlement_tax`` when it sits in
+    the sanity band, else the configured FX rate).
+    """
+    data = event.raw.get("data") or {}
+    net = event.amount_credits - _int_field(data, "tax")
+    charged = event.currency.upper()
+    if charged == "USD":
+        return max(net, 0)
+    if charged == "INR":
+        settled = max(event.settlement_amount - _int_field(data, "settlement_tax"), 0)
+        cents, _, _ = _inr_base_credits(
+            replace(event, amount_credits=max(net, 0), settlement_amount=settled)
+        )
+        return max(cents, 0)
+    return None
+
+
+def _partner_payment_mismatch(event: GatewayEvent, rec: Any) -> str:
+    """Why a matched payment is NOT the one the link was made for, or ""."""
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    if event.currency.upper() != rec.currency.upper():
+        return "currency"
+    data = event.raw.get("data") or {}
+    # A payment link cannot switch discount codes off at Dodo; a discounted
+    # payment is not the list price the link was made for.
+    if data.get("discount_id") or data.get("discounts"):
+        return "discount"
+    tax = _int_field(data, "tax")
+    # Tax-inclusive: the total IS the list price. Tax-exclusive: Dodo adds tax on top.
+    if rec.amount_minor not in (event.amount_credits, event.amount_credits - tax):
+        return "amount"
+    expected = _credit_product_for(rec.currency)
+    if not expected or event.product_ids != (expected,):
+        return "product"
+    tier = site_plans.site_scoped_tier(rec.sku)
+    if tier is None or not tier.partner_only:
+        return "sku"
+    return ""
+
+
+async def _handle_partner_client_payment(event: GatewayEvent, doc: Any, rec: Any) -> dict:
+    """A verified payment for a client pay link we created (matched by payment id).
+
+    Never a top-up. Records the payment against the PARTNER's workspace (the
+    site's), then, for a pending record that matches what was sold, claims it and
+    activates the year in one write (``sites.activate_client_paid_site``) with the
+    commission figure frozen on the record; then grants that stored figure
+    (idempotent per payment). A redelivery of a paid record re-drives only the
+    grant. A mismatch flags the record and moves nothing.
+    """
+    from pocketpaw_ee.cloud.partners import _calc
+    from pocketpaw_ee.cloud.partners import service as partners_service
+    from pocketpaw_ee.sites import service as sites_service
+
+    site_id, payment_id = str(doc.id), rec.payment_id
+    await _record_payment(replace(event, workspace_id=doc.workspace))
+
+    if rec.status == "pending":
+        reason = _partner_payment_mismatch(event, rec)
+        paid_cents = _partner_paid_usd_cents(event) if not reason else None
+        if not reason and paid_cents is None:
+            reason = "currency"
+        if reason:
+            await sites_service.flag_partner_payment(
+                site_id=site_id, payment_id=payment_id, reason=reason
+            )
+            # Ids only: the amounts are the client's payment.
+            logger.error(
+                "billing.webhook: partner client payment=%s (site=%s, event_id=%s) does not "
+                "match its pay link (%s) — flagged; nothing activated, no commission",
+                payment_id,
+                site_id,
+                event.event_id,
+                reason,
+            )
+            return {"ok": True, "granted": False}
+        now = datetime.now(UTC)
+        profile = await partners_service.partner_profile_for_workspace(doc.workspace)
+        first = min(
+            (_as_utc(p.paid_at) for p in doc.partner_payments if p.status == "paid" and p.paid_at),
+            default=now,
+        )
+        rate = _calc.commission_rate_bps(
+            founding=bool(profile is not None and profile.founding),
+            first_client_payment_at=first,
+            paid_at=now,
+            tier=profile.tier if profile is not None else "bronze",
+        )
+        # The shop paid, so its year activates whatever the partner's state; a
+        # partner that is not ACTIVE earns nothing automatically (manual review).
+        active = profile is not None and profile.status == "active"
+        outcome = await sites_service.activate_client_paid_site(
+            site_id=site_id,
+            payment_id=payment_id,
+            paid_at=now,
+            commission_credits=_calc.commission_credits(paid_cents, rate) if active else 0,
+            rate_bps=rate if active else 0,
+            flag_reason="" if active else "partner_inactive",
+        )
+        if outcome == "flagged":
+            again = await sites_service.find_partner_payment(payment_id)
+            logger.error(
+                "billing.webhook: partner client payment=%s (site=%s, event_id=%s) cannot "
+                "activate the site (%s) — flagged; nothing activated, no commission. The "
+                "client's payment needs a refund",
+                payment_id,
+                site_id,
+                event.event_id,
+                again[1].flag_reason if again is not None else "unknown",
+            )
+    else:
+        outcome = rec.status
+
+    found = await sites_service.find_partner_payment(payment_id)
+    rec = found[1] if found is not None else rec
+    moved = 0
+    if rec.status == "paid" and rec.commission_credits > 0:
+        result = await credits_service.grant(
+            workspace=doc.workspace,
+            amount=rec.commission_credits,
+            cause=PARTNER_COMMISSION_CAUSE,
+            idempotency_key=f"{payment_id}:commission",
+            ref={
+                "gateway": _GATEWAY,
+                "event_id": event.event_id,
+                "payment_id": payment_id,
+                "site_id": site_id,
+                "sku": rec.sku,
+                "rate_bps": rec.rate_bps,
+            },
+        )
+        moved = rec.commission_credits if result.created else 0
+    if rec.status == "paid":
+        # PH-15: tier upgrade + milestone rewards. Every paid delivery re-drives
+        # it (both idempotent), so a redelivery heals a crash right here.
+        await partners_service.refresh_standing(doc.workspace)
+    if outcome == "activated":
+        logger.info(
+            "billing.webhook: partner client payment=%s activated site=%s on %s; commission "
+            "%d credits at %d bps (event_id=%s)",
+            payment_id,
+            site_id,
+            rec.sku,
+            rec.commission_credits,
+            rec.rate_bps,
+            event.event_id,
+        )
+        try:
+            await sites_service.redeploy_site(site_id)
+        except Exception:
+            # The money state already stands; a republish refreshes the stamps.
+            logger.exception(
+                "billing.webhook: redeploy after partner client payment=%s failed (site=%s)",
+                payment_id,
+                site_id,
+            )
+    return {"ok": True, "granted": False, "commission_credits": moved}
+
+
+async def _reverse_partner_commission(event: ReversalEvent) -> None:
+    """Claw back a client payment's commission for a refund / lost dispute.
+
+    ANCHORED ON THE LEDGER. The site's record says which partner was paid, but a
+    deleted site takes its records with it, so the partner's workspace comes
+    from the ``Payment`` row (written against the partner) and the 60-day window
+    runs from the commission's own ledger entry. The site side — voiding a
+    pending record, lapsing the year — is best-effort and only when the record
+    still exists.
+
+    THE AMOUNT mirrors ``_handle_reversal_event``: a stated amount in the
+    payment's currency takes ``commission * refunded // paid`` (a partial refund
+    takes its share and the site keeps its year); a partial with no usable
+    amount takes nothing and alarms; otherwise the whole remainder goes. A full
+    refund, a lost dispute, or partials whose running total (``refunded_minor``)
+    reaches the amount paid lapse the site.
+
+    THE CLAIM runs first on the Payment row (``commission_reversed`` capped at
+    what the ledger shows was granted, ``refunded_minor``, plus the event id),
+    then the site lapses, then the debit keyed
+    ``<payment_id>:commission:reversal:<event_id>``; a debit that raises (or is
+    cancelled) releases the claim so the redelivery re-drives. Allowed to go
+    negative, like M1 reversals.
+    """
+    if event.type not in _REVERSAL_EVENTS:
+        return
+    from pocketpaw_ee.sites import service as sites_service
+
+    pid = event.payment_id
+    now = datetime.now(UTC)
+    # The OLDEST row: a redelivery under a new webhook id records a second row
+    # for the same payment, and every reversal must claim against the same one.
+    payment = (
+        await Payment.find(Payment.gateway == _GATEWAY, Payment.gateway_ref == pid)
+        .sort("+_id")
+        .first_or_none()
+    )
+    paid = int(payment.amount_credits or 0) if payment is not None else 0
+    same_currency = (
+        payment is not None
+        and bool(event.currency)
+        and event.currency.upper() == (payment.currency or "").upper()
+    )
+    full = event.type == _DISPUTE_LOST or not (
+        event.is_partial or (same_currency and 0 < event.amount_credits < paid)
+    )
+
+    found = await sites_service.find_partner_payment(pid)
+    workspace = payment.workspace if payment is not None else None
+    if found is not None:
+        doc, rec = found
+        workspace = workspace or doc.workspace
+        if rec.status == "pending":
+            # Refunded before we processed it. A FULL refund voids the record so
+            # the late payment.succeeded activates and pays nothing; a partial one
+            # leaves a mostly-paid year to activate, and a human to settle.
+            if full:
+                await sites_service.void_pending_partner_payment(
+                    site_id=str(doc.id), payment_id=pid
+                )
+            else:
+                logger.error(
+                    "billing.webhook: %s for partner client payment=%s (event_id=%s) is a "
+                    "PARTIAL refund of %d landing before the payment was processed — record "
+                    "left pending (the year will still activate, full commission); needs a human",
+                    event.type,
+                    pid,
+                    event.event_id,
+                    event.amount_credits,
+                )
+            return
+
+    claim = None
+    if workspace and payment is not None:
+        refunded = (paid if full else min(event.amount_credits, paid)) if same_currency else 0
+        claim = await _claim_commission_reversal(
+            event, payment, workspace, paid=paid, same_currency=same_currency, refunded=refunded
+        )
+    # ponytail: ``refunded_minor`` moves only on a commission claim, so partials
+    # summing to full on a site with NO commission to claw (inactive partner)
+    # keep the year; widen with a separate refund claim if that ever matters.
+    if claim is not None and paid > 0 and int(claim[0].get("refunded_minor") or 0) >= paid:
+        full = True
+    if found is not None and full:
+        await sites_service.reverse_client_paid_site(
+            site_id=str(found[0].id), payment_id=pid, paid_since=now - _PARTNER_CLAWBACK
+        )
+    if claim is None:
+        return
+
+    amount = claim[1]
+    key = f"{pid}:commission:reversal:{event.event_id}"
+    try:
+        await credits_service.debit(
+            workspace=workspace,
+            amount=amount,
+            cause=PARTNER_COMMISSION_REVERSAL_CAUSE,
+            idempotency_key=key,
+            allow_negative=True,
+            ref={
+                "gateway": _GATEWAY,
+                "event_id": event.event_id,
+                "payment_id": pid,
+                "reason": event.type,
+            },
+        )
+    except BaseException:
+        # BaseException: a CancelledError mid-debit must release too, or the
+        # redelivery finds its id listed and stops (the alarm below catches only
+        # what no release could).
+        if not await credits_service.is_recorded(workspace, key):
+            await Payment.get_pymongo_collection().update_one(
+                {"_id": payment.id, "commission_reversal_event_ids": event.event_id},
+                {
+                    "$inc": {"commission_reversed": -amount, "refunded_minor": -claim[2]},
+                    "$pull": {"commission_reversal_event_ids": event.event_id},
+                },
+            )
+        raise
+    logger.warning(
+        "billing.webhook: %s clawed back %d commission credits from workspace=%s "
+        "(payment=%s, event_id=%s)",
+        event.type,
+        amount,
+        workspace,
+        pid,
+        event.event_id,
+    )
+
+
+async def _claim_commission_reversal(
+    event: ReversalEvent,
+    payment: Payment,
+    workspace: str,
+    *,
+    paid: int,
+    same_currency: bool,
+    refunded: int,
+) -> tuple[dict, int, int] | None:
+    """Claim this reversal's commission share on the Payment row.
+
+    Returns ``(row after the claim, amount claimed, refunded counted)``, or None
+    when there is nothing to claw back (no grant, outside 60 days, already
+    claimed, nothing left) — the caller then debits nothing.
+    """
+    pid = event.payment_id
+    key = f"{pid}:commission:reversal:{event.event_id}"
+    entry = await credits_service.find_by_key(workspace, f"{pid}:commission")
+    granted = entry.amount_delta if entry is not None and entry.applied else 0
+    if granted <= 0:
+        return None
+    if _as_utc(entry.created_at) < datetime.now(UTC) - _PARTNER_CLAWBACK:
+        logger.info(
+            "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
+            "paid over 60 days ago, not clawed back",
+            event.type,
+            pid,
+            event.event_id,
+        )
+        return None
+    if event.event_id in (payment.commission_reversal_event_ids or []):
+        # Every listed id is a claim that had something to debit, so a listed id
+        # with no ledger movement is a reversal that died between claim and
+        # debit (mirrors the general path's alarm, with its in-flight caveat).
+        if not await credits_service.is_recorded(workspace, key):
+            logger.error(
+                "billing.webhook: %s for partner client payment=%s (event_id=%s) is RECORDED "
+                "ON THE PAYMENT ROW WITH NO LEDGER MOVEMENT BEHIND IT — the commission "
+                "clawback died between claim and debit, workspace=%s still holds it, and "
+                "nothing retries it. CHECK THE LEDGER BEFORE SETTLING BY HAND: a duplicate "
+                "delivery still in flight reads identically for about one round-trip",
+                event.type,
+                pid,
+                event.event_id,
+                workspace,
+            )
+        return None
+    already = int(payment.commission_reversed or 0)
+    if event.amount_credits > 0 and same_currency and paid > 0:
+        share = granted * min(event.amount_credits, paid) // paid
+    elif event.is_partial:
+        logger.error(
+            "billing.webhook: %s for partner client payment=%s (event_id=%s) is PARTIAL with "
+            "no usable amount — commission NOT clawed back; needs a human",
+            event.type,
+            pid,
+            event.event_id,
+        )
+        return None
+    else:
+        share = granted
+    amount = min(share, max(granted - already, 0))
+    if amount <= 0:
+        return None
+
+    col = Payment.get_pymongo_collection()
+    for _attempt in range(2):
+        claimed = await col.find_one_and_update(
+            {
+                "_id": payment.id,
+                "commission_reversal_event_ids": {"$ne": event.event_id},
+                "$or": [
+                    {"commission_reversed": {"$lte": granted - amount}},
+                    {"commission_reversed": {"$exists": False}},
+                ],
+            },
+            {
+                "$inc": {"commission_reversed": amount, "refunded_minor": refunded},
+                "$push": {"commission_reversal_event_ids": event.event_id},
+                "$currentDate": {"updatedAt": True},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if claimed is not None:
+            return claimed, amount, refunded
+        # Refused: a redelivery of this event (routine), or a concurrent reversal
+        # took part of the remainder first — retry ONCE with what is left.
+        current = await col.find_one({"_id": payment.id}) or {}
+        if event.event_id in (current.get("commission_reversal_event_ids") or []):
+            logger.info(
+                "billing.webhook: %s for partner client payment=%s (event_id=%s) — commission "
+                "already clawed back by this event",
+                event.type,
+                pid,
+                event.event_id,
+            )
+            return None
+        already = int(current.get("commission_reversed") or 0)
+        amount = min(share, max(granted - already, 0))
+        if amount <= 0:
+            break
+    logger.error(
+        "billing.webhook: %s for partner client payment=%s (event_id=%s) could not claim its "
+        "commission share — REFUSED before debiting. granted=%d, already reversed=%d: a "
+        "concurrent reversal on the same payment claimed the remainder first",
+        event.type,
+        pid,
+        event.event_id,
+        int(granted),
+        already,
+    )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -626,7 +2270,7 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
         #     later and re-sets the plan).
         # Credits are NEVER clawed back either way.
         await _upsert_subscription(event, status="cancelled", plan_key="free")
-        still_active = await _active_subscription(event.workspace_id)
+        still_active = await _billable_subscription(event.workspace_id)
         if still_active is not None:
             logger.info(
                 "billing.webhook: subscription.cancelled for workspace=%s (event_id=%s) — "
@@ -647,9 +2291,18 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
         )
         return {"ok": True, "granted": False}
 
+    # DUNNING (M5). A failing card no longer costs us nothing: on_hold starts a
+    # grace clock, expired/failed suspend at once. Neither ever touches credits.
+    if event.type == _SUB_ON_HOLD:
+        return await _handle_dunning_hold(event)
+    if event.type in _SUB_TERMINAL_EVENTS:
+        return await _handle_dunning_terminal(event)
+
     if event.type not in _SUB_GRANT_EVENTS:
-        # on_hold / paused / failed / expired / plan_changed / updated — acked,
-        # no money/plan action in v1.
+        # plan_changed / updated — acked, no money/plan action here. plan_changed
+        # is deliberately still inert: a switch driven through ``change_plan``
+        # persists the new tier at the call site, and reacting to the webhook too
+        # would apply it twice.
         logger.info("billing.webhook: ignoring subscription event type=%s", event.type)
         return {"ok": True, "granted": False}
 
@@ -696,6 +2349,12 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
         # delta heuristic races under concurrency.
         applied = result.created
 
+    # Read the row BEFORE the upsert below clears the dunning stamps: a
+    # grant-bearing delivery landing on a SUSPENDED subscription is the card
+    # finally clearing, and the recovery leg needs to know that happened.
+    prior = await _subscription_by_gateway_id(event.subscription_id)
+    recovered = prior is not None and prior.suspended_at is not None
+
     # subscription.active upgrades the entitlement to the subscribed tier.
     if event.type == _SUB_ACTIVE:
         await workspace_service.set_workspace_plan(event.workspace_id, tier.key)
@@ -722,9 +2381,33 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
                 tier.key,
                 event.event_id,
             )
+    elif recovered:
+        # RECOVERY (M5). A renewal that lands on a suspended subscription means
+        # the card finally cleared. ``active`` already re-sets the plan above;
+        # ``renewed`` never did, so without this the buyer pays and stays on
+        # free. Only fires when the row was actually suspended, so an ordinary
+        # renewal writes nothing extra.
+        ok = await workspace_service.set_workspace_plan(event.workspace_id, tier.key)
+        logger.info(
+            "billing.webhook: %s recovered suspended subscription=%s for workspace=%s "
+            "(event_id=%s) — plan restored to %s=%s",
+            event.type,
+            event.subscription_id,
+            event.workspace_id,
+            event.event_id,
+            tier.key,
+            ok,
+        )
 
-    # Track the subscription lifecycle (active for both active + renewed).
-    await _upsert_subscription(event, status="active", plan_key=tier.key)
+    # Track the subscription lifecycle (active for both active + renewed), and
+    # clear any dunning state — a grant-bearing delivery IS the payment working.
+    await _upsert_subscription(
+        event,
+        status=_STATUS_ACTIVE,
+        plan_key=tier.key,
+        grace_until=None,
+        suspended_at=None,
+    )
 
     if applied:
         # Rule 9 — emit only on a grant that actually applied (not a replay).
@@ -761,111 +2444,278 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
     return {"ok": True, "granted": applied}
 
 
-async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
-    """Act on a VERIFIED PER-SITE ``subscription.*`` webhook (BC-9 + charge-first).
+_PAYMENT_FAILED_KIND = "billing.payment_failed"
+_PLAN_DOWNGRADED_KIND = "billing.plan_downgraded"
 
-    A per-site annual sub (each published site has its OWN recurring plan) is
-    distinguished from a workspace-plan sub by the ``site_id`` on its metadata.
-    This path updates the SITE's lifecycle ONLY — it NEVER grants workspace
-    credits and NEVER changes ``Workspace.plan`` (the two grant/plan side effects
-    of the BC-7 workspace path). All site writes are delegated to the sites service
-    (entity isolation — billing never imports the Site model):
 
-      * ``subscription.active`` → CHARGE-FIRST ACTIVATION. A paid-tier site was
-        published as PENDING (created but NOT deployed live) and is deployed + goes
-        live only now that payment is confirmed: ``sites_service.activate_site``
-        runs the deferred deploy (generate + smoke-gate + Cloudflare/local deploy)
-        and marks the sub active. It is idempotent — an already-active/deployed
-        site is a no-op, so a replayed delivery (or a renewal that arrives as
-        ``active``) does not re-deploy.
-      * ``subscription.renewed`` → the site is already live; just refresh the
-        renewal date (one year out) via ``mark_site_subscription`` — no re-deploy.
-      * ``subscription.cancelled`` → mark the site sub ``cancelled``. The live site
-        is NOT undeployed in v1 (a cancelled annual plan keeps serving until the
-        paid period would lapse; an undeploy/teardown is a follow-up).
-      * any other subscription.* delivery → acked, no action.
+def _plan_name(plan_key: str) -> str:
+    tier = plan_catalog.get_plan(plan_key)
+    return tier.display_name if tier is not None and tier.display_name else plan_key
 
-    Returns ``{"ok": True, "granted": False}`` always — a per-site sub never
-    moves the workspace credit wallet, so ``granted`` is never True here.
-    """
-    # Lazy import — keeps billing free of an eager sites-service import at module
-    # load, mirroring the workspace-service lazy import in the BC-7 path.
-    from pocketpaw_ee.cloud._core.errors import NotFound
-    from pocketpaw_ee.sites import service as sites_service
 
+async def _alert_admins(workspace_id: str, kind: str, title: str, body: str) -> None:
+    """Tell a workspace's owners/admins about a dunning step, in-app (bell + push).
+
+    Never raises: the billing state change has already landed by the time this
+    runs, and a broken notification path must not fail or roll it back."""
     try:
-        if event.type == _SUB_ACTIVE:
-            # CHARGE-FIRST: payment confirmed → deploy the pending site live and
-            # mark the sub active. Idempotent for at-least-once delivery.
-            await sites_service.activate_site(
-                workspace_id=event.workspace_id,
-                site_id=event.site_id,
+        from pocketpaw_ee.cloud.notifications import service as notifications_service
+        from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+        admins = await workspace_service.list_admin_ids(workspace_id)
+        if admins:
+            await notifications_service.create_many(
+                workspace_id=workspace_id,
+                recipients=admins,
+                kind=kind,
+                title=title,
+                body=body,
+                deliver_external=False,
             )
-            status = "active"
-        elif event.type == _SUB_RENEWED:
-            # Already live — just refresh the annual renewal date (no re-deploy).
-            await sites_service.mark_site_subscription(
-                workspace_id=event.workspace_id,
-                site_id=event.site_id,
-                status="active",
-                subscription_id=event.subscription_id or None,
-                annual_renewal_date=datetime.now(UTC) + timedelta(days=365),
-            )
-            status = "active"
-        elif event.type == _SUB_CANCELLED:
-            # Mark cancelled; do NOT undeploy the live site in v1.
-            # TODO(billing-lapse): a cancelled per-site sub is recorded but the live
-            # site keeps serving. Full lapse / teardown / dunning — grace-period
-            # length, undeploy-vs-grace, buyer notifications — is a DELIBERATE
-            # follow-up pending a product decision on the grace policy. Until that
-            # lands, cancellation is visibility-only: the status flips to
-            # "cancelled" and the site stays up. Do NOT add an undeploy here without
-            # that policy.
-            await sites_service.mark_site_subscription(
-                workspace_id=event.workspace_id,
-                site_id=event.site_id,
-                status="cancelled",
-                subscription_id=event.subscription_id or None,
-                annual_renewal_date=None,
-            )
-            status = "cancelled"
-        else:
-            # on_hold / paused / failed / expired / plan_changed / updated — acked,
-            # no site-state action in v1.
-            logger.info(
-                "billing.webhook: ignoring per-site subscription event type=%s (site=%s)",
-                event.type,
-                event.site_id,
-            )
-            return {"ok": True, "granted": False}
-    except NotFound:
-        # A verified delivery for a site that doesn't exist for this workspace
-        # (deleted, or a stale/cross-tenant id) — ack (200) so Dodo stops
-        # retrying, but take no action. Nothing to update.
+    except Exception:
         logger.warning(
-            "billing.webhook: per-site %s for unknown site=%s (event_id=%s) — ignoring",
-            event.type,
-            event.site_id,
+            "billing: could not send the %s notice for workspace=%s",
+            kind,
+            workspace_id,
+            exc_info=True,
+        )
+
+
+async def _alert_moved_to_free(workspace_id: str, plan_key: str) -> None:
+    await _alert_admins(
+        workspace_id,
+        _PLAN_DOWNGRADED_KIND,
+        "Your workspace moved to the Free plan",
+        f"The payment for your {_plan_name(plan_key)} plan wasn't completed, so this "
+        "workspace is on the Free plan now. To get it back, resubscribe in "
+        "Settings > Billing (/settings/billing).",
+    )
+
+
+async def _handle_dunning_hold(event: SubscriptionEvent) -> dict:
+    """``subscription.on_hold`` — a payment failed. Start the grace clock.
+
+    The entitlements are deliberately NOT touched here. On hold means Dodo is
+    still retrying the card, and taking the plan away on the first declined
+    charge would punish a customer whose bank said no once. What lands instead is
+    a deadline: ``sweep_subscription_grace`` revokes the plan if it passes, and a
+    successful retry (``renewed`` / ``active``) clears it.
+
+    Credits are NEVER clawed back on this path. A failed renewal means next month
+    was not paid for, not that last month was refunded — reversal belongs to
+    ``refund.succeeded`` / ``dispute.lost`` and to nothing else.
+
+    A REDELIVERY MUST NOT EXTEND THE WINDOW. Delivery is at-least-once, so
+    re-stamping on every retry would hand a non-paying workspace a rolling grace
+    period that never expires. The stamp lands only on the TRANSITION into
+    on_hold; a genuine recover-then-fail-again cycle passes through ``active``
+    first, which clears the deadline, so it re-stamps then.
+    """
+    existing = await _subscription_by_gateway_id(event.subscription_id)
+    if existing is not None and existing.status == _STATUS_ON_HOLD and existing.grace_until:
+        logger.info(
+            "billing.webhook: subscription.on_hold for workspace=%s (event_id=%s) — already on "
+            "hold until %s; not extending the grace window",
+            event.workspace_id,
             event.event_id,
+            existing.grace_until,
         )
         return {"ok": True, "granted": False}
 
-    logger.info(
-        "billing.webhook: per-site %s for site=%s → %s (event_id=%s)",
+    grace_until = datetime.now(UTC) + timedelta(days=_dunning_grace_days())
+    await _upsert_subscription(event, status=_STATUS_ON_HOLD, grace_until=grace_until)
+    logger.warning(
+        "billing.webhook: subscription.on_hold for workspace=%s subscription=%s (event_id=%s) — "
+        "payment failed; plan kept until %s, then suspended by the grace sweep",
+        event.workspace_id,
+        event.subscription_id,
+        event.event_id,
+        grace_until.isoformat(),
+    )
+    plan = _plan_name(event.plan_key)
+    await _alert_admins(
+        event.workspace_id,
+        _PAYMENT_FAILED_KIND,
+        f"Payment failed for your {plan} plan",
+        f"We couldn't charge the card for your {plan} plan. The plan stays active until "
+        f"{grace_until.strftime('%d %b %Y')} (UTC). Update your payment method in "
+        "Settings > Billing (/settings/billing) to keep it.",
+    )
+    return {"ok": True, "granted": False}
+
+
+async def _handle_dunning_terminal(event: SubscriptionEvent) -> dict:
+    """``subscription.expired`` / ``.failed`` — dead at the gateway, no grace.
+
+    Grace exists because a retry might still succeed. These two say it will not:
+    Dodo has stopped the subscription. So the entitlements go now, on the same
+    terms the cancellation path uses — and with the same out-of-order guard,
+    because an ``expired`` for last month's subscription must not strip the plan
+    a newly-active one just granted. Credits are not clawed back.
+    """
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    await _upsert_subscription(
+        event,
+        status=_STATUS_EXPIRED,
+        grace_until=None,
+        suspended_at=datetime.now(UTC),
+    )
+    still_billable = await _billable_subscription(event.workspace_id)
+    if still_billable is not None:
+        logger.info(
+            "billing.webhook: %s for workspace=%s (event_id=%s) — subscription=%s still owns the "
+            "workspace; NOT reverting to free",
+            event.type,
+            event.workspace_id,
+            event.event_id,
+            still_billable.gateway_subscription_id,
+        )
+        return {"ok": True, "granted": False}
+
+    ok = await workspace_service.set_workspace_plan(event.workspace_id, "free")
+    logger.warning(
+        "billing.webhook: %s for workspace=%s subscription=%s (event_id=%s) — no other billable "
+        "subscription; plan reverted to free=%s, credits NOT clawed back",
+        event.type,
+        event.workspace_id,
+        event.subscription_id,
+        event.event_id,
+        ok,
+    )
+    if ok:
+        await _alert_moved_to_free(event.workspace_id, event.plan_key)
+    return {"ok": True, "granted": False}
+
+
+async def sweep_subscription_grace() -> int:
+    """Suspend every subscription still on hold past its grace deadline.
+
+    The half of dunning a webhook cannot do. ``subscription.on_hold`` only stamps
+    a deadline, and nothing arrives from the gateway when it passes, so a
+    periodic pass is what actually turns "the payment failed a week ago" into
+    "the entitlements are gone". Driven from the five-minute sweeper heartbeat in
+    ``extensions.start_run_sweeper``; a deadline measured in days does not need a
+    tighter tick. Returns how many subscriptions it suspended.
+
+    THE ROW KEEPS ``status == "on_hold"`` and gains a ``suspended_at`` stamp
+    rather than moving to a terminal status, and that split is load-bearing.
+    Suspension is OURS: it revokes the entitlements we grant. The subscription
+    itself is still alive at Dodo, still being retried, and still able to recover
+    — so it stays BILLABLE, which is what keeps ``subscribe`` cancelling it
+    before opening a replacement instead of leaving the buyer paying for two.
+    ``suspended_at`` is also what makes the pass idempotent: an already-suspended
+    row is skipped rather than re-revoked every five minutes.
+
+    Never touches credits. A workspace that stops paying loses its plan, not the
+    credits it already bought.
+    """
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+
+    now = datetime.now(UTC)
+    suspended = 0
+    async for sub in Subscription.find(Subscription.status == _STATUS_ON_HOLD):
+        if sub.suspended_at is not None:
+            continue
+        deadline = _as_utc(sub.grace_until)
+        if deadline is None or deadline > now:
+            continue
+
+        sub.suspended_at = now
+        await sub.save()
+        suspended += 1
+
+        # Another subscription may have taken over mid-dunning (a plan switch
+        # leaves the old row on hold). Ask for a PAID-UP one specifically — the
+        # billable set would match the very row being swept.
+        paying = await _paid_up_subscription(sub.workspace)
+        if paying is not None:
+            logger.info(
+                "billing.sweep_subscription_grace: workspace=%s subscription=%s passed its grace "
+                "deadline, but subscription=%s is still paying — plan kept",
+                sub.workspace,
+                sub.gateway_subscription_id,
+                paying.gateway_subscription_id,
+            )
+            continue
+
+        ok = await workspace_service.set_workspace_plan(sub.workspace, "free")
+        logger.warning(
+            "billing.sweep_subscription_grace: workspace=%s subscription=%s stayed on hold past "
+            "%s — plan reverted to free=%s, credits NOT clawed back",
+            sub.workspace,
+            sub.gateway_subscription_id,
+            deadline.isoformat(),
+            ok,
+        )
+        if ok:
+            await _alert_moved_to_free(sub.workspace, sub.plan_key)
+    if suspended:
+        logger.info("billing.sweep_subscription_grace: suspended %d subscription(s)", suspended)
+    return suspended
+
+
+async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
+    """Acknowledge a VERIFIED subscription webhook that carries a ``site_id``.
+
+    ACKS AND DOES NOTHING, and the "does nothing" is the point of the function
+    rather than a gap in it. Paw Sites left Dodo on 2026-09-05: a paid site is
+    charged to the workspace credit balance, renews from the credit balance, and
+    has no gateway subscription of its own. Nothing we create can produce one of
+    these deliveries any more.
+
+    WHY THE FORK STAYS ANYWAY. Dispatch routes on the presence of ``site_id``, and
+    the other side of that fork is the WORKSPACE-plan path — which grants credits
+    and rewrites ``Workspace.plan``. Deleting this branch would not stop a stray
+    delivery arriving; it would send it there. A per-site subscription that was
+    sold before the cutover and has not been cancelled at the gateway yet is
+    exactly such a delivery, and it must not be allowed to top up a wallet or
+    change a plan on its way past.
+
+    So the site's lifecycle is no longer driven from here. A gateway subscription
+    that is still billing a customer for a site has to be cancelled IN DODO — see
+    docs/runbooks/2026-09-05-site-plans-on-credits.md. Logged at WARNING rather
+    than INFO because a delivery reaching this function means exactly that: money
+    is still moving at the gateway for something this product no longer sells.
+
+    Returns ``{"ok": True, "granted": False}`` — acked so Dodo stops retrying, and
+    never a grant.
+    """
+    logger.warning(
+        "billing.webhook: per-site subscription event type=%s for site=%s "
+        "(event_id=%s) — Paw Sites no longer bills through Dodo, so this is a "
+        "subscription left live at the gateway. Acked with NO action; cancel it "
+        "in the Dodo dashboard.",
         event.type,
         event.site_id,
-        status,
         event.event_id,
     )
     return {"ok": True, "granted": False}
 
 
-async def _upsert_subscription(event: SubscriptionEvent, *, status: str, plan_key: str) -> None:
+async def _upsert_subscription(
+    event: SubscriptionEvent,
+    *,
+    status: str,
+    plan_key: str | None = None,
+    grace_until: datetime | None = None,
+    suspended_at: datetime | None = None,
+) -> None:
     """Upsert the human-facing ``Subscription`` record. Idempotent.
 
     Keyed on the unique ``(gateway, gateway_subscription_id)`` index: a first
     activation inserts, a renewal / cancellation of a known subscription updates
     the existing row's status / plan.
+
+    ``plan_key=None`` means LEAVE THE TIER ALONE on an existing row (falling back
+    to the event's own metadata on a fresh insert). The dunning paths use it:
+    a subscription that went on hold is still on the tier it was sold, and
+    overwriting that would destroy the record of what the buyer was paying for.
+
+    ``grace_until`` / ``suspended_at`` are written on EVERY path, including the
+    insert and the duplicate-key re-fetch. Writing them on only one path is how a
+    racing insert keeps a stale deadline: the caller has decided what the dunning
+    state is, so passing None must clear the field rather than skip it.
 
     B2 review fix — a missing / falsy ``subscription_id`` is SKIPPED (logged), not
     recorded with an empty id. Two different workspaces whose verified events both
@@ -885,13 +2735,13 @@ async def _upsert_subscription(event: SubscriptionEvent, *, status: str, plan_ke
         )
         return
 
-    existing = await Subscription.find_one(
-        Subscription.gateway == _GATEWAY,
-        Subscription.gateway_subscription_id == event.subscription_id,
-    )
+    existing = await _subscription_by_gateway_id(event.subscription_id)
     if existing is not None:
         existing.status = status
-        existing.plan_key = plan_key
+        if plan_key is not None:
+            existing.plan_key = plan_key
+        existing.grace_until = grace_until
+        existing.suspended_at = suspended_at
         if event.product_id:
             existing.product_id = event.product_id
         await existing.save()
@@ -900,27 +2750,35 @@ async def _upsert_subscription(event: SubscriptionEvent, *, status: str, plan_ke
         workspace=event.workspace_id,
         gateway=_GATEWAY,
         gateway_subscription_id=event.subscription_id,
-        plan_key=plan_key,
+        plan_key=plan_key if plan_key is not None else (event.plan_key or "free"),
         product_id=event.product_id or None,
         status=status,
+        grace_until=grace_until,
+        suspended_at=suspended_at,
     )
     try:
         await doc.insert()
     except DuplicateKeyError:
         # A racing delivery inserted it first — re-fetch and update instead.
-        existing = await Subscription.find_one(
-            Subscription.gateway == _GATEWAY,
-            Subscription.gateway_subscription_id == event.subscription_id,
-        )
+        existing = await _subscription_by_gateway_id(event.subscription_id)
         if existing is not None:
             existing.status = status
-            existing.plan_key = plan_key
+            if plan_key is not None:
+                existing.plan_key = plan_key
+            existing.grace_until = grace_until
+            existing.suspended_at = suspended_at
             await existing.save()
 
 
 __all__ = [
     "cancel",
+    "charge_site_plan_credits",
+    "checkout_return_target",
+    "create_partner_client_checkout",
     "create_topup",
     "handle_webhook",
+    "require_payments_open",
+    "site_plan_debit_key",
     "subscribe",
+    "sweep_subscription_grace",
 ]

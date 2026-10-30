@@ -1,10 +1,28 @@
 # tests/ee/agent/test_sites_mcp_server/test_mcp_tool.py
+# Updated 2026-09-27 (feat/sites-visual-research): preview_site registered — 15 tool ids.
+# Updated 2026-09-24 (PP-2): verify_site registered — 14 tool ids.
 # Created: 2026-06-01 (Phase 4 — chat→create-site) — coverage for the in-process
 # ``pocketpaw_sites_manager`` MCP server. Mirrors the foresight/pocket_specialist
 # test layout: registration assertions (server name, tool id, build, provider
 # allowlist publication) plus per-handler tests that mock the identity
 # ContextVars + the shared publish_pocket service and inspect the MCP envelope
 # the SDK returns to the agent.
+#
+# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — the registration test
+# pins a THIRTEENTH id, ``set_site_dependencies``: the only way to declare or drop npm
+# packages on a svelte / react / html site, and the only writer of
+# ``paw.dependencies.json``.
+#
+# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3 + RX-4) — the registration test
+# now pins the EIGHTH and NINTH tool ids on this server, ``edit_react_component`` and
+# the read-only ``get_site_build_status``. The count assertion did its job both times:
+# each new tool failed this test before anything else, which is exactly the decision
+# point it exists to force (SITES_TOOL_IDS feeds the /sites surface allow-list, so a new
+# id widens what the agent can reach).
+#
+# The publish handler's own response is no longer covered only here — RX-4 widened it
+# with the build-lane fields, and those live in test_build_status_tool.py beside the
+# status tool that shares their derivation.
 """MCP server registration + handler tests for the Paw Sites publish tool."""
 
 from __future__ import annotations
@@ -28,9 +46,15 @@ class TestSitesMcpServerRegistration:
             CREATE_DYNAMIC_SITE_TOOL_ID,
             CREATE_HTML_SITE_TOOL_ID,
             CREATE_LANDING_SITE_TOOL_ID,
+            CREATE_REACT_SITE_TOOL_ID,
             CREATE_SVELTE_SITE_TOOL_ID,
+            EDIT_HTML_FILE_TOOL_ID,
+            EDIT_REACT_COMPONENT_TOOL_ID,
             EDIT_SVELTE_COMPONENT_TOOL_ID,
+            GET_SITE_BUILD_STATUS_TOOL_ID,
+            LIST_SITE_ASSETS_TOOL_ID,
             PUBLISH_TOOL_ID,
+            READ_SITE_SOURCE_TOOL_ID,
             SERVER_NAME,
             SITES_TOOL_IDS,
         )
@@ -50,13 +74,100 @@ class TestSitesMcpServerRegistration:
         )
         assert CREATE_DYNAMIC_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_dynamic_site"
         assert CREATE_HTML_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_html_site"
+        # RX-2 — the react-track create tool, the 5th create tool on this server.
+        assert CREATE_REACT_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__create_react_site"
+        # RX-3 — the react-track EDIT tool, the SECOND edit tool on this server.
+        # Its absence was the whole react-edit hole: with only the svelte edit tool
+        # registered, a react site could be created and published but never changed.
+        assert EDIT_REACT_COMPONENT_TOOL_ID == "mcp__pocketpaw_sites_manager__edit_react_component"
+        # HE-10 — the html-track EDIT tool, the THIRD edit tool and the one that
+        # completes the set: every engine with a create tool now has an edit tool.
+        # Named for a FILE because an html site has no component model. Its absence
+        # was the react hole one engine over — an html site could be created,
+        # imported and published but never changed.
+        assert EDIT_HTML_FILE_TOOL_ID == "mcp__pocketpaw_sites_manager__edit_html_file"
         assert PUBLISH_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_LANDING_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_SVELTE_SITE_TOOL_ID in SITES_TOOL_IDS
         assert EDIT_SVELTE_COMPONENT_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_DYNAMIC_SITE_TOOL_ID in SITES_TOOL_IDS
         assert CREATE_HTML_SITE_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 6
+        assert CREATE_REACT_SITE_TOOL_ID in SITES_TOOL_IDS
+        assert EDIT_REACT_COMPONENT_TOOL_ID in SITES_TOOL_IDS
+        assert EDIT_HTML_FILE_TOOL_ID in SITES_TOOL_IDS
+        # RX-4 — the READ-ONLY build-status tool. It is the only way the
+        # agent can learn how an ASYNC build ended, since publish returns before the
+        # build starts.
+        assert (
+            GET_SITE_BUILD_STATUS_TOOL_ID == "mcp__pocketpaw_sites_manager__get_site_build_status"
+        )
+        assert GET_SITE_BUILD_STATUS_TOOL_ID in SITES_TOOL_IDS
+        # The READ-ONLY source tool — the counterpart the three edit tools above
+        # were written against. Each PREFERS an `edits` diff whose `old_string`
+        # must be copied VERBATIM from the current file, and each says "read it
+        # first"; until this shipped /sites had no reader, because the allowlist
+        # excludes the `pockets` server (whose `get_pocket` does carry `source`)
+        # and the profile drops the file/shell built-ins. The reachable edit form
+        # was therefore a blind whole-file rewrite — the shape that silently drops
+        # a capture form's hidden paw_* inputs.
+        assert READ_SITE_SOURCE_TOOL_ID == "mcp__pocketpaw_sites_manager__read_site_source"
+        assert READ_SITE_SOURCE_TOOL_ID in SITES_TOOL_IDS
+        # The READ-ONLY asset tool — the owner's OWN uploaded images, with durable
+        # public URLs. It is the only way the agent can learn that a logo or a
+        # product shot exists: nothing in the source map or the preamble names
+        # them, so without it the agent's best available move is a stock photo of
+        # somebody else's product, or an invented src that 404s on a live page.
+        # Read-only and pocket-scoped; the workspace comes from the per-stream
+        # identity, never from the tool args.
+        assert LIST_SITE_ASSETS_TOOL_ID == "mcp__pocketpaw_sites_manager__list_site_assets"
+        assert LIST_SITE_ASSETS_TOOL_ID in SITES_TOOL_IDS
+        # The count is deliberate: adding a tool here widens the /sites surface
+        # allow-list (SITES_TOOL_IDS feeds it), so a new id must be a decision,
+        # not a side effect. Bump it WITH an id assertion above — never alone.
+        # PP-1 — the dependency setter. Every edit lane refuses the manifest path,
+        # so without this id on the allow-list no package could ever be declared on
+        # an existing site.
+        from pocketpaw_ee.agent.mcp_servers.sites import SET_SITE_DEPENDENCIES_TOOL_ID
+
+        assert (
+            SET_SITE_DEPENDENCIES_TOOL_ID == "mcp__pocketpaw_sites_manager__set_site_dependencies"
+        )
+        assert SET_SITE_DEPENDENCIES_TOOL_ID in SITES_TOOL_IDS
+        # The draft screenshot. Without it on the allow-list the agent is told to
+        # look at its page with a tool it cannot call.
+        from pocketpaw_ee.agent.mcp_servers.sites import PREVIEW_SITE_TOOL_ID
+
+        assert PREVIEW_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__preview_site"
+        assert PREVIEW_SITE_TOOL_ID in SITES_TOOL_IDS
+        # Per-site secrets: ask the owner for one by name, list names + status.
+        from pocketpaw_ee.agent.mcp_servers.sites import (
+            LIST_SITE_SECRETS_TOOL_ID,
+            REQUEST_SITE_SECRET_TOOL_ID,
+        )
+
+        assert REQUEST_SITE_SECRET_TOOL_ID == "mcp__pocketpaw_sites_manager__request_site_secret"
+        assert LIST_SITE_SECRETS_TOOL_ID == "mcp__pocketpaw_sites_manager__list_site_secrets"
+        assert REQUEST_SITE_SECRET_TOOL_ID in SITES_TOOL_IDS
+        assert LIST_SITE_SECRETS_TOOL_ID in SITES_TOOL_IDS
+        # The project engine's twelve tools (templates, recipes, generic files,
+        # sandbox builds) ride the same allow-list.
+        from pocketpaw_ee.agent.mcp_servers.sites_project import SITES_PROJECT_TOOL_IDS
+
+        assert set(SITES_PROJECT_TOOL_IDS) <= set(SITES_TOOL_IDS)
+        # Sites integrations: list bindings, ask the owner to connect a provider.
+        from pocketpaw_ee.agent.mcp_servers.sites import (
+            CONNECT_SITE_INTEGRATION_TOOL_ID,
+            LIST_SITE_INTEGRATIONS_TOOL_ID,
+        )
+
+        assert LIST_SITE_INTEGRATIONS_TOOL_ID in SITES_TOOL_IDS
+        assert CONNECT_SITE_INTEGRATION_TOOL_ID in SITES_TOOL_IDS
+        # Playing the draft (keys, clicks, console errors) in a remote browser.
+        from pocketpaw_ee.agent.mcp_servers.sites import PLAY_TEST_SITE_TOOL_ID
+
+        assert PLAY_TEST_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__play_test_site"
+        assert PLAY_TEST_SITE_TOOL_ID in SITES_TOOL_IDS
+        assert len(SITES_TOOL_IDS) == 32
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

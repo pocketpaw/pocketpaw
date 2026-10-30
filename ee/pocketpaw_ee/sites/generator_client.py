@@ -6,7 +6,77 @@
 # fail-gates on the workerd SSR render markers. If the gate fails the site does
 # NOT proceed to deploy (Contract clause 4). The subprocess calls are isolated
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
+#
+# Updated 2026-09-24 (PP-2, feat/sites-verify-pipeline): paw-sites now prints a
+# structured ``{"error","code"}`` line on stdout for every failed ``build`` (contract §3),
+# parsed by PP-4's ``parse_generator_refusal`` into ``GeneratorRefused``; ``run_static_check``
+# reuses the same parser. NEW
+# ``run_static_check`` drives ``paw-sites-gen check`` — the static verification layer,
+# which installs nothing and is therefore safe on the API host for any source.
+#
+# Updated 2026-09-24 (PP-1, feat/sites-author-dependencies): this client builds on
+# the HOST it runs in — the API process, the dev server, draft markup, the native
+# pre-warm — and its install step is a real ``bun install``. Author-declared npm
+# packages (``paw.dependencies.json`` in the source map) must install only in the
+# Daytona sandbox, so ``_build_one`` now REFUSES a node build of such a source with
+# ``HostInstallRefused`` before generate even runs. It is the last line: the service
+# routes those pockets to the sandbox lane first. The manifest itself passes through
+# ``build_generator_input`` untouched as an ordinary source-map file (the generator
+# parses it). ``_ripple_motion_dep`` now reads motion's pin from ``vetted_pins``
+# (the vendored ``paw-sites-gen allowlist`` output) instead of a hard-coded copy.
+#
+# Updated 2026-09-24 (PP-4, fix/sites-legacy-build-shell-migration): paw-sites PS-1
+# prints a structured ``{"error", "code"}`` line on stdout when ``build`` refuses on
+# purpose. ``_SubprocessRunner.generate`` now reads it and raises ``GeneratorRefused``
+# (a ``RuntimeError`` subclass, so every existing catch still holds) carrying the code
+# and, for ``reserved_path``, the offending source-map key. The sites service maps a
+# reserved_path refusal to a 422 that names the file instead of generator_failed.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
+#
+# Updated 2026-08-10 (SL-3 — the async publish needs the payload without the build):
+# extracted ``build_generator_input`` out of ``_build_one`` as a module-level function.
+# ``_build_one`` now calls it and passes the result straight through, so every existing
+# payload is byte-identical; the point is that the ASYNC publish path can assemble the
+# same input in the web process while ``generate`` runs in a worker. Two copies of that
+# assembly would drift on the next generator key that lands, and the failure would be
+# silent — a site that builds differently depending on which path published it.
+#
+# Updated 2026-07-30 (fix/sites-d1-svelte-audit): corrected the build-timeout
+# comments. They claimed "a legit build is ~45-60s", which is true for a static site
+# and false for a dynamic one — a measured 1-table dynamic ripple build takes 4m47s,
+# so the 120s default kills a healthy dynamic build and blames a wedged workerd
+# prerender. Comment-only; the default and the code are unchanged (see the
+# ``_DEFAULT_BUILD_TIMEOUT_SEC`` block for the measurement and the operator note).
+#
+# Updated 2026-08-07 (MT-1 — an interactive site keeps its own JavaScript):
+# build()/_build_one() gained an optional ``keeps_client_bundle: bool = False`` that
+# rides ``siteConfig.keepsClientBundle`` — ONLY when True, so a site that declares
+# nothing keeps byte-identical wire bytes (the SE-2b ``builderOrigin`` pattern, not the
+# DP0-1 always-present one, because the generator treats an absent flag as false).
+# A published site is generated with ``csr = false`` and, on ripple, has its emitted
+# hydration bundle deleted by prune-client, so the author's own client JS never runs
+# (no onMount, no ``use:`` action, no IntersectionObserver, no WebGL canvas). The
+# paw-sites generator reads this flag to emit ``csr = true`` and to mark the route
+# manifest. This is ONLY the pass-through: a caller CAN now declare it. Reading the
+# per-pocket fact at the caller (service.publish) is a LATER task — the same split
+# DP0-1 made for ``d1_database_id`` below.
+#
+# Updated 2026-07-17 (feat/sites-native-artifact-no-build): added ``artifact_home()``
+# (the ~/.pocketpaw/site-artifacts root for the native-artifact read-through cache,
+# mirroring build_home) and ``generator_version()`` (an artifact-format + dep epoch
+# the cache key rides so a generator/dep upgrade invalidates stored renders). These
+# back service.get_native_artifact becoming read-through: a preview VIEW no longer
+# triggers a build, so the prod box stops running a 1-2 min SvelteKit build on every
+# site view. Builds now happen only at publish and (cached/pre-warmed) at edit-arm.
+#
+# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): build()/_build_one() gain an
+# OPTIONAL ``assets`` param — the base64 binary sideband ({path: base64}) an html
+# IMPORT carries alongside its text ``source`` map. It rides ``input.assets`` on the
+# html branch only, and ONLY when non-empty, so every existing ripple/svelte/html
+# payload stays byte-identical. CROSS-REPO SEAM: the paw-sites generator's ``assets``
+# key (decode + write each entry verbatim into the static tree) is being added in a
+# parallel paw-sites slice — this codes to that contract; a generator predating it
+# ignores the key and deploys the text tree only.
 #
 # Updated 2026-07-10 (HE-3 — html publish skips the Node build): build()/_build_one()
 # now branch the STAGE-2 payload AND the build chain on the engine's CAPABILITY, via
@@ -99,9 +169,10 @@
 #     whole process GROUP (``_kill_process_group`` → ``os.killpg`` — kills the leaked
 #     workerd CHILD too, not just the bun parent), reaps the parent, and raises the
 #     internal ``_BuildTimeout``.
-#   * Timeout is ``PAW_SITES_BUILD_TIMEOUT_SEC`` (int, default 120s — a legit build is
-#     ~45-60s, a wedged one runs for minutes, so 120s cleanly separates them); read
-#     once per call via ``_build_timeout_sec()`` with an int-parse-or-fallback.
+#   * Timeout is ``PAW_SITES_BUILD_TIMEOUT_SEC`` (int, default 120s); read once per
+#     call via ``_build_timeout_sec()`` with an int-parse-or-fallback. 120s separates
+#     wedged from legit for a STATIC site only — see the constant below for the
+#     measured dynamic-lane figure and why a dynamic deploy must raise the var.
 #   * Each call site converts ``_BuildTimeout`` into its EXISTING failure contract
 #     (callers unchanged): ``install``/``build_static`` return ``(False, "<step> timed
 #     out after Ns ...")`` — the same ``(ok, msg)`` shape the non-zero-exit path
@@ -262,7 +333,21 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import unquote
 
-from pocketpaw_ee.sites.engines import is_source_engine, needs_node_build, static_output_rel
+from pocketpaw_ee.sites import vetted_pins
+from pocketpaw_ee.sites.bun_supply_chain import (
+    BUILD_BUNFIG_REL,
+    host_build_env,
+    write_host_bunfig,
+)
+from pocketpaw_ee.sites.dependency_manifest import requires_sandbox
+from pocketpaw_ee.sites.engines import (
+    build_requires_sandbox,
+    candidate_static_output_rels,
+    is_source_engine,
+    needs_node_build,
+    normalize_engine,
+    static_output_rel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -270,11 +355,22 @@ logger = logging.getLogger(__name__)
 # and the `bun run build` static build) so a wedged step fails FAST instead of
 # hanging the request unbounded. The static build runs adapter-cloudflare's workerd
 # prerender, which can hang forever on a known upstream SvelteKit bug; without a
-# timeout `/editable` and publish hang for tens of minutes. A legit build is
-# ~45-60s and a wedged one runs for minutes, so the 120s default cleanly separates
-# them. Override with PAW_SITES_BUILD_TIMEOUT_SEC (int seconds). Read once per call
-# via _build_timeout_sec() with an int-parse-or-fallback so a malformed value can
-# never crash the build.
+# timeout `/editable` and publish hang for tens of minutes. A legit STATIC build is
+# ~45-60s, so the 120s default cleanly separates a static publish from a wedged one.
+#
+# It does NOT separate them for a DYNAMIC site. Measured 2026-07-30 on a 1-table
+# dynamic ripple pocket (one read source + one write action) on an M-series laptop:
+# `bun run build` took 4m47s, because the dynamic page is SSR'd (prerender off) and
+# the whole Ripple widget bundle lands in the server chunk (_page.js ~2.6 MB). At
+# 120s the gate kills that build and reports it as "likely a wedged workerd
+# prerender", so the provision job fails on a healthy site. A deployment that
+# publishes dynamic sites must raise PAW_SITES_BUILD_TIMEOUT_SEC (≥ 600 leaves
+# headroom on a cold node_modules); the default is deliberately left at 120 because
+# the STATIC publish path is request-synchronous and cannot afford a longer hang.
+#
+# Override with PAW_SITES_BUILD_TIMEOUT_SEC (int seconds). Read once per call via
+# _build_timeout_sec() with an int-parse-or-fallback so a malformed value can never
+# crash the build.
 _DEFAULT_BUILD_TIMEOUT_SEC = 120
 
 
@@ -387,10 +483,52 @@ async def _communicate_bounded(
 # current fingerprint matches this; mismatch forces a reinstall (PERF-3).
 _INSTALL_HASH_FILE = ".paw-install-hash"
 
+#: Written into a pocket's persistent build dir after a successful static build: the
+#: hash of the content that build rendered (:func:`draft_source_hash`). ``draft_markup``
+#: serves an on-disk build only when this matches the pocket's CURRENT content, so an
+#: edit since the last build is never photographed as the old page.
+DRAFT_SOURCE_STAMP_FILE = ".paw-draft-source-hash"
+
+
+def draft_source_hash(
+    *, engine: str | None, source: dict[str, Any] | None, ripple_spec: dict[str, Any] | None
+) -> str:
+    """Hash of the content a build renders: the ``source`` map on a source engine, the
+    ``rippleSpec`` (which carries the theme) on ripple. Order-independent."""
+    from pocketpaw_ee.sites.engines import is_source_engine, normalize_engine
+
+    eng = normalize_engine(engine)
+    content = (source or {}) if is_source_engine(eng) else (ripple_spec or {})
+    payload = json.dumps({"engine": eng, "content": content}, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def read_draft_source_stamp(project_dir: Path) -> str:
+    try:
+        return (project_dir / DRAFT_SOURCE_STAMP_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 # Files whose contents define the dependency set. If any change, node_modules is
 # stale and must be reinstalled. The lockfile names cover bun's text + binary
 # lockfiles and the npm fallback.
-_INSTALL_INPUT_FILES = ("package.json", "bun.lock", "bun.lockb", "package-lock.json")
+#
+# bunfig.toml is in this list even though it declares no dependency, because it
+# decides HOW they resolve: the release-age floor and ignoreScripts. A node_modules
+# installed without the floor is exactly as stale as one installed from a different
+# package.json, and leaving it out is how introducing the floor would have silently
+# skipped every already-built site — the hash would not move, so install() (which
+# writes it) would never be reached. Including it costs one reinstall per cached
+# build dir, once.
+_INSTALL_INPUT_FILES = (
+    "package.json",
+    "bun.lock",
+    "bun.lockb",
+    "package-lock.json",
+    BUILD_BUNFIG_REL,
+    ".npmrc",
+)
 
 # Known workerd SSR-render failure markers (mirrors paw-sites/src/smoke.ts). A
 # LIVE publish fail-gates on these; a preview build tolerates them (the live
@@ -434,6 +572,84 @@ def _split_svelte_source(
     files = {k: v for k, v in src.items() if k not in _SVELTE_BINDING_KEYS}
     bindings = {k: src[k] for k in _SVELTE_BINDING_KEYS if k in src}
     return files, bindings
+
+
+def svelte_source_is_dynamic(source: dict[str, Any] | None) -> bool:
+    """Would the generator build this svelte source on adapter-CLOUDFLARE (SL-4)?
+
+    The Python mirror of ``paw-sites/src/bindings.ts::parseBindings``, whose
+    ``isDynamic`` (``sources.length > 0 || actions.length > 0 || auth``) is the ONE flag
+    that picks the adapter — and therefore the output dir, and therefore whether the
+    artifact is a self-contained tree or a worker shell that cannot execute outside its
+    build.
+
+    A SECOND IMPLEMENTATION OF A RULE THAT ALREADY EXISTS IN TYPESCRIPT, and that is worth
+    naming rather than hiding. It earns its place because the answer is needed BEFORE the
+    generator runs: ``service.build_runs_async`` has to decide whether to spend a queue
+    slot, and the only thing that knows the answer today is a build that has not happened.
+
+    THE DISAGREEMENT IS DESIGNED TO BE LOUD. If this and ``parseBindings`` ever diverge,
+    the lane's include-list points at a directory the build did not write, so the artifact
+    is EMPTY and ``classify_build`` refuses it before anything deploys — the same
+    fail-closed shape ``artifact_tar_command`` was built around. It cannot ship the wrong
+    site; it can only fail a publish that should have succeeded.
+
+    MIRRORED EXACTLY, including the parts that look like details:
+
+    * ``sources`` is filtered to ``kind == "data"`` first, because ``parseBindings`` does.
+      Counting every entry would hold static sites out of the lane forever, which is the
+      failure mode that looks like nothing happening.
+    * LENGTH, not presence. An envelope carrying ``sources: []`` is static; a classifier
+      keying on the key existing would call it dynamic.
+    * ``auth`` must be exactly ``True`` (``spec.auth === true``), not merely truthy.
+
+    Accepts either shape the payload takes on its way through the publish: the bindings
+    NESTED in the ``source`` envelope (how a pocket persists them) and spread FLAT as
+    siblings (how ``build_generator_input`` hands them to the generator, via
+    :func:`_split_svelte_source`). Both are read, so a caller holding either one classifies
+    the same and the tar cannot end up aimed at the wrong directory.
+    """
+    if not isinstance(source, dict):
+        return False
+    if source.get("auth") is True:
+        return True
+    raw_sources = source.get("sources")
+    if isinstance(raw_sources, list):
+        for entry in raw_sources:
+            if isinstance(entry, dict) and entry.get("kind") == "data":
+                return True
+    raw_actions = source.get("actions")
+    return isinstance(raw_actions, list) and len(raw_actions) > 0
+
+
+def expected_static_output_rel(engine: str | None, generator_input: dict[str, Any]) -> str:
+    """Which output dir THIS build will write, decided from the payload (SL-4).
+
+    The predict-ahead sibling of ``engines.resolve_static_output_rel``, which answers the
+    same question by reading a finished build off disk. The ephemeral lane needs the answer
+    before the build exists — the include-list that packs the artifact is rendered into the
+    wrapper script, and the unpack that feeds the deploy has to land the tree where the
+    deployer will look for it. ONE helper for both, so the tar and the unpack cannot drift
+    apart; a mismatch between them deploys an empty directory.
+
+    Only svelte can answer anything but its nominal value. Every other engine has exactly
+    one output shape, so this returns ``static_output_rel(engine)`` unchanged for them and
+    their behaviour is byte-for-byte what it was before this function existed.
+
+    Reads the bindings from BOTH shapes the payload takes: nested under ``source`` (how a
+    pocket persists them) and flat at the top level (how ``build_generator_input`` spreads
+    them for the generator).
+    """
+    if normalize_engine(engine) != "svelte":
+        return static_output_rel(engine)
+    nested = generator_input.get("source")
+    if svelte_source_is_dynamic(nested if isinstance(nested, dict) else None):
+        return static_output_rel("svelte")
+    if svelte_source_is_dynamic(generator_input):
+        return static_output_rel("svelte")
+    # The FIRST candidate is adapter-static's ``build`` — read from engines.py rather
+    # than restated here, so the probe order and the prediction can never disagree.
+    return candidate_static_output_rels("svelte")[0]
 
 
 def reap_build_workerd(project_dir: str) -> int:
@@ -564,6 +780,142 @@ async def _clear_stale_svelte_kit(project_dir: str) -> None:
 
 class SmokeGateFailed(RuntimeError):
     """Raised when the workerd smoke render fails — the site is not deployed."""
+
+
+class GeneratorRefused(RuntimeError):
+    """The generator refused the input on purpose (paw-sites ``failStructured``, PP-4).
+
+    ``code`` is the generator's stable wire code (``reserved_path``,
+    ``dependency_policy``, ``engine_unsupported``, ``invalid_input``). ``path`` is the
+    source-map key a ``reserved_path`` refusal names, when the message carries one.
+    A ``RuntimeError`` subclass so callers that caught a failed generate still do.
+    """
+
+    def __init__(self, code: str, message: str, path: str | None = None) -> None:
+        super().__init__(f"generator refused ({code}): {message}")
+        self.code = code
+        self.message = message
+        self.path = path
+
+
+_RESERVED_PATH_RE = re.compile(r'generator-owned path "([^"]+)"')
+
+
+def parse_generator_refusal(stdout: str) -> GeneratorRefused | None:
+    """The structured refusal on the generator's last stdout line, or ``None``.
+
+    ``internal_error`` is not a refusal (it is a crash the CLI still reports as a
+    line), so it returns ``None`` and the caller keeps its generic failure.
+    """
+    lines = [ln for ln in (stdout or "").strip().splitlines() if ln.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    code, message = payload.get("code"), payload.get("error")
+    if not isinstance(code, str) or not isinstance(message, str) or code == "internal_error":
+        return None
+    path = None
+    if code == "reserved_path" and (m := _RESERVED_PATH_RE.search(message)):
+        path = m.group(1)
+    return GeneratorRefused(code, message, path)
+
+
+class HostInstallRefused(RuntimeError):
+    """A host build was asked to install author-declared npm packages (PP-1).
+
+    Deliberately NOT a ``SmokeGateFailed``: nothing about the site failed. The build
+    was routed to the wrong place, and the edit lane's rollback-on-smoke-failure must
+    not treat it as a bad edit. The sites service maps it to a 422.
+    """
+
+
+#: The paw-sites structured-error codes that are DELIBERATE refusals of the author's
+#: input (contract §3) — the author can fix these. ``internal_error`` is not one.
+AUTHOR_FIXABLE_GENERATOR_CODES: frozenset[str] = frozenset(
+    {"dependency_policy", "reserved_path", "engine_unsupported", "invalid_input"}
+)
+
+
+class StaticCheckUnavailable(RuntimeError):
+    """``paw-sites-gen check`` could not run: no generator on PATH, a generator that
+    predates the subcommand, a crash, or a timeout. ``reason`` is a fixed identifier."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+#: Budget for the static check. It parses TS and compiles svelte in-process and runs in
+#: about a second; anything near this is a wedged process.
+STATIC_CHECK_TIMEOUT_SEC = 60
+
+
+async def run_static_check(
+    input_json: dict[str, Any], *, _exec: Any = None, timeout_s: int | None = None
+) -> dict[str, Any]:
+    """Run ``paw-sites-gen check`` (the STATIC verification layer, contract §3).
+
+    Installs nothing and builds nothing — safe on the API host for any source,
+    including one with author packages. Returns the parsed ``{ok, errors, warnings}``
+    report. A structured refusal (exit 1 with an author-fixable code) is returned AS a
+    failed report with one static error, because it is the author's to fix. Everything
+    else that stops the check from running raises :class:`StaticCheckUnavailable`.
+    """
+    input_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            input_path = fh.name
+            json.dump(input_json, fh)
+        try:
+            proc = await (_exec or asyncio.create_subprocess_exec)(
+                *_gen_cmd_argv(),
+                "check",
+                "--input",
+                input_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            raise StaticCheckUnavailable("checker_unavailable") from exc
+        try:
+            stdout, _stderr = await _communicate_bounded(
+                proc, timeout_s or STATIC_CHECK_TIMEOUT_SEC, "check"
+            )
+        except _BuildTimeout as exc:
+            raise StaticCheckUnavailable("timeout") from exc
+        if proc.returncode == 0:
+            try:
+                report = json.loads(stdout.decode().strip().splitlines()[-1])
+            except (ValueError, IndexError) as exc:
+                raise StaticCheckUnavailable("check_output_unreadable") from exc
+            if not isinstance(report, dict) or not isinstance(report.get("errors"), list):
+                raise StaticCheckUnavailable("check_output_unreadable")
+            return report
+        refusal = parse_generator_refusal(stdout.decode(errors="replace"))
+        if proc.returncode == 1 and refusal is not None:
+            if refusal.code in AUTHOR_FIXABLE_GENERATOR_CODES:
+                return {
+                    "ok": False,
+                    "errors": [
+                        {"layer": "static", "code": refusal.code, "message": refusal.message}
+                    ],
+                    "warnings": [],
+                }
+            raise StaticCheckUnavailable("check_crashed")
+        if proc.returncode == 1:
+            # A structured ``internal_error`` line, or none at all: a crash.
+            raise StaticCheckUnavailable("check_crashed")
+        # Exit 2 is usage — a generator that predates ``check`` lands here too.
+        raise StaticCheckUnavailable("checker_unavailable")
+    finally:
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -771,6 +1123,118 @@ def _gen_cmd_argv() -> list[str]:
     return shlex.split(os.environ.get("PAW_SITES_GEN_CMD", "paw-sites-gen"))
 
 
+def artifact_home() -> Path:
+    """Root dir for the persistent per-pocket native-artifact CACHE (the read-through
+    store behind ``get_native_artifact``). Each pocket's rendered ``{body_html, css}``
+    artifacts live under ``artifact_home()/<pocket_id>/<content_hash>.json`` so a
+    preview view can serve a prior render from disk WITHOUT a subprocess build.
+
+    ``~/.pocketpaw/site-artifacts`` by default so it rides the prod ``backend-data``
+    volume alongside ``build_home()`` (``~/.pocketpaw/site-builds``); override with
+    PAW_SITES_ARTIFACT_DIR (tests point it at a temp dir so they never write the real
+    home). Mirrors ``build_home()`` / ``local_server.sites_home()``'s convention."""
+    raw = os.environ.get("PAW_SITES_ARTIFACT_DIR")
+    base = Path(raw) if raw else Path.home() / ".pocketpaw" / "site-artifacts"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+# Cache-format epoch for the native-artifact store. Bump this string whenever the
+# artifact EXTRACTION shape changes (what ``_read_native_artifact`` pulls out of a
+# build) so a code change that alters the stored ``{body_html, css}`` invalidates
+# every previously-cached artifact instead of serving a stale render.
+_ARTIFACT_FORMAT_EPOCH = "v1"
+
+
+# Single-slot memo for :func:`_generator_build_id`: the last entry file's stat key
+# ``(resolved path, st_mtime_ns, st_size)`` and the content digest computed for it.
+_BUILD_ID_MEMO: dict[str, Any] = {}
+
+
+def _generator_build_id() -> str:
+    """Identity of the paw-sites BUILD currently on disk — a SHA-256 content digest
+    prefix of the resolved generator entry file, or ``"unresolved"`` when it cannot be
+    located or read.
+
+    :func:`generator_version` once claimed to identify "the paw-sites
+    GENERATOR", but every term of it was a hand-maintained constant or a dep version
+    string: rebuilding ``paw-sites/dist/cli.js`` did not move the cache key at all.
+    So a generator change that alters the built HTML — exactly what RX-2's react
+    ``data-uid`` stamping is — kept serving the render made by the OLD generator,
+    forever. Observed: two react pockets cached with ZERO ``data-uid``, which the
+    native editor reads as ``uids.size === 0`` and answers by falling back to the
+    section-level iframe editor. The symptom reaches the operator as "react selection
+    is coarse and stays armed in Browse mode", nowhere near the cache that caused it,
+    and no amount of rebuilding the generator clears it.
+
+    Content, not mtime: a redeploy, image rebuild or fresh checkout writes the SAME
+    bytes with a NEW mtime. The built HTML cannot differ, so the key must not either;
+    keying on mtime made every routine deploy re-build every site's preview in a
+    sandbox the next time it was opened, with nothing about the site changed.
+
+    Memoised on stat, not at import. The bundled ``cli.js`` is ~10MB and this rides
+    a per-view code path, so the digest is cached against ``(resolved path,
+    st_mtime_ns, st_size)``: an unchanged file costs one ``stat()``, and any stat
+    change forces a re-hash. That still picks up a generator rebuilt while the
+    server is running (the normal inner loop when iterating on the generator
+    itself), which a value pinned at import would miss.
+
+    ``"unresolved"`` (a CONSTANT, never a changing value) is the honest degrade: it
+    restores exactly today's behaviour rather than making the key unstable, which
+    would defeat the cache on every call."""
+    argv = _gen_cmd_argv()
+    # LAST existing-file token wins, and the direction is load-bearing. The documented
+    # local override is an INTERPRETER plus a script — the shipped one on this box is
+    # "C:/PROGRA~1/nodejs/node.exe D:/…/paw-sites/dist/cli.js" — so both tokens are
+    # real files and taking the FIRST fingerprints node.exe, whose bytes never change
+    # on a generator rebuild. That would leave this function returning a constant and
+    # the bug entirely unfixed, while looking like it worked.
+    entry: str | None = next((tok for tok in reversed(argv) if Path(tok).is_file()), None)
+    if entry is None and argv:
+        entry = shutil.which(argv[0])
+    if not entry:
+        return "unresolved"
+    try:
+        path = Path(entry).resolve()
+        st = path.stat()
+        stat_key = (str(path), st.st_mtime_ns, st.st_size)
+        if _BUILD_ID_MEMO.get("stat") == stat_key:
+            return _BUILD_ID_MEMO["digest"]
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return "unresolved"
+    digest = h.hexdigest()[:20]
+    _BUILD_ID_MEMO["stat"] = stat_key
+    _BUILD_ID_MEMO["digest"] = digest
+    return digest
+
+
+def generator_version() -> str:
+    """A stable identifier of the paw-sites GENERATOR + artifact-format the cache is
+    keyed on, so a generator/dep upgrade (which changes the built output) invalidates
+    the native-artifact store rather than serving a render from the old toolchain.
+
+    Combines the artifact-format epoch, the BUILD IDENTITY of the generator actually
+    on disk (see :func:`_generator_build_id`), and the pinned ripple + motion dep
+    specs — the inputs that most directly move the built HTML/CSS. It rides the
+    content hash in ``service._artifact_content_hash``; a change to any of these
+    yields a fresh key, so the next preview rebuilds once and re-caches.
+
+    The build-id term is what makes the docstring's first sentence true. Without it
+    the only generator-identifying inputs were a hand-bumped epoch and two dep
+    strings, so shipping a generator change and forgetting the manual bump served
+    stale renders indefinitely. ``_ARTIFACT_FORMAT_EPOCH`` stays for what it is
+    actually good at: invalidating when the EXTRACTION shape changes on the Python
+    side, which no amount of watching the generator file can detect."""
+    return (
+        f"{_ARTIFACT_FORMAT_EPOCH}|{_generator_build_id()}"
+        f"|{_ripple_dep_source()}|{_ripple_motion_dep()}"
+    )
+
+
 def _ripple_dep_source() -> str:
     """The npm source spec the generated project's @ripple-ui/svelte dep is
     rewritten to before install. Default "0.2.0" (a registry version — valid
@@ -787,8 +1251,10 @@ def _ripple_motion_dep() -> str:
     declare it as a direct dep or `bun run build` can't resolve the dynamic
     import. Matters most on the local ``file:`` ripple path: a ``file:`` dep
     isn't hoisted, so ripple's own motion never reaches the consumer. Override
-    with PAW_SITES_MOTION_DEP; keep it in lockstep with ripple's motion pin."""
-    return os.environ.get("PAW_SITES_MOTION_DEP", "^12.40.0")
+    with PAW_SITES_MOTION_DEP; otherwise the pin comes from ``vetted_pins`` (the
+    vendored generator allowlist, with a fallback constant), so it moves when
+    paw-sites moves it rather than when someone remembers to edit this line."""
+    return os.environ.get("PAW_SITES_MOTION_DEP") or vetted_pins.pin_for("motion")
 
 
 def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
@@ -805,6 +1271,231 @@ def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
         deps["@ripple-ui/svelte"] = source
         deps.setdefault("motion", _ripple_motion_dep())
         pkg_path.write_text(json.dumps(pkg, indent=2))
+
+
+# A `<form … action="/api/submit" …>` opening tag, in any attribute order and with
+# either quote style. ``[^>]*`` cannot cross the tag boundary, so this matches one
+# opening tag and never runs past it — the same shape paw-sites' ``rewireForms``
+# uses on arbitrary imported HTML, applied here to markup we generated ourselves.
+_LEGACY_SUBMIT_FORM = re.compile(
+    r"(<form\b[^>]*\baction=)([\"'])/api/submit\2([^>]*>)", re.IGNORECASE
+)
+
+# The hidden inputs a direct capture POST needs, in TOKEN form — ``_resolve_capture_tokens``
+# runs after this and turns them into real values, so there is exactly one place in this
+# module that knows the site id and the signed key.
+_CAPTURE_HIDDEN_FIELDS = (
+    '<input type="hidden" name="paw_site_id" value="__SITE_ID__">'
+    '<input type="hidden" name="paw_key" value="__CAPTURE_SIGNED_KEY__">'
+    '<input type="hidden" name="paw_redirect" value="/thank-you">'
+)
+
+
+def _rewire_legacy_submit_forms(contents: str) -> str:
+    """Repoint a form still aimed at the removed ``/api/submit`` route.
+
+    The svelte skill taught ``<form method="POST" action="/api/submit">`` for as long
+    as that route existed, so it is baked into the stored source of every svelte pocket
+    authored before this change. The route is gone — a STATIC svelte site never even
+    served it (``svelte-scaffold.ts`` deletes ``src/routes/api`` because adapter-static
+    cannot prerender a POST handler, which is why those sites have been losing every
+    lead), and deleting it for the dynamic sites too is what leaves one capture path
+    across all four engines instead of one per engine.
+
+    Rewriting rather than leaving them to break is the same call the alias table in
+    ``sites_capture.contact_form`` makes: the fleet is already published, nobody
+    republishes a site that looks fine, and a form that 404s looks exactly like a site
+    nobody is filling in.
+
+    Emits PLACEHOLDERS, never values — the caller resolves them immediately after.
+    Idempotent: the rewritten action is no longer ``/api/submit``, so a second pass
+    matches nothing, and source authored against the new contract is untouched."""
+    return _LEGACY_SUBMIT_FORM.sub(
+        lambda m: (
+            f'{m.group(1)}"__CAPTURE_API_BASE__/capture/form"{m.group(3)}' + _CAPTURE_HIDDEN_FIELDS
+        ),
+        contents,
+    )
+
+
+def _resolve_capture_tokens(
+    source: dict[str, Any],
+    *,
+    site_id: str,
+    capture_api_base: str,
+    capture_signed_key: str,
+) -> dict[str, Any]:
+    """Replace the capture placeholders in every text entry of a source map.
+
+    The same three tokens ``scaffoldProject`` substitutes into the svelte templates,
+    so a site author (human or agent) writes one convention on every engine. Returns
+    a NEW map — the caller's dict is the stored pocket source and must not be mutated.
+
+    Only ``str`` values are touched. A svelte source envelope carries live-data
+    binding keys alongside its files (see ``_split_svelte_source``), and those are
+    dicts/lists that must ride through untouched.
+
+    Runs ``_rewire_legacy_submit_forms`` FIRST, so a form still pointing at the removed
+    ``/api/submit`` route is repointed into tokens and then resolved by the same pass —
+    one place that knows the real values, rather than two.
+
+    Idempotent, and a no-op on source with no tokens and no legacy form — which is every
+    ripple site, so this cannot change their emitted bytes."""
+    resolved = {
+        "__CAPTURE_API_BASE__": capture_api_base,
+        "__SITE_ID__": site_id,
+        "__CAPTURE_SIGNED_KEY__": capture_signed_key,
+    }
+    out: dict[str, Any] = {}
+    for path, contents in source.items():
+        if not isinstance(contents, str):
+            out[path] = contents
+            continue
+        contents = _rewire_legacy_submit_forms(contents)
+        for token, value in resolved.items():
+            contents = contents.replace(token, value)
+        out[path] = contents
+    return out
+
+
+def build_generator_input(
+    *,
+    engine: str,
+    theme: dict[str, Any],
+    site_id: str,
+    title: str,
+    capture_api_base: str,
+    capture_signed_key: str,
+    ripple_spec: dict[str, Any] | None = None,
+    source: dict[str, Any] | None = None,
+    assets: dict[str, str] | None = None,
+    builder_origin: str | None = None,
+    d1_database_id: str = "",
+    keeps_client_bundle: bool = False,
+    turnstile_site_key: str = "",
+) -> dict[str, Any]:
+    """The generator's STAGE-1/2 input payload — the exact dict handed to ``generate``.
+
+    Extracted from ``_build_one`` 2026-08-10 (SL-3) so the ASYNC publish path can build
+    the same payload without a second implementation. That mattered enough to justify a
+    refactor of a well-covered function: the ephemeral build lane runs ``generate`` in a
+    worker, so the payload has to be assembled at enqueue time in the web process. Two
+    copies of this assembly would drift on the next generator key that lands, and the
+    failure would be silent — a site that builds differently depending on which path
+    published it.
+
+    Behaviour-preserving by construction: ``_build_one`` now calls this and passes the
+    result straight through, so every existing payload is byte-identical.
+    """
+    site_config: dict[str, Any] = {
+        "siteId": site_id,
+        "title": title,
+        "captureApiBase": capture_api_base,
+        "captureSignedKey": capture_signed_key,
+        # DP0-1: the per-tenant D1 id the generator threads into the emitted
+        # wrangler.toml ``database_id``. ALWAYS present (default "" for a static
+        # site — the prior empty value), so a caller CAN bind a dynamic site's
+        # data plane by supplying it. The real id comes from the provision job
+        # at the caller in a later task (DP0-3/DP0-4).
+        "d1DatabaseId": d1_database_id,
+    }
+    # SE-2b: only present when the site is being published as editable, so a
+    # non-editable publish's payload is byte-identical to before this change.
+    if builder_origin:
+        site_config["builderOrigin"] = builder_origin
+    # MT-1: only present when the site DECLARES that its own client JS is
+    # load-bearing. The generator then emits ``csr = true`` (the page stays
+    # prerendered) and marks the route manifest, so the hand-written onMount /
+    # ``use:`` action / IntersectionObserver / WebGL code actually runs and the
+    # ripple build's prune step leaves the hydration bundle alone. Omitted when
+    # False so a plain static site's payload is byte-identical to before.
+    if keeps_client_bundle:
+        site_config["keepsClientBundle"] = True
+    # The site's own Turnstile widget (the ``turnstile`` integration). The generator
+    # puts it on paw.js as ``data-turnstile-sitekey`` so a write the gateway answers
+    # with ``turnstile_required`` can be retried with a token. Omitted when unset.
+    if turnstile_site_key:
+        site_config["turnstileSiteKey"] = turnstile_site_key
+    # 2026-08-13 — resolve the capture tokens in AUTHORED source, public deploys only.
+    #
+    # The react and html tracks have no server route: there is no ``/api/submit`` to
+    # forward a lead, and ``rewireForms`` runs only on the IMPORT path. So a
+    # hand-authored ``<form>`` on those tracks posted to nothing and every submission
+    # was lost on page reload. The authoring prompt now tells the agent to write the
+    # native-form contract with ``__CAPTURE_API_BASE__`` / ``__SITE_ID__`` /
+    # ``__CAPTURE_SIGNED_KEY__`` placeholders — the same token convention
+    # ``scaffoldProject`` already substitutes into the svelte templates — and this is
+    # where they become real values.
+    #
+    # It happens HERE, not in the generator, for one reason: the prompt that emits the
+    # tokens and the code that resolves them then ship in the same commit. Split across
+    # repos, a prompt live before its substitution puts a literal
+    # ``__CAPTURE_API_BASE__`` in the action of every react/html site published in
+    # between.
+    #
+    # GATED ON A PUBLIC DEPLOY (``not builder_origin``), and that gate is load-bearing
+    # rather than tidiness: the html edit lane records ``byteSpan`` offsets in its edit
+    # manifest, computed over the bytes the generator was handed. Substitution changes
+    # lengths (a real signed key is roughly twice its placeholder), so arming a build
+    # with substituted source and later splicing edits into the STORED placeholder
+    # source would land every edit after the form at the wrong offset and quietly
+    # corrupt the page. Armed builds therefore keep the placeholders — the form does
+    # not submit inside the builder preview, which is also the better behaviour (an
+    # edit session cannot mint live leads).
+    #
+    # The pocket keeps the placeholders either way: ``apply_leaf_edits`` has its own
+    # subprocess path and never sees a substituted map, so stored source is never
+    # rewritten with a real key. That is what keeps ``rotate_signed_key`` meaningful —
+    # the next publish substitutes the new key with nothing to migrate.
+    if source and not builder_origin:
+        source = _resolve_capture_tokens(
+            source,
+            site_id=site_id,
+            capture_api_base=capture_api_base,
+            capture_signed_key=capture_signed_key,
+        )
+
+    input_json: dict[str, Any] = {
+        "engine": engine,
+        "theme": theme,
+        "siteConfig": site_config,
+    }
+    if engine == "svelte":
+        # DSV-5: a DYNAMIC svelte pocket carries its live-data bindings
+        # (objects/sources/actions/auth) as SIBLING keys on the same ``source``
+        # envelope that holds the {path: contents} files. Peel them out: the
+        # file map goes on ``input.source`` (materializeSource writes each key
+        # as a file, so a binding key mixed in would break the build), and the
+        # bindings are spread as FLAT siblings on GenerateInput — the exact
+        # shape DSV-1's parseBindings reads (``input.objects`` / ``input.sources``
+        # / ``input.actions`` / ``input.auth``), NOT nested under ``source``. A
+        # STATIC svelte pocket has no binding keys → ``bindings`` is empty and
+        # ``input.source`` is the unchanged file map (pre-DSV-5 wire bytes).
+        files, bindings = _split_svelte_source(source)
+        input_json["source"] = files
+        input_json.update(bindings)
+    elif is_source_engine(engine):
+        # HE-3/HE-1: html is a source-map engine too — it sends its raw
+        # ``{path: contents}`` static tree on ``input.source`` and OMITS
+        # ``rippleSpec`` (a hand-authored html site has no rippleSpec). Unlike
+        # svelte there is NO binding split: dynamic (live-data) html is a
+        # non-goal, so an html source map carries only files. ripple (not a
+        # source engine) is untouched by this branch and still sends rippleSpec
+        # below, so its wire bytes — and svelte's — are unchanged.
+        input_json["source"] = source or {}
+        # SI-4 CROSS-REPO SEAM: an html IMPORT also carries binary files, which
+        # cannot ride the text-only ``source`` map — they ride ``input.assets``
+        # ({path: base64}). The paw-sites generator's ``assets`` handling
+        # (decode + write each entry verbatim into the emitted static tree) is
+        # being added in a PARALLEL paw-sites slice; this codes to that
+        # contract. Sent ONLY when non-empty, so a plain html publish's payload
+        # stays byte-identical, and a generator predating the key ignores it
+        # (the import report warns that assets then don't deploy).
+        if assets:
+            input_json["assets"] = assets
+    else:
+        input_json["rippleSpec"] = ripple_spec
+    return input_json
 
 
 class _Runner(Protocol):
@@ -858,6 +1549,12 @@ class _SubprocessRunner:
                 # generator is a failed generate.
                 raise RuntimeError(f"generator timed out after {exc.timeout_s}s") from exc
             if proc.returncode != 0:
+                # PP-4 / PP-2: paw-sites prints a structured ``{"error","code"}`` line on
+                # stdout for a deliberate refusal; stderr carries a stack only for an
+                # internal error.
+                refusal = parse_generator_refusal(stdout.decode(errors="replace"))
+                if refusal is not None:
+                    raise refusal
                 raise RuntimeError(f"generator failed: {stderr.decode()}")
             return json.loads(stdout.decode().strip().splitlines()[-1])
         finally:
@@ -873,6 +1570,16 @@ class _SubprocessRunner:
         # The deps are already made resolvable by build() (_rewrite_ripple_dep runs
         # before the install decision so the dep-hash reflects the final inputs).
         # This just runs `bun install` on the prepared dir.
+        #
+        # ...behind the HOST supply-chain floor (7-day release age, no lifecycle
+        # scripts). This runner is the API host — dev_server, draft_markup, service
+        # and the deployed Coolify image all use it — and it only installs our own
+        # toolchain (author packages are refused before this, HostInstallRefused);
+        # the open sandbox bunfig is the Daytona lane's alone. Written here rather
+        # than in build() because this is the method that spawns the install: a
+        # floor applied anywhere else is one a future caller can route around by
+        # calling install() directly.
+        write_host_bunfig(project_dir)  # the floor, laid at the spawn
         timeout_s = _build_timeout_sec()
         # start_new_session=True: own process group so a wedged install is killable
         # as a group on timeout.
@@ -881,6 +1588,7 @@ class _SubprocessRunner:
             "install",
             "--no-save",
             cwd=project_dir,
+            env=host_build_env(),  # no API secrets reach the package manager
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -927,6 +1635,7 @@ class _SubprocessRunner:
             "run",
             "build",
             cwd=project_dir,
+            env=host_build_env(),  # the build runs site code: no API secrets
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -968,10 +1677,74 @@ class _SubprocessRunner:
         return await self.build_static(project_dir, gate=True)
 
 
+async def run_import(
+    files: dict[str, str],
+    *,
+    site_id: str,
+    capture_api_base: str,
+    capture_signed_key: str,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Run imported files through the paw-sites ``import`` generator subcommand and
+    return ``{source, assets, report}`` — the rewired html source map, the base64
+    binary sideband, and the authoritative import report.
+
+    This is what makes an imported ``<form>`` actually post to the capture API: the
+    generator runs buildImportPlan + rewireForms over ``files`` (path -> base64
+    bytes) using ``siteConfig`` (the site id + capture base + the site's signed
+    key), rewrites each form's action to ``{captureApiBase}/capture/form`` with the
+    hidden paw_* fields, and returns the rewired source plus a report whose keys are
+    the exact snake_case shape the Site doc + /sites report panel read.
+
+    Shells out to the SAME tokenised generator command as apply_leaf_edits
+    (``_gen_cmd_argv()`` + ``import --input <tempfile>``) and emits exactly ONE JSON
+    line on stdout. A PURE transform — no bun install / build / workerd — so it is
+    fast and safe to call inline on the import path before publish. Failure surfaces
+    as a ``RuntimeError`` (non-zero exit carries the CLI stderr; a wedged run is a
+    failed run, mirroring generate()/apply_leaf_edits). ``_exec`` is the injectable
+    subprocess-exec seam tests stub so the bridge is unit-testable without Bun."""
+    input_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            input_path = fh.name
+            json.dump(
+                {
+                    "files": files,
+                    "siteConfig": {
+                        "siteId": site_id,
+                        "captureApiBase": capture_api_base,
+                        "captureSignedKey": capture_signed_key,
+                    },
+                },
+                fh,
+            )
+        timeout_s = _build_timeout_sec()
+        proc = await (_exec or asyncio.create_subprocess_exec)(
+            *_gen_cmd_argv(),
+            "import",
+            "--input",
+            input_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, "import")
+        except _BuildTimeout as exc:
+            raise RuntimeError(f"import timed out after {exc.timeout_s}s") from exc
+        if proc.returncode != 0:
+            raise RuntimeError(f"import failed: {stderr.decode()}")
+        return json.loads(stdout.decode().strip().splitlines()[-1])
+    finally:
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
+
+
 async def apply_leaf_edits(
     source: dict[str, str],
     edits: list[dict[str, Any]],
     *,
+    lane: str | None = None,
     _exec: Any = None,
 ) -> dict[str, Any]:
     """Splice native-editor leaf edits into a svelte source map via the paw-sites
@@ -1007,17 +1780,81 @@ async def apply_leaf_edits(
     # need its path to clean it up. ONE outer try/finally covers creation + write +
     # exec, and the finally is guarded (only unlink a path that was assigned AND still
     # exists) so it never NameErrors on an early failure and never leaks the tempfile.
+    payload: dict[str, Any] = {"source": source, "edits": edits}
+    # HE-9: only send `lane` when the caller asked for one. The CLI treats an absent
+    # lane as svelte, so omitting it keeps an old payload byte-identical rather than
+    # relying on both sides agreeing on a default they both spell out.
+    if lane is not None:
+        payload["lane"] = lane
+    return await _run_gen_json("apply-leaf-edit", payload, _exec=_exec)
+
+
+async def arm_html(
+    source: dict[str, str],
+    *,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Stamp ``data-uid`` on an html source map's editable leaves and return the
+    stamped files plus the leaf manifest (HE-9).
+
+    The READ half of the html edit lane, and the reason it exists is an identity
+    mismatch the builder cannot paper over. An html pocket previews by assembling its
+    RAW ``source`` into a sandboxed srcdoc, so nothing in that document carries a uid:
+    the in-frame select agent resolves a click to a DOM-walk guess
+    (``<section>:<tag>:<ordinal>``) while the write path resolves by manifest uid
+    (``<page>:<role>:<ordinal>``). Two schemes over two documents — a pick could never
+    address a leaf. Arming emits the document the preview should actually render, so
+    both sides key off the SAME derived uids.
+
+    Returns ``{"source": {<relpath>: <stamped contents>}, "manifest": [leaf, ...]}``.
+    The stamping is an offset splice, so the returned files are byte-identical to the
+    input except the inserted attributes.
+
+    Like ``apply_leaf_edits`` this is a PURE transform — a parse and a splice, no
+    ``bun install``, no build — so it is safe to call inline when the operator opens
+    Design mode.
+
+    uids are DERIVED, never stored, so the caller must RE-ARM after a write rather than
+    cache: spans shift under a splice, which is exactly what makes a stale manifest
+    fail loudly instead of mis-targeting.
+
+    Failure surfaces as ``RuntimeError`` (non-zero exit or timeout), same contract as
+    ``apply_leaf_edits`` — the caller maps it to a structured CloudError.
+    """
+    return await _run_gen_json("arm-html", {"source": source}, _exec=_exec)
+
+
+async def _run_gen_json(
+    command: str,
+    payload: dict[str, Any],
+    *,
+    _exec: Any = None,
+) -> dict[str, Any]:
+    """Run a PURE generator subcommand that takes ``--input <json>`` and emits exactly
+    one JSON line, and return the parsed line.
+
+    Extracted (HE-9) when ``arm-html`` became the second caller of this plumbing. The
+    tempfile handling below is subtle enough that two copies would be two chances to
+    get it wrong, and the copy is what rots.
+
+    ``input_path`` is assigned BEFORE ``json.dump`` so a serialization failure cannot
+    leave the created temp file un-tracked: ``NamedTemporaryFile(delete=False)``
+    materializes the file immediately, so if ``json.dump`` raises mid-write we still
+    need its path to clean up. ONE outer try/finally covers creation + write + exec,
+    and the finally is guarded (only unlink a path that was assigned AND still exists)
+    so it never NameErrors on an early failure and never leaks the tempfile.
+    """
     input_path = ""
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             input_path = fh.name
-            json.dump({"source": source, "edits": edits}, fh)
+            json.dump(payload, fh)
         timeout_s = _build_timeout_sec()
-        # start_new_session=True: own process group so a wedged splice (and any
-        # children it leaked) can be killed as a group on timeout — same as generate().
+        # start_new_session=True: own process group so a wedged run (and any children
+        # it leaked) can be killed as a group on timeout — same as generate().
         proc = await (_exec or asyncio.create_subprocess_exec)(
             *_gen_cmd_argv(),
-            "apply-leaf-edit",
+            command,
             "--input",
             input_path,
             stdout=asyncio.subprocess.PIPE,
@@ -1025,12 +1862,12 @@ async def apply_leaf_edits(
             start_new_session=True,
         )
         try:
-            stdout, stderr = await _communicate_bounded(proc, timeout_s, "apply-leaf-edit")
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, command)
         except _BuildTimeout as exc:
-            # A timed-out splice is a failed splice (mirror generate()'s raise-on-timeout).
-            raise RuntimeError(f"apply-leaf-edit timed out after {exc.timeout_s}s") from exc
+            # A timed-out run is a failed run (mirror generate()'s raise-on-timeout).
+            raise RuntimeError(f"{command} timed out after {exc.timeout_s}s") from exc
         if proc.returncode != 0:
-            raise RuntimeError(f"apply-leaf-edit failed: {stderr.decode()}")
+            raise RuntimeError(f"{command} failed: {stderr.decode()}")
         return json.loads(stdout.decode().strip().splitlines()[-1])
     finally:
         if input_path and os.path.exists(input_path):
@@ -1067,13 +1904,21 @@ class GeneratorClient:
         capture_signed_key: str,
         engine: str = "ripple",
         source: dict[str, Any] | None = None,
+        assets: dict[str, str] | None = None,
         builder_origin: str | None = None,
         d1_database_id: str = "",
+        keeps_client_bundle: bool = False,
         pocket_id: str | None = None,
         smoke: bool = True,
         static_build: bool = True,
+        turnstile_site_key: str = "",
     ) -> BuildResult:
         """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
+
+        ``assets`` (SI-4) is the html import's base64 BINARY sideband
+        ({path: base64}) — sent as ``input.assets`` on the html branch only, and only
+        when non-empty (see _build_one for the cross-repo seam note). ripple/svelte
+        payloads never carry it.
 
         ``engine="ripple"`` (default) compiles ``ripple_spec`` into the site;
         ``engine="svelte"`` materializes ``source`` (the pocket's hand-written
@@ -1110,6 +1955,18 @@ class GeneratorClient:
         the right D1. This is only the pass-through — the real id is supplied by the
         provision job at the caller in a later task (DP0-3/DP0-4).
 
+        ``keeps_client_bundle`` (MT-1) declares that this site's own JavaScript is
+        load-bearing — an ``onMount``, a ``use:`` action, an IntersectionObserver
+        scroll-reveal, a raw-WebGL canvas. A published site is otherwise generated
+        with ``csr = false`` (and, on ripple, has its emitted hydration bundle deleted
+        after the build), so that code never runs in the browser. When True it rides
+        ``siteConfig.keepsClientBundle`` and the paw-sites generator emits
+        ``csr = true`` + marks the route manifest; the page stays PRERENDERED, so the
+        content is still in view-source and hydration only arms the motion on top. The
+        key is OMITTED when False, so a site that declares nothing keeps the exact
+        prior wire bytes. Pass-through only — reading the per-pocket fact at the caller
+        is a later task, mirroring ``d1_database_id`` above.
+
         ``pocket_id`` (PERF-3) builds into a STABLE per-pocket working dir under
         build_home() (``<build_home>/<pocket_id>/``) so node_modules persists and
         `bun install` is cached across builds (preview AND publish). When None,
@@ -1145,14 +2002,23 @@ class GeneratorClient:
                 capture_signed_key=capture_signed_key,
                 engine=engine,
                 source=source,
+                assets=assets,
                 builder_origin=builder_origin,
                 d1_database_id=d1_database_id,
+                keeps_client_bundle=keeps_client_bundle,
                 pocket_id=None,
                 smoke=smoke,
                 static_build=static_build,
+                turnstile_site_key=turnstile_site_key,
             )
         async with self._lock_for(pocket_id):
-            return await self._build_one(
+            # The stamp says which content the on-disk build rendered. Drop it before
+            # the dir is rewritten (a failed build leaves stale output and NO stamp),
+            # and write it only after a static build succeeded.
+            stamp = build_home() / pocket_id / DRAFT_SOURCE_STAMP_FILE
+            with contextlib.suppress(OSError):
+                stamp.unlink()
+            result = await self._build_one(
                 ripple_spec=ripple_spec,
                 theme=theme,
                 site_id=site_id,
@@ -1161,12 +2027,22 @@ class GeneratorClient:
                 capture_signed_key=capture_signed_key,
                 engine=engine,
                 source=source,
+                assets=assets,
                 builder_origin=builder_origin,
                 d1_database_id=d1_database_id,
+                keeps_client_bundle=keeps_client_bundle,
                 pocket_id=pocket_id,
                 smoke=smoke,
                 static_build=static_build,
+                turnstile_site_key=turnstile_site_key,
             )
+            if static_build and stamp.parent.is_dir():
+                with contextlib.suppress(OSError):
+                    stamp.write_text(
+                        draft_source_hash(engine=engine, source=source, ripple_spec=ripple_spec),
+                        encoding="utf-8",
+                    )
+            return result
 
     async def _build_one(
         self,
@@ -1181,10 +2057,29 @@ class GeneratorClient:
         source: dict[str, Any] | None,
         builder_origin: str | None,
         d1_database_id: str,
+        keeps_client_bundle: bool,
         pocket_id: str | None,
         smoke: bool,
         static_build: bool = True,
+        assets: dict[str, str] | None = None,
+        turnstile_site_key: str = "",
     ) -> BuildResult:
+        # PP-1: author packages AND authored build-shell files (package.json,
+        # vite.config.*, svelte.config.*, bunfig.toml, .npmrc) build ONLY in the
+        # Daytona sandbox. This client installs on whatever host it runs on, so a
+        # node build of such a source is refused here, before generate — nothing is
+        # written and nothing installs. html is exempt: it never installs (its
+        # packages load from the CDN through an importmap). Fails closed
+        # (``requires_sandbox``).
+        if build_requires_sandbox(engine) or (
+            needs_node_build(engine) and requires_sandbox(source)
+        ):
+            raise HostInstallRefused(
+                "this site declares npm packages or carries its own build config "
+                "(package.json, vite/svelte config, bunfig.toml, .npmrc), and those "
+                "build only in the isolated build sandbox — never on the API host. "
+                "Publish it through the build lane instead."
+            )
         # PERF-3: stable per-pocket working dir (overwrite the source each build)
         # so node_modules persists; fall back to a throwaway tempfile dir when no
         # pocket_id is given (legacy callers — no caching).
@@ -1196,52 +2091,21 @@ class GeneratorClient:
         # §4.2: ``engine`` is always present; the STAGE-2 payload key forks on
         # it. svelte → ``source`` (no rippleSpec); ripple → ``rippleSpec`` (no
         # source). siteConfig + theme ride both tracks unchanged.
-        site_config: dict[str, Any] = {
-            "siteId": site_id,
-            "title": title,
-            "captureApiBase": capture_api_base,
-            "captureSignedKey": capture_signed_key,
-            # DP0-1: the per-tenant D1 id the generator threads into the emitted
-            # wrangler.toml ``database_id``. ALWAYS present (default "" for a static
-            # site — the prior empty value), so a caller CAN bind a dynamic site's
-            # data plane by supplying it. The real id comes from the provision job
-            # at the caller in a later task (DP0-3/DP0-4).
-            "d1DatabaseId": d1_database_id,
-        }
-        # SE-2b: only present when the site is being published as editable, so a
-        # non-editable publish's payload is byte-identical to before this change.
-        if builder_origin:
-            site_config["builderOrigin"] = builder_origin
-        input_json: dict[str, Any] = {
-            "engine": engine,
-            "theme": theme,
-            "siteConfig": site_config,
-        }
-        if engine == "svelte":
-            # DSV-5: a DYNAMIC svelte pocket carries its live-data bindings
-            # (objects/sources/actions/auth) as SIBLING keys on the same ``source``
-            # envelope that holds the {path: contents} files. Peel them out: the
-            # file map goes on ``input.source`` (materializeSource writes each key
-            # as a file, so a binding key mixed in would break the build), and the
-            # bindings are spread as FLAT siblings on GenerateInput — the exact
-            # shape DSV-1's parseBindings reads (``input.objects`` / ``input.sources``
-            # / ``input.actions`` / ``input.auth``), NOT nested under ``source``. A
-            # STATIC svelte pocket has no binding keys → ``bindings`` is empty and
-            # ``input.source`` is the unchanged file map (pre-DSV-5 wire bytes).
-            files, bindings = _split_svelte_source(source)
-            input_json["source"] = files
-            input_json.update(bindings)
-        elif is_source_engine(engine):
-            # HE-3/HE-1: html is a source-map engine too — it sends its raw
-            # ``{path: contents}`` static tree on ``input.source`` and OMITS
-            # ``rippleSpec`` (a hand-authored html site has no rippleSpec). Unlike
-            # svelte there is NO binding split: dynamic (live-data) html is a
-            # non-goal, so an html source map carries only files. ripple (not a
-            # source engine) is untouched by this branch and still sends rippleSpec
-            # below, so its wire bytes — and svelte's — are unchanged.
-            input_json["source"] = source or {}
-        else:
-            input_json["rippleSpec"] = ripple_spec
+        input_json = build_generator_input(
+            engine=engine,
+            theme=theme,
+            site_id=site_id,
+            title=title,
+            capture_api_base=capture_api_base,
+            capture_signed_key=capture_signed_key,
+            ripple_spec=ripple_spec,
+            source=source,
+            assets=assets,
+            builder_origin=builder_origin,
+            d1_database_id=d1_database_id,
+            keeps_client_bundle=keeps_client_bundle,
+            turnstile_site_key=turnstile_site_key,
+        )
         gen = await self._runner.generate(input_json, out_dir)
         project_dir = gen["projectDir"]
         # HE-3: an html publish's last-mile output IS the authored source (HE-1 makes
@@ -1260,6 +2124,10 @@ class GeneratorClient:
         # rewrite). ripple + svelte (``needs_node_build`` True) fall through to the
         # unchanged generate → install → build_static → gate chain.
         if not needs_node_build(engine):
+            # Deliberately the NOMINAL predicate, not SL-1's resolver: this branch is
+            # reached only when ``not needs_node_build(engine)``, i.e. html, whose
+            # output dir is the project dir itself and has exactly one shape. The
+            # resolver would return the same value. Only svelte is ambiguous.
             static_dir = Path(project_dir, static_output_rel(engine))
             _html_static_smoke(static_dir)
             return BuildResult(project_dir=project_dir, ripple_version=gen.get("rippleVersion"))
@@ -1271,6 +2139,22 @@ class GeneratorClient:
         # is not a real dir) don't fail on a missing package.json.
         if Path(project_dir, "package.json").is_file():
             _rewrite_ripple_dep(project_dir, _ripple_dep_source())
+            # Lay the supply-chain floor down BEFORE the fingerprint is taken, not
+            # just inside install(). bunfig.toml is one of the fingerprinted install
+            # inputs (it decides how the deps RESOLVE), and the fingerprint is what
+            # decides whether install() runs at all — so a floor written only inside
+            # install() would never reach a build dir whose deps had not changed.
+            # That is the whole cached fleet. Writing it here moves the hash once,
+            # which forces exactly one reinstall per existing dir and nothing after.
+            # install() writes it again at spawn time; the two are idempotent and
+            # guard different things — this one guards the cache decision, that one
+            # guards a caller who reaches install() without coming through build().
+            #
+            # Inside the package.json guard for two reasons that agree: a dir with no
+            # manifest has no install to put a floor under, and the fake-runner tests
+            # hand this a projectDir that was never created on disk (the same reason
+            # _rewrite_ripple_dep is guarded).
+            write_host_bunfig(project_dir)
         # PERF-3 install cache: run `bun install` ONLY when the dependency set
         # changed. Fingerprint the install inputs and compare to the sentinel from
         # the last successful install in this dir. Match → skip (reuse the cached

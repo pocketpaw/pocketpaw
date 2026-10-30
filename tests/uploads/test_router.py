@@ -9,14 +9,13 @@ from fastapi.testclient import TestClient
 PNG = b"\x89PNG\r\n\x1a\n" + b"body"
 
 
-@pytest.fixture()
-def client(tmp_path: Path, monkeypatch):
+def _build_client(tmp_path: Path, monkeypatch, allowed_mimes=None) -> TestClient:
     """Build an app with the uploads router pointed at a tmp dir."""
     # Patch module-level globals BEFORE importing the router
     import pocketpaw.api.v1.uploads as uploads_module
 
     root = tmp_path / "u"
-    root.mkdir()
+    root.mkdir(exist_ok=True)
 
     # Rebuild module-level service against tmp dirs
     from pocketpaw.uploads.config import UploadSettings
@@ -24,7 +23,10 @@ def client(tmp_path: Path, monkeypatch):
     from pocketpaw.uploads.local import LocalStorageAdapter
     from pocketpaw.uploads.service import UploadService
 
-    test_cfg = UploadSettings(local_root=root)
+    kwargs = {"local_root": root}
+    if allowed_mimes is not None:
+        kwargs["allowed_mimes"] = allowed_mimes
+    test_cfg = UploadSettings(**kwargs)
     test_adapter = LocalStorageAdapter(root=root)
     test_meta = JSONLFileStore(path=root / "_idx.jsonl")
     test_svc = UploadService(adapter=test_adapter, meta=test_meta, cfg=test_cfg)
@@ -34,6 +36,20 @@ def client(tmp_path: Path, monkeypatch):
     app = FastAPI()
     app.include_router(uploads_module.router, prefix="/api/v1")
     return TestClient(app)
+
+
+@pytest.fixture()
+def client(tmp_path: Path, monkeypatch):
+    """The shipped configuration: every type accepted."""
+    return _build_client(tmp_path, monkeypatch)
+
+
+@pytest.fixture()
+def gated_client(tmp_path: Path, monkeypatch):
+    """A deployment that narrowed the policy via POCKETPAW_UPLOAD_ALLOWED_MIMES."""
+    from pocketpaw.uploads.config import DEFAULT_ALLOWED_MIMES
+
+    return _build_client(tmp_path, monkeypatch, allowed_mimes=DEFAULT_ALLOWED_MIMES)
 
 
 def test_upload_single_roundtrip(client: TestClient):
@@ -55,8 +71,10 @@ def test_upload_single_roundtrip(client: TestClient):
     assert "inline" in r2.headers["content-disposition"]
 
 
-def test_bulk_upload_partial_success(client: TestClient):
-    r = client.post(
+def test_bulk_upload_partial_success(gated_client: TestClient):
+    """A 200 carrying per-file failures, not a 4xx for the whole batch. Needs
+    the narrowed policy — the default accepts the svg."""
+    r = gated_client.post(
         "/api/v1/uploads",
         files=[
             ("files", ("good.png", PNG, "image/png")),
@@ -68,6 +86,21 @@ def test_bulk_upload_partial_success(client: TestClient):
     assert len(data["uploaded"]) == 1
     assert len(data["failed"]) == 1
     assert data["failed"][0]["code"] == "unsupported_mime"
+
+
+def test_bulk_upload_accepts_unknown_types_by_default(client: TestClient):
+    """The default policy: a format nobody registered still uploads."""
+    r = client.post(
+        "/api/v1/uploads",
+        files=[
+            ("files", ("good.png", PNG, "image/png")),
+            ("files", ("scene.blend", b"BLENDER-v303\x00\x00", "application/octet-stream")),
+        ],
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert [u["filename"] for u in data["uploaded"]] == ["good.png", "scene.blend"]
+    assert data["failed"] == []
 
 
 def test_delete_then_get_not_found(client: TestClient):

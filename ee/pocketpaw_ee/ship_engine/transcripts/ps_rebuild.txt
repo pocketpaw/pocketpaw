@@ -1,0 +1,8 @@
+# transcript: `dokku ps:rebuild demo` — rebuilds the app from source and restarts it.
+EXIT: 0
+--- stdout ---
+-----> Rebuilding demo from source
+-----> Building demo from Dockerfile
+-----> Releasing demo...
+=====> Application rebuilt
+--- stderr ---

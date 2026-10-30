@@ -2,9 +2,36 @@
 
 Core event loop that consumes from the message bus, feeds messages
 through AgentRouter (which delegates to the configured backend),
-and streams AgentEvent responses back to channels.
+and streams AgentEvent responses back to channels. On a processing error it
+stops only that session's run (``router.stop(session_key=...)``), never every
+session sharing the router.
 
 PII scanning before memory storage is opt-in via pii_scan_enabled + pii_scan_memory settings.
+
+Updated: 2026-08-15 (HTN-4, feat/claude-sdk-tool-args) — the ``tool_use`` branch
+correlates ONE pending call per real tool call, not one per event. The claude_sdk
+backend now announces a streamed call twice (provisional when the tool block
+opens, then resolved with the assembled arguments), and this branch appended a
+``pending_tool_calls`` entry per EVENT — so every streamed call left a stale entry
+that ``tool_result``'s name-match never popped, and the ``pop(0)`` fallback then
+handed later results an id belonging to an earlier call. It also published two
+``tool_start`` events per call, the first carrying no real arguments. The branch
+now skips the provisional announcement (``metadata["input_pending"] is True``).
+Backends that never set the flag read None and are untouched.
+
+Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the channel turn
+carries its prompt's ``stable_digest`` to the backend. ``_process_message_inner``
+calls ``AgentContextBuilder.assemble_system_prompt`` (which returns the digest
+alongside the text) instead of ``build_system_prompt``, and passes
+``system_prompt_digest`` to ``AgentRouter.run``, which forwards it only to
+backends whose ``run`` declares it. Everything this module does to the prompt
+AFTER assembly — ``_reinforce_identity``'s every-fifth-message identity append —
+moves the text and NOT the digest, on purpose: a backend caching an agent object
+should not rebuild it for a block the prompt already contained. Before this, the
+warm Claude client on Telegram / Discord / Slack / CLI keyed on
+``claude_sdk._behavior_prefix``, which infers the stable region by pattern-
+matching the rendered text and so cannot see a real behaviour change hiding below
+its cut.
 
 Updated: feat/pocketpaw-cognitive-engine
 - start() now builds a PocketPawCognitiveEngine backed by the active AgentRouter
@@ -20,6 +47,15 @@ SystemEvent apiece ({file_id,name,mime,size}) ahead of ``stream_end``, and
 persists a matching ``{type:"artifact", meta}`` attachment on the assistant
 message (persisting even on an artifact-only, empty-text turn). Mirrors the cloud
 run_core collector-drain contract so the client's card+viewer works in local mode.
+
+Updated: 2026-09-02 (fix/metering-partial-usage-capture) — ``token_usage``
+payloads are RUN-CUMULATIVE and ``usage_tracker.record`` is ADDITIVE, so the
+handler records the DELTA between payloads rather than each payload whole.
+Recording them whole counted turn 1 again in every later payload. This was
+latent while every backend reported exactly once per run; it stopped being
+latent when ``pydantic_ai`` began reporting as the run progresses — which it
+must, because the cloud run loop abandons a cancelled run's stream and never
+sees a payload produced at the end.
 """
 
 import asyncio
@@ -44,6 +80,7 @@ from pocketpaw.bus.commands import get_command_handler
 from pocketpaw.bus.events import Channel
 from pocketpaw.config import Settings, get_settings
 from pocketpaw.memory import get_memory_manager
+from pocketpaw.prompt.channel import CHANNEL_TURN_CONTEXT_LAYERS
 from pocketpaw.recent_files import get_recent_files_tracker
 from pocketpaw.security.injection_scanner import ThreatLevel, get_injection_scanner
 from pocketpaw.security.redact import redact_output
@@ -259,6 +296,77 @@ async def _publish_pocket_event(
                 data=payload,
             )
         )
+
+
+def _flow_ctx_id(metadata: dict | None) -> str | None:
+    """Read the flow_id a chat request carried (``flow_context.flow_id``)."""
+    if not isinstance(metadata, dict):
+        return None
+    ctx = metadata.get("flow_context")
+    if not isinstance(ctx, dict):
+        return None
+    fid = ctx.get("flow_id")
+    return str(fid) if fid else None
+
+
+async def _publish_studio_flow_event(
+    bus: "MessageBus",
+    content: str,
+    session_key: str,
+    trace_id: str | None = None,
+    flow_id: str | None = None,
+) -> None:
+    """Detect a ``build_studio_flow`` tool result and publish a dedicated
+    ``studio_flow`` SystemEvent.
+
+    The StudioFlowTool returns ``{"studio_flow": {goal, nodes, edges}}`` — the
+    full node/edge spec for the /studio Flow canvas. ``tool_result`` truncates
+    to 200 chars (far too small for a graph), so this mirrors the
+    ``pocket_created`` pattern: detect the marker envelope in the full tool
+    output and fan the whole spec as its own SystemEvent, which the chat SSE
+    bridge forwards to paw-enterprise so the canvas materialises live.
+
+    ``flow_id`` (from the tool envelope or the session's flow_context) tells
+    the frontend WHICH flow project the graph belongs to, so ``applyFlowSpec``
+    materialises it into that project and the existing flow-projects sync
+    persists it under the same id.
+
+    The spec is persisted server-side by the /studio flow-projects store the
+    moment ``applyFlowSpec`` runs (client → PUT /studio/flow-projects/{id});
+    this event is the transport that gets it onto the canvas.
+    """
+    if '"studio_flow"' not in content:
+        return
+    data = _extract_pocket_json(content)
+    if not data:
+        return
+    spec = data.get("studio_flow")
+    if not isinstance(spec, dict):
+        return
+    # Prefer the id the tool echoed; fall back to the session's flow context.
+    spec_flow_id = spec.get("flow_id")
+    resolved_flow_id = str(spec_flow_id) if spec_flow_id else (str(flow_id) if flow_id else "")
+    logger.info(
+        "Studio flow event detected: nodes=%d, edges=%d, goal=%r, flow_id=%r",
+        len(spec.get("nodes") or []),
+        len(spec.get("edges") or []),
+        spec.get("goal"),
+        resolved_flow_id,
+    )
+    payload: dict[str, Any] = {
+        "spec": spec,
+        "session_key": session_key,
+    }
+    if resolved_flow_id:
+        payload["flow_id"] = resolved_flow_id
+    if trace_id:
+        payload["trace_id"] = trace_id
+    await bus.publish_system(
+        SystemEvent(
+            event_type="studio_flow",
+            data=payload,
+        )
+    )
 
 
 def _extract_pocket_tool_policy(content: str) -> dict[str, bool] | None:
@@ -1122,8 +1230,14 @@ class AgentLoop:
             else:
                 agents_md_dir = str(self.settings.file_jail_path)
 
-            system_prompt, history = await asyncio.gather(
-                self.context_builder.build_system_prompt(
+            # ``assemble_system_prompt`` rather than ``build_system_prompt``
+            # (PA-7b): the same assembly, but it hands back the digest as well as
+            # the text. The digest goes to the backend UNMODIFIED while the text
+            # below is still mutated per turn (identity reinforcement, and the
+            # backend's own history splice) — that asymmetry is the point of a
+            # digest over layer keys rather than over bytes.
+            assembled_prompt, history = await asyncio.gather(
+                self.context_builder.assemble_system_prompt(
                     user_query=content,
                     channel=message.channel,
                     sender_id=sender_id,
@@ -1140,6 +1254,34 @@ class AgentLoop:
                     llm_summarize=self.settings.compaction_llm_summarize,
                 ),
             )
+            system_prompt = assembled_prompt.text
+            # The per-message layers (memory recall, KB hits), kept apart for a
+            # backend that takes them as ``turn_context``: its system prompt is
+            # fixed at connect, so on a warm client they would otherwise stay
+            # turn 1's. The router picks the full or the split form per backend.
+            stable_prompt, turn_layers = assembled_prompt.split(CHANNEL_TURN_CONTEXT_LAYERS)
+
+            # 2a0. Studio Flow build context — tell the agent WHICH flow this
+            # request belongs to so its build_studio_flow call carries the id the
+            # desktop project owns (flow_context.flow_id threaded from the chat
+            # request). The tool upserts the spec under that id, the SSE event
+            # echoes it, and the canvas saves into the same project. Without this
+            # the agent would fork a random flow the user never asked about.
+            flow_ctx = (message.metadata or {}).get("flow_context")
+            if isinstance(flow_ctx, dict) and flow_ctx.get("flow_id"):
+                _fid = str(flow_ctx["flow_id"])
+                _fname = str(flow_ctx.get("project_name") or "Untitled flow")
+                flow_block = (
+                    f"[studio flow context]\n"
+                    f"You are building a Studio Flow on the desktop canvas.\n"
+                    f"ACTIVE FLOW ID: {_fid}\n"
+                    f"ACTIVE FLOW NAME: {_fname}\n"
+                    f'Call build_studio_flow with flow_id="{_fid}" so the graph '
+                    f"saves into that flow project. Do NOT invent a different id."
+                )
+                system_prompt = f"{system_prompt}\n\n{flow_block}"
+                # Per request, so per turn on a warm client too.
+                turn_layers = f"{turn_layers}\n\n{flow_block}" if turn_layers else flow_block
 
             # 2a. Emit AGENTS.md event for the dashboard Activity panel
             try:
@@ -1177,7 +1319,15 @@ class AgentLoop:
             if asyncio.iscoroutine(bootstrap_context):
                 bootstrap_context = await bootstrap_context
             identity_block = bootstrap_context.to_identity_block()
+            # Mutates the TEXT and deliberately not the digest: this appends a
+            # copy of a block the prompt already contains, so two turns that
+            # differ only by reinforcement are the same prompt as far as a
+            # backend caching an agent object is concerned. Moving the digest
+            # here would rebuild the warm client every fifth message for no
+            # change in behaviour. Pinned by
+            # ``tests/test_channel_prompt_digest.py``.
             system_prompt = _reinforce_identity(system_prompt, identity_block, message_count)
+            stable_prompt = _reinforce_identity(stable_prompt, identity_block, message_count)
 
             # 2c. Emit agent_start + thinking events
             agent_started = True
@@ -1254,10 +1404,28 @@ class AgentLoop:
             # boundaries are still caught.
             stream_buffer = ""
             safe_sent = ""
+            # What this run has already handed to the usage tracker. Backends
+            # report token_usage as a RUN-CUMULATIVE total, and
+            # ``usage_tracker.record`` is ADDITIVE, so a run that reports twice
+            # would count its first turn again in every later payload. Recording
+            # the delta keeps one row per model call and the right run total.
+            recorded_input = 0
+            recorded_output = 0
+            recorded_cached = 0
+            recorded_cost = 0.0
 
             await _policy_ctx.__aenter__()
             run_iter = router.run(
-                content, system_prompt=system_prompt, history=history, session_key=session_key
+                content,
+                system_prompt=system_prompt,
+                history=history,
+                session_key=session_key,
+                # The router decides per BACKEND whether this is deliverable —
+                # an out-of-tree backend whose ``run`` never declared the
+                # parameter must keep working, so the check is on the signature
+                # and it lives in ``agents.backend``.
+                system_prompt_digest=assembled_prompt.stable_digest,
+                turn_split=(stable_prompt, turn_layers),
             )
             try:
                 async for event in run_iter:
@@ -1352,15 +1520,34 @@ class AgentLoop:
                             if usage_tracker is None:
                                 usage_tracker = usage_tracker_module.get_usage_tracker()
 
-                            usage_tracker.record(
-                                backend=meta.get("backend", "unknown"),
-                                model=meta.get("model", ""),
-                                input_tokens=input_tokens,
-                                output_tokens=output_tokens,
-                                cached_input_tokens=cached_input_tokens,
-                                session_id=session_key or "",
-                                total_cost_usd=meta.get("total_cost_usd"),
-                            )
+                            # DELTA, not the payload. See ``recorded_*`` above:
+                            # the payload is the run's running total and this
+                            # call adds to a ledger, so passing it whole
+                            # re-counts every earlier turn. max(0, ...) because
+                            # a shrinking payload can only be a backend
+                            # regression and must never subtract from a bill.
+                            d_input = max(0, input_tokens - recorded_input)
+                            d_output = max(0, output_tokens - recorded_output)
+                            d_cached = max(0, cached_input_tokens - recorded_cached)
+                            reported_cost = meta.get("total_cost_usd")
+                            d_cost = None
+                            if isinstance(reported_cost, (int, float)):
+                                d_cost = max(0.0, float(reported_cost) - recorded_cost)
+                            if d_input or d_output or d_cached or d_cost:
+                                usage_tracker.record(
+                                    backend=meta.get("backend", "unknown"),
+                                    model=meta.get("model", ""),
+                                    input_tokens=d_input,
+                                    output_tokens=d_output,
+                                    cached_input_tokens=d_cached,
+                                    session_id=session_key or "",
+                                    total_cost_usd=d_cost,
+                                )
+                                recorded_input += d_input
+                                recorded_output += d_output
+                                recorded_cached += d_cached
+                                if d_cost is not None:
+                                    recorded_cost += d_cost
                         except Exception:
                             logger.debug(
                                 "Failed to persist token usage metrics",
@@ -1408,9 +1595,38 @@ class AgentLoop:
                             except Exception:
                                 logger.debug("Failed to evaluate budget state", exc_info=True)
 
-                    elif etype == "tool_use":
+                    # ``input_pending`` marks a PROVISIONAL announcement: the
+                    # backend knows the tool's name but its arguments are still
+                    # streaming (claude_sdk emits one when the tool block opens,
+                    # then a resolved event with the assembled arguments). Only
+                    # the resolved event may be correlated here — this branch
+                    # appends one pending entry per event, so honouring both
+                    # would leak an entry per call and corrupt every later
+                    # ``tool_call_id`` via the ``pop(0)`` fallback below. It is
+                    # skipped rather than merged because the ``tool_start`` this
+                    # publishes is APPENDED by its consumers (the dashboard
+                    # transparency log and the client activity store both render
+                    # ``params`` as a new row), so a provisional row is a junk
+                    # row with no arguments, not a placeholder that gets
+                    # upgraded. The fast-indicator role the provisional event
+                    # exists for is served on the chat ``tool_use`` path, which
+                    # replaces a status line instead of appending. Backends that
+                    # never set the flag (pydantic_ai, deep_agents, ...) read
+                    # None here and behave exactly as before.
+                    elif etype == "tool_use" and meta.get("input_pending") is not True:
                         tool_name = meta.get("name") or meta.get("tool", "unknown")
-                        tool_input = meta.get("input") or meta
+                        # A tool called with NO arguments reports ``input={}``,
+                        # which is falsy — an ``or meta`` fallback here published
+                        # the whole metadata dict as the call's parameters, so the
+                        # transparency log rendered ``{'input': {}, 'name':
+                        # 'get_system_status'}`` where the arguments belong. No
+                        # backend ever put arguments outside ``input`` (opencode
+                        # omits the key entirely and simply has none to give), so
+                        # the fallback never recovered anything real. Absent or
+                        # malformed now reads as "no arguments", which is true.
+                        tool_input = meta.get("input")
+                        if not isinstance(tool_input, dict):
+                            tool_input = {}
                         tool_call_seq += 1
                         tool_call_id = f"{trace_id}:{tool_call_seq}"
                         pending_tool_calls.append({"id": tool_call_id, "name": tool_name})
@@ -1491,6 +1707,16 @@ class AgentLoop:
                             session_key,
                             metadata=message.metadata,
                             trace_id=trace_id,
+                        )
+                        # Detect build_studio_flow tool output and fan the full
+                        # flow spec as a dedicated SystemEvent (tool_result
+                        # truncates to 200 chars — too small for a node graph).
+                        await _publish_studio_flow_event(
+                            self.bus,
+                            econtent,
+                            session_key,
+                            trace_id=trace_id,
+                            flow_id=_flow_ctx_id(message.metadata),
                         )
                         media_paths.extend(_extract_media_paths(econtent))
 
@@ -1727,10 +1953,11 @@ class AgentLoop:
                     "Failed to persist processing error in health engine",
                     exc_info=True,
                 )
-            # Kill the backend on error
+            # Stop THIS session's run on error. Scoped: the router is shared by
+            # every session, and an unscoped stop killed their streams too.
             if router is not None:
                 try:
-                    await router.stop()
+                    await router.stop(session_key=session_key)
                 except Exception:
                     logger.warning(
                         "Failed to stop router cleanly after processing error",

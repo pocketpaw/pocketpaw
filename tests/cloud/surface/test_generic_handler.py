@@ -16,7 +16,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_generic_handler_returns_valid_preamble_with_no_meta() -> None:
     """Empty meta still produces a valid preamble with the surface tag."""
-    preamble = await generic_handler.build_preamble("w1", "u1", SurfaceMeta())
+    preamble = (await generic_handler.build_preamble("w1", "u1", SurfaceMeta())).text
 
     assert '<surface kind="generic"' in preamble
     # Route fall-back when no route_path was supplied.
@@ -27,8 +27,8 @@ async def test_generic_handler_returns_valid_preamble_with_no_meta() -> None:
 
 async def test_generic_handler_honors_route_path_hint() -> None:
     """When meta carries route_path it is reflected in the surface tag."""
-    preamble = await generic_handler.build_preamble(
-        "w1", "u1", SurfaceMeta(route_path="/some/new/route")
-    )
+    preamble = (
+        await generic_handler.build_preamble("w1", "u1", SurfaceMeta(route_path="/some/new/route"))
+    ).text
 
     assert 'route="/some/new/route"' in preamble

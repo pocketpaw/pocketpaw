@@ -23,6 +23,12 @@
 # Updated 2026-06-24 (S1 review fix): add test_topup_request_rejects_over_ceiling /
 #   _accepts_ceiling — CreateTopupRequest.amount_credits is capped at 1,000,000
 #   credits ($10,000); an over-ceiling amount is a 422 at the DTO.
+# Updated 2026-09-02 (fix/billing-reversals-and-dunning, M1a):
+#   ``test_non_usd_event_does_not_grant`` now asserts that a non-USD charge DOES
+#   leave a Payment row, carrying ``credits_granted=0``. Its previous assertion
+#   (no row at all) was the defect: the charge most likely to be refunded was the
+#   one with no record, and a reversal joins through that record. The
+#   grant assertions are untouched — non-USD still grants nothing.
 
 from __future__ import annotations
 
@@ -356,7 +362,12 @@ async def test_non_usd_event_does_not_grant(mongo_db, recording_bus):
     """A validly-signed payment.succeeded in a non-USD currency is acked (200)
     but grants NOTHING — the 1-credit==1-cent mapping is USD-only, so crediting a
     ¥750 charge 1:1 would wrongly grant 750 credits ($7.50). The USD-only guard
-    must short-circuit before the grant."""
+    must short-circuit before the grant.
+
+    It does NOT short-circuit the record any more (M1a). This charge is the one
+    most likely to be refunded, and a reversal joins through the payment row, so
+    the row is written with ``credits_granted=0``: we took the money and gave
+    nothing, and both halves of that are now on the record."""
     body = _payment_succeeded_body(workspace_id=WS, total_amount=750, currency="JPY")
     headers = _sign(body, msg_id="evt_jpy_1")
 
@@ -369,9 +380,14 @@ async def test_non_usd_event_does_not_grant(mongo_db, recording_bus):
     assert result == {"ok": True, "granted": False}
     # Balance unchanged: NO credits granted for the non-USD charge.
     assert await credits.balance(WS) == 0
-    # No Payment row and no capture event for a charge that never granted.
-    assert await Payment.find(Payment.workspace == WS).to_list() == []
+    # No capture event for a charge that never granted...
     assert [e for e in recording_bus.events if e.type == "billing.topup.captured"] == []
+    # ...but the payment IS recorded, paid-but-ungranted, so a later refund of it
+    # can be joined back to this workspace.
+    rows = await Payment.find(Payment.workspace == WS).to_list()
+    assert len(rows) == 1
+    assert rows[0].amount_credits == 750
+    assert rows[0].credits_granted == 0
 
 
 # ---------------------------------------------------------------------------
@@ -452,3 +468,70 @@ def test_dodo_secrets_are_in_secret_fields():
 
     assert "dodo_payments_api_key" in SECRET_FIELDS
     assert "dodo_webhook_secret" in SECRET_FIELDS
+
+
+# ---------------------------------------------------------------------------
+# A delivery carrying a ``site_id`` must never reach the workspace path.
+# ---------------------------------------------------------------------------
+
+
+async def test_a_site_carrying_delivery_never_grants_workspace_credits(mongo_db, recording_bus):
+    """THE REASON THE ``site_id`` FORK SURVIVED THE DODO REMOVAL.
+
+    Paw Sites left Dodo on 2026-09-05: a paid site is charged to the workspace
+    credit balance and no site has a gateway subscription any more. Nothing we
+    create can produce a delivery like this — but a per-site subscription sold
+    before the cutover and not yet cancelled at the gateway still can, and the
+    OTHER side of that fork is the workspace-plan path, which grants credits and
+    rewrites ``Workspace.plan``.
+
+    So deleting the branch would not stop such a delivery arriving. It would send
+    it somewhere much worse: a subscription for one site topping up the wallet and
+    changing the workspace's plan every renewal.
+
+    Breaks on: ``handle_webhook`` losing its ``if event.site_id`` fork.
+    """
+    body = json.dumps(
+        {
+            "business_id": "biz_1",
+            "type": "subscription.active",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "data": {
+                "subscription_id": "sub_legacy_per_site",
+                "product_id": "prod_site_pro",
+                "metadata": {
+                    "workspace_id": WS,
+                    "site_id": "6512c1f0e4b0a1b2c3d4e5f6",
+                    # "free" ON PURPOSE, and this is the whole strength of the
+                    # test. It is a SITE tier key and also a WORKSPACE plan key —
+                    # the two catalogs share it — so the workspace path can act on
+                    # this delivery rather than bouncing off an unresolvable plan.
+                    # A site-tier key that happened not to collide (like "site")
+                    # would make this pass on an accident of naming instead of on
+                    # the fork, and the collision is real: every legacy per-site
+                    # subscription on the free floor carries exactly this value.
+                    "plan_key": "free",
+                },
+            },
+        }
+    )
+
+    result = await billing.handle_webhook(
+        payload=body.encode(),
+        headers=_sign(body, msg_id="evt_stray_site_sub"),
+        provider=_provider(),
+    )
+
+    # Acked so Dodo stops retrying...
+    assert result == {"ok": True, "granted": False}
+    # ...and nothing moved. Each of these is a separate way the workspace path
+    # would have shown up: a wallet top-up, a plan change, or a capture event.
+    assert await credits.balance(WS) == 0
+    assert [e for e in recording_bus.events if e.type == "billing.topup.captured"] == []
+
+    # No subscription row either. The workspace path records one for every
+    # subscription.* it acts on, so its absence is the cleanest proof that this
+    # delivery was never treated as a workspace subscription.
+    from pocketpaw_ee.cloud.models.subscription import Subscription
+
+    assert await Subscription.find_all().to_list() == []

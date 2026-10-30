@@ -15,6 +15,11 @@ Token shape: same HS256 + SECRET as the session JWT, but with
 ``aud=["ws"]`` and ``type=ws_ticket``. The chat WS handler decodes with
 that audience and DELs the jti from Redis; if the DEL returns 0, the
 ticket was never minted or has already been consumed.
+
+Updated: 2026-10-03 — ``redeem_dashboard_ws_ticket`` consumes a ticket for the
+OSS dashboard socket (/api/v1/ws) and returns True only for an active
+superuser, the same rule the EE auth bridge uses for ``full_access``. Core
+reaches it through ``CloudAuthProvider`` (entry-point group ``pocketpaw.auth``).
 """
 
 from __future__ import annotations
@@ -94,4 +99,24 @@ async def consume_ws_ticket(token: str) -> str | None:
     return user_id
 
 
-__all__ = ["consume_ws_ticket", "mint_ws_ticket"]
+async def redeem_dashboard_ws_ticket(token: str) -> bool:
+    """Consume ``token`` for the dashboard socket. True only for an active superuser.
+
+    Every other credential the dashboard socket accepts is owner-level, but any
+    active cloud user (guests too) can mint a ticket, so only platform admins
+    get through. Fails closed on any error.
+    """
+    from pocketpaw_ee.cloud.models.user import User
+
+    try:
+        user_id = await consume_ws_ticket(token)
+        if user_id is None:
+            return False
+        user = await User.get(user_id)
+        return bool(user and user.is_active and user.is_superuser)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        logger.warning("dashboard ws_ticket redeem failed: %s", exc)
+        return False
+
+
+__all__ = ["consume_ws_ticket", "mint_ws_ticket", "redeem_dashboard_ws_ticket"]

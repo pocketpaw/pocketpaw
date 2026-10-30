@@ -56,7 +56,8 @@ def test_agent_service_imports_canonical_prompts(agent_service_source: str) -> N
     """The cloud chat agent must source pocket prompts from pocketpaw.ripple."""
     assert "from pocketpaw.ripple import" in agent_service_source
     assert "get_pocket_prompts" in agent_service_source
-    assert "POCKET_ID_TOKEN" in agent_service_source
+    # The pocket-id token is filled by fill_current_pocket, never a bare replace.
+    assert "fill_current_pocket(" in agent_service_source
 
 
 def test_canonical_prompts_carry_required_features() -> None:

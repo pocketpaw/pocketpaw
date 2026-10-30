@@ -1,0 +1,21 @@
+ripple-models.json: ripple's built-in 3D model library (the model-viewer widget's
+`asset` ids), as {id: {title, anchors}}: each asset's title and its anchor names in
+catalog order. Generated from qbtrix/ripple-iui branch feat/3d-assets at 84617fa
+(packages/svelte/src/lib/widgets/media/model-assets.ts, 31 assets, 146 anchors),
+pending a release. Only names are vendored: positions, files and credits stay in ripple.
+
+card_spec holds a ripple card's model-viewer to these ids and anchors, and the
+concierge prompt lists them, so refresh this file whenever the catalog changes:
+  python -I - <ripple>/packages/svelte/src/lib/widgets/media/model-assets.ts \
+    ee/pocketpaw_ee/paw_bar/ripple-models.json <<'PY'
+  import json, re, sys
+  src = open(sys.argv[1], encoding="utf-8").read()
+  out = {}
+  for m in re.finditer(r"\n\t'([a-z0-9-]+)': \{(.*?)\n\t\}", src, re.S):
+      body = m.group(2)
+      title = re.search(r"\btitle: '((?:[^'\\]|\\.)*)'", body).group(1)
+      out[m.group(1)] = {"title": title, "anchors": re.findall(r"\{ name: '([a-z0-9-]+)'", body)}
+  open(sys.argv[2], "w", encoding="utf-8").write(json.dumps(out, indent=2) + "\n")
+  PY
+then update this file and the counts in test_the_vendored_ripple_models_parse
+(tests/cloud/test_paw_bar_ripple_profile.py).

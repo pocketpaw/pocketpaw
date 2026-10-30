@@ -42,6 +42,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.billing import usage
+from pocketpaw_ee.cloud.credits.domain import credits_to_micro
 from pocketpaw_ee.cloud.models.credit import CreditLedgerEntry
 
 WS = "ws_usage_test"
@@ -70,8 +71,8 @@ async def _seed_spend(
     entry = CreditLedgerEntry(
         workspace=ws,
         kind="spend",
-        amount_delta=-credits,
-        balance_after=0,
+        amount_delta_micro=credits_to_micro(-credits),
+        balance_after_micro=credits_to_micro(0),
         applied=True,
         conditional=False,
         cause=cause,

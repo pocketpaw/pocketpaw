@@ -20,16 +20,23 @@
 # The /studio SurfaceProfile sets ``ripple_mode="off"`` (see service.py) so the
 # agent does not inherit the ~20k-char "default to ui-spec" ripple LAW and build
 # a dashboard instead of generating media.
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` keyed on the route alone, which is the only thing that
+# varies: "static orientation — no live data to fake" was already the design,
+# and it makes the key exact. The gallery filling up does not move it, because
+# this block never described the gallery's contents.
 
 from __future__ import annotations
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import meta_key
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the /studio surface preamble — describe→generate media."""
     route = meta.route_path or "/studio"
-    return (
+    text = (
         f'<surface kind="studio" route="{route}" />\n'
         "<studio-orientation>\n"
         "The user is on the STUDIO surface, a media-generation canvas. They "
@@ -63,6 +70,7 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "what was added to the gallery.\n"
         "</studio-procedure>"
     )
+    return SurfacePreamble(text=text, cache_key=meta_key("studio", route))
 
 
 __all__ = ["build_preamble"]

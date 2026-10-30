@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 import pytest
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
-from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.events import (
     TaskBlocked,
     TaskProposed,
@@ -191,17 +191,36 @@ async def test_update_patches_only_provided_fields(recording_bus) -> None:
     assert any(isinstance(e, TaskUpdated) for e in recording_bus.events)
 
 
-async def test_update_denies_other_workspace_member() -> None:
+async def test_update_allows_same_workspace_member() -> None:
+    """Metadata is editable by any member of the task's workspace, not just the
+    creator or assignee (08efd9344). Status moves keep their own tighter verbs."""
     created = await tasks_service.agent_create_task(
         _ctx(user_id="creator"),
         CreateTaskRequest(title="x", assignee=_human_assignee("assignee")),
     )
-    with pytest.raises(Forbidden):
+    updated = await tasks_service.agent_update_task(
+        _ctx(user_id="teammate"),
+        created.id,
+        UpdateTaskRequest(title="renamed"),
+    )
+    assert updated.title == "renamed"
+    assert (await tasks_service.agent_get_task(_ctx(), created.id)).title == "renamed"
+
+
+async def test_update_denies_member_of_another_workspace() -> None:
+    """Tenancy: the same task id from another workspace's context is NotFound
+    (not Forbidden, so ids cannot be enumerated), and nothing is written."""
+    created = await tasks_service.agent_create_task(
+        _ctx(user_id="creator"),
+        CreateTaskRequest(title="x", assignee=_human_assignee("assignee")),
+    )
+    with pytest.raises(NotFound):
         await tasks_service.agent_update_task(
-            _ctx(user_id="random-stranger"),
+            _ctx(user_id="random-stranger", workspace_id="w2"),
             created.id,
             UpdateTaskRequest(title="hijack"),
         )
+    assert (await tasks_service.agent_get_task(_ctx(), created.id)).title == "x"
 
 
 # ---------------------------------------------------------------------------

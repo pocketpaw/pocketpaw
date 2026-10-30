@@ -13,13 +13,22 @@
 # Failure modes degrade — any query exception logs at ``debug`` and gets
 # omitted from the preamble. The chat path receives a minimal surface
 # tag even when every query fails (better than no preamble + a 5xx).
+#
+# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
+# ``SurfacePreamble`` keyed on a digest of what was rendered. This handler
+# assembles up to four blocks from three different services (the active run,
+# the edited scenario, workspace ambient counts, a static skill hint) and each
+# block is independently allowed to fail and be omitted. There is no one
+# revision that covers that, and a key built from ``meta`` alone would miss the
+# thing this surface is FOR — a run's status moving while the user watches it.
+# The digest of the assembled text covers every block including the omissions.
 
 from __future__ import annotations
 
 import logging
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
-from pocketpaw_ee.cloud.surface.handlers._helpers import truncate_preamble
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import content_key, truncate_preamble
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +36,10 @@ logger = logging.getLogger(__name__)
 _VALID_PANELS = {"scenarios", "live", "results", "aggregate", "insights", "editor"}
 
 
-async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
     """Render the /foresight surface preamble.
 
-    Always returns a string. Individual data fetches are wrapped in
+    Always returns a preamble. Individual data fetches are wrapped in
     isolated try/except so a single missing collection (e.g. backtests
     not yet seeded) doesn't drop the whole preamble.
     """
@@ -95,7 +104,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     if skill_block:
         parts.append(skill_block)
 
-    return truncate_preamble("\n".join(parts))
+    text = truncate_preamble("\n".join(parts))
+    return SurfacePreamble(text=text, cache_key=content_key("foresight", text))
 
 
 async def _render_active_run(workspace_id: str, run_id: str) -> str:

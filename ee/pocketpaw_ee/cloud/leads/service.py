@@ -1,55 +1,34 @@
-# ee/pocketpaw_ee/cloud/leads/service.py — sole owner of Lead writes. The
-# public capture endpoint calls capture(); the Leads view calls list_for_site().
-# Ingest hardening order: honeypot → rate limit → injection screen →
-# event-mapping → persist. Origin pinning + the payload size cap are enforced at
-# the router (they need the request). Tenancy: every read filters on workspace.
+# ee/pocketpaw_ee/cloud/leads/service.py — the ONLY writer of Lead documents.
 #
-# Created 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.3): the cloud
-# capture pipeline composing the OSS sites_capture primitive (honeypot +
-# mapping interpolation) with a Mongo sliding-window rate limit, an input
-# screen, and the tenant-scoped Lead doc write + reads.
+# Two ways in, one insert:
+#   * ``capture`` serves the public site-form routes. Hardening order: honeypot ->
+#     atomic per-(scope, minute) rate limit -> injection screen -> contact-form
+#     normalize/validate -> event-mapping -> persist. Origin pinning, the signed
+#     key and the payload size cap live in the router (they need the request).
+#   * ``capture_internal`` serves leads the product writes itself (the concierge's
+#     send_to_team, a handoff with a contact). It skips the public-form steps
+#     (honeypot, event_mapping, signed key, per-IP limit; its callers rate-limit
+#     on their own) and keeps the injection screen.
+# Both go through ``_persist``: insert, then AWAIT ``lead.captured`` on the bus
+# with identifiers only (workspace_id, lead_id, site_id, site_name, form_type,
+# source_kind), never the visitor's values. The emit runs inline on the request;
+# ``EventBus.emit`` swallows a failing handler, so a subscriber can never lose a
+# persisted lead.
 #
-# Updated 2026-05-30 (security hardening, H2): replaced the dead Guardian
-# `check_input` call — GuardianAgent only screens shell commands (check_command),
-# so `getattr(guardian, "check_input", None)` was always None and the screen
-# always accepted, letting untrusted form input reach mapping + DB unchecked.
-# Now screens the stringified payload through the real InjectionScanner (the
-# command-injection / prompt-injection heuristic scanner) and drops any
-# submission at/above the drop threshold (see the follow-up item 5 note below for
-# the MEDIUM -> HIGH threshold change).
+# A lead is filed under ``domain.lead_site_id``: the script_name of a built
+# site, the object id of a connected one (which has no script_name). Every
+# write, rate bucket, audit row and ``lead.captured`` emit uses it.
 #
-# Updated 2026-05-30 (follow-up item 1): the per-IP rate-limit bucket is keyed on
-# a SERVER-derived ``rate_key`` (the router hashes ``request.client.host``), not
-# the caller-controlled ``submitter_ref``. ``submitter_ref`` was trivially
-# randomizable to mint a fresh per-IP bucket on every request and so was never a
-# real limiter. It is retained only as an opaque, non-PII provenance LABEL on the
-# stored Lead; it is never the limiter key.
+# The owner side: ``update_lead`` (status / read) and ``mark_all_read``.
+# ``lead.updated`` is emitted on a status change only. Every read and write
+# filters on workspace (and site), so another tenant's lead reads as absent.
 #
-# Updated 2026-05-30 (follow-up item 2): every dropped submission (honeypot /
-# rate-limit / injection screen) emits ONE low-severity audit event carrying the
-# drop reason + counts via the canonical audit infra
-# (``get_audit_logger().log(AuditEvent.create(...))``). The event NEVER carries
-# the form payload — the payload is attacker-/user-supplied PII, and the whole
-# point of the drop is to keep it out of the workspace, so it must not be
-# resurfaced through the audit log either. "Low severity" maps to
-# ``AuditSeverity.INFO``: the audit enum defines INFO < WARNING < CRITICAL <
-# ALERT and has no dedicated LOW rung, and a routine ingest drop is informational
-# (not a workspace-mutating or security-violation event).
-#
-# Updated 2026-05-30 (follow-up item 3): the rate limit is now ATOMIC. The old
-# window read a persisted-lead count and THEN inserted (TOCTOU — a burst all read
-# under-cap before any insert landed and all slipped past). It now ``$inc``-s a
-# per-(scope, minute) ``SiteRateCounter`` doc via one ``find_one_and_update`` and
-# tests the cap on the post-increment result, so the check and the increment are
-# a single atomic step. See ``_within_rate_limit`` for the one known residual gap
-# (increment-and-test over-counts a REJECTED request by one — strictly safer, not
-# looser).
-#
-# Updated 2026-05-30 (follow-up item 5): the injection-screen drop threshold
-# moved MEDIUM -> HIGH (``_INJECTION_DROP_THRESHOLD``). MEDIUM risked
-# false-dropping legitimate lead text (e.g. "act as a guarantor" scans MEDIUM
-# persona_hijack), and a lost lead is the worst failure here, so only HIGH-or-
-# above verdicts now drop.
+# Invariants: the per-IP limiter keys on the server-derived ``rate_key``, never
+# the caller's ``submitter_ref``; increment-and-test over-counts a rejected
+# request by one (stricter, never looser). The injection screen drops HIGH and
+# above only (MEDIUM false-drops real lead text, and a lost lead is the worst
+# failure). A dropped submission emits one INFO audit event with the reason and
+# never the payload.
 
 from __future__ import annotations
 
@@ -61,13 +40,19 @@ from pocketpaw.security.injection_scanner import (
     ThreatLevel,
     get_injection_scanner,
 )
-from pocketpaw.sites_capture.ingest import interpolate_mapping, is_honeypot_tripped
+from pocketpaw.sites_capture import contact_form
+from pocketpaw.sites_capture.ingest import (
+    interpolate_mapping,
+    is_honeypot_tripped,
+    origin_allowed,
+)
 from pocketpaw.sites_capture.models import SiteEventMapping
-from pocketpaw_ee.cloud.leads.domain import Lead
+from pocketpaw_ee.cloud.leads.domain import Lead, lead_site_id
 from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.lead import LeadSource as _LeadSourceDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _RateCounterDoc
+from pocketpaw_ee.cloud.shared.events import event_bus
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +65,12 @@ def _to_domain(doc: _LeadDoc) -> Lead:
         form_type=doc.form_type,
         properties=doc.properties,
         submitter_ref=doc.source.submitter_ref if doc.source else "",
+        origin=doc.source.origin if doc.source else "",
+        origin_unrecognized=bool(doc.source and doc.source.origin_unrecognized),
+        source_kind=(doc.source.kind if doc.source else "") or "form",
+        conversation_ref=(doc.source.conversation_ref if doc.source else "") or "",
+        status=doc.status or "new",
+        read_at=doc.read_at,
         created_at=getattr(doc, "createdAt", None),
     )
 
@@ -104,7 +95,7 @@ def _emit_drop_audit(
 
         context: dict[str, Any] = {
             "reason": reason,
-            "site_id": site.script_name,
+            "site_id": lead_site_id(site),
             "form_type": form_type,
         }
         if count is not None:
@@ -114,7 +105,7 @@ def _emit_drop_audit(
                 severity=AuditSeverity.INFO,
                 actor="sites_capture",
                 action="sites.capture.drop",
-                target=site.script_name,
+                target=lead_site_id(site),
                 status="dropped",
                 category="sites_capture",
                 workspace_id=site.workspace,
@@ -172,7 +163,7 @@ async def _within_rate_limit(workspace_id: str, site: _SiteDoc, rate_key: str) -
     Mongo transaction across the two counter docs (deferred)."""
     now = datetime.now(UTC)
     bucket = _bucket_minute(now)
-    site_scope_id = f"{workspace_id}:{site.script_name}"
+    site_scope_id = f"{workspace_id}:{lead_site_id(site)}"
 
     per_ip = await _bump("ip", f"{site_scope_id}:{rate_key}", bucket, now)
     if per_ip > site.per_ip_limit_per_min:
@@ -216,6 +207,8 @@ async def capture(
     payload: dict[str, Any],
     submitter_ref: str,
     rate_key: str = "",
+    origin: str = "",
+    known_origins: list[str] | None = None,
 ) -> Lead | None:
     """Harden + persist one submission as a tenant-scoped Lead. Returns None
     when the submission is dropped (honeypot / rate-limited / injection screen /
@@ -225,7 +218,21 @@ async def capture(
     the client host). ``submitter_ref`` is only an opaque label. An empty
     ``rate_key`` falls back to a fixed sentinel — never to ``submitter_ref`` —
     so a missing client host collapses to one shared bucket rather than handing
-    the caller a fresh bucket per request."""
+    the caller a fresh bucket per request.
+
+    ``origin`` is the submitting page's ``Origin`` header, recorded on the lead for
+    attribution. It is NOT a gate here: the router owns the (opt-in,
+    ``Site.enforce_origin``) enforcement decision, and by default a submission from
+    an unrecognized host is accepted and flagged rather than dropped. Passing it is
+    what lets an owner see that leads are arriving from somewhere they did not
+    expect — the visibility that replaces the old silent 403.
+
+    ``known_origins`` is the set the flag is judged against, and the router passes
+    its DERIVED set (``allowed_origins`` plus the site's own url host and attached
+    custom domains) rather than letting this re-read the stored field. The two must
+    agree: if the gate accepts a host the flag then marks unrecognized, the flag
+    fires on a site's own normal traffic and stops meaning anything. Defaults to the
+    stored field for a caller with nothing better."""
     effective_rate_key = rate_key or "unknown"
     if is_honeypot_tripped(payload, honeypot_field=site.honeypot_field):
         _emit_drop_audit(site=site, form_type=form_type, reason="honeypot")
@@ -238,6 +245,20 @@ async def capture(
         _emit_drop_audit(site=site, form_type=form_type, reason="injection")
         return None
 
+    # CONTACT FORM ONLY — alias normalization + schema validation. Other form
+    # types have no declared schema, so they keep the previous behaviour exactly.
+    if form_type == contact_form.CONTACT_FORM_TYPE:
+        # Non-destructive: adds canonical keys, drops nothing. This is what makes
+        # a lead from an ALREADY-PUBLISHED site land — those Workers POST
+        # ``name=...`` and will until someone republishes them, which nobody does
+        # because the site looks fine. Also what lets an IMPORTED form's
+        # ``your-email`` / ``Phone Number`` reach the mapping at all.
+        payload = contact_form.normalize(payload)
+        reason = contact_form.validate(payload)
+        if reason is not None:
+            _emit_drop_audit(site=site, form_type=form_type, reason=reason)
+            return None
+
     raw_mapping = site.event_mapping.get(form_type)
     if raw_mapping is None:
         _emit_drop_audit(site=site, form_type=form_type, reason="no_mapping")
@@ -245,21 +266,100 @@ async def capture(
     mapping = SiteEventMapping.model_validate(raw_mapping)
     properties = interpolate_mapping(mapping, {"payload": payload, "submitter_ref": submitter_ref})
 
-    doc = _LeadDoc(
-        workspace=site.workspace,
-        site_id=site.script_name,
-        form_type=form_type,
-        properties=properties,
-        source=_LeadSourceDoc(
+    return await _persist(
+        site,
+        form_type,
+        properties,
+        _LeadSourceDoc(
             form_type=form_type,
-            site_id=site.script_name,
+            site_id=lead_site_id(site),
             submitter_ref=submitter_ref,
             rate_key=effective_rate_key,
+            origin=origin,
+            # Evaluated NOW, against the allowlist as it stands at capture time, so
+            # the flag keeps meaning "unrecognized when it arrived" even after the
+            # owner later connects the domain it came from.
+            origin_unrecognized=bool(origin)
+            and not origin_allowed(
+                site.allowed_origins if known_origins is None else known_origins, origin
+            ),
         ),
     )
+
+
+async def _persist(
+    site: _SiteDoc,
+    form_type: str,
+    properties: dict[str, Any],
+    source: _LeadSourceDoc,
+    *,
+    status: str = "new",
+) -> Lead:
+    """Insert one Lead and ring the workspace. The one insert both entries share."""
+    doc = _LeadDoc(
+        workspace=site.workspace,
+        site_id=lead_site_id(site),
+        form_type=form_type,
+        properties=properties,
+        source=source,
+        status=status,
+    )
     await doc.insert()
-    # no-event: lead capture is a public ingest; the Leads view polls, no realtime subscriber yet
+    # Identifiers only, never the visitor's values (untrusted PII); a subscriber
+    # that needs them reads the Lead. ``source_kind`` lets the bridge skip a
+    # handoff lead, whose handoff already notified the owner.
+    await event_bus.emit(
+        "lead.captured",
+        {
+            "workspace_id": site.workspace,
+            "lead_id": str(doc.id),
+            "site_id": lead_site_id(site),
+            # The site's DISPLAY name (site_id is a hex script name); "" when unnamed.
+            "site_name": site.name,
+            "form_type": form_type,
+            "source_kind": source.kind,
+        },
+    )
     return _to_domain(doc)
+
+
+async def capture_internal(
+    *,
+    site: _SiteDoc,
+    form_type: str,
+    kind: str,
+    properties: dict[str, Any],
+    conversation_ref: str = "",
+    submitter_ref: str = "",
+    status: str = "new",
+) -> Lead | None:
+    """Persist a lead the product writes itself (``kind`` concierge / handoff /
+    booking). No honeypot, event_mapping, signed key or per-IP limit: the caller
+    already authenticated the visitor and enforces its own rate limit. The HIGH
+    injection screen still runs; a drop returns None and writes nothing. So does
+    a second handoff lead for the same conversation: the partial unique index
+    refuses the insert, and nothing is emitted."""
+    from pymongo.errors import DuplicateKeyError
+
+    if not _passes_injection_screen(properties):
+        _emit_drop_audit(site=site, form_type=form_type, reason="injection")
+        return None
+    try:
+        return await _persist(
+            site,
+            form_type,
+            dict(properties),
+            _LeadSourceDoc(
+                form_type=form_type,
+                site_id=lead_site_id(site),
+                submitter_ref=submitter_ref,
+                kind=kind,
+                conversation_ref=conversation_ref,
+            ),
+            status=status,
+        )
+    except DuplicateKeyError:
+        return None
 
 
 async def list_for_site(workspace_id: str, site_id: str, *, limit: int = 100) -> list[Lead]:
@@ -271,8 +371,138 @@ async def list_for_site(workspace_id: str, site_id: str, *, limit: int = 100) ->
     return [_to_domain(doc) async for doc in cursor]
 
 
+async def has_conversation_lead(
+    workspace_id: str, site_id: str, kind: str, conversation_ref: str
+) -> bool:
+    """Whether this site already holds a ``kind`` lead for the conversation."""
+    if not conversation_ref:
+        return False
+    found = await _LeadDoc.find_one(
+        {
+            "workspace": workspace_id,
+            "site_id": site_id,
+            "source.kind": kind,
+            "source.conversation_ref": conversation_ref,
+        }
+    )
+    return found is not None
+
+
 async def count_for_site(workspace_id: str, site_id: str) -> int:
     return await _LeadDoc.find({"workspace": workspace_id, "site_id": site_id}).count()
 
 
-__all__ = ["Lead", "capture", "list_for_site", "count_for_site"]
+def _oid(lead_id: str) -> Any:
+    from beanie import PydanticObjectId
+
+    try:
+        return PydanticObjectId(lead_id)
+    except Exception:  # noqa: BLE001 — a malformed id is simply not found
+        return None
+
+
+async def update_lead(
+    workspace_id: str,
+    site_id: str,
+    lead_id: str,
+    *,
+    status: str | None = None,
+    read: bool | None = None,
+) -> Lead | None:
+    """Set a lead's status and/or read state; None when it isn't this
+    workspace's lead on this site. ``read`` true keeps the first read time.
+    Emits ``lead.updated`` when the status actually changed."""
+    oid = _oid(lead_id)
+    if oid is None:
+        return None
+    query = {"_id": oid, "workspace": workspace_id, "site_id": site_id}
+    doc = await _LeadDoc.find_one(query)
+    if doc is None:
+        return None
+    previous = doc.status or "new"
+    update: dict[str, Any] = {}
+    if status is not None and status != previous:
+        update["status"] = status
+    if read is True and doc.read_at is None:
+        update["read_at"] = datetime.now(UTC)
+    elif read is False and doc.read_at is not None:
+        update["read_at"] = None
+    if update:
+        # A targeted $set on the tenant-scoped filter, never a whole-doc save.
+        await _LeadDoc.get_pymongo_collection().update_one(query, {"$set": update})
+        doc = await _LeadDoc.find_one(query)
+        if doc is None:
+            return None
+    if "status" in update:
+        await event_bus.emit(
+            "lead.updated",
+            {
+                "workspace_id": workspace_id,
+                "lead_id": lead_id,
+                "site_id": site_id,
+                "status": update["status"],
+                "previous_status": previous,
+            },
+        )
+    return _to_domain(doc)
+
+
+async def mark_all_read(workspace_id: str, site_id: str) -> int:
+    """Mark every unread lead on this workspace's site read; returns how many."""
+    result = await _LeadDoc.get_pymongo_collection().update_many(
+        {"workspace": workspace_id, "site_id": site_id, "read_at": None},
+        {"$set": {"read_at": datetime.now(UTC)}},
+    )
+    return int(result.modified_count)
+
+
+async def lead_payload(workspace_id: str, lead_id: str) -> dict[str, Any] | None:
+    """The full lead as the owner-notification sinks see it (email body, webhook
+    ``data``), or None when it doesn't exist in this workspace. Loaded at send
+    time by the notification outbox so the queue never stores visitor data."""
+    oid = _oid(lead_id)
+    if oid is None:
+        return None
+    doc = await _LeadDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        return None
+    from pocketpaw_ee.cloud.leads.notification_settings import find_site
+
+    # By script_name (built) or object id (connected), as ``lead_site_id`` filed it.
+    site = await find_site(workspace_id, doc.site_id)
+    contact = contact_form.normalize(dict(doc.properties or {}))
+    src = doc.source
+    created = getattr(doc, "createdAt", None)
+    return {
+        "id": str(doc.id),
+        "site_id": str(site.id) if site is not None else doc.site_id,
+        "site_name": (site.name if site is not None else "") or "",
+        "form_type": doc.form_type,
+        "status": doc.status or "new",
+        "name": str(contact.get(contact_form.FULL_NAME) or ""),
+        "email": str(contact.get(contact_form.EMAIL) or ""),
+        "phone": str(contact.get(contact_form.PHONE) or ""),
+        "message": str(contact.get(contact_form.MESSAGE) or ""),
+        "properties": dict(doc.properties or {}),
+        "source": {
+            "kind": str(getattr(src, "kind", "") or "form"),
+            "form_type": getattr(src, "form_type", doc.form_type),
+            "origin": getattr(src, "origin", ""),
+            "origin_unrecognized": bool(getattr(src, "origin_unrecognized", False)),
+            "conversation_ref": str(getattr(src, "conversation_ref", "") or ""),
+        },
+        "created_at": created.isoformat() if created is not None else None,
+    }
+
+
+__all__ = [
+    "Lead",
+    "capture",
+    "capture_internal",
+    "count_for_site",
+    "has_conversation_lead",
+    "lead_payload",
+    "list_for_site",
+    "mark_all_read",
+    "update_lead",
+]

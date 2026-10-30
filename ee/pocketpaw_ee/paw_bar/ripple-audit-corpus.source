@@ -1,0 +1,11 @@
+ripple-audit-corpus/: the shared planted-fault corpus, vendored verbatim from
+qbtrix/ripple-iui packages/core/src/core/__fixtures__/audit-corpus/ on branch
+feat/cl-3 at 4b4f8c7 (pending merge to main). Each entry's expect.python is what
+card_spec.strict_audit must report on the ripple profile; expect.core is ripple's
+side and is not read here. tests/cloud/test_paw_bar_audit_corpus.py runs it.
+
+Refresh with the manifest (same ripple commit when possible):
+  rm -rf ee/pocketpaw_ee/paw_bar/ripple-audit-corpus
+  cp -R <ripple>/packages/core/src/core/__fixtures__/audit-corpus \
+    ee/pocketpaw_ee/paw_bar/ripple-audit-corpus
+then update the branch and commit above.

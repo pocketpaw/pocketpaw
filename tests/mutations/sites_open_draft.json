@@ -1,0 +1,39 @@
+[
+  {
+    "label": "another workspace's pocket is opened for editing because the tenant check is gone",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if workspace_id != pocket.get(\"workspace\"):\n        raise NotFound(\"pocket\", pocket_id)",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_draft_worker_service.py::test_the_open_draft_route_is_404_for_an_unknown_or_foreign_pocket"
+    ]
+  },
+  {
+    "label": "a reader without edit access opens a draft because the edit check is gone",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not await pockets_service.has_edit_access(pocket_id, user_id):\n        raise Forbidden(\"pocket.access_denied\", \"You do not have access to edit this site.\")",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_draft_worker_service.py::test_the_open_draft_route_needs_edit_access"
+    ]
+  },
+  {
+    "label": "a publish never returns an opened draft to the published view",
+    "file": "ee/pocketpaw_ee/sites/draft_worker.py",
+    "find": "            rec.published_hash, rec.published_url = published_hash, published_url\n            rec.reopened_hash = \"\"",
+    "replace": "            rec.published_hash, rec.published_url = published_hash, published_url",
+    "tests": [
+      "tests/ee/sites/test_draft_worker.py::test_reopen_turns_the_published_view_into_a_draft_until_the_next_publish",
+      "tests/ee/sites/test_draft_worker_service.py::test_a_publish_after_open_draft_brings_back_the_published_view"
+    ]
+  },
+  {
+    "label": "an opened draft flips back to the live site because the published view ignores it",
+    "file": "ee/pocketpaw_ee/sites/draft_worker.py",
+    "find": "    if rec.reopened_hash == content_hash:\n        return False",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_draft_worker_service.py::test_open_draft_sends_the_published_content_down_the_draft_path"
+    ]
+  }
+]

@@ -1,4 +1,12 @@
 # Browser driver tests
+# Changes: 2026-09-06 (BR-1, feat/browser-surface-server) — the mocked page no
+#   longer fakes ``page.accessibility.snapshot``. Playwright removed that API, so
+#   every mock of it was asserting against a method the real Page does not have —
+#   which is exactly why the driver shipped broken while this file stayed green.
+#   The mocks now fake the DOM-walk ``page.evaluate`` payload, and refs resolve
+#   as ``[data-paw-ref="N"]``. These remain unit tests of the driver's plumbing;
+#   the honest end-to-end gate is ``test_browser_surface.py``, which drives a
+#   REAL browser.
 # Changes: Initial creation with comprehensive Playwright driver tests
 # Fixed mocking for async_playwright().start() pattern
 """Tests for browser driver module."""
@@ -10,6 +18,16 @@ import pytest
 
 from pocketpaw.browser.driver import BrowserDriver
 from pocketpaw.browser.snapshot import RefMap
+
+
+def _snap_payload(
+    text: str = "",
+    count: int = 0,
+    title: str = "Test Page",
+    url: str = "https://example.com",
+) -> dict:
+    """The shape ``SNAPSHOT_JS`` returns from ``page.evaluate``."""
+    return {"text": text, "count": count, "title": title, "url": url}
 
 
 class TestBrowserDriverInit:
@@ -110,9 +128,7 @@ class TestBrowserDriverNavigation:
         driver._page.goto = AsyncMock()
         driver._page.title = AsyncMock(return_value="Test Page")
         driver._page.url = "https://example.com"
-        driver._page.accessibility.snapshot = AsyncMock(
-            return_value={"role": "WebArea", "name": "Test Page", "children": []}
-        )
+        driver._page.evaluate = AsyncMock(return_value=_snap_payload())
 
         result = await driver.navigate("https://example.com")
 
@@ -129,12 +145,8 @@ class TestBrowserDriverNavigation:
         driver._page.goto = AsyncMock()
         driver._page.title = AsyncMock(return_value="Example")
         driver._page.url = "https://example.com"
-        driver._page.accessibility.snapshot = AsyncMock(
-            return_value={
-                "role": "WebArea",
-                "name": "Example",
-                "children": [{"role": "button", "name": "Click Me"}],
-            }
+        driver._page.evaluate = AsyncMock(
+            return_value=_snap_payload(text='- button "Click Me" [ref=1]', count=1)
         )
 
         result = await driver.navigate("https://example.com")
@@ -160,21 +172,18 @@ class TestBrowserDriverClick:
         """Should click element by reference number."""
         driver = BrowserDriver()
         driver._page = AsyncMock()
-        driver._refmap = RefMap()
-        driver._refmap.add('role=button[name="Submit"]')
+        driver._refmap = RefMap(refs={1: '[data-paw-ref="1"]'})
 
         driver._page.locator = MagicMock()
         mock_locator = AsyncMock()
         driver._page.locator.return_value = mock_locator
         driver._page.title = AsyncMock(return_value="Form")
         driver._page.url = "https://example.com/form"
-        driver._page.accessibility.snapshot = AsyncMock(
-            return_value={"role": "WebArea", "name": "Form", "children": []}
-        )
+        driver._page.evaluate = AsyncMock(return_value=_snap_payload())
 
         result = await driver.click(ref=1)
 
-        driver._page.locator.assert_called_once_with('role=button[name="Submit"]')
+        driver._page.locator.assert_called_once_with('[data-paw-ref="1"]')
         mock_locator.click.assert_called_once()
         assert result.snapshot is not None
 
@@ -205,8 +214,7 @@ class TestBrowserDriverType:
         """Should type text into element by ref."""
         driver = BrowserDriver()
         driver._page = AsyncMock()
-        driver._refmap = RefMap()
-        driver._refmap.add('role=textbox[name="Username"]')
+        driver._refmap = RefMap(refs={1: '[data-paw-ref="1"]'})
 
         driver._page.locator = MagicMock()
         mock_locator = AsyncMock()
@@ -214,7 +222,7 @@ class TestBrowserDriverType:
 
         await driver.type_text(ref=1, text="testuser")
 
-        driver._page.locator.assert_called_once_with('role=textbox[name="Username"]')
+        driver._page.locator.assert_called_once_with('[data-paw-ref="1"]')
         mock_locator.fill.assert_called_once_with("testuser")
 
     @pytest.mark.asyncio
@@ -222,8 +230,7 @@ class TestBrowserDriverType:
         """Should clear field before typing (fill behavior)."""
         driver = BrowserDriver()
         driver._page = AsyncMock()
-        driver._refmap = RefMap()
-        driver._refmap.add('role=textbox[name="Email"]')
+        driver._refmap = RefMap(refs={1: '[data-paw-ref="1"]'})
 
         driver._page.locator = MagicMock()
         mock_locator = AsyncMock()
@@ -255,9 +262,7 @@ class TestBrowserDriverScroll:
         driver._page = AsyncMock()
         driver._page.title = AsyncMock(return_value="Page")
         driver._page.url = "https://example.com"
-        driver._page.accessibility.snapshot = AsyncMock(
-            return_value={"role": "WebArea", "name": "Page", "children": []}
-        )
+        driver._page.evaluate = AsyncMock(return_value=_snap_payload())
 
         result = await driver.scroll(direction="down")
 
@@ -271,9 +276,7 @@ class TestBrowserDriverScroll:
         driver._page = AsyncMock()
         driver._page.title = AsyncMock(return_value="Page")
         driver._page.url = "https://example.com"
-        driver._page.accessibility.snapshot = AsyncMock(
-            return_value={"role": "WebArea", "name": "Page", "children": []}
-        )
+        driver._page.evaluate = AsyncMock(return_value=_snap_payload())
 
         await driver.scroll(direction="up")
 
@@ -299,12 +302,10 @@ class TestBrowserDriverSnapshot:
         driver._page = AsyncMock()
         driver._page.title = AsyncMock(return_value="Current Page")
         driver._page.url = "https://example.com/current"
-        driver._page.accessibility.snapshot = AsyncMock(
-            return_value={
-                "role": "WebArea",
-                "name": "Current Page",
-                "children": [{"role": "heading", "name": "Hello", "level": 1}],
-            }
+        driver._page.evaluate = AsyncMock(
+            return_value=_snap_payload(
+                text='- heading "Hello"', title="Current Page", url="https://example.com/current"
+            )
         )
 
         result = await driver.snapshot()

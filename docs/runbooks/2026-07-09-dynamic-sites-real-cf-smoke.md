@@ -28,7 +28,7 @@ A dynamic publish will silently sit in `provisioning` or fail unless every row h
 | 4 | **wrangler creds** (migrate subprocess) | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (the standard wrangler env names; the same D1-capable token is fine). Set both pairs. |
 | 5 | **wrangler on the box** | The enterprise image bakes it (#1681) and sets `PAW_CF_WRANGLER_CMD=wrangler`. On a non-baked host, install wrangler and point `PAW_CF_WRANGLER_CMD` at it. Verify: `wrangler --version` runs. |
 | 6 | **Generator toolchain** | Already baked: `paw-sites-gen`, `bun`, the `@ripple-ui/svelte` tarball (`PAW_SITES_RIPPLE_DEP`). Verify: `paw-sites-gen --help` runs. |
-| 7 | **arq worker running** | The `provision_site` job runs on the shared chat/jobs arq worker (`arq pocketpaw_ee.cloud.chat.runs.worker.WorkerSettings`). If it isn't running, the site enqueues and never provisions. Needs `POCKETPAW_REDIS_URL`. |
+| 7 | **arq worker running** | The `provision_site` job runs on the shared chat/jobs arq lane, started by `python -m pocketpaw_ee.cloud.worker_supervisor` along with the separate site-build lane. If it isn't running, the site enqueues and never provisions. Needs `POCKETPAW_REDIS_URL`. |
 | 8 | **Sites domain (for a live URL)** | `PAW_CF_SITES_DOMAIN` so the provisioned site resolves at `https://<site_id>.<domain>`. |
 
 > Quick pre-flight on the box:

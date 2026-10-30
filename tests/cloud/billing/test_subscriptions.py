@@ -1,55 +1,24 @@
 # tests/cloud/billing/test_subscriptions.py — proves the BC-7 Subscription-
 # primitive contract end-to-end:
-#   1. ``subscribe(ws, "pro")`` opens a Dodo recurring checkout with the
-#      right product id + {workspace_id, plan_key} metadata, returning the hosted
-#      url (the SDK client mocked).
+#   1. ``subscribe(ws, "pro")`` opens a Dodo CHECKOUT SESSION with the right
+#      product id + {workspace_id, plan_key} metadata, a product_cart line, and
+#      return_url / cancel_url on the backend return hop carrying the buyer's app
+#      origin (omitted when no base is available); returns the hosted url.
 #   2. a VERIFIED ``subscription.active`` grants the tier's monthly allotment AND
 #      upgrades ``Workspace.plan`` — entitlements then resolve to that tier.
-# Updated 2026-06-25 (feat/consumer-plan-ladder): rekeyed the tiers exercised here
-#   from {team, business} to the consumer ladder {go, pro}. The product map is now
-#   {go: prod_go_recurring, pro: prod_pro_recurring}; the active/renew/cancel flow
-#   subscribes a workspace to ``pro`` (the business-tier successor).
 #   3. a VERIFIED ``subscription.renewed`` (a NEW event id) grants the allotment
-#      AGAIN, ADDITIVELY — proving ROLLOVER (balance == 2x allotment after
-#      active + renewed).
-#   4. a REPLAY of the same renewal event id is a no-op (balance unchanged).
-#   5. a VERIFIED ``subscription.cancelled`` reverts ``Workspace.plan`` to free
+#      AGAIN, ADDITIVELY (rollover); a replay of the same event id is a no-op.
+#   4. a VERIFIED ``subscription.cancelled`` reverts ``Workspace.plan`` to free
 #      WITHOUT clawing back the granted credits.
+#   5. empty subscription ids never collide across tenants on the unique index.
+#   6. ``cancel`` targets the ACTIVE sub only (402 when none); ``subscribe`` with an
+#      active sub cancels the old one then opens one new checkout.
 #
-# Signing uses the REAL ``standardwebhooks`` library so the verification path is
-# exercised end-to-end (no shortcut around the signature check). The Dodo SDK
-# CLIENT is mocked only for the ``subscribe`` checkout call; the webhook path
-# never touches the SDK (verification is pure ``standardwebhooks``).
-#
-# Uses the shared ``mongo_db`` fixture (mongomock-motor + Beanie over
-# ALL_DOCUMENTS) from tests/cloud/conftest.py. Workspaces are inserted as REAL
-# ``Workspace`` docs so ``set_workspace_plan`` / ``get_workspace_plan`` (which
-# parse a PydanticObjectId) and the entitlements resolver run against live docs
-# — the credit wallet is keyed on the workspace id string the same way.
-#
-# Created 2026-06-24 (integration/billing-credits, BC-7): new test module.
-# Updated 2026-06-24 (B2 review fix): added
-#   test_empty_subscription_id_does_not_corrupt_cross_tenant — two workspaces whose
-#   verified active events both carry an EMPTY subscription_id must NOT collide on
-#   the unique (gateway, "") Subscription index. The fix SKIPS the audit upsert on
-#   a falsy subscription_id, so the second workspace never overwrites the first's
-#   row; the grant + plan change still apply for both.
-# Updated 2026-06-28 (fix/billing-checkout-sessions): added the checkout-sessions
-#   bug-fix tests — create_subscription must open a Dodo CHECKOUT SESSION with a
-#   non-empty return_url + cancel_url + a product_cart line + customer (so the buyer
-#   is returned to the app after paying), omit return_url when no base is available,
-#   and the service must thread an ``origin`` into the return_url. Rewired the
-#   existing criterion-1 mock from subscriptions.create to checkout_sessions.create.
-# Updated 2026-07-08 (feat/billing-cancel-downgrade): added the two money-management
-#   bug-fix tests. (A) CANCEL — ``billing.cancel`` calls the provider's
-#   cancel_subscription with the ACTIVE sub id (proven at the SDK edge:
-#   subscriptions.update(<id>, status="cancelled")), 402s
-#   ``billing.no_active_subscription`` when there is none, and NEVER selects a stale
-#   cancelled historical row; plus POST /billing/cancel route wiring (200 + 402). (B)
-#   DOWNGRADE — ``subscribe`` on a workspace with an active sub does cancel-then-create
-#   (opens exactly one new checkout AND cancels the old sub id), does NOT cancel when
-#   there's no active sub (or only a cancelled row), and stays event_id-idempotent on
-#   the new subscription's active-webhook replay.
+# Signing uses the REAL ``standardwebhooks`` library; only the Dodo SDK CLIENT is
+# mocked. Uses the shared ``mongo_db`` fixture with REAL ``Workspace`` docs. The
+# ``billing_app_client`` fixture is an OWNER of w1 because POST /billing/cancel is
+# gated on ``billing.manage``; the role gate itself is tested in
+# tests/cloud/test_ee_guards.py.
 
 from __future__ import annotations
 
@@ -306,7 +275,8 @@ async def test_create_subscription_omits_return_url_when_not_provided(monkeypatc
 async def test_subscribe_threads_origin_into_return_url(mongo_db, monkeypatch, patch_plan_products):
     """End-to-end at the service layer: an ``origin`` passed to ``subscribe`` is
     woven into return_url/cancel_url on the checkout session (the route reads it
-    from the buyer's Origin header)."""
+    from the buyer's Origin header), via the backend return hop."""
+    monkeypatch.setenv("POCKETPAW_PUBLIC_BASE_URL", "https://api.acme.com")
     ws = await _make_workspace(plan="free")
     fake_client = _fake_session_client(monkeypatch)
 
@@ -322,8 +292,9 @@ async def test_subscribe_threads_origin_into_return_url(mongo_db, monkeypatch, p
     assert result == {"checkout_url": SESSION_CHECKOUT_URL}
 
     _, kwargs = fake_client.checkout_sessions.create.call_args
-    assert kwargs["return_url"] == "https://app.acme.com/settings/billing?checkout=success"
-    assert kwargs["cancel_url"] == "https://app.acme.com/settings/billing?checkout=cancel"
+    hop = "https://api.acme.com/api/v1/billing/checkout/return"
+    assert kwargs["return_url"] == f"{hop}/success?to=https%3A%2F%2Fapp.acme.com"
+    assert kwargs["cancel_url"] == f"{hop}/cancel?to=https%3A%2F%2Fapp.acme.com"
 
 
 async def test_subscribe_rejects_unknown_plan(mongo_db, patch_plan_products):
@@ -735,20 +706,49 @@ async def test_cancel_with_only_cancelled_row_raises_402(mongo_db, monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def billing_app_client() -> AsyncClient:
+async def billing_app_client(monkeypatch) -> AsyncClient:
     """A FastAPI app with ONLY the billing router mounted + auth/license overridden,
     scoped to workspace ``w1`` — so the POST /billing/cancel wiring is exercised
-    without a real JWT / license (mirrors the shared cloud_app_client fixture)."""
+    without a real JWT / license (mirrors the shared cloud_app_client fixture).
+
+    The caller is an OWNER of w1. Updated 2026-09-02
+    (fix/billing-router-authorization): /billing/cancel is now gated on
+    ``billing.manage`` (OWNER), so the route resolves ``current_active_user`` as
+    well as the two ids this fixture already overrode. Overriding only the ids left
+    the real fastapi-users dependency to run, and it 401s with no session. The
+    identity is OWNER because that is who can cancel a subscription in production —
+    a fixture whose caller would be refused is not exercising the cancel path, it is
+    exercising the gate, and the gate has its own tests in
+    tests/cloud/test_ee_guards.py.
+    """
+    from types import SimpleNamespace
+
     from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
     from pocketpaw_ee.cloud.billing.router import router as billing_router
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
+    from pocketpaw_ee.guards import deps as guards_deps
+
+    # Per-member action overrides are a separate mechanism and would otherwise drive
+    # a Mongo read on the deny path. Not what this file measures.
+    monkeypatch.setattr(guards_deps, "_has_action_override", lambda *a, **k: False)
+
+    owner = SimpleNamespace(
+        id="u1",
+        active_workspace="w1",
+        workspaces=[SimpleNamespace(workspace="w1", role="owner")],
+    )
+
+    async def _fake_current_active_user():
+        return owner
 
     app = FastAPI()
     add_error_handler(app)
     app.include_router(billing_router)
     app.dependency_overrides[current_user_id] = lambda: "u1"
     app.dependency_overrides[current_workspace_id] = lambda: "w1"
+    app.dependency_overrides[current_active_user] = _fake_current_active_user
     app.dependency_overrides[require_license] = lambda: None
 
     transport = ASGITransport(app=app)

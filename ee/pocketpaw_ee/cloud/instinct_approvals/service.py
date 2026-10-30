@@ -1,4 +1,15 @@
 # ee/pocketpaw_ee/cloud/instinct_approvals/service.py
+#
+# Updated: 2026-08-11 (fix/notif-push-convergence) — ``create_approval`` now
+# also writes an ``instinct_approval`` NOTIFICATION for ``requested_by``
+# (``_notify_requester``, best-effort). A guardian block previously had no
+# notification row at all: the only signal was a push listener wired straight
+# to ``instinct.approval.created``, so the in-app bell never showed it. Push has
+# converged on ``notification.new``, so the row is what now reaches both the
+# bell and the OS. Side effect worth knowing: notifications also fan OUT to a
+# workspace's configured Slack / generic webhook (notifications/delivery.py), so
+# a tenant with external delivery on will start seeing guardian blocks there.
+#
 # Created: 2026-05-28 (feat/wave-3a-instinct-dispatch) — sole Beanie
 # writer for the ``InstinctApproval`` collection (RFC 03 v2). Module-
 # level ``async def`` API per EE cloud rule 5. Every state-mutating
@@ -35,6 +46,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -56,6 +68,8 @@ from pocketpaw_ee.cloud.instinct_approvals.dto import (
     approval_to_wire_dict,
 )
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval as _ApprovalDoc
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Private mapping helper — Beanie doc → domain
@@ -130,7 +144,47 @@ async def create_approval(
     domain = _to_domain(doc)
     wire = approval_to_wire_dict(domain)
     await emit(InstinctApprovalCreated(data=dict(wire)))
+    await _notify_requester(domain)
     return wire
+
+
+async def _notify_requester(approval: InstinctApproval) -> None:
+    """Write the bell/OS notification for a guardian block. Never raises.
+
+    Before 2026-08-11 the ONLY signal a blocked user got was a push listener
+    subscribed straight to ``instinct.approval.created`` — no notification row
+    existed, so the in-app bell never showed the block at all. Push has since
+    converged on ``notification.new`` (push/listeners.py), so persisting the
+    row is what now reaches BOTH surfaces. Title and body are carried over
+    verbatim from that retired listener.
+
+    Late import mirrors the other cross-module fan-out callers
+    (meetings/bridges/notifications.py, leads/bridges/notifications.py): it
+    avoids a circular import and tolerates the service being unavailable in
+    unit-test contexts. Best-effort by design — a notification failure must
+    not roll back the approval row the gate depends on.
+    """
+    try:
+        from pocketpaw_ee.cloud.notifications import service as notifications_service
+        from pocketpaw_ee.cloud.notifications.domain import NotificationSource
+
+        await notifications_service.create(
+            workspace_id=approval.workspace_id,
+            recipient=approval.requested_by,
+            kind="instinct_approval",
+            title="Action needs approval",
+            body=f"{approval.action_name or 'An action'} was held for your review.",
+            source=NotificationSource(
+                type="instinct_approval",
+                id=approval.id,
+                pocket_id=approval.pocket_id,
+                room_id=None,
+            ),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to create instinct_approval notification for approval=%s", approval.id
+        )
 
 
 async def auto_approve(

@@ -1,0 +1,74 @@
+[
+  {
+    "label": "the SSE reader parks on the shared pool again",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/redis_stream.py",
+    "find": "            resp = await self._blocking.xread(",
+    "replace": "            resp = await self._redis.xread(",
+    "tests": [
+      "tests/cloud/runs/test_redis_stream_pool.py::test_read_events_uses_the_blocking_client_not_the_shared_one"
+    ]
+  },
+  {
+    "label": "the transport is built without the blocking client",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/transport.py",
+    "find": "RedisStreamTransport(get_redis(), blocking_redis=get_blocking_redis())",
+    "replace": "RedisStreamTransport(get_redis())",
+    "tests": [
+      "tests/cloud/runs/test_redis_stream_pool.py::TestWiring::test_transport_reads_through_the_blocking_client"
+    ]
+  },
+  {
+    "label": "an over-limit stream reader waits forever for a slot",
+    "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
+    "find": "            timeout=_BLOCKING_POOL_WAIT_SECONDS,",
+    "replace": "            timeout=None,",
+    "tests": [
+      "tests/cloud/runs/test_redis_stream_pool.py::TestBlockingClient::test_waits_for_a_connection_instead_of_failing_instantly"
+    ]
+  },
+  {
+    "label": "the blocking client loses its read timeout",
+    "file": "ee/pocketpaw_ee/cloud/_core/redis_client.py",
+    "find": "            socket_timeout=_BLOCKING_SOCKET_TIMEOUT_SECONDS,",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_redis_stream_pool.py::TestBlockingClient::test_read_timeout_outlasts_the_longest_block"
+    ]
+  },
+  {
+    "label": "the first append no longer sets a TTL",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/redis_stream.py",
+    "find": "            pipe.expire(key, initial_stream_ttl(), nx=True)",
+    "replace": "            pipe.ping()",
+    "tests": [
+      "tests/cloud/runs/test_redis_stream_pool.py::TestStreamTtl::test_first_append_sets_a_ttl"
+    ]
+  },
+  {
+    "label": "appends overwrite the terminal TTL",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/redis_stream.py",
+    "find": "            pipe.expire(key, initial_stream_ttl(), nx=True)",
+    "replace": "            pipe.expire(key, initial_stream_ttl())",
+    "tests": [
+      "tests/cloud/runs/test_redis_stream_pool.py::TestStreamTtl::test_terminal_ttl_still_shortens_and_later_appends_keep_it"
+    ]
+  },
+  {
+    "label": "an EXPIRE failure loses the append",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/redis_stream.py",
+    "find": "            entry_id, expired = await pipe.execute(raise_on_error=False)",
+    "replace": "            entry_id, expired = await pipe.execute()",
+    "tests": [
+      "tests/cloud/runs/test_redis_stream_pool.py::TestStreamTtl::test_an_expire_failure_does_not_lose_the_event"
+    ]
+  },
+  {
+    "label": "the xproc consumer parks on the shared pool again",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/xproc.py",
+    "find": "    redis = get_blocking_redis()\n",
+    "replace": "    redis = get_redis()\n",
+    "tests": [
+      "tests/cloud/runs/test_redis_stream_pool.py::TestWiring::test_xproc_consumer_uses_the_blocking_client"
+    ]
+  }
+]

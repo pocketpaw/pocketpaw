@@ -1,0 +1,146 @@
+{
+  "_comment": [
+    "The /studio/vector op vocabulary: the wire contract between the edit_vector MCP",
+    "tool (pocketpaw) and the vector editor's op applier (paw-enterprise).",
+    "",
+    "Committed BYTE-IDENTICAL in both repos:",
+    "  pocketpaw/ee/pocketpaw_ee/agent/mcp_servers/vector_ops.contract.json",
+    "  paw-enterprise/src/lib/core/studio/craft/contracts/vector_ops.contract.json",
+    "Each side's suite checks its validator against its own copy, so a verb or",
+    "param added in one repo only fails that repo's tests.",
+    "",
+    "Shape: ops.<name>.params maps each allowed param to a type; any other param",
+    "is rejected. Types: number (finite), number0 (>= 0), number+ (> 0), int3",
+    "(integer >= 3), text (non-empty string), bool, paint, ids (non-empty list of",
+    "layer ids), id (one layer id), points (>= 2 of [x,y] or {x,y,...}), object,",
+    "effectId, command, enum:a|b|c. `required` must be present; `anyOf` needs at",
+    "least one; `requiredWhen` adds required params keyed by another param's value.",
+    "`engine` names the vectorcraft MCP tool or engine command the applier runs.",
+    "",
+    "Paint: \"#rrggbb\", \"none\", [r,g,b] in 0..1, {c,m,y,k} in 0..1, {gray} in",
+    "0..1, or {swatch: name}. Coordinates are points, y down, origin at the",
+    "artboard's top-left. Scale is percent; rotate is degrees counter-clockwise.",
+    "",
+    "runCommand is the escape hatch to the rest of the engine's commands. The id",
+    "must match `pattern`, its namespace must not be in `deniedNamespaces`, and no",
+    "dot-segment may match `deniedSegmentPattern` (file I/O, export, app state)."
+  ],
+  "version": 1,
+  "maxOpsPerBatch": 50,
+  "ops": {
+    "draw_shape": {
+      "engine": "MCP draw_shape",
+      "params": {
+        "shape": "enum:rectangle|ellipse|polygon|star|line",
+        "x": "number", "y": "number", "width": "number+", "height": "number+",
+        "radius": "number0", "cx": "number", "cy": "number", "sides": "int3",
+        "radius1": "number+", "radius2": "number+", "points": "int3",
+        "x1": "number", "y1": "number", "x2": "number", "y2": "number",
+        "fill": "paint", "stroke": "paint", "strokeWidth": "number0"
+      },
+      "required": ["shape"],
+      "requiredWhen": {
+        "shape": {
+          "rectangle": ["x", "y", "width", "height"],
+          "ellipse": ["x", "y", "width", "height"],
+          "polygon": ["cx", "cy", "radius"],
+          "star": ["cx", "cy", "radius1", "radius2"],
+          "line": ["x1", "y1", "x2", "y2"]
+        }
+      }
+    },
+    "draw_path": {
+      "engine": "MCP draw_path",
+      "params": {
+        "d": "text", "points": "points", "closed": "bool",
+        "fill": "paint", "stroke": "paint", "strokeWidth": "number0"
+      },
+      "anyOf": ["d", "points"]
+    },
+    "add_text": {
+      "engine": "MCP add_text, then text.setStyle {justify} when align is set",
+      "params": {
+        "text": "text", "x": "number", "y": "number", "width": "number+", "height": "number+",
+        "size": "number+", "font": "text", "color": "paint",
+        "align": "enum:left|center|right|justify"
+      },
+      "required": ["text", "x", "y"]
+    },
+    "set_paint": {
+      "engine": "MCP set_paint",
+      "params": {"ids": "ids", "fill": "paint", "stroke": "paint", "strokeWidth": "number0"},
+      "anyOf": ["fill", "stroke", "strokeWidth"]
+    },
+    "transform": {
+      "engine": "MCP transform",
+      "params": {
+        "ids": "ids", "dx": "number", "dy": "number", "rotate": "number",
+        "scale": "number+", "scaleX": "number+", "scaleY": "number+",
+        "reflect": "enum:vertical|horizontal"
+      },
+      "anyOf": ["dx", "dy", "rotate", "scale", "scaleX", "scaleY", "reflect"]
+    },
+    "align": {
+      "engine": "object.align {horizontal: left|center|right | vertical: top|center|bottom (middle -> center), to}",
+      "params": {
+        "ids": "ids",
+        "align": "enum:left|center|right|top|middle|bottom",
+        "to": "enum:selection|artboard"
+      },
+      "required": ["align"]
+    },
+    "arrange": {
+      "engine": "object.arrange.bringToFront|sendToBack|bringForward|sendBackward",
+      "params": {"ids": "ids", "order": "enum:front|back|forward|backward"},
+      "required": ["order"]
+    },
+    "group": {"engine": "select.set {ids}, object.group", "params": {"ids": "ids"}, "required": ["ids"]},
+    "ungroup": {"engine": "select.set {ids}, object.ungroup", "params": {"ids": "ids"}, "required": ["ids"]},
+    "delete": {"engine": "edit.clear {ids}", "params": {"ids": "ids"}, "required": ["ids"]},
+    "set_text": {
+      "engine": "text.setText {id, text}, text.setStyle {id, size, font}, set_paint {ids:[id], fill: color}",
+      "params": {"id": "id", "text": "text", "size": "number+", "font": "text", "color": "paint"},
+      "required": ["id"],
+      "anyOf": ["text", "size", "font", "color"]
+    },
+    "apply_effect": {
+      "engine": "MCP apply_effect (effect.apply)",
+      "params": {"ids": "ids", "effect": "effectId", "params": "object"},
+      "required": ["effect"]
+    },
+    "pathfinder": {
+      "engine": "MCP pathfinder",
+      "params": {
+        "ids": "ids",
+        "operation": "enum:unite|minusFront|intersect|exclude|divide|trim|merge|crop|outline|minusBack"
+      },
+      "required": ["operation"]
+    },
+    "new_document": {
+      "engine": "file.new {width, height, units, colorMode}",
+      "params": {
+        "width": "number+", "height": "number+",
+        "units": "enum:Points|Inches|Millimeters|Pixels",
+        "colorMode": "enum:cmyk|rgb"
+      },
+      "required": ["width", "height"]
+    },
+    "set_artboard": {
+      "engine": "artboard.setProps {index: 0, width, height}",
+      "params": {"width": "number+", "height": "number+"},
+      "anyOf": ["width", "height"]
+    },
+    "run_command": {
+      "engine": "Session::execute(command, params)",
+      "params": {"command": "command", "params": "object"},
+      "required": ["command"]
+    }
+  },
+  "runCommand": {
+    "pattern": "^[a-z][A-Za-z0-9]*(\\.[A-Za-z][A-Za-z0-9]*){1,3}$",
+    "deniedNamespaces": [
+      "app", "clipboard", "color", "command", "document", "file", "help", "prefs", "tool", "view", "window"
+    ],
+    "deniedSegmentPattern": "^(open|save|saveAs|saveAsTemplate|export|exportSelection|exportForScreens|serialize|load|loadProfile|import|importSvg|close|closeAll|quit)$"
+  }
+}

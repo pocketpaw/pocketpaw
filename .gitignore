@@ -51,7 +51,13 @@ htmlcov/
 
 # Internal drafts
 idocs/
-.claude 
+# Local Claude Code state stays out; the tracked verification skill is the exception.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/verify-pocketpaw/
+# Proof artifacts written by .claude/skills/verify-pocketpaw (screenshots, page text, server logs)
+.verify-evidence/
 
 # Config (contains secrets)
 .env
@@ -78,6 +84,8 @@ private.key
 
 # Backups and secrets
 .env.bak
+.env.backup*
+.env.backup-*
 *.bak
 
 output.txt
@@ -94,3 +102,30 @@ output.txt
 !/deploy/paw-sites/.gitkeep
 /deploy/ripple/*
 !/deploy/ripple/.gitkeep
+# Vendored paw-fx effects registry (feat/fx-mcp-server), staged by scripts/vendor-paw-fx.sh.
+/deploy/paw-fx/*
+!/deploy/paw-fx/.gitkeep
+
+# Load-test artifacts (scripts/loadtest)
+out/
+
+# SG-1 sites proving harness — build outputs, not source.
+# .build/ holds a machine-resolved package.json, node_modules, and the ~6.5MB
+# SSR bundle; evidence/ holds generated reports and rendered HTML artifacts.
+tests/harness/sites_proving/node/.build/
+tests/harness/sites_proving/evidence/
+
+# SR-1 per-engine cost measurement — generated evidence, not source.
+tests/harness/engine_cost/evidence/
+# scripts/mutate.py writes this while a sweep is live so a concurrent reader
+# knows a test failure is a deliberate mutation, not a regression. Ignored because
+# a sweep artifact must never be committable; discovery is via pytest's report
+# header (tests/conftest.py), which is the path a reader actually takes anyway.
+.mutation-sweep-active
+
+# Local scratch / backup — e.g. .tmp/livekit-meetings-backup-*.json (operator
+# backups pulled before a LiveKit migration). Never committable.
+.tmp/
+
+# Flake census output (scripts/flake_census.sh)
+.flake-census/

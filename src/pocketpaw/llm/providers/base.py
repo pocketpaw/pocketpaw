@@ -1,5 +1,12 @@
 """Base types for the provider adapter pattern.
 
+Updated: 2026-07-29 (feat/pydantic-ai-backend) — registered the ninth backend,
+  ``pydantic_ai`` -> ``pydantic_ai_model``, in ``_BACKEND_MODEL_ATTR``. This map
+  is not optional bookkeeping: a backend missing from it makes ``route_model``
+  a silent no-op, so a per-agent ``config.model`` is dropped on the floor and
+  every agent quietly runs the global default — the MCG-3 bug this module was
+  written to fix. Adding a backend means adding its row here in the same change.
+
 Updated: 2026-06-26 (feat/mcg-3-pool-route-model) — added ``route_model``, the
   single writer that maps a per-agent ``model`` string onto the correct
   ``Settings`` field for ANY registered agent backend, driven by
@@ -50,6 +57,7 @@ _BACKEND_MODEL_ATTR: dict[str, str] = {
     "copilot_sdk": "copilot_sdk_model",
     "opencode": "opencode_model",
     "deep_agents": "deep_agents_model",
+    "pydantic_ai": "pydantic_ai_model",
 }
 
 # -- Backends that read another backend's model field instead of their own --

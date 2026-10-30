@@ -1,0 +1,74 @@
+[
+  {
+    "label": "tenancy: an idea patch reads across workspaces",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    doc = await _IdeaDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})",
+    "replace": "    doc = await _IdeaDoc.find_one({\"_id\": oid})",
+    "tests": [
+      "tests/cloud/growth/social/test_router.py"
+    ]
+  },
+  {
+    "label": "tenancy: the latest-profile read drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            await _ProfileDoc.find({\"workspace\": workspace_id})",
+    "replace": "            await _ProfileDoc.find({})",
+    "tests": [
+      "tests/cloud/growth/social/test_router.py"
+    ]
+  },
+  {
+    "label": "tenancy: a profile read by id drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    return await _ProfileDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})",
+    "replace": "    return await _ProfileDoc.find_one({\"_id\": oid})",
+    "tests": [
+      "tests/cloud/growth/social/test_router.py"
+    ]
+  },
+  {
+    "label": "scoping: the ideas list drops its profile filter (one social sees another's ideas)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    query: dict[str, Any] = {\"workspace\": workspace_id, \"profile\": str(doc.id)}",
+    "replace": "    query: dict[str, Any] = {\"workspace\": workspace_id}",
+    "tests": [
+      "tests/cloud/growth/social/test_router.py"
+    ]
+  },
+  {
+    "label": "server-owned: a hand edit may overwrite pages_read",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/dto.py",
+    "find": "    hooks: _AnalysisList | None = None\n",
+    "replace": "    hooks: _AnalysisList | None = None\n    pages_read: list[str] | None = None\n",
+    "tests": [
+      "tests/cloud/growth/social/test_router.py"
+    ]
+  },
+  {
+    "label": "typed fields: the owner's avoid list is dropped",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/analyst.py",
+    "find": "    if typed_avoid:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_analyst.py"
+    ]
+  },
+  {
+    "label": "analyze: a failed run wipes the last good analysis",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            \"analysis_status\": \"failed\",\n",
+    "replace": "            \"analysis_status\": \"failed\",\n            \"analysis\": None,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_router.py"
+    ]
+  },
+  {
+    "label": "gate: a social route loses its RBAC guard",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/router.py",
+    "find": "@router.get(\n    \"/ideas\",\n    response_model=SocialIdeaListResponse,\n    dependencies=[Depends(require_action_any_workspace(\"growth.read\"))],\n)",
+    "replace": "@router.get(\n    \"/ideas\",\n    response_model=SocialIdeaListResponse,\n)",
+    "tests": [
+      "tests/cloud/growth/test_gate.py"
+    ]
+  }
+]

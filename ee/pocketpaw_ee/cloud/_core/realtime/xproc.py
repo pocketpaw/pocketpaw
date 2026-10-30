@@ -13,6 +13,20 @@ emitted from arq workers — typically zero, since Tier 1 doesn't run any.
 The stream + consumer group survives both worker and web restarts: arq
 workers keep XADD-ing; the web's consumer group XACKs each delivered entry,
 so a fresh web process resumes from the last unacked cursor.
+
+Bus envelopes stay on this stream's SHARED consumer group, so exactly one web
+process runs each event's handlers; with N web processes that is what stops one
+worker event from starting N agent runs or sending N push notifications. WS
+envelopes take the same path by default; with ``POCKETPAW_REALTIME_BUS=
+redis-streams`` the worker sends them to ``broadcast``'s per-process groups
+instead, so every web process reaches its own sockets.
+
+The consumer dispatches a batch by ORDERING LANE. Every worker-originated frame
+flows through this one loop, so dispatching strictly one envelope at a time let
+one tenant's slow socket stall delivery for every other tenant. Envelopes carry
+streamed agent output whose chunks must arrive in order, so concurrency is only
+ever across lanes; ``_ordering_lane`` falls back to the event type when it
+cannot identify a scope, keeping an unfamiliar envelope serial.
 """
 
 from __future__ import annotations
@@ -25,9 +39,10 @@ from typing import Literal
 
 from redis import exceptions as redis_exceptions
 
+from pocketpaw_ee.cloud._core.realtime import broadcast
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
 from pocketpaw_ee.cloud._core.realtime.events import Event, rebuild_event
-from pocketpaw_ee.cloud._core.redis_client import get_redis
+from pocketpaw_ee.cloud._core.redis_client import get_blocking_redis, get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +97,17 @@ async def publish_ws_envelope(
     ws_type: str,
     ws_data: dict,
 ) -> None:
-    """Worker → web: ship a WS broadcast for ``manager.broadcast_to_group``."""
+    """Worker → web: ship a WS broadcast for ``manager.broadcast_to_group``.
+
+    With cross-process broadcast on, the frame goes to the broadcast stream so
+    EVERY web process delivers it to the sockets it holds. Otherwise it goes to
+    the shared group, where exactly one web process picks it up.
+    """
     if not is_worker():
+        return
+    channel = broadcast.active_channel()
+    if channel is not None:
+        await channel.publish_group(scope_id, recipients, ws_type, ws_data)
         return
     envelope = {
         "kind": "ws",
@@ -122,7 +146,7 @@ async def run_consumer(
     to transient Redis/dispatch errors (logged, brief backoff, loop continues).
     Cancellation propagates out so the lifecycle hook can stop it cleanly.
     """
-    redis = get_redis()
+    redis = get_blocking_redis()
     try:
         await redis.xgroup_create(XPROC_STREAM, XPROC_GROUP, id="$", mkstream=True)
     except redis_exceptions.ResponseError as exc:
@@ -155,21 +179,86 @@ async def run_consumer(
         if not resp:
             continue
 
+        # Dispatch the batch by ORDERING LANE: envelopes that share a lane run
+        # one after another, different lanes run at the same time.
+        #
+        # The old loop awaited every envelope in turn, so one slow dispatch
+        # held up every envelope behind it — and because this is the single
+        # bridge for all worker-originated realtime traffic, "behind it" means
+        # every other tenant on the box. One workspace with a wedged socket
+        # made agent replies look frozen for every customer.
+        #
+        # A plain gather over the batch would fix that and break something
+        # worse. These envelopes carry streamed agent output: the chunks of one
+        # reply must arrive in the order they were produced, or the answer
+        # renders scrambled. Concurrency is therefore only ever ACROSS lanes.
+        lanes: dict[tuple[str, str], list[tuple[str, dict | None]]] = {}
         for _key, entries in resp:
             for entry_id, fields in entries:
                 try:
                     envelope = json.loads(fields["envelope"])
-                    await _dispatch(envelope)
                 except Exception:
-                    logger.exception("xproc dispatch failed for entry %s", entry_id)
-                finally:
-                    # Always ack — a bad envelope must not stall the stream.
-                    # Worst case the side-effect is missed once and the user
-                    # observes a one-off glitch; better than blocking forever.
-                    try:
-                        await redis.xack(XPROC_STREAM, XPROC_GROUP, entry_id)
-                    except Exception:
-                        logger.debug("xproc xack failed for %s", entry_id, exc_info=True)
+                    logger.exception("xproc: unparseable envelope in entry %s", entry_id)
+                    # Still needs an ack, in its own lane so it cannot delay
+                    # anything real.
+                    lanes.setdefault(("bad", entry_id), []).append((entry_id, None))
+                    continue
+                lanes.setdefault(_ordering_lane(envelope), []).append((entry_id, envelope))
+
+        await asyncio.gather(*(_run_lane(redis, entries) for entries in lanes.values()))
+
+
+#: Fields, in priority order, that identify "the conversation this envelope
+#: belongs to" on a bus envelope. A bus envelope carries no explicit scope —
+#: the audience is resolved later from ``data`` — so the lane is read from the
+#: same identifiers the audience resolver uses.
+_BUS_SCOPE_FIELDS = ("group_id", "scope_id", "session_id", "session_key", "run_id", "pocket_id")
+
+
+def _ordering_lane(envelope: dict) -> tuple[str, str]:
+    """The lane an envelope must stay ordered within.
+
+    Two envelopes sharing a lane are dispatched in stream order. Envelopes in
+    different lanes may overtake each other, which is the entire point.
+
+    Conservative by construction: when no scope can be identified, the lane
+    falls back to the event TYPE rather than to something unique. That keeps
+    same-type envelopes serial — the old behaviour — instead of silently
+    parallelising a stream whose ordering requirements we could not read.
+    Getting this wrong does not raise; it scrambles a user's reply.
+    """
+    kind = envelope.get("kind")
+    if kind == "ws":
+        return ("ws", str(envelope.get("scope_id", "")))
+    if kind == "bus":
+        data = envelope.get("data") or {}
+        if isinstance(data, dict):
+            for field in _BUS_SCOPE_FIELDS:
+                value = data.get(field)
+                if value:
+                    return ("bus", str(value))
+        return ("bus-type", str(envelope.get("type", "")))
+    # Unknown kinds are forward-compatible no-ops in _dispatch, but keep them
+    # in one lane so a newer worker's stream can't fan out unbounded.
+    return ("unknown", str(kind))
+
+
+async def _run_lane(redis, entries: list[tuple[str, dict | None]]) -> None:
+    """Dispatch one lane's envelopes in order, acking each as it finishes."""
+    for entry_id, envelope in entries:
+        try:
+            if envelope is not None:
+                await _dispatch(envelope)
+        except Exception:
+            logger.exception("xproc dispatch failed for entry %s", entry_id)
+        finally:
+            # Always ack — a bad envelope must not stall the stream. Worst
+            # case the side-effect is missed once and the user observes a
+            # one-off glitch; better than blocking forever.
+            try:
+                await redis.xack(XPROC_STREAM, XPROC_GROUP, entry_id)
+            except Exception:
+                logger.debug("xproc xack failed for %s", entry_id, exc_info=True)
 
 
 async def _dispatch(envelope: dict) -> None:

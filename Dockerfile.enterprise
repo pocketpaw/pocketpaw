@@ -1,71 +1,39 @@
 # Dockerfile.enterprise — sovereign per-tenant PocketPaw Enterprise image.
-# Created: 2026-06-10 (sov/w1a-deploy).
 #
 # WHY a separate Dockerfile (vs the root Dockerfile): the root image is the
 # OSS-default single-user build. This one ships the FSL enterprise layer
-# (POCKETPAW_EDITION=enterprise) AND bundles the `kb` binary the cloud
-# knowledge-base features expect (POCKETPAW_KB_BIN) — neither of which belongs
-# in the lean OSS image. Everything the root Dockerfile hardened is PRESERVED:
-#   * POCKETPAW_ENV=production (W0e fail-fast on the default AUTH_SECRET / the
-#     legacy admin123 password),
-#   * POCKETPAW_LOCALHOST_AUTH_BYPASS=false,
-#   * non-root pocketpaw user, 0.0.0.0:8888 bind, healthcheck.
+# (POCKETPAW_EDITION=enterprise, a Cython-compiled, source-stripped wheel) plus the
+# toolchains the cloud features shell out to. Everything the root Dockerfile
+# hardened is PRESERVED: POCKETPAW_ENV=production (fail-fast on default secrets),
+# POCKETPAW_LOCALHOST_AUTH_BYPASS=false, non-root pocketpaw user, 0.0.0.0:8888
+# bind, healthcheck. The ENTRYPOINT (docker-entrypoint.enterprise.sh) generates and
+# persists a stable AUTH_SECRET on first run; CMD stays `pocketpaw`.
 #
-# Changes:
-#   - 2026-07-09 (chore/dp0-bake-wrangler, DP0-5): bake the `wrangler` CLI so the
-#     DYNAMIC-site provision path (`wrangler d1 migrations apply` in the
-#     provision_site job) and workers-mode deploy (`wrangler deploy`) run offline
-#     instead of `bunx`-fetching wrangler at publish time. A `wrangler` stage
-#     `bun add wrangler@<pin>`; the runtime COPYs its node_modules to /opt/wrangler,
-#     installs a shebang wrapper at /usr/local/bin/wrangler (execs Node on the real
-#     entry, like paw-sites-gen), VERIFIES it with `wrangler --version` at build
-#     time, and sets `PAW_CF_WRANGLER_CMD=wrangler`. Without this the migrate step of
-#     a live dynamic publish would try to network-fetch wrangler on the box.
-#   - 2026-06-25 (feat/paw-sites-prod-deploy, DEP-1 + DEP-2): the Paw Sites publish
-#     path shells out to the paw-sites generator (`paw-sites-gen`) + `bun` at
-#     publish time, and a generated ripple-track site installs `@ripple-ui/svelte`.
-#     This image previously shipped NONE of that toolchain, so every publish 500'd.
-#     Now bundled:
-#       * `bun` — COPY'd from the pinned `oven/bun:1.2-debian` image (no curl|bash),
-#         on PATH in the runtime stage.
-#       * `paw-sites-gen` — built in a `paw-sites` stage (vendor prebuilt tree, or
-#         clone+build) and COPY'd to /opt/paw-sites, symlinked at
-#         /usr/local/bin/paw-sites-gen. The generator is pure-Node (stdlib + local
-#         modules), so dist/ + templates/ + package.json is all it needs (no
-#         node_modules); it runs via `node`. On the CLONE path its package.json pins
-#         @ripple-ui/svelte = "file:../ripple" (absent in that stage), so the stage
-#         rewrites that one dep to the 0.5.0 tarball the `ripple` stage builds before
-#         `bun install` — the generator never imports ripple (string literals only),
-#         so this just satisfies the installer.
-#       * `@ripple-ui/svelte` tarball — built+packed in a `ripple` stage (vendor
-#         prebuilt .tgz, or clone+build+pack) and COPY'd to
-#         /opt/ripple-ui-svelte-0.5.0.tgz. Baked into
-#         `PAW_SITES_RIPPLE_DEP=file:/opt/ripple-ui-svelte-0.5.0.tgz` so the publish
-#         path rewrites the generated site's dep to a resolvable source, plus
-#         `PAW_SITES_MOTION_DEP` in lockstep with ripple's motion pin.
-#     Both sibling repos live OUTSIDE the pocketpaw build context, so each has a
-#     vendor/clone source switch (mirrors paw-enterprise/deploy/Dockerfile):
-#       * PAW_SITES_SOURCE / RIPPLE_SOURCE = `vendor` (default) COPYs a prebuilt
-#         tree from the build context (deploy/paw-sites/, deploy/ripple/), produced
-#         by scripts/vendor-paw-sites.sh + scripts/vendor-ripple-tarball.sh.
-#       * = `clone` (internal CI / Coolify, which HAS repo access) clones
-#         PAW_SITES_REPO / RIPPLE_REPO and builds in-image. The vendored trees are
-#         gitignored artifacts, so Coolify (which clones pocketpaw dev) MUST pass
-#         `--build-arg PAW_SITES_SOURCE=clone --build-arg RIPPLE_SOURCE=clone`.
-#         See deploy/README-build.md.
-#   - 2026-06-10 (sov/w1a-deploy): Added an ENTRYPOINT
-#     (docker-entrypoint.enterprise.sh) that generates + persists a stable
-#     AUTH_SECRET on first run, so the production-posture auth gate (W0e) is
-#     satisfied by a plain `docker compose up` with no hand-crafted secrets.
-#     CMD stays `pocketpaw` so the command is still overridable. Bundled the kb
-#     binary + POCKETPAW_KB_BIN, and the FSL enterprise layer.
+# Bundled toolchains, each pinned and verified at build time:
+#   * `kb` (kb-go) for the knowledge-base features (POCKETPAW_KB_BIN).
+#   * Node 22 + the claude / codex CLIs (POCKETPAW_CLAUDE_SDK_CLI_PATH).
+#   * Paw Sites publish: `bun`, the `paw-sites-gen` generator (+ starters,
+#     recipes, browser-check harness, allowlist.json) at /opt/paw-sites, the
+#     @ripple-ui/svelte tarball (PAW_SITES_RIPPLE_DEP) and `wrangler`
+#     (PAW_CF_WRANGLER_CMD) so a publish never network-fetches a CLI.
+#   * The paw-fx effects registry at /opt/paw-fx (PAW_FX=1 makes it required).
+#   * Sites motion video: the `hyperframes` CLI (POCKETPAW_HYPERFRAMES_CMD), its
+#     pinned chrome-headless-shell (downloaded at build time into the pocketpaw
+#     user's ~/.cache/hyperframes) and ffmpeg.
+# Bin wrappers are shebang scripts that exec Node on the package entry, because
+# callers exec without a shell and the entries carry no shebang.
+#
+# paw-sites and ripple are sibling repos outside the build context, so each has a
+# vendor/clone switch: PAW_SITES_SOURCE / RIPPLE_SOURCE = `vendor` (default) COPYs
+# prebuilt trees from deploy/ (scripts/vendor-paw-sites.sh,
+# scripts/vendor-ripple-tarball.sh); `clone` (internal CI / Coolify, which has repo
+# access and no vendored artifacts) builds in-image. See deploy/README-build.md.
+#
 # Build:
-#   # Vendor the generator + ripple tarball into the build context first (once):
 #   scripts/vendor-paw-sites.sh && scripts/vendor-ripple-tarball.sh
 #   docker compose -f docker-compose.enterprise.yml build
-#   # or directly:
-#   docker build -f Dockerfile.enterprise -t pocketpaw-ee .
-#   # Internal CI / Coolify (has private-repo access — no vendoring needed):
+#   # or: docker build -f Dockerfile.enterprise -t pocketpaw-ee .
+#   # Coolify / internal CI:
 #   docker build -f Dockerfile.enterprise \
 #     --build-arg PAW_SITES_SOURCE=clone --build-arg RIPPLE_SOURCE=clone \
 #     -t pocketpaw-ee .
@@ -77,7 +45,7 @@
 # `go install` on the host. Pinned (not @latest) for reproducible builds; bump
 # KB_GO_VERSION to upgrade.
 FROM golang:1.25-bookworm AS kb
-ARG KB_GO_VERSION=v0.1.0
+ARG KB_GO_VERSION=v0.3.0
 # Produces /go/bin/kb-go; we expose it as `kb` (the name the resolver prefers).
 RUN go install github.com/qbtrix/kb-go@${KB_GO_VERSION} && \
     cp /go/bin/kb-go /usr/local/bin/kb
@@ -89,6 +57,20 @@ FROM node:22.14.0-slim AS node
 # Pre-install CLI-based agent backends so they're cached in this layer
 RUN npm install -g @anthropic-ai/claude-code @openai/codex && \
     npm cache clean --force
+
+# ---- hyperframes stage ----
+# The HTML-to-MP4 renderer behind Sites motion video
+# (ee/pocketpaw_ee/sites/motion_video.py). Installed here so a render never runs
+# `npx` against the registry. Pinned: the version must match
+# motion_video.HYPERFRAMES_VERSION. Its native deps (sharp, esbuild) are built for
+# this debian/glibc base, which matches the runtime stage.
+FROM node AS hyperframes
+ARG HYPERFRAMES_VERSION=0.8.181
+WORKDIR /opt/hyperframes
+RUN npm init -y >/dev/null \
+    && npm install --omit=dev --no-audit --no-fund hyperframes@${HYPERFRAMES_VERSION} \
+    && test -f /opt/hyperframes/node_modules/hyperframes/bin/hyperframes.mjs \
+    && npm cache clean --force
 
 # ---- bun stage ----
 # Pin the bun image so the runtime stage can COPY a known bun binary (no
@@ -220,6 +202,29 @@ RUN if [ "$PAW_SITES_SOURCE" = "clone" ]; then \
     cp -R /build/paw-sites/templates /out/templates && \
     cp /build/paw-sites/package.json /out/package.json && \
     test -d /out/templates || ( echo "ERROR: generator templates/ missing — runtime generate would fail." && exit 1 )
+# The base app templates (starters/) and backend recipes (recipes/) that
+# `paw-sites-gen template-copy` / `apply-recipe` read. Copied without installs or build
+# output (node_modules, .wrangler, .paw), which only a clone build could carry.
+RUN mkdir -p /out/starters /out/recipes && \
+    ( cd /build/paw-sites && tar -cf - --exclude=node_modules --exclude=.wrangler --exclude=.paw starters recipes ) \
+      | tar -xf - -C /out && \
+    test -f /out/starters/astro/paw.template.json \
+      || ( echo "ERROR: paw-sites starters/ missing; template-copy would fail." && exit 1 )
+# PP-2 (2026-09-24): the browser verification harness. Four files, no node_modules —
+# the sandbox installs it from the frozen lockfile. Absent (an older generator), the
+# browser layer reports unverified/harness_unavailable rather than failing the image.
+RUN if [ -f /build/paw-sites/harness/browser-check.mjs ]; then \
+      mkdir -p /out/harness && \
+      for f in browser-check.mjs package.json bun.lock bunfig.toml; do \
+        [ ! -f "/build/paw-sites/harness/$f" ] || cp "/build/paw-sites/harness/$f" /out/harness/; \
+      done ; \
+    else echo "WARN: paw-sites harness/ missing; browser verification will be unverified" ; fi
+# PP-1 (2026-09-24): the generator's own dependency pins, read by
+# pocketpaw_ee.sites.vetted_pins from /opt/paw-sites/allowlist.json. Generated here so
+# the vendor and clone paths both get it. A generator without the subcommand leaves
+# no file and pocketpaw falls back to its pinned constants.
+RUN ( bun /out/dist/cli.js allowlist > /out/allowlist.json && test -s /out/allowlist.json ) \
+    || ( rm -f /out/allowlist.json && echo "WARN: paw-sites-gen allowlist unavailable; using pocketpaw's fallback pins" )
 
 # ---- Builder stage ----
 FROM python:3.12-slim AS builder
@@ -252,9 +257,20 @@ COPY ee/ ee/
 # front-end) + wheel (RECORD-safe repack) for the release script. `rm -rf ee/dist`
 # drops any wheel that rode in from the build context so the glob matches one.
 RUN pip install --no-cache-dir uv wheel
+# `[extraction]` is NOT optional in practice, despite the name. It carries the
+# libraries ee/pocketpaw_ee/cloud/extraction lazy-imports — pypdf, python-docx,
+# trafilatura, pymupdf — and without them a PDF or .docx a user attaches in chat
+# raises inside the adapter, the attachment loop swallows it, and the agent is
+# handed NO entry for that file. The user sees a reply saying no document was
+# attached. Measured 2026-09-01: `.[all]` above does not cover this (it is a
+# curated list that never references `[knowledge]`, where root keeps pypdf), and
+# a bare wheel install takes no extras, so the image had none of them.
+#
+# The extras ride the wheel path, which pip accepts. `rm -rf ee/dist` above
+# guarantees the glob matches exactly one file, so the substitution is safe.
 RUN rm -rf ee/dist \
     && bash ee/scripts/build_compiled_wheel.sh \
-    && pip install --no-cache-dir ee/dist/pocketpaw_ee-*.whl
+    && pip install --no-cache-dir "$(ls ee/dist/pocketpaw_ee-*.whl)[extraction]"
 
 # Install Playwright Chromium browser
 RUN playwright install chromium
@@ -284,6 +300,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxshmfence1 \
     libx11-xcb1 \
     fonts-liberation \
+    # Sites motion video: the hyperframes renderer encodes with ffmpeg/ffprobe
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the kb binary from the kb-go stage. The resolver finds it on PATH as
@@ -295,8 +313,9 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
-    ln -s /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude && \
-    ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+    ln -sf "/usr/local/lib/node_modules/@anthropic-ai/claude-code/$(node -e "const b=require('/usr/local/lib/node_modules/@anthropic-ai/claude-code/package.json').bin;process.stdout.write(typeof b==='string'?b:b.claude)")" /usr/local/bin/claude && \
+    ln -sf "/usr/local/lib/node_modules/@openai/codex/$(node -e "const b=require('/usr/local/lib/node_modules/@openai/codex/package.json').bin;process.stdout.write(typeof b==='string'?b:b.codex)")" /usr/local/bin/codex && \
+    claude --version
 
 # --- Paw Sites publish toolchain (DEP-1 + DEP-2) ---
 # bun: the Sites publish path runs `bun install` + `bun run build` on the generated
@@ -313,6 +332,15 @@ COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 # `join(dirname(import.meta.url), '..', 'templates')` correctly finds
 # /opt/paw-sites/templates.
 COPY --from=paw-sites /out /opt/paw-sites
+# paw-fx effects registry (feat/fx-mcp-server). deploy/paw-fx/ always exists (a
+# tracked .gitkeep), so the COPY never fails; scripts/vendor-paw-fx.sh stages
+# ../paw-fx/dist/registry into deploy/paw-fx/registry. PAW_FX=1 makes a missing
+# registry a build FAILURE; the default (0) skips the check so existing builds
+# don't break and the pocketpaw_fx MCP server serves an empty registry.
+ARG PAW_FX=0
+COPY deploy/paw-fx/ /opt/paw-fx/
+RUN [ "$PAW_FX" != "1" ] || test -f /opt/paw-fx/registry/registry.json \
+    || ( echo "ERROR: PAW_FX=1 but deploy/paw-fx/registry/registry.json is missing. Run scripts/vendor-paw-fx.sh first." && exit 1 )
 RUN printf '#!/bin/sh\nexec node /opt/paw-sites/dist/cli.js "$@"\n' > /usr/local/bin/paw-sites-gen && \
     chmod 0755 /usr/local/bin/paw-sites-gen
 # ripple tarball: a generated ripple-track site installs @ripple-ui/svelte from the
@@ -329,6 +357,14 @@ COPY --from=wrangler /wrangler/node_modules /opt/wrangler/node_modules
 RUN printf '#!/bin/sh\nexec node /opt/wrangler/node_modules/wrangler/bin/wrangler.js "$@"\n' > /usr/local/bin/wrangler \
     && chmod 0755 /usr/local/bin/wrangler \
     && CI=1 WRANGLER_SEND_METRICS=false /usr/local/bin/wrangler --version
+
+# hyperframes (Sites motion video): wrapper on PATH, verified here. The pinned
+# chrome-headless-shell it renders with is fetched after the USER switch below so
+# it lands in the pocketpaw user's cache, where the CLI looks for it.
+COPY --from=hyperframes /opt/hyperframes /opt/hyperframes
+RUN printf '#!/bin/sh\nexec node /opt/hyperframes/node_modules/hyperframes/bin/hyperframes.mjs "$@"\n' > /usr/local/bin/hyperframes \
+    && chmod 0755 /usr/local/bin/hyperframes \
+    && HYPERFRAMES_NO_TELEMETRY=1 HYPERFRAMES_NO_UPDATE_CHECK=1 /usr/local/bin/hyperframes --version
 
 # Copy venv from builder
 COPY --from=builder /opt/venv /opt/venv
@@ -354,6 +390,11 @@ RUN groupadd --system pocketpaw && \
 USER pocketpaw
 WORKDIR /home/pocketpaw
 
+# The renderer's pinned Chrome, into ~/.cache/hyperframes/chrome. Fails the build
+# when the download or the binary is broken rather than at the first render.
+RUN HYPERFRAMES_NO_TELEMETRY=1 HYPERFRAMES_NO_UPDATE_CHECK=1 hyperframes browser ensure \
+    && test -x "$(HYPERFRAMES_NO_TELEMETRY=1 HYPERFRAMES_NO_UPDATE_CHECK=1 hyperframes browser path | tail -n1)"
+
 # Bind to 0.0.0.0 so the container port is reachable from the host
 ENV POCKETPAW_WEB_HOST=0.0.0.0
 ENV POCKETPAW_WEB_PORT=8888
@@ -370,6 +411,11 @@ ENV POCKETPAW_ENV=production
 ENV POCKETPAW_KB_BIN=/usr/local/bin/kb
 # Agent-created files land here — bind-mount to access them on the host
 ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
+# The Claude SDK backend runs the CLI bundled in the claude-agent-sdk wheel
+# unless told otherwise, and that CLI lags new models ("Claude Code 2.1.276 does
+# not support this model; version 2.1.280 or newer is required"). Point it at
+# the npm-installed CLI above, which each build takes at its latest release.
+ENV POCKETPAW_CLAUDE_SDK_CLI_PATH=/usr/local/bin/claude
 
 # --- Paw Sites publish toolchain config (DEP-2) ---
 # A generated ripple-track site pins an unpublished @ripple-ui/svelte; the publish
@@ -385,6 +431,17 @@ ENV PAW_SITES_MOTION_DEP=^12.40.0
 # wrangler wrapper so `wrangler d1 migrations apply` / `wrangler deploy` run offline
 # — no `bunx wrangler@...` network fetch at publish time (DP0-5).
 ENV PAW_CF_WRANGLER_CMD=wrangler
+# Sites motion video runs the baked CLI, never `npx` at render time. Telemetry and
+# the update check stay off: a render must not phone home. The render browser's
+# network isolation is NOT done here: motion_video preloads
+# vendor/hf-network-guard.cjs into the CLI (dead proxy + no DNS for Chrome, only
+# the CLI's own project server reachable) and hands it an allow-listed env. An
+# OS-level `unshare -n` was rejected: it needs user namespaces, which Docker's
+# default seccomp profile denies to this non-root user.
+ENV POCKETPAW_HYPERFRAMES_CMD=hyperframes
+ENV HYPERFRAMES_NO_TELEMETRY=1
+ENV HYPERFRAMES_NO_UPDATE_CHECK=1
+ENV HYPERFRAMES_NO_AUTO_INSTALL=1
 
 EXPOSE 8888
 

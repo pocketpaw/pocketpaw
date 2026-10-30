@@ -17,6 +17,7 @@ from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.auth.core import UserCreate, UserManager, get_user_db
 from pocketpaw_ee.cloud.auth.router import router as auth_router
+from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.workspace import Workspace
 from pocketpaw_ee.cloud.workspace import domains as domains_service
@@ -58,6 +59,10 @@ def _resolver_raising() -> AsyncMock:
 def _build_app() -> FastAPI:
     app = FastAPI()
     add_error_handler(app)
+    # The workspace router carries Depends(require_license). Entitlement is a
+    # different question from authorization; without this every route 403s on
+    # "no license key" and the RBAC denials below would pass vacuously.
+    app.dependency_overrides[require_license] = lambda: None
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(workspace_router, prefix="/api/v1")
     return app
@@ -349,6 +354,7 @@ async def test_member_cannot_add_domain(member_client):
         json={"domain": "acme.com"},
     )
     assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "workspace.insufficient_role"
 
 
 @pytest.mark.asyncio
@@ -364,5 +370,7 @@ async def test_member_cannot_verify_or_delete(member_client, env):
 
     resp = await member.post(f"/api/v1/workspaces/{ws_id}/domains/acme.com/verify")
     assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "workspace.insufficient_role"
     resp = await member.delete(f"/api/v1/workspaces/{ws_id}/domains/acme.com")
     assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "workspace.insufficient_role"

@@ -1,5 +1,14 @@
 # Instinct data models — decision pipeline types.
 # Created: 2026-03-28
+# Updated: 2026-07-31 (AL-1, agent ledger spine) — added an ADDITIVE, optional
+#   ``Action.actor_agent_id``. Until now the only record of WHICH agent proposed
+#   an action was a free-text ``trigger.source`` string ("paw_bar:<widget_id>",
+#   "belt:develop") — parseable by a human, not joinable by a query. That gap is
+#   why "what did my agents do for me?" could not be asked: the approval
+#   pipeline every agent kind funnels through did not carry the agent. The field
+#   is a plain str defaulting to "" and nothing validates it as non-empty on
+#   purpose: an unattributed proposal must stay legal, land its row, and show up
+#   in an honest "unattributed" bucket rather than being dropped or blocked.
 # Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — added an
 #   ADDITIVE, nullable ``Action.scope_type`` so an Action can be scoped to a
 #   GENERIC artifact (pocket / site / dashboard / …) instead of being implicitly
@@ -133,6 +142,14 @@ class Action(BaseModel):
     # scope_type. Purely additive — nothing was renamed, so the pocket pipeline
     # is unchanged.
     scope_type: str | None = None
+    # ``actor_agent_id`` (AL-1) names the AGENT that proposed this action, so an
+    # approval can be attributed to the worker that asked for it rather than
+    # inferred from a trigger string. Stamped best-effort at the propose call
+    # sites that know it (paw-bar reads its widget's bound agent; a chat run
+    # knows its own; a belt station knows its identity). "" is legal and
+    # permanent-by-design: an action nobody could attribute still belongs in the
+    # ledger, counted honestly as unattributed.
+    actor_agent_id: str = ""
     pocket_id: str
     title: str
     description: str

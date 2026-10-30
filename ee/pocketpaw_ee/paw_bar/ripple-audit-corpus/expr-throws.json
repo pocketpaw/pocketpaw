@@ -1,0 +1,30 @@
+{
+  "about": "A props expression the evaluator throws on (toFixed past 100). Reported once, as exprThrows, not again as a leftover. Core only.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "{state.price.toFixed(200)}"
+          }
+        }
+      ]
+    },
+    "state": {
+      "price": 5
+    }
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "exprThrows",
+        "path": "/ui/children/0/props/text",
+        "message": "`{state.price.toFixed(200)}` throws when evaluated, so the prop renders as nothing"
+      }
+    ],
+    "python": []
+  }
+}

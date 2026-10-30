@@ -18,15 +18,19 @@ descriptor magic.
 
 #10: ``arq_executor._pool`` had no aclose hook — a web process that ever
      enqueued a job leaked the connection through shutdown.
+
+Changes (2026-10-01, CN-4): the arq pool moved to ``_core.redis_client``
+(``get_arq_pool`` / ``close_arq_pool``); the #10 tests follow it there.
 """
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import AsyncMock
 
 import pytest
 from arq.connections import RedisSettings
-from pocketpaw_ee.cloud.chat.runs import arq_executor
+from pocketpaw_ee.cloud._core import redis_client
 from pocketpaw_ee.cloud.chat.runs import worker as worker_mod
 
 pytestmark = pytest.mark.asyncio
@@ -78,28 +82,28 @@ async def test_redis_settings_helper_parses_env(monkeypatch):
 
 
 async def test_close_pool_aclose_called_when_pool_exists(monkeypatch):
-    """close_pool must actually invoke aclose() on the cached pool, then
-    null the reference so subsequent _get_pool builds a fresh one."""
-    arq_executor._reset_for_tests()
+    """close_arq_pool must actually invoke aclose() on the cached pool, then
+    null the reference so subsequent get_arq_pool builds a fresh one."""
+    redis_client._reset_for_tests()
 
     fake_pool = AsyncMock()
     fake_pool.aclose = AsyncMock()
-    monkeypatch.setattr(arq_executor, "_pool", fake_pool)
+    monkeypatch.setattr(redis_client, "_arq_pool", fake_pool)
 
-    await arq_executor.close_pool()
+    await redis_client.close_arq_pool()
 
     fake_pool.aclose.assert_awaited_once()
-    assert arq_executor._pool is None
+    assert redis_client._arq_pool is None
 
 
 async def test_close_pool_is_safe_when_no_pool_exists():
-    """Web processes that never enqueued a Tier 2 job will call close_pool
+    """Web processes that never enqueued a Tier 2 job will call close_arq_pool
     on shutdown — it must be a no-op, not raise AttributeError."""
-    arq_executor._reset_for_tests()
+    redis_client._reset_for_tests()
 
     # Should not raise.
-    await arq_executor.close_pool()
-    assert arq_executor._pool is None
+    await redis_client.close_arq_pool()
+    assert redis_client._arq_pool is None
 
 
 async def test_close_pool_swallows_aclose_failure(monkeypatch, caplog):
@@ -107,16 +111,16 @@ async def test_close_pool_swallows_aclose_failure(monkeypatch, caplog):
     paths can't afford to raise."""
     import logging
 
-    arq_executor._reset_for_tests()
+    redis_client._reset_for_tests()
 
     fake_pool = AsyncMock()
     fake_pool.aclose = AsyncMock(side_effect=RuntimeError("redis lost"))
-    monkeypatch.setattr(arq_executor, "_pool", fake_pool)
+    monkeypatch.setattr(redis_client, "_arq_pool", fake_pool)
 
-    with caplog.at_level(logging.DEBUG, logger="pocketpaw_ee.cloud.chat.runs.arq_executor"):
-        await arq_executor.close_pool()  # must not raise
+    with caplog.at_level(logging.DEBUG, logger="pocketpaw_ee.cloud._core.redis_client"):
+        await redis_client.close_arq_pool()  # must not raise
 
-    assert arq_executor._pool is None  # ref cleared even on failure
+    assert redis_client._arq_pool is None  # ref cleared even on failure
 
 
 # --- run job_timeout: arq's 300s default cancelled long agent runs ----------
@@ -158,3 +162,115 @@ async def test_job_timeout_helper_invalid_or_nonpositive_falls_back(monkeypatch)
         assert worker_mod._job_timeout_seconds() == worker_mod._DEFAULT_RUN_JOB_TIMEOUT_SECONDS, (
             f"{bad!r} should fall back to the default"
         )
+
+
+# --- POCKETPAW_ARQ_MAX_JOBS: the cluster-wide concurrency ceiling ----------
+#
+# Added 2026-09-01 (feat/scale-concurrency-knobs). ``max_jobs`` was previously
+# UNSET on WorkerSettings, so arq's own default of 10 applied invisibly and
+# bounded every registered lane at once. These pin both halves of the fix: the
+# attribute reaches arq at all (same ``__dict__`` contract as redis_settings),
+# and the helper is fail-soft in the same way ``_job_timeout_seconds`` is.
+
+
+async def test_worker_settings_max_jobs_is_a_plain_int_in_dict():
+    """arq reads ``settings_cls.__dict__`` directly, so ``max_jobs`` must be a
+    concrete int there — not a property, not a descriptor. Same reason as
+    ``redis_settings`` above; a descriptor would be handed straight to
+    ``Worker.__init__`` and crash ``BoundedSemaphore(max_jobs + 1)``."""
+    raw = worker_mod.WorkerSettings.__dict__.get("max_jobs")
+    assert isinstance(raw, int), (
+        f"WorkerSettings.max_jobs in __dict__ is {type(raw).__name__}, expected int. "
+        "arq bypasses the descriptor protocol via __dict__ access."
+    )
+    assert raw > 0
+
+
+async def test_max_jobs_helper_default(monkeypatch):
+    monkeypatch.delenv("POCKETPAW_ARQ_MAX_JOBS", raising=False)
+    assert worker_mod._max_jobs() == worker_mod._DEFAULT_MAX_JOBS
+
+
+async def test_max_jobs_default_matches_arq_own_default():
+    """The default must stay arq's own (10), so merely shipping this knob does
+    not change the concurrency of any existing deploy."""
+    from arq.worker import Worker
+
+    arq_default = inspect.signature(Worker.__init__).parameters["max_jobs"].default
+    assert worker_mod._DEFAULT_MAX_JOBS == arq_default
+
+
+async def test_max_jobs_helper_env_override(monkeypatch):
+    monkeypatch.setenv("POCKETPAW_ARQ_MAX_JOBS", "40")
+    assert worker_mod._max_jobs() == 40
+
+
+async def test_max_jobs_helper_invalid_or_nonpositive_falls_back(monkeypatch):
+    """0 would wedge the worker into accepting no jobs and a negative would
+    crash arq's BoundedSemaphore, so neither may reach it."""
+    for bad in ("not-a-number", "-5", "0", "", "  "):
+        monkeypatch.setenv("POCKETPAW_ARQ_MAX_JOBS", bad)
+        assert worker_mod._max_jobs() == worker_mod._DEFAULT_MAX_JOBS, (
+            f"{bad!r} should fall back to the default"
+        )
+
+
+# --- H7: the health key has to expire fast enough to mean anything ---------
+#
+# arq refreshes a Redis key every ``health_check_interval`` with a TTL of
+# interval + 1, and ``arq --check`` exits 0 while it is alive. The container
+# healthcheck in deploy/coolify/docker-compose.yaml is built on that command,
+# so the interval is what decides whether the probe can ever fail.
+
+
+async def test_worker_settings_health_check_interval_is_a_plain_int_in_dict():
+    """Same arq-reads-__dict__ contract as ``max_jobs`` and ``redis_settings``."""
+    raw = worker_mod.WorkerSettings.__dict__.get("health_check_interval")
+    assert isinstance(raw, int), (
+        f"WorkerSettings.health_check_interval in __dict__ is {type(raw).__name__}, "
+        "expected int. arq bypasses the descriptor protocol via __dict__ access."
+    )
+    assert raw > 0
+
+
+async def test_the_health_key_expires_far_faster_than_arq_would_leave_it():
+    """The whole point of the knob, stated as a number.
+
+    arq's own default is an hour. A container healthcheck polling every 30
+    seconds against an hour-old key reports healthy for the rest of the hour
+    after the worker dies, which is worse than having no probe: it looks like
+    coverage. Anything at or above arq's default is that bug.
+    """
+    from arq.worker import Worker
+
+    arq_default = inspect.signature(Worker.__init__).parameters["health_check_interval"].default
+
+    assert worker_mod._DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS < arq_default
+    assert worker_mod._DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS <= 60, (
+        "the compose healthcheck polls on a 30s interval; a refresh period "
+        "above a minute makes the probe flap or lie"
+    )
+
+
+async def test_health_check_interval_helper_default(monkeypatch):
+    monkeypatch.delenv("POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL", raising=False)
+    assert (
+        worker_mod._health_check_interval_seconds()
+        == worker_mod._DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+    )
+
+
+async def test_health_check_interval_helper_env_override(monkeypatch):
+    monkeypatch.setenv("POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL", "15")
+    assert worker_mod._health_check_interval_seconds() == 15
+
+
+async def test_health_check_interval_helper_invalid_or_nonpositive_falls_back(monkeypatch):
+    """A non-positive interval turns arq's health loop into a busy wait, so it
+    must never reach arq."""
+    for bad in ("not-a-number", "-5", "0", "", "  "):
+        monkeypatch.setenv("POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL", bad)
+        assert (
+            worker_mod._health_check_interval_seconds()
+            == worker_mod._DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+        ), f"{bad!r} should fall back to the default"

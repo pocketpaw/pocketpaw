@@ -168,3 +168,36 @@ async def test_version_hook_failure_does_not_break_merge(
     assert fake_doc.save_calls == 1
     # No version row was written, but the merge persisted.
     assert await ArtifactVersion.find().count() == 0
+
+
+async def test_merge_labels_the_version(beanie_test_db, monkeypatch: pytest.MonkeyPatch):
+    """The row carries a label, so the timeline is not a bare list of ordinals.
+
+    Every write_draft callsite passed label=None, so a site with six versions
+    offered its owner "v1" through "v6" and no way to tell which one to roll
+    back to. The rippleSpec merge is a page edit and says so.
+    """
+    fake_doc = _FakeDoc(copy.deepcopy(_base_spec()))
+    _wire_stubs(monkeypatch, fake_doc)
+
+    await pockets_service.merge_spec(
+        workspace_id=WS_ID,
+        user_id=USER_ID,
+        pocket_id=POCKET_ID,
+        body={"merge": {"state": {"draft": "hello"}}},
+    )
+
+    draft = await versions.get_draft(scope_type="pocket", scope_id=POCKET_ID)
+    assert draft is not None
+    assert draft.label == "Edited the page"
+
+
+async def test_source_edit_label_names_the_file_not_the_path():
+    """A source edit names the file it touched — basename only.
+
+    The full path is what the callsite has, but the timeline row is narrow and
+    "src/lib/components/Hero.svelte" pushes the author and date off the end for
+    no gain: the directory is the same for every row.
+    """
+    assert pockets_service._edit_label("src/lib/components/Hero.svelte") == "Edited Hero.svelte"
+    assert pockets_service._edit_label("index.html") == "Edited index.html"

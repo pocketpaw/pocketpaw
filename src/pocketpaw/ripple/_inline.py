@@ -1,72 +1,25 @@
-# pocketpaw/ripple/_inline.py — Canonical system prompt for chat-inline Ripple.
+# pocketpaw/ripple/_inline.py — the chat-only parts of the chat-inline Ripple
+# system prompt.
 #
-# This is the SOURCE OF TRUTH for the chat-inline Ripple system prompt.
-# Imported by pocketpaw_ee/cloud/chat/agent_service.py::build_context_block.
-# Edits land here; the agent service does not duplicate any of this content.
+# Imported by pocketpaw_ee/cloud/chat/agent_service.py, which builds the chat
+# prompt as INLINE_RIPPLE_PROMPT_HEAD, then the widget block generated from the
+# vendored Ripple manifest (the Paw Bar generators widget_relevance.core_lines and
+# index_lines, and concierge_runtime.ripple_rules for the chat card profile), then
+# INLINE_RIPPLE_PROMPT_TAIL. Core cannot import pocketpaw_ee, so the widget block
+# is not here; INLINE_RIPPLE_SYSTEM_PROMPT is head plus tail without it.
 #
 # Surface contract: cloud chat (DM / group / pocket-chat scopes). The host
-# (paw-enterprise's MarkdownRenderer) intercepts `emit chat.send` events and
-# posts the value as the user's next message — buttons in chat-inline specs
-# ARE supported and drive the conversation loop.
+# (paw-enterprise's chat ripple adapter) handles `emit chat.send` (posts the
+# value as the user's next message), the flow.* emits, navigate, toast and api.
+# Any other emit name, and pin / unpin, does nothing in chat, so the prompt
+# never advertises them.
 #
-# Composition: surface-specific framing here (intro, chat.send loop, fence
-# rules) + the shared design language from pocketpaw.ripple._design (widget
-# catalog, canonical shapes, full-pane rule, theme, design-quality bar).
-#
-# Modified: 2026-05-21 — prepended a ground-truth / do-not-mock rule to
-# the inline system prompt. Reworked from PR #1106.
-# Modified: 2026-05-31 (fix/bridge-start-flow-to-chat, RFC 13) — added
-#   `_MULTI_STEP_FLOW_RULE`: for any multi-step / wizard / step-by-step /
-#   collect-then-act flow, call the `start_flow` tool (descriptor only) and
-#   emit its returned doc verbatim. Do NOT hand-author nested chain /
-#   chain_map trees and do NOT fake a flow with a single `set`-stepped spec
-#   — that anti-pattern renders step 1 and never advances. Wired into the
-#   assembled prompt + the final self-check.
-# Modified: 2026-06-15 (feat/chain-flow-v2) — rewrote `_MULTI_STEP_FLOW_RULE`
-#   for CHAIN FLOW v2. The rule now teaches STATE-TRANSITION authoring ("think
-#   in states, not screens"): the agent describes a FLAT step-graph to
-#   `start_flow` (a `flow` id, an `entry`, and a `steps` list where each step
-#   points at the next by id via `next` / `branch`), and the builder owns the
-#   nesting + deep-validation. Dropped the 2-template ceiling and the
-#   "no-template-fit → ask-user-questions" fallback (there is no fixed template
-#   list anymore — describe the graph the request needs). Appended a
-#   state-grammar primitives block and two copy-paste flat-descriptor skeletons
-#   (a branching intake and an action-rich mini-app). `invoke_tool` is marked as
-#   possibly-unavailable until the tool registry ships; call_binding /
-#   create_pocket / api / emit / navigate are the actions that work now.
-# Modified: 2026-06-15 (feat/chain-flow-v2 — REAL-SCENARIO SKELETONS) — the
-#   genesis "biggest lever": added an ACTION GRAMMAR callout block (a terminal
-#   `complete` uses `action:` not `type:`/`kind:`; approve/reject/fulfill/take-
-#   action means a `call_binding` ACTION BUTTON, never a yes/no select; use
-#   `call_binding` for backend/connector data, not the possibly-unavailable
-#   `invoke_tool`) and three copy-paste skeletons for the captain's real
-#   internal-team scenarios, each ending in a REAL action (not Q&A): APPROVE /
-#   REJECT (call_binding buttons), FULFILL ORDER (collect → confirm with a
-#   call_binding action), and ACT ON CONNECTOR/BACKEND DATA (call_binding
-#   against the pocket's backend, explicitly NOT invoke_tool). Kept the two
-#   existing skeletons (A branching intake, B action-rich mini-app).
-# Modified: 2026-06-15 (feat/invoke-tool-v1, v2) — refreshed the two
-#   `invoke_tool` notes now that the verb is live. It is no longer
-#   "possibly-unavailable until the tool registry ships": a connector READ
-#   grant fires immediately; a connector WRITE grant is PROPOSED for the user's
-#   approval (it lands in their Instinct Tray and fires on approve) rather than
-#   running inline. `call_binding` remains the first reach for backend/connector
-#   data; `invoke_tool` is for a named tool/connector grant the owner allow-listed.
-# Modified: 2026-06-16 (feat/invoke-tool-v1 — close the in-chat approval loop)
-#   — added `_INSTINCT_TRAY_RULE`: when the agent renders the pending-Instinct-
-#   approvals view (the items `instinct_pending` returns), the Approve / Reject
-#   buttons MUST be bound to the backend Instinct decision routes as `api`
-#   actions — POST /api/v1/instinct/actions/{id}/approve and .../reject — so the
-#   HUMAN's click finalizes the decision directly (the backend re-validates
-#   workspace + params_hash + idempotency and fires the connector write via
-#   execute_approved_external_action). Explicitly NOT an `emit`/`chat.send`
-#   round-trip and NOT an autonomous agent verb — the user's click IS the
-#   approval, which is the whole point of the gate. Also teaches the Tray route:
-#   the pending-approvals list is at /deep-work, surfaced via a `navigate`
-#   button + referenced in the text guidance. Spliced into the assembled prompt
-#   after `_MULTI_STEP_FLOW_RULE` and added to the final self-check.
+# Head: ground-truth rule, preamble (UI-first rule, spec shape, chat.send loop).
+# Tail: the get_widget_spec rule for widgets the prompt lists without props, the
+# ask-user-questions shape, the each-items rule, the multi-step flow rule
+# (`start_flow`), the Instinct tray rule, and the final self-check. Mutation
+# anchors in tests/mutations/prompt_truth.json pin some sentences here.
 
-from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
 _GROUND_TRUTH_RULE = """\
 <ground-truth>
@@ -163,7 +116,7 @@ Only skip the ui-spec when:
 ## UI design principles
 
 1. Actionable — every component must lead somewhere (emit, navigate, etc.)
-2. Minimal — no clutter; one clear purpose per spec
+2. Focused — no clutter; one clear purpose per spec
 3. Structured — use proper layout widgets, not text rows
 4. Progressive — break complex flows into steps; one spec per turn
 5. Loop-driven — every action feeds back into the next turn via chat.send
@@ -223,18 +176,17 @@ Use `{event}` to forward the chosen value from a select / multi-select
     "on_change": { "action": "emit", "target": "chat.send",
                    "value": "I'd like a {event}" } }
 
-Standard channels (host-recognized targets on `emit`):
-- `chat.send`    — post the value as the user's next message in this thread.
-- `chat.suggest` — surface as a tappable quick-reply chip (host's call).
-- `tool.invoke`  — call a registered tool by name; payload is `{name, args}`.
-- `nav.open`     — navigate; or use the dedicated `navigate` action.
+The only `emit` target the chat host handles is `chat.send` (plus the
+flow.* verbs `start_flow` writes for you). Any other emit name, and the
+`pin` / `unpin` actions, do nothing in chat: never use them.
 
-Field name per action: `navigate` uses `url`; `emit`/`pin`/`unpin` use `target`.
+Field name per action: `navigate` uses `url`; `emit` uses `target`.
 They are NOT interchangeable.
 
 Interaction rules:
-- EVERY interactive element MUST include on_click / on_change.
-- EVERY action MUST emit chat.send unless explicitly not needed.
+- EVERY interactive element MUST bind to state or carry on_click / on_change.
+- Actions that change the card itself use set / toggle / push / remove;
+  actions that advance the conversation emit chat.send.
 - NEVER create dead UI — every component must lead somewhere.
 - ALWAYS guide the user to the next step.
 
@@ -242,62 +194,38 @@ Interaction rules:
 """
 
 
-_INLINE_CORE_CATALOG = """\
-
-# WIDGET CATALOG — chat-inline allowlist
-
-Six core widgets cover ~90% of chat replies. Use these from memory:
-
-  text       — plain or rich text. Props: text, variant ('h1'..'h4',
-               'body','muted','small'), align.
-  heading    — same as text.h1..h4 with stronger visual default.
-  stat       — single big number. Props: label, value, delta, trend
-               ('up'|'down'|'flat'), sublabel.
-  button     — Props: label, icon, variant ('primary'|'secondary'|
-               'outline'|'ghost'|'link'|'destructive'). Always carries
-               on_click.
-  table      — Props: columns ([{accessorKey, header}, ...]), rows
-               (data array OR `{state.x}` expression), variant
-               ('default'|'compact'|'striped'|'minimal'), searchable,
-               sortable, pageSize.
-  flex       — layout. Props: direction ('row'|'column'), gap, align,
-               justify. Children = the laid-out nodes.
-               `gap` is a number on a ×4px scale (2 → 8px, 4 → 16px),
-               a t-shirt token ('xs'|'sm'|'md'|'lg'|'xl'|'2xl'), or a
-               CSS length string ('12px'); raw words like 'medium' are
-               ignored. For chat-inline keep spacing TIGHT — use a
-               numeric gap of 2 or 4. A bare number is multiplied by
-               4, so `gap: 12` renders as 48px, far too loose for a
-               chat bubble. Want 12px exactly? Write the string
-               '12px', never the bare number 12.
-
-Anything beyond these — chart, sparkline, kanban, calendar, gauge,
-heatmap, treemap, timeline, gantt, candlestick OHLC, comparison-table,
-pricing-table, source-card, news-card, link-preview, master-detail,
-entity-detail, dashboard, definition-list, wizard-layout, form-layout,
-checklist-layout, report-layout, invoice-layout, callout, badge,
-progress, rating, kbd, code-block, etc. — is supported but the prop
-schema is NOT in this prompt.
+_INLINE_WIDGET_SPEC_RULE = """\
 
 # MUST CALL BEFORE EMIT
 
-Before the FIRST node of any non-core type lands in your spec, you MUST
-call `get_inline_widget_help(types=[...])` and copy prop names FROM
-the returned schema. The widget name is not a contract — the manifest
-is. Guessing prop names has shipped broken UIs (e.g. `definition-list`
-with `description` instead of `definition`, `timeline` events with
-`description` instead of `detail`) that render as empty rows. Batch
-types in one call: `get_inline_widget_help(types=["chart", "sparkline",
-"definition-list"])` is one round-trip — there is no excuse to skip it.
+Before the FIRST node of a widget not listed with its props lands in your
+spec, you MUST
+call `get_widget_spec(types=[...])` and copy prop names FROM the
+returned schema. The widget name is not a contract — the manifest is,
+and `get_widget_spec` is what reads it. Guessing prop names has shipped
+broken UIs (e.g. `definition-list` with `description` instead of
+`definition`, `timeline` events with `description` instead of `detail`)
+that render as empty rows. Batch types in one call:
+`get_widget_spec(types=["chart", "sparkline", "definition-list"])` is
+one round-trip — there is no excuse to skip it.
 
 Example: planning a candlestick + sparkline reply →
-  get_inline_widget_help(types=["chart", "sparkline"])
+  get_widget_spec(types=["chart", "sparkline"])
   → returns the OHLC data shape for candlestick and the values/labels
     shape for sparkline. Use the returned text verbatim as the prop
     contract.
 
-If the tool returns an error, OMIT the widget rather than guess. A
-partial UI is correct; a guessed-shape widget renders empty.
+`get_inline_widget_help` is a DIFFERENT tool and does not answer this
+question. It carries hand-written design guidance — layout, spacing,
+composition — for a handful of widgets. Reach for it when you want to
+know how something should LOOK. For what props a widget TAKES, it is
+`get_widget_spec`, always.
+
+If `get_widget_spec` reports a type as unknown, this deployment's
+manifest does not carry that widget: OMIT it and choose one the
+manifest has. Do not emit it anyway and do not guess its props — it
+would render as nothing. A partial UI is correct; a guessed-shape
+widget renders empty.
 
 # ASK-USER-QUESTIONS — STRUCTURED DISAMBIGUATION
 
@@ -366,31 +294,12 @@ the tool materializes the nested, validated tree and returns a
 {version, ui} doc. Drop that doc VERBATIM into your `ui-spec` fence. The
 flow then advances entirely client-side — no model calls between steps.
 
-HOW TO AUTHOR (think in states, not screens):
-  steps: a list. Each step has an `id`, a `kind`
-    (select | form | confirm | info), a title, its content
-    (options / fields / review rows), and where it goes next:
-      - `next: "<id>"`        → linear next step
-      - `branch: { "<optId>": "<id>" }` → branch on the picked option
-    A step with neither `next` nor `branch` is the TERMINAL step and
-    carries `complete` (what to do with the answers).
-
-  Actions make it a real mini-app, not just Q&A:
-    - per-step `actions`: buttons that call a tool/API mid-flow
-      (verb: call_binding | api | invoke_tool) without leaving the step.
-    - terminal `complete.action`:
-        chat        → hand the collected answers back to you (default)
-        call_binding→ write to the backend
-        create_pocket → materialize a permanent pocket from the answers
-        navigate / emit → go somewhere / raise an event
-        invoke_tool → run a named tool with the answers
-                      (connector reads fire; connector writes are
-                       proposed for the user's approval — the Tray)
-
-  Reference earlier answers with `{stepId.field}` (e.g.
-  `{pick_goal.label}`, `{enter_details.company}`) in review rows and
-  action args. The tool rewrites them correctly — you never write the
-  raw `{state.…_selection/_formData}` form.
+HOW TO AUTHOR: think in states, not screens. `start_flow`'s own schema
+is the authoring contract — the step shape, the transitions, the
+terminal `complete`, the per-step `actions`, and the `{stepId.field}`
+answer references are all specified there, and it is the one place that
+stays in step with the builder. Read it and author against it rather
+than working from memory.
 
 DO NOT hand-write a nested `chain` / `chain_map` tree, and do NOT fake a
 flow with a single `set`-stepped spec (that anti-pattern renders step 1
@@ -416,19 +325,13 @@ STATE GRAMMAR — the primitives every flow composes from:
   transition, every terminal state has a `complete`. (You can't violate
   this even if you try — the builder repairs or rejects it.)
 
-ACTION GRAMMAR — the rules that turn a flow into a real tool, not Q&A:
-  - A terminal `complete` uses `action:` (chat | navigate | emit |
-    call_binding | create_pocket) — NEVER `type:`/`kind:`. (If you slip and
-    write `type:`/`kind:`, the builder coerces it, but author `action:`.)
-  - When the user says approve / reject / fulfill / take action / do X —
-    that is a `call_binding` ACTION BUTTON wired to the verb, NOT a yes/no
-    select. Never leave an action flow as plain Q&A.
-  - To act on backend / connector data, use `call_binding` (works today).
-    `invoke_tool` runs a named tool the owner allow-listed on the pocket:
-    a connector READ fires immediately; a connector WRITE is proposed for
-    the user's approval (it lands in their Instinct Tray, fires on approve)
-    rather than running inline. Reach for `call_binding` first; use
-    `invoke_tool` when the action is a named tool/connector grant.
+ACTION GRAMMAR — the one rule the tool schema cannot tell you, because it
+is about reading the REQUEST rather than shaping the output:
+  - Never leave an action flow as plain Q&A. When the user says approve /
+    reject / fulfill / take action / do X, the flow must DO it — that is
+    an action button wired to the verb, not a select that collects an
+    opinion and hands it back. The tool's schema says how to write the
+    button; this says when the request demands one.
 
 SKELETON A — branching intake (collect, then hand answers to you):
 ```
@@ -611,17 +514,24 @@ _INLINE_RULES = """\
 - Pocket canvases are a SEPARATE surface — do not call
   `cloud_update_pocket` from a chat reply. chat.send loops drive the
   conversation; they do NOT mutate pocket state.
-- Interactive elements MUST have on_click / on_change. A button with
-  a label and no handler is dead UI — render only buttons that lead
-  somewhere via chat.send (or omit them entirely).
+- Interactive elements MUST bind to state or have on_click / on_change.
+  A button with a label and no handler is dead UI — render only buttons
+  that change the card's state or lead somewhere via chat.send (or omit
+  them entirely).
 
 Final self-check before sending:
 ✔ ui-spec used when response has structure
-✔ Interactive elements have on_click / on_change
-✔ Actions emit chat.send to close the loop
-✔ One focal widget — clean, minimal layout, no clutter
+✔ Interactive elements bind to state or have on_click / on_change
+✔ Buttons change card state or emit chat.send; no other emit target, no pin
+✔ The card's main widget is a purpose-built one when one fits the request; only
+  when none fits, a primitives tool (about 25 to 90 nodes) with state, bind,
+  derived values, each
 ✔ flex/grid `gap` is tight for inline — numeric 2 or 4, not 10/12+
-✔ Used a core widget, or called `get_inline_widget_help` BEFORE emitting the type
+✔ Matched the reply SHAPE to its typed widget (comparison-table / data-grid /
+  timeline / kv-table / status-dot / pricing-table) — did NOT rebuild it from a
+  plain table / text / flex
+✔ Used a widget listed with its props, or called `get_widget_spec` BEFORE
+  emitting any other type
 ✔ Multi-step / wizard / intake flow → called `start_flow`, not a hand-authored or `set`-stepped spec
 ✔ Pending Instinct approvals → Approve/Reject buttons `api`-POST the route, NOT chat.send
 ✔ Open Tray affordance navigates to /deep-work (not a chat.send)
@@ -631,14 +541,17 @@ Final self-check before sending:
 </ripple>"""
 
 
-INLINE_RIPPLE_SYSTEM_PROMPT = (
-    _GROUND_TRUTH_RULE
-    + _INLINE_PREAMBLE
-    + WIDGET_CATALOG
+_INLINE_EACH_RULE = """\
+- "each" takes items at node level, never inside props:
+  {"type":"each","items":"{state.people}","children":[...]}.
+"""
+
+INLINE_RIPPLE_PROMPT_HEAD = _GROUND_TRUTH_RULE + _INLINE_PREAMBLE
+
+INLINE_RIPPLE_PROMPT_TAIL = (
+    _INLINE_WIDGET_SPEC_RULE
     + "\n"
-    + USE_THE_WIDGET_RULE
-    + "\n"
-    + _INLINE_CORE_CATALOG
+    + _INLINE_EACH_RULE
     + "\n"
     + _MULTI_STEP_FLOW_RULE
     + "\n"
@@ -647,5 +560,11 @@ INLINE_RIPPLE_SYSTEM_PROMPT = (
     + _INLINE_RULES
 )
 
+INLINE_RIPPLE_SYSTEM_PROMPT = INLINE_RIPPLE_PROMPT_HEAD + INLINE_RIPPLE_PROMPT_TAIL
 
-__all__ = ["INLINE_RIPPLE_SYSTEM_PROMPT"]
+
+__all__ = [
+    "INLINE_RIPPLE_PROMPT_HEAD",
+    "INLINE_RIPPLE_PROMPT_TAIL",
+    "INLINE_RIPPLE_SYSTEM_PROMPT",
+]

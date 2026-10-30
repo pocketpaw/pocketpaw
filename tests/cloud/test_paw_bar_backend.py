@@ -144,6 +144,68 @@ class TestWidgetCRUD:
         assert fetched.event_mapping["order_click"].creates == "Order"
 
     @pytest.mark.asyncio
+    async def test_agent_id_round_trips_create_to_get(self, store: PawBarStore) -> None:
+        """T3 — a concierge widget's agent binding survives create → get (and the
+        default is "" for an unbound widget, like the workspace_id column)."""
+        bound = await store.create_widget(_widget(agent_id="agent-123"))
+        fetched = await store.get_widget(bound.id)
+        assert fetched is not None
+        assert fetched.agent_id == "agent-123"
+
+        # It also rides the list read (SELECT * → _row_to_widget).
+        listed = await store.list_widgets(pocket_id=bound.pocket_id)
+        assert listed and listed[0].agent_id == "agent-123"
+
+        # An unset binding defaults to "" (not None), mirroring workspace_id.
+        unbound = await store.create_widget(_widget(pocket_id="pocket-unbound"))
+        fetched_unbound = await store.get_widget(unbound.id)
+        assert fetched_unbound is not None
+        assert fetched_unbound.agent_id == ""
+
+    @pytest.mark.asyncio
+    async def test_migrates_pre_column_db(self, tmp_path: Path) -> None:
+        """A paw_bar.db created BEFORE the W4a workspace_id + T3 agent_id columns
+        must be migrated in place: _ensure_schema ALTER-adds the missing columns
+        before the SCHEMA_SQL index on workspace_id runs, so create_widget works
+        instead of raising 'no such column: workspace_id' (the T5 pilot-smoke bug)."""
+        import aiosqlite
+
+        db_path = tmp_path / "legacy_paw_bar.db"
+        # Old schema: paw_bar_widgets WITHOUT workspace_id / agent_id (pre-W4a/T3).
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "CREATE TABLE paw_bar_widgets ("
+                " id TEXT PRIMARY KEY, pocket_id TEXT NOT NULL, owner TEXT NOT NULL,"
+                " name TEXT DEFAULT '', spec TEXT NOT NULL, allowed_domains TEXT DEFAULT '[]',"
+                " access_token TEXT NOT NULL, rate_limit_per_min INTEGER DEFAULT 60,"
+                " per_customer_limit_per_min INTEGER DEFAULT 10, event_mapping TEXT DEFAULT '{}',"
+                " created_at TEXT DEFAULT (datetime('now')),"
+                " updated_at TEXT DEFAULT (datetime('now')))"
+            )
+            await db.commit()
+
+        store = PawBarStore(db_path)
+        # Raised 'no such column: workspace_id' before the migration.
+        bound = await store.create_widget(_widget(agent_id="agent-mig"))
+        fetched = await store.get_widget(bound.id)
+        assert fetched is not None
+        assert fetched.agent_id == "agent-mig"
+        assert fetched.workspace_id == ""  # migrated column, model default
+
+    @pytest.mark.asyncio
+    async def test_migration_is_idempotent(self, tmp_path: Path) -> None:
+        """On a fresh/current DB the columns already exist, so _migrate_columns is a
+        no-op — a second store opening the same DB re-runs _ensure_schema cleanly."""
+        path = tmp_path / "paw_bar.db"
+        w = await PawBarStore(path).create_widget(_widget(agent_id="a1"))
+        again = await PawBarStore(path).create_widget(_widget(pocket_id="p2", agent_id="a2"))
+        both = PawBarStore(path)
+        first = await both.get_widget(w.id)
+        second = await both.get_widget(again.id)
+        assert first is not None and first.agent_id == "a1"
+        assert second is not None and second.agent_id == "a2"
+
+    @pytest.mark.asyncio
     async def test_list_filters_by_pocket_and_owner(self, store: PawBarStore) -> None:
         await store.create_widget(_widget(pocket_id="pocket-1", owner="user:maya"))
         await store.create_widget(_widget(pocket_id="pocket-2", owner="user:priya"))

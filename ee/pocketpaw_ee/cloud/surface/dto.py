@@ -1,30 +1,19 @@
 # dto.py — Wire schemas the client attaches to chat requests.
 #
-# Created: 2026-05-24 — The chat agent's per-turn context grows a
-# {surface, surface_meta} hint. ``SurfaceMetaRequest`` mirrors
-# ``SurfaceMeta`` for inbound validation; ``SurfaceRequest`` is the
-# composite the client stamps. ``resolve_surface_context`` validates
-# arbitrary inbound dicts through ``SurfaceRequest.model_validate``
-# rather than trusting whatever the wire produced.
+# ``SurfaceMetaRequest`` mirrors ``SurfaceMeta`` field for field for inbound
+# validation, and ``SurfaceRequest`` is the {surface, surface_meta} composite the
+# client stamps. ``resolve_surface_context`` validates inbound dicts through
+# ``SurfaceRequest.model_validate`` rather than trusting the wire. A hint added
+# to ``SurfaceMeta`` must be mirrored here (and passed through in
+# service._meta_from_request), or it validates away silently and the handler
+# always sees ``None``.
 #
-# Per the entity rules — DTOs separate input (Request) from any future
-# response shape. There is no response DTO here because the surface
-# context is consumed in-process by ``chat/agent_service`` (no HTTP
-# round-trip).
-#
-# Updated: 2026-06-04 (feat/sites-refine-surface) — mirror ``SurfaceMeta``'s
-# new ``site_id`` hint so the /sites/[siteId] refine chat can stamp the
-# published site id on the wire and the sites handler can branch to refine.
-# Updated: 2026-06-04 (feat/sites-svelte-engine) — mirror ``SurfaceMeta``'s new
-# ``engine`` hint so the /sites create UI's "Use Svelte pages" toggle can stamp
-# ``engine="svelte"`` on the wire and the sites handler routes the create
-# preamble to the svelte-track skill instead of the ripple/default one.
-# Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — mirror ``SurfaceMeta``'s
-# new ``repo`` + ``base_branch`` Belt console hints so the /belt page can stamp
-# the bound repo + branch on the wire and the belt handler injects them into the
-# preamble (agent stops asking for the repo).
+# Request-only by design: the surface context is consumed in-process by
+# chat/agent_service, so there is no response DTO.
 
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -55,6 +44,7 @@ class SurfaceMetaRequest(BaseModel):
     # "Use Svelte pages" toggle: "ripple" (default) | "svelte". Selects which
     # create-site authoring skill the preamble prefers. Optional.
     engine: str | None = None
+    brief_id: str | None = None
     # Sites refine hint — mirror SurfaceMeta. The Build/Chat toggle in the
     # /sites/[siteId] refine chat: "chat" answers with no mutation, "build" (the
     # default, preserving today's behavior) refines the site. Optional.
@@ -75,6 +65,50 @@ class SurfaceMetaRequest(BaseModel):
     storage_root: str | None = None
     is_cloud_storage: str | None = None
     workspace_vm: str | None = None
+    # Concierge action registry hint (C1) — mirror SurfaceMeta. Set server-side by
+    # ``concierge_chat`` from the widget spec (never by an untrusted client on the
+    # public path), so the concierge run allow-lists + surfaces exactly this
+    # widget's declared verbs. A JSON list of {verb, policy, args, label}.
+    pawbar_actions: list[dict[str, Any]] | None = None
+    # Concierge catalog hint (C1) — mirror SurfaceMeta. Set server-side from the
+    # catalog store (the turn's retrieved items) so the preamble can name real
+    # products.
+    pawbar_catalog: list[dict[str, Any]] | None = None
+    # Studio editor hint — mirror SurfaceMeta. The open timeline, projected to
+    # ids + times. Carries state rather than an identifier because the document
+    # lives in the browser and there is no server copy to fetch.
+    timeline: dict[str, Any] | None = None
+    # Craft studio hints — mirror SurfaceMeta.vector / .photo / .design.
+    vector: dict[str, Any] | None = None
+    photo: dict[str, Any] | None = None
+    design: dict[str, Any] | None = None
+    # Otherhand hints — mirror SurfaceMeta. Stamped by the /other-hand page on
+    # every turn. ``snapshot_path`` is the absolute path the snapshot endpoint
+    # returned for this page's PNG (the client echoes it back, it never invents
+    # one); ``free_y`` is the y below which the page is empty, as a string to
+    # match the other scalar hints. Both optional.
+    snapshot_path: str | None = None
+    free_y: str | None = None
+    # Book mode (2026-08-26): the read-only source page beside the notebook.
+    book_path: str | None = None
+    # ``mark_box`` is "x1,y1,x2,y2" in the page's logical space: exactly where
+    # the reader's pen went on the book. The client already knows this, so we
+    # TELL the agent rather than make it re-derive a circled region from a
+    # rasterised page of dense body text — which it does badly.
+    mark_box: str | None = None
+    # The marked region re-rendered at high resolution (scans, figures,
+    # equations) and the exact words under the mark, read off the PDF's own
+    # text layer (born-digital pages). Two channels because they fail in
+    # different places: no text layer on a scan, no crop worth reading on a
+    # pure-text page.
+    mark_image_path: str | None = None
+    mark_text: str | None = None
+    # Compact JSON of what is already ON the page (text content with exact
+    # coordinates, shape/user-ink bounding boxes), measured client-side from
+    # the live stroke model AFTER the placement guard. The agent anchors its
+    # annotations to these coordinates rather than to its memory of what it
+    # emitted — which the guard may have shifted.
+    scene: str | None = None
 
 
 class SurfaceRequest(BaseModel):

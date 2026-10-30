@@ -1,0 +1,7 @@
+# transcript: `dokku logs demo --num 100` — a short recent app log window.
+EXIT: 0
+--- stdout ---
+2026-07-21T10:12:01.000000000Z app[web.1]: Booting worker with pid: 12
+2026-07-21T10:12:02.000000000Z app[web.1]: Listening at: http://0.0.0.0:5000
+2026-07-21T10:12:05.000000000Z app[web.1]: GET /health 200
+--- stderr ---

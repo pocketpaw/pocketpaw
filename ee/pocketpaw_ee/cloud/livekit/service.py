@@ -2,7 +2,11 @@
 
 Uses the ``livekit-api`` Python SDK to talk to LiveKit Cloud.
 Requires ``LIVEKIT_URL``, ``LIVEKIT_API_KEY``, ``LIVEKIT_API_SECRET``
-environment variables.
+environment variables. ``create_room`` starts the meeting-notes bot only when
+``_meeting_notes_allowed``: an unpaid early-access workspace's call runs without
+it, since its STT and summary spend never reaches the credit ledger. The bot's
+token may publish microphone audio only (no camera, screen or data), which is
+how Ask Paw answers are voiced into the call.
 
 Change log:
 - Fix duplicate call-bot spawn race: ``create_room()`` now guards the agent
@@ -12,6 +16,34 @@ Change log:
   runs a single worker, so this in-process lock fully covers it; true
   cross-replica dedupe is out of scope here (see the LiveKit Agents migration
   design doc).
+- Added daily CALL-TIME budget enforcement (feat/billing-rbac-member-caps):
+  ``create_room()`` resolves the workspace's plan (entitlements) and enforces
+  ``max_call_seconds_per_day`` (Free = 0 → no calls, Go = 1800 = 30 min, Pro =
+  7200 = 2 hrs, Pro Max = 28800 = 8 hrs, Enterprise = None). A NEW room is
+  blocked with ``CallLimitError`` when the budget is exhausted; a join to an
+  already-running room is not (that call already owns its budget). Each new
+  call records its remaining budget as a ``Meeting.call_budget_deadline`` and a
+  watchdog task (``_force_end_at_budget``) force-ends it at the deadline, so a
+  single over-budget call is cut off rather than merely blocking later starts.
+- ``get_room_info()["active"]`` now means a participant other than the call-bot
+  is in the room (fix/livekit-call-security, 2026-09-30). It was hard-coded True
+  for any existing room, which left invite accept's "call ended" branch dead.
+- ``create_room(..., record_meeting=False)`` (same branch): a scheduled meeting
+  starting through ``meetings/providers/livekit`` now passes its workspace, so
+  the daily budget gate and the watchdog apply, without inserting a duplicate
+  "Instant call" row. The result carries ``call_budget_deadline``.
+- ``require_call_group()`` (same branch): the shared, audited check that a
+  group exists, is in the caller's workspace and has the caller as a member.
+  Used by the LiveKit routes and by scheduling a LiveKit meeting.
+- ``end_room()`` closes EVERY in_progress LiveKit meeting row for the room, not
+  just the first (feat/meetings-instant, 2026-10-01): a scheduled start landing
+  on a running instant call left two rows, and ending the call half-closed
+  them. ``_daily_call_usage`` merges overlapping spans per room so those two
+  rows count one call's time once.
+- ``_reap_agent_process`` (feat/meetings-ics, 2026-10-01): when the call-bot
+  exits on its own because everyone left, a hidden meeting room's meeting goes
+  back to ``scheduled`` (``meetings.service.release_meeting_room``) instead of
+  staying "live" forever. ``end_room`` still marks it ended.
 """
 
 from __future__ import annotations
@@ -31,6 +63,7 @@ from livekit.protocol.room import (
     ListRoomsRequest,
 )
 
+from pocketpaw_ee.cloud._core.errors import CallLimitError, Forbidden
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     CallEnded,
@@ -118,6 +151,29 @@ def _ensure_configured() -> None:
 def room_name_for_group(group_id: str) -> str:
     """Build a deterministic LiveKit room name for a group."""
     return f"group-call-{group_id}"
+
+
+async def require_call_group(group_id: str | None, user_id: str, workspace_id: str) -> None:
+    """Refuse unless ``group_id`` is a group in ``workspace_id`` that ``user_id`` is in.
+
+    The one access check for every group-scoped call operation (token, room,
+    recording, scheduling a LiveKit meeting). A single 403 covers "no such
+    group", "another workspace" and "not a member", so the response doesn't
+    reveal which groups exist, and every refusal is written to the audit log.
+    """
+    from pocketpaw_ee.cloud.chat.group_service import _get_group_domain_or_none
+    from pocketpaw_ee.guards.audit import log_denial
+
+    group = await _get_group_domain_or_none(group_id) if group_id else None
+    if group is None or group.workspace_id != workspace_id or user_id not in group.members:
+        log_denial(
+            actor=user_id,
+            action="group.view",
+            code="livekit.room_forbidden",
+            resource_id=group_id or "",
+            workspace_id=workspace_id,
+        )
+        raise Forbidden("livekit.room_forbidden", "You don't have access to this call.")
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +427,16 @@ async def _reap_agent_process(
         except Exception:
             logger.debug("Could not emit CallEnded for natural room end (shutdown?)")
 
+        # A meeting room everyone left goes back to "scheduled" (its link starts a
+        # new call); end_room is what marks a meeting ended.
+        if workspace_id:
+            try:
+                from pocketpaw_ee.cloud.meetings import service as meetings_service
+
+                await meetings_service.release_meeting_room(workspace_id, group_id)
+            except Exception:
+                logger.exception("Could not release meeting room %s after natural end", group_id)
+
 
 # ---------------------------------------------------------------------------
 # S3 configuration for LiveKit recording output
@@ -587,10 +653,151 @@ async def get_recording_info(group_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Daily call-time budget (feat/billing-rbac-member-caps)
+# ---------------------------------------------------------------------------
+
+
+def _start_of_today_utc() -> datetime:
+    """Midnight UTC of the current calendar day (the budget window boundary)."""
+    return datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """Coerce a DB round-tripped datetime to tz-aware UTC.
+
+    mongomock (and some drivers) return naive datetimes even when stored aware;
+    production Mongo round-trips aware. Normalize so comparisons never mix
+    offset-aware and offset-naive values.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+async def _daily_call_usage(workspace_id: str) -> int:
+    """Total SECONDS of LiveKit calls used today by a workspace.
+
+    Sums the overlap between each of the workspace's LiveKit ``Meeting`` rows
+    and today (UTC). An ended meeting contributes ``actual_end - actual_start``;
+    one still in progress contributes ``now - actual_start`` so a running call
+    counts toward the daily budget immediately. A call started BEFORE today that
+    ends today is counted for its today-overlap; a call started before today
+    that is still running (no ``actual_end``) is not counted — an accepted edge
+    (the daily window is UTC, and such cross-midnight in-flight calls are rare).
+    """
+    start = _start_of_today_utc()
+    end = start + timedelta(days=1)
+    docs = await MeetingDoc.find(
+        {
+            "workspace": workspace_id,
+            "source": "livekit",
+            "$or": [
+                {"actual_start": {"$gte": start}},
+                {"actual_end": {"$gte": start}},
+            ],
+        }
+    ).to_list()
+    now = datetime.now(UTC)
+    # Clip each row's span to today's window, grouped by room: two rows for one
+    # room (a scheduled start on a running call) overlap, and one call's time
+    # must count once. A row with no room name stands alone.
+    spans: dict[str, list[tuple[datetime, datetime]]] = {}
+    for doc in docs:
+        s = max(_as_utc(doc.actual_start or now), start)
+        e = min(_as_utc(doc.actual_end or now), end)
+        if e > s:
+            spans.setdefault(doc.provider_meeting_id or str(doc.id), []).append((s, e))
+    total = 0
+    for room_spans in spans.values():
+        cur_s, cur_e = None, None
+        for s, e in sorted(room_spans):
+            if cur_e is None or s > cur_e:
+                if cur_e is not None:
+                    total += int((cur_e - cur_s).total_seconds())
+                cur_s, cur_e = s, e
+            else:
+                cur_e = max(cur_e, e)
+        total += int((cur_e - cur_s).total_seconds())
+    return total
+
+
+async def _call_budget_remaining(workspace_id: str) -> tuple[int | None, int]:
+    """Resolve the workspace's today call budget as ``(cap_seconds, remaining)``.
+
+    ``cap`` is the plan's ``max_call_seconds_per_day``: None = uncapped
+    (Enterprise), 0 = Free (no calls at all). ``remaining`` is
+    ``cap - today_used`` and may be negative once the budget is spent (a None
+    cap yields ``remaining = 0`` — meaningless, callers check the cap). Raises
+    nothing itself; ``create_room`` decides how to enforce.
+    """
+    from pocketpaw_ee.cloud.entitlements import service as entitlements_service
+
+    ent = await entitlements_service.resolve_entitlements(workspace_id)
+    cap = ent.max_call_seconds_per_day
+    if cap is None:
+        return None, 0
+    if cap == 0:
+        # Free — no calls at all; today's usage is irrelevant (the gate blocks
+        # at entry, so skip the DB usage query entirely).
+        return 0, 0
+    used = await _daily_call_usage(workspace_id)
+    return cap, cap - used
+
+
+async def _force_end_at_budget(group_id: str, workspace_id: str, deadline: datetime) -> None:
+    """Force-end a call once its daily budget is exhausted.
+
+    Scheduled at call-start with ``deadline = now + remaining budget``. Sleeps
+    until the deadline, then ends the room ONLY if its Meeting is still
+    ``in_progress`` (a user who hung up early means ``end_room`` already ran and
+    the meeting is ``ended`` — this becomes a no-op). In-memory like the
+    meeting-agent reaper: a deploy restart loses the task, and LiveKit's
+    ``empty_timeout`` (5 min) reaps an orphaned room anyway.
+    """
+    delay = max(0.0, (deadline - datetime.now(UTC)).total_seconds())
+    if delay > 0:
+        await asyncio.sleep(delay)
+    try:
+        room_name = room_name_for_group(group_id)
+        meeting = await MeetingDoc.find_one(
+            MeetingDoc.workspace == workspace_id,
+            MeetingDoc.provider_meeting_id == room_name,
+            MeetingDoc.status == "in_progress",
+        )
+        if meeting is None:
+            logger.info("Budget force-end skipped: call %s already ended", room_name)
+            return
+        logger.info("Daily call budget exhausted — force-ending call %s", room_name)
+        await end_room(group_id, workspace_id, reason="budget_exhausted")
+    except Exception as exc:
+        logger.warning("Failed to force-end call %s at budget deadline: %s", group_id, exc)
+
+
+async def _meeting_notes_allowed(workspace_id: str) -> bool:
+    """False for an unpaid early-access workspace: the notes bot spends on STT
+    and an LLM summary outside the credit ledger, so the call runs without it.
+    A failed check also answers False; a call with no notes is the safe miss.
+    """
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+    try:
+        return await early_access_denial(workspace_id) is None
+    except Exception:
+        logger.warning(
+            "livekit: early-access check failed for workspace=%s; no meeting notes",
+            workspace_id,
+            exc_info=True,
+        )
+        return False
+
+
 async def create_room(
     group_id: str,
     workspace_id: str = "",
     user_id: str = "",
+    *,
+    record_meeting: bool = True,
 ) -> dict[str, Any]:
     """Create a LiveKit room for a group call.
 
@@ -602,10 +809,33 @@ async def create_room(
     the room was just created or already existed. When a new room is
     created, a ``Meeting`` document is also persisted so the call
     appears in the scheduled meetings sidebar as "Live".
+
+    Daily CALL-TIME budget (ABAC/RBAC member-cap seam): the workspace's plan
+    caps LiveKit minutes per day (Free = 0 → no calls). Free is blocked at
+    entry; a paid tier with an exhausted budget is blocked from creating a NEW
+    room (joining an already-running room is allowed — that call already owns
+    its budget). Each new call gets a ``call_budget_deadline`` and a watchdog
+    that force-ends it at the deadline so a single over-budget call is cut off.
+
+    ``record_meeting=False`` is for a caller that already owns the call's
+    ``Meeting`` row (a scheduled meeting starting): the budget gate and the
+    watchdog still apply, but no "Instant call" row is inserted and no
+    ``meeting.started`` is emitted. The caller stores the returned
+    ``call_budget_deadline`` and sets ``provider_meeting_id`` to the room name
+    on its own row so ``end_room`` and the watchdog find it.
     """
     _ensure_configured()
 
     room_name = room_name_for_group(group_id)
+
+    # Daily call-time budget: Free (cap 0) has NO calling at all, so block
+    # before touching LiveKit. Paid tiers are enforced only when creating a NEW
+    # room below (a join to an already-running call is not blocked).
+    budget: tuple[int | None, int] | None = None
+    if workspace_id:
+        budget = await _call_budget_remaining(workspace_id)
+        if budget[0] == 0:
+            raise CallLimitError(0)
 
     is_new = False
     async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
@@ -617,10 +847,18 @@ async def create_room(
         room_exists = len(list_resp.rooms) > 0
 
         if not room_exists:
+            # A paid tier only blocks a NEW call once today's budget is spent;
+            # joining an existing room is always allowed. A None cap (Enterprise
+            # / no plan context) is uncapped — no gate.
+            if budget is not None and budget[0] is not None:
+                cap, remaining = budget
+                if remaining <= 0:
+                    raise CallLimitError(cap)
             req = CreateRoomRequest(
                 name=room_name,
                 empty_timeout=5 * 60,
                 max_participants=50,
+                max_playout_delay=750,
             )
             await lk.room.create_room(req)
             logger.info("Created LiveKit room %s for group %s", room_name, group_id)
@@ -628,11 +866,23 @@ async def create_room(
         else:
             logger.info("LiveKit room %s already exists for group %s", room_name, group_id)
 
+    # The new call may run until its remaining daily budget is spent — the
+    # watchdog force-ends it there. Uncapped (Enterprise / no plan context)
+    # calls, and joins to a running room, get no deadline.
+    now = datetime.now(UTC)
+    budget_deadline = None
+    if is_new and budget is not None:
+        cap, remaining = budget
+        if cap is not None and remaining > 0:
+            budget_deadline = now + timedelta(seconds=remaining)
+
+    if budget_deadline is not None and not record_meeting:
+        asyncio.create_task(_force_end_at_budget(group_id, workspace_id, budget_deadline))
+
     # Persist a Meeting document when a new room is created so the
     # call shows up in the scheduled meetings sidebar as "Live".
-    if is_new and workspace_id:
+    if is_new and workspace_id and record_meeting:
         try:
-            now = datetime.now(UTC)
             meeting = MeetingDoc(
                 workspace=workspace_id,
                 source="livekit",
@@ -644,6 +894,7 @@ async def create_room(
                 scheduled_end=None,
                 actual_start=now,
                 status="in_progress",
+                call_budget_deadline=budget_deadline,
                 participants=[],
                 recording_file_ids=[],
                 raw_provider_payload={"group_id": group_id},
@@ -651,6 +902,14 @@ async def create_room(
             )
             await meeting.insert()
             logger.info("Created Meeting doc for instant call in group %s", group_id)
+
+            if budget_deadline is not None:
+                asyncio.create_task(_force_end_at_budget(group_id, workspace_id, budget_deadline))
+                logger.info(
+                    "Scheduled budget force-end for group %s at %s",
+                    group_id,
+                    budget_deadline.isoformat(),
+                )
 
             # Emit meeting.started so other clients pick it up
             from pocketpaw_ee.cloud.meetings.events import MeetingStarted
@@ -669,16 +928,18 @@ async def create_room(
         except Exception as exc:
             logger.warning("Failed to create Meeting doc for instant call: %s", exc)
 
-    # Generate a subscriber-only token for the call bot (no agent flag
-    # so it auto-subscribes to remote tracks for transcription).
+    # The call bot subscribes for transcription and publishes one microphone
+    # track for Ask Paw's spoken answers; no camera, screen share or data.
     # Use a 24h TTL so the bot never expires mid-call.
     bot_token = await _generate_token(
         room_name,
         "call-bot",
-        can_publish=False,
+        can_publish=True,
         can_subscribe=True,
         is_admin=False,
         ttl_seconds=86400,
+        publish_sources=["microphone"],
+        can_publish_data=False,
     )
 
     # Start the meeting notes agent as a managed subprocess so it does not
@@ -693,8 +954,9 @@ async def create_room(
     # deploy runs a single worker so this fully dedupes it; cross-replica dedupe
     # (only if the API is ever run multi-replica) is the LiveKit Agents
     # migration's job, not a best-effort participant poll here.
+    notes_on = await _meeting_notes_allowed(workspace_id)
     async with _spawn_lock_for(group_id):
-        if group_id not in _active_agents:
+        if notes_on and group_id not in _active_agents:
             proc = await _spawn_agent_process(
                 group_id=group_id,
                 room_name=room_name,
@@ -724,6 +986,7 @@ async def create_room(
         "bot_token": bot_token,
         "created_at": datetime.now(UTC).isoformat(),
         "is_new": is_new,
+        "call_budget_deadline": budget_deadline,
     }
 
 
@@ -760,13 +1023,18 @@ async def generate_participant_token(
     )
 
 
-async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
+async def end_room(group_id: str, workspace_id: str = "", reason: str = "") -> dict[str, Any]:
     """End an active call by deleting the LiveKit room.
 
     When the room is deleted, all participants are disconnected and the
     call bot's cleanup logic (posting meeting notes) is triggered.
     Also transitions the associated Meeting document to ``ended`` so
     the call shows as "Over" in the scheduled meetings sidebar.
+
+    ``reason`` is a machine-readable end reason carried on the ``call.ended``
+    event (e.g. ``budget_exhausted`` when the daily call-time budget watchdog
+    force-ends the room) so the UI can show plan-specific messaging. Omitted
+    (empty) for ordinary, user-initiated end-calls.
     """
     _ensure_configured()
 
@@ -819,19 +1087,24 @@ async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
                 logger.error("Failed to delete LiveKit room: %s", exc)
                 raise
 
-    await emit(CallEnded(data={"group_id": group_id, "room_name": room_name}))
+    ended_data: dict[str, Any] = {"group_id": group_id, "room_name": room_name}
+    if reason:
+        ended_data["reason"] = reason
+    await emit(CallEnded(data=ended_data))
 
-    # Transition the Meeting doc to ended so the call shows as "Over".
+    # Transition the call's Meeting rows to ended so the call shows as "Over".
+    # All of them: a scheduled start on a running call leaves two in_progress
+    # rows for one room, and closing only one strands the other as "Live".
     if workspace_id:
         try:
             now = datetime.now(UTC)
-            meeting = await MeetingDoc.find_one(
+            meetings = await MeetingDoc.find(
                 MeetingDoc.workspace == workspace_id,
                 MeetingDoc.provider_meeting_id == room_name,
                 MeetingDoc.source == "livekit",
                 MeetingDoc.status == "in_progress",
-            )
-            if meeting is not None:
+            ).to_list()
+            for meeting in meetings:
                 meeting.status = "ended"
                 meeting.actual_end = now
                 await meeting.save()
@@ -849,7 +1122,8 @@ async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
 async def get_room_info(group_id: str) -> dict[str, Any] | None:
     """Get the current state of a LiveKit room.
 
-    Returns None if the room doesn't exist (no active call).
+    Returns None if the room doesn't exist (no active call). ``active`` is
+    True only while a participant other than the call-bot is in the room.
     """
     _ensure_configured()
 
@@ -879,7 +1153,9 @@ async def get_room_info(group_id: str) -> dict[str, Any] | None:
                     }
                     for p in participants
                 ],
-                "active": True,
+                # A room holding only the call-bot (or nobody) is not a live
+                # call. It used to report True whenever the room existed.
+                "active": any(p.identity != "call-bot" for p in participants),
             }
         except Exception as exc:
             msg = str(exc).lower()
@@ -960,6 +1236,7 @@ async def post_meeting_notes_to_group(
     try:
         # Use direct message creation to bypass membership check
 
+        from pocketpaw_ee.cloud.chat import group_service
         from pocketpaw_ee.cloud.chat.message_service import _create_group_message_doc
         from pocketpaw_ee.cloud.shared.events import event_bus
 
@@ -970,7 +1247,15 @@ async def post_meeting_notes_to_group(
             sender_name="Meeting Notes",
             content=content,
         )
-        # Emit on internal event bus (group stats, mention notifications)
+        # The message's writer owns the group stats (nothing on the bus does).
+        # A stats failure must not lose the notes, so it is logged, not raised.
+        try:
+            await group_service.bump_message_stats(
+                group_id, last_message_at=domain_msg.created_at or datetime.now(UTC)
+            )
+        except Exception:
+            logger.warning("meeting notes: group stats bump failed for %s", group_id)
+        # Emit on the internal event bus (agent routing)
         await event_bus.emit(
             "message.sent",
             {
@@ -1092,6 +1377,60 @@ async def post_meeting_notes_to_group(
             logger.warning("Failed to create tasks from meeting notes: %s", exc)
 
 
+async def post_call_bot_message(group_id: str, content: str, sender_name: str) -> str:
+    """Post ``content`` to the group chat as the call bot; returns the message id.
+
+    Same write path as the meeting notes: the call-bot is not a group member,
+    so the message doc is created directly, then the group stats, the internal
+    ``message.sent`` bus and the realtime ``message.new`` are updated.
+    """
+    from pocketpaw_ee.cloud.chat import group_service
+    from pocketpaw_ee.cloud.chat.message_service import _create_group_message_doc
+    from pocketpaw_ee.cloud.shared.events import event_bus
+
+    domain_msg = await _create_group_message_doc(
+        group_id=group_id,
+        sender=CALL_BOT_USER_ID,
+        sender_type="user",
+        sender_name=sender_name,
+        content=content,
+    )
+    try:
+        await group_service.bump_message_stats(
+            group_id, last_message_at=domain_msg.created_at or datetime.now(UTC)
+        )
+    except Exception:
+        logger.warning("call bot message: group stats bump failed for %s", group_id)
+    await event_bus.emit(
+        "message.sent",
+        {
+            "group_id": group_id,
+            "message_id": domain_msg.id,
+            "sender_id": CALL_BOT_USER_ID,
+            "sender_type": "user",
+            "content": content,
+            "mentions": [],
+        },
+    )
+    await emit(
+        MessageNew(
+            data={
+                "group": group_id,
+                "group_id": group_id,
+                "sender": CALL_BOT_USER_ID,
+                "senderName": sender_name,
+                "senderType": "user",
+                "created_at": datetime.now(UTC).isoformat(),
+                "message_id": domain_msg.id,
+                "_id": domain_msg.id,
+                "content": content,
+                "mentions": [],
+            }
+        )
+    )
+    return domain_msg.id
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -1106,14 +1445,19 @@ async def _generate_token(
     can_subscribe: bool = True,
     is_admin: bool = False,
     ttl_seconds: int = 3600,
+    publish_sources: list[str] | None = None,
+    can_publish_data: bool = True,
 ) -> str:
     """Internal: generate a LiveKit access token."""
+    if publish_sources is None:
+        publish_sources = ["microphone", "camera", "screen_share"]
     grants = VideoGrants(
         room_join=True,
         room=room_name,
         can_publish=can_publish,
         can_subscribe=can_subscribe,
-        can_publish_sources=["microphone", "camera", "screen_share"] if can_publish else None,
+        can_publish_data=can_publish_data,
+        can_publish_sources=publish_sources if can_publish else None,
         can_update_own_metadata=True,
         agent=is_admin or None,
     )

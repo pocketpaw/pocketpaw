@@ -1,0 +1,30 @@
+[
+  {
+    "label": "a tool action may name a tool the page never declared",
+    "file": "ee/pocketpaw_ee/paw_bar/action_spec.py",
+    "find": "    tool = next((t for t in tools if t.get(\"name\") == name), None)",
+    "replace": "    tool = next((t for t in tools), None)",
+    "tests": [
+      "tests/cloud/test_paw_bar_declared_tools.py::test_an_unknown_tool_is_dropped",
+      "tests/cloud/test_paw_bar_declared_tools.py::test_v2_drops_a_fence_naming_an_unknown_tool"
+    ]
+  },
+  {
+    "label": "tool args may carry keys the schema does not declare",
+    "file": "ee/pocketpaw_ee/paw_bar/action_spec.py",
+    "find": "    if not set(args) <= set(props) or not set(schema.get(\"required\") or ()) <= set(args):",
+    "replace": "    if not set(schema.get(\"required\") or ()) <= set(args):",
+    "tests": [
+      "tests/cloud/test_paw_bar_declared_tools.py::test_args_that_break_the_schema_drop_the_action"
+    ]
+  },
+  {
+    "label": "<page-tools> is written even when the page declared no valid tool",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        if declared:\n            blocks.append(_page_tools_block(declared))",
+    "replace": "        if True:\n            blocks.append(_page_tools_block(declared))",
+    "tests": [
+      "tests/cloud/test_paw_bar_declared_tools.py::test_page_tools_appear_only_when_on_and_a_tool_is_valid"
+    ]
+  }
+]

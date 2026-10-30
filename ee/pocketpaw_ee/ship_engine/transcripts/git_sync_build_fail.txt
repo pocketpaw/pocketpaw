@@ -1,0 +1,12 @@
+# transcript: `dokku git:sync --build demo <repo> <ref>` failing IN THE BUILD —
+# the repo cloned but no build source was detected. A nonzero exit the driver
+# maps to CommandFailed with the redacted stderr tail (never a silent hang).
+EXIT: 1
+--- stdout ---
+-----> Cloning demo from the specified git repository...
+       Cloning into bare repository...
+-----> Building demo from herokuish
+--- stderr ---
+ !     App build failed
+ !     No Dockerfile, Procfile, or supported buildpack detected in the repository
+ !     See https://dokku.com/docs/deployment/builders/ for supported build sources
