@@ -1050,3 +1050,36 @@ async def test_kb_gets_a_longer_budget_than_the_other_sources(redis, grounding) 
             ask_id="a1",
         )
     assert budgets == {"live transcript": 1.5, "knowledge base": 3.0, "memory facts": 1.5}
+
+
+async def _ask(redis, question: str) -> tuple[str, str]:
+    """Run one answer and return the (system, user) prompts the LLM was given."""
+    assert await assistant.acquire_ask_lock(GROUP, "a1")
+    await _played(redis)
+    seen: dict[str, str] = {}
+
+    async def stream(system, user):
+        seen["system"], seen["user"] = system, user
+        yield "Hi Ann."
+
+    with patch.object(assistant, "stream_text", stream):
+        await assistant.answer_call_question(
+            group_id=GROUP,
+            workspace_id=WS,
+            user_id="u1",
+            asked_by_name="Ann",
+            question=question,
+            ask_id="a1",
+        )
+    return seen["system"], seen["user"]
+
+
+async def test_a_greeting_gets_a_recap_rule_not_a_request_for_the_question(
+    redis, grounding
+) -> None:
+    system, user = await _ask(redis, "hi")
+
+    assert "Ann says to you: hi" in user
+    flat = " ".join(system.split()).lower()
+    assert "greeting" in flat and "recap" in flat
+    assert "never ask them to repeat" in flat

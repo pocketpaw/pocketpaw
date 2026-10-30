@@ -449,7 +449,7 @@ def _build_user_prompt(
         "<workspace-memory>\n"
         + ("\n".join(f"- {f}" for f in facts) if facts else "(none found)")
         + "\n</workspace-memory>",
-        f"{asked_by_name} asks: {question}",
+        f"{asked_by_name} says to you: {question}",
     ]
     return "\n\n".join(sections)
 
