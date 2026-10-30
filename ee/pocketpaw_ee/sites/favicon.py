@@ -1,88 +1,36 @@
 # ee/pocketpaw_ee/sites/favicon.py — a site's gallery card wears the site's own
-# mark, not a globe.
+# mark, not a globe. Finds the icon a page declares and records it on the Site.
 #
-# Created 2026-09-02. The /sites card had a hard-coded Lucide globe tinted by a
-# hash of the site id (SiteCard.svelte's ``.site-logo``), so a gallery of ten
-# published sites showed ten globes in ten colours. Nothing anywhere in the stack
-# had ever read a site's icon: there was no field on the Site document, none on
-# either DTO, and no extraction step. This module is that missing step.
+# NOT THE SCREENSHOT LANE: an icon is a string in the markup, so finding it costs
+# one GET (or nothing, for a data: URI) and needs no Browser Rendering. Same three
+# rules as that lane though: never blocks a publish, never raises into one (the
+# ``safe_`` wrapper), never gates anything. Tests patch the module-attribute
+# scheduler to run inline; the strong-ref task set keeps detached tasks alive.
 #
-# IT IS NOT THE SCREENSHOT LANE, deliberately. ``sites.screenshot`` answers "what
-# does this page look like" and pays a paid, quota'd Cloudflare Browser Rendering
-# call to do it. An icon is a string in the markup: finding it costs one GET of a
-# page we have already probed, or nothing at all when the icon is a data: URI. So
-# this is its own module and its own scheduled task, and a deployment with Browser
-# Rendering unconfigured — which gets no screenshots at all — still gets favicons.
+# THE VALUE IS A data: URI, capped at ``_MAX_ICON_BYTES``: no blob row, no
+# per-card auth grant, no third-party hot-link. An icon over the cap is dropped
+# (the card keeps its globe) rather than stored somewhere else.
 #
-# THE SAME THREE RULES the screenshot lane runs under, for the same reasons: it
-# can never block a publish, never raise into one, and never gate anything. A site
-# whose icon cannot be found keeps the globe, which is exactly the pre-existing
-# card. Hence the ``safe_`` wrapper that swallows everything, the module-attribute
-# scheduler tests patch to run inline, and the strong-ref task set (asyncio holds
-# only a WEAK ref to a bare create_task, so a fire-and-forget task can be collected
-# mid-run).
+# SSRF. Hrefs come out of markup that, for an imported or connected site, a third
+# party wrote. ``_same_origin`` fetches a candidate ONLY when its host equals the
+# site's own; data: URIs reach no network. HOW the fetch is made depends on whose
+# host it is: a hosted site's address is one we composed, so ``_plain_get`` (plain
+# httpx) is fine; a CONNECTED site's host is the customer's, so ``foreign=True``
+# routes every request through ``safe_fetch.fetch_single_url`` (``_safe_get``):
+# DNS pinned to a validated public IP, every redirect hop re-checked. A foreign
+# host must never reach ``_plain_get``.
 #
-# THE VALUE IS A data: URI, NOT AN UPLOADS LINK — the one real design decision
-# here, and the opposite of what ``preview_image_url`` does. A screenshot is a
-# 1280x800 PNG and has to live in blob storage behind ``/api/v1/uploads/{id}``,
-# which is auth-gated, which is why the card resolves it through a per-card grant
-# (``grantThumbUrl``). An icon is typically under 3 KB. Inlining it on the wire
-# costs a few KB of list response and buys: no blob row, no grant round-trip per
-# card, no auth dance, no second request before the card can paint, and no
-# third-party host learning the IP of everyone who opens the gallery. The cost is
-# that the list response grows with the number of sites, which is what
-# ``_MAX_ICON_BYTES`` bounds — an icon over the cap is DROPPED (the card keeps its
-# globe) rather than stored somewhere else, because two storage paths for one field
-# is how a field starts lying about what it holds. If real sites turn out to carry
-# icons over the cap, raise the cap or move the whole field to blob storage; do not
-# add a second branch.
+# SVG SAFETY: the card draws through <img src> (scripts do not run there) and
+# ``_svg_is_inert`` independently keeps active content out of the field.
 #
-# SSRF — the reason ``_same_origin`` exists and is not optional. Unlike the
-# screenshot lane, which only ever addresses a hostname WE composed
-# (``<site_id>.<PAW_CF_SITES_DOMAIN>``), this module reads hrefs out of MARKUP, and
-# for an imported site that markup is written by whoever we imported. A
-# ``<link rel=icon href="http://169.254.169.254/latest/meta-data/">`` would
-# otherwise make this server fetch cloud-instance metadata and base64 it onto a
-# card. So a candidate is fetched ONLY when its host equals the site's own host —
-# the host we already probe and already photograph. A data: URI carries its own
-# bytes and reaches no network at all, so it needs no such check. Everything else
-# (a third-party CDN icon, an absolute link to another domain) is skipped, which
-# also disposes of the IP-leak problem: we never hot-link, we store what we
-# fetched.
+# CANDIDATES, best first (``extract_icon_candidates``): a scalable SVG icon,
+# apple-touch-icon, rel=icon by declared size, msapplication-TileImage,
+# mask-icon, the web-app manifest's icons (one extra GET), then /favicon.ico.
+# og:image is deliberately excluded: a 1200x630 banner is not a mark.
 #
-# SVG SAFETY — an icon can be an SVG, an SVG can carry <script>, and for an
-# imported site the SVG is attacker-supplied. The primary control is on the render
-# side: the card draws this through <img src>, and scripts inside an SVG do not
-# execute in an <img> context (they do when the same markup is inlined into the
-# DOM). ``_svg_is_inert`` is a SECOND, independent control here at the source, so
-# the field never carries active content in the first place — the two are checked
-# by different tests and neither is load-bearing for the other.
-#
-# WHAT IT LOOKS AT, best first (``extract_icon_candidates``). "The favicon" is not
-# one tag; a real page declares its mark two or three different ways and a
-# generated one may use any of them:
-#   * a scalable SVG icon — sharp at any DPR, so it wins outright;
-#   * apple-touch-icon / -precomposed, conventionally 180px and reliably square;
-#   * rel=icon / rel="shortcut icon", largest declared ``sizes`` first;
-#   * <meta name=msapplication-TileImage>, the Windows tile;
-#   * rel=mask-icon, Safari's pinned-tab silhouette — monochrome and meant to be
-#     tinted, so it is a poor chip and ranks last among declared icons;
-#   * rel=manifest -> the web-app manifest's ``icons`` array, which is where a PWA
-#     puts its good 192/512px art. Costs one extra same-origin GET, so it is tried
-#     only after everything already in the document;
-#   * /favicon.ico at the site root — the pre-HTML default, tried last because it
-#     is a guess rather than a declaration.
-# og:image is deliberately NOT in that list. It is a ~1200x630 social banner; a
-# wide banner cropped into a 24px round chip is worse than the globe it would
-# replace, and unlike everything above it was never a claim about the site's mark.
-#
-# ABSENCE IS AUTHORITATIVE, but only when we actually read the page. If the markup
-# was fetched and declares no icon, the field is CLEARED — a site that removed its
-# icon should lose it from the card. If the fetch failed, nothing is written and
-# the card keeps what it had. The draft lane passes ``clear_when_absent=False``
-# because its markup is lossy in exactly this respect: ``draft_markup``'s
-# ``inline_document`` DROPS every local <link> that is not a stylesheet, icons
-# included, so "no icon in the assembled draft" is not evidence of "no icon".
+# ABSENCE IS AUTHORITATIVE only when the page was actually read: markup with no
+# icon CLEARS the field, a failed fetch leaves it alone. The draft lane passes
+# ``clear_when_absent=False`` because assembled draft markup drops icon links.
 
 from __future__ import annotations
 
@@ -351,9 +299,48 @@ def _same_origin(href: str, base_url: str) -> bool:
     return target.netloc.lower() == base.netloc.lower()
 
 
-async def _get(url: str, *, limit: int, transport: Any = None) -> bytes:
+async def _get(
+    url: str,
+    *,
+    limit: int,
+    transport: Any = None,
+    foreign: bool = False,
+    resolver: Any = None,
+) -> bytes:
     """One capped GET. b"" on anything that is not a 2xx, and never raises — every
-    failure here is "this site has no icon we can use", not an error to report."""
+    failure here is "this site has no icon we can use", not an error to report.
+
+    ``foreign`` says the host is a customer's (a connected site): the request then
+    goes through the SSRF-hardened ``_safe_get`` and never the plain client."""
+    if foreign:
+        return await _safe_get(url, limit=limit, transport=transport, resolver=resolver)
+    return await _plain_get(url, limit=limit, transport=transport)
+
+
+async def _safe_get(url: str, *, limit: int, transport: Any = None, resolver: Any = None) -> bytes:
+    """The customer-host GET: ``safe_fetch.fetch_single_url`` (DNS pinned, private
+    targets refused, every redirect hop re-checked). An oversized body raises there
+    mid-stream, which lands here as b"" like every other refusal."""
+    from pocketpaw_ee.sites.safe_fetch import fetch_single_url
+
+    try:
+        result = await fetch_single_url(
+            url,
+            max_bytes=limit,
+            timeout_sec=_FETCH_TIMEOUT,
+            user_agent=_FETCH_UA,
+            transport=transport,
+            resolver=resolver,
+        )
+    except Exception:  # noqa: BLE001 — refused or unreachable is "no icon"
+        return b""
+    if result.status // 100 != 2:
+        return b""
+    return result.body
+
+
+async def _plain_get(url: str, *, limit: int, transport: Any = None) -> bytes:
+    """The hosted-site GET, for an address we composed. Never a customer's host."""
     import httpx
 
     kwargs: dict[str, Any] = {"timeout": _FETCH_TIMEOUT, "follow_redirects": True}
@@ -380,7 +367,14 @@ def _as_data_uri(data: bytes, mime: str) -> str:
     return "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")
 
 
-async def _resolve_one(cand: IconCandidate, *, base_url: str, transport: Any) -> str:
+async def _resolve_one(
+    cand: IconCandidate,
+    *,
+    base_url: str,
+    transport: Any,
+    foreign: bool = False,
+    resolver: Any = None,
+) -> str:
     """One candidate -> a data: URI to store, or "" to move on to the next."""
     href = cand.href.strip()
     if not href:
@@ -400,20 +394,39 @@ async def _resolve_one(cand: IconCandidate, *, base_url: str, transport: Any) ->
         return ""
 
     absolute = urljoin(base_url, href)
-    data = await _get(absolute, limit=_MAX_ICON_BYTES, transport=transport)
+    data = await _get(
+        absolute,
+        limit=_MAX_ICON_BYTES,
+        transport=transport,
+        foreign=foreign,
+        resolver=resolver,
+    )
     mime = _accept(data)
     if not mime:
         return ""
     return _as_data_uri(data, mime)
 
 
-async def _resolve_manifest(cand: IconCandidate, *, base_url: str, transport: Any) -> str:
+async def _resolve_manifest(
+    cand: IconCandidate,
+    *,
+    base_url: str,
+    transport: Any,
+    foreign: bool = False,
+    resolver: Any = None,
+) -> str:
     """A web-app manifest's best icon. One extra same-origin GET for the JSON and one
     for the image it names, and every gate the declared path uses applies to both."""
     if not _same_origin(cand.href, base_url):
         return ""
     manifest_url = urljoin(base_url, cand.href)
-    body = await _get(manifest_url, limit=_MAX_MANIFEST_BYTES, transport=transport)
+    body = await _get(
+        manifest_url,
+        limit=_MAX_MANIFEST_BYTES,
+        transport=transport,
+        foreign=foreign,
+        resolver=resolver,
+    )
     if not body:
         return ""
     try:
@@ -437,33 +450,44 @@ async def _resolve_manifest(cand: IconCandidate, *, base_url: str, transport: An
     for _size, src in ranked:
         # An icon src is relative to the MANIFEST, not to the document.
         inner = IconCandidate(urljoin(manifest_url, src), "manifest-icon", _TIER_MANIFEST)
-        got = await _resolve_one(inner, base_url=base_url, transport=transport)
+        got = await _resolve_one(
+            inner, base_url=base_url, transport=transport, foreign=foreign, resolver=resolver
+        )
         if got:
             return got
     return ""
 
 
-async def resolve_favicon(markup: str, *, base_url: str = "", transport: Any = None) -> str:
+async def resolve_favicon(
+    markup: str,
+    *,
+    base_url: str = "",
+    transport: Any = None,
+    foreign: bool = False,
+    resolver: Any = None,
+) -> str:
     """This document's best usable icon as a data: URI, or "" when it has none.
 
     Walks :func:`extract_icon_candidates` in order and returns the first candidate
     that survives every gate, then falls back to the ``/favicon.ico`` guess. With no
     ``base_url`` only data: URIs can resolve — nothing else has an origin to be
     same-origin with — which is exactly the draft case.
+
+    ``foreign`` marks ``base_url`` as a customer's host (a connected site): every
+    request goes through ``safe_fetch``. ``resolver`` is its DNS test seam.
     """
+    net = {"transport": transport, "foreign": foreign, "resolver": resolver}
     for cand in extract_icon_candidates(markup):
         if cand.source == "manifest":
-            got = await _resolve_manifest(cand, base_url=base_url, transport=transport)
+            got = await _resolve_manifest(cand, base_url=base_url, **net)
         else:
-            got = await _resolve_one(cand, base_url=base_url, transport=transport)
+            got = await _resolve_one(cand, base_url=base_url, **net)
         if got:
             logger.debug("sites.favicon: resolved icon from %s", cand.source)
             return got
 
     if base_url:
-        data = await _get(
-            urljoin(base_url, "/favicon.ico"), limit=_MAX_ICON_BYTES, transport=transport
-        )
+        data = await _get(urljoin(base_url, "/favicon.ico"), limit=_MAX_ICON_BYTES, **net)
         mime = _accept(data)
         if mime:
             logger.debug("sites.favicon: resolved icon from /favicon.ico")

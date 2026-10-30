@@ -1,66 +1,31 @@
 """WebSocket connection manager for real-time chat.
 
-Single endpoint: ws://host/ws/cloud?token=<JWT>
+Single endpoint: ws://host/ws/cloud?token=<JWT>. The manager owns the sockets
+THIS process holds: user -> sockets (multi-tab/device), socket -> current room,
+typing timers (5s auto-expiry) and presence grace timers (30s before offline).
 
-Handles:
-- Connection lifecycle (connect -> authenticate -> active -> disconnect)
-- User-to-connections mapping: user_id -> set[WebSocket] (multi-tab/device)
-- Message routing to group members
-- Typing indicators with auto-expiry (5s)
-- Presence tracking with grace period (30s before marking offline)
-- Per-socket liveness (see below)
+Fan-out (``send_to_user``, ``broadcast_to_group``, ``send_to_room``) sends
+concurrently under a bounded gather, each send capped by
+``SEND_TIMEOUT_SECONDS``, so one back-pressured tab costs the slowest recipient,
+not the sum. A timed-out or failing socket is dropped, never retried.
 
-Updated: 2026-09-04 (fix/unblock-event-loop, backend-perf H1) — the three
-fan-out loops (``send_to_user``, ``broadcast_to_group``, ``send_to_room``) now
-send CONCURRENTLY under a bounded gather instead of one serial await per
-recipient. ``SEND_TIMEOUT_SECONDS`` below already bounds a single send, and the
-note on it explains exactly why: "one stuck socket would stall delivery to
-every other member and the sender's own request". That is true of one send, but
-the serial loop around it re-introduced the very stall the timeout was added to
-prevent — the cost was the SUM over recipients, so a 200-member workspace with
-ten back-pressured tabs held the emitting POST for ~50s with every individual
-timeout behaving perfectly. Delivery is now max-per-socket. The freshness gate,
-the dead-socket bookkeeping, and the ``delivered`` count (which
-``push/dispatch.py`` reads to choose WS over Web Push) are unchanged.
+Cross-process: with ``POCKETPAW_REALTIME_BUS=redis-streams``,
+``broadcast_to_group`` and ``send_to_room`` also relay the frame through
+``_core/realtime/broadcast.py`` so other web processes reach their own sockets.
+``send_to_user`` never relays: its return value counts THIS process's accepting
+sockets. ``is_online`` and typing state are process-local; the cluster-wide
+presence answer (first/last connection, online elsewhere) lives in
+``_core/realtime/presence.py``, which the router and ``push/dispatch.py`` call
+with this manager.
 
-Updated: 2026-08-18 (fix/ws-fanout-stale-sockets) — the liveness verdict below
-was only consulted by ``is_online``. Fan-out (``send_to_user`` /
-``send_to_room``) still wrote to every registered socket, so a zombie kept
-receiving kernel-buffered frames and — worse — kept counting toward
-``delivered``, the signal ``push/dispatch.py`` reads to pick WS over Web Push.
-Both fan-out paths now apply the same ``_is_fresh`` gate: a stale ping-capable
-socket is skipped (not delivered) and closed best-effort via ``_close_stale``,
-exactly as ``is_online`` does. Legacy sockets are unaffected. Each send is
-also bounded by ``SEND_TIMEOUT_SECONDS``: a back-pressured socket (client
-stopped reading) used to stall the whole inline fan-out loop; on timeout it is
-now treated as dead and dropped, never retried (see the constant's note).
-
-Updated: 2026-08-11 (fix/notif-liveness-dispatch) — ``is_online`` used to mean
-"a socket object is present in the dict", which a half-open socket (laptop
-asleep, NAT timeout) satisfies indefinitely: the TCP close never arrives, so
-the registry keeps a socket nobody is listening on. Notification dispatch
-reads that verdict to pick WS over Web Push, so a zombie socket silently ate
-the notification.
-
-Liveness is now **capability-gated**, because the honest signal is only
-available from clients that ping:
-
-- A socket that has sent a ``ping`` frame is marked ping-capable
-  (``mark_ping_capable``, called from the router's ping branch — capability is
-  proved by behaviour, not assumed). For these, liveness is INBOUND traffic
-  inside ``LIVENESS_STALE_SECONDS``. Outbound sends are deliberately excluded:
-  a write to a half-open socket succeeds for minutes because the kernel
-  buffers it, so counting outbound would let workspace fan-out resurrect a
-  zombie forever. Past the window the socket is dropped from the verdict and
-  closed best-effort, which wakes the receive loop so the normal
-  disconnect/presence path runs.
-- Every other socket (older FE bundles that never ping) keeps the legacy
-  "live while registered" verdict. They send nothing for long stretches while
-  perfectly alive, so applying staleness would churn them into a
-  close/reconnect loop. Their safety net is unchanged: the dispatch
-  zero-accept fallback in ``push/dispatch.py``. That also removes any
-  deployment-ordering constraint against the FE ping rollout — this can ship
-  first, and each client tightens itself the moment it starts pinging.
+Liveness is capability-gated. A socket that has sent a ``ping`` is marked
+ping-capable and is live only while INBOUND traffic arrives inside
+``LIVENESS_STALE_SECONDS``; outbound sends are not evidence, because a write to
+a half-open socket succeeds for minutes into the kernel buffer. A stale capable
+socket is skipped by fan-out, not counted as delivered, and closed best-effort,
+which wakes the receive loop so the normal disconnect/presence path runs.
+Sockets that never ping (older clients) keep the "live while registered"
+verdict; their safety net is the zero-accept fallback in ``push/dispatch.py``.
 """
 
 from __future__ import annotations
@@ -72,6 +37,7 @@ import time
 
 from fastapi import WebSocket
 
+from pocketpaw_ee.cloud._core.realtime import broadcast
 from pocketpaw_ee.cloud._core.realtime.fanout import map_bounded
 from pocketpaw_ee.cloud.chat.schemas import WsOutbound
 
@@ -129,6 +95,12 @@ class ConnectionManager:
         # Strong refs to in-flight close tasks — a bare create_task result is
         # only weakly held by the loop and can be GC'd mid-await.
         self._close_tasks: set[asyncio.Task] = set()
+        # Explicit cross-process broadcast channel, for tests that simulate
+        # several web processes in one; otherwise the process's own channel is
+        # used, and exists only when broadcast is on (see broadcast.py).
+        self.relay_channel: broadcast.Channel | None = None
+        # Same idea for the cluster presence registry (see presence.py).
+        self.presence_registry = None
 
     async def connect(self, websocket: WebSocket, user_id: str) -> None:
         """Register an authenticated WebSocket connection."""
@@ -382,13 +354,26 @@ class ConnectionManager:
         member_ids: list[str],
         message: WsOutbound,
         exclude_user: str | None = None,
+        *,
+        relay: bool = True,
     ) -> None:
-        """Broadcast a message to all online members of a group."""
+        """Broadcast a message to all online members of a group.
+
+        With cross-process broadcast on, the frame is also relayed so the other
+        web processes reach the members whose sockets they hold. ``relay=False``
+        is for the broadcast consumer itself, delivering a frame another
+        process already relayed.
+        """
         targets = [uid for uid in member_ids if uid != exclude_user]
         # Concurrent for the same reason as send_to_user, one level up: a
         # group's members are independent recipients, so the broadcast should
         # cost the slowest member rather than all of them added together.
         await map_bounded(targets, lambda uid: self.send_to_user(uid, message))
+        channel = (self.relay_channel or broadcast.active_channel()) if relay else None
+        if channel is not None and targets:
+            await channel.publish_group(
+                group_id, targets, message.type, message.model_dump(mode="json")["data"]
+            )
 
     # ------------------------------------------------------------------
     # Room tracking (at most one current room per socket)
@@ -412,14 +397,21 @@ class ConnectionManager:
         message: WsOutbound,
         *,
         exclude_user: str | None = None,
+        relay: bool = True,
     ) -> None:
         """Send to every socket currently joined to the room.
 
         Does not know group membership — membership was enforced at join time
         by the handler (the router dispatcher validates the joiner is allowed
-        in the group before calling ``join_room``).
+        in the group before calling ``join_room``). Room membership is per
+        process, so with cross-process broadcast on the frame is relayed and
+        each process sends to its own joined sockets; ``relay=False`` is for the
+        broadcast consumer.
         """
         data = message.model_dump(mode="json")
+        channel = (self.relay_channel or broadcast.active_channel()) if relay else None
+        if channel is not None:
+            await channel.publish_room(group_id, message.type, data["data"], exclude_user)
         now = time.monotonic()
         fresh: list[WebSocket] = []
         for ws, room in list(self._ws_to_room.items()):

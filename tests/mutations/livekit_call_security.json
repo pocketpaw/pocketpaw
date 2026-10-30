@@ -1,0 +1,274 @@
+[
+  {
+    "label": "token: drop the membership comparison",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "    if group is None or group.workspace_id != workspace_id or user_id not in group.members:",
+    "replace": "    if group is None or group.workspace_id != workspace_id:",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "token: let non group-call room names through again",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    await livekit_service.require_call_group(gid, str(user.id), workspace_id)\n",
+    "replace": "    if gid:\n        await livekit_service.require_call_group(gid, str(user.id), workspace_id)\n",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "accept: skip the allow-list check",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    if allowed and (email or \"\").strip().lower() not in allowed:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/livekit/test_invite_email_allowlist.py"
+    ]
+  },
+  {
+    "label": "accept: compare without normalizing",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    if allowed and (email or \"\").strip().lower() not in allowed:",
+    "replace": "    if allowed and (email or \"\") not in allowed:",
+    "tests": [
+      "tests/cloud/livekit/test_invite_email_allowlist.py"
+    ]
+  },
+  {
+    "label": "allow-list: ignore legacy display_name emails",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    return doc.allowed_emails or _split_emails(doc.display_name)[1]",
+    "replace": "    return doc.allowed_emails",
+    "tests": [
+      "tests/cloud/livekit/test_invite_email_allowlist.py"
+    ]
+  },
+  {
+    "label": "validate: echo display_name with the emails",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "        \"display_name\": _split_emails(doc.display_name)[0],",
+    "replace": "        \"display_name\": doc.display_name,",
+    "tests": [
+      "tests/cloud/livekit/test_invite_email_allowlist.py"
+    ]
+  },
+  {
+    "label": "accept: treat a missing room as joinable",
+    "file": "ee/pocketpaw_ee/cloud/livekit/invites.py",
+    "find": "    if room_info is None or not room_info.get(\"active\", False):",
+    "replace": "    if room_info is not None and not room_info.get(\"active\", False):",
+    "tests": [
+      "tests/cloud/livekit/test_invite_no_restart.py"
+    ]
+  },
+  {
+    "label": "get_room_info: active whenever the room exists",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "                \"active\": any(p.identity != \"call-bot\" for p in participants),",
+    "replace": "                \"active\": True,",
+    "tests": [
+      "tests/cloud/livekit/test_invite_no_restart.py"
+    ]
+  },
+  {
+    "label": "token: use the body identity again",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "        identity=identity,\n        name=display_name,",
+    "replace": "        identity=body.identity or identity,\n        name=display_name,",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "token: drop the TTL clamp",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "        ttl_seconds=min(max(body.ttl_seconds, 60), MAX_TOKEN_TTL_SECONDS),",
+    "replace": "        ttl_seconds=body.ttl_seconds,",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "scheduled start: drop the workspace",
+    "file": "ee/pocketpaw_ee/cloud/meetings/providers/livekit/provider.py",
+    "find": "            group_id, ctx.workspace_id, ctx.user_id or \"\", record_meeting=False",
+    "replace": "            group_id, \"\", ctx.user_id or \"\", record_meeting=False",
+    "tests": [
+      "tests/cloud/livekit/test_call_budget.py"
+    ]
+  },
+  {
+    "label": "scheduled start: insert the Instant call row too",
+    "file": "ee/pocketpaw_ee/cloud/meetings/providers/livekit/provider.py",
+    "find": "record_meeting=False",
+    "replace": "record_meeting=True",
+    "tests": [
+      "tests/cloud/livekit/test_call_budget.py"
+    ]
+  },
+  {
+    "label": "scheduled start: leave a budget-blocked meeting scheduled",
+    "file": "ee/pocketpaw_ee/cloud/meetings/scheduling/service.py",
+    "find": "        doc.status = \"failed\"\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/livekit/test_call_budget.py"
+    ]
+  },
+  {
+    "label": "create_room: no watchdog when the caller owns the row",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "    if budget_deadline is not None and not record_meeting:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/livekit/test_call_budget.py"
+    ]
+  },
+  {
+    "label": "rooms: return the call-bot token again",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    url: str\n    created_at: str",
+    "replace": "    url: str\n    bot_token: str\n    created_at: str",
+    "tests": [
+      "tests/cloud/livekit/test_room_routes_guard.py"
+    ]
+  },
+  {
+    "label": "require_call_group: drop the audit record",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        log_denial(\n            actor=user_id,",
+    "replace": "        (lambda **_: None)(\n            actor=user_id,",
+    "tests": [
+      "tests/cloud/livekit/test_token_room_access.py"
+    ]
+  },
+  {
+    "label": "require_call_group: drop the workspace comparison",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "    if group is None or group.workspace_id != workspace_id or user_id not in group.members:",
+    "replace": "    if group is None or user_id not in group.members:",
+    "tests": [
+      "tests/cloud/livekit/test_room_routes_guard.py",
+      "tests/cloud/livekit/test_token_room_access.py",
+      "tests/cloud/livekit/test_scheduled_meeting_group_scope.py"
+    ]
+  },
+  {
+    "label": "end_call: back to membership-only",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)\n\n    result = await livekit_service.end_room(group_id, workspace_id)",
+    "replace": "    group = await _get_group_domain_or_404(group_id)\n    _require_domain_group_member(group, str(user.id))\n\n    result = await livekit_service.end_room(group_id, workspace_id)",
+    "tests": [
+      "tests/cloud/livekit/test_room_routes_guard.py"
+    ]
+  },
+  {
+    "label": "scheduling: skip the group check",
+    "file": "ee/pocketpaw_ee/cloud/meetings/providers/livekit/provider.py",
+    "find": "            await livekit_service.require_call_group(group_id, ctx.user_id, ctx.workspace_id)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/livekit/test_scheduled_meeting_group_scope.py"
+    ]
+  },
+  {
+    "label": "ask: skip the group check",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    await livekit_service.require_call_group(group_id, str(user.id), workspace_id)\n    if not await livekit_service._meeting_notes_allowed(workspace_id):",
+    "replace": "    if not await livekit_service._meeting_notes_allowed(workspace_id):",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: answer even when the bot is not allowed",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    if not await livekit_service._meeting_notes_allowed(workspace_id):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: read the asker's private KB scope",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "        f\"workspace:{workspace_id}\", question, limit=3",
+    "replace": "        f\"user:{workspace_id}\", question, limit=3",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: read member-attributed memory facts",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "        if (entry.metadata or {}).get(\"user_id\") not in _SHARED_MEMORY_USER_IDS:\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: release a lock someone else holds",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "    return bool(await _redis().eval(_RELEASE_LUA, 1, key, ask_id))",
+    "replace": "    return bool(await _redis().delete(key))",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: answer with no bot in the call",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    if not await _assistant_redis(assistant.bot_in_call(group_id)):\n        raise ConflictError(\"livekit.assistant_offline\", \"Paw isn't in this call.\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: let any member end someone's push-to-talk",
+    "file": "ee/pocketpaw_ee/cloud/livekit/router.py",
+    "find": "    if holder != body.ask_id or asker != user_id:\n",
+    "replace": "    if holder != body.ask_id:\n",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: go idle before the answer has played",
+    "file": "ee/pocketpaw_ee/cloud/livekit/assistant.py",
+    "find": "        await wait_for_playback(ask_id, len(spoken))\n        if await ask_lock_holder(group_id) != ask_id:\n",
+    "replace": "        if await ask_lock_holder(group_id) != ask_id:\n",
+    "tests": [
+      "tests/ee/test_livekit_ask_paw.py"
+    ]
+  },
+  {
+    "label": "ask: bot token back to listen-only",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        \"call-bot\",\n        can_publish=True,\n",
+    "replace": "        \"call-bot\",\n        can_publish=False,\n",
+    "tests": [
+      "tests/ee/test_livekit_service.py"
+    ]
+  },
+  {
+    "label": "ask: bot token publishes camera and screen too",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        publish_sources=[\"microphone\"],\n        can_publish_data=False,\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/test_livekit_service.py"
+    ]
+  },
+  {
+    "label": "ask: assistant_state no longer reaches the group",
+    "file": "ee/pocketpaw_ee/cloud/_core/realtime/audience.py",
+    "find": "            \"call.assistant_state\",\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/realtime/test_audience.py"
+    ]
+  }
+]

@@ -32,6 +32,14 @@ Regression test for edit-ignores-agent-mode bug (#1170):
     returns a draft kit; the second call (``ops`` populated) applies the
     chat agent's granular ops through the real edit tools — rejected and
     unknown ops fold into ``warnings`` like the subagent path.
+
+Skill path on the subagent pipeline (``POCKETPAW_POCKET_SPECIALIST_USE_SKILL``):
+  * The specialist edits with ``curl`` through ``Bash``, but its prompt opens
+    with ``<pocket-scope>``, which locks the Claude SDK backend to Agent /
+    WebSearch / WebFetch / Skill. The pipeline declares exactly the built-ins
+    the pocketpaw-pocket-specialist SKILL.md names (read from the shipped file)
+    through ``allow_sdk_tools``, and only to a backend whose ``run`` takes that
+    keyword.
 """
 
 from __future__ import annotations
@@ -955,3 +963,110 @@ class TestAgentModeEditDispatch:
         assert out.error
         assert out.warnings
         assert "create_pocket" in " ".join(out.warnings)
+
+
+class TestSkillPathDeclaresItsTools:
+    """The skill path needs its skill's built-ins past the pocket lock (see the
+    module docstring). The default ``deep_agents`` backend has no
+    ``allow_sdk_tools`` keyword, so it must never be handed one."""
+
+    @staticmethod
+    def _skill_built_ins() -> frozenset[str]:
+        """The built-ins the pocketpaw-pocket-specialist SKILL.md tells the agent
+        it has ("You have ``Bash``, ``Read``, ..."), read from the shipped file."""
+        import re
+
+        from pocketpaw.bundled_skills import bundled_skills_plugin_dir
+
+        root = bundled_skills_plugin_dir()
+        assert root is not None, "the bundled skills plugin is missing"
+        text = (root / "skills" / "pocketpaw-pocket-specialist" / "SKILL.md").read_text()
+        sentence = re.search(r"You have (.+?)\.", text, re.S)
+        assert sentence, "SKILL.md no longer says which tools the specialist has"
+        return frozenset(re.findall(r"``(\w+)``", sentence.group(1)))
+
+    @staticmethod
+    async def _run(monkeypatch: pytest.MonkeyPatch, run, *, use_skill: bool = True):
+        from unittest.mock import MagicMock
+
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
+            PocketSpecialistEditInput,
+            run_edit_specialist,
+        )
+
+        from pocketpaw.config import Settings
+
+        monkeypatch.setenv("POCKETPAW_POCKET_SPECIALIST_USE_SKILL", "true" if use_skill else "")
+        backend = MagicMock()
+        backend.run = run
+        backend.stop = AsyncMock()
+        with patch(
+            "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+            return_value=backend,
+        ):
+            return await run_edit_specialist(
+                PocketSpecialistEditInput(pocket_id="p1", intent="rename row 1"),
+                workspace_id="w1",
+                user_id="u1",
+                settings=Settings(pocket_specialist_mode="subagent"),
+            )
+
+    @pytest.mark.asyncio
+    async def test_the_skill_built_ins_reach_the_claude_backend_past_the_pocket_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pocketpaw.agents.claude_sdk import _POCKET_SCOPE_OPENING
+        from pocketpaw.agents.protocol import AgentEvent
+        from tests.test_claude_sdk_tool_scoping import _build
+
+        seen: dict = {}
+
+        async def run(message, *, system_prompt=None, allow_sdk_tools=frozenset()):
+            seen.update(system_prompt=system_prompt, allow_sdk_tools=allow_sdk_tools)
+            yield AgentEvent(type="message", content="done.")
+
+        await self._run(monkeypatch, run)
+
+        declared = self._skill_built_ins()
+        assert "Bash" in declared, "the skill curls the merge endpoint"
+        assert seen["allow_sdk_tools"] == declared, "grant exactly what the skill names"
+        assert _POCKET_SCOPE_OPENING.search(seen["system_prompt"]), "the lock this test is about"
+        options = await _build(
+            system_prompt=seen["system_prompt"], allow_sdk_tools=seen["allow_sdk_tools"]
+        )
+        # Skill rides on the pocket lock itself; the declared set rides on top.
+        assert declared | {"Skill"} <= set(options.tools)
+        assert "Glob" not in options.tools, "the lock still holds what the skill does not name"
+
+    @pytest.mark.asyncio
+    async def test_a_backend_without_the_keyword_is_not_handed_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pocketpaw.agents.protocol import AgentEvent
+
+        calls: list[str] = []
+
+        async def run(message, *, system_prompt=None):
+            calls.append(message)
+            yield AgentEvent(type="message", content="done.")
+
+        out = await self._run(monkeypatch, run)
+
+        assert calls, "the backend must still run"
+        assert out.error is None
+
+    @pytest.mark.asyncio
+    async def test_without_the_skill_flag_nothing_extra_is_declared(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from pocketpaw.agents.protocol import AgentEvent
+
+        seen: dict = {}
+
+        async def run(message, *, system_prompt=None, allow_sdk_tools=frozenset()):
+            seen["allow_sdk_tools"] = allow_sdk_tools
+            yield AgentEvent(type="message", content="done.")
+
+        await self._run(monkeypatch, run, use_skill=False)
+
+        assert seen["allow_sdk_tools"] == frozenset()

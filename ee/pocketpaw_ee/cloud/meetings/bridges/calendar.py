@@ -19,11 +19,19 @@ Subscribes on ``shared.events.event_bus``:
 * ``calendar.event.deleted`` → forward: cancel the linked Meeting
 * ``meeting.scheduled`` → reverse: mint a CalendarEvent, link both rows
 * ``meeting.cancelled`` → reverse: delete the linked CalendarEvent
+* ``meeting.edited`` → reverse: re-sync the linked CalendarEvent (time,
+  title, description, location), or mint one for a meeting that just got a
+  date (2026-10-01, feat/meetings-ics, MC-4)
 
-Updates (``calendar.event.updated`` / silent meeting updates)
-intentionally don't sync. Re-detecting URLs on calendar updates risks
-double-creating meetings when descriptions are edited for unrelated
-reasons; the same logic applies in reverse.
+``calendar.event.updated`` intentionally doesn't sync back: re-detecting URLs
+on calendar updates risks double-creating meetings when descriptions are
+edited for unrelated reasons. Bus ``meeting.updated`` (the Recall webhook
+upsert) isn't listened to either — a calendar write per webhook is noise;
+``meeting.edited`` comes only from a host's PATCH.
+
+2026-10-01 (feat/meetings-ics, MC-4): a meeting-room meeting (hidden room,
+code + link) gets its joining info as the event description; location is the
+meeting link (its ``join_url``).
 """
 
 from __future__ import annotations
@@ -302,22 +310,12 @@ async def _on_meeting_scheduled(data: dict[str, Any]) -> None:
     if payload.get("calendar_event_id"):
         return
 
-    starts_at = doc.scheduled_start
-    if starts_at is None:
+    window = _window(doc)
+    if window is None:
         # Meetings without a scheduled_start (e.g. instant calls) don't
         # need a calendar entry; skip silently.
         return
-    if starts_at.tzinfo is None:
-        starts_at = starts_at.replace(tzinfo=UTC)
-    ends_at = doc.scheduled_end
-    if ends_at is None:
-        ends_at = _default_end(starts_at)
-    elif ends_at.tzinfo is None:
-        ends_at = ends_at.replace(tzinfo=UTC)
-    # CreateEventRequest enforces ends > starts; nudge by 1 minute if
-    # the meeting somehow ended up zero-length.
-    if ends_at is None or ends_at <= starts_at:
-        ends_at = starts_at + timedelta(minutes=30)
+    starts_at, ends_at = window
 
     actor = doc.created_by_user_id or data.get("created_by") or "system"
     ctx = RequestContext(workspace_id=workspace_id, user_id=actor)
@@ -353,6 +351,81 @@ async def _on_meeting_scheduled(data: dict[str, Any]) -> None:
         event_resp.id,
         meeting_id,
     )
+
+
+def _window(doc: Any) -> tuple[datetime, datetime] | None:
+    """The event's (starts_at, ends_at) in aware UTC; None for an undated meeting."""
+    starts_at = doc.scheduled_start
+    if starts_at is None:
+        return None
+    if starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=UTC)
+    ends_at = doc.scheduled_end
+    if ends_at is None:
+        ends_at = _default_end(starts_at)
+    elif ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=UTC)
+    # The calendar DTOs enforce ends > starts; fall back to 30 minutes if
+    # the meeting somehow ended up zero-length.
+    if ends_at is None or ends_at <= starts_at:
+        ends_at = starts_at + timedelta(minutes=30)
+    return starts_at, ends_at
+
+
+async def _on_meeting_edited(data: dict[str, Any]) -> None:
+    """Re-sync the CalendarEvent this bridge minted after the host edits the meeting.
+
+    A meeting that had no date (so no event) and now has one gets its event here.
+    Events the forward bridge linked (the user's own calendar invite) are left alone.
+    """
+    workspace_id = data.get("workspace_id")
+    meeting_id = data.get("meeting_id")
+    if not (workspace_id and meeting_id):
+        return
+
+    try:
+        from pocketpaw_ee.calendar._context import RequestContext
+        from pocketpaw_ee.calendar.dto import UpdateEventRequest
+        from pocketpaw_ee.calendar.service import update_event
+        from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
+    except ImportError:
+        return
+
+    doc = await _MeetingDoc.find_one(
+        {"workspace": workspace_id, "_id": _maybe_object_id(meeting_id)},
+    )
+    if doc is None or doc.status == "cancelled":
+        return
+    payload = doc.raw_provider_payload or {}
+    event_id = payload.get("calendar_event_id")
+    if not event_id:
+        await _on_meeting_scheduled(data)  # idempotent; skips an undated meeting
+        return
+    if payload.get("auto_linked_to_calendar") != "meeting_bridge":
+        return
+    window = _window(doc)
+    if window is None:
+        return
+    starts_at, ends_at = window
+
+    # The event's creator is the meeting's creator (see _on_meeting_scheduled);
+    # calendar policy only lets the creator modify it.
+    ctx = RequestContext(workspace_id=workspace_id, user_id=doc.created_by_user_id or "system")
+    body = UpdateEventRequest(
+        title=doc.title or "Untitled meeting",
+        description=_format_description(doc),
+        starts_at=starts_at,
+        ends_at=ends_at,
+        location=doc.join_url or None,
+    )
+    try:
+        await update_event(ctx, event_id, body)
+    except Exception:  # noqa: BLE001 — bridge must not break the meeting edit
+        logger.exception(
+            "reverse bridge: failed to update CalendarEvent=%s for meeting=%s",
+            event_id,
+            meeting_id,
+        )
 
 
 async def _on_meeting_cancelled(data: dict[str, Any]) -> None:
@@ -401,8 +474,15 @@ def _format_description(doc: Any) -> str:
 
     Kept terse — the join URL goes in ``location`` so calendar clients
     surface it as a clickable link. Description carries the human label
-    and a stable provenance marker.
+    and a stable provenance marker. A meeting-room meeting gets its joining
+    info (title, time, link, code, description) instead.
     """
+    if getattr(doc, "room_group_id", None) and getattr(doc, "code", None):
+        from pocketpaw_ee.cloud.meetings import service as meetings_service
+
+        info = meetings_service.joining_info_for(doc)
+        if info:
+            return info
     lines: list[str] = []
     if doc.provider == "zoom":
         lines.append("Zoom meeting")
@@ -439,6 +519,7 @@ def register_meeting_calendar_listeners() -> None:
     event_bus.subscribe("calendar.event.deleted", _on_calendar_event_deleted)
     event_bus.subscribe("meeting.scheduled", _on_meeting_scheduled)
     event_bus.subscribe("meeting.cancelled", _on_meeting_cancelled)
+    event_bus.subscribe("meeting.edited", _on_meeting_edited)
     logger.info("registered calendar ↔ meeting bidirectional bridge")
 
 

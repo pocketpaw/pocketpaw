@@ -1,9 +1,24 @@
-"""Message document — unified message store for pocket agent memory and group chat."""
+"""Message document — unified message store for pocket agent memory and group chat.
+
+Agent replies carry extras beyond their text:
+
+- ``run_status``: the terminal status (``failed`` | ``cancelled`` |
+  ``interrupted``) when the row is the partial text of a run that did not
+  complete, so the UI can mark it cut off and the history reader can tell the
+  model the reply is incomplete. ``None`` on every complete reply.
+- ``steps`` / ``steps_omitted`` (display only): the ordered thinking blocks and
+  tool calls the reply streamed (``chat/runs/steps.StepRecorder``).
+- ``ask_user`` (display only): the question the reply asked through the ``ask_user`` tool
+  (``MessageAskUser``), so the option chips survive a reload. The user's next
+  message in the scope marks it answered.
+
+All are additive with empty defaults, so legacy rows load without a migration.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -30,6 +45,57 @@ class Attachment(BaseModel):
 class Reaction(BaseModel):
     emoji: str
     users: list[str] = Field(default_factory=list)
+
+
+class MessageStep(BaseModel):
+    """One thinking block or tool call of an agent reply, in stream order.
+
+    Written already bounded and scrubbed by ``StepRecorder``: ``input`` is the
+    scrubbed argument dict, or a truncated JSON string when it was too large;
+    ``output`` is redacted and capped (``output_truncated`` says so).
+    ``missing_result`` marks a call whose run ended before its result arrived.
+    """
+
+    id: str
+    kind: Literal["thinking", "tool"]
+    tool: str = ""
+    narration: str = ""
+    text: str = ""  # thinking only
+    input: Any = None
+    output: str = ""
+    output_truncated: bool = False
+    status: Literal["running", "complete", "error", "missing_result"] = "running"
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class MessageAskUser(BaseModel):
+    """The ``ask_user`` question an agent reply is waiting on.
+
+    ``id`` is the run that asked. ``options`` are the normalized labels the
+    client renders as chips (``ask_user_payload``). ``multi_select`` is ``False``
+    today: the tool asks single-choice questions only. ``answered`` flips, and
+    ``answer`` takes the reply's text, when the user's next message in the same
+    scope lands.
+    """
+
+    id: str
+    question: str
+    options: list[str] = Field(default_factory=list)
+    multi_select: bool = False
+    answered: bool = False
+    answer: str | None = None
+
+    def to_wire(self) -> dict[str, Any]:
+        """The ``askUser`` value the history wire dicts carry (camelCase)."""
+        return {
+            "id": self.id,
+            "question": self.question,
+            "options": list(self.options),
+            "multiSelect": self.multi_select,
+            "answered": self.answered,
+            "answer": self.answer,
+        }
 
 
 class Message(TimestampedDocument):
@@ -86,6 +152,22 @@ class Message(TimestampedDocument):
     # populate it from the group's workspace.
     workspace_id: str | None = None
 
+    # --- Cut-off agent replies ------------------------------------------
+    # The terminal run status (``failed`` | ``cancelled`` | ``interrupted``) when
+    # this assistant row is the partial text of a run that did not complete.
+    # ``None`` for every complete reply and every human message.
+    run_status: str | None = None
+
+    # --- Agent work behind a reply ----------------------------------------
+    # Thinking blocks and tool calls, in order, capped per message; the calls a
+    # cap dropped are counted in ``steps_omitted`` rather than stored.
+    steps: list[MessageStep] = Field(default_factory=list)
+    steps_omitted: int = 0
+
+    # --- Interactive question ---------------------------------------------
+    # Set when the reply called ``ask_user``; ``None`` everywhere else.
+    ask_user: MessageAskUser | None = None
+
     @model_validator(mode="after")
     def _enforce_context(self) -> Message:
         # Infer context when unset so legacy constructors (group=..., sender=...)
@@ -135,4 +217,10 @@ class Message(TimestampedDocument):
             [("workspace_id", 1), ("session_key", 1), ("createdAt", 1)],
             [("session_key", 1), ("createdAt", 1)],
             [("group", 1), ("createdAt", -1)],
+            # Thread / reply reads: filter on the parent message id (globally
+            # unique, so no group prefix) and walk replies oldest-first.
+            [("thread_id", 1), ("createdAt", 1)],
+            [("reply_to", 1), ("createdAt", 1)],
+            # Unread count: ``group`` + ``_id > last_read_message_id``.
+            [("group", 1), ("_id", 1)],
         ]

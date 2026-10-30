@@ -119,6 +119,7 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
                     phone_number_id=settings.whatsapp_phone_number_id,
                     verify_token=settings.whatsapp_verify_token or "",
                     allowed_phone_numbers=settings.whatsapp_allowed_phone_numbers,
+                    app_secret=settings.whatsapp_app_secret or "",
                 )
             )
 

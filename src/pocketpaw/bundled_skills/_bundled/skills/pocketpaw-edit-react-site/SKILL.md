@@ -46,18 +46,12 @@ this track, and it is silent — the create succeeds and reads like a success.
 If you find yourself assembling a full `source` map, stop: you are creating,
 not editing.
 
-## ⚠️ NOT the ripple specialist — even if the surface tells you otherwise
+## ⚠️ NOT the ripple specialist
 
 `mcp__pocketpaw_pocket_specialist__edit` mutates a **rippleSpec**. A react site
-pocket has **no rippleSpec** — its payload is the `source` map of React files.
-
-The `/sites` per-site refine chat carries a preamble that instructs "apply the
-change via `mcp__pocketpaw_pocket_specialist__edit`, then re-publish". That
-instruction is written for ripple landing sites and is **engine-blind** — it
-does not check whether the pocket is react. On a react pocket it is the wrong
-tool: it will not touch your components. **This skill overrides it.** For a
-pocket with `engine="react"`, the edit path is `edit_react_component` and
-nothing else.
+pocket has **no rippleSpec**: its payload is the `source` map of React files,
+so that tool will not touch your components. For a pocket with
+`engine="react"`, the edit path is `edit_react_component` and nothing else.
 
 ## STEP 1 — Read the current source before you touch it
 
@@ -187,27 +181,31 @@ build tree-shakes it), so prefer that over a delete you cannot undo.
 
 ## What you cannot change
 
-**Generator-owned paths are refused** — `index.html`, `package.json`,
-`vite.config.ts`, `paw-prerender.mjs`, and anything under `src/paw/**`. That
+**Generator-owned paths are refused** — `index.html`, `paw-prerender.mjs`,
+`paw.dependencies.json`, lockfiles, and anything under `src/paw/**`. That
 reservation is what guarantees the page cannot silently become a
 blank-without-JavaScript SPA shell.
 
 The path is **normalized before it is checked**, and the resolved result must sit
-under `src/` or `public/`. So `./package.json` and `src/paw/../paw/thing.tsx` are
-refused too — a relative dodge is not a way around the reservation, it is just a
-rejected call.
+under `src/` or `public/`, or be one of the root build files (`package.json`,
+`vite.config.*`, `bunfig.toml`, `.npmrc`). So `src/paw/../paw/thing.tsx` is
+refused too — a relative dodge is not a way around the reservation.
 
-**So you cannot add a dependency.** The manifest is allowlisted and owned by
-the generator; there is no call that installs a package. The project has
-**react**, **react-dom**, **vite** and **@vitejs/plugin-react**, and that is
-all — no router, no CSS framework, no state library, no animation library.
+**Packages.** The project starts with **react**, **react-dom**, **vite** and
+**@vitejs/plugin-react**; to add a library, call
+`set_site_dependencies(pocket_id, add=[{"name": "gsap"}])` (`remove=[...]`
+drops one). Any public npm package works, at any version, range or dist-tag,
+and is pinned to an exact version. `rejected` only holds what could not be
+resolved (misspelt, no matching version); `warnings` carry advisories worth
+passing on. Import packages normally; only a browser-only library that touches
+`window` at import time needs a dynamic `import()` inside `useEffect`. You may
+also edit `package.json` or `vite.config.*` when the build needs it.
 
-When a request needs a library that is not there, you have two honest answers:
-implement it in **plain React and plain CSS** (which covers the large majority
-of real asks — carousels, accordions, reveals, sticky nav, marquees), or tell
-the user it is not available on this track. **Never claim you added a
-package.** The site is also **one page**; there is no router, so "add an About
-page" is a new section on the same page or a different conversation.
+Plain React and plain CSS still cover most asks (carousels, accordions,
+reveals, sticky nav, marquees), so add a package only when it earns its weight.
+**Never claim you added a package that came back in `rejected`.** The site is
+also **one page**; there is no router, so "add an About page" is a new section
+on the same page or a different conversation.
 
 ## ⚠️ THE PRERENDER AUTHORING RULE — an edit is the easiest place to break it
 
@@ -297,15 +295,22 @@ Every edit is held to the bar the page was built to. Briefly:
 - **Other photography comes from `mcp__pocketpaw_stock__search_stock_images`** with a
   generic descriptive query. Embed the returned `url` directly, set `alt` from
   the returned `alt`, and render the returned `credit` — the providers' terms
-  require it. On an empty result, use a gradient or solid treatment. **Never
-  fabricate a photo URL**; a made-up `src` is a broken image on a live site.
-  Set `width`/`height` (or `aspect-ratio`) so the page does not jump.
+  require it. **Never fabricate a photo URL**; a made-up `src` is a broken image
+  on a live site. Set `width`/`height` (or `aspect-ratio`) so the page does not
+  jump.
+- **What stock cannot supply, generate** with
+  `mcp__pocketpaw_site_media__generate_site_image` (pass the `pocket_id` and a
+  concrete visual prompt): a bespoke hero, a product or concept shot, a brand
+  texture. It **costs money per image**, so use it deliberately and never for
+  photography stock already covers. It returns a permanent public `url`; embed it
+  verbatim. If it errors, relay the reason and fall back to a gradient or solid
+  treatment rather than a broken `<img>`.
 - **Video and other media are allowed.** A `video` asset from the manifest (or
   one the user supplies) belongs on the page at its native medium; there is no
   images-only rule. The only asset rule is that the URL is one you were given.
 - **Every CTA is an anchor** — `href="#pricing"`, `tel:`, `mailto:` — not a
   bare `onClick` button.
-- **The lead form stays a native `<form>`** with flat named fields (`name`,
+- **The lead form stays a native `<form>`** with flat named fields (`full_name`,
   `email`, `phone`, `message`) and a `<button type="submit">`. There is no
   server route on this track, so an `onSubmit` that fetches drops the lead.
 - **`className`, not `class`.** This is JSX.
@@ -365,7 +370,8 @@ publish.
 ## Reading the response
 
 A success is `{ok, status:"draft", is_live:false, pocket_id, component_path,
-created, message}` — no `site` object and no url, because nothing was built.
+created, unreferenced, verification, message}`: no `site` object and no url,
+because nothing was published.
 
 - **`ok: true`** — the draft is updated. Give a **one-line** summary of what
   changed, and be concrete, because the user cannot see it until a build runs.
@@ -382,6 +388,27 @@ created, message}` — no `site` object and no url, because nothing was built.
 Never fall back to another engine's tool, and never fall back to
 `create_react_site`, after a failed edit.
 
+## Verify loop — never call it ready unless it passed
+
+Every create and edit result carries `verification`: `{status, reason?,
+layers, errors, warnings}`, from a static check, a real build and a
+headless-browser load of the built pages. It is your only evidence the draft
+works.
+
+- **`passed`** — only now tell the user the site (or the change) is ready.
+- **`failed`** — fix the listed `errors` (each names `file`, `line`,
+  `message`), then call `mcp__pocketpaw_sites_manager__verify_site(pocket_id)`.
+  At most **3** fix-and-verify rounds; if errors remain, tell the user plainly
+  which ones are left. Never call it ready.
+- **`unverified`** — it could not be checked (`reason`, e.g.
+  `sandbox_unavailable`, `timeout`). Say the draft is saved but unchecked, and
+  why. When the result has a `message`, give that sentence as written: a full
+  build queue is not an outage, so never say the build server is down. On
+  `timeout` or `waiting_for_capacity` the build is still coming, so one more
+  `verify_site` is worth it. Never report `unverified` as a pass.
+- **`warnings`** don't block a pass, but move a `top_level_client_import`
+  client-side anyway: it is how a prerender build breaks.
+
 ## When NOT to use this skill
 
 - **There is no site yet.** "Build me a React landing page" is a create —
@@ -389,13 +416,16 @@ Never fall back to another engine's tool, and never fall back to
 - **The pocket is `engine="svelte"`.** Use
   `mcp__pocketpaw_sites_manager__edit_svelte_component`, which takes the same
   `edits` / `new_source` shape against `src/lib/components/*.svelte`.
-- **The pocket is `engine="ripple"` or `"dynamic"`.** Those carry a rippleSpec,
-  not a source map — `mcp__pocketpaw_pocket_specialist__edit` is the right tool
-  there, and it is what the refine preamble is written for.
-- **The pocket is `engine="html"`.** There is no targeted component-edit tool
-  on the html track today. `edit_react_component` rejects a non-react pocket,
-  so do not aim it there; say plainly that this edit path does not cover an
-  html site rather than reaching for a tool that will refuse.
+- **The pocket is `engine="ripple"`** (including a `pattern="dynamic"` one).
+  It carries a rippleSpec, not a source map, so
+  `mcp__pocketpaw_pocket_specialist__edit` is the right tool there.
+- **The pocket is `engine="html"`.** Use
+  `mcp__pocketpaw_sites_manager__edit_html_file` (root-relative `file_path`,
+  same `edits` / `new_source` shape). `edit_react_component` rejects a non-react
+  pocket.
+- **The pocket is `engine="project"`.** It is a whole repo edited with the
+  project file tools (`read_site_files`, `patch_site_file`); see
+  `pocketpaw-site`.
 - **The user wants an in-app dashboard pocket changed**, not a website. That is
   `pocketpaw-edit-pocket`.
 - **The user wants the site deleted.** That is a workspace-level operation, not
@@ -408,7 +438,9 @@ Never fall back to another engine's tool, and never fall back to
 - With **all JavaScript disabled**, the edited section still looks finished.
 - A new section was **both** written and rendered from `src/App.tsx` — and the
   last `create` did not come back `unreferenced: true`.
-- No claim was made about a package being added, or about the change being live.
+- No package was claimed that came back `rejected`, and nothing was called live.
+- `verification.status` was `passed` before you called the change ready, or you
+  told the user which errors remain, or that it could not be checked and why.
 - The user was told it is a draft, and was not invited to go and look at a
   rendered page that does not exist until a build runs.
 
@@ -418,9 +450,15 @@ Never fall back to another engine's tool, and never fall back to
 - `mcp__pocketpaw_sites_manager__read_site_source` — read the current `source`,
   `engine` and `keeps_client_bundle` (STEP 1). The /sites counterpart of
   `get_pocket`, which is NOT on this surface's allow-list
+- `mcp__pocketpaw_sites_manager__set_site_dependencies` — declare or drop npm packages
+- `mcp__pocketpaw_sites_manager__verify_site` — re-run the checks after a fix
 - `mcp__pocketpaw_sites_manager__publish` — deploy, on explicit request (STEP 4)
 - `mcp__pocketpaw_sites_manager__edit_svelte_component` — the svelte-track sibling
 - `mcp__pocketpaw_sites_manager__list_site_assets` — the owner's own uploaded images
 - `mcp__pocketpaw_stock__search_stock_images` — real photography for a new section
+- `mcp__pocketpaw_site_media__generate_site_image` — imagery stock cannot supply
 - `mcp__pocketpaw_icons__search_icons` — feature icons
+- `mcp__pocketpaw_fx__search_effects` / `get_effect` — drop-in visual effects.
+  Pass `engine="react"`: an effect with `needs` comes back with `dependencies`
+  to declare via `set_site_dependencies`.
 - `mcp__pocketpaw_palette__scale_from_color` / `extract_palette` — brand colour

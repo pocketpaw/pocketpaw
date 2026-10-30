@@ -15,11 +15,17 @@ fan-out logic doesn't fork.
 Phase 1 scope: recipient is the meeting's creator (the user who fired
 ``create_meeting``). Participant fan-out lands when meetings grow a
 participant_user_ids list (Phase 3 alongside LiveKit scheduling).
+
+2026-10-01 (feat/meetings-by-code, MC-2): ``meeting_scheduled`` is only sent
+for a LiveKit meeting that has a date (a "for later" meeting with no
+``scheduled_start`` schedules nothing), and a dated meeting reads
+"<title> is scheduled for <Mon D at HH:MM UTC>". The copy never names LiveKit.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from pocketpaw_ee.cloud.notifications.domain import NotificationSource
@@ -41,6 +47,9 @@ async def _on_meeting_scheduled(data: dict[str, Any]) -> None:
         return
 
     source = data.get("source", "recall")
+    if source == "livekit" and not data.get("scheduled_start"):
+        # A meeting "for later" with no date: nothing is scheduled to announce.
+        return
 
     # LiveKit meetings: fan-out to ALL group members so everyone in the
     # channel sees the notification. Recall meetings: creator-only (legacy).
@@ -57,7 +66,12 @@ async def _on_meeting_scheduled(data: dict[str, Any]) -> None:
     if not recipients:
         return
 
-    provider = data.get("provider") or source or "meeting"
+    starts = _parse_start(data.get("scheduled_start"))
+    if starts is not None:
+        body = f"{data.get('title') or 'A meeting'} is scheduled for {_when(starts)}"
+    else:
+        provider = data.get("provider") or source or "meeting"
+        body = f"A {_pretty(provider)} meeting was scheduled."
     created_by = data.get("created_by") or data.get("organizer_user_id")
     for recipient in recipients:
         await _create(
@@ -65,7 +79,7 @@ async def _on_meeting_scheduled(data: dict[str, Any]) -> None:
             recipient=recipient,
             kind="meeting_scheduled",
             title="Meeting scheduled",
-            body=f"A {_pretty(provider)} meeting was scheduled.",
+            body=body,
             meeting_id=meeting_id,
             actor_id=created_by,
         )
@@ -155,6 +169,23 @@ async def _on_meeting_transcript_ready(data: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _parse_start(value: Any) -> datetime | None:
+    """The event's ``scheduled_start`` (datetime or ISO string) as aware UTC."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _when(dt: datetime) -> str:
+    """``Oct 3 at 09:00 UTC``. The server doesn't know the reader's time zone."""
+    return f"{dt:%b} {dt.day} at {dt:%H:%M} UTC"
 
 
 def _pretty(provider: str) -> str:

@@ -1,9 +1,9 @@
 # tests/cloud/surface/test_chat_handler.py — Chat surface handler.
 #
-# Created: 2026-05-24 — Two guarantees:
+# Two guarantees:
 #   1. Happy path — the preamble carries ``<chat-snapshot sessions="N" />``
-#      when the sessions service returns a real listing. This is the
-#      hint the agent reads to answer "how many threads do I have?".
+#      with the sessions service's server-side count. This is the hint the
+#      agent reads to answer "how many threads do I have?".
 #   2. Failure path — the preamble falls back to
 #      ``(session count unavailable)`` when the sessions service raises,
 #      so a transient DB hiccup never breaks the chat send.
@@ -20,12 +20,9 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_chat_handler_emits_session_count() -> None:
-    """Sessions service returning N rows -> ``<chat-snapshot sessions="N" />``."""
-    fake_rows = [{"id": "1"}, {"id": "2"}, {"id": "3"}]
-    with patch(
-        "pocketpaw_ee.cloud.sessions.service.list_for_user",
-        new=AsyncMock(return_value=fake_rows),
-    ):
+    """Sessions service counting N rows -> ``<chat-snapshot sessions="N" />``."""
+    count = AsyncMock(return_value=3)
+    with patch("pocketpaw_ee.cloud.sessions.service.count_for_user", new=count):
         preamble = (await chat_handler.build_preamble("w1", "u1", SurfaceMeta())).text
 
     assert '<surface kind="chat"' in preamble
@@ -33,12 +30,14 @@ async def test_chat_handler_emits_session_count() -> None:
     # The unavailable-fallback tag must NOT appear on the happy path —
     # if both shipped the agent would see contradictory hints.
     assert "session count unavailable" not in preamble
+    # Counted server-side for the chat surface, never listed and len()'d.
+    count.assert_awaited_once_with("w1", "u1", surface="chat")
 
 
 async def test_chat_handler_falls_back_when_lister_raises() -> None:
     """Any exception from the sessions service yields the unavailable fallback."""
     with patch(
-        "pocketpaw_ee.cloud.sessions.service.list_for_user",
+        "pocketpaw_ee.cloud.sessions.service.count_for_user",
         new=AsyncMock(side_effect=RuntimeError("db down")),
     ):
         preamble = (await chat_handler.build_preamble("w1", "u1", SurfaceMeta())).text

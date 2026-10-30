@@ -98,7 +98,10 @@ async def test_the_ledger_invariant_survives(mongo_db):
 
     await _run_migration(mongo_db)
 
-    assert await credits.reconcile(WS) == 660
+    result = await credits.reconcile(WS)
+    assert result.balance == 660
+    assert result.redriven == 0
+    assert result.voided == 0
     entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == WS).to_list()
     assert sum(e.amount_delta_micro for e in entries) == credits_to_micro(660)
 

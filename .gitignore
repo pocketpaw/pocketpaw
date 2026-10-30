@@ -51,7 +51,13 @@ htmlcov/
 
 # Internal drafts
 idocs/
-.claude 
+# Local Claude Code state stays out; the tracked verification skill is the exception.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/verify-pocketpaw/
+# Proof artifacts written by .claude/skills/verify-pocketpaw (screenshots, page text, server logs)
+.verify-evidence/
 
 # Config (contains secrets)
 .env
@@ -96,6 +102,9 @@ output.txt
 !/deploy/paw-sites/.gitkeep
 /deploy/ripple/*
 !/deploy/ripple/.gitkeep
+# Vendored paw-fx effects registry (feat/fx-mcp-server), staged by scripts/vendor-paw-fx.sh.
+/deploy/paw-fx/*
+!/deploy/paw-fx/.gitkeep
 
 # Load-test artifacts (scripts/loadtest)
 out/
@@ -117,3 +126,6 @@ tests/harness/engine_cost/evidence/
 # Local scratch / backup — e.g. .tmp/livekit-meetings-backup-*.json (operator
 # backups pulled before a LiveKit migration). Never committable.
 .tmp/
+
+# Flake census output (scripts/flake_census.sh)
+.flake-census/

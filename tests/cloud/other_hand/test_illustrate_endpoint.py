@@ -1,0 +1,455 @@
+# tests/cloud/other_hand/test_illustrate_endpoint.py — the whole round trip.
+#
+# Created 2026-08-28. The unit tests cover the geometry and the spend gate
+# separately; this one proves the pieces are actually joined — request in,
+# validated `path` ops out — WITHOUT calling the paid generator. Everything
+# except fal is real: the route, the body validation, the SVG conversion, the
+# box fitting.
+#
+# Updated 2026-10-01 (CN-3): the daily budget is the shared
+# ``metering.service.try_spend`` primitive (``illustration_budget`` is gone).
+# The fakes patch that one function and answer a bool; the assertions are
+# unchanged. An autouse fixture now gives every test a platform fal key: the
+# route tests that need one used to pass only on a machine with FAL_KEY set,
+# and with it present the "tool ignores the stored key" mutation is caught.
+
+from __future__ import annotations
+
+import sys
+import types
+
+import pytest
+from pocketpaw_ee.cloud.other_hand import illustrate as ill
+from pocketpaw_ee.cloud.other_hand.svg_to_ink import Box
+
+# A hand-written stand-in for what Recraft returns: a viewBox, a curve, and a
+# shape element, which between them exercise the three code paths that matter.
+FAKE_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">'
+    '<path d="M20 100 C 20 40, 180 40, 180 100"/>'
+    '<circle cx="100" cy="140" r="30"/>'
+    "</svg>"
+)
+
+
+@pytest.fixture
+def fake_generator(monkeypatch):
+    """A fal client that costs nothing and returns our SVG."""
+
+    class _Client:
+        def __init__(self, *a, **k): ...
+
+        async def run(self, endpoint, arguments=None, **k):
+            _Client.last_endpoint = endpoint
+            _Client.last_arguments = arguments or {}
+            return {
+                "images": [{"url": "https://example.test/x.svg", "content_type": "image/svg+xml"}]
+            }
+
+    mod = types.ModuleType("fal_client")
+    mod.AsyncClient = _Client
+    monkeypatch.setitem(sys.modules, "fal_client", mod)
+
+    async def _fetch(_url: str) -> str:
+        return FAKE_SVG
+
+    monkeypatch.setattr(ill, "_fetch_svg", _fetch)
+    return _Client
+
+
+class TestTheRoundTrip:
+    @pytest.mark.asyncio
+    async def test_a_prompt_comes_back_as_drawable_path_ops(self, fake_generator):
+        ops = await ill.illustrate_as_ops(
+            "a honeybee", Box(x=100, y=400, w=600, h=600), api_key="k", allowed=True
+        )
+        assert ops, "the round trip produced nothing to draw"
+        assert {op["t"] for op in ops} == {"path"}
+        for op in ops:
+            assert len(op["pts"]) >= 2
+            for x, y in op["pts"]:
+                # Inside the box it was given, which is what makes it safe to
+                # append to a page without landing on the user's handwriting.
+                assert 100 <= x <= 700
+                assert 400 <= y <= 1000
+
+    @pytest.mark.asyncio
+    async def test_the_curve_survives_as_a_curve(self, fake_generator):
+        ops = await ill.illustrate_as_ops(
+            "a honeybee", Box(x=0, y=0, w=400, h=400), api_key="k", allowed=True
+        )
+        # The cubic in FAKE_SVG must arrive as many points, not as a chord.
+        assert max(len(op["pts"]) for op in ops) > 6
+
+    @pytest.mark.asyncio
+    async def test_the_generator_is_asked_for_line_art_not_just_the_prompt(self, fake_generator):
+        await ill.illustrate_as_ops(
+            "a honeybee", Box(x=0, y=0, w=400, h=400), api_key="k", allowed=True
+        )
+        sent = fake_generator.last_arguments["prompt"]
+        assert sent.startswith("a honeybee")
+        assert "line art" in sent, "the pen cannot draw fills; the ask must say so"
+
+    @pytest.mark.asyncio
+    async def test_it_calls_the_vector_endpoint_not_a_raster_one(self, fake_generator):
+        await ill.illustrate_as_ops(
+            "a honeybee", Box(x=0, y=0, w=400, h=400), api_key="k", allowed=True
+        )
+        # A raster model here would silently break the whole premise: the
+        # result would be a picture, and svg_to_ink would find no geometry.
+        assert "text-to-vector" in fake_generator.last_endpoint
+
+
+@pytest.fixture(autouse=True)
+def _platform_fal_key(monkeypatch):
+    """A platform key, so a test reaches the budget instead of the no-key
+    refusal, whatever the machine's env holds."""
+    from pocketpaw_ee.cloud.studio import fal_edit
+
+    monkeypatch.setattr(fal_edit, "fal_api_key", lambda: "platform-key")
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-01, from the pre-PR review of integration/session-2026-08-29.
+#
+# The tests above call `ill.illustrate_as_ops` DIRECTLY, which is why they all
+# passed while the route itself spent money with no ceiling: the REST handler
+# hard-wired `allowed=True` and never claimed the daily budget, so
+# the illustration budget's `try_spend` had exactly one caller in the whole repo —
+# the MCP tool. A signed-up user (guest accounts included) could script the
+# wand button into an unmetered bill at roughly $0.08 a call.
+#
+# These two tests exercise the HANDLER, not the generator, because that is
+# where the hole was. Mutation-checked: delete the `try_spend` claim in
+# router.py and `test_the_route_refuses_once_the_day_is_spent` fails.
+# ---------------------------------------------------------------------------
+
+
+class TestTheRouteHonoursTheDailyBudget:
+    """The paid route must claim the budget, and must not pay when refused."""
+
+    @pytest.mark.asyncio
+    async def test_the_route_refuses_once_the_day_is_spent(self, monkeypatch):
+        from pocketpaw_ee.cloud._core.errors import CloudError
+        from pocketpaw_ee.cloud.metering import service as metering
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _refuse(**_k):
+            return False
+
+        monkeypatch.setattr(metering, "try_spend", _refuse)
+
+        # If the handler reaches the generator at all, that is the bug.
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the route paid the generator while over cap")
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _must_not_run)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        with pytest.raises(CloudError) as caught:
+            await oh_router.illustrate(body=body, workspace_id="ws-1")
+
+        assert caught.value.status_code == 429
+        assert caught.value.code == "other_hand.illustration_limit"
+        assert "20/20" in caught.value.message
+
+    @pytest.mark.asyncio
+    async def test_the_route_claims_one_unit_before_it_draws(self, monkeypatch):
+        from pocketpaw_ee.cloud.metering import service as metering
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        claimed: list[str | None] = []
+
+        async def _allow(**kw):
+            claimed.append(kw["subject_id"])
+            return True
+
+        monkeypatch.setattr(metering, "try_spend", _allow)
+
+        async def _draw(*_a, **_k):
+            assert claimed, "the generator ran before the budget was claimed"
+            return [{"t": "path", "d": "M0 0 L1 1"}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        out = await oh_router.illustrate(body=body, workspace_id="ws-1")
+
+        assert out["ops"], "an allowed call should still draw"
+        assert claimed == ["ws-1"], "the claim must be scoped to the caller's workspace"
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-01. The daily budget is a COST CEILING, not an entitlement: it
+# caps what one workspace spends, and a guest can mint a fresh workspace to get
+# a fresh ceiling. So guests are refused outright, on BOTH paths -- the REST
+# route and the MCP tool the agent calls when asked to draw. Gating only the
+# route would leave the feature reachable by simply asking.
+#
+# Mutation-checked: drop either guest check and the matching test goes red.
+# ---------------------------------------------------------------------------
+
+
+class TestTheRouteFailsClosedOnItsOwnClaim:
+    @pytest.mark.asyncio
+    async def test_an_unreadable_counter_refuses_the_platform_paid_drawing(self, monkeypatch):
+        """The real claim (``try_spend`` NOT patched): the counter raises, the
+        route answers 429 and the generator is never paid."""
+        from pocketpaw_ee.cloud._core.errors import CloudError
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
+        from pocketpaw_ee.cloud.other_hand import illustration_credentials as creds
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _not_a_guest(_user_id):
+            return None
+
+        async def _platform_grant(_workspace_id, *, is_guest):
+            return creds.IllustrationGrant(api_key="platform-key", byok=False)
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("counter unavailable")
+
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the route paid the generator on an unreadable counter")
+
+        monkeypatch.setattr(guest_budget, "load_guest", _not_a_guest)
+        monkeypatch.setattr(creds, "resolve", _platform_grant)
+        monkeypatch.setattr(DailyUsage, "get_pymongo_collection", _boom)
+        monkeypatch.setattr(ill, "illustrate_as_ops", _must_not_run)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        with pytest.raises(CloudError) as caught:
+            await oh_router.illustrate(body=body, workspace_id="ws-1", user_id="u-real")
+        assert caught.value.code == "other_hand.illustration_limit"
+
+
+class TestGuestsCannotSpendPlatformMoneyOnPictures:
+    @pytest.mark.asyncio
+    async def test_the_route_refuses_a_guest_before_claiming_budget(self, monkeypatch):
+        from pocketpaw_ee.cloud._core.errors import GuestIllustrateForbidden
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.metering import service as metering
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _is_a_guest(_user_id):
+            return {"id": "guest-1"}
+
+        monkeypatch.setattr(guest_budget, "load_guest", _is_a_guest)
+
+        async def _budget_must_not_be_touched(**_k):
+            raise AssertionError("a refused guest still consumed the daily budget")
+
+        monkeypatch.setattr(metering, "try_spend", _budget_must_not_be_touched)
+
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the route paid the generator for a guest")
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _must_not_run)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        with pytest.raises(GuestIllustrateForbidden) as caught:
+            await oh_router.illustrate(body=body, workspace_id="ws-1", user_id="u-guest")
+
+        assert caught.value.status_code == 403
+        assert caught.value.code == "guest_illustrate_forbidden"
+        # The frontend keys the signup prompt off a TOP-LEVEL code.
+        assert caught.value.to_dict()["code"] == "guest_illustrate_forbidden"
+
+    @pytest.mark.asyncio
+    async def test_a_real_account_still_draws(self, monkeypatch):
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.metering import service as metering
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _not_a_guest(_user_id):
+            return None
+
+        monkeypatch.setattr(guest_budget, "load_guest", _not_a_guest)
+
+        async def _allow(**_k):
+            return True
+
+        monkeypatch.setattr(metering, "try_spend", _allow)
+
+        async def _draw(*_a, **_k):
+            return [{"t": "path", "d": "M0 0 L1 1"}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        out = await oh_router.illustrate(body=body, workspace_id="ws-1", user_id="u-real")
+        assert out["ops"], "a signed-up account should still get its drawing"
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_tool_refuses_a_guest_too(self, monkeypatch):
+        """The path a guest reaches by ASKING the agent, rather than pressing."""
+        from pocketpaw_ee.agent.mcp_servers import other_hand as tool_mod
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.chat import agent_service
+        from pocketpaw_ee.cloud.metering import service as budget
+        from pocketpaw_ee.cloud.other_hand import illustrate as ill_mod
+        from pocketpaw_ee.cloud.studio import fal_edit
+
+        monkeypatch.setattr(fal_edit, "fal_api_key", lambda: "test-key")
+        monkeypatch.setattr(agent_service, "current_user_id", lambda: "u-guest")
+
+        async def _is_a_guest(_user_id):
+            return {"id": "guest-1"}
+
+        monkeypatch.setattr(guest_budget, "load_guest", _is_a_guest)
+
+        async def _budget_must_not_be_touched(*_a, **_k):
+            raise AssertionError("a refused guest still consumed the daily budget")
+
+        monkeypatch.setattr(budget, "try_spend", _budget_must_not_be_touched)
+
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the tool paid the generator for a guest")
+
+        monkeypatch.setattr(ill_mod, "illustrate_as_ops", _must_not_run)
+
+        res = await tool_mod._illustrate_handler({"subject": "a honeybee"})
+        assert "account" in res["content"][0]["text"].lower(), res
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_tool_refuses_when_it_cannot_tell_who_is_asking(self, monkeypatch):
+        """No identity resolves to a refusal, not to a free drawing."""
+        from pocketpaw_ee.agent.mcp_servers import other_hand as tool_mod
+        from pocketpaw_ee.cloud.chat import agent_service
+        from pocketpaw_ee.cloud.metering import service as budget
+        from pocketpaw_ee.cloud.other_hand import illustrate as ill_mod
+        from pocketpaw_ee.cloud.studio import fal_edit
+
+        monkeypatch.setattr(fal_edit, "fal_api_key", lambda: "test-key")
+        monkeypatch.setattr(agent_service, "current_user_id", lambda: None)
+
+        async def _budget_must_not_be_touched(*_a, **_k):
+            raise AssertionError("an unidentified caller still consumed budget")
+
+        monkeypatch.setattr(budget, "try_spend", _budget_must_not_be_touched)
+
+        async def _must_not_run(*_a, **_k):
+            raise AssertionError("the tool paid the generator for an unknown caller")
+
+        monkeypatch.setattr(ill_mod, "illustrate_as_ops", _must_not_run)
+
+        res = await tool_mod._illustrate_handler({"subject": "a honeybee"})
+        assert "account" in res["content"][0]["text"].lower(), res
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-11 (feat/byok-image-key). A workspace may bring its OWN fal key,
+# and then it is spending its own money. Two things follow, and both are silent
+# when wrong:
+#
+#   * it must NOT claim the platform's daily ceiling. Charging it a quota as
+#     well as a bill is charging it twice, and nothing looks broken until the
+#     twentieth picture of the day stops for no visible reason;
+#   * a GUEST on their own key must be allowed. The guest refusal exists
+#     because a guest can mint a fresh workspace for a fresh ceiling — an
+#     argument about the platform's money that says nothing about someone
+#     spending their own.
+# ---------------------------------------------------------------------------
+
+
+class TestAWorkspaceOnItsOwnKey:
+    @pytest.fixture
+    def own_key(self, monkeypatch):
+        """The workspace has stored a fal key of its own."""
+        import pocketpaw_ee.cloud.byok.service as byok_service
+
+        async def _resolve(_workspace_id):
+            return "tenant-id:tenant-secret"
+
+        monkeypatch.setattr(byok_service, "resolve_image_key", _resolve)
+
+    @pytest.fixture
+    def budget_spy(self, monkeypatch):
+        from pocketpaw_ee.cloud.metering import service as metering
+
+        claimed: list[str | None] = []
+
+        async def _spend(**kw):
+            claimed.append(kw["subject_id"])
+            return True
+
+        monkeypatch.setattr(metering, "try_spend", _spend)
+        return claimed
+
+    @pytest.mark.asyncio
+    async def test_the_route_does_not_claim_our_budget(self, monkeypatch, own_key, budget_spy):
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        used: list[str] = []
+
+        async def _draw(*_a, **kw):
+            used.append(kw["api_key"])
+            return [{"t": "path", "d": "M0 0 L1 1"}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        out = await oh_router.illustrate(body=body, workspace_id="ws-1")
+
+        assert out["ops"], "a workspace paying its own way should still draw"
+        assert used == ["tenant-id:tenant-secret"], "it drew on the wrong account"
+        assert budget_spy == [], "a self-funded workspace was charged our quota too"
+
+    @pytest.mark.asyncio
+    async def test_a_guest_on_their_own_key_may_draw(self, monkeypatch, own_key, budget_spy):
+        from pocketpaw_ee.cloud.auth import guest_budget
+        from pocketpaw_ee.cloud.other_hand import router as oh_router
+
+        async def _is_guest(_user_id):
+            return object()
+
+        monkeypatch.setattr(guest_budget, "load_guest", _is_guest)
+
+        async def _draw(*_a, **_k):
+            return [{"t": "path", "d": "M0 0 L1 1"}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        body = oh_router.IllustrateRequest(prompt="a honeybee", x=0, y=0, w=600, h=600)
+        out = await oh_router.illustrate(body=body, workspace_id="ws-g", user_id="u-guest")
+
+        assert out["ops"], "a guest on their own key was refused anyway"
+        assert budget_spy == []
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_tool_does_not_claim_our_budget_either(
+        self, monkeypatch, own_key, budget_spy
+    ):
+        """The tool is the more natural way in — the agent draws when it judges
+        a picture helps — so a rule enforced only on the route is not enforced."""
+        from pocketpaw_ee.agent.mcp_servers import other_hand as tool
+
+        monkeypatch.setattr(tool, "_workspace_or_none", lambda: "ws-1")
+
+        async def _not_a_guest():
+            return None
+
+        monkeypatch.setattr(tool, "_guest_or_none", _not_a_guest)
+
+        used: list[str] = []
+
+        async def _draw(*_a, **kw):
+            used.append(kw["api_key"])
+            # The tool measures the drawing's bottom edge off ``pts``, so this
+            # stand-in carries the real op shape rather than the route's.
+            return [{"t": "path", "pts": [[0.0, 0.0], [1.0, 1.0]]}]
+
+        monkeypatch.setattr(ill, "illustrate_as_ops", _draw)
+
+        async def _push(*_a, **_k):
+            return None
+
+        import pocketpaw_ee.cloud.chat.agent_service as agent_service
+
+        monkeypatch.setattr(agent_service, "push_sse_event", _push, raising=False)
+
+        await tool._illustrate_handler({"subject": "a honeybee"})
+
+        assert used == ["tenant-id:tenant-secret"], "the tool drew on the wrong account"
+        assert budget_spy == [], "a self-funded workspace was charged our quota too"

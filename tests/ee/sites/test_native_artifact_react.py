@@ -181,20 +181,23 @@ async def test_react_pocket_renders_from_dist(beanie_test_db, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_html_pocket_still_rejected(beanie_test_db):
-    """html is a SOURCE engine but has no build to render — its served artifact IS
-    its source. Widening the guard to `is_source_engine` would have swept it in."""
+async def test_html_pocket_is_served_without_a_build(beanie_test_db):
+    """html is a SOURCE engine with no build: its served artifact IS its source. The
+    draft preview origin serves those files directly, so the endpoint answers a
+    preview URL straight away and never queues a sandbox."""
     pocket_id = await _make_pocket("html", {"index.html": "<h1>hi</h1>"})
 
     pool = _RecordingPool()
-    with pytest.raises(ValidationError):
-        await sites_service.get_native_artifact(
-            workspace_id="ws1",
-            user_id="u1",
-            pocket_id=pocket_id,
-            _pool=pool,
-        )
-    assert pool.calls == [], "a rejected engine must not queue a sandbox"
+    result = await sites_service.get_native_artifact(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        _pool=pool,
+    )
+
+    assert result["build_status"] == "none"
+    assert isinstance(result["preview_url"], str)
+    assert pool.calls == [], "an html draft must not queue a sandbox"
 
 
 @pytest.mark.asyncio

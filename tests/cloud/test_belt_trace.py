@@ -42,6 +42,12 @@
 # The doubled-terminal trap is the thing under test: every assertion counts the
 # terminal events and proves EXACTLY ONE decision.completed lands per run, and a
 # SECOND full cycle produces a SECOND distinct, clean chain.
+#
+# Updated: 2026-10-01 (CN-5 review) — added a characterization test pinning the
+#   belt propose's full ``agent.proposed`` actor/scope/payload (incl. the
+#   ``summary`` extra), the ``record_decision`` audit kwargs, and the chain ids
+#   back-written onto the ``_code_change`` blob, so the move to the shared
+#   ``cloud/_core/proposals`` helper is proven byte-identical.
 
 from __future__ import annotations
 
@@ -604,3 +610,73 @@ async def test_bulk_approve_code_change_is_one_clean_chain(
     assert chain[1].payload.get("note") == "ship it"
     assert chain[2].payload["action_outcome"] == "landed"
     assert len(_events(journal, "decision.completed")) == 1
+
+
+async def test_propose_pins_agent_proposed_payload_and_audit(
+    repo, store, allowlist, journal, graph, monkeypatch
+):
+    import pocketpaw_ee.cloud.decisions.journal_writer as jw
+
+    decisions: list[dict] = []
+    monkeypatch.setattr(belt, "record_decision", lambda **kw: decisions.append(kw))
+    emitted: list[dict] = []
+    real_emit = jw.record_agent_proposed
+
+    def _spy_emit(**kw):
+        emitted.append(kw)
+        return real_emit(**kw)
+
+    monkeypatch.setattr(jw, "record_agent_proposed", _spy_emit)
+
+    action_id = await _propose(repo, _good_diff(), summary="  Friendlier greeting.  ")
+    corr = await _correlation_for(store, action_id)
+    changed = belt._count_changed_lines(_good_diff())
+
+    proposed = _events(journal, "agent.proposed")
+    assert len(proposed) == 1
+    ev = proposed[0]
+    assert ev.correlation_id == corr
+    assert len(emitted) == 1
+    actor = emitted[0]["actor"]
+    assert (actor.kind, actor.id, list(actor.scope_context)) == (
+        "agent",
+        f"user:{USER}",
+        [f"workspace:{WS}"],
+    )
+    assert emitted[0]["scope"] == [f"workspace:{WS}"]
+    assert emitted[0]["payload"] == ev.payload
+    assert ev.payload == {
+        "intent": f"code change to {repo.name} (main) — {changed} changed lines",
+        "action": "code_change",
+        "pocket_id": WS,
+        "inputs": [],
+        "proposal_kind": "code_change",
+        "summary": "Friendlier greeting.",
+        "proposal": {
+            "repo": repo.name,
+            "base_branch": "main",
+            "task": "Make hello() return a greeting.",
+            "changed_lines": changed,
+        },
+        "action_id": action_id,
+    }
+
+    assert decisions == [
+        {
+            "workspace_id": WS,
+            "actor_id": USER,
+            "pocket_id": WS,
+            "decision_action": "agent.proposed",
+            "outcome": "proposed",
+            "metadata": {
+                "proposal_kind": "code_change",
+                "repo": repo.name,
+                "summary": "Friendlier greeting.",
+                "correlation_id": str(corr),
+            },
+        }
+    ]
+
+    blob = (await store.get_action(action_id)).parameters["_code_change"]
+    assert blob["correlation_id"] == str(corr)
+    assert blob["proposed_event_id"] == str(ev.id)

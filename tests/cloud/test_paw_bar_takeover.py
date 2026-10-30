@@ -1,4 +1,11 @@
 # tests/cloud/test_paw_bar_takeover.py — type-to-takeover (owner inbox, slice 2).
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # Created 2026-07-30: the owner types, the bot shuts up, the visitor sees a human.
 # Layers, in the order the feature fails if any one of them is wrong:
 #   * Owner reply: persists an owner line, mutes the bot (stamped), clears the
@@ -68,6 +75,12 @@ async def _site(**ov: Any):
         allowed_origins=["brewco.com"],
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s

@@ -1,19 +1,23 @@
-# tests/cloud/workspace/test_provisioning_trigger.py — proves the WU-F workspace
-# provisioning trigger is BEST-EFFORT and NON-BLOCKING.
+# tests/cloud/workspace/test_provisioning_trigger.py — proves workspace create
+# mints the LiteLLM tenant key OFF the request path, best-effort.
 #
-#   1. Happy path — creating a workspace fires ensure_tenant_key(workspace_id) so
-#      a per-tenant LiteLLM key is provisioned for the new workspace.
-#   2. Proxy-down — if ensure_tenant_key RAISES (proxy unreachable / mint failure),
-#      workspace creation STILL SUCCEEDS (the workspace + owner membership land);
-#      the provisioning error is swallowed + logged, never fatal.
+#   1. Happy path — create schedules ensure_tenant_key(workspace_id); after the
+#      background mints drain, a per-tenant key row exists.
+#   2. Proxy-down — a raising mint is logged, never raised into create; the
+#      workspace + owner membership still land and no key row is written.
+#   3. Slow proxy — create returns promptly while the mint is still sleeping;
+#      the mint still runs to completion on drain.
+#   4. Drain timeout — a mint that outlives drain_pending_mints' timeout leaves
+#      drain returning cleanly, and the task can be cancelled.
 #
 # Uses the shared ``mongo_db`` + autouse ``recording_bus`` fixtures. The resolver
 # is mocked (the realtime resolver isn't initialised in unit tests).
-#
-# Created 2026-06-26 (feat/litellm-billing-cutover, WU-F): new test module.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -72,15 +76,25 @@ async def stub_proxy(monkeypatch):
             return {"key": f"sk-{kwargs.get('key_alias', 'x')}", **kwargs}
 
     monkeypatch.setattr(svc, "LiteLLMAdminClient", lambda *a, **k: _FakeAdmin())
+    # Other tests create workspaces without draining; their mints sit on loops
+    # that are already closed. Start each test from an empty set.
+    svc._pending_mints.clear()
     yield
+    # Never leak a background mint into the next test.
+    for task in list(svc._pending_mints):
+        task.cancel()
+    await svc.drain_pending_mints(timeout=1.0)
 
 
 async def test_create_workspace_provisions_tenant_key() -> None:
+    import pocketpaw_ee.cloud.llm_provisioning.service as svc
+
     owner = await _seed_user()
 
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="Acme", slug="acme")
     )
+    await svc.drain_pending_mints()
 
     # The provisioning trigger fired: a per-tenant key row exists for the new ws.
     row = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == ws.id)
@@ -89,7 +103,7 @@ async def test_create_workspace_provisions_tenant_key() -> None:
     assert row.key_alias == f"ws-{ws.id}"
 
 
-async def test_create_workspace_survives_proxy_down(monkeypatch) -> None:
+async def test_create_workspace_survives_proxy_down(monkeypatch, caplog) -> None:
     # Simulate the proxy being unreachable: ensure_tenant_key raises.
     import pocketpaw_ee.cloud.llm_provisioning.service as svc
 
@@ -104,6 +118,14 @@ async def test_create_workspace_survives_proxy_down(monkeypatch) -> None:
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="Acme", slug="acme")
     )
+    with caplog.at_level(logging.WARNING, logger=svc.__name__):
+        await svc.drain_pending_mints()
+
+    # The failure was logged, with the workspace id, not lost.
+    assert any(
+        "background tenant-key mint failed" in r.getMessage() and ws.id in r.getMessage()
+        for r in caplog.records
+    )
 
     # The workspace + owner membership landed (creation fully succeeded)...
     assert ws.id
@@ -115,3 +137,63 @@ async def test_create_workspace_survives_proxy_down(monkeypatch) -> None:
     # ...but no key row was provisioned (the failure was swallowed, not retried here).
     row = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == ws.id)
     assert row is None
+
+
+async def test_create_workspace_does_not_wait_for_a_slow_mint(monkeypatch) -> None:
+    import pocketpaw_ee.cloud.llm_provisioning.service as svc
+
+    started = asyncio.Event()
+    finished: list[str] = []
+
+    async def _slow(workspace, **kwargs):
+        started.set()
+        await asyncio.sleep(2.0)
+        finished.append(workspace)
+
+    monkeypatch.setattr(svc, "ensure_tenant_key", _slow)
+    owner = await _seed_user()
+
+    t0 = time.perf_counter()
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="Acme", slug="acme")
+    )
+    elapsed = time.perf_counter() - t0
+
+    # create() returned well before the 2 s mint could have finished.
+    assert elapsed < 1.5, f"create waited on the mint ({elapsed:.2f}s)"
+    assert finished == []
+    # The mint was scheduled and is held (not garbage-collectable).
+    assert len(svc._pending_mints) == 1
+
+    await svc.drain_pending_mints(timeout=5.0)
+    assert started.is_set()
+    assert finished == [ws.id]
+    assert not svc._pending_mints
+
+
+async def test_drain_times_out_cleanly_and_task_can_be_cancelled(monkeypatch) -> None:
+    import pocketpaw_ee.cloud.llm_provisioning.service as svc
+
+    async def _hang(workspace, **kwargs):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(svc, "ensure_tenant_key", _hang)
+
+    task = svc.schedule_ensure_tenant_key("ws-hang")
+    assert task is not None
+
+    t0 = time.perf_counter()
+    await svc.drain_pending_mints(timeout=0.1)  # must not raise
+    assert time.perf_counter() - t0 < 1.0
+
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled()
+    assert task not in svc._pending_mints
+
+
+def test_schedule_without_a_running_loop_returns_none() -> None:
+    import pocketpaw_ee.cloud.llm_provisioning.service as svc
+
+    assert svc.schedule_ensure_tenant_key("ws-x") is None
+    assert svc.schedule_ensure_tenant_key("") is None

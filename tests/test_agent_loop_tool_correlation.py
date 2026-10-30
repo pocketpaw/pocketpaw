@@ -99,6 +99,7 @@ async def _drive(events: list[AgentEvent]) -> list:
         history=None,
         session_key=None,
         system_prompt_digest="",
+        turn_split=None,
     ):
         for ev in events:
             yield ev

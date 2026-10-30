@@ -1,3 +1,5 @@
+<!-- Updated: 2026-09-28 (feat/persist-tool-steps) — documented tool calls and thinking persisted on the assistant message as `steps`. -->
+<!-- Updated: 2026-09-27 (fix/chat-run-heartbeat) — documented the run heartbeat, the heartbeat-based stale-run sweep, partial replies saved as messages, and POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS. -->
 # Tier 2 deploy — resumable chat runs with `arq` worker
 
 This is the operational guide for switching cloud chat runs from the
@@ -151,22 +153,64 @@ Two-step rollback, web-first:
 Rollback is independent of any data migration: the `chat_runs` collection
 schema is identical between tiers, and the Redis Stream layout is unchanged.
 
-## Crash policy
+## Shutdown and crash policy
 
-`WorkerSettings.max_tries = 1` — no auto-retry. A job that raises lands as
-`failed` (or `interrupted` if killed mid-execution). LLM token streams cannot
-be resumed mid-generation, so silently re-running would double-bill and risk
-emitting a partial duplicate. The user decides via Retry.
+**SIGTERM drains.** The worker supervisor stops every lane from claiming new jobs
+and waits for running ones to finish, up to `POCKETPAW_WORKER_DRAIN_SECONDS`
+(default 300; `0` cancels at once). The container's stop grace period must be
+longer than that, or Docker SIGKILLs mid-drain: set `stop_grace_period: 6m` on
+the `worker` service in the Coolify compose. While it drains, no other worker
+is consuming, so new messages wait in the queue; that is why the default is
+short of the 30-minute job timeout.
+
+**One retry for a run the worker killed.** A chat run still going when the
+drain window ends is cancelled. If it called no tools and is on its first
+attempt, it goes back to `queued` (`attempt` 2, `requeued_at` stamped, no
+partial message saved) and its stream gets a non-terminal `retrying` frame
+(`reason: "system_restart"`). `execute_run_job` allows arq two tries, so the
+next worker re-runs it from the top; that try skips the run-start gates that
+spend (guest turn, daily turns, early-access reservation) because attempt 1
+already paid them, and the run is billed once, for the attempt that finished.
+A client should drop the text it shows when it sees `retrying`.
+
+**Everything else is not retried.** `WorkerSettings.max_tries = 1` for every
+other job. A run killed by its own `job_timeout`, a run that already called a
+tool (re-running could repeat a side effect), and a run on its second attempt
+end `interrupted` with their partial saved. A run that raises lands as
+`failed`. LLM token streams cannot be resumed mid-generation, so the user
+decides via Retry.
 
 ## Operational notes
 
 - Worker boot sweep uses a **5-second cutoff** (`worker._BOOT_SWEEP_OLDER_THAN_SECONDS`).
   A run that the web enqueued less than 5s before the worker booted is left
   alone for the worker to pick up.
-- Heartbeat sweep on the web side still runs every 5 minutes with a 10-minute
-  cutoff — that catches in-process orphans during the Tier-1 mode and also
-  serves as a safety net under Tier 2 if both worker replicas crash without
-  rebooting.
+- The stale-run sweep on the web side runs every 5 minutes with a 10-minute
+  cutoff. It catches in-process orphans during the Tier-1 mode and is the safety
+  net under Tier 2 if a worker dies without rebooting. A `queued` run is stale
+  when it was created before the cutoff; a `running` run is stale only when its
+  liveness stamp, `coalesce(last_heartbeat_at, started_at, createdAt)`, is
+  before the cutoff. The worker refreshes `last_heartbeat_at` every
+  `POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS` while it drives a run, so a long but
+  healthy run is never swept. The sweep writes conditionally, so it can't
+  overwrite a run the worker has just finished, and a queued run it interrupts
+  is not driven later (`mark_running` only claims `queued` runs). A requeued
+  run is timed from `requeued_at`, not `createdAt`.
+- A run that ends `failed`, `cancelled` or `interrupted` (including arq's
+  `job_timeout`) saves the text it had already streamed as an assistant
+  message with `run_status` set, and the run's `assistant_message_id` points
+  at it. `partial_text` on the run doc keeps a copy. Worker shutdown waits up to
+  10s for those cancelled-run writes before it closes the database.
+- The tool calls, tool results and thinking a run streams are also saved on
+  that assistant message as `steps` (ordered; one entry per thinking block or
+  tool call), on the completed path and on every partial path above. A call
+  still open when the run ends is stored as `missing_result`. Tool input is
+  scrubbed, output and thinking are redacted, and everything is capped (4 KB
+  output, 2 KB input, 8 KB thinking, 50 steps and ~64 KB per message; dropped
+  steps are counted in `steps_omitted`). The history APIs return them as
+  `steps` / `stepsOmitted` (camelCase inner keys) only when non-empty, so plain
+  messages are unchanged. They are display data: the agent's LLM history never
+  includes them. The group/DM agent bridge records its replies the same way.
 - Multiple worker replicas are safe: arq uses a single Redis-backed queue, so
   each job goes to exactly one worker.
 
@@ -189,8 +233,12 @@ Env vars (all also documented in `backend/CLAUDE.md` → Key Conventions):
 | `POCKETPAW_SESSION_WARM_MAX_PER_TENANT` | `8` | Per-process warm session slots one workspace may hold. The per-tenant fairness knob |
 | `POCKETPAW_SESSION_WARM_MAX_GLOBAL` | `64` | Per-process warm session slots across all workspaces |
 | `POCKETPAW_REDIS_URL` | — | Required for both tiers; web + worker must share |
+| `POCKETPAW_REDIS_MAX_CONNECTIONS` | `128` | Per-process ceiling on the shared, non-blocking Redis pool (tickets, cancel keys, session revocation, rate limits, enqueue, stream appends). Exhaustion raises at once |
+| `POCKETPAW_REDIS_STREAM_MAX_CONNECTIONS` | `512` | Per-process ceiling on the separate blocking pool used only by `XREAD`/`XREADGROUP BLOCK` (SSE run-stream readers, xproc consumer). About one per open SSE stream. An over-limit reader waits up to 5s, then fails without touching the shared pool |
+| `POCKETPAW_REALTIME_BUS` | `inprocess` | Set to `redis-streams` on **both** the web service and the worker before running more than one web process (`uvicorn --workers N` or several replicas). Socket frames then reach every web process through a per-process consumer group on `cloud:realtime:broadcast`, while bus handlers (agent runs, push, calendar) still run exactly once. Enable it on the web service first, or on both in one deploy, never on the worker alone: a worker on `redis-streams` writes agent replies to the broadcast stream, and a web service still on `inprocess` never reads it. It also turns on cluster-wide presence (`_core/realtime/presence.py`) and single-runner Redis leases for every scheduled loop (`_core/lease.py`), so set it while still at one web process, check the `presence:*` and `lease:*` keys appear, then raise the process count. See `ee/pocketpaw_ee/cloud/_core/realtime/broadcast.py` |
 | `CLOUD_MONGODB_URI` | `mongodb://localhost:27017/paw-enterprise` | Web + worker must share |
-| `POCKETPAW_CLOUD_RUN_STREAM_TTL` | `3600` | Redis Stream retention after a run terminates |
+| `POCKETPAW_CLOUD_RUN_STREAM_TTL` | `3600` | Redis Stream retention after a run terminates. Every append also sets `EXPIRE NX` to run timeout + 120s + this value, so a stream left by a killed worker still expires |
+| `POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS` | `30` | How often the worker stamps `last_heartbeat_at` on a running run. Keep it well under the sweeper's 10-minute cutoff. A non-numeric or non-positive value falls back to the default |
 | `POCKETPAW_CLOUD_STREAM_TRANSPORT` | `redis` | Future hook for non-Redis backends |
 | `PAW_SITES_BUILD_TIMEOUT_SEC[_<ENGINE>]` | `600` (floor) | Per-build sandbox budget for the site-build function. Read at worker **import**, so a change takes effect on the worker restart a deploy performs — see below |
 | `PAW_SITES_SVELTE_ASYNC_BUILD` | unset (off) | Routes STATIC svelte publishes to the Daytona build lane instead of building them inline. Read per call, so it takes effect without a restart — but set it on **both** the web service and the worker: the web side decides whether to enqueue, the worker side does the build. See the caveat below before turning it on |

@@ -1,0 +1,65 @@
+[
+  {
+    "label": "the flag is ignored — every signed-up kiosk turn is refused the moment the code ships, on every deploy",
+    "file": "ee/pocketpaw_ee/cloud/chat/kiosk_byok.py",
+    "find": "    if not get_settings().other_hand_require_byok:\n        return False",
+    "replace": "    if False:\n        return False",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py::test_flag_off_keeps_the_platform_fallback"]
+  },
+  {
+    "label": "the gate never fires — the switch reads On and the platform keeps paying for every kiosk turn",
+    "file": "ee/pocketpaw_ee/cloud/chat/kiosk_byok.py",
+    "find": "    return (ent.plan or _FREE_PLAN) == _FREE_PLAN",
+    "replace": "    return False",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py::test_flag_on_refuses_a_keyless_account_on_the_kiosk"]
+  },
+  {
+    "label": "the surface check is dropped — the gate goes workspace-wide and takes the whole Paw OS off the platform key",
+    "file": "ee/pocketpaw_ee/cloud/chat/kiosk_byok.py",
+    "find": "    if sc is None or sc.kind is not SurfaceKind.OTHER_HAND:\n        return False",
+    "replace": "    if False:\n        return False",
+    "tests": ["tests/cloud/chat/test_kiosk_byok_gate.py::test_a_non_kiosk_surface_is_never_gated"]
+  },
+  {
+    "label": "the PLAN term is dropped — every free signup runs on our Claude Code subscription",
+    "file": "ee/pocketpaw_ee/cloud/chat/kiosk_byok.py",
+    "find": "    return (ent.plan or _FREE_PLAN) == _FREE_PLAN",
+    "replace": "    return ent.plan is None",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py::test_free_still_has_to_bring_a_key"]
+  },
+  {
+    "label": "the plan test is inverted — a paying member is asked for a key and a free one is not",
+    "file": "ee/pocketpaw_ee/cloud/chat/kiosk_byok.py",
+    "find": "    return (ent.plan or _FREE_PLAN) == _FREE_PLAN",
+    "replace": "    return (ent.plan or _FREE_PLAN) != _FREE_PLAN",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py::test_a_paying_account_runs_on_the_platform_key"]
+  },
+  {
+    "label": "an unresolvable plan fails OPEN — anyone who can break a lookup gets an unbounded platform credential",
+    "file": "ee/pocketpaw_ee/cloud/chat/kiosk_byok.py",
+    "find": "            exc_info=True,\n        )\n        return True",
+    "replace": "            exc_info=True,\n        )\n        return False",
+    "tests": ["tests/cloud/chat/test_kiosk_byok_gate.py::test_an_unresolvable_plan_asks_for_a_key"]
+  },
+  {
+    "label": "the executor keeps its OWN copy of the rule — the router refuses a paying member the executor would admit",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    from pocketpaw_ee.cloud.chat import kiosk_byok\n\n    return await kiosk_byok.requires_own_key(ctx)",
+    "replace": "    from pocketpaw.config import get_settings\n\n    return bool(get_settings().other_hand_require_byok)",
+    "tests": ["tests/cloud/chat/test_kiosk_byok_gate.py::test_both_seams_answer_the_same_for_every_tier"]
+  },
+  {
+    "label": "the account gate runs BEFORE the guest one — a guest is told to add a key instead of to sign up",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            if _guest is not None:\n                yield (\n                    \"error\",\n",
+    "replace": "            if False:\n                yield (\n                    \"error\",\n",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py"]
+  },
+  {
+    "label": "a resolved key is refused too — the gate fires on every kiosk turn, keyless or not",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        if byok_creds.source == \"byok\" and byok_creds.api_key:",
+    "replace": "        if False:",
+    "tests": ["tests/cloud/runs/test_run_core_kiosk_requires_byok.py"]
+  }
+]

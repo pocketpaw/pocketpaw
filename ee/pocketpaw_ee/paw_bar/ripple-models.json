@@ -1,0 +1,303 @@
+{
+  "astronaut": {
+    "title": "Astronaut",
+    "anchors": [
+      "helmet",
+      "chest-pack",
+      "left-glove",
+      "right-glove",
+      "boot"
+    ]
+  },
+  "boombox": {
+    "title": "Boombox",
+    "anchors": [
+      "display",
+      "handle",
+      "antenna",
+      "speaker"
+    ]
+  },
+  "camera": {
+    "title": "Antique camera",
+    "anchors": [
+      "lens",
+      "camera-body",
+      "tripod-head",
+      "tripod-leg"
+    ]
+  },
+  "car": {
+    "title": "Car",
+    "anchors": [
+      "headlight",
+      "windshield",
+      "roof",
+      "front-wheel",
+      "rear-wheel",
+      "rear"
+    ]
+  },
+  "chair": {
+    "title": "Armchair",
+    "anchors": [
+      "seat",
+      "backrest",
+      "leg",
+      "arm"
+    ]
+  },
+  "dog": {
+    "title": "Dog (Shiba Inu)",
+    "anchors": [
+      "nose",
+      "ear",
+      "back",
+      "tail",
+      "front-leg"
+    ]
+  },
+  "fish": {
+    "title": "Barramundi fish",
+    "anchors": [
+      "mouth",
+      "eye",
+      "dorsal-fin",
+      "tail"
+    ]
+  },
+  "fox": {
+    "title": "Fox",
+    "anchors": [
+      "nose",
+      "ear",
+      "back",
+      "tail",
+      "front-leg"
+    ]
+  },
+  "globe": {
+    "title": "Desk globe",
+    "anchors": [
+      "earth",
+      "meridian",
+      "axis",
+      "base"
+    ]
+  },
+  "guitar": {
+    "title": "Electric guitar",
+    "anchors": [
+      "body",
+      "pickups",
+      "neck",
+      "headstock"
+    ]
+  },
+  "headphones": {
+    "title": "Headphones",
+    "anchors": [
+      "headband",
+      "left-cup",
+      "right-cup",
+      "slider"
+    ]
+  },
+  "heart": {
+    "title": "Human heart",
+    "anchors": [
+      "aorta",
+      "pulmonary-artery",
+      "right-atrium",
+      "right-ventricle",
+      "left-ventricle",
+      "left-atrium"
+    ]
+  },
+  "helicopter": {
+    "title": "Helicopter",
+    "anchors": [
+      "nose",
+      "cockpit",
+      "main-rotor",
+      "tail",
+      "tail-rotor"
+    ]
+  },
+  "helmet": {
+    "title": "Sci-fi helmet",
+    "anchors": [
+      "visor",
+      "crown",
+      "ear-piece",
+      "respirator",
+      "back"
+    ]
+  },
+  "house": {
+    "title": "House",
+    "anchors": [
+      "door",
+      "window",
+      "roof",
+      "side-wall"
+    ]
+  },
+  "human": {
+    "title": "Human figure",
+    "anchors": [
+      "head",
+      "chest",
+      "left-hand",
+      "right-hand",
+      "knee",
+      "foot"
+    ]
+  },
+  "lantern": {
+    "title": "Street lantern",
+    "anchors": [
+      "lamp",
+      "arm",
+      "post",
+      "base"
+    ]
+  },
+  "lighthouse": {
+    "title": "Lighthouse",
+    "anchors": [
+      "lamp-room",
+      "roof",
+      "tower",
+      "base"
+    ]
+  },
+  "motorcycle": {
+    "title": "Motorcycle",
+    "anchors": [
+      "headlight",
+      "handlebar",
+      "seat",
+      "front-wheel",
+      "rear-wheel"
+    ]
+  },
+  "plane": {
+    "title": "Plane (NASA X-57 Maxwell)",
+    "anchors": [
+      "nose",
+      "cockpit",
+      "left-wing",
+      "right-wing",
+      "engine",
+      "tail"
+    ]
+  },
+  "robot": {
+    "title": "Robot",
+    "anchors": [
+      "eye",
+      "head",
+      "chest",
+      "left-hand",
+      "foot"
+    ]
+  },
+  "rocket": {
+    "title": "Rocket",
+    "anchors": [
+      "nose-cone",
+      "body",
+      "fin",
+      "nozzle"
+    ]
+  },
+  "ship": {
+    "title": "Sailing ship",
+    "anchors": [
+      "bow",
+      "stern",
+      "mainmast",
+      "sails",
+      "hull"
+    ]
+  },
+  "skeleton": {
+    "title": "Skeleton",
+    "anchors": [
+      "skull",
+      "ribcage",
+      "pelvis",
+      "left-hand",
+      "femur",
+      "foot"
+    ]
+  },
+  "skull": {
+    "title": "Human skull",
+    "anchors": [
+      "eye-socket",
+      "nasal-cavity",
+      "teeth",
+      "cranium",
+      "temporal-bone"
+    ]
+  },
+  "sneaker": {
+    "title": "Sneaker",
+    "anchors": [
+      "toe",
+      "heel",
+      "laces",
+      "sole",
+      "collar"
+    ]
+  },
+  "t-rex": {
+    "title": "T-Rex",
+    "anchors": [
+      "jaws",
+      "eye",
+      "arm",
+      "leg",
+      "tail"
+    ]
+  },
+  "telescope": {
+    "title": "Telescope",
+    "anchors": [
+      "tube",
+      "mount",
+      "tripod-leg"
+    ]
+  },
+  "train": {
+    "title": "Steam locomotive",
+    "anchors": [
+      "smokestack",
+      "cab",
+      "boiler",
+      "cowcatcher",
+      "driving-wheel"
+    ]
+  },
+  "tree": {
+    "title": "Tree",
+    "anchors": [
+      "canopy",
+      "treetop",
+      "branch",
+      "trunk"
+    ]
+  },
+  "whale": {
+    "title": "Whale",
+    "anchors": [
+      "head",
+      "eye",
+      "flipper",
+      "back",
+      "fluke"
+    ]
+  }
+}

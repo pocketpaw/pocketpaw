@@ -20,8 +20,8 @@
   {
     "label": "draft realtime: a bus failure escapes and costs the user the site they just created",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "    try:\n        await _emit_site_created(doc)\n    except Exception:  # noqa: BLE001",
-    "replace": "    await _emit_site_created(doc)\n    if False:",
+    "find": "    # a booted cloud (a script, a test tree without the bus fixture) still succeeds.\n    try:\n        await _emit_site_created(doc)\n    except Exception:  # noqa: BLE001",
+    "replace": "    # a booted cloud (a script, a test tree without the bus fixture) still succeeds.\n    await _emit_site_created(doc)\n    if False:",
     "tests": [
       "tests/ee/sites/test_draft_first_visibility.py"
     ]

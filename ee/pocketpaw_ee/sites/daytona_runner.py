@@ -1,131 +1,68 @@
-# ee/pocketpaw_ee/sites/daytona_runner.py — drives one ephemeral Daytona build
-# round-trip: create → upload → build → read the sentinel → extract → delete.
+# ee/pocketpaw_ee/sites/daytona_runner.py -- drives one ephemeral Daytona build
+# round-trip: create -> upload -> build -> read the sentinel -> extract -> delete.
 #
-# Created 2026-08-09 (SG-9i slice 1). The decision procedure lives next door in
-# ``daytona_build.py`` as pure functions; this module is the I/O half that feeds it.
-# Split that way on purpose: the part that must be right (what happened, and who is
-# to blame) is testable without a sandbox, and this part is testable with a fake
-# client.
+# The decision procedure (what happened, who is to blame) lives in ``daytona_build.py``
+# as pure functions; this module is the I/O half that feeds it, testable with a fake
+# client. The downloaded artifact passes ``daytona_build.verify_artifact`` before the
+# result is assembled: an empty, truncated, unreadable or ``node_modules``-carrying
+# artifact demotes the build to a non-deployable ``infra_lost`` (with the rejection's
+# own ``retryable``) and the bytes are dropped.
 #
-# Edited 2026-08-10 (SL-3 — the install-time supply-chain floor): the upload step now
-# writes a ``bunfig.toml`` into the sandbox project (see :data:`SANDBOX_BUNFIG`).
+# Optional arguments, all inert when omitted: ``image`` (the preview lane's
+# Playwright image), ``on_artifact`` (stores the draft as soon as a clean artifact is
+# verified), ``after_build`` (the browser harness, run in the same sandbox before
+# teardown; a raise is logged and never costs the build its verdict), ``labels``,
+# ``on_lease_wait`` / ``on_lease_admit`` (the admission wait hooks, step 0).
+# Box size: ``PAW_SITES_BUILD_{CPU,MEMORY_GIB,DISK_GIB}`` (2/4/10, max 8/16/50). ``build_usage``
+# measures the box alongside ``on_artifact``, before ``after_build``; never changes a verdict.
+# The sandbox ``bunfig.toml`` is OPEN (no release-age floor, scripts allowed) because
+# the sandbox is the isolation boundary; an author-supplied one wins.
+# ``--frozen-lockfile`` is NOT used: the generator emits no lockfile, so the flag would
+# fail every build. Enforcing it needs a vetted lockfile, owed as its own design.
 #
-# WHY IT BELONGS HERE rather than in the generated project or the image: this
-# workspace's install protections live in the DEVELOPER'S HOME DIR (``~/.npmrc``,
-# ``~/.bunfig.toml``) and are in no repo, so a fresh container inherited none of them.
-# The captain's ruling that Daytona is ALWAYS the build host is what turns that from a
-# footnote into the whole exposure — the build box was weaker than the runtime image
-# beside it. Injecting at this boundary means a template change cannot silently drop it,
-# and it keeps a build-host control out of the customer's source tree.
+# THE ORDER OF STEPS IS THE CONTRACT:
+#   0. Admission first: ``admission.memory_lease(memory_gb)`` waits for room in the
+#      sites budget and is held until the delete has run (except a cancel mid-create, 3).
+#      On a refusal ``admission.create_admitted`` stops idle workspace VMs once, retries.
+#   1. The clock starts BEFORE ``create_sandbox`` (after admission); it is what
+#      separates a timeout from an eviction when no sentinel comes back.
+#   2. The sentinel is read BEFORE teardown; once the box is gone the evidence is too.
+#   3. Teardown is explicit. A ``finally`` deletes by id once create returned one. A
+#      create that raised first may still have registered the box, so it is deleted by
+#      its unique name (``sandbox_reaper.teardown_unreturned``). A cancel mid-create (a
+#      superseded preview, arq's timeout) propagates at once, but the box is deleted only
+#      after create settles in the background: deleting it while Daytona builds the
+#      dynamic image caches that build as failed (``admission.create_admitted``). The
+#      lease is released with the cancel, so that tail runs unleased; accepted. Boxes
+#      carry ``paw_lane=site-build`` plus the caller's ``paw_pocket`` / ``paw_job``; a
+#      box an earlier attempt of the same job left is deleted before the create.
+#      Backstops: auto-delete on stop (``auto_delete_interval=0``) and the reaper cron.
+#      Not an unconditional immediate self-delete: that would also destroy the log.
 #
-# NOT DONE, and deliberately not faked: ``--frozen-lockfile``. The generator emits no
-# lockfile — verified, nothing under paw-sites writes one — so the flag would fail every
-# build rather than harden it. Enforcing it needs a vetted lockfile for the allowlisted
-# dependency set, which is its own design and is recorded as owed rather than pretended.
-#
-# THE ORDER OF STEPS IS THE CONTRACT, not an implementation detail:
-#
-#   1. Our clock starts BEFORE ``create_sandbox``. It is the only timing signal that
-#      survives the sandbox's death, and it is what separates a timeout from an
-#      eviction when no sentinel comes back.
-#   2. The sentinel is read BEFORE any teardown. Once the sandbox is gone the
-#      evidence is gone with it, and "not found" cannot distinguish "deleted
-#      normally" from "died and was reaped".
-#   3. Teardown is EXPLICIT and in a ``finally``, with Daytona's own auto-delete as a
-#      backstop rather than the primary mechanism (see ``_lifecycle_minutes``).
-#
-# WHY NOT LET THE SANDBOX SELF-DELETE UNCONDITIONALLY, which is the literal ruling:
-# an unconditional immediate self-delete also destroys the build log, so a genuine
-# build failure would reach the user as "your site failed to build" with no reason to
-# act on. Deleting after the read costs exactly the same and keeps the stderr. The
-# auto-delete backstop still guarantees no sandbox outlives us if THIS process dies.
-#
-# ┌───────────────────────────────────────────────────────────────────────────────────┐
-# │ INVARIANT — THIS LANE NEVER SNAPSHOTS THE SANDBOX.                                │
-# └───────────────────────────────────────────────────────────────────────────────────┘
-#
-# THE PRIMARY REASON IS LIVE. A svelte project carries ``__CAPTURE_SIGNED_KEY__``
-# substituted into ``src/routes/api/submit/+server.ts`` — a real per-site secret, minted at
-# ``sites/service.py:1068`` and substituted by ``paw-sites/src/scaffold.ts:71`` (and again
-# for the dynamic track at ``dynamic-scaffold.ts:232``). React has no server route and so
-# no key. The decision that this exposure is acceptable rests ENTIRELY on the key living
-# only in a container that is then destroyed. A snapshot would make it durable.
-#
-# ── CORRECTION, 2026-08-09. This header previously said the opposite. ────────────────
-#
-# It read: *"Lead capture was then dropped (captain: do not serve ``/api/submit``), so no
-# route and no key enters any sandbox on either engine, and that specific justification is
-# gone."* Quoted rather than deleted, because a reader one ``git blame`` away should be able
-# to see the correction happened rather than assume the header was always right.
-#
-# THAT WAS FALSE, and the distinction is the whole lesson. The captain's ruling was about
-# SERVING ``/api/submit``, not about GENERATING it, and it was never implemented in the
-# generator: the route template still exists and the key is still substituted into every
-# svelte build. What WAS true is narrower — no key enters a DAYTONA sandbox today, but only
-# because NOTHING does, since this lane has no callers yet. That narrow truth was
-# generalised into a claim about "either engine", which is false about the path that
-# actually runs.
-#
-# THE GAP WORTH REMEMBERING: the distance between "the captain decided X" and "X is true of
-# the artifact" was ONE GREP, and nobody ran it for several turns — including the author of
-# this header, while writing this header. A decision reported as made arrives formatted as a
-# fact about the code. It is not one until you have looked.
-#
-# TWO FURTHER GROUNDS, now ADDITIONAL rather than replacements:
-#   1. Build inputs are customer content. A snapshot moves them from an ephemeral
-#      container into durable blob storage, which is a different data-residency
-#      question than the one this lane was cleared for (SG-0 conditions 4 and 6).
-#   2. Lead capture is "we will see what we can do about leads" — not deleted forever.
-#      Even once the generator does stop emitting the route, a returning server route
-#      brings the secret back with it.
-#
-# WIRING CONTRACT THIS IMPLIES: the moment this lane gets callers, the key enters the
-# sandbox unless the wiring strips it — substitute the tokens after the artifact returns,
-# or inject them at deploy via wrangler ``[vars]``. Today's protection is the accident that
-# nothing calls ``run_build``.
-#
-# WHAT WOULD ENTER IS NO LONGER AN INFERENCE — it has a filename. A canary build on
-# 2026-08-10 (a real generated svelte project built with a marked
-# ``capture_signed_key``, run by SG-7) found the key in
-# ``src/routes/api/submit/+server.ts`` — i.e. in the source map this runner UPLOADS — and
-# compiled into ``.svelte-kit/output/server/entries/endpoints/api/submit/_server.ts.js``.
-# The contract above is therefore checkable rather than merely cautionary: the file is
-# known by name before anyone writes the wiring.
-#
-# THE SAME CANARY FOUND THE KEY NOWHERE IN THE DEPLOYABLE ARTIFACT
-# (``.svelte-kit/cloudflare/``), including under ``_app/`` on the widest client-bundle
-# setting. DO NOT read that as reassurance about this lane. The key is absent from the
-# artifact because the compiled server route is absent from it — and that same missing file
-# is what the shipped ``_worker.js`` imports (``./../output/server/index.js``, verified on
-# a local adapter-cloudflare build). So the svelte artifact this lane tars CANNOT EXECUTE.
-# The security pass and the correctness bug are one fact; see §8 item 14 of the findings
-# record cited below.
-#
-# Recorded as an OBLIGATION, not a note, in the proving-phase findings record — see §9a of
-# ``docs/design/drafts/2026-08-09-sites-proving-SG12-findings.md`` in paw-workspace, which
-# also carries the three options and why patching the built output is the worst of them.
-# Cross-referenced deliberately: whoever finds this header while about to add a caller
-# should land on the obligation, not just on the history of a corrected claim.
-#
-# CACHING ``node_modules`` IN A SNAPSHOT IS THE OBVIOUS OPTIMISATION HERE, and it is the
-# thing that would undo this. If you are reading this because you were about to do it: the
-# primary reason above is live, so re-make the security decision first — do not reason from
-# the retracted claim that the signed key is gone.
-#
-# Updated 2026-08-11 (SG-7, fault ladder): the downloaded artifact now passes through
-# ``daytona_build.verify_artifact`` before the result is assembled, so an empty, truncated,
-# unreadable or ``node_modules``-carrying artifact demotes the classification to a
-# non-deployable ``infra_lost`` and the bytes are dropped, instead of leaving ``deployable``
-# True on a result a caller would deploy. The rejection carries its OWN ``retryable``: a
-# truncated transfer is worth another attempt, a build that produced garbage is not.
+# INVARIANT -- THIS LANE NEVER SNAPSHOTS THE SANDBOX. A svelte project carries
+# ``__CAPTURE_SIGNED_KEY__`` substituted into ``src/routes/api/submit/+server.ts``, a
+# real per-site secret, and a canary build confirmed it lands in the uploaded source
+# and the compiled server route. Accepting that rests entirely on the key living only
+# in a container that is then destroyed; a snapshot would make it durable. Build inputs
+# are also customer content, and a snapshot moves them into durable storage (a
+# different data-residency question). Caching ``node_modules`` in a snapshot would undo
+# this: re-make the security decision first. The obligation (strip or inject the key at
+# deploy) and the svelte artifact's missing server output are in section 9a and 8.14 of
+# ``docs/design/drafts/2026-08-09-sites-proving-SG12-findings.md`` in paw-workspace.
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+import os
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from pocketpaw_ee.sites import build_usage
+from pocketpaw_ee.sites.admission import create_admitted, memory_lease
+from pocketpaw_ee.sites.bun_supply_chain import BUILD_BUNFIG, BUILD_BUNFIG_REL
 from pocketpaw_ee.sites.daytona_build import (
     BUILD_RESULT_FILENAME,
     BuildClassification,
@@ -134,6 +71,12 @@ from pocketpaw_ee.sites.daytona_build import (
     classify_build,
     promised_artifact_bytes,
     verify_artifact,
+)
+from pocketpaw_ee.sites.sandbox_reaper import (
+    JOB_LABEL,
+    delete_job_leftovers,
+    lane_labels,
+    unique_sandbox_name,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -151,38 +94,17 @@ SANDBOX_PROJECT_DIR = "/home/daytona/paw-build"
 SANDBOX_WRAPPER_PATH = "/tmp/paw-build.sh"
 SANDBOX_ARTIFACT_PATH = "/tmp/paw-artifact.tgz"
 
-#: SL-3 — the install-time supply-chain floor, uploaded INTO the sandbox project.
+#: The sandbox bunfig, uploaded INTO the sandbox project when it ships none. Lives in
+#: ``bun_supply_chain`` (next to the host floor it deliberately differs from) and is
+#: re-exported here under the original names.
 #:
-#: WHY THIS FILE HAS TO EXIST HERE AT ALL. This workspace's protections live in the
-#: DEVELOPER'S HOME DIR (``~/.npmrc``, ``~/.bunfig.toml``) and are not in any repo, so a
-#: fresh container inherits NONE of them: no release-age floor, no ``ignore-scripts``. A
-#: build box that resolves from the open registry with lifecycle scripts enabled is
-#: strictly weaker than the runtime image beside it, and once Daytona is the ONLY build
-#: host that inversion is the whole exposure rather than a note.
-#:
-#: ``minimumReleaseAge`` is the same 7-day floor the dev machines enforce, expressed in
-#: SECONDS because that is bun's unit — 604800. It is the control that would have caught
-#: a compromised fresh publish of an already-vetted package, which the allowlist cannot:
-#: the allowlist pins WHICH packages and a caret pin still floats the VERSION.
-#:
-#: ``ignore-scripts`` matters more here than on a laptop. A postinstall script in a build
-#: container runs with the sandbox's network and its filesystem, next to the artifact we
-#: are about to deploy. Nothing in the vetted set needs one.
-#:
-#: DELIBERATELY UPLOADED, NOT TEMPLATED INTO THE GENERATED PROJECT. Two reasons: it is a
-#: property of the BUILD HOST, not of the customer's site, so it has no business in their
-#: source tree; and injecting it at this boundary means a template change cannot silently
-#: drop it. It lands in the project dir because that is where bun looks.
-SANDBOX_BUNFIG_REL = "bunfig.toml"
-SANDBOX_BUNFIG = """# Written by pocketpaw's build lane — NOT part of your site's source.
-# Install-time supply-chain floor for this sandbox. See daytona_runner.SANDBOX_BUNFIG.
-[install]
-# 7 days, in seconds. Matches the floor the dev machines enforce via ~/.bunfig.toml.
-minimumReleaseAge = 604800
-# No lifecycle scripts. Nothing in the vetted dependency set needs one, and a
-# postinstall here would run beside the artifact we are about to deploy.
-ignoreScripts = true
-"""
+#: Deliberately NOT naming that other runner here: this module is the Daytona lane,
+#: and ``test_fault_ladder_build`` text-scans it to keep a local build fallback from
+#: being reintroduced. Sharing a supply-chain constant is not a build fallback, but
+#: the guard reads source text, and a guard that has to reason about intent is worth
+#: less than one that does not.
+SANDBOX_BUNFIG_REL = BUILD_BUNFIG_REL
+SANDBOX_BUNFIG = BUILD_BUNFIG
 
 #: Seconds added to the in-sandbox timeout for our own ``execute_command`` budget.
 #: The inner ``timeout(1)`` should always fire first, because that path still runs the
@@ -191,8 +113,65 @@ ignoreScripts = true
 #: get evidence.
 EXEC_TIMEOUT_SLACK_SECONDS = 120
 
+#: The ``paw_lane`` label value on every sandbox this module creates.
+BUILD_LANE = "site-build"
+
 #: Minutes of headroom between the build's own timeout and Daytona's idle auto-stop.
 _LIFECYCLE_MARGIN_MINUTES = 10
+
+#: The build box's size, per build, from the environment so ops can right-size it from
+#: the ``sites.build_usage:`` log lines without a code change. Defaults are today's size.
+BUILD_CPU_ENV = "PAW_SITES_BUILD_CPU"
+BUILD_MEMORY_ENV = "PAW_SITES_BUILD_MEMORY_GIB"
+BUILD_DISK_ENV = "PAW_SITES_BUILD_DISK_GIB"
+DEFAULT_BUILD_CPU = 2
+DEFAULT_BUILD_MEMORY_GIB = 4
+DEFAULT_BUILD_DISK_GIB = 10
+#: Ceilings on the env values: a typo (``40`` for ``4``) must not ask Daytona for a box
+#: bigger than the whole org.
+MAX_BUILD_CPU = 8
+MAX_BUILD_MEMORY_GIB = 16
+MAX_BUILD_DISK_GIB = 50
+
+
+def _positive_int_env(name: str, default: int, ceiling: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value < 1:
+        logger.warning("%s=%r is not a positive integer; using %d", name, raw, default)
+        return default
+    if value > ceiling:
+        logger.warning("%s=%d is above the ceiling; using %d", name, value, ceiling)
+        return ceiling
+    return value
+
+
+def build_resources() -> tuple[int, int, int]:
+    """``(cpu, memory GiB, disk GiB)`` for a build sandbox, read from the env now.
+    Warns when the memory exceeds an active admission budget (each such build would
+    then run only when nothing else holds a lease)."""
+    from pocketpaw_ee.sites.admission import BUDGET_ENV, budget_gib
+
+    memory = _positive_int_env(BUILD_MEMORY_ENV, DEFAULT_BUILD_MEMORY_GIB, MAX_BUILD_MEMORY_GIB)
+    budget = budget_gib()
+    if budget is not None and memory > budget:
+        logger.warning(
+            "%s=%d is above %s=%d: each build runs alone, past the budget",
+            BUILD_MEMORY_ENV,
+            memory,
+            BUDGET_ENV,
+            budget,
+        )
+    return (
+        _positive_int_env(BUILD_CPU_ENV, DEFAULT_BUILD_CPU, MAX_BUILD_CPU),
+        memory,
+        _positive_int_env(BUILD_DISK_ENV, DEFAULT_BUILD_DISK_GIB, MAX_BUILD_DISK_GIB),
+    )
 
 
 def _lifecycle_minutes(timeout_seconds: int) -> int:
@@ -240,6 +219,9 @@ class BuildRunResult:
     artifact_bytes: int
     sandbox_id: str | None
     sandbox_deleted: bool
+    #: PP-2: what the ``after_build`` hook returned, or ``None`` when there was no hook,
+    #: the build was not clean, or the hook raised.
+    post_build: Any = None
 
     @property
     def ok(self) -> bool:
@@ -262,6 +244,20 @@ async def _read_sentinel(client: DaytonaClient, sandbox_id: str) -> bytes | None
         return None
 
 
+def _output_dir(engine: str, artifact_rel: str | None) -> str:
+    """Absolute in-sandbox path of the dir this build writes (the project dir when the
+    engine is unknown, so the probe still sizes something real)."""
+    rel = artifact_rel
+    if rel is None:
+        try:
+            from pocketpaw_ee.sites.engines import static_output_rel
+
+            rel = static_output_rel(engine)
+        except Exception:  # noqa: BLE001 -- only feeds a measurement
+            rel = "."
+    return f"{SANDBOX_PROJECT_DIR}/{rel}".rstrip("/.") or SANDBOX_PROJECT_DIR
+
+
 async def run_build(
     files: dict[str, str | bytes],
     *,
@@ -269,12 +265,21 @@ async def run_build(
     timeout_seconds: int,
     client: DaytonaClient | None = None,
     sandbox_name: str | None = None,
-    cpu: int = 2,
-    memory_gb: int = 4,
-    disk_gb: int = 10,
+    cpu: int | None = None,
+    memory_gb: int | None = None,
+    disk_gb: int | None = None,
     install_command: str = "bun install",
     build_command: str = "bun run build",
     artifact_rel: str | None = None,
+    image: str | None = None,
+    after_build: Callable[[Any, str, str], Awaitable[Any]] | None = None,
+    on_artifact: Callable[[bytes], Awaitable[Any]] | None = None,
+    extra_uploads: list[tuple[bytes, str]] | None = None,
+    ssr_markers: tuple[str, ...] | None = None,
+    log_tail_bytes: int | None = None,
+    labels: dict[str, str] | None = None,
+    on_lease_wait: Callable[[], Awaitable[None]] | None = None,
+    on_lease_admit: Callable[[], Awaitable[None]] | None = None,
 ) -> BuildRunResult:
     """Build ``files`` in a fresh Daytona sandbox and return the verdict + artifact.
 
@@ -296,7 +301,29 @@ async def run_build(
     all *results*, and the caller needs the classification to decide between reporting
     and retrying. It may still raise if the sandbox cannot be created at all, which is
     a distinct condition the caller must handle as retryable (nothing has run yet).
+
+    ``image`` / ``after_build`` / ``on_artifact`` — see the module header.
+
+    ``extra_uploads`` are ``(bytes, absolute sandbox path)`` pairs written beside the
+    project (the project lane uploads the vendored generator and its build script);
+    ``ssr_markers`` / ``log_tail_bytes`` reach :func:`build_wrapper_script`. All three
+    are inert when omitted, so existing callers render byte-identical sandboxes.
+    ``after_build`` receives ``(client, sandbox_id, static_dir)`` where ``static_dir`` is
+    the absolute in-sandbox path of the output dir this build wrote; ``on_artifact``
+    receives the verified artifact bytes before it.
+
+    ``labels`` are merged over ``{"paw_lane": "site-build"}`` and stamped on the
+    sandbox; the build jobs pass ``paw_pocket`` and ``paw_job``. With a ``paw_job``, a
+    box an earlier attempt of the same job left behind is deleted before the create.
+
+    ``cpu`` / ``memory_gb`` / ``disk_gb`` default to :func:`build_resources` (the env).
+    ``on_lease_wait`` / ``on_lease_admit`` are ``admission.memory_lease``'s ``on_wait`` /
+    ``on_admit``: the job's status write for "waiting for capacity", then "building".
     """
+    env_cpu, env_memory, env_disk = build_resources()
+    cpu = env_cpu if cpu is None else cpu
+    memory_gb = env_memory if memory_gb is None else memory_gb
+    disk_gb = env_disk if disk_gb is None else disk_gb
     if client is None:
         from pocketpaw_ee.cloud.daytona.client import get_daytona_client
 
@@ -314,6 +341,8 @@ async def run_build(
         install_command=install_command,
         build_command=build_command,
         artifact_rel=artifact_rel,
+        **({"ssr_markers": ssr_markers} if ssr_markers is not None else {}),
+        **({"log_tail_bytes": log_tail_bytes} if log_tail_bytes is not None else {}),
     )
     # Rendered here rather than inside the wrapper so an engine whose output is the
     # project root fails BEFORE a sandbox is created and billed.
@@ -326,27 +355,51 @@ async def run_build(
         engine, SANDBOX_PROJECT_DIR, SANDBOX_ARTIFACT_PATH, output_rel=artifact_rel
     )
 
-    name = sandbox_name or f"paw-build-{int(time.time() * 1000)}"
+    name = sandbox_name or unique_sandbox_name("paw-build-")
     idle_minutes = _lifecycle_minutes(timeout_seconds)
 
-    # ── The clock starts here, before anything exists. ──────────────────────
+    create_kwargs: dict[str, Any] = {
+        "name": name,
+        "cpu": cpu,
+        "memory": memory_gb,
+        "disk": disk_gb,
+        # Idle auto-stop EXCEEDS the build budget (see _lifecycle_minutes).
+        "auto_stop_interval": idle_minutes,
+        # 0 = delete immediately on stop. This is the BACKSTOP for our own process
+        # dying, not the primary teardown — the explicit delete below is.
+        "auto_delete_interval": 0,
+    }
+    if image:
+        # PP-2: only when set, so a caller that passes nothing creates exactly as before.
+        create_kwargs["image"] = image
+    create_kwargs["labels"] = lane_labels(BUILD_LANE, labels)
+    await delete_job_leftovers(client, create_kwargs["labels"])
+
+    # Admission: wait for room in the sites memory budget BEFORE asking Daytona. Held
+    # until the delete in the ``finally`` below has run; entered with no await between
+    # it and the ``try``, so no exit path skips the release.
+    lease = memory_lease(
+        memory_gb,
+        wait_tag=create_kwargs["labels"].get(JOB_LABEL),
+        on_wait=on_lease_wait,
+        on_admit=on_lease_admit,
+    )
+    await lease.__aenter__()
+
+    # ── The clock starts here, after admission and before anything exists. ─────
     t_start = time.monotonic()
     sandbox_id: str | None = None
     deleted = False
     t_created = t_uploaded = t_exec_done = t_extracted = t_start
+    post_build: Any = None
+    probe: asyncio.Future[dict[str, Any]] | None = None
 
     try:
-        info = await client.create_sandbox(
-            name=name,
-            cpu=cpu,
-            memory=memory_gb,
-            disk=disk_gb,
-            # Idle auto-stop EXCEEDS the build budget (see _lifecycle_minutes).
-            auto_stop_interval=idle_minutes,
-            # 0 = delete immediately on stop. This is the BACKSTOP for our own process
-            # dying, not the primary teardown — the explicit delete below is.
-            auto_delete_interval=0,
-        )
+        # The SDK registers the box BEFORE it waits for ``started``, so a create that
+        # timed out or was cancelled can leave a box we hold no id for: it is found by
+        # its unique name and deleted (shielded) before the original re-raises. A
+        # capacity refusal stops idle workspace VMs once and retries the create.
+        info = await create_admitted(client, create_kwargs)
         sandbox_id = info.id
         await client.wait_for_sandbox(sandbox_id, target_state="started")
         t_created = time.monotonic()
@@ -358,31 +411,15 @@ async def run_build(
             )
             for rel, contents in files.items()
         ]
-        # SL-3 — the supply-chain floor. OURS WINS, and the conflict is resolved HERE
-        # rather than by upload ordering.
-        #
-        # ``bulk_upload`` hands the whole list to the Daytona SDK in ONE batch call, so
-        # which write survives for a duplicate destination is the SDK's business and is
-        # not specified by anything we control. Relying on "later overwrites earlier"
-        # would be a guess dressed as a guarantee, so the caller's copy is dropped
-        # explicitly instead — deterministic, and visible in the log when it happens.
-        #
-        # Ours wins because this is a FLOOR: a control the built project can override is
-        # not one. The trade is that a legitimate project-level bun setting would be
-        # discarded, which is why the drop is logged at WARNING rather than passed over in
-        # silence. No generated project emits a bunfig.toml today, so this is a guard
-        # against a future template or a hostile source map, not a live collision.
+        # The sandbox bunfig is OPEN (no release-age floor, scripts allowed): the
+        # sandbox is the isolation boundary for author packages. An author may ship
+        # their own bunfig.toml, and theirs wins — ours is uploaded only when the
+        # project has none, so there is exactly one bunfig destination either way
+        # (``bulk_upload`` gives no ordering guarantee for duplicates).
         bunfig_dst = f"{SANDBOX_PROJECT_DIR}/{SANDBOX_BUNFIG_REL}"
-        displaced = [u for u in uploads if u[1] == bunfig_dst]
-        if displaced:
-            logger.warning(
-                "sites: dropped a project-supplied %s in favour of the lane's "
-                "supply-chain floor (sandbox %s)",
-                SANDBOX_BUNFIG_REL,
-                sandbox_id,
-            )
-            uploads = [u for u in uploads if u[1] != bunfig_dst]
-        uploads.append((SANDBOX_BUNFIG.encode(), bunfig_dst))
+        if not any(u[1] == bunfig_dst for u in uploads):
+            uploads.append((SANDBOX_BUNFIG.encode(), bunfig_dst))
+        uploads.extend(extra_uploads or [])
         uploads.append((wrapper.encode(), SANDBOX_WRAPPER_PATH))
         await client.bulk_upload(sandbox_id, uploads)
         t_uploaded = time.monotonic()
@@ -457,7 +494,61 @@ async def run_build(
                     # what this check refused.
                     artifact = None
         t_extracted = time.monotonic()
+
+        # Right-sizing evidence, read in the box ALONGSIDE the artifact hook (so the
+        # draft is not held up) and finished before after_build (so the browser harness
+        # is not counted in the peak). Skipped when no sentinel came back: the box is
+        # likely gone and an exec would only wait out its timeout.
+        if sentinel is not None:
+            probe = asyncio.ensure_future(
+                build_usage.measure(
+                    client,
+                    sandbox_id,
+                    project_dir=SANDBOX_PROJECT_DIR,
+                    output_dir=_output_dir(engine, artifact_rel),
+                )
+            )
+
+        # The artifact hook first (the preview lane stores the draft here), so the
+        # draft is visible before the browser check below spends its time. Same rule
+        # as after_build: only a clean, verified artifact, and a raise is swallowed.
+        if on_artifact is not None and artifact is not None and classification.deployable:
+            try:
+                await on_artifact(artifact)
+            except Exception as exc:  # noqa: BLE001 — see after_build below
+                logger.warning("daytona_runner: on_artifact hook raised (%s)", exc)
+
+        usage = await probe if probe is not None else None
+        probe = None
+        build_usage.log_usage(
+            usage,
+            engine=engine,
+            labels=create_kwargs["labels"],
+            outcome=classification.outcome,
+            cpu=cpu,
+            memory_gib=memory_gb,
+            disk_gib=disk_gb,
+            duration_seconds=t_extracted - t_start,
+        )
+
+        # PP-2: the post-build hook (the browser harness), only on a CLEAN build and
+        # still inside the sandbox's lifetime. A raise is logged and swallowed: the
+        # build verdict and its artifact above are already decided and must survive.
+        if after_build is not None and artifact is not None and classification.deployable:
+            from pocketpaw_ee.sites.engines import static_output_rel
+
+            rel = artifact_rel or static_output_rel(engine)
+            static_dir = f"{SANDBOX_PROJECT_DIR}/{rel}".rstrip("/.") or SANDBOX_PROJECT_DIR
+            try:
+                post_build = await after_build(client, sandbox_id, static_dir)
+            except Exception as exc:  # noqa: BLE001 — see above
+                logger.warning("daytona_runner: after_build hook raised (%s)", exc)
+                post_build = None
     finally:
+        # A probe still in flight (on_artifact raised a BaseException) must not outlive
+        # the box it is reading.
+        if probe is not None and not probe.done():
+            probe.cancel()
         # Explicit teardown. Swallows its own errors: a delete that fails must not mask
         # the build result, and the auto-delete backstop still reaps the sandbox.
         #
@@ -467,18 +558,21 @@ async def run_build(
         # this lane, since the whole point of the concurrency ceiling is that several
         # builds run at once and would have raced on that dict. Assembling the result
         # AFTER the try/finally gets the same information with no shared state.
-        if sandbox_id is not None:
-            try:
-                await client.delete_sandbox(sandbox_id)
-                deleted = True
-                logger.info("daytona_runner: deleted sandbox %s", sandbox_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "daytona_runner: explicit delete of %s failed (%s); "
-                    "auto_delete_interval=0 remains the backstop",
-                    sandbox_id,
-                    exc,
-                )
+        try:
+            if sandbox_id is not None:
+                try:
+                    await client.delete_sandbox(sandbox_id)
+                    deleted = True
+                    logger.info("daytona_runner: deleted sandbox %s", sandbox_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "daytona_runner: explicit delete of %s failed (%s); "
+                        "auto_delete_interval=0 remains the backstop",
+                        sandbox_id,
+                        exc,
+                    )
+        finally:
+            await lease.__aexit__(None, None, None)
 
     # Reached only when the try-block completed: an exception during create/upload
     # propagates through the ``finally`` and never gets here, which is correct — there
@@ -496,15 +590,20 @@ async def run_build(
         artifact_bytes=len(artifact) if artifact else 0,
         sandbox_id=sandbox_id,
         sandbox_deleted=deleted,
+        post_build=post_build,
     )
 
 
 __all__ = [
+    "BUILD_CPU_ENV",
+    "BUILD_DISK_ENV",
+    "BUILD_MEMORY_ENV",
     "EXEC_TIMEOUT_SLACK_SECONDS",
     "SANDBOX_ARTIFACT_PATH",
     "SANDBOX_PROJECT_DIR",
     "SANDBOX_WRAPPER_PATH",
     "BuildRunResult",
     "BuildTimings",
+    "build_resources",
     "run_build",
 ]

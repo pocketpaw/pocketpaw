@@ -1,6 +1,9 @@
 """Encrypted credential storage for PocketPaw.
 
 Changes:
+  - 2026-10-03: add the four ai_visibility_* provider keys/tokens (AV-3) and
+    turnstile_secret (AV-4 free AI check).
+  - 2026-10-02: add msg91_platform_authkey (partner lead WhatsApp, PH-6).
   - 2026-06-24: add dodo_payments_api_key + dodo_webhook_secret to SECRET_FIELDS
     so they persist encrypted, never plaintext in config.json (BC-2 trust boundary).
   - 2026-04-10: v1 migration failure no longer crashes — logs warning, starts with empty store.
@@ -44,6 +47,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "slack_app_token",
         "whatsapp_access_token",
         "whatsapp_verify_token",
+        "whatsapp_app_secret",
         "tavily_api_key",
         "brave_search_api_key",
         "parallel_api_key",
@@ -65,6 +69,15 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "dodo_payments_api_key",
         "dodo_webhook_secret",
         "shield_api_token",
+        "lens_api_token",
+        "cf_email_api_token",
+        "msg91_platform_authkey",
+        "ai_visibility_openai_api_key",
+        "ai_visibility_perplexity_api_key",
+        "ai_visibility_anthropic_api_key",
+        "ai_visibility_cf_api_token",
+        "turnstile_secret",
+        "public_web_key",
     }
 )
 

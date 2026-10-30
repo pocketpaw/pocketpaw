@@ -1,94 +1,37 @@
-"""arq worker entry point for Tier 2 run execution.
+"""arq worker for chat runs: the default-queue lane and the shared worker bootstrap.
 
-Updated: 2026-09-04 (fix/queue-lanes, backend-perf C1) — THIS IS NO LONGER THE ONLY
-LANE. Site builds now enqueue onto their own queue and are consumed by
-``pocketpaw_ee.sites.build_worker.WorkerSettings``; both lanes run in one container
-under ``pocketpaw_ee.cloud.worker_supervisor``. The two site functions stay
-registered HERE as well, and deliberately: a deploy cuts over the enqueue side
-instantly, so anything already sitting on the default queue when the old process
-stopped still needs someone willing to claim it. That backlog drains once and is
-then permanently empty.
+The web process enqueues ``execute_run_job`` via ``ArqExecutor``; this lane runs it
+and streams events back through Redis. It runs beside the sites lane
+(``pocketpaw_ee.sites.build_worker``) in one container under
+``pocketpaw_ee.cloud.worker_supervisor``, which drains in-flight jobs on SIGTERM.
 
-``max_jobs`` below is therefore no longer the whole cluster's ceiling — it is this
-lane's. The sites lane carries its own, and neither can consume the other's.
+Registered functions, each with its own arq timeout so none clips another: chat runs
+(``POCKETPAW_CLOUD_RUN_JOB_TIMEOUT``, default 30 min), workspace jobs and the two
+/ship jobs (``POCKETPAW_JOB_TIMEOUT_SECONDS``), and the two site builds (their build
+budget, which must outlast the in-sandbox ``timeout(1)``). The site builds stay
+registered here too so a backlog left on the default queue by an older deploy still
+has a consumer. ``max_jobs`` (``POCKETPAW_ARQ_MAX_JOBS``, default 10) is this lane's
+ceiling; replicas multiply it. Raise it with the container's memory limit: the
+claude_agent_sdk backend spawns a Node process per run.
 
-Updated: 2026-09-01 (feat/scale-concurrency-knobs) — ``WorkerSettings.max_jobs`` is
-now set, from ``POCKETPAW_ARQ_MAX_JOBS`` (default 10, arq's own). It was previously
-unset, so arq's default applied silently and the whole cluster ran ten concurrent
-jobs across ALL SIX registered lanes. That is the ceiling a multi-user deploy hits
-first — and it is invisible, because job 11 is not rejected or retried, it just sits
-in Redis behind a ``job_timeout`` of up to 30 minutes. Raise it together with the
-worker container's memory limit: the default ``claude_agent_sdk`` backend spawns a
-Node subprocess per run, so RAM binds before CPU does.
+Retry policy: ``max_tries = 1`` for everything except ``execute_run_job``, which allows
+``MAX_RUN_ATTEMPTS`` (2). A run the worker cancelled while shutting down requeues its
+run doc (see ``run_core``) and arq re-runs the job on the next worker; that second try
+drives the run only if the doc is still ``queued``, with ``retry=True`` so the gates
+that spend are not charged twice. Every other failure records itself and is not
+retried: re-running could double-bill or repeat a deploy.
 
-Updated: 2026-07-22 (SHIP-3, feat/ship-3-cloud-entity) — registered the /ship
-deploy job ``deploy_app_job`` into ``WorkerSettings.functions``, wrapped the same
-way as ``provision_box_job``: its own long timeout (a deploy pulls an image and
-swaps containers) and ``max_tries=1`` (the job records the attempt ``failed``
-instead of raising, so an arq retry would only re-run a known-bad deploy).
-Updated: 2026-08-10 (SL-2 slice 2 — the site-build lane) — registered
-``run_site_build`` (``pocketpaw_ee.sites.build_job``) into
-``WorkerSettings.functions``, wrapped in ``arq.worker.func`` with ITS OWN timeout from
-``site_build_job_timeout_seconds()``. Same default #1 as workspace jobs: this is the one
-arq entrypoint that is actually deployed, so the build lane costs no new deploy artifact.
+Bootstrap (``_startup``, once per process however many lanes share it): pin the xproc
+role to ``worker``, init Mongo and the realtime bus, register the built-in and
+entry-point workspace jobs (the registry is per process), then, only when
+``POCKETPAW_CLOUD_WORKER_BOOT_SWEEP=true`` (single replica), sweep runs the previous
+worker orphaned to ``interrupted``, bill unbilled terminal runs, and run the LiteLLM
+billing-cutover sweep. Multi-replica deploys rely on the web heartbeat sweeper.
+``_shutdown`` (last lane out) waits, bounded, for cancelled runs' shielded cleanups
+before closing Mongo, so a requeue or a partial reply is never cut off mid-write.
 
-The separate timeout is not tidiness. A site build's budget is the widest per-engine
-in-sandbox timeout plus ``run_build``'s exec slack plus the phases outside the sandbox —
-1020s at today's defaults, ALREADY over the 900s the workspace-jobs registry shares. An
-arq cancellation before the in-sandbox ``timeout(1)`` fires destroys the sentinel the
-lane classifies from, so a healthy-but-slow build would be recorded as lost
-infrastructure. Three functions now carry three budgets, and none can clip another.
-
-Updated: 2026-06-22 (feat/jobs-custom-job-entrypoints) — ``_startup`` now also
-calls ``load_entrypoint_jobs()`` right after ``register_builtins()`` so the
-worker registers WORKSPACE-CUSTOM jobs (declared under the ``pocketpaw.jobs``
-entry-point group) in its own process. Without this a custom job would resolve
-in the web process but raise ``UnknownJobError`` in the worker that runs it.
-No-op when no custom-job package is installed.
-
-Updated: 2026-06-22 (feat/jobs-worker-register-and-connector-read) — PRODUCTION
-FIX: ``_startup`` now calls ``register_builtins()`` AFTER ``init_realtime()`` so
-the worker process populates the process-wide job registry on boot. The registry
-is a module-level dict; the worker runs in a SEPARATE process from the web
-``mount_cloud`` that registered the built-ins there, so without this the
-worker's registry was EMPTY and ``execute_workspace_job`` → ``resolve_job(name)``
-raised ``UnknownJobError`` for EVERY job in a real deploy. Mirrors the ordering
-in ``ee/pocketpaw_ee/cloud/__init__.py:mount_cloud`` (register after
-init_realtime so a job's writeback emit has a bus to publish onto).
-
-Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — registered the workspace
-jobs entrypoint ``execute_workspace_job`` into ``WorkerSettings.functions``
-(default #1: SAME worker process, no new deploy artifact). It is wrapped with
-``arq.worker.func(timeout=...)`` so workspace jobs get their OWN per-function
-timeout (``POCKETPAW_JOB_TIMEOUT_SECONDS``, default 900s) without changing the
-chat-run timeout. The jobs share this worker's Redis pool + realtime bootstrap.
-
-Deploy as a separate process alongside the web service::
-
-    arq pocketpaw_ee.cloud.chat.runs.worker.WorkerSettings
-
-The worker owns the agent run; the web process just enqueues
-``execute_run_job`` via ``ArqExecutor`` and streams events back through Redis.
-
-On boot, if ``POCKETPAW_CLOUD_WORKER_BOOT_SWEEP=true`` (single-replica only —
-multi-replica would interrupt sibling workers' in-flight runs), sweep any
-``queued``/``running`` leftovers as ``interrupted``. LLM streams can't resume
-mid-generation; the partial already streamed remains visible, the user
-retries manually. HA deploys rely on the 10-minute heartbeat sweeper instead.
-
-Updated: 2026-06-24 (integration/billing-credits, BC-3) — the boot sweep now
-also runs the compute-cost metering sweep (``sweep_unbilled_runs``) so any
-terminal runs the prior worker left unbilled are charged on restart. The
-metering sweep is idempotent (billed flag + ``run:{run_id}`` ledger key), so it
-is safe even when the boot stale-run sweep is disabled — it just bills the
-already-terminal backlog.
-
-Updated: 2026-06-26 (feat/litellm-billing-cutover, WU-F) — the boot sweep also
-runs the per-tenant LiteLLM billing-cutover sweep (``run_cutover_sweep``): a
-no-op in ``off`` mode, a read-only reconciliation compare in ``shadow``, and a
-proxy-spend debit in ``live`` (where ``sweep_unbilled_runs`` self-gates off so
-exactly one meter charges). Idempotent + its own try so a cutover-sweep failure
-can't abort worker startup.
+The health key refreshes every ``POCKETPAW_ARQ_HEALTH_CHECK_INTERVAL`` seconds
+(default 30) so ``arq --check`` means "alive now", not "alive this hour".
 """
 
 from __future__ import annotations
@@ -104,12 +47,18 @@ from arq.worker import func
 # Imported at module scope so tests can ``monkeypatch.setattr(worker, …)``.
 from pocketpaw_ee.cloud import init_realtime
 from pocketpaw_ee.cloud._core.realtime import xproc
+from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import (
     DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
+    MAX_RUN_ATTEMPTS,
     RunSpec,
     run_job_timeout_seconds,
 )
-from pocketpaw_ee.cloud.chat.runs.run_core import execute_run
+from pocketpaw_ee.cloud.chat.runs.run_core import (
+    _heartbeat_seconds,
+    drain_pending_cleanups,
+    execute_run,
+)
 from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
 from pocketpaw_ee.cloud.jobs.domain import job_timeout_seconds
 from pocketpaw_ee.cloud.jobs.worker import execute_workspace_job
@@ -127,7 +76,9 @@ from pocketpaw_ee.sites.build_job import (
     run_site_build,
     run_site_preview_build,
     site_build_job_timeout_seconds,
+    site_preview_job_timeout_seconds,
 )
+from pocketpaw_ee.sites.capacity import CAPACITY_MAX_TRIES
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +86,18 @@ logger = logging.getLogger(__name__)
 # A short cutoff because worker boot implies the previous worker just died;
 # runs created seconds ago by the web process should not be swept.
 _BOOT_SWEEP_OLDER_THAN_SECONDS = 5
+
+
+def _boot_sweep_older_than_seconds() -> int:
+    """The boot sweep's cutoff: short, but never inside the heartbeat interval.
+
+    A running run is judged by its last heartbeat, which is up to one interval
+    old on a perfectly healthy replica. A cutoff below that let a booting
+    replica interrupt runs another replica was still driving. Three intervals
+    leaves room for a missed beat.
+    """
+    return max(_BOOT_SWEEP_OLDER_THAN_SECONDS, int(3 * _heartbeat_seconds()))
+
 
 # Default off — multi-replica safety. See module docstring.
 _BOOT_SWEEP_ENV = "POCKETPAW_CLOUD_WORKER_BOOT_SWEEP"
@@ -145,10 +108,23 @@ def _boot_sweep_enabled() -> bool:
 
 
 async def execute_run_job(ctx: dict[str, Any], spec_dict: dict[str, Any]) -> None:
-    """arq job entrypoint — rehydrate the RunSpec and run the agent."""
+    """arq job entrypoint — rehydrate the RunSpec and run the agent.
+
+    A ``job_try`` past 1 is arq re-running a job a worker shutdown cancelled. It is
+    driven only when the run doc was requeued (still ``queued``): a run that ended
+    ``interrupted`` instead (it called tools, or used its attempts) already told its
+    client so, and driving it again would answer nobody.
+    """
     spec = RunSpec.model_validate(spec_dict)
-    logger.info("worker: starting run %s", spec.run_id)
-    await execute_run(spec)
+    if (ctx.get("job_try") or 1) > 1:
+        if not await run_service.is_queued(spec.run_id):
+            logger.info("worker: run %s already ended; not retrying it", spec.run_id)
+            return
+        logger.info("worker: retrying run %s after a worker shutdown", spec.run_id)
+        await execute_run(spec, retry=True)
+    else:
+        logger.info("worker: starting run %s", spec.run_id)
+        await execute_run(spec)
     # Same as the in-process executor: charge at completion so the balance is not
     # a sweep interval behind. Idempotent, best-effort, sweeper still the backstop.
     from pocketpaw_ee.cloud.metering.service import bill_run_now
@@ -191,7 +167,7 @@ async def _bootstrap(ctx: dict[str, Any]) -> None:
         logger.info("worker boot: stale-run sweep disabled (%s)", _BOOT_SWEEP_ENV)
         return
     try:
-        swept = await sweep_stale_runs(older_than_seconds=_BOOT_SWEEP_OLDER_THAN_SECONDS)
+        swept = await sweep_stale_runs(older_than_seconds=_boot_sweep_older_than_seconds())
         if swept:
             logger.info("worker boot: marked %d orphaned runs as interrupted", swept)
     except Exception:
@@ -235,6 +211,11 @@ async def _bootstrap(ctx: dict[str, Any]) -> None:
 _bootstrap_lock = asyncio.Lock()
 _bootstrap_lanes = 0
 
+# How long shutdown waits for cancelled runs' cleanups (partial Message, terminal
+# status, ``interrupted`` frame) before closing the database under them. Bounded
+# so a wedged write cannot hold a deploy; each cleanup is a handful of writes.
+_CLEANUP_DRAIN_TIMEOUT_SECONDS = 10.0
+
 
 async def _startup(ctx: dict[str, Any]) -> None:
     """Run :func:`_bootstrap` for the FIRST lane in this process only."""
@@ -261,6 +242,9 @@ async def _shutdown(ctx: dict[str, Any]) -> None:
         # on_startup raised still gets its on_shutdown called) would otherwise drive
         # this negative and leave the NEXT bootstrap thinking a lane is still up.
         _bootstrap_lanes = 0
+        # Let cancelled runs finish writing their partial reply and terminal
+        # status first; closing the DB under them loses both.
+        await drain_pending_cleanups(timeout=_CLEANUP_DRAIN_TIMEOUT_SECONDS)
         await close_cloud_db()
 
 
@@ -451,38 +435,43 @@ _ship_deploy_fn = func(
 # timeouts above, so a deploy that retunes ``PAW_SITES_BUILD_TIMEOUT_SEC*`` picks it up
 # on the worker restart the deploy performs anyway.
 #
-# ``max_tries=1`` matches the rest of this worker and is load-bearing here: a build is
-# billed per attempt in a third-party sandbox, and the retry decision belongs to
-# ``build_state.settle`` (which records WHY it gave up), not to arq silently re-running a
-# job whose row already says ``failed``.
+# ``max_tries`` admits ONLY the job's own capacity retries (``sites.capacity``): the job
+# raises arq's ``Retry`` when Daytona refuses a sandbox because the org's resource limit
+# is full, and nothing else in it raises ``Retry``. Every other outcome still settles on
+# the first try, because a build is billed per attempt and the retry decision belongs to
+# ``build_state.settle``, not to arq silently re-running a job whose row says ``failed``.
 _site_build_fn = func(
     run_site_build,
     name=SITE_BUILD_FUNCTION_NAME,
     timeout=site_build_job_timeout_seconds(),
-    max_tries=1,
+    max_tries=CAPACITY_MAX_TRIES,
 )
 
 # SP-2: the DRAFT-PREVIEW build. Same sandbox, same budget (it is the same build — only
-# what happens to the artifact differs), and the same ``max_tries=1``: a preview is billed
-# per attempt too, and a client re-triggers by asking for the render again rather than by
-# arq silently re-running a job whose result already says why it failed.
+# what happens to the artifact differs), and the same capacity-only ``max_tries``: a
+# preview is billed per attempt too, and a client re-triggers by asking for the render
+# again rather than by arq silently re-running a job whose result says why it failed.
+# PP-2: plus the browser check that now runs in the same sandbox after the build.
 _site_preview_build_fn = func(
     run_site_preview_build,
     name=SITE_PREVIEW_BUILD_FUNCTION_NAME,
-    timeout=site_build_job_timeout_seconds(),
-    max_tries=1,
+    timeout=site_preview_job_timeout_seconds(),
+    max_tries=CAPACITY_MAX_TRIES,
 )
+
+
+# The one function arq may retry: a chat run the worker cancelled while shutting down
+# requeues itself, and arq only re-runs a cancelled job while ``job_try <= max_tries``.
+# The name is pinned to what ``ArqExecutor`` enqueues and what the supervisor's
+# interactive-job exclusion matches.
+_execute_run_fn = func(execute_run_job, name="execute_run_job", max_tries=MAX_RUN_ATTEMPTS)
 
 
 class WorkerSettings:
     """arq worker configuration. Loaded by ``arq <dotted-path>``."""
 
-    functions = [execute_run_job, _workspace_job_fn, _ship_provision_fn, _ship_deploy_fn]
-    # All four lanes. Keeping both sides of this merge verbatim produced two
-    # consecutive `functions = [...]` assignments, where the second silently
-    # won and NEITHER ship job would have registered.
     functions = [
-        execute_run_job,
+        _execute_run_fn,
         _workspace_job_fn,
         _ship_provision_fn,
         _ship_deploy_fn,
@@ -493,7 +482,8 @@ class WorkerSettings:
     on_shutdown = _shutdown
     # Crash policy: no auto-retry. A failed run is left as ``failed``/``interrupted``
     # so the user can decide whether to resend — re-running could double-bill or
-    # surface a partial duplicate.
+    # surface a partial duplicate. ``_execute_run_fn`` overrides this for the one
+    # retry a worker shutdown earns (see the module docstring).
     max_tries = 1
     # Per-run timeout. arq's default (300s) cancels long agent runs mid-stream; lift
     # it and make it env-tunable (POCKETPAW_CLOUD_RUN_JOB_TIMEOUT, default 30 min).

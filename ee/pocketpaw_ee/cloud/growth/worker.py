@@ -63,6 +63,7 @@ from pocketpaw_ee.cloud.growth.discovery import discovery_sweep
 from pocketpaw_ee.cloud.growth.domain import (
     GROWTH_DISCOVERY_SWEEP_JOB_NAME,
     GROWTH_DISPATCH_JOB_NAME,
+    GROWTH_PULSE_SWEEP_JOB_NAME,
     GROWTH_QUEUE_NAME,
 )
 from pocketpaw_ee.cloud.growth.followups import (
@@ -70,6 +71,20 @@ from pocketpaw_ee.cloud.growth.followups import (
     followup_sweep,
 )
 from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
+
+
+async def pulse_sweep(ctx: dict[str, Any]) -> dict[str, int]:
+    """Refresh the Pulses people used this week (Growth › Social and hunt market pulses).
+
+    The worker process never runs ``cloud.__init__``'s wiring, so the production Pulse fn is
+    installed here when missing; otherwise the sweep would be a silent no-op."""
+    from pocketpaw_ee.cloud.growth.social import pulse
+    from pocketpaw_ee.cloud.growth.social.service import refresh_due_pulses
+
+    if pulse.resolve_pulse_fn() is None:
+        pulse.set_production_pulse_fn(pulse.agent_build_pulse)
+    return await refresh_due_pulses()
+
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +245,16 @@ class WorkerSettings:
             discovery_sweep,
             name=GROWTH_DISCOVERY_SWEEP_JOB_NAME,
             hour=6,
+            minute=0,
+            unique=True,
+            run_at_startup=False,
+        ),
+        # The daily Pulse refresh at 05:00 UTC, an hour ahead of discovery so a hunt's market
+        # pulse is fresh when its prospects land. Only Pulses a person refreshed this week.
+        cron(
+            pulse_sweep,
+            name=GROWTH_PULSE_SWEEP_JOB_NAME,
+            hour=5,
             minute=0,
             unique=True,
             run_at_startup=False,

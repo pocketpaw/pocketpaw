@@ -4,7 +4,8 @@
 # waived; the SERVICE is the seam (the router is a thin adapter). Asserts:
 #   * GET /studio/models         → StudioModelsResponse envelope.
 #   * GET /studio/styles         → StudioStylesResponse envelope.
-#   * GET /studio/generations    → GenerationsResponse, scoped to the workspace.
+#   * GET /studio/generations    → GenerationsResponse, scoped to the workspace;
+#                                  ?source= / ?pocket_id= reach the service.
 #   * POST /studio/generate      → a Generation; bad input → 400; video → 501;
 #                                  proxy failure → 502.
 #   * GET /studio/generations/{id} → one generation, 404 on a miss.
@@ -12,8 +13,6 @@
 #                                 400; fal upstream failure → 502.
 #   * POST /studio/suggest-prompt → PromptSuggestion from the {sentence} body.
 #   * license gate               → no override, require_license denies.
-#
-# Created 2026-08-17 (studio-real-backend): new router tests.
 
 from __future__ import annotations
 
@@ -107,16 +106,35 @@ def test_list_styles_returns_envelope(client):
 def test_list_generations_is_workspace_scoped(client, monkeypatch):
     seen: dict = {}
 
-    def _list(workspace_id):
-        seen["workspace"] = workspace_id
+    async def _list(workspace_id, *, source=None, pocket_id=None):
+        seen.update(workspace=workspace_id, source=source, pocket_id=pocket_id)
         return [_generation()]
 
     monkeypatch.setattr(studio_service, "list_generations", _list)
     resp = client.get("/api/v1/studio/generations")
     assert resp.status_code == 200
     assert resp.json()["generations"][0]["id"] == "gen_abc"
-    # The service got the caller's active workspace, not a global list.
-    assert seen["workspace"] == "ws-1"
+    # The service got the caller's active workspace, not a global list, and no
+    # filter the caller did not ask for.
+    assert seen == {"workspace": "ws-1", "source": None, "pocket_id": None}
+
+
+def test_list_generations_passes_source_and_pocket_filters(client, monkeypatch):
+    """The Sites builder asks for what a site agent made for one site; the filter
+    has to reach the service, or it gets the whole workspace's history.
+
+    MUTATION: call ``service.list_generations(workspace_id)`` without the filters.
+    """
+    seen: dict = {}
+
+    async def _list(workspace_id, *, source=None, pocket_id=None):
+        seen.update(workspace=workspace_id, source=source, pocket_id=pocket_id)
+        return []
+
+    monkeypatch.setattr(studio_service, "list_generations", _list)
+    resp = client.get("/api/v1/studio/generations?source=sites&pocket_id=pk-1")
+    assert resp.status_code == 200
+    assert seen == {"workspace": "ws-1", "source": "sites", "pocket_id": "pk-1"}
 
 
 def test_post_generate_returns_generation(client, monkeypatch):
@@ -181,7 +199,7 @@ def test_post_generate_proxy_failure_is_502(client, monkeypatch):
 
 
 def test_get_generation_found(client, monkeypatch):
-    def _get(gen_id, workspace_id):
+    async def _get(workspace_id, gen_id):
         assert gen_id == "gen_abc"
         assert workspace_id == "ws-1"
         return _generation()
@@ -193,7 +211,10 @@ def test_get_generation_found(client, monkeypatch):
 
 
 def test_get_generation_not_found_is_404(client, monkeypatch):
-    monkeypatch.setattr(studio_service, "get_generation", lambda gen_id, workspace_id: None)
+    async def _missing(workspace_id, gen_id):
+        return None
+
+    monkeypatch.setattr(studio_service, "get_generation", _missing)
     resp = client.get("/api/v1/studio/generations/nope")
     assert resp.status_code == 404
 
@@ -494,3 +515,50 @@ def test_flow_projects_crud_roundtrip(client, flow_env):
     assert client.delete("/api/v1/studio/flow-projects/proj_1").status_code == 204
     assert client.get("/api/v1/studio/flow-projects").json()["projects"] == []
     assert client.delete("/api/v1/studio/flow-projects/proj_1").status_code == 404
+
+
+# ── Editor timelines ─────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def timeline_env(tmp_path, monkeypatch):
+    path = tmp_path / "studio" / "timelines.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(studio_service, "_timelines_path", lambda: path)
+    return path
+
+
+def test_timelines_crud_roundtrip(client, timeline_env):
+    """GET list → PUT (upsert) → GET → DELETE, through the real service. The doc
+    is opaque: whatever the client sent comes back byte-for-byte."""
+    assert client.get("/api/v1/studio/timelines").json() == {"projects": []}
+
+    doc = {"version": 1, "id": "tl_1", "name": "Reel", "tracks": [], "updatedAt": 100}
+    resp = client.put(
+        "/api/v1/studio/timelines/tl_1",
+        json={"name": "Reel", "updatedAt": 100, "doc": doc},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["doc"] == doc
+    assert resp.json()["updatedAt"] == 100
+
+    listed = client.get("/api/v1/studio/timelines").json()["projects"]
+    assert [p["id"] for p in listed] == ["tl_1"]
+
+    assert client.delete("/api/v1/studio/timelines/tl_1").status_code == 204
+    assert client.delete("/api/v1/studio/timelines/tl_1").status_code == 404
+
+
+def test_timeline_stale_write_is_409(client, timeline_env):
+    """The staleness guard reaches the wire: an older edit clock is refused, and
+    the stored doc is the newer one."""
+    client.put(
+        "/api/v1/studio/timelines/tl_1",
+        json={"name": "Reel", "updatedAt": 500, "doc": {"name": "new"}},
+    )
+    resp = client.put(
+        "/api/v1/studio/timelines/tl_1",
+        json={"name": "Reel", "updatedAt": 400, "doc": {"name": "stale"}},
+    )
+    assert resp.status_code == 409
+    assert client.get("/api/v1/studio/timelines").json()["projects"][0]["doc"]["name"] == "new"

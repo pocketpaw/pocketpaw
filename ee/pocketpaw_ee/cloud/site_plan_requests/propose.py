@@ -2,6 +2,11 @@
 # site on a paid plan.
 #
 # Created: 2026-09-01 (feat/sites-plan-purchase-request).
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
+# Updated: 2026-10-02 (feat/partners-sell, PH-2): partner-only rungs are refused
+# here like an unknown key — they are sold only through /partners/sell, and the
+# request card would quote their display-only monthly price.
 #
 # The propose half of the site-plan request gate. A member publishes and asks for
 # a paid tier; ``sites.buy_plan`` (ADMIN) refuses them; instead of ending there,
@@ -56,6 +61,8 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
 logger = logging.getLogger(__name__)
 
 # The Instinct Action kind discriminator. The blob also carries this as ``kind``
@@ -95,109 +102,6 @@ def compute_request_hash(workspace_id: str, pocket_id: str, site_plan_key: str) 
         default=str,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _emit_agent_proposed(
-    *,
-    correlation_id: UUID,
-    action_id: str,
-    workspace_id: str,
-    pocket_id: str,
-    site_plan_key: str,
-    user_id: str,
-) -> UUID | None:
-    """Emit the chain-opening ``agent.proposed`` event for a plan request.
-
-    Mirrors ``admin_proposals.propose._emit_agent_proposed``: the requesting
-    member is the actor. Unlike an admin action, this proposal IS bound to a
-    pocket, so the chain's ``pocket_id`` carries the real pocket rather than
-    standing in with the workspace.
-
-    Returns the emitted event id for the blob's ``proposed_event_id`` (the
-    ``human.corrected`` causation handle), or ``None`` when the emit raised —
-    best-effort; the reconciler picks up orphans.
-    """
-    from soul_protocol.spec.journal import Actor
-
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
-
-    actor = Actor(
-        kind="agent",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}"],
-    )
-    payload: dict[str, Any] = {
-        "intent": f"put this site on the '{site_plan_key}' plan",
-        "action": "site_plan_request",
-        "pocket_id": pocket_id,
-        "inputs": [],
-        "proposal_kind": "site_plan_request",
-        "proposal": {"site_plan_key": site_plan_key, "pocket_id": pocket_id},
-        "action_id": action_id,
-    }
-    try:
-        entry = record_agent_proposed(
-            correlation_id=correlation_id,
-            actor=actor,
-            scope=[f"workspace:{workspace_id}"],
-            payload=payload,
-        )
-        return entry.id
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "site_plan_request agent.proposed emit failed for correlation_id=%s "
-            "(action_id=%s) — reconciler will catch up",
-            correlation_id,
-            action_id,
-            exc_info=True,
-        )
-        return None
-
-
-async def _persist_chain_ids(
-    *,
-    store: Any,
-    action_id: str,
-    correlation_id: str,
-    proposed_event_id: str | None,
-) -> None:
-    """Write the chain ids onto the persisted blob after ``agent.proposed`` fired.
-
-    Direct SQL update, the same pattern ``admin_proposals.propose`` uses.
-    Best-effort: a failure leaves ``proposed_event_id`` None and the eventual
-    ``human.corrected`` emits without a causation_id (the chain still folds).
-    """
-    import json as _json
-
-    import aiosqlite
-
-    try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(SITE_PLAN_REQUEST_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["correlation_id"] = correlation_id
-        blob["proposed_event_id"] = proposed_event_id
-        params[SITE_PLAN_REQUEST_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
-    except Exception:  # noqa: BLE001 — write-back is best-effort
-        logger.warning(
-            "site_plan_request: failed to persist chain ids onto action %s — the "
-            "chain's human.corrected will emit without causation_id",
-            action_id,
-            exc_info=True,
-        )
 
 
 async def propose_site_plan_request(
@@ -242,16 +146,24 @@ async def propose_site_plan_request(
     if not requested_by:
         raise ValueError("propose_site_plan_request requires a non-empty requested_by")
 
-    # ``site_scoped_tier`` rather than ``get_site_plan``: it resolves a legacy
-    # alias AND returns None for an ORG-scoped flat (studio / agency), which is
-    # exactly the refusal wanted here. An org key is not a legal ``site_plan_key``
-    # on a publish, so a request for one could only ever become a Tray card that
-    # fails on approval — refuse it at the door, where the requester is present to
-    # be told why. Using the same helper the entitlement seams use also means this
-    # cannot drift from their idea of what a per-site rung is.
+    # THE REFUSAL BELOW IS THE GATE; the choice of lookup is not.
+    #
+    # ``site_scoped_tier`` was picked here because it resolved a legacy alias AND
+    # returned None for an ORG-scoped flat (studio / agency). Those flats were
+    # retired on 2026-09-06, so it now returns exactly what ``get_site_plan``
+    # returns — the mutation swapping the two escaped, which is how this comment
+    # came to be rewritten. It stays because it is the helper every entitlement
+    # seam uses, so this cannot drift from their idea of what a per-site rung is.
+    #
+    # What still refuses anything is the ``tier is None`` raise: a key the ladder
+    # cannot sell — retired, mistyped, invented — is not a legal ``site_plan_key``
+    # on a publish, so a request carrying one could only ever become a Tray card
+    # that fails on approval. Refuse it at the door, where the requester is present
+    # to be told why.
     canonical_key = site_plans.canonical_site_tier_key(str(site_plan_key or ""))
     tier = site_plans.site_scoped_tier(canonical_key)
-    if tier is None:
+    # Partner-only rungs are sold through /partners/sell, never requested (PH-2).
+    if tier is None or tier.partner_only:
         raise ValueError(f"'{site_plan_key}' is not a plan a single site can be put on")
     monthly_price_usd = int(tier.monthly_price_usd or 0)
 
@@ -261,10 +173,33 @@ async def propose_site_plan_request(
 
     tier_label = getattr(tier, "display_name", "") or canonical_key
     subject = site_name or "this site"
-    human_summary = (
-        f"Put {subject} on the {tier_label} plan "
-        f"(${monthly_price_usd}/month, added to this workspace's subscription)."
-    )
+
+    # A REQUEST FOR THE $0 FLOOR IS A CANCELLATION, and it has to read like one.
+    #
+    # It only started arriving here on 2026-09-05. Dropping a paying site to the
+    # free floor used to change nothing anyone was billed for, so the purchase
+    # gate let it through and no card was ever filed; it CLOSES the plan now, so a
+    # member asking for it is refused and lands in this queue like any other plan
+    # change. Left on the paid wording, the card an admin approves would have read
+    # "Put Acme Dental on the Free plan ($0/month, added to this workspace's
+    # subscription)" — which names no cost, mentions adding a line for a request
+    # that removes one, and gives no hint that a $19 plan is about to end. That is
+    # a money decision described as a formality.
+    is_cancellation = monthly_price_usd <= 0
+    if is_cancellation:
+        human_summary = (
+            f"End {subject}'s paid plan. It keeps what it has until the period it "
+            f"has already paid for runs out, then drops to {tier_label}."
+        )
+    else:
+        # "workspace credits", not "this workspace's subscription": a paid site is
+        # bought from the credit wallet since the same cutover, and an admin told
+        # it lands on a subscription will go looking for an invoice line that does
+        # not exist.
+        human_summary = (
+            f"Put {subject} on the {tier_label} plan "
+            f"(${monthly_price_usd}/month, charged to this workspace's credits)."
+        )
 
     blob: dict[str, Any] = {
         "kind": SITE_PLAN_REQUEST_KIND,
@@ -281,11 +216,20 @@ async def propose_site_plan_request(
         "proposed_event_id": None,
     }
 
-    recommendation = (
-        f"Approving adds ${monthly_price_usd}/month to this workspace's "
-        f"subscription and publishes {subject} on the {tier_label} plan. "
-        "Rejecting leaves the site on its current plan."
-    )
+    if is_cancellation:
+        recommendation = (
+            f"Approving ends the paid plan on {subject} — nothing is charged or "
+            "refunded, the site stays online, and it loses its paid features when "
+            "the current period runs out. Rejecting leaves the plan running."
+        )
+    else:
+        recommendation = (
+            f"Approving charges this workspace's credits for {tier_label} and "
+            f"publishes {subject} on it — the difference only if the site is "
+            "already inside a paid period, otherwise "
+            f"${monthly_price_usd} for the month. "
+            "Rejecting leaves the site on its current plan."
+        )
     trigger = ActionTrigger(
         type="user",
         source=requested_by,
@@ -324,20 +268,24 @@ async def propose_site_plan_request(
         corr,
     )
 
-    proposed_event_id = _emit_agent_proposed(
+    proposed_event_id = emit_agent_proposed(
         correlation_id=UUID(corr),
         action_id=action_obj.id,
+        kind="site_plan_request",
+        intent=f"put this site on the '{canonical_key}' plan",
+        proposal={"site_plan_key": canonical_key, "pocket_id": pocket_id},
         workspace_id=workspace_id,
         pocket_id=pocket_id,
-        site_plan_key=canonical_key,
         user_id=requested_by,
     )
     if proposed_event_id is not None:
-        await _persist_chain_ids(
+        await persist_chain_ids(
             store=store,
             action_id=action_obj.id,
+            param_key=SITE_PLAN_REQUEST_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="site_plan_request",
         )
 
     return action_obj.id

@@ -1,0 +1,86 @@
+[
+  {
+    "label": "the spec threshold never escalates",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "unclear = tuple(i for i, p in enumerate(spec) if 0 <= p < t.min_spec_clear)",
+    "replace": "unclear = ()",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_spec_clarity",
+      "tests/cloud/test_belt_plan_policy.py::test_spec_threshold_from_env"
+    ]
+  },
+  {
+    "label": "an unanswered spec score escalates the plan",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "unclear = tuple(i for i, p in enumerate(spec) if 0 <= p < t.min_spec_clear)",
+    "replace": "unclear = tuple(i for i, p in enumerate(spec) if p < t.min_spec_clear)",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_spec_clarity"
+    ]
+  },
+  {
+    "label": "a spec score on the threshold escalates",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "unclear = tuple(i for i, p in enumerate(spec) if 0 <= p < t.min_spec_clear)",
+    "replace": "unclear = tuple(i for i, p in enumerate(spec) if 0 <= p <= t.min_spec_clear)",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_spec_clarity"
+    ]
+  },
+  {
+    "label": "an issue already labelled needs-spec is commented on again",
+    "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
+    "find": "        if label in {lb.get(\"name\") for lb in labels}:\n            return \"already\"",
+    "replace": "        if False:\n            return \"already\"",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_flag_needs_spec_skips_labelled_and_foreign_sources"
+    ]
+  },
+  {
+    "label": "the auto gate flags no unclear issue",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "if decision.rule == \"spec_unclear\":",
+    "replace": "if False:",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_auto_gate_flags_the_unclear_issue_needs_spec"
+    ]
+  },
+  {
+    "label": "too_big still escalates a plan whose every task is testable",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "if len(spec) < len(tasks) or any(p < t.min_spec_clear for p in spec):",
+    "replace": "if True:",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_too_big_alone_no_longer_escalates_a_testable_plan",
+      "tests/cloud/test_belt_plan_policy.py::test_the_overnight_plan_now_escalates_on_its_risk_with_too_big_noted"
+    ]
+  },
+  {
+    "label": "too_big is waived for a task with no spec score",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "if len(spec) < len(tasks) or any(p < t.min_spec_clear for p in spec):",
+    "replace": "if any(p < t.min_spec_clear for p in spec):",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_too_big_still_escalates_without_cited_testable_tasks"
+    ]
+  },
+  {
+    "label": "an unanswered spec score waives too_big",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "if len(spec) < len(tasks) or any(p < t.min_spec_clear for p in spec):",
+    "replace": "if len(spec) < len(tasks) or any(0 <= p < t.min_spec_clear for p in spec):",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_too_big_still_escalates_without_cited_testable_tasks"
+    ]
+  },
+  {
+    "label": "the waived too_big is not noted in the reason",
+    "file": "ee/pocketpaw_ee/cloud/mandates/plan_policy.py",
+    "find": "noted = f\"; too_big {verdict.too_big:.2f} > {t.max_too_big:.2f} noted, lane size cap guards\"",
+    "replace": "noted = \"\"",
+    "tests": [
+      "tests/cloud/test_belt_plan_policy.py::test_too_big_alone_no_longer_escalates_a_testable_plan",
+      "tests/cloud/test_belt_plan_policy.py::test_the_overnight_plan_now_escalates_on_its_risk_with_too_big_noted"
+    ]
+  }
+]

@@ -63,6 +63,17 @@
 #   uploads pipeline (``storage.service.storage_cap_exceeded``) against the sum of
 #   the workspace's live ``FileUpload`` blob sizes (the Files → Knowledge Base
 #   store). ``GET /storage/usage`` surfaces used vs cap for the Settings page.
+# Updated 2026-09-06 (feat/plan-included-sites) — ADDED ``included_sites``: how many
+#   published Paw Sites the workspace plan CARRIES at ``staff`` quality (custom
+#   domain, no badge, concierge) for no extra money — Free 0, Go 1, Pro 3, Pro Max
+#   10, Enterprise uncapped. The concierge block that comes with them is NOT here:
+#   a carried site is a ``staff`` site and ``staff`` already sells 200 a month per
+#   site, enforced per widget — see the note where the constant would have gone.
+#   This is the first field here that makes the workspace plan decide
+#   what a DIFFERENT primitive costs, and it demotes the per-site ladder
+#   (``billing.site_plans``) to an overflow price. See the constants for the
+#   arithmetic; the short version is that Paw Pro is the same $19 as one ``staff``
+#   site and carries three, so the rungs now price overflow and free workspaces.
 
 from __future__ import annotations
 
@@ -197,7 +208,13 @@ _MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
 # The workspace S3 STORAGE cap, in BYTES (feat/billing-storage-caps, 2026-08-08).
 # The approved consumer numbers — the Files → Knowledge Base / memory store a
 # workspace may hold (decimal GB, the SI convention Google/consumer storage uses):
-#   * free      =          5 GB — 5_000_000_000 bytes — a generous starter stash
+#   * free      =          1 GB — 1_000_000_000 bytes — a trial, not a stash
+#
+# Free was 5 GB until 2026-09-12 and was never enforced, because the gate in
+# ``storage.service`` was behind ``billing_enforced`` and nothing sets that.
+# 5 GB of unbilled object storage per signup is a real bill the moment the
+# product is public, so the number came down to 1 GB and the gate came off the
+# flag in the same change. Every paid rung is unchanged.
 #   * go        =         15 GB — everyday file + KB usage
 #   * pro       =         50 GB — ~3.3× Go, for daily drivers
 #   * pro_max   =        100 GB — ~2× Pro, for power users
@@ -206,14 +223,60 @@ _MAX_CALL_SECONDS_PER_DAY: dict[str, int | None] = {
 # workspace's live ``FileUpload`` blob sizes are summed and a new upload is
 # blocked with ``StorageLimitError`` when it would push the total over the cap.
 # The ``_build`` default for an unknown key FAILS CLOSED to the Free value
-# (5 GB), never None/uncapped.
+# (1 GB), never None/uncapped.
 _MAX_STORAGE_BYTES: dict[str, int | None] = {
-    "free": 5_000_000_000,
+    "free": 1_000_000_000,
     "go": 15_000_000_000,
     "pro": 50_000_000_000,
     "pro_max": 100_000_000_000,
     "enterprise": None,
 }
+
+# ---------------------------------------------------------------------------
+# Tunable constants — INCLUDED PAW SITES per tier, and the pooled concierge block
+# that comes with them.
+# ---------------------------------------------------------------------------
+#
+# How many published sites the workspace plan CARRIES, at ``staff`` quality — the
+# custom domain, no attribution badge, and the visitor concierge — for no extra
+# money and no credit debit.
+#
+#   free        =  0 sites — the per-site ladder is the only way to buy one
+#   go          =  1 site
+#   pro         =  3 sites
+#   pro_max     = 10 sites
+#   enterprise  = None     — uncapped, like every other ceiling here
+#
+# THIS DEMOTES THE PER-SITE LADDER TO AN OVERFLOW PRICE, on purpose, and the
+# arithmetic is worth stating where someone will read it before changing a
+# number. ``staff`` is $19 a SITE; Paw Pro is $19 a MONTH and carries three of
+# them plus the agent. So nobody holding a workspace plan buys ``staff`` again:
+# the $7/$19 rungs now price site 2 on Go, site 4 on Pro, site 11 on Pro Max, and
+# every site a FREE workspace publishes. That is the deal — bundle sites to sell
+# subscriptions — but it means a change to these counts moves real revenue, and a
+# change to the workspace prices has to be checked against the site ladder rather
+# than against the credit allotment alone.
+_INCLUDED_SITES: dict[str, int | None] = {
+    "free": 0,
+    "go": 1,
+    "pro": 3,
+    "pro_max": 10,
+    "enterprise": None,
+}
+
+# THE CONCIERGE BLOCK IS PER SITE, and deliberately does NOT live here.
+#
+# A carried site is a ``staff`` site, and ``staff`` already sells 200 conversations
+# a month to the site it covers — the number is on the site-plan catalog row
+# (``site_plans.SitePlanTier.conversation_allowance``) and
+# ``billing.enforcement.concierge_conversation_quota_exceeded`` already counts
+# against it, per widget, from the start of the month.
+#
+# So a workspace plan carrying three sites carries three private blocks of 200,
+# and there is nothing to add here. A ``pooled_conversations`` field on this
+# catalog was written and then removed for exactly that reason: it would have been
+# a second number describing the same allowance, read by nothing, and the first
+# person to wire it up would have had two answers to choose between.
 
 # Order the catalog is listed in — the price ladder, cheapest first. Any tier in
 # PLAN_FEATURES not named here is appended afterwards (so a new tier never
@@ -337,6 +400,7 @@ class PlanTier:
     max_connectors: int | None
     max_call_seconds_per_day: int | None
     max_storage_bytes: int | None
+    included_sites: int | None
     dodo_product_id: str | None
     features: frozenset[str]
     display_name: str
@@ -400,6 +464,12 @@ def _build(key: str) -> PlanTier:
         ),
         # S3 storage cap — fail closed to Free (5 GB), never None/uncapped.
         max_storage_bytes=_MAX_STORAGE_BYTES.get(key, _MAX_STORAGE_BYTES["free"]),
+        # Included Paw Sites and their pooled concierge block — fail closed to
+        # Free (0 of each), never None/uncapped. An unknown plan key must not hand
+        # a workspace free hosting: this is the one ceiling here whose generous
+        # default would be given away permanently rather than merely overspent,
+        # because a site covered by the plan stops being billed at all.
+        included_sites=_INCLUDED_SITES.get(key, _INCLUDED_SITES["free"]),
         dodo_product_id=_dodo_product_for(key),
         features=frozenset(PLAN_FEATURES.get(key, set())),
         display_name=str(display["display_name"]),

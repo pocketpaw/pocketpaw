@@ -1,0 +1,6 @@
+{
+  "source_repo": "qbtrix/paw-sites",
+  "source_path": "paw-sites-gen allowlist (src/cli.ts runAllowlist over src/allowlist.ts)",
+  "source_commit": "170a273e9de7aedec74ecf069a400949557b2dfd",
+  "sha256": "2669ed44a8663784312ba9104b6465fa6018c92cb064c73a52eed5fadd4e5ead"
+}

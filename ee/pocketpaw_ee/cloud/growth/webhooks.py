@@ -12,30 +12,28 @@
 #
 # Signature scheme: HMAC-SHA256 over the RAW request body, keyed by
 # ``GROWTH_MSG91_WEBHOOK_SECRET``, hex-encoded, in ``X-Msg91-Signature``. An
-# optional ``sha256=`` prefix is tolerated because several providers emit it.
-# MSG91 does not publish a fixed signing scheme for WhatsApp inbound events
-# (you configure the callback URL and any custom headers on the account), so
-# this is the repo-standard shared-secret HMAC — the same primitive the Svix
-# verification in ``meetings/providers/recall/webhooks.py`` uses, minus the
-# Svix-specific id/timestamp envelope.
+# optional ``sha256=`` or ``v1=`` prefix is tolerated because several providers
+# emit one. MSG91 does not publish a fixed signing scheme for WhatsApp inbound
+# events (you configure the callback URL and any custom headers on the account),
+# so this uses the same HMAC check as Meta's X-Hub-Signature-256: the digest
+# comparison is core's ``whatsapp_adapter.verify_signature``, and this module
+# only resolves the secret and the header and maps failures to ``Forbidden``.
 #
-# WHAT AN INBOUND REPLY MEANS: under Meta's rules a user-initiated message both
-# opens a 24-hour service window and is the opt-in signal for that number. So
-# the handler sets ``prospect.opted_in = True``, moves the prospect to
-# ``replied``, and walks any ``sent`` WhatsApp draft for that prospect to
-# ``replied`` through the service's gate seam.
+# WHAT AN INBOUND REPLY MEANS: a user-initiated message opens a 24-hour service
+# window and, unless it is an opt-out, is read as the opt-in signal for that
+# number. A whole-message STOP word (``growth.domain.whatsapp_reply_intent``)
+# clears ``prospect.opted_in`` and stamps ``whatsapp_opt_out_at``; START undoes
+# that; any other reply sets ``opted_in`` unless the prospect opted out. Every
+# reply moves the prospect to ``replied`` and walks any ``sent`` WhatsApp draft
+# for that prospect to ``replied`` through the service's gate seam.
 #
 # The response body is a CONSTANT ``{"ok": true}`` for every accepted request —
 # processed, ignored, or unknown number. A caller with a valid signature still
 # must not be able to use this endpoint as a membership oracle over phone
 # numbers.
-#
-# Created 2026-07-27 (feat/growth-g6): new module.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
 import os
@@ -44,6 +42,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from starlette.datastructures import Headers
 
+from pocketpaw.bus.adapters.whatsapp_adapter import verify_signature
 from pocketpaw_ee.cloud._core.errors import Forbidden
 
 logger = logging.getLogger(__name__)
@@ -74,8 +73,9 @@ _NUMBER_KEYS = (
 async def msg91_webhook(request: Request) -> dict:
     """Ingest an MSG91 WhatsApp inbound event.
 
-    A verified inbound reply opts the prospect in, marks them ``replied``, and
-    walks their sent WhatsApp drafts to ``replied``. Delivery-status callbacks
+    A verified inbound reply marks the prospect ``replied`` and walks their sent
+    WhatsApp drafts to ``replied``. A STOP reply opts them out; START or any
+    other reply opts them in, unless they opted out. Delivery-status callbacks
     and numbers we don't hold are accepted and ignored. A bad or missing
     signature is a 403 — nothing is read from an unverified body.
     """
@@ -100,7 +100,7 @@ async def msg91_webhook(request: Request) -> dict:
 
     from pocketpaw_ee.cloud.growth import service as growth_service
 
-    matched = await growth_service.record_whatsapp_inbound_reply(number)
+    matched = await growth_service.record_whatsapp_inbound_reply(number, _extract_text(event))
     # Logged (operators need it), never returned — the response shape is
     # identical for a known and an unknown number.
     logger.info("growth/msg91 webhook: inbound reply applied to %d prospect row(s)", matched)
@@ -142,14 +142,13 @@ def _verify_signature(headers: Headers, body: bytes) -> None:
         raise Forbidden(
             "growth.webhook_unsigned", "The MSG91 webhook is missing its signature header."
         )
-    # Tolerate the common ``sha256=<hex>`` prefix form.
+    # Strip a ``sha256=`` or ``v1=`` prefix (the core check only knows ``sha256=``).
     if "=" in provided:
         prefix, _, rest = provided.partition("=")
         if prefix.strip().lower() in ("sha256", "v1"):
             provided = rest.strip()
 
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(provided.lower(), expected):
+    if not verify_signature(secret, body, provided):
         raise Forbidden(
             "growth.webhook_signature_invalid", "The MSG91 webhook signature did not verify."
         )
@@ -208,6 +207,35 @@ def _extract_number(event: dict[str, Any]) -> str:
                 sender = first.get("from") or first.get("customer_number")
                 if isinstance(sender, str) and sender.strip():
                     return sender.strip()
+    return ""
+
+
+def _text_of(value: Any) -> str:
+    """A text field that is either a string or nested as ``{"text"|"body": ...}``."""
+    if isinstance(value, dict):
+        return _text_of(value.get("text") or value.get("body"))
+    return value if isinstance(value, str) else ""
+
+
+def _extract_text(event: dict[str, Any]) -> str:
+    """The message text of an inbound payload, or "" (media, unknown shapes).
+
+    Covers the same envelopes as ``_extract_number``: flat (``content.text``,
+    ``text``), ``data``/``payload``-wrapped, and Meta's ``messages[0].text.body``.
+    """
+    candidates: list[dict[str, Any]] = []
+    for container in (event, event.get("data"), event.get("payload")):
+        if not isinstance(container, dict):
+            continue
+        candidates.append(container)
+        messages = container.get("messages")
+        if isinstance(messages, list) and messages and isinstance(messages[0], dict):
+            candidates.append(messages[0])
+    for candidate in candidates:
+        for key in ("text", "content", "body", "message"):
+            text = _text_of(candidate.get(key))
+            if text.strip():
+                return text
     return ""
 
 

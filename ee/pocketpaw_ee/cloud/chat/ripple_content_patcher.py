@@ -1,28 +1,34 @@
-"""Splice Ripple inline-state patches into a message's ``content``.
+"""Persist Ripple inline-state patches onto the message that holds the spec.
 
-When a user drags a kanban card (or toggles a checkbox, etc.) inside an inline
-``ui-spec`` block in a chat message, the frontend PATCHes the new state to the
-backend. Rather than carrying that state in a separate ``Message.ui_state``
-field — which would leave the agent's chat-history context stuck on the
-agent's original cards — we splice the new values directly into the
-fenced ``ui-spec`` JSON inside ``message.content``.
+When a user drags a kanban card, toggles a checkbox, or finishes a flow inside
+a Ripple widget in a chat message, the frontend PATCHes the new state to the
+backend. A spec lives in one of two places, and ``spec_id`` says which:
 
-This makes ``message.content`` the single source of truth for both the
-renderer and the agent's memory.
+* ``spec_<n>`` - the n-th fenced ``ui-spec`` block inside ``message.content``.
+  ``patch_content_with_state`` splices the new values into that JSON, so
+  ``message.content`` stays the single source of truth for both the renderer
+  and the agent's memory.
+* ``att_<n>`` - the n-th attachment of ``type == "ripple"`` (other attachment
+  types are not counted). Agent replies land here because the run pipeline
+  strips the fence out of the content and stores the spec as the attachment's
+  ``meta``. ``patch_attachments_with_state`` shallow-merges the patch into
+  ``meta["state"]`` and leaves the rest of ``meta`` alone.
 
-The state's keys (``_auto_kanban_0``, ``_auto_checkbox_1``, ...) are
-synthesized client-side by ``autoBindStatefulWidgets`` in
+For content fences, the state keys (``_auto_kanban_0``, ``_auto_checkbox_1``,
+...) are synthesized client-side by ``autoBindStatefulWidgets`` in
 ``paw-enterprise/.../ripple-spec-fix.ts``. To map a key back to the correct
 node, we mirror that traversal here: depth-first, pre-order, counting
 per-type indices for stateful widgets that don't already declare ``bind``.
 
-Created: 2026-05-02 — replaces ``Message.ui_state`` field-based storage.
+Both functions are pure and return ``None`` when the target can't be found;
+the caller turns that into a 404.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from typing import Any
 
 # Must mirror the set in
@@ -157,4 +163,54 @@ def patch_content_with_state(content: str, spec_id: str, patch_state: dict[str, 
     return content[: match.start()] + new_block + content[match.end() :]
 
 
-__all__ = ["patch_content_with_state", "STATEFUL_WIDGETS"]
+def patch_attachments_with_state(
+    attachments: Sequence[Any], spec_id: str, patch_state: dict[str, Any]
+) -> list[dict[str, Any]] | None:
+    """Return a new attachments list with the ``spec_id`` ripple spec's state merged.
+
+    ``spec_id`` is ``att_<n>``: the n-th (0-based) attachment whose ``type`` is
+    ``"ripple"``. The target's ``meta["state"]`` becomes
+    ``{**existing_state, **patch_state}``; every other key is kept as-is.
+
+    Accepts plain dicts or pydantic models (anything with ``model_dump``) and
+    always returns plain dicts, deep enough copies that the input is never
+    mutated. Returns ``None`` for a malformed id, an out-of-range index, or a
+    target whose ``meta`` isn't a dict.
+    """
+    if not spec_id.startswith("att_"):
+        return None
+    try:
+        target_index = int(spec_id[len("att_") :])
+    except ValueError:
+        return None
+    if target_index < 0:
+        return None
+
+    out: list[dict[str, Any]] = [
+        a.model_dump() if hasattr(a, "model_dump") else dict(a) for a in attachments
+    ]
+    ripple_seen = 0
+    for i, att in enumerate(out):
+        if att.get("type") != "ripple":
+            continue
+        if ripple_seen == target_index:
+            meta = att.get("meta")
+            if not isinstance(meta, dict):
+                return None
+            existing_state = meta.get("state")
+            out[i] = {
+                **att,
+                "meta": {
+                    **meta,
+                    "state": {
+                        **(existing_state if isinstance(existing_state, dict) else {}),
+                        **patch_state,
+                    },
+                },
+            }
+            return out
+        ripple_seen += 1
+    return None
+
+
+__all__ = ["patch_attachments_with_state", "patch_content_with_state", "STATEFUL_WIDGETS"]

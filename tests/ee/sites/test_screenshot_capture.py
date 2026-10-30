@@ -363,3 +363,57 @@ async def test_a_site_with_no_screenshot_reports_none_not_an_empty_string(
     rows = await sites_service.list_for_workspace("ws1")
     assert len(rows) == 1
     assert rows[0].preview_image_url is None
+
+
+# --------------------------------------------------------------------------- #
+# The settle delay — intro animations finish before the shutter
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_capture_screenshot_sends_the_settle_delay_and_omits_a_zero_one():
+    """``waitForTimeout`` is Browser Rendering's pause after the page loads. Sent when
+    asked for, left off entirely at 0 so Cloudflare's own default applies."""
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, content=_PNG, headers={"content-type": "image/png"})
+
+    await _cf(handler).capture_screenshot(url="https://example.test/", wait_for_timeout=2500)
+    await _cf(handler).capture_screenshot(url="https://example.test/", wait_for_timeout=0)
+
+    assert bodies[0]["waitForTimeout"] == 2500
+    assert "waitForTimeout" not in bodies[1]
+
+
+class _KwCF(_FakeCFScreenshot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.kwargs: list[dict] = []
+
+    async def capture_screenshot(self, *, url="", **kw):
+        self.kwargs.append(kw)
+        return await super().capture_screenshot(url=url or "about:blank")
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [(None, 2500), ("4000", 4000), ("0", 0), ("99999", 8000), ("-5", 0), ("soon", 2500)],
+)
+@pytest.mark.asyncio
+async def test_a_live_capture_waits_for_the_page_to_settle(monkeypatch, tmp_path, env, expected):
+    """A landing page that fades its hero in is photographed blank at network idle,
+    so the shutter waits ``PAW_SITES_SCREENSHOT_DELAY_MS`` (default 2.5s). Capped at
+    8s so goto (20s) plus the pause stays inside the client's 30s HTTP timeout; a
+    junk value falls back to the default rather than disabling the pause."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    if env is None:
+        monkeypatch.delenv("PAW_SITES_SCREENSHOT_DELAY_MS", raising=False)
+    else:
+        monkeypatch.setenv("PAW_SITES_SCREENSHOT_DELAY_MS", env)
+    cf = _KwCF()
+
+    await screenshot_mod.take_site_screenshot(_site(), cloudflare=cf)
+
+    assert cf.kwargs[0]["wait_for_timeout"] == expected

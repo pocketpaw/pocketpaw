@@ -115,5 +115,5 @@ async def test_get_storage_usage_empty_workspace_is_zero(mongo_db) -> None:
     assert resp.status_code == 200
     body = resp.json()
     assert body["used_bytes"] == 0
-    assert body["max_bytes"] == 5_000_000_000
+    assert body["max_bytes"] == 1_000_000_000
     assert body["percent_used"] == 0.0

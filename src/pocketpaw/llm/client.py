@@ -153,6 +153,7 @@ def resolve_llm_client(
     settings: Settings,
     *,
     force_provider: str | None = None,
+    backend: str = "",
 ) -> LLMClient:
     """Resolve settings into an ``LLMClient``.
 
@@ -164,6 +165,11 @@ def resolve_llm_client(
         Override the configured ``llm_provider``.  Useful for security
         modules that must always use a cloud API (``"anthropic"``), or
         for the ``--check-ollama`` CLI that forces ``"ollama"``.
+    backend:
+        The agent backend asking (e.g. ``"claude_agent_sdk"``). When given, the
+        model resolves backend field first (``resolve_model``'s order), so a
+        per-agent model routed onto that field wins over the provider default.
+        Empty keeps the provider-level model.
 
     Auto-resolution order (when ``llm_provider == "auto"``):
         anthropic (if key set) -> openai (if key set) -> ollama (fallback).
@@ -202,7 +208,7 @@ def resolve_llm_client(
     # compat, but uses the OpenRouter adapter for config resolution.
     if provider == "openrouter":
         adapter = get_adapter("openrouter")
-        config = adapter.resolve_config(settings, backend="")
+        config = adapter.resolve_config(settings, backend=backend)
         return LLMClient(
             provider="openai_compatible",
             model=config.model,
@@ -219,7 +225,7 @@ def resolve_llm_client(
     except KeyError:
         logger.warning("Unknown provider %r, falling back to anthropic", provider)
         adapter = get_adapter("anthropic")
-    config = adapter.resolve_config(settings, backend="")
+    config = adapter.resolve_config(settings, backend=backend)
     return LLMClient(
         provider=config.provider,
         model=config.model,

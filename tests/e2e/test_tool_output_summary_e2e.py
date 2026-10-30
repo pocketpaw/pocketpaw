@@ -166,7 +166,13 @@ async def test_agent_loop_tool_result_is_capped(mock_bus, mock_memory):
     captured: dict[str, str] = {}
 
     async def mock_run(
-        message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+        message,
+        *,
+        system_prompt=None,
+        history=None,
+        session_key=None,
+        system_prompt_digest="",
+        turn_split=None,
     ):
         """Stand-in for the LLM backend. A real backend would call the tool
         and stream a tool_result; here we run the real registry and yield

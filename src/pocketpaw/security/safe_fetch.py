@@ -6,6 +6,15 @@
 #   resolving once, pinning the IP, and preserving Host/SNI; the SSRF check
 #   re-runs on every redirect hop). Added safe_get_streamed() for callers
 #   that need a body-size cap + final-URL tracking (link unfurl).
+# 2026-09-06 (BR-1, feat/browser-surface-server) — added ``assert_public_url``:
+#   the scheme+DNS+public-IP check on its own, with no fetch. The browser
+#   surface's Playwright request interceptor needs the VERDICT for a URL it is
+#   not going to fetch itself (Chromium does the fetch), so it composes the same
+#   private helpers every safe_get hop already runs.
+# 2026-09-26 (feat/unfurl-richer-previews) — safe_get_streamed() takes optional
+#   request ``headers``. The link unfurler needs to send a crawler User-Agent:
+#   with httpx's default "python-httpx" UA many sites refuse the request or
+#   serve a page with no Open Graph tags.
 
 from __future__ import annotations
 
@@ -132,6 +141,27 @@ async def _resolve_public_ip(hostname: str, port: int) -> str:
     return candidate_ips[0]
 
 
+async def assert_public_url(url: str) -> None:
+    """Raise if ``url`` is not a fetchable public http(s) URL.
+
+    The scheme + DNS + public-IP half of :func:`safe_get`, exposed for callers
+    that need the VERDICT without doing the fetch — the browser surface's
+    Playwright ``context.route`` interceptor decides abort/continue per request
+    while Chromium owns the socket. Raises :class:`UnsupportedSchemeError`,
+    :class:`BlockedURLError` or :class:`FetchFailedError` (all
+    :class:`SafeFetchError`).
+
+    ponytail: verdict-only, so it cannot pin the IP the way
+    ``IPPinningTransport`` does — a DNS-rebind between this check and
+    Chromium's own resolve is still theoretically open. Pin via CDP
+    ``Network.setHostResolverRules`` if that threat ever matters.
+    """
+    parsed = httpx.URL(url)
+    _ensure_supported_url(parsed)
+    assert parsed.host is not None  # narrowed by _ensure_supported_url
+    await _resolve_public_ip(parsed.host, _port_for_url(parsed))
+
+
 def _next_redirect_url(current_url: httpx.URL, location: str) -> httpx.URL:
     next_url = current_url.join(location)
     _ensure_supported_url(next_url)
@@ -215,6 +245,7 @@ async def safe_get_streamed(
     max_bytes: int,
     timeout: float,
     allowed_content_types: tuple[str, ...] = ("text/html",),
+    headers: dict[str, str] | None = None,
 ) -> FetchResult:
     """Stream a URL with SSRF protection, capping the body at ``max_bytes``.
 
@@ -226,7 +257,8 @@ async def safe_get_streamed(
     raises ``ValueError`` without downloading the payload.
 
     Returns a :class:`FetchResult` carrying the final URL (after redirects),
-    so callers can resolve relative metadata URLs against it. Raises
+    so callers can resolve relative metadata URLs against it. ``headers`` are
+    sent on every hop (e.g. a User-Agent). Raises
     ``ValueError`` on any blocked URL, unsupported scheme, too many
     redirects, or disallowed content-type.
     """
@@ -249,6 +281,7 @@ async def safe_get_streamed(
                 timeout=timeout,
                 follow_redirects=False,
                 transport=transport,
+                headers=headers,
             ) as client,
             client.stream("GET", str(current_url)) as response,
         ):
@@ -300,6 +333,7 @@ async def safe_get_streamed(
 
 __all__ = [
     "BlockedURLError",
+    "assert_public_url",
     "FetchFailedError",
     "FetchResult",
     "IPPinningTransport",

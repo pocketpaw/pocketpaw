@@ -1,0 +1,567 @@
+# studio_editor.py — /studio/editor surface preamble.
+#
+# Created: 2026-09-08 (feat/agentic-studio-editor). Orients the chat agent when
+# the user is looking at the timeline editor. Until this existed the route
+# mapped to NOTHING (surfaces.ts declared `studio` with no routeVariants), so
+# the client stamped GENERIC and the agent answered "arrange these clips" by
+# building a dashboard about them.
+#
+# Unlike handlers/studio.py this preamble carries LIVE DATA: the open timeline,
+# projected to ids and times. It has to — the document lives in the browser
+# (IndexedDB + OPFS) and there is no server copy for a handler to fetch, which
+# is also why there is no read tool. The summary IS the read path.
+#
+# Rows render through ``entity_line`` (mandatory: ``edit_timeline`` declares
+# required clipId / assetId, and tests/cloud/surface/test_entity_id_contract.py
+# derives addressable kinds from the MCP tool schemas). Ids therefore render as
+# ``…tail``, and the tool's validator resolves tails back through
+# ``pockets.id_resolve``. A MOTION GRAPHICS block carries each motion graphic's
+# id and HTML source (capped), whether the agent wrote it or the user made it
+# from the Graphics gallery, so an edit rewrites it in place via
+# ``add_motion_graphic``'s ``replace_asset_id`` instead of adding a second one.
+#
+# Changes: 2026-09-30 (feat/open-surface-tool) — ONLY PLACE WHAT EXISTS now also
+# names ``open_surface``: when the clip is not in their gallery yet, the agent can
+# open /files so the user uploads or picks it.
+#
+# Changes: 2026-09-10 (feat/studio-editor-gallery-attach) — the user can now type
+# ``@`` in the editor's chat rail and pick an item from their /studio gallery,
+# and the page IMPORTS it into the media rail before the message is even sent.
+# So the preamble grew three things and lost one claim:
+#
+#   * rail rows carry ``attached=yes`` when the asset arrived this turn, so the
+#     agent can tell which of forty rail items the user just pointed at;
+#   * an ATTACHED THIS TURN block (``timeline["attached"]``, a list of asset ids)
+#     names them in the order the user picked, because "add these" resolves to
+#     that list and nothing else;
+#   * an ATTACHMENTS THAT FAILED block (``timeline["attach_failed"]``, already
+#     formatted "<name>: <reason>") — the honesty floor. An import that failed
+#     leaves no asset to place, and the agent must say so rather than place
+#     nothing and describe an arrangement.
+#
+# The claim that went: "You cannot import or generate media from here". Half of
+# it is still true (generation is /studio) and half is now false — attach IS
+# import, so the right answer to "the rail doesn't have that" is to tell the user
+# how to attach it, not to refuse.
+#
+# NO new op, and deliberately so. An attached asset is an ordinary rail asset
+# with a real assetId by the time the agent sees the turn, so ``place_clip`` /
+# ``place_audio`` already place it. The op vocabulary, the contract JSON and the
+# validator are untouched.
+
+from __future__ import annotations
+
+from typing import Any
+
+from pocketpaw.prompt.entity import entity_line
+from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
+from pocketpaw_ee.cloud.surface.handlers._helpers import content_key
+
+# Rows are capped rather than truncated silently: a 200-clip timeline would
+# otherwise crowd out the procedure block that tells the agent what to do with
+# it. The tail line keeps the agent honest about what it cannot see.
+_MAX_ROWS = 40
+
+# Failure lines are capped harder than rows: they are prose, not entities, and a
+# hundred failed attaches say nothing the first ten do not. Same number the
+# ``last_edit.failures`` block has used since it shipped.
+_MAX_FAILURES = 10
+
+# A generation prompt is a free description of the shot; the client cuts it at
+# 160 chars, this guards a client that does not.
+_MAX_PROMPT_CHARS = 160
+
+# Scene and sound spans per asset. Matches the client's scan cap.
+_MAX_SCENES = 24
+
+# Total motion-graphic HTML carried into the prompt. Matches the client's budget.
+_MAX_MOTION_SOURCE_CHARS = 100_000
+
+
+def _fmt_ms(value: Any) -> str:
+    """Milliseconds as seconds, one decimal — the unit a person edits in."""
+    try:
+        return f"{float(value) / 1000:.1f}s"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _rows(items: list[dict[str, Any]], render) -> list[str]:
+    out = [render(item) for item in items[:_MAX_ROWS]]
+    if len(items) > _MAX_ROWS:
+        # Not an entity row and deliberately not shaped like one: it names no
+        # entity and carries no id, so it must not read as something the
+        # agent can address.
+        out.append(f"  …and {len(items) - _MAX_ROWS} more (ask the user to narrow the request)")
+    return out
+
+
+def _asset_row(asset: dict[str, Any]) -> str:
+    """One MEDIA RAIL row.
+
+    ``attached`` is rendered only when it is true. A row carrying ``attached=no``
+    would be a fact about forty items to mark two of them, and the whole point of
+    the marker is that it is scannable.
+    """
+    facts: dict[str, Any] = {
+        "kind": asset.get("kind"),
+        "duration": _fmt_ms(asset.get("duration_ms")),
+        "used": ("yes" if asset.get("in_use") else "no"),
+    }
+    if asset.get("size"):
+        facts["size"] = asset["size"]
+    if asset.get("has_audio") is False:
+        facts["audio"] = "none"
+    if asset.get("source") == "generation":
+        facts["source"] = "generated"
+    if asset.get("attached"):
+        facts["attached"] = "yes"
+    lines = [entity_line(asset.get("name"), asset.get("id"), **facts)]
+    prompt = " ".join(str(asset.get("prompt") or "").split())[:_MAX_PROMPT_CHARS]
+    if prompt:
+        lines.append(f'    made from prompt: "{prompt}"')
+    scenes = [sc for sc in (asset.get("scenes") or []) if isinstance(sc, dict)]
+    if scenes:
+        lines.append("    scenes: " + " · ".join(_scene_text(sc) for sc in scenes[:_MAX_SCENES]))
+    sound = [so for so in (asset.get("sound") or []) if isinstance(so, dict)]
+    if sound:
+        lines.append("    sound: " + " · ".join(_sound_text(so) for so in sound[:_MAX_SCENES]))
+    return "\n".join(lines)
+
+
+def _span(item: dict[str, Any]) -> str:
+    try:
+        return f"{float(item['start_ms']) / 1000:.1f}-{float(item['end_ms']) / 1000:.1f}s"
+    except (KeyError, TypeError, ValueError):
+        return "?"
+
+
+def _scene_text(scene: dict[str, Any]) -> str:
+    colour = scene.get("colour")
+    light = None if colour in ("black", "white") else scene.get("light")
+    look = " ".join(str(v) for v in (light, colour) if v and v != "normal")
+    parts = [f"{_span(scene)} {look}".strip()]
+    motion = scene.get("motion")
+    if motion:
+        parts.append("still" if motion == "still" else f"{motion} motion")
+    fade = scene.get("fade")
+    if fade:
+        parts.append(
+            {"in": "fades in", "out": "fades out", "both": "fades in and out"}.get(fade, "fade")
+        )
+    return ", ".join(parts)
+
+
+def _sound_text(span: dict[str, Any]) -> str:
+    text = f"{_span(span)} {span.get('level') or '?'}"
+    return f"{text}, voice-like" if span.get("voice_like") else text
+
+
+def _attached_block(timeline: dict[str, Any], assets: list[dict[str, Any]]) -> list[str]:
+    """The two attach blocks: what arrived this turn, and what did not.
+
+    ``timeline["attached"]`` is a list of asset ids in the order the user picked
+    them, which is the order they should be placed in — so this renders from that
+    list rather than filtering ``assets``, whose order is the rail's.
+    """
+    lines: list[str] = []
+    by_id = {str(a.get("id")): a for a in assets if a.get("id")}
+
+    attached = [str(a) for a in (timeline.get("attached") or []) if a]
+    if attached:
+        lines.append("")
+        lines.append(
+            "ATTACHED THIS TURN (the user just attached these from their gallery "
+            "and they are already on the rail above):"
+        )
+        lines.extend(
+            _rows(
+                # A picked id with no rail row is not dropped: the id is still
+                # placeable, and silently shortening this list would make "add
+                # all three" quietly arrange two.
+                [by_id.get(aid, {"id": aid}) for aid in attached],
+                lambda a: entity_line(a.get("name"), a.get("id"), kind=a.get("kind")),
+            )
+        )
+        lines.append(
+            "  When the user says 'these clips', 'this' or 'it', they almost "
+            "certainly mean these — place them in the order listed."
+        )
+
+    failed = [str(f) for f in (timeline.get("attach_failed") or []) if f]
+    if failed:
+        lines.append("")
+        lines.append("ATTACHMENTS THAT FAILED (these did NOT reach the rail):")
+        lines.extend(f"  • {f}" for f in failed[:_MAX_FAILURES])
+        if len(failed) > _MAX_FAILURES:
+            lines.append(f"  …and {len(failed) - _MAX_FAILURES} more")
+        lines.append("  Tell the user which ones failed before you arrange anything.")
+
+    return lines
+
+
+def _motion_graphics_block(timeline: dict[str, Any]) -> list[str]:
+    """MOTION GRAPHICS: each one's id and HTML source, so the agent edits in place.
+
+    Newest first, as the client sends them. Source is included while the running
+    total stays within ``_MAX_MOTION_SOURCE_CHARS`` (the client caps the same way;
+    this guards a client that does not).
+    """
+    graphics = [g for g in (timeline.get("motion_graphics") or []) if isinstance(g, dict)]
+    if not graphics:
+        return []
+
+    lines = [
+        "",
+        "MOTION GRAPHICS (ones you authored — edit with add_motion_graphic and replace_asset_id):",
+    ]
+    budget = _MAX_MOTION_SOURCE_CHARS
+    for graphic in graphics[:_MAX_ROWS]:
+        lines.append(entity_line(graphic.get("name"), graphic.get("asset_id")))
+        html = graphic.get("html")
+        if isinstance(html, str) and html and len(html) <= budget:
+            budget -= len(html)
+            lines.extend(["```html", html, "```"])
+        else:
+            lines.append(
+                "  Source too large to include. To change it, write a fresh composition "
+                "and still pass this replace_asset_id."
+            )
+    if len(graphics) > _MAX_ROWS:
+        lines.append(f"  …and {len(graphics) - _MAX_ROWS} more")
+    return lines
+
+
+def _draft_graphic_block(timeline: dict[str, Any]) -> list[str]:
+    """DRAFT GRAPHIC: a gallery preset the user asked to have customised this turn."""
+    draft = timeline.get("draft_graphic")
+    html = draft.get("html") if isinstance(draft, dict) else None
+    if not isinstance(html, str) or not html or len(html) > _MAX_MOTION_SOURCE_CHARS:
+        return []
+
+    span = draft.get("replace_range")
+    if isinstance(span, dict):
+        placement = f"replace_range from_ms={span.get('from_ms')} to_ms={span.get('to_ms')}"
+    elif isinstance(draft.get("start_ms"), int):
+        placement = f"start_ms={draft['start_ms']}"
+    else:
+        placement = "the end of the timeline (no placement argument)"
+    return [
+        "",
+        f'DRAFT GRAPHIC "{draft.get("name") or "Graphic"}" (customise, then add at {placement}):',
+        "```html",
+        html,
+        "```",
+    ]
+
+
+def _timeline_block(timeline: dict[str, Any]) -> str:
+    """Render the open timeline as ids + times, plus motion-graphic source."""
+    lines: list[str] = []
+
+    name = timeline.get("name") or "Untitled timeline"
+    lines.append(
+        f"Project: {name} — {timeline.get('aspect_ratio') or '?'}, "
+        f"{timeline.get('fps') or '?'}fps, {_fmt_ms(timeline.get('duration_ms'))} long."
+    )
+    if timeline.get("playhead_ms") is not None:
+        playhead = timeline["playhead_ms"]
+        lines.append(f"Playhead: {_fmt_ms(playhead)} ({playhead} ms) — what 'here' means.")
+    if timeline.get("graphic_style"):
+        lines.append(
+            f"Graphic style: {timeline['graphic_style']} — use it for new motion graphics."
+        )
+
+    tracks = [t for t in (timeline.get("tracks") or []) if isinstance(t, dict)]
+    if tracks:
+        lines.append("")
+        lines.append("LANES (rows clips sit on — target one by id or by name, add_lane for more):")
+        lines.extend(
+            _rows(
+                tracks,
+                lambda t: entity_line(
+                    t.get("name"),
+                    t.get("id"),
+                    kind=t.get("kind"),
+                    role=t.get("role") or "-",
+                    clips=t.get("clip_count"),
+                ),
+            )
+        )
+
+    assets = [a for a in (timeline.get("assets") or []) if isinstance(a, dict)]
+    lines.append("")
+    if assets:
+        lines.append("MEDIA RAIL (what can be placed — nothing else exists):")
+        lines.extend(_rows(assets, _asset_row))
+    else:
+        lines.append(
+            "MEDIA RAIL: empty. Nothing can be placed until the user adds media — "
+            "they can attach it from their /studio gallery with `@` in the "
+            "composer, or drag files onto the rail."
+        )
+
+    lines.extend(_attached_block(timeline, assets))
+    lines.extend(_motion_graphics_block(timeline))
+    lines.extend(_draft_graphic_block(timeline))
+
+    clips = [c for c in (timeline.get("clips") or []) if isinstance(c, dict)]
+    lines.append("")
+    if clips:
+        lines.append("CLIPS ON THE TIMELINE (in timeline order):")
+        lines.extend(
+            _rows(
+                clips,
+                lambda c: entity_line(
+                    c.get("label"),
+                    c.get("id"),
+                    track=c.get("track_name"),
+                    start=_fmt_ms(c.get("start_ms")),
+                    end=_fmt_ms(c.get("end_ms")),
+                    kind=c.get("kind"),
+                    chroma=c.get("chroma"),
+                    effects=c.get("effects"),
+                ),
+            )
+        )
+    else:
+        lines.append("CLIPS ON THE TIMELINE: none yet — the timeline is empty.")
+
+    last = timeline.get("last_edit")
+    if isinstance(last, dict) and last.get("failures"):
+        # The result of the PREVIOUS turn's edit. This is the only confirmation
+        # channel: edit_timeline returns once the batch is validated and
+        # dispatched, not once the browser has applied it.
+        lines.append("")
+        lines.append("YOUR LAST EDIT DID NOT FULLY APPLY:")
+        lines.extend(f"  • {f}" for f in list(last["failures"])[:10])
+
+    return "\n".join(lines)
+
+
+_PROCEDURE = """\
+<studio-editor-procedure>
+To change the timeline, call `mcp__pocketpaw_timeline__edit_timeline` with an
+`ops` list. ONE call carries the whole change — "arrange these three clips, put
+a caption here, drop the music underneath" is a SINGLE batch, not six calls. The
+batch is applied atomically and lands as ONE undo step, so a user who dislikes
+the result presses Ctrl+Z once.
+
+Operations (this list is closed — an invented verb is rejected):
+- place_clip    {assetId, atMs|after, track?, inMs?, outMs?}
+- move_clip     {clipId, atMs|after, track?}
+- add_lane      {kind: video|audio|text|overlay, role?: 'captions', name?}
+- trim_clip     {clipId, inMs?, outMs?}     absolute SOURCE points, not a delta
+- split_clip    {clipId, atMs}
+- remove_clip   {clipId}
+- set_transition{clipId, kind, durationMs?, direction?, color?, softness?}
+- add_text      {text, fromMs, toMs, track?, + any style field below}
+- style_text    {clipId, text?, + any style field below}   restyle what exists
+- add_caption   {text, fromMs, toMs, anchorClip?, style?}
+- style_captions{style?, fontSize?, y?}                    the whole cue set
+- place_audio   {assetId, atMs|after, track?, volume?, muted?}
+- set_volume    {target: clipId|'master', volume}
+- set_transform {clipId, x?, y?, scale?, rotation?, opacity?}
+- add_keyframe  {clipId, prop, atMs, value?, ease?}
+- clear_keyframes {clipId, prop, atMs?}
+- zoom_clip     {clipId, focusX, focusY, scale, atMs?, inMs?, holdMs?, outMs?}
+- set_chroma    {clipId, color?: '#rrggbb'|'auto', similarity?, smoothness?, spill?, off?}
+- set_effects   {clipId, preset?, exposure?, contrast?, temperature?, tint?, saturation?,
+                 glow?, vignette?, spotlight?, rays?, sweep?, leak?, grain?, aberration?,
+                 flicker?, off?}
+- set_project   {name?, aspectRatio?, fps?, fit?, background?}
+
+Style fields (add_text and style_text both take these):
+  presetId   clean | pop | boxed | subtitle | neon | typewriter | impact |
+             sticker | editorial — a whole designed look
+  fontSize   pixels          color   any CSS colour     align  left|center|right
+  animIn / animOut   none | fade | pop | slide | typewriter | bounce
+  animDurationMs     how long each end runs, capped at half the clip
+  animDirection      slide only: the edge the text travels FROM
+
+Rules that matter:
+- TO ARRANGE NEW CLIPS END TO END, PLACE THEM WITH NO POSITION. Omit both atMs
+  and after, and each clip lands after the last one on its lane. "Arrange these
+  three clips" is three bare place_clip ops, in the order you want them. Do NOT
+  add up durations to compute atMs yourself.
+  You CANNOT use `after` for a clip created in the same batch — clip ids are
+  minted when the batch is applied, so a clip you are creating right now has no
+  id yet. `after: <clipId>` is for anchoring to a clip ALREADY on the timeline
+  (one listed above); it is resolved against the live document, so it stays right
+  even when an earlier op in the same batch changed a length.
+- LANES ARE THE LAYOUT. A timeline is rows, not one line. Things that play AT
+  THE SAME TIME go on DIFFERENT lanes; things that play one after another go on
+  ONE lane. Music under narration is two audio lanes. A logo over a shot is two
+  video lanes (the LATER lane draws on top). Three shots in a row is one lane.
+  Put a clip on a specific lane with `track`, and open a new one with add_lane
+  when the arrangement needs a row that is not there.
+- NAME A LANE YOU OPEN, AND ADDRESS IT BY THAT NAME. `track` takes a lane id OR
+  a lane name, and the name is the only way to use a lane in the batch that
+  creates it — lane ids, like clip ids, are minted when the batch applies. So
+  "score under the whole thing" is:
+      {op: add_lane, kind: audio, name: "Score"}
+      {op: place_audio, assetId: …, track: "Score", atMs: 0, volume: 0.3}
+  Name it for what it carries — Score, VO, Lower thirds — not Audio 2. A name
+  already on the timeline is rejected: target that lane instead of opening a
+  second one with the same name.
+- DO NOT OPEN A LANE YOU DO NOT NEED. Sequential clips belong on one lane, and
+  a row per clip makes a five-shot cut five rows tall. Open a lane when things
+  must overlap, or when the user asked for a separate one.
+- A CUE LANE IS A TEXT LANE WITH role 'captions'. add_lane {kind: text, role:
+  'captions'} when the timeline has no caption row yet. Loose titles never land
+  on it and cues never land off it, so a text lane and a cue lane are not
+  interchangeable. add_caption always fills the FIRST caption lane — a second
+  one is for cues the user drags there, not a thing to target.
+- ANCHOR CAPTIONS. Caption times are timeline-absolute and do NOT move when a
+  clip moves. If a caption belongs to a clip's dialogue, pass
+  `anchorClip: <clipId>` and give fromMs/toMs as offsets from that clip's start.
+  Absolute times are only right for captions that belong to the timeline itself.
+- ONLY PLACE WHAT EXISTS. assetId must come from the MEDIA RAIL above;
+  never invent one, and never claim to have generated footage (generation is
+  the /studio surface, not this one). But the rail is not fixed: the user attaches
+  media from their /studio gallery by typing `@` in the composer, and it is
+  imported onto the rail before they even send. So when the rail lacks what they
+  described, tell them to attach it with `@` (or drag the file onto the rail) —
+  do not tell them media cannot be brought in here. If the file is not in their
+  gallery at all yet, call `mcp__pocketpaw_surfaces__open_surface` with route
+  /files so they can upload or pick it, then have them attach it here. The one
+  thing you make yourself is a motion graphic (title card, kinetic type,
+  animated stat, logo sting), authored with
+  `mcp__pocketpaw_timeline__add_motion_graphic`. Motion graphics render full
+  frame and opaque, so overlays like lower thirds are not possible yet.
+- PLACE A MOTION GRAPHIC IN THE CALL. The rendered asset only exists next turn,
+  so placement rides on add_motion_graphic itself. "Replace 0:10-0:14 with a
+  stat card" is replace_range {from_ms: 10000, to_ms: 14000}, with data-duration
+  set to exactly that span (4 seconds): the span is cut from the main video and
+  the graphic takes its place. "Put a title here" is start_ms = the Playhead.
+  The Playhead is what "here" and "from here" mean. Use the Graphic style for new
+  graphics unless the user names another.
+- EDIT A MOTION GRAPHIC IN PLACE. To change one listed under MOTION GRAPHICS,
+  edit its source from that block and call add_motion_graphic with
+  replace_asset_id set to its id — never add a second one alongside it.
+- A DRAFT GRAPHIC IS A STARTING POINT. When DRAFT GRAPHIC appears above, the
+  user picked that gallery preset and wants it changed as their message says.
+  Edit that HTML (keep the root, the --mg-* variables and the timeline
+  registration), then call add_motion_graphic ONCE with the placement shown.
+  Never add it unedited or twice. With replace_range, keep data-duration equal
+  to the span; if they ask for a different length, move to_ms to match.
+- WHAT THEY JUST ATTACHED IS WHAT THEY MEAN. When ATTACHED THIS TURN appears
+  above and the user says "add these", "put this on the timeline" or "use it",
+  those assets are the ones — place them in the ORDER LISTED, and place all of
+  them unless the user narrowed it.
+- SCENES AND SOUND ARE ROUGH. The `scenes:` and `sound:` lines under a rail
+  row come from pixel and loudness maths on the file, not from watching it:
+  cut times, light, main colour, motion, silent/quiet/loud, and a voice-like
+  guess. Times are SOURCE time inside that asset, so map a clip's inMs/outMs
+  onto them before you trim or split. When the turn carries an image named
+  `<asset>-scenes.jpg`, it is one frame from the middle of each scene, numbered
+  and labelled with the same time ranges: use it to say who and what is on
+  screen. If neither tells you enough, ask the user rather than guess.
+- A TRANSITION IS EXPLICIT. Clips touching or overlapping does not create one.
+  Use set_transition, and only when the user asked for one.
+- COPY IDS EXACTLY as they appear above (the `…` prefix and all).
+- RESTYLE, DO NOT RE-ADD. "make that title bigger" is style_text on the clip
+  that exists. add_text would leave the original in place and put a second one
+  on top of it.
+- A PRESET SETS THE WHOLE LOOK, and any style field you pass alongside wins over
+  it — "Neon but 90px" is ONE style_text with presetId and fontSize together.
+- TWO DIFFERENT STYLE VOCABULARIES, and 'boxed' is in both. The nine named looks
+  above are for TITLES (add_text / style_text). Captions take plain | boxed |
+  outlined, and are styled as a SET with style_captions — never one cue at a
+  time.
+- TRANSFORM IS ABSOLUTE, not a nudge. x and y are pixel offsets from the frame
+  CENTRE, so negative is left and up; scale 1 is original size; opacity 0-1.
+- TO ANIMATE, PIN TWO VALUES. add_keyframe at the start time and again at the
+  end time, and the property moves between them. atMs is TIMELINE time and must
+  fall inside the clip. Animatable: x, y, scale, rotation, opacity, volume, fx —
+  nothing else (font size and colour cannot be animated).
+- GREEN SCREEN IS set_chroma. "Remove / key out the green (or blue) background"
+  is set_chroma on that video or image clip, color 'auto' unless they name one;
+  off: true removes it. Whatever sits on a LOWER lane shows through the keyed
+  area.
+- LIGHT AND LOOK ARE set_effects. "Golden hour", "make it moody", "add a glow",
+  "spotlight on her", "light rays" are set_effects on that clip, with a preset
+  (golden-hour | moody | neon-glow | spotlight | dreamy) when one fits; fields
+  passed with it override the preset, null removes one effect, off: true clears
+  them all. To ramp the strength, add_keyframe prop fx (0-1). These change
+  brightness and colour on the frame; they cannot move the real light on a
+  subject, so say so if that is what they want.
+- A MARKED AREA IS A BOX THE USER DREW ON THE FRAME at that time: "At 00:08,
+  marked area x 40-60%, y 20-50% (centre 0.50, 0.35): ...". It targets the video
+  clip under that time on the main video track. "Zoom in here" is zoom_clip with
+  focusX/focusY = the centre and atMs = that time. "Fade in" / "Fade out" are
+  opacity keyframes pinned at that time and half a second after (animIn / animOut
+  on a text clip). "Add a graphic here" is add_motion_graphic with start_ms =
+  that time, or replace_range if they ask to replace the footage. "Spotlight
+  here" / "Light rays from here" are set_effects with spotlight / rays x, y = the
+  centre (spotlight radius about half the box's larger side). Anything the
+  ops cannot do to just that box, such as blurring it, say so plainly instead of
+  approximating it.
+
+Honesty (this surface has burned people before):
+- edit_timeline returns when the batch is VALIDATED AND DISPATCHED — not when
+  the browser has applied it. Say what you arranged, never "done" or "applied".
+- If the tool returns an error, relay it plainly and fix the ops. NEVER claim an
+  edit that did not go through, and never invent a clip, asset or timing.
+- If "YOUR LAST EDIT DID NOT FULLY APPLY" appears above, tell the user which
+  parts the editor declined before doing anything else.
+- If "ATTACHMENTS THAT FAILED" appears above, name those files and say they did
+  not make it onto the rail. Placing the ones that worked and staying quiet about
+  the rest looks like the whole request went through.
+
+To render the finished video, call `mcp__pocketpaw_timeline__export_timeline`.
+Never batch an export with edits — it would render a half-built timeline.
+
+For a motion graphic, load the `hyperframes-core` and `studio-motion` skills and
+call `mcp__pocketpaw_timeline__add_motion_graphic` with one self-contained HTML
+composition (plus `replace_asset_id` when editing one that exists). Graphics the
+user makes with the editor's Graphics button are listed under MOTION GRAPHICS
+too (data-preset and data-style on the root); edit them the same way, with
+replace_asset_id. It renders in the browser after the call returns: say it is
+rendering, never that it is done.
+</studio-editor-procedure>"""
+
+_NO_TIMELINE = """\
+<studio-editor-procedure>
+No timeline is open, so there is nothing to edit yet. Ask the user to open a
+project in the editor (or start a new one) and to add media to the rail. Do NOT
+call the timeline tools — they will refuse. Do not offer to generate media here
+either; that is the /studio surface.
+</studio-editor-procedure>"""
+
+
+async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
+    """Render the /studio/editor preamble — arrange what is on the timeline."""
+    route = meta.route_path or "/studio/editor"
+    timeline = meta.timeline if isinstance(meta.timeline, dict) else None
+
+    orientation = (
+        "<studio-editor-orientation>\n"
+        "The user is looking at a VIDEO TIMELINE EDITOR — tracks, clips, "
+        "captions, transitions. Your job here is to ARRANGE what is already on "
+        "the timeline: order clips, trim them, place titles and captions, and "
+        "lay things out across lanes — opening new ones when the arrangement "
+        "needs a row that is not there. This is NOT a dashboard: do not build widgets, "
+        "charts, a pocket or a ui-spec. It is also NOT the generation surface: "
+        "you cannot make new footage here, except motion graphics you author as "
+        "HyperFrames HTML. Talk about 'clips', 'tracks', "
+        "'captions' and 'the timeline'.\n"
+        "</studio-editor-orientation>"
+    )
+
+    if timeline is None:
+        body = _NO_TIMELINE
+    else:
+        body = f"<timeline>\n{_timeline_block(timeline)}\n</timeline>\n{_PROCEDURE}"
+
+    text = f'<surface kind="studio_editor" route="{route}" />\n{orientation}\n{body}'
+    # Digest, not meta_key. handlers/studio.py can key on the route because its
+    # preamble is static; this one renders the live clip list, so a route key
+    # would serve a stale timeline all session. Keying on `updated_at` would go
+    # the other way and reconnect (~12s on the SDK backend) after every edit,
+    # including ones that change nothing the agent can see. The digest moves
+    # exactly when the agent's view does.
+    return SurfacePreamble(text=text, cache_key=content_key("studio_editor", text))
+
+
+__all__ = ["build_preamble"]

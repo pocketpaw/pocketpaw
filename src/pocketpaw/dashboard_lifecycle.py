@@ -233,11 +233,13 @@ async def startup_event(
     bus = get_message_bus()
     await ws_adapter.start(bus)
 
-    # Load .env for enterprise config (license key, MongoDB URI, admin creds)
+    # Load .env for enterprise config (license key, MongoDB URI, admin creds). The
+    # working directory's file only, the one Settings reads: a bare load_dotenv()
+    # walks up and would import a parent project's .env.
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(".env")
     except ImportError:
         pass
 
@@ -699,6 +701,23 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
     except Exception as exc:
         logger.debug("Request-log flush skipped: %s", exc)
 
+    # Run the enterprise lifecycle shutdown hooks. The mirror of the startup
+    # loop above, which existed on its own for months: ``on_shutdown`` was
+    # declared in the protocol (src/pocketpaw/extensions.py), implemented by
+    # CloudLifecycleHook, and called by nothing. Everything that hook started --
+    # the meeting scheduler, the pocket interval refresh, the temporal sweeps,
+    # the run sweeper -- outlived the process it belonged to.
+    #
+    # Placed after the run drain and the request-log flush so cloud teardown
+    # happens before the channel adapters and the daemon go down under it.
+    try:
+        from pocketpaw._registry import providers as _ext_providers
+
+        for _hook in _ext_providers("pocketpaw.lifecycle"):
+            await _bounded("lifecycle_shutdown", _hook.on_shutdown(), timeout=10.0)
+    except Exception as exc:
+        logger.debug("Lifecycle shutdown hooks skipped: %s", exc)
+
     # Stop all channel adapters
     if _stop_channel_adapter_fn:
         for channel in list(_channel_adapters):
@@ -724,3 +743,10 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
         await _bounded("mcp_servers", get_mcp_manager().stop_all(), timeout=8.0)
     except Exception as e:
         logger.warning("Error stopping MCP servers: %s", e)
+
+    # Deliver the last paw-lens check-ins (the final ``ok`` of a job that just
+    # finished). Last, so the schedulers and the ee hooks above have stopped.
+    # Bounded at 1 s; ``flush`` never raises.
+    from pocketpaw.lens_checkins import flush as flush_lens_checkins
+
+    await flush_lens_checkins(timeout=1.0)

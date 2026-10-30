@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pocketpaw_ee.cloud.media.router as media_module
 import pytest
@@ -31,6 +32,13 @@ from pocketpaw_ee.cloud.media.router import router as media_router
 from pocketpaw.uploads.adapter import StorageAdapter, StorageItem, StoredObject
 from pocketpaw.uploads.local import LocalStorageAdapter
 
+# Gallery files are listed only to the workspace whose token is in the name, so
+# the fixtures' files carry ws-1's prefix (the fixture client's workspace).
+_WS1 = storage.owned_name_prefix("ws-1")
+_GEN = f"{_WS1}gen-uuid.png"
+_AAAA = f"{_WS1}1700000000000-aaaa.png"
+_BBBB = f"{_WS1}1699999999000-bbbb.png"
+
 
 @pytest.fixture
 def client(tmp_path, monkeypatch) -> TestClient:
@@ -41,10 +49,15 @@ def client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setattr(
         media_module,
         "tracked_generation_filenames",
-        lambda: {"gen-uuid.png"},
+        AsyncMock(return_value={_GEN}),
     )
     app = FastAPI()
     app.include_router(media_router, prefix="/api/v1")
+    # #2114 put current_workspace_id on list/upload. These fixtures build a bare
+    # app with no session, so without an override every request 401s and the whole
+    # file fails before it reaches what it means to test.
+    app.dependency_overrides[media_module.current_workspace_id] = lambda: "ws-1"
+    app.dependency_overrides[media_module.optional_workspace_id] = lambda: "ws-1"
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -60,8 +73,11 @@ def generated(client, tmp_path) -> Path:
 
 
 def test_list_media_excludes_generation_tracked_files(client, generated) -> None:
-    (generated / "gen-uuid.png").write_bytes(b"png-bytes")
-    (generated / "agent-uuid.png").write_bytes(b"agent-bytes")
+    agent = f"{_WS1}agent-uuid.png"
+    (generated / _GEN).write_bytes(b"png-bytes")
+    (generated / agent).write_bytes(b"agent-bytes")
+    (generated / "legacy-uuid.png").write_bytes(b"untagged")
+    (generated / f"{storage.owned_name_prefix('ws-2')}theirs.png").write_bytes(b"theirs")
     (generated / "note.txt").write_text("not media")
 
     resp = client.get("/api/v1/media")
@@ -69,9 +85,10 @@ def test_list_media_excludes_generation_tracked_files(client, generated) -> None
     media = resp.json()["media"]
     names = [m["name"] for m in media]
     # The tracked generation file is excluded; the agent-side file is not.
-    assert names == ["agent-uuid.png"]
+    # Excluded: the tracked generation, the untagged legacy file, ws-2's file.
+    assert names == [agent]
     item = media[0]
-    assert item["url"] == "/api/v1/media/agent-uuid.png"
+    assert item["url"] == f"/api/v1/media/{agent}"
     assert item["mime"] == "image/png"
 
 
@@ -101,25 +118,34 @@ def test_post_media_upload_saves_and_returns_mediafile(client, generated) -> Non
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["name"] == "edited.png"
-    assert body["url"] == "/api/v1/media/edited.png"
+    # #2114 makes the owner travel IN the filename (the key cannot carry a
+    # workspace segment), so an uploaded name is prefixed. These tests are about
+    # sanitising and collision handling, so assert the sanitised TAIL rather than
+    # pinning a whole name that predates that change.
+    assert body["name"].endswith("edited.png")
+    assert body["url"] == f"/api/v1/media/{body['name']}"
     assert body["mime"] == "image/png"
     assert body["size"] == len(b"\x89PNG\r\n\x1a\nedit-bytes")
-    assert (generated / "edited.png").read_bytes() == b"\x89PNG\r\n\x1a\nedit-bytes"
+    assert (generated / body["name"]).read_bytes() == b"\x89PNG\r\n\x1a\nedit-bytes"
 
 
 def test_post_media_upload_collision_makes_unique_name(client, generated) -> None:
-    (generated / "edited.png").write_bytes(b"first")
+    # Seed the OWNED name, not the bare one. Since #2114 an upload is stored as
+    # `<owner>-<name>`, so a bare `edited.png` on disk no longer collides with
+    # anything and this test would silently stop exercising the rename it exists
+    # for.
+    first_name = f"{storage.owned_name_prefix('ws-1')}edited.png"
+    (generated / first_name).write_bytes(b"first")
     resp = client.post(
         "/api/v1/media",
         files={"file": ("edited.png", b"second", "image/png")},
     )
     assert resp.status_code == 200
     name = resp.json()["name"]
-    assert name != "edited.png"
-    assert name.startswith("edited-")
+    assert not name.endswith("-edited.png"), "the collision must have renamed it"
+    assert "edited-" in name
     # Both files exist — the original was not overwritten.
-    assert (generated / "edited.png").read_bytes() == b"first"
+    assert (generated / first_name).read_bytes() == b"first"
     assert (generated / name).read_bytes() == b"second"
 
 
@@ -153,10 +179,13 @@ class _FakeRemoteAdapter(StorageAdapter):
 
     def __init__(self) -> None:
         self.store: dict[str, bytes] = {
-            "generated/1700000000000-aaaa.png": b"gen-bytes",
-            "generated/1699999999000-bbbb.png": b"older-gen-bytes",
+            f"generated/{_AAAA}": b"gen-bytes",
+            f"generated/{_BBBB}": b"older-gen-bytes",
+            # Untagged legacy key: still serves, never listed.
+            "generated/1700000000001-legacy.png": b"legacy-bytes",
         }
         self.put_calls: list[tuple[str, bytes]] = []
+        self.modified: dict[str, int] = {}
 
     def local_path(self, key: str) -> Path | None:
         return None
@@ -175,7 +204,14 @@ class _FakeRemoteAdapter(StorageAdapter):
         for key, data in self.store.items():
             if key.startswith(prefix):
                 name = key[len(prefix) :]
-                items.append(StorageItem(name=name, is_dir=False, size=len(data)))
+                items.append(
+                    StorageItem(
+                        name=name,
+                        is_dir=False,
+                        size=len(data),
+                        modified=self.modified.get(name, 0),
+                    )
+                )
         items.sort(key=lambda i: i.name)
         return items
 
@@ -197,10 +233,15 @@ def remote_client(remote_adapter, monkeypatch) -> TestClient:
     monkeypatch.setattr(
         media_module,
         "tracked_generation_filenames",
-        lambda: {"1699999999000-bbbb.png"},
+        AsyncMock(return_value={_BBBB}),
     )
     app = FastAPI()
     app.include_router(media_router, prefix="/api/v1")
+    # #2114 put current_workspace_id on list/upload. These fixtures build a bare
+    # app with no session, so without an override every request 401s and the whole
+    # file fails before it reaches what it means to test.
+    app.dependency_overrides[media_module.current_workspace_id] = lambda: "ws-1"
+    app.dependency_overrides[media_module.optional_workspace_id] = lambda: "ws-1"
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -210,13 +251,26 @@ def test_remote_list_uses_browse_and_timestamp_modified(remote_client, remote_ad
     resp = remote_client.get("/api/v1/media")
     assert resp.status_code == 200
     media = resp.json()["media"]
-    # bbbb is tracked (excluded); only aaaa remains.
-    assert [m["name"] for m in media] == ["1700000000000-aaaa.png"]
+    # bbbb is tracked and legacy is untagged (both excluded); only aaaa remains.
+    assert [m["name"] for m in media] == [_AAAA]
     assert media[0]["modified"] == 1700000000000
 
 
+def test_remote_list_dates_an_upload_by_its_storage_time(remote_client, remote_adapter) -> None:
+    """An upload's name carries no timestamp, so S3's own LastModified dates it.
+    Without that it reported 0 and every editor save landed at the end."""
+    upload = f"{storage.owned_name_prefix('ws-1')}timeline.mp4"
+    remote_adapter.store[f"generated/{upload}"] = b"render"
+    remote_adapter.modified[upload] = 1800000000000
+
+    media = remote_client.get("/api/v1/media").json()["media"]
+
+    assert [m["name"] for m in media] == [upload, _AAAA]
+    assert media[0]["modified"] == 1800000000000
+
+
 def test_remote_serve_streams_bytes(remote_client, remote_adapter) -> None:
-    resp = remote_client.get("/api/v1/media/1700000000000-aaaa.png")
+    resp = remote_client.get(f"/api/v1/media/{_AAAA}")
     assert resp.status_code == 200
     assert resp.content == b"gen-bytes"
     assert resp.headers["content-type"].startswith("image/png")
@@ -228,5 +282,10 @@ def test_remote_upload_keys_under_generated_prefix(remote_client, remote_adapter
         files={"file": ("edited.png", b"PNG-BYTES", "image/png")},
     )
     assert resp.status_code == 200
-    assert resp.json()["name"] == "edited.png"
-    assert ("generated/edited.png", b"PNG-BYTES") in remote_adapter.put_calls
+    # #2114 makes the owner travel IN the filename (the key cannot carry a
+    # workspace segment), so an uploaded name is prefixed. These tests are about
+    # sanitising and collision handling, so assert the sanitised TAIL rather than
+    # pinning a whole name that predates that change.
+    name = resp.json()["name"]
+    assert name.endswith("edited.png")
+    assert (f"generated/{name}", b"PNG-BYTES") in remote_adapter.put_calls

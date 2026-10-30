@@ -1,0 +1,47 @@
+[
+  {
+    "label": "payments closed: checkout guard never refuses",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if not get_settings().payments_open:\n        raise Forbidden(",
+    "replace": "    if False:\n        raise Forbidden(",
+    "tests": [
+      "tests/cloud/billing/test_payments_closed.py"
+    ]
+  },
+  {
+    "label": "payments closed: webhook grants in test mode",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "bool(settings.payments_open) and settings.dodo_environment == \"live_mode\"",
+    "replace": "bool(settings.payments_open)",
+    "tests": [
+      "tests/cloud/billing/test_payments_closed.py"
+    ]
+  },
+  {
+    "label": "payments closed: subscription grants slip past the webhook gate",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        or (isinstance(event, SubscriptionEvent) and event.type in _SUB_GRANT_EVENTS)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/billing/test_payments_closed.py"
+    ]
+  },
+  {
+    "label": "payments closed: refused payment is not recorded for review",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if isinstance(event, GatewayEvent) and event.workspace_id:\n        await _record_payment(event)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/billing/test_payments_closed.py"
+    ]
+  },
+  {
+    "label": "payments closed: partner hands back an open pay link",
+    "file": "ee/pocketpaw_ee/cloud/partners/service.py",
+    "find": "    billing_service.require_payments_open()\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/partners/test_partner_commissions.py::test_payments_closed_refuses_even_an_open_link"
+    ]
+  }
+]

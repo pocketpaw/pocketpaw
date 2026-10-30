@@ -1,6 +1,6 @@
 [
   {
-    "label": "the sites-only flag is never read — the seams answer to the global switch alone",
+    "label": "the sites-only flag is never read \u2014 the seams answer to the global switch alone",
     "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
     "find": "        getattr(settings, \"billing_enforced\", False)\n        or getattr(settings, \"sites_billing_enforced\", False)",
     "replace": "        getattr(settings, \"billing_enforced\", False)",
@@ -11,18 +11,18 @@
     ]
   },
   {
-    "label": "the global flag stops counting — an existing tenant loses its sites enforcement",
+    "label": "the global flag stops counting \u2014 an existing tenant loses its sites enforcement",
     "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
     "find": "        getattr(settings, \"billing_enforced\", False)\n        or getattr(settings, \"sites_billing_enforced\", False)",
     "replace": "        getattr(settings, \"sites_billing_enforced\", False)",
     "tests": [
       "tests/cloud/sites/test_sites_billing_flag.py::test_either_flag_turns_the_sites_seams_on",
       "tests/cloud/sites/test_sites_billing_flag.py::test_the_global_flag_alone_still_enforces_the_domain_cap",
-      "tests/cloud/sites/test_custom_domain_cap.py::test_a_second_free_site_is_refused"
+      "tests/cloud/sites/test_custom_domain_cap.py::test_a_free_site_may_carry_apex_plus_www_and_no_more"
     ]
   },
   {
-    "label": "the OR becomes an AND — both flags are needed and neither alone works",
+    "label": "the OR becomes an AND \u2014 both flags are needed and neither alone works",
     "file": "ee/pocketpaw_ee/cloud/billing/enforcement.py",
     "find": "        getattr(settings, \"billing_enforced\", False)\n        or getattr(settings, \"sites_billing_enforced\", False)",
     "replace": "        getattr(settings, \"billing_enforced\", False)\n        and getattr(settings, \"sites_billing_enforced\", False)",
@@ -40,20 +40,20 @@
     ]
   },
   {
-    "label": "the flag defaults ON — every self-host install acquires the sites paywall on upgrade",
+    "label": "the flag defaults ON \u2014 every self-host install acquires the sites paywall on upgrade",
     "file": "src/pocketpaw/config.py",
     "find": "    sites_billing_enforced: bool = Field(\n        default=False,",
     "replace": "    sites_billing_enforced: bool = Field(\n        default=True,",
     "tests": [
       "tests/cloud/sites/test_sites_billing_flag.py::test_the_setting_defaults_off_and_reads_its_env_var",
-      "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_a_second_site_attaches_freely"
+      "tests/cloud/sites/test_custom_domain_cap.py::test_with_billing_off_a_free_site_is_not_capped"
     ]
   },
   {
     "label": "the sites flag leaks into the chat-run credit gate",
     "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
-    "find": "    if not get_settings().billing_enforced:\n        return None\n    if not workspace_id:",
-    "replace": "    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced\n\n    if not sites_enforced():\n        return None\n    if not workspace_id:",
+    "find": "    settings = get_settings()\n    if not (settings.billing_enforced or settings.credits_enforced):\n        return None\n    if not workspace_id or source == \"byok\":",
+    "replace": "    from pocketpaw_ee.cloud.billing.enforcement import sites_enforced\n\n    if not sites_enforced():\n        return None\n    if not workspace_id or source == \"byok\":",
     "tests": [
       "tests/cloud/sites/test_sites_billing_flag.py::test_the_sites_flag_does_not_start_402ing_chat_runs"
     ]

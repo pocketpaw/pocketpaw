@@ -1,0 +1,667 @@
+# Paw Sites plans are paid from workspace credits — Dodo is out
+
+Created 2026-09-05 (`fix/sites-plan-credits`). Read this before touching site
+billing, before diagnosing a site stuck showing "pending", and before assuming
+any site charge appears on a Dodo invoice.
+
+Updated 2026-09-06 (`feat/plan-included-sites`): **there is now a SECOND way a
+site is paid for, and it is not the wallet.** The workspace plan carries sites
+(Go 1 / Pro 3 / Pro Max 10) — see "The plan rail" below, which is the section to
+read first if a paid-looking site shows no debit. The same change retired the
+`studio` and `agency` org flats; "What was removed" records that.
+
+Updated 2026-10-02 (`feat/partners-sell`, PH-2): **Paw Partners sell yearly
+plans.** See "Partner yearly plans" below. A renewal now buys one *period* of the
+tier, which is still one month for every public rung.
+
+Updated 2026-10-02 (`feat/partners-commissions`, PH-13): **a third rail,
+`client`.** A partner's client can pay a site's year directly through a one-time
+pay link, and the partner earns a commission. See "Client-paid partner sites"
+below. Also: a Dodo `payment.succeeded` that carries a `subscription_id` is now
+recorded and never granted as a top-up, which applies to workspace-plan
+subscriptions too. Re-check fixes on the same branch: partial refunds that add up
+to the full amount now lapse the site, early partial refunds no longer cancel the
+link, and a stale pay-link reservation is refused instead of filled.
+
+Updated 2026-10-02 (`feat/partners-tiers`, PH-15): **partner prices and
+commissions depend on a volume tier, and partners earn milestone rewards.** See
+"Partner volume tiers and milestone rewards" below. A partner's wallet charge
+for `site_year` / `staff_year` is no longer always the table price.
+
+## What was broken
+
+Selecting a paid plan for a site produced a site that said **pending payment** and
+never went live. There was no payment to complete.
+
+The publish path had two Dodo rails and picked the wrong one for the deployment it
+was running on. A paid tier with an add-on id configured took the add-on rail,
+which attaches the site as a line on the workspace's **own** Dodo subscription.
+That rail refuses a workspace with no subscription — `NoActiveSubscription` — and
+that refusal was not a bug in it, it was its documented shape: an add-on has to
+attach to something.
+
+What the refusal did to the site is the bug. The site was created PENDING first,
+so the failed charge left a real `Site` document sitting undeployed, and the
+Billing tab rendered the copy for the *other* rail: "Pending payment — complete
+checkout to publish." No checkout had been opened. Nothing in the product could
+open one. There was no action the operator could take from inside the app that
+moved that site forward, and the pending sweeper is visibility-only by design, so
+nothing moved it forward from outside either.
+
+## What it does now
+
+**A paid site is bought from the workspace credit balance**, in the publish
+request, and deploys in that same request. One credit is one cent, so a $7/month
+tier debits 700 credits.
+
+- No payment gateway is involved and none has to be configured. That is what makes
+  it work on a self-hosted deployment and on a workspace that has never bought a
+  workspace plan.
+- An underfunded wallet raises `credits.insufficient` (402) with **zero** side
+  effects — nothing debited, the site left unpublished. The builder shows "Not
+  enough workspace credits… top up in Settings → Billing".
+- `Site.billing_rail` records which rail paid: `credits` for a site bought from
+  the wallet, `plan` for one the workspace subscription carries (see below),
+  `addon` / `subscription` / `""` on rows sold before the cutover.
+
+## The plan rail — the workspace subscription carries sites
+
+Added 2026-09-06. **A paid-looking site with no debit against it is not a bug.**
+Before the wallet is touched, the publish path asks whether the workspace plan has
+a free site slot, and if it does the site rides the plan instead of the balance.
+
+| Workspace plan | Sites carried |
+|---|---|
+| Free | 0 |
+| Paw Go | 1 |
+| Paw Pro | 3 |
+| Paw Pro Max | 10 |
+| Enterprise | uncapped |
+
+Four things follow from that, and each is a place this goes wrong quietly:
+
+- **A carried site is stamped `billing_rail = "plan"`**, and that field is the only
+  thing telling the two answers apart. Stamp a carried site `credits` and the
+  renewal sweep bills a customer every month for a site their subscription already
+  covers; stamp a bought site `plan` and they keep paid capabilities after they
+  stop paying.
+- **A carried site gets `staff` regardless of the rung asked for.** Both rungs cost
+  the buyer nothing here, so handing them the cheaper one would only withhold the
+  concierge their subscription includes.
+- **It carries no `renewal_date` and `period_paid_usd` stays 0.** The sweep selects
+  on `credits` alone, so a carried site is invisible to it. The 0 is load-bearing
+  rather than tidy: leaving the tier's price there would let someone walk a carried
+  site down a rung, drop off the plan, and come back holding a month of credit for
+  money nobody spent.
+- **A tier change on a carried site is free**, and is refused the credits
+  arithmetic entirely rather than being priced at a difference of zero.
+
+### A downgrade releases the sites the new plan cannot carry
+
+This is the leak the rail would otherwise have. The allowance is checked when a
+site is published and never again, so three sites published on Pro keep riding a
+plan that carries one after the subscription drops to Go — free hosting,
+permanently, with nothing in the product ever mentioning it again.
+
+`sites.service.reconcile_plan_carried_sites` is what closes it, and it is called
+from `workspace.service.set_workspace_plan` — the chokepoint, not from each
+caller, so a plan written by a webhook, an admin action, or a test converges the
+same way. `platform_set_workspace_overrides` calls it too, since an
+`included_sites` override moves the allowance just like a plan. Allowances that
+shrink with no write at all (an override reaching its `expires_at`) or through a
+writer that skips both (a direct DB edit) are caught by the renewal sweep, which
+runs `reconcile_all_plan_carried_sites` over every workspace with a site on the
+plan rail each tick. **Oldest first keeps its slot**, ordered on `createdAt`: the oldest site
+is the one most likely to be linked to and indexed, and losing its custom domain
+is the most expensive release available.
+
+Ordering on `_id` would be wrong in a way that looks right. A `Site`'s `_id` here
+is a deterministic hash of `(workspace, pocket)`, so sorting on it orders by
+digest — arbitrary, and it agrees with insertion order often enough that a test
+built on three sites passes against the bug about a sixth of the time. The test
+that guards this stamps the two orders into deliberate opposition for that reason.
+
+A released site keeps `deployed = True` — it stays live on the free floor, with
+the watermark back and the custom domain no longer resolving. It is not taken
+down.
+
+### Reading a site's rail
+
+```javascript
+db.sites.aggregate([{ $group: { _id: "$billing_rail", n: { $sum: 1 } } }])
+```
+
+`""` is a pre-cutover row. If a site shows `plan` on a workspace whose plan
+carries fewer sites than it holds, the reconciler has not run for it — write the
+workspace's plan again through `set_workspace_plan` rather than editing documents.
+
+## What a plan CHANGE costs, which is not the sticker price
+
+A first purchase pays the tier's whole monthly price. A **change** of tier does
+not, because the period it lands in has already been bought:
+
+| Move | Charged now | `renewal_date` |
+|---|---|---|
+| Buy a plan on an unplanned site | the tier's full month | now + 1 month |
+| Move UP mid-period | the difference only | unchanged |
+| Move DOWN mid-period | nothing | unchanged |
+| Back UP to a tier already bought this period | nothing | unchanged |
+| Down to the free floor | nothing | KEPT — the plan closes on that date |
+| Monthly renewal | the current tier's full month | steps from the DUE date |
+
+`Site.period_paid_usd` is what makes this work: the **most expensive tier already
+bought for the current period**, in whole dollars. A change charges
+`new_tier - period_paid_usd` and only when that is positive. It is a high-water
+mark, so it does **not** fall on a downgrade — the customer paid for the dearer
+tier and holds it until the period ends, which is why going back up inside that
+period is free. It resets when a new period starts (the renewal sweep sets it to
+the tier just charged) or when the site leaves its plan.
+
+It is **not time-prorated**: an upgrade on day 29 costs the same difference as one
+on day 2. The wallet has no proration machinery and a second pricing model in the
+sites service is worse than a rule stated plainly. It rounds toward the customer
+on a downgrade and away from them on a late upgrade, by at most the difference
+between two rungs, and the Billing tab says so where the change is made.
+
+Before this, every tier change was priced at the new tier's full month. That was
+three overcharges at once: a downgrade cost more than the plan it was leaving,
+flipping between two tiers charged a month per flip and could drain a funded
+wallet, and an upgrade billed a period the customer had already paid for — then
+reset `renewal_date`, handing back a free month that made the balance look
+explicable.
+
+### Cancelling runs to the end of the month already paid for
+
+Dropping a paying site to the free floor does not end its plan on the spot. It
+sets `Site.plan_cancels_at_period_end`, and everything the customer bought is
+left standing — tier, `subscription_status: "active"`, `renewal_date`,
+`period_paid_usd` — so the custom domain, analytics and badge removal survive to
+the date they were paid up to. The renewal sweep closes it there: the row goes to
+the free tier with no subscription, no renewal and nothing pre-paid, counted under
+`closed` and logged at INFO, and nothing is debited.
+
+Closing immediately, which is what the first cut of this did, is the mirror image
+of the overcharges the rest of this document removes. The model is *the period is
+bought, and a tier change re-prices it rather than restarting it* — that is why a
+downgrade costs nothing and going back up inside the period is free. Ending the
+plan the moment somebody clicks away contradicts it for the one move where it
+costs the customer money: cancel on the 2nd and you forfeit 28 days **and** pay a
+full month to come back, because the high-water mark is already zero.
+
+Three consequences worth knowing before you touch this:
+
+- **`_apply_site_plan` must not stamp the floor.** The request that schedules the
+  close carries `site_plan_key="free"`, and entitlements resolve from `plan_tier`
+  as much as from `subscription_status` — so writing the tier immediately would
+  strip the capabilities mid-month while the flag sat there looking correct.
+- **Resuming is a same-tier republish**, which is the one shape a tier change is
+  written to ignore, so it is handled separately. It needs the explicit key and
+  `purchase_authorized` (it re-arms a recurring charge). An unauthorized member
+  republishing the same tier is not refused — that is their daily content edit —
+  the close simply stays scheduled.
+- **A site with no `renewal_date` closes immediately.** There is no period to
+  honour, and the sweep selects on that date, so scheduling one would be a close
+  nothing ever performs.
+
+In the Billing tab: the date reads "Ends" rather than "Renews", picking the free
+card explains what happens rather than saying "nothing more will be charged", and
+the button on the current tier becomes **Resume plan** and is enabled — without
+that last one, cancelling is one-way from the UI, because the picker correctly
+shows the tier the site still holds.
+
+### Who may make the change
+
+Any member republishes a site freely — same tier, or no tier key at all — because
+that is a content edit and it is what the people who build these sites do all day.
+**Every move BETWEEN tiers needs `sites.buy_plan`, which is ADMIN**, and that
+includes dropping to the free floor. Cancelling costs nothing, so a gate that only
+watched for spending waved it through; it ends a plan the workspace is paying for
+and takes the custom domain, the concierge and the badge removal off a live page,
+with nothing refunded and nothing restored. Spending the company's money and
+destroying what it already bought are the same decision seen from two sides.
+
+A refused change writes nothing — the tier, the renewal date and the paid mark are
+all left as the admin bought them. The caller gets `sites.plan_purchase_forbidden`
+(403).
+
+## Sites still on a pre-cutover rail cannot change plan
+
+A site sold before the cutover is a line on the workspace's **Dodo** subscription,
+and Dodo goes on invoicing it. `sync_site_addons` — the only code that could
+adjust or cancel that line — was deleted with the rest of the gateway. So a tier
+change on one of those rows is **refused**, with `sites.legacy_billing_rail`
+(409), rather than served: charging the wallet would take payment on both rails
+for the same site, and not charging would hand out a paid upgrade Dodo is still
+billing at the old price.
+
+The refusal is narrow. Republishing content on the plan the site already has is
+untouched and still free, which is what those customers actually do day to day.
+Only switching plans is blocked.
+
+Find them:
+
+```javascript
+db.sites.find({
+  subscription_status: "active",
+  billing_rail: { $ne: "credits" },
+  plan_tier: { $nin: ["free", null] },
+})
+```
+
+Migrating one, **after** cancelling its line at the gateway:
+
+```javascript
+db.sites.updateOne(
+  { _id: ObjectId("<site id>") },
+  { $set: {
+      billing_rail: "credits",
+      period_paid_usd: <the monthly price of its current tier, in dollars>,
+      renewal_date: ISODate("<when the period the customer already paid for ends>"),
+  } },
+)
+```
+
+Set `renewal_date` to the end of the period the gateway already charged for, not
+to today: the sweep charges the wallet on that date, and bringing it forward bills
+the customer twice for one month. `period_paid_usd` should be the price of the
+tier they are on, so the first upgrade after the move charges a difference rather
+than a whole month.
+
+## What was removed
+
+Dodo is gone from Paw Sites, not bypassed. Deleted rather than left unread,
+because a field nothing consumes is one a later change quietly depends on again:
+
+| Removed | Was |
+|---|---|
+| `POCKETPAW_DODO_SITE_PRODUCTS`, `POCKETPAW_DODO_SITE_ADDONS` | the two tier→gateway-id maps. Setting either env var is now inert |
+| `SitePlanTier.dodo_product_id` / `.dodo_addon_id` and their resolvers | the catalog's gateway ids |
+| `billing.service._site_addon_cart` / `sync_site_addons` | the workspace add-on cart, rebuilt from Site documents |
+| `sites.service._publish_addon_site`, `_site_checkout_return_urls`, `mark_site_subscription` | the add-on purchase rail and the webhook's site writes |
+| `SiteResponse.checkout_url` and the frontend redirect | the hosted-checkout hand-off |
+
+**`dodo_plan_products` and the credit product id are untouched.** Workspace plans
+and credit top-ups still bill through Dodo. Only the per-site ladder left.
+
+`purchasable` therefore changed meaning rather than value: it asks "does the
+ladder sell this tier one site at a time", which is true for every rung the
+catalog now ships.
+
+**The `studio` ($39, 5 sites) and `agency` ($149, 25 sites) org flats were retired
+on 2026-09-06**, along with the `white_label` and `included_sites` fields that
+existed only for them. They were not repriced: the workspace plan carries sites
+now, so a second ladder selling a bundle of sites for a flat fee both contradicted
+it and priced worse than Pro Max. Bundled sites have one home, the workspace
+ladder, and the per-site rungs are overflow above it.
+
+Nothing migrates, and nothing needs to: a `Site` still holding `"studio"` resolves
+to no tier at all and reads as the free floor — the same answer the scope guard
+gave while the key existed. Check for any before assuming there are none:
+
+```javascript
+db.sites.find({ plan_tier: { $in: ["studio", "agency"] } }, { workspace: 1, plan_tier: 1 })
+```
+
+The scope machinery (`SitePlanTier.scope`, `is_org_scoped`, `site_scoped_tier`)
+stayed. It no longer guards anything — with no org-scoped tier shipping, that
+lookup returns exactly what the plain one returns, and two mutations swapping it
+out were watched to escape — but it is the named seam every read of a stored
+`plan_tier` goes through, so the next org-scoped tier does not have to re-derive
+which call sites were safe. Treat it as shape, not as a live gate.
+
+## The one thing an operator must do
+
+**Cancel any live per-site Dodo subscription in the Dodo dashboard.** Nothing in
+the code will cancel one after this change — the lifecycle writes are gone.
+
+The webhook still ACKS a delivery carrying a `site_id` and logs it at WARNING. A
+line in the logs reading
+
+```
+billing.webhook: per-site subscription event type=... — Paw Sites no longer bills
+through Dodo, so this is a subscription left live at the gateway.
+```
+
+means a customer is still being charged at the gateway for something the product
+no longer sells. Find them:
+
+```javascript
+db.sites.find({ subscription_id: { $ne: null } }, { workspace: 1, plan_tier: 1, subscription_id: 1 })
+```
+
+`Site.subscription_id` is deliberately kept and no longer written: it is the only
+record of which sites had a gateway subscription, and it is what that query needs.
+
+**The routing fork on `site_id` stays for a reason.** Deleting it would not stop
+those deliveries arriving; it would send them to the WORKSPACE path, which grants
+credits and rewrites `Workspace.plan`. The two catalogs share the key `free`, so a
+legacy per-site subscription on the floor would be read as a workspace plan
+change. `tests/cloud/billing/test_dodo_webhook.py::test_a_site_carrying_delivery_never_grants_workspace_credits`
+pins that.
+
+## The renewal, which is the half that is easy to forget
+
+A Dodo subscription is what used to make a monthly plan recur. A wallet-paid site
+does not have one, so `sites/renewal_sweeper.py` does it: on the five-minute
+heartbeat it debits the next month for every credits-paid site whose
+`renewal_date` has passed and steps the date forward one month **from the due
+date**, not from now.
+
+When the wallet cannot cover a renewal the site is marked `cancelled` and drops to
+the free floor — the attribution badge returns, the custom domain stops resolving,
+the concierge goes quiet — and **the site itself stays live**. Republishing after a
+top-up buys the tier again through the ordinary purchase path.
+
+`POCKETPAW_SITE_RENEWALS_ENABLED=0` stops the sweep charging without a redeploy.
+
+**A site on a legacy rail is not renewed from the wallet.** The sweep selects
+`billing_rail == "credits"` only, so a site the gateway may still be billing is
+never also debited. Once its gateway subscription is cancelled, flip it over by
+setting `billing_rail` to `credits` and `renewal_date` to when its paid period
+ends — after that the sweep picks it up like any other.
+
+## Partner yearly plans (`site_year`, `staff_year`)
+
+An ACTIVE Paw Partners workspace can sell a client site a yearly plan from its
+own wallet (`POST /api/v1/partners/sell`). There is no separate purchase code:
+the sale calls `publish_pocket` with the partner tier, so the debit, the redeploy,
+the badge/concierge stamping and the renewal date are what any paid publish does.
+The sale also stamps `Site.partner_client_id` (the Fabric `Customer` id).
+
+| Tier | Features | Period | IN | Everywhere else |
+|------|----------|--------|----|-----------------|
+| `site_year` | same as `site` (badge off, custom domain) | 12 months | $17 | $29 |
+| `staff_year` | same as `staff` + 1,200 concierge conversations per year | 12 months | $56 | $89 |
+
+- Prices live in one table in `billing/site_plans.py`, read by
+  `partner_price_usd(tier, country, partner_tier)`; the country is the partner
+  profile's `billing_country`, and the volume tier's discount is applied there
+  (see the tiers section). `billing.service.site_plan_price_usd` is what every charge
+  site calls, and for a monthly rung it is still `monthly_price_usd`.
+- The rungs are **not** in the public catalog (`list_site_plans`). A publish
+  naming one outside an active partner workspace is refused with **403**
+  `sites.partner_plan_only` — and so is re-buying one on a lapsed site once the
+  partner is suspended. The member plan-request door never takes them: `POST
+  /sites/plan-requests` answers **422** `sites.unknown_plan_tier`, and the propose
+  step refuses them too. They are never carried by the workspace plan.
+- Re-buying the tier a LAPSED (or pending) site still names is a purchase, so it
+  needs `sites.buy_plan` like any other (`sites.plan_purchase_forbidden` for a
+  member). This applies to every workspace, not only partners.
+- `monthly_price_usd` on these rows is display-only (year price / 12, rounded
+  down). Nothing charges it.
+- **Renewals ride the same sweep.** A due `site_year` site is debited the partner
+  price again and its `renewal_date` steps 12 months from the due date; a short
+  wallet lapses it to the free floor and the site stays up, like any other.
+- **Changing to a different period length is a fresh purchase**, not a re-price.
+  Monthly to yearly charges the FULL year price, sets `period_paid_usd` to it and
+  starts the year today. The unused part of the month is not credited; nothing on
+  this rail prorates.
+- **A running year cannot move to a monthly plan.** Yearly to any monthly rung
+  before `renewal_date` is refused with `sites.period_downgrade_refused` ("This
+  site is paid through <date>. Switch plans when it renews."), with no charge and
+  no change. After the date it is a fresh monthly purchase.
+- **Tier-change debits have their own key** (`site_plan:<site>:<tier>:<date>:change`).
+  Purchases and renewals keep `site_plan:<site>:<tier>:<date>`. Before this, an
+  upgrade made on a renewal's due date shared that renewal's key, the renewal
+  replayed as a no-op, and the whole next period was free (monthly too).
+- A period change that would replay a `:change` debit already made today is
+  refused (`sites.plan_already_bought_today`) rather than restarting the period
+  for nothing.
+- Changes within the same period length keep the old rule: pay the difference
+  against `period_paid_usd`, keep the date. The rule is
+  `billing.service.site_plan_change_terms` (pure; unit-tested).
+- If a partner's profile is removed, its yearly sites renew at `period_paid_usd`
+  **only when that is a real price of the tier**, in any country at any volume-tier
+  discount (17, 15, 13, 29, 26 or 23 for `site_year`; 56, 50, 44, 89, 80 or 71 for
+  `staff_year`). `period_paid_usd` is a high-water mark, so after a
+  mid-year `staff_year` → `site_year` downgrade it reads 89. With no real price
+  to keep, the site **lapses at renewal** exactly like a short wallet: free floor,
+  site stays up, logged by site id. **An operator removing a partner profile
+  therefore lapses that partner's yearly sites at their next renewal unless the
+  profile is restored first.**
+- **A change after the paid period has ENDED** (renewal date passed, sweep not yet
+  run) is a fresh purchase of the new tier with a new period from now, whatever
+  the period lengths. The sweep then finds the date moved forward and skips the
+  site. Before this, an upgrade billed the gap on the ended period and the sweep
+  billed a whole new one ($60 + $89 instead of $89).
+- **Save race at a renewal.** Both the renewal sweep and a publish tier change
+  write the whole Site document with `save()`. If an admin changes a site's plan
+  in the same few seconds the sweep is renewing it, the later save wins. A
+  change debit can then be in the ledger with nothing delivered (the sweep's save
+  put the old tier back), or a renewal debit can be recorded against a row the
+  change rewrote. The same key is never charged twice, but money **can be taken
+  without the change being delivered**. If a site's tier and its latest
+  `site_plan` ledger rows disagree around a renewal, trust the ledger: fix the row
+  to what was paid, or refund the change debit.
+- **Deploy-day edge for the `:change` keys.** Tier-change debits written BEFORE
+  this deploy used the plain key. On the deploy day D only, a change made before
+  the deploy and a renewal of the same site and tier falling due later on D share
+  that plain key, so the renewal replays as a no-op (the old R1 bug, once). To
+  avoid it, deploy right after a sweep tick. To check afterwards: a site renewed
+  on D with no new `site_plan` ledger debit for that renewal was the replay.
+- The `staff_year` concierge quota counts from `renewal_date` minus 12 months,
+  not from the 1st of the month.
+
+## Client-paid partner sites (`billing_rail: "client"`)
+
+A partner calls `POST /partners/pay-link`. That opens a one-time Dodo payment on
+the credits product (USD, or the INR credits product for an IN partner) at the
+plan's list yearly price, and appends a record to the site's `partner_payments`:
+`{payment_id, sku, amount_minor, currency, client_id, checkout_url, created_at,
+status: "pending"}`. `payment_id` is the id Dodo returned when the link was made.
+
+When `payment.succeeded` arrives, the webhook looks that payment id up in
+`partner_payments` before doing anything else. A match is never granted as a
+top-up. If the currency, the amount (the total, or the total minus `tax` when tax
+was added on top) and the product all match the record, one write flips the
+record to `paid` and puts the site on the plan for 12 months: `billing_rail:
+"client"`, `subscription_status: "active"`, `partner_client_id` set. The same
+write freezes `commission_credits` and `rate_bps` on the record. The commission
+is then granted to the partner's workspace (ledger cause `partner_commission`,
+key `<payment_id>:commission`), and the site is republished as a content edit so
+the badge and co-brand mark follow the plan. If anything doesn't match, or the
+wallet bought the site after the link went out, the record becomes `flagged`
+with a `flag_reason` and nothing moves. The client has paid for nothing at that
+point, so refund them in Dodo.
+
+Commission is the partner's tier rate (25% / 30% / 35%) of the US cents paid, net
+of tax, floored. INR converts the way INR top-ups do. Founding partners
+(`Workspace.partner.founding`) get max(40%, tier rate) on payments within 24
+months of the site's first client payment. The rule lives in
+`partners/_calc.py::commission_rate_bps`, and the numbers in that file's `TIERS`
+table; that is the only place to change them.
+
+## Partner volume tiers and milestone rewards
+
+All numbers are in `partners/_calc.py` (`TIERS`, `MILESTONES`).
+
+| Tier | Active sold sites | Wallet discount | Commission |
+|------|-------------------|-----------------|------------|
+| bronze | 0–9 | 0% | 25% |
+| silver | 10–24 | 10% | 30% |
+| gold | 25+ | 20% | 35% |
+
+- **Active sold sites** = sites in the workspace with `partner_client_id` set and
+  `subscription_status: "active"`, on any rail.
+- **Who sets `Workspace.partner.tier`:** `partners.service.refresh_standing`,
+  through `workspace.service.set_partner_tier` (a compare-and-set on the tier as
+  read). It runs after every `POST /partners/sell` and every paid client payment
+  (including redeliveries), and only RAISES the tier there. It never raises an
+  exception: a failure is logged (`partners: refresh_standing failed`) and the
+  next sale, payment redelivery or monthly review repairs it.
+- **Monthly review:** `sweep_partner_tiers` on the 5-minute heartbeat, right after
+  the renewal sweep. It picks ACTIVE partners whose `partner.tier_reviewed_at` is
+  unset or before the current UTC month, recomputes with downgrade, grants any
+  missing milestone and stamps `tier_reviewed_at`. Kill switch:
+  `POCKETPAW_PARTNER_TIER_SWEEP_ENABLED=0` (default on). Suspended partners are
+  not reviewed; their tier freezes.
+- **Operator precedence:** the platform PUT can still write `tier`. It stands until
+  a recompute moves it: the next upgrade, or the next month's review. The PUT
+  keeps `tier_reviewed_at`, so a manual promotion lasts at least to the month
+  boundary.
+- **Discount** is floor(price × (1 − d)) in whole USD, applied in
+  `site_plans.partner_price_usd`, so the sale, a tier change, the renewal (priced
+  at the tier on the renewal day) and the offers agree. The debit keys are
+  unchanged (`site_plan:<site>:<tier>:<date>[:change]`).
+- The sale or payment that crosses a threshold is priced at the OLD tier; the
+  tier moves after it.
+- **Milestones** (`partner_reward`, key `partner_reward:<workspace_id>:<sites>`):
+  1st +200, 10th +1,000, 25th +3,000, 50th +7,500 credits, on LIFETIME distinct
+  sites sold, read from the ledger: distinct `ref.site_id` over applied
+  `site_plan` debits on a partner rung plus applied `partner_commission` grants.
+  Refunds, lapses and deleted sites never lower it, so a milestone is granted
+  once and never clawed back. Because it reads the ledger, partners who sold
+  before this shipped get their milestones at their next sale, payment or review.
+- Check a partner: `db.workspaces.find_one({_id: ObjectId("<id>")}, {partner: 1})`
+  and `db.credit_ledger.find({workspace: "<id>", cause: "partner_reward"})`.
+
+The renewal sweep never debits a `client` site. Once `renewal_date` passes, it
+drops the site to `free` / `none` and leaves it published. A new paid link in
+the last 30 days of the year adds a year from `renewal_date`.
+
+A `refund.succeeded` or `dispute.lost` takes the commission back when the
+commission's ledger entry is less than 60 days old. The clawback is anchored on
+the ledger, not the Site: the partner's workspace comes from the `Payment` row,
+so it works after the site is deleted. A stated refund amount takes
+`commission * refunded // paid` (a partial refund takes its share); a partial
+with no usable amount takes nothing and logs ERROR. The running total is claimed
+on the Payment row (`commission_reversed`, `commission_reversal_event_ids`)
+before the debit (cause `partner_commission_reversal`, key
+`<payment_id>:commission:reversal:<event_id>`, may go negative), so a refund and
+a dispute, or several partials, never take more than was granted. A claim that
+loses that race re-reads the row and retries once with what is left, then logs
+ERROR. The same claim sums the refunds into `refunded_minor`, so a full refund, a
+lost dispute, or partials that add up to the amount paid (within 60 days of
+`paid_at`) flip the record to `reversed` and drop the site to free. The site
+lapses after the claim and before the debit. Known gap: `refunded_minor` only
+moves when there is commission to claim, so an inactive partner's site keeps its
+year after partials that add up to the full amount (a single full refund still
+lapses it). A debit that raises, including a cancellation, releases the claim so
+the redelivery re-drives it; a redelivery that finds its event id on the row with
+no ledger entry behind it logs ERROR (the process died between claim and debit;
+check the ledger, then settle by hand). A full refund that lands while the record
+is still `pending` marks it `reversed` (`refunded_before_processed`), so the late
+payment does nothing; a partial one logs ERROR and leaves the record to activate.
+
+A pay link's reservation is filled only while it is younger than five minutes.
+After that another request may have treated it as crashed and opened its own
+link, so the slow request releases its slot and returns 409
+`partners.link_in_progress`. The Dodo payment it created is never handed out.
+
+Other flags on a record: `discount` (a discount code was used; payment links
+cannot switch codes off), `sku_mismatch` (a payment for another plan than the
+client-paid year running), `partner_inactive` (the year activated, no commission
+paid; review by hand). Pay links pin `billing_currency`, so a USD link is never
+charged in EUR.
+
+Things to know:
+
+- A metadata tag `kind: partner_client_payment` on a payment that matches no
+  record is logged at ERROR and NOT granted. If Dodo ever reported a different
+  payment id at completion than at creation, real client payments would land
+  here instead of becoming top-ups in the partner's wallet. Check the log, find
+  the site by `metadata.site_id`, and settle by hand.
+- Changing the plan of a `client` site through publish is refused with
+  `sites.client_paid_plan` (a plan change would need a second client payment).
+- A pay link is reserved on the Site before Dodo is called (a record whose
+  `payment_id` starts `reserving:` and has no `checkout_url`). One left behind by
+  a crash stops blocking new links after 5 minutes.
+- Subscription charges: their `payment.succeeded` writes a Payment row stamped
+  `subscription_id` and grants nothing. A refund of one logs ERROR with the
+  subscription id; settle the allotment by hand.
+- Not fixed, by design: a refund racing the commission grant can leave the
+  grant standing (the refund reads no ledger entry yet); the founding 24-month
+  window is per site, from that site's first client payment.
+- A refund of an earlier payment inside 60 days of a later renewal payment still
+  drops the site to free, although the later year was paid. Restore the row by
+  hand if that happens.
+- Find client-paid payments: `db.sites.find({"partner_payments.payment_id": "<id>"})`.
+
+### Behaviour change for EVERY workspace: a refused upgrade no longer strands a live site
+
+Upgrading a live free site to a paid tier first rewrites the row to "pending" on
+the new tier, then debits the wallet. When the wallet was short, the row used to
+stay that way: still deployed, but `pending` on a tier nobody paid for. Since
+2026-10-02 the purchase puts back the site's previous `plan_tier`,
+`subscription_status`, `billing_rail`, `pending_deploy_inputs`, `owner` and `name`
+when the charge fails. A brand-new site that was never live still stays pending
+and undeployed, as before.
+
+## A site that was charged and never went live
+
+`activate_site` marks the subscription active **before** it runs the deploy, on
+purpose: the badge stamper and the concierge embed both re-read the document
+mid-deploy and resolve the site's paid capabilities from that field, so flipping
+it afterwards branded a paying customer's page as free. The cost is that a deploy
+which raises leaves the row `subscription_status: "active"` with
+`deployed: false` — charged, and not up.
+
+Two things follow, and both are deliberate:
+
+- **The renewal sweep skips it.** It counts the row under `not_live` and logs at
+  WARNING, leaving `renewal_date` in the past so the next tick re-examines it. It
+  will not debit a second month for a page that 404s.
+- **The buyer recovers it by republishing**, and that costs nothing. The site
+  reads as already paying at the same tier, so no charge branch is entered; the
+  republish just redeploys. Pinned by
+  `test_a_failed_deploy_is_recovered_by_republishing_for_free`.
+
+Nothing else surfaces these rows — the pending sweeper only looks for
+`subscription_status: "pending"` — so the `not_live` count and its WARNING are
+the operator signal. Find them:
+
+```javascript
+db.sites.find({ subscription_status: "active", deployed: false })
+```
+
+A dynamic site mid-provision has the same shape legitimately, for minutes. It
+renews on the tick after it goes live.
+
+## Recovering a site that is already stuck pending
+
+Sites stranded by the old rail are still in the database. There is no migration:
+the fix is the ordinary flow.
+
+1. Make sure the workspace has credits (Settings → Billing → top up).
+2. Open the site, pick the tier, and apply it.
+
+The republish charges the wallet and deploys. Nothing has to be edited by hand,
+and the stranded row is reused rather than duplicated — the site id is
+deterministic per (workspace, pocket).
+
+To find them:
+
+```javascript
+db.sites.find({ subscription_status: "pending", deployed: false })
+```
+
+## Before changing any of this
+
+```bash
+uv run python scripts/mutate.py --plan tests/mutations/site_plan_credits.json
+```
+
+Thirty mutations, each one a way to charge a customer wrongly: an
+overdraftable purchase, a debit key that bills month two as month one, a renewal
+that walks the billing day through the calendar, a lapse that takes the site down,
+a republish billed as a purchase, a webhook falling through to the workspace
+wallet, a tier change priced at a full month again, a legacy-rail site billed on
+both rails, an upgrade that restarts the paid period, a keyless republish read
+as a downgrade to free, a renewal billing a site that never deployed, and an
+authorization gate narrowed back to purchases so a member can cancel a plan the
+workspace pays for, a cancellation that closes on the spot and forfeits the month
+already bought, a pending close that drops the paid tier immediately, a renewal
+that charges a plan the customer already cancelled, and a resume that does not
+call the close off. All are caught today; a plan with one rotted anchor applies none of them and reads as
+covered while proving nothing, so run `--validate` repo-wide after editing the
+code they point at.
+
+`tests/mutations/site_plan_request_gate.json` is the sibling plan for the ask-an-
+admin path, and it grew a mutation here too: a member who is refused can file a
+Tray card instead, and since a cancellation is now refused the same way, that card
+had to stop describing every request as a purchase.
+
+That is not theoretical for this gate:
+`tests/mutations/site_plan_purchase_authz.json` anchors three of its seven
+mutations inside the same `if` block, and widening the gate to cover
+cancellation silently rotted all three.

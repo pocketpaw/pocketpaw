@@ -9,6 +9,10 @@ The events here intentionally mirror the existing ``ee.cloud._core.realtime``
 ``Event`` shape so they ride the same bus + audience resolver. They are
 defined in this module (rather than in ``_core.realtime.events``) so the
 meetings module stays the single owner of its event vocabulary.
+
+2026-10-01 (feat/meetings-lobby, MC-3): ``MeetingKnock`` and
+``MeetingKnockResolved`` — a guest asking to join, and that ask being admitted,
+denied, cancelled or expired. Realtime only, to the meeting room's members.
 """
 
 from __future__ import annotations
@@ -114,9 +118,34 @@ class MeetingTranscriptReady(Event):
     EVENT_TYPE: ClassVar[str] = "meeting.transcript_ready"
 
 
+@dataclass
+class MeetingKnock(Event):
+    """A guest asked to join a meeting (``access="ask"``).
+
+    ``data``: ``{workspace_id, meeting_id, group_id, knock_id, name}``;
+    ``group_id`` is the meeting room, whose members get the event. Drives the
+    in-call "<name> wants to join" card.
+    """
+
+    EVENT_TYPE: ClassVar[str] = "meeting.knock"
+
+
+@dataclass
+class MeetingKnockResolved(Event):
+    """A knock left ``waiting``: admitted, denied, cancelled or expired.
+
+    ``data``: ``{workspace_id, meeting_id, group_id, knock_id, status}``.
+    Clears the admit card for everyone in the call.
+    """
+
+    EVENT_TYPE: ClassVar[str] = "meeting.knock_resolved"
+
+
 __all__ = [
     "MeetingCancelled",
     "MeetingEnded",
+    "MeetingKnock",
+    "MeetingKnockResolved",
     "MeetingRecordingReady",
     "MeetingReminder",
     "MeetingScheduled",

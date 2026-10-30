@@ -1,131 +1,23 @@
-# tests/cloud/surface/test_sites_handler.py — Sites surface handler.
+# tests/cloud/surface/test_sites_handler.py — the /sites surface preamble.
 #
-# Created: 2026-06-03 — Guards the /sites surface preamble.
-# Updated: 2026-09-01 (fix/sites-drop-bundled-design-systems) — the bundled
-# DESIGN.md library and its ``pocketpaw_design_systems`` MCP server are gone, so
-# ``test_create_names_design_and_asset_tools`` split in two: the asset half kept
-# its stock/palette assertions under a truthful name, and the design half became
-# an INVERSE guard — no create preamble on any engine may name a design-system
-# tool id. A third test pins the replacement instruction, because deleting the
-# retriever without saying where tokens come from would leave the model on its
-# own defaults, which is the repetition the removal is meant to end.
-# Updated: 2026-08-11 (feat/sites-react-edit-lane, RX-3) — four tests at the BOTTOM
-# of this file pin the two preambles that route to the new react edit tool: the
-# react create step now says a follow-up change is
-# `edit_react_component`, NOT a second `create_react_site` (the re-create is what
-# minted a SECOND site pocket), and a react refine routes to
-# `_react_refine_preamble` instead of the rippleSpec merge path a react pocket has
-# nothing to merge into. The fourth test pins that ripple/svelte/no-engine refine is
-# byte-for-byte unchanged, so the fork cannot leak into the engine it was not
-# written for.
-# Updated: 2026-06-03 (pm) — Bundled skills now load on the SDK backend (local
-# plugin via the SDK `plugins=` option), so the preamble PREFERS the
-# `pocketpaw-create-site` skill and keeps the raw MCP tools only as a fallback.
-# Updated: 2026-06-03 (feat/sites-landing-brain, Task P4) — the preamble now
-# prefers the dedicated `pocketpaw-create-paw-site` marketing brain and stamps
-# `pattern="landing"`. It also drops the `form-layout` lead-form nudge: the
-# `form`/`newsletter` widgets nest an invalid `<form>` inside the static
-# template's outer POST form (the broken-dashboard render). The lead-form test
-# now pins the FLAT-native-input guidance instead of a form widget.
-# Updated: 2026-06-04 (feat/sites-refine-surface) — the /sites surface now has
-# TWO modes. The gallery (no pocket_id) still gets the create-a-new-site
-# preamble; the per-site refine chat (meta carries a pocket_id) gets a
-# LANDING-AWARE REFINE preamble that edits the existing published pocket via
-# the merge/edit path instead of rebuilding from scratch. The create-mode tests
-# below pin the no-pocket_id branch; the new refine-mode tests pin the
-# pocket_id branch (existing-site orientation, edit tool, the same 5 SSR rules,
-# and that it does NOT say "build a new site").
-# Updated: 2026-06-04 (feat/sites-svelte-engine) — the CREATE branch now forks on
-# `meta.engine` ("ripple" | "svelte"), set by the /sites create UI's "Use Svelte
-# pages" toggle. The engine-routing tests at the bottom pin that `engine="svelte"`
-# yields a create preamble preferring the `pocketpaw-create-svelte-site` skill
-# (and the `create_svelte_site` MCP fallback) and NOT preferring create-paw-site,
-# while the default (engine None / "ripple") create preamble is unchanged — still
-# names `pocketpaw-create-paw-site`. The toggle does not touch the refine branch.
-# These tests assert the create-mode preamble carries:
-#   1. The orientation — surface kind="sites", talk "site" not "pocket".
-#   2. The preferred path — the `pocketpaw-create-paw-site` marketing brain.
-#   3. The fallback path — the create MCP tool + the publish MCP tool — still
-#      present so the flow never breaks when the skill is unavailable.
-#   4. A lead-capture form with named fields, built FLAT (no form widget) so the
-#      published static site captures leads out of the box.
-# Updated: 2026-06-05 (feat/sites-svelte-engine, consolidated PR) — aligned the
-# svelte-engine create test with the strengthened preamble: the directive moved
-# from "prefer" to "this track is MANDATORY ... Use the skill", so the test now
-# pins "mandatory" instead of "prefer".
-# Updated: 2026-07-06 (feat/sites-crew-create-flow, SC-crew) — the CREATE branch
-# now optionally runs a guided two-phase authoring-crew flow behind the
-# `settings.sites_crew_enabled` flag (default OFF). The crew tests at the bottom
-# pin: (1) flag OFF → the create branch is BYTE-FOR-BYTE `_create_preamble` for
-# both ripple and svelte metas, and refine is untouched; (2) flag ON → a create
-# meta returns the crew preamble carrying the two-phase structure (interview +
-# build), the design-system / stock / palette MCP tool ids, the "just build it"
-# escape hatch, and the correct engine skill (`pocketpaw-create-svelte-site` on
-# the svelte track, `pocketpaw-create-paw-site` otherwise). The flag is toggled
-# via monkeypatch of `pocketpaw.config.get_settings` (not process env).
-# Updated: 2026-07-06 (feat/sites-crew-frontend-brief, SC-2) — added the
-# `_frontend_preamble(meta, brief)` tests: it renders the Frontend stage's build
-# instructions FROM a structured `DesignBrief` (the crew baton). The new tests pin
-# (1) sitemap roles/headings + copy injection from a hand-authored brief, (2)
-# engine ROUTING (svelte → create_svelte_site & not the ripple landing tool;
-# ripple → create_landing_site & not create_svelte_site), (3) the static-site
-# (SSR) rules language survives for a landing brief, and (4) that `build_preamble`
-# is UNCHANGED for the live create/refine paths (compared byte-for-byte against
-# calling `_create_preamble`/`_refine_preamble` directly), proving the new helper
-# is additive and not silently wired into the dispatch.
-# Updated: 2026-07-04 (feat/sites-chat-mode, CHAT-BE) — the /sites/[siteId] surface
-# now carries a Build/Chat mode. The refine branch (pocket_id present) forks on
-# `meta.mode`: "build" (default — today's behavior) keeps the mutate-and-republish
-# refine preamble; "chat" routes to a NO-MUTATION Q&A preamble that answers
-# questions about the existing site WITHOUT calling pocket_specialist__edit,
-# without republishing, and without creating pockets. The new chat-mode tests at
-# the bottom pin: (a) chat + pocket_id yields a Q&A preamble that does NOT instruct
-# the edit tool / mutation; (b) build (or unset) + pocket_id is byte-identical to
-# the existing refine preamble (regression guard); (c) create path (no pocket_id)
-# is unaffected by mode.
-# Updated: 2026-07-14 (fix/sites-unified-create-preamble) — the three create
-# preambles + the `sites_crew_enabled` flag collapsed into ONE always-on
-# `_create_preamble`. Every create (no pocket_id) now carries the clarity gate
-# (PHASE 1 + `ask_user` chips + "just build it" escape) and the design phase,
-# regardless of engine. The build step forks on `meta.engine`: DEFAULT/unset →
-# HTML (`create_html_site`); "svelte" → `create_svelte_site`; "ripple" → the
-# pocket-specialist landing spec. The old flag tests are gone; the create tests
-# below pin the always-asks behavior + per-engine build tool, and the refine/chat
-# tests are unchanged.
-#
-# Updated: 2026-07-17 (feat/sites-draft-first-create) — added
-# test_create_is_draft_first_publish_on_request: the create preamble now stops at a
-# reviewable DRAFT and offers to publish, gating the publish tool on an EXPLICIT
-# go-live request instead of auto-publishing off a plain "create a site". Asserts the
-# draft/preview framing + the explicit-go-live gate across all engines, and that the
-# publish tool is still named (the on-request path) so an explicit publish is unbroken.
-#
-# Updated: 2026-08-02 (fix/concierge-tools-for-site-agent) — added the concierge
-# awareness block at the bottom. The reported bug ("the agent building sites
-# sometimes does not know about concierge at all") was failure mode (2) AWARENESS
-# and it was TOTAL: "concierge" appeared zero times in every /sites preamble, zero
-# times in the sites MCP tool descriptions, and zero times in the bundled skills,
-# so whether the agent mentioned one was decided by model sampling alone. The new
-# tests are parametrized across all FIVE dispatched (engine, mode) combinations —
-# determinism is the fix, so spot-checking one mode would not prove it — and they
-# also pin the block's two honest limits: it must not claim a draft already has a
-# concierge (provisioning is live-publish-only) and must not name a configuration
-# tool that does not exist (catalog/actions are owner-authored only).
-
-# Updated: 2026-08-18 (fix/sites-html-refine-names-the-edit-tool) — the html
-# refine branch was denying a tool that exists. ``edit_html_file`` shipped in
-# db083bfc without touching the handler, so the preamble kept telling the agent an
-# html site had no edit tool and the agent relayed that to users. Three tests here
-# changed: ``test_html_refine_admits_it_has_no_edit_tool`` became
-# ``test_html_refine_routes_the_edit_to_the_html_edit_tool`` (it had been
-# certifying the stale prompt as correct on every run), and two new ones pin the
-# publish step html now earns and the unknown-engine fallback that listed html as
-# uneditable. The gate that should have caught this gained its missing direction:
-# ``test_every_registered_edit_tool_is_named_by_its_refine_branch`` fails when a
-# REGISTERED tool goes unnamed, where the existing gate only failed when a NAMED
-# tool was unregistered.
+# Guards the four modes (create / import-create / refine / chat) and the routing
+# between them. Create: every new site is a project started from a template through
+# the `pocketpaw-site` skill and the project tools, whatever create-time engine
+# hint arrives (`CREATE_ENGINE_TEMPLATE` maps html / ripple -> static, react ->
+# vite-react-hono, svelte -> sveltekit), and no old create tool or authoring skill
+# is named. Refine still forks on the engine the site was built with and names that
+# engine's edit tool. The routing tests at the BOTTOM pin that a meta carrying only
+# a ``site_id`` resolves to REFINE and that an unresolvable one fails closed rather
+# than falling into create; they seed a real Site row and pocket and go through
+# ``build_preamble``, because that defect only exists on the live path. Also
+# pinned: draft-first publishing, the research and art-direction steps, the craft
+# floor and size budget, the concierge block, the WhatsApp orders rule, the
+# per-engine refine rules (packages, verify, ask mechanism), and the shared facts /
+# blocked / stored-data / closing rules and Google-Fonts-only type.
 
 from __future__ import annotations
+
+import re
 
 import pytest
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
@@ -173,30 +65,251 @@ async def test_sites_handler_create_mode_when_no_pocket_id() -> None:
     # The unified create surface, tagged mode="create".
     assert 'mode="create"' in preamble
     # It always opens with the clarity gate, never blind-builds.
-    assert "phase 1" in lower
+    assert "research real sites" in lower
     # It must NOT slip into refine framing when there's no pocket to refine.
     assert 'mode="refine"' not in preamble
 
 
 async def test_create_default_engine_is_html() -> None:
-    """No engine hint → the DEFAULT create engine is html: the build step authors
-    a static HTML/CSS bundle via `create_html_site`, NOT the ripple or svelte
-    tracks."""
+    """Kept by name for history: a create with no hint is now a PROJECT that starts
+    from the `static` template (hand-written HTML, no build) through the
+    `pocketpaw-site` skill, not the old `create_html_site` track."""
     preamble = (
         await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     ).text
 
-    assert 'engine="html"' in preamble
-    assert "mcp__pocketpaw_sites_manager__create_html_site" in preamble
+    assert 'engine="project"' in preamble
+    assert "template=" not in preamble.split("\n", 1)[0]
+    assert "Start from `static`" in preamble
+    assert "pocketpaw-site" in preamble
     assert "mcp__pocketpaw_sites_manager__publish" in preamble
-    # html is MANDATED — create_html_site is the persist tool and the preamble
-    # explicitly forbids switching engines for a normal create.
+
+
+_CREATE_HINTS = (None, "html", "ripple", "svelte", "react", "project", "solid")
+
+_OLD_CREATE_TOOLS = (
+    "mcp__pocketpaw_sites_manager__create_html_site",
+    "mcp__pocketpaw_sites_manager__create_svelte_site",
+    "mcp__pocketpaw_sites_manager__create_react_site",
+    "mcp__pocketpaw_sites_manager__create_landing_site",
+    "mcp__pocketpaw_sites_manager__create_dynamic_site",
+    "mcp__pocketpaw_pocket_specialist__create",
+    "edit_html_file",
+    "edit_svelte_component",
+    "edit_react_component",
+)
+
+_OLD_CREATE_SKILLS = (
+    "pocketpaw-create-paw-site",
+    "pocketpaw-create-svelte-site",
+    "pocketpaw-create-react-site",
+    "pocketpaw-create-dynamic-site",
+    "pocketpaw-create-project-site",
+)
+
+
+@pytest.mark.parametrize("engine", _CREATE_HINTS)
+async def test_every_new_site_routes_to_the_site_skill_and_project_tools(
+    engine: str | None,
+) -> None:
+    """One create flow: whatever hint the create screen sends, the build step loads
+    `pocketpaw-site` and drives the project tools. No old create or edit tool and no
+    old authoring skill is named, so the preamble cannot point at a tool the create
+    profile denies (``surface_registry._SITES_LEGACY_AUTHORING_DENY``)."""
+    preamble = await _preamble_for(engine)
+
+    assert 'engine="project"' in preamble
+    assert 'mode="create"' in preamble
+    assert "`pocketpaw-site`" in preamble
+    for tool in ("list_site_templates", "start_site_from_template", "run_site_build"):
+        assert f"mcp__pocketpaw_sites_manager__{tool}" in preamble, tool
+    assert "patch_site_file" in preamble and "request_site_secret" in preamble
+    for name in _OLD_CREATE_TOOLS + _OLD_CREATE_SKILLS:
+        assert name not in preamble, f"{engine}: names {name}"
+    # Ripple is off on every create, so questions go through ask_user.
+    assert "mcp__pocketpaw_ask__ask_user" in preamble
+    assert "ask-user-questions" not in preamble
+
+
+async def test_create_engine_hints_map_to_templates() -> None:
+    """The documented mapping: html and ripple are the static default (ripple is out
+    for new sites), react and svelte pin their framework starters, and anything else
+    lets the agent pick."""
+    assert sites_handler.CREATE_ENGINE_TEMPLATE == {
+        "html": "static",
+        "ripple": "static",
+        "react": "vite-react-hono",
+        "svelte": "sveltekit",
+    }
+    for engine in (None, "", "project", "solid"):
+        assert sites_handler.create_template_hint(engine) is None, engine
+    assert sites_handler.create_template_hint(" React ") == "vite-react-hono"
+
+
+@pytest.mark.parametrize(
+    ("engine", "template"),
+    [
+        ("html", "static"),
+        ("ripple", "static"),
+        ("react", "vite-react-hono"),
+        ("svelte", "sveltekit"),
+    ],
+)
+async def test_create_preamble_carries_the_template_the_hint_pins(
+    engine: str, template: str
+) -> None:
+    preamble = await _preamble_for(engine)
+    assert f'template="{template}"' in preamble.split("\n", 1)[0]
+    if template == "static":
+        assert "Start from `static`" in preamble
+    else:
+        assert f"start from `{template}`" in preamble
+        assert "Start from `static`" not in preamble
+
+
+async def test_create_without_a_hint_picks_static_unless_a_framework_is_needed() -> None:
+    preamble = await _preamble_for(None)
+    assert "Start from `static` only for content pages" in preamble
+    assert "server logic" in preamble
+    assert "the user names a framework" in preamble
+
+
+async def test_create_without_a_hint_sends_client_heavy_apps_to_a_framework() -> None:
+    """Regression: on Auto (no hint) a complex browser 3D game (three.js / React
+    Three Fiber, menus, many systems) was built on the no-build `static` starter,
+    because the rule only listed SERVER needs as framework triggers. An app (game,
+    3D/WebGL, canvas, simulation, editor, dashboard) or a need for npm packages and
+    a bundler must pick a framework template too, `vite-react-hono` by default."""
+    preamble = await _preamble_for(None)
     lower = preamble.lower()
-    assert "do not switch engines" in lower
-    assert "must use" in lower
-    # The svelte/ripple tools appear ONLY after the html one (i.e. in the
-    # do-not-use / explicit-exception context, never as the primary path).
-    assert preamble.index("create_html_site") < preamble.index("create_svelte_site")
+    # static is for content pages only, with no npm packages and no bundler.
+    assert "`static` only for content pages" in preamble
+    assert "no npm packages, no bundler" in lower
+    # Client-side app triggers, not just server needs.
+    for trigger in ("a game", "3d/webgl", "canvas", "simulation", "dashboard"):
+        assert trigger in lower, trigger
+    assert "needs npm packages" in lower
+    assert "three" in lower and "@react-three/fiber" in lower
+    # The client-heavy default, and the named framework still wins.
+    assert "prefer `vite-react-hono`" in preamble
+    assert "a named framework still wins" in lower
+    # When in doubt, frameworks win; and the choice is said out loud.
+    assert "when unsure between `static` and a framework" in lower
+    assert "pick the framework" in lower
+    assert "state the template you chose and a one-line reason" in lower
+
+
+@pytest.mark.parametrize("engine", _CREATE_HINTS)
+async def test_create_plans_apps_and_games_before_building(engine: str | None) -> None:
+    """Regression: a "3D horror game" brief was written in one pass (crude models, an
+    unfinished world, no fun) because nothing made the agent plan. Every create, on
+    every engine hint, sends an app or game through ``sites-app-plan``: PLAN.md and
+    a user check BEFORE any UI file, then every milestone in order. The rule is a
+    short pointer (the preamble has a size budget); the detail lives in the skill.
+
+    THE MUTATION THAT BREAKS THIS: drop ``_APP_PLAN_RULE`` from ``build_step``."""
+    preamble = await _preamble_for(engine)
+    rule = sites_handler._APP_PLAN_RULE
+    assert rule in preamble, engine
+    assert "`sites-app-plan`" in rule
+    for trigger in ("a game", "3D", "a simulation", "an editor", "a tool", "a dashboard"):
+        assert trigger in rule, trigger
+    assert "`PLAN.md`" in rule and "before any UI or game file" in rule
+    assert "checks with the user" in rule
+    assert "every milestone in order without stopping" in rule
+    assert "looked at before the next" in rule
+    assert len(rule) < 300, len(rule)
+    # Stated once: the rule rides the build step, not a second copy elsewhere.
+    assert preamble.count(rule) == 1, engine
+    # The plan check is the app's one round of questions, not a second one.
+    assert "ONE round of questions maximum (for an app, the plan check)" in preamble
+
+
+@pytest.mark.parametrize("pattern", ["landing", "dynamic"])
+async def test_frontend_preamble_plans_apps_and_games(pattern: str) -> None:
+    """The brief-driven create is the second create branch; it reads the same rule."""
+    brief = _landing_brief().model_copy(update={"pattern": pattern})
+    preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
+    assert preamble.count(sites_handler._APP_PLAN_RULE) == 1
+
+
+async def test_project_refine_continues_the_app_plan() -> None:
+    """The plan check's go-ahead usually lands on the site's own page, so a project
+    refine reads PLAN.md and builds the rest of it through the same skill. Only
+    the project lane carries it: older engines never had a plan."""
+    preamble = sites_handler._refine_preamble(_refine_meta(), "project")
+    assert sites_handler._APP_PLAN_REFINE_RULE in preamble
+    assert "`sites-app-plan`" in sites_handler._APP_PLAN_REFINE_RULE
+    assert "`PLAN.md`" in sites_handler._APP_PLAN_REFINE_RULE
+    for engine in ("html", "svelte", "react", "ripple"):
+        other = sites_handler._refine_preamble(_refine_meta(), engine)
+        assert "sites-app-plan" not in other, engine
+
+
+async def test_project_refine_builds_every_remaining_milestone_in_one_turn() -> None:
+    """Regression: after the user clicked "Build this plan" the agent built M1, said
+    "stage 1 done" and waited. The click lands on the site's own page (a project
+    refine), and this rule told it to build "the next unticked one", so it built one
+    milestone and ended the turn. An approved plan is built to the end in ONE turn;
+    only a real blocker or a finished plan ends it.
+
+    THE MUTATION THAT BREAKS THIS: put "build the next unticked one" back."""
+    preamble = sites_handler._refine_preamble(_refine_meta(), "project")
+    rule = sites_handler._APP_PLAN_REFINE_RULE
+    assert rule in preamble
+    lower = " ".join(rule.lower().split())
+    assert "every unticked milestone in this turn" in lower
+    assert "back to back" in lower
+    assert "do not stop between milestones" in lower
+    # The only ways out: a real blocker, or every milestone ticked.
+    assert "real blocker" in lower
+    for blocker in ("a secret", "a decision only the user can make", "a missing fact"):
+        assert blocker in lower, blocker
+    assert "every milestone is ticked" in lower
+    # The per-milestone discipline stays.
+    assert "preview" in lower and "tick" in lower
+    # No wording that licenses a stop after one milestone.
+    assert "the next unticked one" not in lower
+    assert "boundary" not in lower
+    assert "one milestone at a time" not in lower
+
+
+async def test_create_app_rule_does_not_read_as_one_milestone_per_turn() -> None:
+    """The old "builds one milestone at a time" read as one per turn. The create rule says the
+    approved plan is built through every milestone without stopping."""
+    rule = " ".join(sites_handler._APP_PLAN_RULE.split())
+    assert "one milestone at a time" not in rule
+    assert "every milestone" in rule and "without stopping" in rule
+
+
+async def test_new_static_sites_carry_the_lead_form_contract() -> None:
+    """`static` has no server route, so its contact form posts to the capture
+    endpoint with placeholders the project publish resolves
+    (``project_build.apply_capture_tokens_to_bundle``)."""
+    preamble = await _preamble_for(None)
+    assert "On `static` there is no server route" in preamble
+    assert "__CAPTURE_API_BASE__/capture/form" in preamble
+
+
+@pytest.mark.parametrize(
+    ("engine", "tool"),
+    [
+        ("html", "mcp__pocketpaw_sites_manager__edit_html_file"),
+        ("svelte", "mcp__pocketpaw_sites_manager__edit_svelte_component"),
+        ("react", "mcp__pocketpaw_sites_manager__edit_react_component"),
+        ("ripple", "mcp__pocketpaw_pocket_specialist__edit"),
+        ("project", "`patch_site_file`"),
+    ],
+)
+async def test_refine_of_an_existing_site_still_routes_by_its_engine(
+    engine: str, tool: str
+) -> None:
+    """Existing sites keep their lanes: refine names the edit tool of the engine the
+    site was built with and never the new-site skill."""
+    preamble = sites_handler._refine_preamble(SurfaceMeta(pocket_id="pk1"), engine)
+    assert f'engine="{engine}"' in preamble
+    assert tool in preamble
+    assert "pocketpaw-site`" not in preamble
 
 
 async def test_create_is_draft_first_publish_on_request() -> None:
@@ -223,40 +336,12 @@ async def test_create_is_draft_first_publish_on_request() -> None:
         assert "mcp__pocketpaw_sites_manager__publish" in preamble
 
 
-async def test_create_ripple_engine_uses_pocket_specialist_fallback() -> None:
-    """engine="ripple" is the widget-spec track: it prefers the create-paw-site
-    marketing brain, stamps `pattern="landing"`, and keeps the pocket-specialist
-    MCP tool as the fallback."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
-        )
-    ).text
-
-    assert 'engine="ripple"' in preamble
-    assert "pocketpaw-create-paw-site" in preamble
-    assert 'pattern="landing"' in preamble
-    # Fallback path — the pocket specialist create tool + publish.
-    assert "mcp__pocketpaw_pocket_specialist__create" in preamble
-    assert "mcp__pocketpaw_sites_manager__publish" in preamble
-    assert "fall back" in preamble.lower() or "fallback" in preamble.lower()
-
-
 async def _preamble_for(engine: str | None) -> str:
     return (
         await sites_handler.build_preamble(
             WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
         )
     ).text
-
-
-async def test_sites_handler_specifies_flat_lead_capture_form() -> None:
-    """Every create carries the flat-native lead-form rule so the published static
-    site captures leads: fields built FLAT, never a nested form widget."""
-    for engine in (None, "ripple", "react"):
-        lower = (await _preamble_for(engine)).lower()
-        assert "form" in lower
-        assert "flat" in lower
 
 
 async def test_the_tracks_that_author_their_own_form_are_told_where_it_posts() -> None:
@@ -278,19 +363,6 @@ async def test_the_tracks_that_author_their_own_form_are_told_where_it_posts() -
         assert "__CAPTURE_SIGNED_KEY__" in preamble, f"{engine}: no signed key field"
         for field in contact_form.CONTACT_FIELD_NAMES:
             assert field in preamble, f"{engine}: never told to emit {field!r}"
-
-
-async def test_the_ripple_track_is_not_told_to_author_a_form() -> None:
-    """On ripple the form is COMPOSED BY CODE — ``assemble_landing_spec`` builds it
-    from ``contact_form.CONTACT_FIELDS`` and the skill supplies copy only. Handing
-    that track the native-form contract would tell the agent to write markup it has
-    no way to write, and naming the fields would imply it chooses them.
-
-    This is the "the prompt may not command something the agent cannot do" rule
-    applied to markup rather than to a tool."""
-    preamble = await _preamble_for("ripple")
-    assert "__CAPTURE_API_BASE__" not in preamble
-    assert "paw_site_id" not in preamble
 
 
 # --- Refine mode (meta carries a pocket_id — the per-site /sites/[siteId] chat) ---
@@ -359,7 +431,7 @@ async def test_sites_handler_refine_mode_uses_edit_path() -> None:
 
 
 async def test_sites_handler_refine_mode_is_landing_aware() -> None:
-    """The RIPPLE refine preamble carries the same landing structure + 5 SSR rules
+    """The RIPPLE refine preamble preserves the page's existing sections + carries the 5 SSR rules
     as the create brain, so an edit can't introduce a static-site trap.
 
     These five rules are the ripple branch's and only the ripple branch's: each one
@@ -394,191 +466,6 @@ async def test_sites_handler_refine_mode_is_landing_aware() -> None:
 # existing ripple marketing brain byte-for-byte.
 
 
-async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> None:
-    """engine="svelte" routes the build step to the Svelte-track skill.
-
-    It prefers `pocketpaw-create-svelte-site`, points the MCP fallback at
-    `create_svelte_site`, stamps engine="svelte", and forbids the ripple-spec
-    machinery — while STILL carrying the shared clarity gate."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
-        )
-    ).text
-    lower = preamble.lower()
-
-    # Still the sites surface, now tagged with the svelte engine + create mode.
-    assert '<surface kind="sites"' in preamble
-    assert 'engine="svelte"' in preamble
-    assert 'mode="create"' in preamble
-    # The shared clarity gate runs on every engine.
-    assert "phase 1" in lower
-
-    # The dedicated Svelte-track authoring skill + the merged design-taste helper.
-    assert "pocketpaw-create-svelte-site" in preamble
-    assert "pocketpaw-design-taste" in preamble
-    # MCP fallback points at the svelte create tool + publish.
-    assert "mcp__pocketpaw_sites_manager__create_svelte_site" in preamble
-    assert "mcp__pocketpaw_sites_manager__publish" in preamble
-    assert "unavailable" in lower
-
-    # It must NOT route to the ripple marketing brain or the html tool here.
-    assert "pocketpaw-create-paw-site" not in preamble
-    assert "create_html_site" not in preamble
-    assert "mcp__pocketpaw_sites_manager__create_landing_site" not in preamble
-    # The svelte track forbids the ripple-spec machinery.
-    assert "no ripplespec" in lower
-
-
-async def test_create_engine_routing_diverges_by_engine() -> None:
-    """The three engines fork ONLY on the build tool — html (default), svelte, and
-    ripple each name their own create tool and never each other's."""
-    html = (
-        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-    ).text
-    svelte = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
-        )
-    ).text
-    ripple = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
-        )
-    ).text
-
-    # Each is a distinct preamble (the fork is real), all in create mode.
-    assert html != svelte != ripple != html
-    for out in (html, svelte, ripple):
-        assert 'mode="create"' in out
-        assert "phase 1" in out.lower()
-
-    # html default → the html tool is the PRIMARY/mandated build path (it names
-    # the svelte/dynamic tools only later, in the do-not-use / exception context).
-    assert "mcp__pocketpaw_sites_manager__create_html_site" in html
-    assert html.index("create_html_site") < html.index("create_svelte_site")
-    # svelte → the svelte tool only, never the html one.
-    assert "mcp__pocketpaw_sites_manager__create_svelte_site" in svelte
-    assert "create_html_site" not in svelte
-    # ripple → the pocket specialist, not the hand-authored tracks.
-    assert "mcp__pocketpaw_pocket_specialist__create" in ripple
-    assert "create_html_site" not in ripple
-    assert "create_svelte_site" not in ripple
-
-
-async def test_create_mode_engine_react_prefers_create_react_site_skill() -> None:
-    """RX-2: engine="react" routes the build step to the React-track skill.
-
-    It names `pocketpaw-create-react-site`, points at `create_react_site`, stamps
-    engine="react", and forbids the ripple-spec machinery — while STILL carrying
-    the shared clarity gate."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-    lower = preamble.lower()
-
-    assert '<surface kind="sites"' in preamble
-    assert 'engine="react"' in preamble
-    assert 'mode="create"' in preamble
-    assert "phase 1" in lower
-
-    # The dedicated React-track authoring skill + the merged design-taste helper.
-    assert "pocketpaw-create-react-site" in preamble
-    assert "pocketpaw-design-taste" in preamble
-    assert "mcp__pocketpaw_sites_manager__create_react_site" in preamble
-    assert "mcp__pocketpaw_sites_manager__publish" in preamble
-
-    # It must NOT route to the other tracks' brains or tools.
-    assert "pocketpaw-create-paw-site" not in preamble
-    assert "pocketpaw-create-svelte-site" not in preamble
-    assert "create_html_site" not in preamble
-    assert "create_svelte_site" not in preamble
-    assert "mcp__pocketpaw_sites_manager__create_landing_site" not in preamble
-    # The react track forbids the ripple-spec machinery.
-    assert "no ripplespec" in lower
-
-
-async def test_react_create_states_the_interactivity_rule() -> None:
-    """The react default is the sharp edge of this engine: the site ships ZERO
-    JavaScript unless the create declares it, so a page authored with a menu
-    toggle or tabs is inert. React is usually chosen BECAUSE of interactivity, so
-    the preamble must state the rule — not leave it to the skill, which the model
-    may or may not load.
-
-    THE MUTATION THAT BREAKS THIS: delete the `interactive=true` sentence from the
-    react `build_step` in handlers/sites.py. Run: every other react assertion
-    still passes and this one fails. (Applied 2026-08-07.)"""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-    lower = preamble.lower()
-
-    assert "interactive=true" in lower
-    # It names what "needs the browser" concretely, so the agent can decide.
-    assert "useeffect" in lower or "onclick" in lower
-    # And it says what happens when the flag is absent.
-    assert "zero javascript" in lower or "no javascript" in lower
-
-
-async def test_react_create_states_the_prerender_rule() -> None:
-    """The prerender rule is engine-shaped, not taste: useEffect does not run at
-    prerender time, so a resting state produced only by an effect bakes the START
-    frame into the deployed HTML. The svelte track carries the same rule for the
-    same reason."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-    lower = preamble.lower()
-
-    assert "prerender" in lower
-    assert "useeffect" in lower
-    assert "markup" in lower
-
-
-async def test_react_create_names_the_reserved_build_shell() -> None:
-    """The generator owns index.html / package.json / vite.config.ts /
-    paw-prerender.mjs and the src/paw/ namespace, and REJECTS a source map that
-    writes one. A preamble that doesn't say so sends the agent into a create error
-    it cannot predict — and those files are what hold the prerender contract."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-
-    assert "src/App.tsx" in preamble
-    for reserved in ("index.html", "package.json", "vite.config.ts", "paw-prerender.mjs"):
-        assert reserved in preamble, f"the preamble does not name the reserved {reserved}"
-    assert "src/paw/" in preamble
-
-
-async def test_react_create_does_not_promise_a_submit_route() -> None:
-    """There is no server runtime on the react track, so the SvelteKit skeleton's
-    `/api/submit` endpoint does not exist here. Promising it would be the prompt
-    offering a capability the deployment lacks — the same class as naming an
-    absent tool — and the agent would wire a form that silently drops leads.
-
-    The preamble must say so EXPLICITLY rather than merely stay silent: the
-    authoring skill and the svelte track both teach `/api/submit`, so an agent
-    carrying that habit needs it revoked, not omitted."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-    lower = preamble.lower()
-
-    assert "no `/api/submit` route" in lower
-    # And it names the alternative, so revoking the habit leaves somewhere to go.
-    assert "native `<form>`" in lower
-
-
 async def test_react_create_uses_ask_user_tool_not_ripple() -> None:
     """react-create has inline ripple OFF (surface_registry._sites_profile), so the
     ask mechanism must be the `ask_user` MCP tool, NOT a ```ui-spec ripple widget.
@@ -596,35 +483,6 @@ async def test_react_create_uses_ask_user_tool_not_ripple() -> None:
 
     assert "mcp__pocketpaw_ask__ask_user" in preamble
     assert "ask-user-questions" not in preamble
-
-
-async def test_unknown_engine_still_falls_back_to_html() -> None:
-    """An engine string this build predates (or a typo) must not render a
-    half-formed preamble — it falls back to the html default, the same policy
-    sites/engines.py::normalize_engine applies on the publish side."""
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="solid")
-        )
-    ).text
-
-    assert 'engine="html"' in preamble
-    assert "mcp__pocketpaw_sites_manager__create_html_site" in preamble
-
-
-async def test_html_default_routes_an_explicit_react_ask_to_the_react_tool() -> None:
-    """The html preamble's escape hatch previously sent 'explicitly asks for a
-    React/component build' to `create_svelte_site` — correct only while no react
-    engine existed. Now that it does, an explicit React request must reach the
-    react tool, or the user asks for React and gets Svelte."""
-    preamble = (
-        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-    ).text
-
-    assert "mcp__pocketpaw_sites_manager__create_react_site" in preamble
-    # The react tool is named in the EXCEPTION context, after the mandated html
-    # one — html is still the default engine.
-    assert preamble.index("create_html_site") < preamble.index("create_react_site")
 
 
 async def test_engine_threads_through_meta_from_request() -> None:
@@ -645,21 +503,16 @@ async def test_engine_threads_through_meta_from_request() -> None:
 # leaks into the refine branch.
 
 
-async def test_create_always_two_phase() -> None:
-    """Every create meta returns the two-phase flow: an interview/clarity front
-    (Phase 1) AND a design+build back (Phase 2) — no flag required."""
+async def test_create_runs_research_then_art_direction_then_build() -> None:
+    """Every create meta walks research -> a written art direction -> build."""
     out = (
         await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     ).text
-    lower = out.lower()
 
     assert '<surface kind="sites"' in out
     assert 'mode="create"' in out
-    # Two-phase structure: a clarity/interview front AND a build back.
-    assert "phase 1" in lower
-    assert "phase 2" in lower
-    assert "question" in lower  # the interview instruction
-    assert "build" in lower
+    assert out.index("RESEARCH REAL SITES") < out.index("ART DIRECTION") < out.index("TOKENS FIRST")
+    assert "question" in out.lower()  # the ask-for-facts instruction
 
 
 async def test_create_names_asset_tools() -> None:
@@ -703,41 +556,21 @@ async def test_create_never_names_a_bundled_design_system_tool() -> None:
 
 
 async def test_create_tells_the_agent_to_author_its_own_tokens() -> None:
-    """With no library to retrieve, Phase 2 must say where the tokens come from.
+    """The art direction becomes custom properties before any markup, and it is
+    chosen for fit, not by a rotation rule.
 
-    Deleting the retriever without replacing the instruction would leave step 1
-    saying nothing about color, type, or ground — and an absence of instruction
-    is how the model falls back to its own defaults, which is the repetition this
-    change exists to remove. So the step names the custom properties to write and
-    points at the embedded design system's own modules for the values.
+    Forced rotation ("pick the less-obvious fit", "reseed the accent") pushed pages
+    away from the right answer for the business; variety now comes from the subject.
     """
     out = (
         await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
     ).text
 
-    assert "--accent" in out
-    assert "--bg" in out
     assert "custom properties" in out.lower()
-    # The anti-repetition rule is now load-bearing rather than a footnote.
-    assert "rotate" in out.lower()
-    assert "reseed the accent" in out
-
-
-async def test_create_clarify_renders_ripple_widget_when_ripple_on() -> None:
-    """On ripple-ON create surfaces (html default, ripple) the clarity question is
-    rendered as a COMPLETE UI: an `ask-user-questions` ripple widget (ui-spec
-    block) whose completeActions emit chat.send — NOT the ask_user chip tool."""
-    for engine in (None, "html", "ripple"):
-        out = (
-            await sites_handler.build_preamble(
-                WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
-            )
-        ).text
-        assert "ask-user-questions" in out
-        assert "ui-spec" in out
-        assert '"target": "chat.send"' in out
-        # The ripple-widget path does NOT reach for the chip tool.
-        assert "mcp__pocketpaw_ask__ask_user" not in out
+    assert "4-6 colours as hex" in out
+    assert "best fits this business" in out
+    assert "less-obvious fit" not in out
+    assert "reseed the accent" not in out
 
 
 async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
@@ -753,22 +586,39 @@ async def test_create_clarify_uses_ask_user_tool_on_svelte() -> None:
     assert "ask-user-questions" not in out
 
 
-async def test_create_embeds_design_system_inline() -> None:
-    """PERMANENT FIX: the full pocketpaw-design-taste system is EMBEDDED in the
-    create preamble (not left to a model-driven skill invocation the agent may
-    skip). A regression that drops the embed would silently return sites to
-    generic AI output."""
-    out = (
-        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
-    ).text
-    # The governing block + load-bearing body markers from the skill file.
-    assert '<design-system name="pocketpaw-design-taste">' in out
-    assert "</design-system>" in out
-    assert "Vision Ledger" in out
-    assert "Trend Engine" in out
-    assert "PRE-FLIGHT" in out.upper()
-    # It is framed as already-loaded so the agent doesn't wait on a skill call.
-    assert "ALREADY LOADED" in out or "already in your context" in out.lower()
+async def test_create_carries_a_short_design_step_not_the_embedded_systems() -> None:
+    """The create preamble is short and positive.
+
+    It used to embed design-taste (33k chars) and sites-craft (23k) with ~100
+    prohibitions, about 77k chars in all. Anthropic's current guidance is a short
+    art direction the model commits to, with its defaults framed as things to
+    question; the two skills stay reachable by name.
+
+    THE MUTATION THAT BREAKS THIS: embed the design-taste body (a
+    ``<design-system>`` block) or ``_craft_system()`` in ``_create_preamble``.
+    """
+    for engine in (None, "svelte", "react", "ripple"):
+        out = (
+            await sites_handler.build_preamble(
+                WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine=engine)
+            )
+        ).text
+        assert "<design-system" not in out, engine
+        assert '<craft-system name="sites-craft">' not in out, engine
+        assert "<craft-floor>" in out, engine
+        assert len(out) < 25_000, (engine, len(out))
+        # Defaults are named as things to question, not banned.
+        assert "Use one only when this brief calls for it" in out, engine
+        # Fonts that actually load: Google Fonts is the one source, and the
+        # Fontshare faces agents kept requesting from it are named as not there.
+        assert "fonts.googleapis.com" in out, engine
+        assert "api.fontshare.com" not in out, engine
+        assert "only families Google Fonts serves" in out, engine
+        assert "Clash Display" in out and "not on it" in out, engine
+
+    note = sites_handler._design_skills_note("create")
+    assert "`pocketpaw-design-taste`" in note
+    assert "`sites-craft`" in note
 
 
 async def test_create_decides_design_and_uses_taste_skill() -> None:
@@ -830,7 +680,7 @@ async def test_create_leaves_refine_untouched() -> None:
 
     assert 'mode="refine"' in out
     assert 'mode="create"' not in out
-    assert "phase 1" not in out.lower()
+    assert "research real sites" not in out.lower()
 
 
 # --- Frontend-consumes-brief (`_frontend_preamble`) — the crew baton, end to end ---
@@ -922,50 +772,57 @@ async def test_frontend_preamble_renders_sitemap_and_copy_from_brief() -> None:
     assert "no dental jargon" in preamble
 
 
-async def test_frontend_preamble_routes_svelte_to_create_svelte_site() -> None:
-    """engine="svelte" routes the build to `create_svelte_site` and must NOT
-    name the ripple landing tool."""
-    brief = _landing_brief(engine="svelte")
+_LEGACY_CREATE_TOOLS = (
+    "create_landing_site",
+    "create_dynamic_site",
+    "create_svelte_site",
+    "create_react_site",
+    "create_html_site",
+    "pocket_specialist",
+)
+
+
+@pytest.mark.parametrize("engine", ["ripple", "svelte"])
+async def test_frontend_preamble_builds_a_project_from_a_template(engine: str) -> None:
+    """A rebuild is a new site, so it takes the one site model whatever engine the
+    brief was stamped with: a repo from a template through ``pocketpaw-site``,
+    ``static`` for a page like this one, and never an old per-engine create tool."""
+    brief = _landing_brief(engine=engine)
     preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
 
-    assert 'engine="svelte"' in preamble
-    assert "create_svelte_site" in preamble
-    # The ripple landing tool must be absent on the svelte track.
-    assert "create_landing_site" not in preamble
+    assert 'engine="project"' in preamble
+    assert 'mode="frontend"' in preamble
+    assert "pocketpaw-site" in preamble
+    assert "mcp__pocketpaw_sites_manager__start_site_from_template" in preamble
+    assert "`static`" in preamble
+    assert sites_handler._PROJECT_LOOP in preamble
+    for tool in _LEGACY_CREATE_TOOLS:
+        assert tool not in preamble, tool
 
 
-async def test_frontend_preamble_routes_ripple_to_landing_tool() -> None:
-    """engine="ripple" routes the build to the ripple create path
-    (`create_landing_site`) and must NOT name `create_svelte_site`."""
-    brief = _landing_brief(engine="ripple")
+async def test_frontend_preamble_sends_a_live_data_brief_to_a_framework() -> None:
+    """A dynamic brief needs its own database, which ``static`` cannot have."""
+    brief = _landing_brief().model_copy(update={"pattern": "dynamic"})
     preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
+    assert sites_handler._STORED_DATA_RULE in preamble
+    assert "list_site_recipes" in preamble
+    assert "framework template" in preamble
+    for tool in _LEGACY_CREATE_TOOLS:
+        assert tool not in preamble, tool
 
-    assert 'engine="ripple"' in preamble
-    assert "create_landing_site" in preamble
-    # The svelte create tool must be absent on the ripple track.
-    assert "create_svelte_site" not in preamble
 
-
-async def test_frontend_preamble_preserves_ssr_rules_for_landing_brief() -> None:
-    """The static-site (SSR) rules language survives into the brief-driven
-    preamble — flat lead form (not form/newsletter), pricing-table tiers, and
-    anchor CTAs — so a brief-driven build can't reintroduce a static-site trap."""
+async def test_frontend_preamble_keeps_the_static_page_rules() -> None:
+    """The brief-driven build follows the same page rules as create: the native
+    form contract on ``static``, the verify contract, and draft-first."""
     brief = _landing_brief()
     preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), brief)
-    lower = preamble.lower()
-
-    # Rule 1 — flat native lead form, never the form/newsletter widget.
-    assert "flat" in lower
-    assert "newsletter" in lower
-    # Rule 2 — pricing-table uses tiers.
-    assert "tiers" in lower
-    # Rule 3 — FAQ never accordion.
-    assert "accordion" in lower
-    # Rule 4 — CTAs are anchor href, never on_click.
-    assert "href" in lower
-    assert "on_click" in lower
-    # Animation Tier-0 only.
-    assert "tier-0" in lower or "tier 0" in lower
+    assert sites_handler.native_form_contract() in preamble
+    assert sites_handler._VERIFY_RULE in preamble
+    assert sites_handler._CLOSING_RULE in preamble
+    assert "DRAFT" in preamble
+    # Widget rules belong to the retired ripple track.
+    for widget in ("pricing-table", "accordion", "on_click"):
+        assert widget not in preamble, widget
 
 
 async def test_build_preamble_unchanged_for_create_path() -> None:
@@ -1086,7 +943,7 @@ async def test_sites_handler_chat_mode_ignored_without_pocket_id() -> None:
     # No pocket to chat about → the create preamble is unchanged by mode.
     assert chat_no_pocket == plain_create
     assert 'mode="create"' in chat_no_pocket
-    assert "phase 1" in chat_no_pocket.lower()
+    assert "research real sites" in chat_no_pocket.lower()
 
 
 async def test_mode_threads_through_meta_from_request() -> None:
@@ -1205,14 +1062,13 @@ async def test_concierge_block_never_promises_a_configuration_tool(
 
 
 async def test_create_ties_the_concierge_to_publish_not_to_the_draft() -> None:
-    """A DRAFT has no concierge — provisioning is live-publish-only.
+    """A DRAFT has no concierge — the bar reaches a page only at a live publish.
 
-    `sites/service.py::_embed_concierge_bar` (and the `ensure_site_widget`
-    trigger inside it) runs between the build and the deploy of a LIVE publish;
-    a preview returns from `publish_pocket` long before it. Since the create
-    flow is draft-first, an agent that told the user "your site has a concierge"
-    right after a create would be wrong. The create block must tie the concierge
-    to publishing.
+    `sites/service.py::_embed_concierge_bar` runs between the build and the
+    deploy of a LIVE publish; a preview returns from `publish_pocket` long before
+    it. Since the create flow is draft-first, an agent that told the user "your
+    site has a concierge" right after a create would be wrong. The create block
+    must tie the concierge to publishing.
     """
     for engine in (None, "svelte", "ripple"):
         meta = SurfaceMeta(route_path="/sites", engine=engine)
@@ -1224,6 +1080,23 @@ async def test_create_ties_the_concierge_to_publish_not_to_the_draft() -> None:
         assert "publish" in window, (
             f"engine={engine}: the concierge block does not tie provisioning to publish"
         )
+
+
+@pytest.mark.parametrize("label,meta", _CONCIERGE_MODES, ids=[m[0] for m in _CONCIERGE_MODES])
+async def test_concierge_block_never_claims_one_is_created_automatically(
+    label: str, meta: SurfaceMeta
+) -> None:
+    """CR-12: the owner creates a concierge in the dashboard; nothing makes one.
+
+    The block used to promise that every published site "ships with" a concierge
+    "provisioned automatically" and "ON by default". An agent repeating that would
+    tell a user their live site has a chat bar it does not have.
+    """
+    lower = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text.lower()
+
+    for claim in ("ships with a concierge", "provisioned automatically", "on by default"):
+        assert claim not in lower, f"{label}: preamble still claims {claim!r}"
+    assert "never created automatically" in lower, f"{label}: the owner-creates rule is missing"
 
 
 async def test_concierge_awareness_does_not_depend_on_the_mcp_tool_id_import() -> None:
@@ -1256,32 +1129,6 @@ async def test_concierge_awareness_does_not_depend_on_the_mcp_tool_id_import() -
 # ---------------------------------------------------------------------------
 # RX-3 — the react EDIT lane reaches the preambles that route to it
 # ---------------------------------------------------------------------------
-
-
-async def test_react_create_step_routes_follow_up_changes_to_the_edit_tool() -> None:
-    """The reported bug in prompt form: with no edit tool named, a follow-up
-    "shorten the hero headline" left the agent one available move — a second
-    ``create_react_site`` — which mints a SECOND site pocket and leaves the site the
-    user is looking at unchanged. The react build step now names the edit tool and
-    forbids the re-create.
-
-    THE MUTATION THAT BREAKS THIS: delete the CHANGES-GO-THROUGH-THE-EDIT-TOOL
-    paragraph from the react ``build_step``.
-    """
-    preamble = (
-        await sites_handler.build_preamble(
-            WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="react")
-        )
-    ).text
-
-    assert "mcp__pocketpaw_sites_manager__edit_react_component" in preamble
-    lower = preamble.lower()
-    # It says the re-create is wrong, and says WHY (a second site).
-    assert "second `create_react_site`" in preamble or "second create_react_site" in lower
-    assert "second site" in lower
-    # And it teaches the two-call add-a-section shape the tool actually needs.
-    assert "create=true" in lower
-    assert "src/app.tsx" in lower
 
 
 async def test_react_refine_names_the_edit_tool_and_not_the_ripple_merge(mongo_db: object) -> None:
@@ -1353,11 +1200,17 @@ async def test_react_refine_carries_the_prerender_and_write_scope_rules(mongo_db
     assert "src/" in preamble and "public/" in preamble
     assert "package.json" in preamble
     assert "src/paw/" in preamble
-    # The dependency list, so the agent does not author an import it cannot install.
-    assert "no way to add a dependency" in lower
+    # Packages go through the resolver, never an edit to package.json, and a
+    # refused one must not be imported (PP-3: the old "no way to add a dependency"
+    # became false when set_site_dependencies shipped).
+    assert "set_site_dependencies" in preamble
+    assert "rejected" in lower
     # And that the edit is a DRAFT, so the agent does not announce a live change.
     assert "draft" in lower
-    assert "nothing is built and nothing goes live" in lower
+    assert "nothing goes live" in lower
+    # And that "ready" waits on ONE verify_site at the end of the turn's edits.
+    assert "VERIFY ONCE PER TURN, AT THE END" in preamble
+    assert "previous_verification" in preamble
 
 
 async def test_ripple_refine_keeps_the_rippleSpec_merge(mongo_db: object) -> None:
@@ -1760,10 +1613,15 @@ async def test_every_refine_branch_keeps_what_transfers(engine: str | None) -> N
     # cannot name its pocket cannot act on it.
     assert REFINE_POCKET in preamble
     assert 'mode="refine"' in preamble
-    # ASK-DON'T-ASSUME and its mechanism (refine keeps ripple_mode="on" on every
-    # engine, so the widget is real here).
+    # ASK-DON'T-ASSUME and its mechanism, which follows the profile's ripple mode:
+    # the widget on a ripple (or unknown-engine) refine, the ask_user tool on the
+    # source engines, whose refine runs with inline ripple OFF.
     assert "ask, don't assume" in lower
-    assert "ask-user-questions" in preamble
+    if engine in ("html", "svelte", "react"):
+        assert "mcp__pocketpaw_ask__ask_user" in preamble
+        assert "ask-user-questions" not in preamble
+    else:
+        assert "ask-user-questions" in preamble
     assert "fabricate" in lower
     # The funnel, real copy, anchor CTAs, and the flat lead form.
     assert "hero" in lower
@@ -1802,8 +1660,12 @@ async def test_svelte_refine_names_its_own_tool_and_calls_the_edit_a_draft() -> 
     # SITE" escape: the surviving `status:"draft"` mention kept the test green while
     # the heading — the sentence the agent actually acts on — said the opposite.
     assert "not a deploy" in lower
-    assert "is not the live site" in lower
+    assert "the live page is unchanged" in lower
     assert "republish" not in lower
+    # A failed STATIC check rolls the edit back; ready waits on one verify at the end.
+    assert "rolled_back" in preamble
+    assert "failed the static check" in preamble
+    assert "VERIFY ONCE PER TURN, AT THE END" in preamble
     # Both edit shapes, so the agent prefers the diff over a whole-file rewrite.
     assert "old_string" in preamble
     assert "new_source" in preamble
@@ -2025,19 +1887,649 @@ async def test_every_registered_edit_tool_is_named_by_its_refine_branch() -> Non
         )
 
 
-async def test_html_create_routes_follow_up_changes_to_the_edit_tool() -> None:
-    """The create side had the same hole: html got no "changes go through the edit
-    tool" clause, so a follow-up change in the SAME conversation re-created the
-    site. react has carried this clause since RX-3; html now does too.
+# ── PHASE 1b: design research (feat/sites-bundled-design-research) ──────────
+#
+# Rewritten 2026-09-16. This first shipped (#2204) with the archive as an
+# EXTERNAL MCP server behind `POCKETPAW_SITES_MCP_SERVERS`, so the step was
+# conditional and most of these tests pinned the gate. That design needed TWO
+# switches — install the server, then grant it — both defaulting off and neither
+# implying the other, and the first deploy duly researched nothing and said
+# nothing about it. The server is bundled in-process now, so the step is
+# unconditional and what needs pinning is different: that the tools it names are
+# ones this surface can actually reach.
 
-    THE MUTATION THAT BREAKS THIS: delete the clause from the html build step.
-    Run: the create branch let a follow-up change mint a second site and this
-    failed.
+
+async def test_the_research_step_is_always_on() -> None:
+    """No setting, no install, no grant: every create preamble carries it.
+
+    The point of bundling. `pocketpaw_inspo` is an ordinary in-process server
+    like stock and icons, so the preamble names its tools the way it names
+    theirs — unconditionally, because they are unconditionally there.
+
+    THE MUTATION THAT BREAKS THIS: make `_design_research_step` return "" again.
+    Run: sites build with no research and nothing anywhere says why.
     """
-    preamble = await _preamble_for(None)  # no engine hint == the html default
+    for engine in (None, "ripple", "svelte", "react"):
+        preamble = await _preamble_for(engine)
+        assert "RESEARCH REAL SITES" in preamble, f"{engine} create lost the research step"
+        assert "mcp__pocketpaw_inspo__research_page_design" in preamble
 
+
+async def test_the_research_step_names_only_tools_sites_can_reach() -> None:
+    """The coupling that decides whether any of this works at all.
+
+    /sites runs a HARD whitelist: an id absent from `sites_allow` is stripped
+    from `allowed_tools` before the subprocess launches, and the agent is simply
+    told the capability does not exist. So a preamble naming a bundled tool is
+    not enough — the id has to be in the allow-list too, and the two live in
+    different files edited by different changes.
+
+    This is the sibling of
+    `test_every_tool_a_refine_branch_names_is_a_registered_tool`, run against
+    the resolved profile rather than the server registry.
+
+    THE MUTATION THAT BREAKS THIS: drop `INSPO_TOOL_IDS` from the `sites_allow`
+    union in `surface_registry`. Run: the preamble still commands the tools, the
+    agent never sees them, and every generated site skips research silently —
+    which is exactly how the first deploy of this feature failed.
+    """
+    from pocketpaw_ee.agent.mcp_servers.inspo import INSPO_TOOL_IDS
+    from pocketpaw_ee.cloud.surface.domain import SurfaceKind
+    from pocketpaw_ee.cloud.surface.service import resolve_profile
+
+    step = sites_handler._design_research_step()
+    named = set(re.findall(r"mcp__pocketpaw_inspo__\w+", step))
+    assert named, "the step named no research tools at all"
+
+    # Every named tool is one the server really builds...
+    unknown = named - set(INSPO_TOOL_IDS)
+    assert not unknown, f"the step names {sorted(unknown)}, which the server does not expose"
+
+    # ...and one /sites is allowed to call.
+    allow = resolve_profile(SurfaceKind.SITES, SurfaceMeta()).allow_mcp_tool_ids
+    assert allow is not None, "the /sites profile stopped pinning an MCP allow-list"
+    unreachable = named - set(allow)
+    assert not unreachable, (
+        f"{sorted(unreachable)} is named by the preamble but missing from the "
+        "/sites allow-list — it is silently unreachable and the instruction "
+        "commands nothing"
+    )
+
+
+def _assert_research_rails(lower: str) -> None:
+    """The rails that stop a reference archive from flattening every site.
+
+    A locked reference now SETS the look, which is what made the hand-built
+    comparison work. What must survive with it: the rotation ban (the same brief
+    returns the same exemplars), no wholesale clone, colour roles kept, and the
+    user's own input outranking every reference.
+    """
+    assert "clone" in lower
+    assert "wholesale" in lower
+    assert "role" in lower
+    assert "user supplied" in lower
+
+
+async def test_the_research_step_keeps_the_rotation_ban_and_roles() -> None:
+    """THE MUTATION THAT BREAKS THIS: delete the rotation clause. Run: nothing
+    fails, every dentist brief converges on the same returned exemplar, and the
+    regression is invisible until a human looks at two sites side by side.
+    """
+    _assert_research_rails(sites_handler._design_research_step().lower())
+
+
+async def test_the_research_step_opens_screenshots_before_the_look_is_chosen(
+    monkeypatch,
+) -> None:
+    """The change the hand-built comparison proved: open the pictures.
+
+    Text descriptions never carried the pattern the good references shared, so
+    both archive states must name their screenshot tool and put it before the
+    look is locked.
+    """
+    for token, view_tool in (
+        (None, "mcp__pocketpaw_inspo__view_reference_screenshot"),
+        ("rf_test", "mcp__pocketpaw_refero__view_reference"),
+    ):
+        _with_refero_token(monkeypatch, token)
+        step = sites_handler._design_research_step()
+        assert view_tool in step, f"token={token!r} names no screenshot tool"
+        assert step.index(view_tool) < step.index("LOCK ONE DIRECTION")
+        assert "before you choose the look" in step.lower()
+
+
+async def test_create_tells_the_agent_to_look_at_its_draft() -> None:
+    """verify_site says it builds; only a screenshot says it looks right."""
+    for engine in (None, "svelte", "react"):
+        preamble = await _preamble_for(engine)
+        assert "mcp__pocketpaw_sites_manager__preview_site" in preamble, engine
+        assert "LOOK BEFORE YOU SHOW IT" in preamble, engine
+
+
+async def test_the_project_loop_looks_after_every_build() -> None:
+    """Every new site is a project; its loop tells the agent to look at each built
+    draft (desktop, then mobile, other routes by `path`) and to say so when it could
+    not, rather than describe a page it never saw."""
+    loop = sites_handler._PROJECT_LOOP
+    assert "mcp__pocketpaw_sites_manager__preview_site" in loop
+    assert loop.index("run_site_build") < loop.index("preview_site")
+    for phrase in ("after every `built`", "device: mobile", "`path`", "`wait_ms`"):
+        assert phrase in loop, phrase
+    assert "say the page was not visually checked rather than implying it was" in loop
+
+
+async def test_the_research_step_runs_before_the_tokens_are_locked() -> None:
+    """The reference decides the look, so research lands before the art direction
+    is written and before any token."""
+    preamble = await _preamble_for(None)
+
+    assert preamble.index("RESEARCH REAL SITES") < preamble.index("ART DIRECTION")
+    assert preamble.index("ART DIRECTION") < preamble.index("TOKENS FIRST")
+
+
+# ---------------------------------------------------------------------------
+# PHASE 1b with Refero: primary when a token is set, Inspo as the fallback.
+#
+# Refero's helpers swallow network trouble into an EMPTY result rather than an
+# error, so "Refero failed" usually reads as `count: 0`. The fallback therefore
+# has to trigger on empty as well as on error, or a dead Refero means a site
+# built on no research while Inspo sat right there.
+# ---------------------------------------------------------------------------
+
+_REFERO_STYLES = "mcp__pocketpaw_refero__search_styles"
+_INSPO_RESEARCH = "mcp__pocketpaw_inspo__research_page_design"
+
+
+def _with_refero_token(monkeypatch, token: str | None) -> None:
+    from types import SimpleNamespace
+
+    import pocketpaw.config as config
+
+    monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(refero_api_token=token))
+
+
+async def test_refero_leads_the_research_step_when_its_token_is_set(monkeypatch) -> None:
+    """THE MUTATION THAT BREAKS THIS: ignore the token and always emit the Inspo
+    step. Run: a deploy pays for Refero and never calls it."""
+    _with_refero_token(monkeypatch, "rf_test")
+    step = sites_handler._design_research_step()
+
+    assert _REFERO_STYLES in step
+    assert _INSPO_RESEARCH in step, "the Inspo fallback is missing"
+    assert step.index(_REFERO_STYLES) < step.index(_INSPO_RESEARCH), "Refero must come first"
+
+
+async def test_the_refero_step_falls_back_to_inspo_on_empty_as_well_as_error(monkeypatch) -> None:
+    """THE MUTATION THAT BREAKS THIS: drop the "comes back empty" trigger. Run:
+    an unreachable Refero returns `count: 0`, the agent reads that as "no
+    references exist", and Inspo is never asked."""
+    _with_refero_token(monkeypatch, "rf_test")
+    lower = sites_handler._design_research_step().lower()
+
+    assert "fallback" in lower
+    assert "errors" in lower
+    assert "empty" in lower
+
+
+async def test_without_a_refero_token_the_step_is_inspo_only(monkeypatch) -> None:
+    """No token means Refero answers nothing, so naming it would only cost a
+    wasted call before every build."""
+    for token in (None, "", "   "):
+        _with_refero_token(monkeypatch, token)
+        step = sites_handler._design_research_step()
+        assert "pocketpaw_refero" not in step, f"token={token!r} still named Refero"
+        assert _INSPO_RESEARCH in step
+
+
+async def test_a_settings_failure_keeps_the_inspo_step(monkeypatch) -> None:
+    """Config trouble must not take research out of the create path."""
+    import pocketpaw.config as config
+
+    def _boom():
+        raise RuntimeError("settings unavailable")
+
+    monkeypatch.setattr(config, "get_settings", _boom)
+    step = sites_handler._design_research_step()
+    assert "pocketpaw_refero" not in step
+    assert _INSPO_RESEARCH in step
+
+
+async def test_both_research_steps_name_only_tools_sites_can_reach(monkeypatch) -> None:
+    """The reachability coupling above, extended to the Refero state: every id
+    either step names must be one its server builds and /sites may call."""
+    from pocketpaw_ee.agent.mcp_servers.inspo import INSPO_TOOL_IDS
+    from pocketpaw_ee.agent.mcp_servers.refero import REFERO_TOOL_IDS
+    from pocketpaw_ee.cloud.surface.domain import SurfaceKind
+    from pocketpaw_ee.cloud.surface.service import resolve_profile
+
+    allow = set(resolve_profile(SurfaceKind.SITES, SurfaceMeta()).allow_mcp_tool_ids or ())
+    known = set(INSPO_TOOL_IDS) | set(REFERO_TOOL_IDS)
+    for token in (None, "rf_test"):
+        _with_refero_token(monkeypatch, token)
+        named = set(
+            re.findall(
+                r"mcp__pocketpaw_(?:inspo|refero)__\w+", sites_handler._design_research_step()
+            )
+        )
+        assert named
+        assert not (named - known), f"token={token!r}: unknown ids {sorted(named - known)}"
+        assert not (named - allow), f"token={token!r}: unreachable ids {sorted(named - allow)}"
+
+
+async def test_the_refero_step_keeps_the_same_rails(monkeypatch) -> None:
+    """Switching archives must not drop the precedence clause or the rotation ban."""
+    _with_refero_token(monkeypatch, "rf_test")
+    _assert_research_rails(sites_handler._design_research_step().lower())
+
+
+async def test_a_create_preamble_carries_refero_when_configured(monkeypatch) -> None:
+    """End to end through build_preamble, not just the helper."""
+    _with_refero_token(monkeypatch, "rf_test")
+    for engine in (None, "svelte", "react"):
+        assert _REFERO_STYLES in await _preamble_for(engine), f"{engine} create lost Refero"
+
+
+# ---------------------------------------------------------------------------
+# fix/sites-design-research: research is a REQUIRED gate, not a suggestion.
+#
+# Sites kept shipping a generic look while the reference tools sat unused: the
+# step said "keep it proportionate" and "if the tools return nothing, say nothing
+# and proceed", which an agent read as permission to skip. Now every create track
+# carries a hard gate, a look-changing refine carries a short version, and a copy
+# tweak stays lean.
+# ---------------------------------------------------------------------------
+
+_CREATE_ENGINES = (None, "html", "ripple", "svelte", "react", "project")
+
+
+async def test_every_create_track_carries_the_required_research_gate(monkeypatch) -> None:
+    """THE MUTATION THAT BREAKS THIS: put the "proportionate / say nothing and
+    proceed" escape back. Run: the agent skips research and ships its default look."""
+    for token in (None, "rf_test"):
+        _with_refero_token(monkeypatch, token)
+        for engine in _CREATE_ENGINES:
+            preamble = await _preamble_for(engine)
+            assert "REQUIRED GATE" in preamble, f"{engine} token={token!r}"
+            assert "at least TWICE" in preamble, f"{engine} token={token!r}"
+            assert "about 3" in preamble, f"{engine} token={token!r}"
+            assert "Always fetch it" in preamble, f"{engine} token={token!r}"
+            assert "palette" in preamble and "type pairing" in preamble
+            assert "layout idea" in preamble
+            assert "proportionate" not in preamble, f"{engine} kept the escape"
+            assert "say nothing about it" not in preamble, f"{engine} kept the escape"
+            # The gate lands before any tokens get written.
+            assert preamble.index("REQUIRED GATE") < preamble.index("TOKENS FIRST")
+
+
+async def test_with_refero_the_gate_requires_a_screen_search(monkeypatch) -> None:
+    _with_refero_token(monkeypatch, "rf_test")
+    step = sites_handler._design_research_step()
+    assert "search screens at least ONCE" in step
+    assert "mcp__pocketpaw_refero__get_style" in step
+
+
+async def test_the_only_exemption_is_an_empty_or_erroring_result() -> None:
+    lower = sites_handler._design_research_step().lower()
+    assert "one exemption" in lower
+    assert "error or come back empty" in lower
+
+
+@pytest.mark.parametrize("engine", ALL_REFINE_ENGINES + ("project",))
+async def test_refine_researches_before_a_new_section_or_restyle(engine, monkeypatch) -> None:
+    """Refine has no intent signal, so the gate is conditional: a new section, page
+    or restyle researches; a copy tweak or bug fix skips it and stays fast."""
+    for token, tool in ((None, _INSPO_RESEARCH), ("rf_test", _REFERO_STYLES)):
+        _with_refero_token(monkeypatch, token)
+        text = sites_handler._refine_preamble(_refine_meta(), engine)
+        assert "RESEARCH BEFORE A NEW SECTION, PAGE OR RESTYLE" in text
+        assert tool in text, f"{engine} token={token!r}"
+        assert "A copy tweak, a fact change or a bug fix skips this" in text
+        # The short version, not the create gate.
+        assert "REQUIRED GATE" not in text
+
+
+async def test_refine_research_names_only_tools_sites_can_reach(monkeypatch) -> None:
+    from pocketpaw_ee.cloud.surface.domain import SurfaceKind
+    from pocketpaw_ee.cloud.surface.service import resolve_profile
+
+    allow = set(
+        resolve_profile(SurfaceKind.SITES, _refine_meta(engine="html")).allow_mcp_tool_ids or ()
+    )
+    for token in (None, "rf_test"):
+        _with_refero_token(monkeypatch, token)
+        named = set(
+            re.findall(
+                r"mcp__pocketpaw_(?:inspo|refero)__\w+", sites_handler._refine_research_step()
+            )
+        )
+        assert named and not (named - allow), f"token={token!r}: {sorted(named - allow)}"
+
+
+async def test_design_taste_triggers_on_create_and_on_a_look_changing_refine() -> None:
+    names = sites_handler.create_design_skill_names()
+    assert "pocketpaw-design-taste" in names
+    for mode in ("create", "refine"):
+        note = sites_handler._design_skills_note(mode)
+        assert "`pocketpaw-design-taste`" in note, mode
+        assert "Before the first UI file on create" in note, mode
+
+
+async def test_setting_the_refero_token_moves_the_create_cache_key(monkeypatch) -> None:
+    """The create preamble names different research tools with and without the
+    token, so a cached preamble from before the token was set must not be served."""
+    meta = SurfaceMeta(route_path="/sites", engine="html")
+    _with_refero_token(monkeypatch, None)
+    without = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+    _with_refero_token(monkeypatch, "rf_test")
+    with_token = await sites_handler.build_preamble(WORKSPACE, USER, meta)
+    assert without.cache_key != with_token.cache_key
+    assert _REFERO_STYLES in with_token.text and _REFERO_STYLES not in without.text
+
+
+# ---------------------------------------------------------------------------
+# fix/sites-edit-mints-duplicate — a site_id with no pocket_id must not create
+# ---------------------------------------------------------------------------
+#
+# THE BUG: editing an existing site could mint a DUPLICATE. The dispatch forked
+# on ``meta.pocket_id`` ALONE and never read ``meta.site_id``, and only the
+# frontend supplied ``pocket_id`` — the builder page's SurfaceMetaProvider adds
+# it from ``sitesStore.sites.find(...)``, a whole-workspace list fetch, while
+# ``site_id`` is stamped from the route param the moment the URL changes. The
+# chat rail is a SIBLING of the page's main content, so the composer is live
+# through the whole loading / load-failed / not-found window. A send inside that
+# window carried site_id and NO pocket_id, so the handler rendered the CREATE
+# preamble — and nothing downstream could refuse it: refine mode leaves every
+# create tool reachable, and no create tool's schema even accepts a pocket id,
+# so the tool minted a fresh pocket and a second Site doc.
+#
+# The fix resolves the pocket SERVER-SIDE from the site id, which is why these
+# tests seed a real Site row and go through ``build_preamble``.
+
+UNRESOLVED_SITE_ID = "68f1a0c0c0c0c0c0c0c0c0c0"  # a well-formed ObjectId, no row
+
+
+async def _seed_site_row(pocket_id: str, *, workspace: str = WORKSPACE) -> str:
+    """Insert a real Site row pointing at ``pocket_id``; return its site id."""
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    doc = _SiteDoc(workspace=workspace, pocket_id=pocket_id, owner=USER, name="seeded site")
+    await doc.insert()
+    return str(doc.id)
+
+
+def _route_only_meta(site_id: str, **kwargs: str) -> SurfaceMeta:
+    """The meta the builder REALLY sends before its site list resolves.
+
+    ``metaFromRouteParams`` in paw-enterprise stamps ``site_id`` from the route
+    param and nothing else; ``pocket_id`` arrives later from the page's provider,
+    or never (a failed list load, a deleted site). This is that wire shape.
+    """
+    return SurfaceMeta(route_path=f"/sites/{site_id}", site_id=site_id, mode="build", **kwargs)
+
+
+async def test_a_site_id_with_no_pocket_id_refines_instead_of_creating(
+    mongo_db: object,
+) -> None:
+    """THE TEST THE FIX EXISTS FOR: site_id alone must never reach create.
+
+    The handler resolves the source pocket from the site id — a primary-key,
+    workspace-scoped read — so the preamble is the REFINE one, addressed to the
+    pocket the user is actually looking at.
+
+    THE MUTATION THAT BREAKS THIS: delete the site_id resolution from
+    ``build_preamble`` so the dispatch forks on ``meta.pocket_id`` alone.
+    """
+    user_id, pocket_id = await _seed_site_pocket("html")
+    site_id = await _seed_site_row(pocket_id)
+
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, user_id, _route_only_meta(site_id))
+    ).text
+
+    assert 'mode="refine"' in preamble
+    assert 'mode="create"' not in preamble
+    # It edits the pocket the site really points at, on that site's own engine.
+    assert pocket_id in preamble
     assert HTML_TOOL in preamble
-    assert "CHANGES GO THROUGH THE EDIT TOOL" in preamble
-    assert "SAME pocket_id" in preamble
-    # Create is still the FIRST thing named — this is a create preamble.
-    assert preamble.index("create_html_site") < preamble.index("edit_html_file")
+    # And it is NOT the create flow: no clarity gate, no create tool commanded.
+    assert "PHASE 1 — CREATIVE DIRECTION" not in preamble
+    assert "create_html_site` with the `source`" not in preamble
+
+
+async def test_an_unresolvable_site_id_fails_closed_never_into_create(
+    mongo_db: object,
+) -> None:
+    """FAIL CLOSED. A site id we cannot resolve is not a licence to create.
+
+    Falling back to ``_create_preamble`` here is the original bug with an extra
+    step: the agent is told to build a new site while the user is sitting on an
+    existing one. The preamble instead says the site could not be identified and
+    tells the agent to establish which site it is before touching anything.
+
+    THE MUTATION THAT BREAKS THIS: make the unresolved branch fall through to
+    ``_create_preamble``.
+    """
+    meta = _route_only_meta(UNRESOLVED_SITE_ID)
+    preamble = (await sites_handler.build_preamble(WORKSPACE, USER, meta)).text
+
+    assert preamble != sites_handler._create_preamble(meta)
+    assert 'mode="create"' not in preamble
+    lower = preamble.lower()
+    # It says what went wrong and refuses the create.
+    assert "could not" in lower
+    assert "existing" in lower
+    # No create tool is commanded — that is the whole point of failing closed.
+    for create_tool in (
+        "create_html_site",
+        "create_react_site",
+        "create_svelte_site",
+        "create_landing_site",
+    ):
+        assert create_tool not in preamble, f"{create_tool} is reachable and now named"
+
+
+async def test_a_site_id_from_another_workspace_fails_closed(mongo_db: object) -> None:
+    """The resolution is tenant-scoped, and a miss fails closed like any other.
+
+    ``_load`` filters on ``{_id, workspace}``, so a site id pasted from another
+    tenant resolves to nothing here. That must land in the same refuse-and-ask
+    branch rather than quietly becoming a create.
+    """
+    _other_user, other_pocket = await _seed_site_pocket("html", workspace="ws-other-tenant")
+    foreign_site_id = await _seed_site_row(other_pocket, workspace="ws-other-tenant")
+
+    preamble = (
+        await sites_handler.build_preamble(WORKSPACE, USER, _route_only_meta(foreign_site_id))
+    ).text
+
+    assert 'mode="create"' not in preamble
+    assert other_pocket not in preamble
+    assert "create_html_site" not in preamble
+
+
+async def test_a_stamped_pocket_id_still_wins(mongo_db: object) -> None:
+    """The existing path is untouched: when the frontend DOES stamp a pocket_id,
+    the handler uses it and does not need the site row at all.
+
+    Stated as a test because the fix adds a read in front of a branch that has
+    always been meta-only, and a regression there would break every refine turn
+    the frontend gets right.
+    """
+    user_id, pocket_id = await _seed_site_pocket("ripple")
+
+    stamped = (await sites_handler.build_preamble(WORKSPACE, user_id, _refine_meta(pocket_id))).text
+    assert pocket_id in stamped
+    assert RIPPLE_TOOL in stamped
+
+
+async def test_every_create_branch_forbids_the_re_create() -> None:
+    """Every create can be changed from chat, so every create hint must route a
+    follow-up change to the file tools on the SAME site, never a second
+    ``start_site_from_template`` (which mints a second site)."""
+    for engine in _CREATE_HINTS:
+        preamble = await _preamble_for(engine)
+        assert "CHANGES GO THROUGH THE FILE TOOLS" in preamble, engine
+        assert "never a second `start_site_from_template`" in preamble, engine
+        assert "SECOND site" in preamble, engine
+
+
+async def test_every_create_branch_builds_whatsapp_orders_from_a_supplied_number() -> None:
+    """PH-10: a shop's WhatsApp order button is a wa.me link, never an invented one.
+
+    The step lives beside the engine build step, so it must reach every engine.
+    """
+    for engine in (None, "html", "svelte", "react", "ripple"):
+        preamble = await _preamble_for(engine)
+        assert f"5a. {sites_handler._WHATSAPP_ORDERS_RULE}" in preamble, engine
+
+
+async def test_the_whatsapp_rule_covers_when_number_handling_and_layout() -> None:
+    """The rule's four parts, pinned on the one constant every preamble shares."""
+    rule = sites_handler._WHATSAPP_ORDERS_RULE
+    # WHEN: only if the user wants WhatsApp orders, not whenever a card shows a number.
+    assert "When the user wants orders or enquiries on WhatsApp" in rule
+    assert "`https://wa.me/<digits>?text=<url-encoded" in rule
+    assert "ONLY from a number the user supplied" in rule
+    # Number handling.
+    assert "Show the number as written" in rule
+    assert "drop +, spaces, dashes and a leading trunk 0" in rule
+    assert "the address doesn't make it certain, ask" in rule
+    # No number.
+    assert "never ship a placeholder wa.me link" in rule
+    # Layout.
+    assert "sticky button on mobile" in rule
+    assert "never covers the lead form's submit or the footer" in rule
+
+
+@pytest.mark.parametrize("engine", ALL_REFINE_ENGINES)
+async def test_every_refine_branch_carries_the_whatsapp_rule(engine: str | None) -> None:
+    """A request to add a WhatsApp button is a refine too, so every branch gets it."""
+    preamble = sites_handler._refine_preamble(_refine_meta(), engine)
+    assert sites_handler._WHATSAPP_ORDERS_RULE in preamble, engine
+    if engine != "ripple":  # ripple keeps its own widget-rule CTA line
+        assert "(or `tel:` / `mailto:` / `https://wa.me/…`)" in preamble, engine
+
+
+@pytest.mark.parametrize("engine", ["svelte", "ripple"])
+async def test_the_frontend_preamble_carries_the_whatsapp_rule(engine: str) -> None:
+    preamble = sites_handler._frontend_preamble(
+        SurfaceMeta(route_path="/sites"), _landing_brief(engine=engine)
+    )
+    assert sites_handler._WHATSAPP_ORDERS_RULE in preamble
+
+
+# --- The 2026-10-21 user-sim rules: facts, blocked, stored data, closing ---------
+#
+# Each rule is one constant with several readers. These pin that every reader
+# carries it, and that the wording the sim's failures hinge on is present: a real
+# venue name, the plan-gate HTML dump, localStorage "bookings", canned closers.
+
+_SIM_RULES = ("_FACTS_RULE", "_BLOCKED_RULE", "_STORED_DATA_RULE", "_CLOSING_RULE")
+
+
+async def test_create_carries_every_sim_rule() -> None:
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
+    for name in _SIM_RULES:
+        assert getattr(sites_handler, name) in out, name
+
+
+@pytest.mark.parametrize("engine", ["project", "html", "svelte", "react", "ripple", None])
+async def test_refine_carries_facts_blocked_and_closing(engine: str | None) -> None:
+    preamble = sites_handler._refine_preamble(_refine_meta(), engine)
+    for name in ("_FACTS_RULE", "_BLOCKED_RULE", "_CLOSING_RULE"):
+        assert getattr(sites_handler, name) in preamble, (engine, name)
+
+
+@pytest.mark.parametrize("engine", ["project", "html", "svelte", "react"])
+async def test_source_refines_carry_the_stored_data_rule(engine: str) -> None:
+    preamble = sites_handler._refine_preamble(_refine_meta(), engine)
+    assert sites_handler._STORED_DATA_RULE in preamble, engine
+
+
+async def test_import_preamble_carries_facts_and_blocked() -> None:
+    preamble = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), _landing_brief())
+    assert sites_handler._FACTS_RULE in preamble
+    assert sites_handler._BLOCKED_RULE in preamble
+
+
+async def test_facts_rule_forbids_invention_and_names_placeholders() -> None:
+    rule = sites_handler._FACTS_RULE
+    for fact in ("business name", "address", "phone", "email", "prices", "review counts"):
+        assert fact in rule, fact
+    assert "real venue" in rule
+    assert "'Your Studio'" in rule
+    assert "lists the placeholders" in rule
+    assert "never say nothing was invented unless that is true" in rule
+    # Research only on an identified business, cited and confirmed by the owner.
+    assert "URL or location that pins it" in rule
+    assert "never borrow a same-named" in rule
+    # Create may omit an unknown section; an edit keeps it with placeholders.
+    assert "an edit keeps existing sections" in rule
+
+
+async def test_refine_preserves_sections_instead_of_a_fixed_funnel() -> None:
+    """A refine keeps whatever sections the page has; it must not imply every site
+    has proof and pricing, which would make the agent invent them."""
+    rules = sites_handler._REFINE_SHARED_RULES
+    assert "PRESERVE the page's sections and their order" in rules
+    assert "does not drop, reorder or add sections" in rules
+    assert "drop the funnel" not in rules
+
+
+async def test_create_does_not_block_on_a_missing_name() -> None:
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
+    assert "Never block on a missing fact" in out
+    assert "listed with the other placeholders" in out
+    # Transient non-asset failures: one retry, then an honest report.
+    assert "retry once, then tell the user plainly what failed" in out
+    # A single-weight family requested at a weight it lacks fails the whole link.
+    assert "Request only weights the family has" in out
+
+
+async def test_blocked_rule_stops_instead_of_handing_the_site_over() -> None:
+    """A plan-gated create pasted the site into chat as HTML, explained the form
+    tokens and recommended other hosts. The old robustness line, "a tool failure
+    must NEVER block the build", is what invited the workaround."""
+    rule = sites_handler._BLOCKED_RULE
+    assert "one plain sentence" in rule
+    assert "then stop" in rule
+    assert "Settings → Billing" in rule
+    assert "pasted into the chat" in rule
+    assert "__CAPTURE_API_BASE__" in rule
+    for host in ("GitHub Pages", "Netlify", "Vercel"):
+        assert host in rule, host
+    out = (
+        await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+    ).text
+    assert "must NEVER block" not in out
+
+
+async def test_stored_data_rule_routes_to_the_database_not_localstorage() -> None:
+    rule = sites_handler._STORED_DATA_RULE
+    assert "database recipe" in rule
+    assert "localStorage" in rule
+    assert "not available here" in rule
+    assert "lead form" in rule
+
+
+async def test_closing_rule_comes_from_the_brief() -> None:
+    rule = sites_handler._CLOSING_RULE
+    assert "brief" in rule
+    assert "two" in rule
+    assert "asked to remove" in rule
+    assert "the placeholder list does not count" in rule
+
+
+async def test_ripple_refine_and_import_preserve_existing_sections() -> None:
+    """The ripple refine and the import build keep the page's own sections, like the
+    shared refine rules: no fixed proof-and-pricing funnel the agent must fill."""
+    ripple = sites_handler._refine_preamble(_refine_meta(), "ripple")
+    assert "PRESERVE the page's existing sections and their order" in ripple
+    assert "landing structure" not in ripple
+    imported = sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), _landing_brief())
+    assert "PRESERVE the source page's existing sections and their order" in imported
+    assert "landing structure" not in imported

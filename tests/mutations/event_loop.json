@@ -37,9 +37,9 @@
   },
   {
     "label": "the SSE stream loses its maximum lifetime",
-    "file": "ee/pocketpaw_ee/cloud/chat/runs/router.py",
-    "find": "            if time.monotonic() >= deadline:",
-    "replace": "            if False:",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/transport.py",
+    "find": "        if time.monotonic() >= deadline:",
+    "replace": "        if False:",
     "tests": [
       "tests/cloud/test_event_loop_blocking.py::TestStreamLifetime::test_stream_terminates_at_the_deadline"
     ]

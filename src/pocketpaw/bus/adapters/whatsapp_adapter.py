@@ -1,8 +1,14 @@
 """
 WhatsApp Channel Adapter (Business Cloud API).
-Created: 2026-02-06
+
+Also home to ``verify_signature``, the one X-Hub-Signature-256 check for Meta
+webhooks. The OSS webhook routes call it through
+``WhatsAppAdapter.verify_webhook_signature`` and the cloud growth webhook calls it
+directly. Webhook routes are auth-exempt (Meta cannot log in), so a body that
+fails this check must never be parsed. An unset app secret fails closed.
 """
 
+import hashlib
 import hmac
 import logging
 
@@ -17,6 +23,23 @@ WHATSAPP_API_VERSION = "v21.0"
 WHATSAPP_API_BASE = f"https://graph.facebook.com/{WHATSAPP_API_VERSION}"
 
 
+def verify_signature(app_secret: str | None, body: bytes, header: str | None) -> bool:
+    """True when ``header`` is the HMAC-SHA256 of the raw ``body`` keyed by ``app_secret``.
+
+    Meta sends ``X-Hub-Signature-256: sha256=<hex>``; the ``sha256=`` prefix is
+    optional here. An unset secret or a missing header returns False, so callers
+    fail closed.
+    """
+    if not app_secret or not header:
+        return False
+    provided = header.strip()
+    if provided[:7].lower() == "sha256=":
+        provided = provided[7:].strip()
+    expected = hmac.new(app_secret.encode(), body, hashlib.sha256).hexdigest()
+    # Bytes, so a non-ASCII header can't raise inside compare_digest.
+    return hmac.compare_digest(provided.lower().encode(), expected.encode())
+
+
 class WhatsAppAdapter(BaseChannelAdapter):
     """Adapter for WhatsApp Business Cloud API."""
 
@@ -26,11 +49,13 @@ class WhatsAppAdapter(BaseChannelAdapter):
         phone_number_id: str,
         verify_token: str,
         allowed_phone_numbers: list[str] | None = None,
+        app_secret: str = "",
     ):
         super().__init__()
         self.access_token = access_token
         self.phone_number_id = phone_number_id
         self.verify_token = verify_token
+        self.app_secret = app_secret
         self.allowed_phone_numbers = allowed_phone_numbers or []
         self._http: httpx.AsyncClient | None = None
         self._buffers: dict[str, str] = {}
@@ -70,6 +95,22 @@ class WhatsAppAdapter(BaseChannelAdapter):
         if mode == "subscribe" and hmac.compare_digest(token or "", self.verify_token):
             return challenge
         return None
+
+    def verify_webhook_signature(self, body: bytes, header: str | None) -> bool:
+        """Check an inbound webhook's X-Hub-Signature-256; log one line on rejection."""
+        if verify_signature(self.app_secret, body, header):
+            return True
+        if not self.app_secret:
+            logger.error(
+                "Rejected WhatsApp webhook: POCKETPAW_WHATSAPP_APP_SECRET is not set. "
+                "Set it to your Meta app secret to accept inbound messages."
+            )
+        else:
+            logger.warning(
+                "Rejected WhatsApp webhook: X-Hub-Signature-256 missing or not signed "
+                "with POCKETPAW_WHATSAPP_APP_SECRET"
+            )
+        return False
 
     async def handle_webhook_message(self, payload: dict) -> None:
         """Parse incoming WhatsApp webhook payload and publish to bus."""

@@ -1,6 +1,10 @@
 # tests/cloud/credits/test_enforcement.py — BC-4 run-start hard-block +
 # the chunk-3 monthly-quota fast-reject (feat/billing-quota-enforcement).
 #
+# Updated 2026-10-01 (CN-3): the router's billing leg is now
+# ``credits.guards.assert_within_billing``, so ``_enforce`` sets the flag where
+# the guard reads it. Every assertion is unchanged.
+#
 # Proves the credit gates at the SINGLE chat run-start chokepoint
 # (chat/agent_router.py::post_agent_chat):
 #   1. billing_enforced=True + balance 0  -> POST returns 402 credits.insufficient
@@ -86,6 +90,9 @@ class _StubTransport:
     async def request_cancel(self, run_id: str) -> None:
         self.cancelled.append(run_id)
 
+    async def scope_stop_token(self, scope_key: str) -> str | None:  # noqa: ARG002
+        return None
+
     def read_events(self, run_id: str, *, after: str = "0", block_ms: int = 15000) -> AsyncIterator:  # noqa: ARG002
         async def _gen() -> AsyncIterator:
             from pocketpaw_ee.cloud.chat.runs.transport import StreamEvent
@@ -100,8 +107,20 @@ class _StubTransport:
 
 
 def _enforce(monkeypatch, mod, *, on: bool) -> None:
-    """Point the router's ``get_settings`` at a stub carrying the flag."""
-    monkeypatch.setattr(mod, "get_settings", lambda: SimpleNamespace(billing_enforced=on))
+    """Point the billing guard's ``get_settings`` at a stub carrying the flag,
+    plus the launch model pair the free-model check reads on every gated turn."""
+    from pocketpaw_ee.cloud.credits import guards
+
+    monkeypatch.setattr(
+        guards,
+        "get_settings",
+        lambda: SimpleNamespace(
+            billing_enforced=on,
+            credits_enforced=False,
+            pydantic_ai_model="litellm:claude-haiku-4-5",
+            free_model_allowlist=["claude-haiku-4-5"],
+        ),
+    )
 
 
 def _patch_run_internals(mod):

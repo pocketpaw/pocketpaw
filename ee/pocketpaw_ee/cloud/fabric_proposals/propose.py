@@ -1,5 +1,7 @@
 # ee/cloud/fabric_proposals/propose.py — propose a gated Fabric-ontology write.
 # Created: 2026-06-19 (SZD-5a — _fabric_objects Instinct proposal type).
+# Updated: 2026-10-01 (CN-5) — the chain emit + chain-id back-write now go through
+#   the shared ``cloud/_core/proposals`` helper (store API, no raw SQL).
 #
 # What this module does (the propose half of the Fabric-objects gate): "sovereign
 # zero-setup discovery" stages a PROPOSED Fabric ontology — a set of object types,
@@ -57,6 +59,8 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from pocketpaw_ee.cloud._core.proposals import emit_agent_proposed, persist_chain_ids
+
 logger = logging.getLogger(__name__)
 
 # The Instinct Action kind discriminator for a Fabric-objects proposal. The
@@ -75,127 +79,6 @@ FABRIC_OBJECTS_PARAM_KEY = "_fabric_objects"
 # instead of writing a misinterpreted ontology (same discipline as the
 # external-action gate's ``EXTERNAL_ACTION_SCHEMA``). Starts at 1 — first version.
 FABRIC_OBJECTS_SCHEMA = 1
-
-
-def _emit_agent_proposed(
-    *,
-    correlation_id: UUID,
-    action_id: str,
-    workspace_id: str,
-    user_id: str,
-    type_count: int,
-    object_count: int,
-    link_count: int,
-) -> UUID | None:
-    """Emit the chain-opening ``agent.proposed`` event for a Fabric-objects write.
-
-    Mirrors ``external_actions.propose._emit_agent_proposed``: the proposing
-    caller is the actor (``kind="agent"`` with the requesting user on its id, the
-    workspace on its scope_context). A Fabric ontology isn't bound to a pocket —
-    its tenancy is the workspace — so ``pocket_id`` on the chain carries the
-    workspace id (matching how the Action's ``pocket_id`` field carries the
-    workspace).
-
-    Returns the emitted event id so the caller can persist it on the blob's
-    ``proposed_event_id`` field for the ``human.corrected`` causation chain, or
-    ``None`` when the emit raised — best-effort per RFC 09; the Slice 4
-    reconciler picks up any orphans.
-    """
-    from soul_protocol.spec.journal import Actor
-
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
-
-    actor = Actor(
-        kind="agent",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}"],
-    )
-    intent = (
-        f"create {object_count} Fabric object(s) across {type_count} type(s) "
-        f"and {link_count} link(s)"
-    )
-    payload: dict[str, Any] = {
-        # Fields the projection's ``_fold_proposed`` consumes.
-        "intent": intent,
-        "action": "fabric_objects",
-        "pocket_id": workspace_id,
-        "inputs": [],
-        # Richer fields for the explain narrator.
-        "proposal_kind": "fabric_objects",
-        "proposal": {
-            "type_count": type_count,
-            "object_count": object_count,
-            "link_count": link_count,
-        },
-        "action_id": action_id,
-    }
-    try:
-        entry = record_agent_proposed(
-            correlation_id=correlation_id,
-            actor=actor,
-            scope=[f"workspace:{workspace_id}"],
-            payload=payload,
-        )
-        return entry.id
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "fabric_objects agent.proposed emit failed for correlation_id=%s "
-            "(action_id=%s) — Slice 4 reconciler will catch up",
-            correlation_id,
-            action_id,
-            exc_info=True,
-        )
-        return None
-
-
-async def _persist_chain_ids(
-    *,
-    store: Any,
-    action_id: str,
-    correlation_id: str,
-    proposed_event_id: str | None,
-) -> None:
-    """Write ``correlation_id`` + ``proposed_event_id`` onto the persisted
-    Action's ``parameters._fabric_objects`` blob after ``agent.proposed`` fired.
-
-    The blob is built with ``correlation_id`` already set (minted before build);
-    ``proposed_event_id`` is the field this back-write fills in. Direct SQL
-    update — the same pattern the external-action gate's ``_persist_chain_ids``
-    uses. Best-effort: a write failure leaves ``proposed_event_id`` None and the
-    eventual ``human.corrected`` emits without a causation_id (the chain still
-    folds; causation_id is optional on EventEntry).
-    """
-    import json as _json
-
-    import aiosqlite
-
-    try:
-        action = await store.get_action(action_id)
-        if action is None:
-            return
-        params = dict(getattr(action, "parameters", None) or {})
-        blob = params.get(FABRIC_OBJECTS_PARAM_KEY)
-        if not isinstance(blob, dict):
-            return
-        blob = dict(blob)
-        blob["correlation_id"] = correlation_id
-        blob["proposed_event_id"] = proposed_event_id
-        params[FABRIC_OBJECTS_PARAM_KEY] = blob
-
-        async with aiosqlite.connect(store._db_path) as db:
-            await db.execute(
-                "UPDATE instinct_actions SET parameters = ?,"
-                " updated_at = datetime('now') WHERE id = ?",
-                (_json.dumps(params), action_id),
-            )
-            await db.commit()
-    except Exception:  # noqa: BLE001 — write-back is best-effort
-        logger.warning(
-            "fabric_objects: failed to persist chain ids onto action %s — the "
-            "chain's human.corrected will emit without causation_id",
-            action_id,
-            exc_info=True,
-        )
 
 
 def _normalize_object_types(object_types: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -419,21 +302,30 @@ async def propose_fabric_objects(
     # proposed`` is the chain origin; its event id is back-written onto the blob
     # so the router's ``human.corrected`` can cite it as causation. Best-effort:
     # a Decision-Graph wiring failure must NOT fail the propose response.
-    proposed_event_id = _emit_agent_proposed(
+    proposed_event_id = emit_agent_proposed(
         correlation_id=UUID(corr),
         action_id=action_obj.id,
+        kind="fabric_objects",
+        intent=(
+            f"create {len(norm_objects)} Fabric object(s) across {len(norm_types)} type(s) "
+            f"and {len(norm_links)} link(s)"
+        ),
+        proposal={
+            "type_count": len(norm_types),
+            "object_count": len(norm_objects),
+            "link_count": len(norm_links),
+        },
         workspace_id=workspace_id,
         user_id=requested_by,
-        type_count=len(norm_types),
-        object_count=len(norm_objects),
-        link_count=len(norm_links),
     )
     if proposed_event_id is not None:
-        await _persist_chain_ids(
+        await persist_chain_ids(
             store=store,
             action_id=action_obj.id,
+            param_key=FABRIC_OBJECTS_PARAM_KEY,
             correlation_id=corr,
             proposed_event_id=str(proposed_event_id),
+            label="fabric_objects",
         )
 
     return action_obj.id

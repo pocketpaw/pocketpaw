@@ -34,6 +34,27 @@ moved. ``test_the_usage_event_carries_what_the_meter_actually_reads`` now expect
 be billed as ordinary input and are now billed at Anthropic's 1.25x write
 premium. The difference is a rounding error on that fixture and is not one on a
 write-heavy turn, which is the whole reason the write got its own line.
+
+Updated 2026-09-11 (feat/other-hand-page-vision) — the images section gained the
+two retention tests. ``test_a_retained_turn_never_replays_its_page_image`` is the
+one that matters: it COUNTS the attachments on turn 2 rather than asserting none,
+because turn 2's own picture is supposed to be there and a presence assertion
+would fail on working code. Pre-fix it saw 2.
+
+Updated 2026-09-27 (fix/concierge-web-tool-deny) — added the ``exclusive_tools``
+section: the flag is in the agent cache key, it registers no native web
+capability, and it loads no skills. Each has a control run first, and none sets
+a deny set, because the concierge's own deny of WebSearch/WebFetch would hide the
+native-web gap. The otherhand_tools_toggle mutation anchor on the capabilities
+call moved with it.
+
+Updated 2026-09-27 (fix/pydantic-ai-tool-images) — added
+``test_a_tool_returning_images_keeps_them_and_reports_text_only``: a tool whose
+return is ``[caption, BinaryContent]`` must reach the model with its image intact
+through the harness char cap, and its ``tool_result`` event must carry the
+caption plus an image count rather than a repr of the bytes.
+``test_harness_capabilities_are_wired`` now expects
+``ImageSafeOverflowingToolOutput``, the wrapper that makes the first half hold.
 """
 
 from __future__ import annotations
@@ -89,7 +110,7 @@ def _backend_with_model(model, **overrides) -> PydanticAIBackend:
     """
     overrides.setdefault("pydantic_ai_skills_enabled", False)
     backend = PydanticAIBackend(_settings(**overrides))
-    backend._build_model = lambda: model  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: model  # type: ignore[method-assign]
     backend._mcp_tools = []
     backend._custom_tools = []
     return backend
@@ -477,7 +498,7 @@ async def test_missing_sdk_yields_error_not_crash():
 
 
 async def test_model_failure_yields_error_then_done():
-    def boom():
+    def boom(*_a, **_k):
         raise RuntimeError("proxy unreachable")
 
     backend = PydanticAIBackend(_settings())
@@ -610,7 +631,7 @@ async def test_run_handle_is_released_on_completion():
 
 
 async def test_run_handle_is_released_on_error():
-    def boom():
+    def boom(*_a, **_k):
         raise RuntimeError("nope")
 
     backend = PydanticAIBackend(_settings())
@@ -727,7 +748,7 @@ async def test_mcp_servers_spawn_once_across_many_runs(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     _drive_real_mcp(monkeypatch, [server])
 
@@ -759,7 +780,7 @@ async def test_concurrent_first_runs_do_not_double_spawn(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     _drive_real_mcp(monkeypatch, servers)
 
@@ -784,7 +805,7 @@ async def test_mcp_server_that_fails_to_start_is_dropped_not_fatal(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     broken = _Broken()
     _drive_real_mcp(monkeypatch, [broken])
@@ -815,7 +836,7 @@ async def test_one_broken_server_does_not_take_down_a_healthy_one(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     backend._custom_tools = []
     broken = _Broken()
     _drive_real_mcp(monkeypatch, [broken, healthy], n_configs=2)
@@ -875,7 +896,7 @@ async def test_mcp_loading_is_cached_per_instance_not_per_run(monkeypatch):
     backend = PydanticAIBackend(
         _settings(pydantic_ai_mcp_enabled=True, pydantic_ai_skills_enabled=False)
     )
-    backend._build_model = lambda: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: TestModel(custom_output_text="ok")  # type: ignore[method-assign]
     # Not _backend_with_model: this test needs MCP loading live, so it pins the
     # builtin tool surface itself (TestModel would otherwise execute all 49).
     backend._custom_tools = []
@@ -910,7 +931,7 @@ def test_harness_capabilities_are_wired():
         "ClearToolResults",
         "Planning",
         "StepPersistence",
-        "OverflowingToolOutput",
+        "ImageSafeOverflowingToolOutput",
     } <= names, names
 
 
@@ -1975,7 +1996,7 @@ async def _tool_surface(backend: PydanticAIBackend, **run_kwargs) -> set[str]:
         yield "ok"
 
     model = FunctionModel(stream_function=capture)
-    backend._build_model = lambda: model  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: model  # type: ignore[method-assign]
     await _collect(backend, "hi", **run_kwargs)
     return seen
 
@@ -2022,6 +2043,10 @@ def test_run_accepts_every_kwarg_the_pool_forwards():
     src = inspect.getsource(pool.AgentPool.run)
     forwarded = set(re.findall(r'run_kwargs\["(\w+)"\]\s*=', src))
     forwarded |= {"system_prompt", "history", "session_key"}
+    # ``turn_context`` is an opt-in: the pool sends it only to a backend whose
+    # ``run`` declares it (the Claude SDK), and a backend that does not keeps the
+    # per-turn layers inside the one assembled prompt, which is what this one wants.
+    forwarded -= {"turn_context"}
     assert "deny_mcp_tool_ids" in forwarded, "regex stopped matching the pool's table"
 
     accepted = set(inspect.signature(PydanticAIBackend.run).parameters)
@@ -2109,7 +2134,7 @@ async def test_a_restricted_run_does_not_reuse_the_unrestricted_agent():
 async def test_the_real_sites_deny_set_removes_the_ripple_fallback():
     """Pinned to the LIVE ``/sites`` profile, not a hand-written double.
 
-    ``/sites`` svelte-create denies ``pocket_specialist__create`` so the agent
+    ``/sites`` new-site create denies ``pocket_specialist__create`` so the agent
     cannot fall back to building a rippleSpec landing page — prose-only "do not
     call the ripple tool" routing was proven to fail (claude_sdk:1865). On this
     backend that same capability is the bridged ``create_pocket``, so matching
@@ -2120,7 +2145,7 @@ async def test_the_real_sites_deny_set_removes_the_ripple_fallback():
     registry = pytest.importorskip(
         "pocketpaw_ee.cloud.surface.surface_registry", reason="pocketpaw-ee not installed"
     )
-    deny = registry._SITES_SVELTE_CREATE_DENY | registry._SITES_BUILTIN_DENY
+    deny = registry._SITES_LEGACY_AUTHORING_DENY | registry._SITES_BUILTIN_DENY
 
     backend = _backend_with_model(TestModel())
     backend._custom_tools = _bridged("create_pocket", "shell", "read_file", "web_search")
@@ -2263,7 +2288,7 @@ async def _draft_turn(backend: PydanticAIBackend, session_key: str | None) -> st
         else:
             yield "Draft ready. Preview it at /sites."
 
-    backend._build_model = lambda: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
     backend._cached_agent = None
     events = await _collect(backend, "Build an HTML bakery site", session_key=session_key)
     return "".join(e.content for e in events if e.type == "message")
@@ -2279,7 +2304,7 @@ async def _what_turn_two_sees(
         seen["messages"] = str(messages)
         yield "ok"
 
-    backend._build_model = lambda: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: FunctionModel(stream_function=stream_fn)  # type: ignore[method-assign]
     backend._cached_agent = None
     history = [
         {"role": "user", "content": "Build an HTML bakery site"},
@@ -2410,7 +2435,7 @@ async def _deferred_surface(backend: PydanticAIBackend, **run_kwargs) -> set[str
         yield "ok"
 
     model = _local_only(FunctionModel(stream_function=capture))
-    backend._build_model = lambda: model  # type: ignore[method-assign]
+    backend._build_model = lambda *_a, **_k: model  # type: ignore[method-assign]
     await _collect(backend, "hi", **run_kwargs)
     return seen
 
@@ -2499,7 +2524,7 @@ async def test_a_denied_tool_cannot_be_discovered_by_searching_for_it():
             revealed.extend(t.name for t in info.function_tools)
             yield "done"
 
-    backend._build_model = lambda: _local_only(FunctionModel(stream_function=script))
+    backend._build_model = lambda *_a, **_k: _local_only(FunctionModel(stream_function=script))
     await _collect(
         backend,
         "make a landing page",
@@ -2539,7 +2564,7 @@ async def test_searching_makes_the_tool_callable_by_its_real_name():
         else:
             yield "done"
 
-    backend._build_model = lambda: _local_only(FunctionModel(stream_function=script))
+    backend._build_model = lambda *_a, **_k: _local_only(FunctionModel(stream_function=script))
     events = await _collect(backend, "build me a website")
     called = [
         (ev.metadata or {}).get("name") for ev in events if ev.type in ("tool_use", "tool_result")
@@ -2639,7 +2664,7 @@ async def test_the_backend_really_runs_our_ranking_not_the_built_in_one():
             revealed.extend(t.name for t in info.function_tools)
             yield "done"
 
-    backend._build_model = lambda: _local_only(FunctionModel(stream_function=script))
+    backend._build_model = lambda *_a, **_k: _local_only(FunctionModel(stream_function=script))
     await _collect(backend, "build me a webpage")
 
     assert "srv_create_html_site" in revealed, (
@@ -3112,21 +3137,105 @@ def test_a_withheld_web_tool_is_not_granted_back_by_the_native_capability():
     assert "WebSearch" not in caps
 
 
+# --------------------------------------------------------------------------
+# exclusive_tools — deny-by-default surfaces (the public Paw Bar concierge)
+#
+# The end-to-end concierge test lives in
+# tests/cloud/test_concierge_pydantic_ai_exclusive_tools.py. These pin the
+# three parts of the backend change that the concierge's own deny set hides:
+# the cache key, native web capabilities and skills.
+# --------------------------------------------------------------------------
+
+_OWN_ACTION = "mcp__pawbar_actions__pawbar_add_to_cart"
+
+
+def _exclusive_backend(**overrides):
+    seen: dict[str, set[str]] = {"function": set(), "native": set()}
+
+    async def capture(messages: list[ModelMessage], info: AgentInfo):
+        seen["function"] = {t.name for t in info.function_tools}
+        seen["native"] = {
+            type(t).__name__ for t in info.model_request_parameters.native_tools or []
+        }
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=capture), **overrides)
+    backend._custom_tools = _bridged("web_search", "url_extract", "remember")
+    backend._mcp_tools = [_mcp_toolset("pawbar_actions", "pawbar_add_to_cart")]
+    return backend, seen
+
+
+async def test_exclusive_tools_is_in_the_agent_cache_key():
+    """Same deny, same allow, only the flag differs. The agent cache is ONE
+    slot, so a key without the flag serves the open agent to the locked run."""
+    backend, seen = _exclusive_backend()
+    allow = frozenset({_OWN_ACTION})
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=allow)
+    assert "remember" in seen["function"], "control: an open run keeps the builtins"
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=allow, exclusive_tools=True)
+    # The harness's own two tools stay: they plan and re-read a truncated result,
+    # and touch nothing outside the run.
+    offered = seen["function"] - {"write_plan", "read_tool_result"}
+    assert offered == {"pawbar_actions_pawbar_add_to_cart"}, seen["function"]
+
+
+async def test_exclusive_tools_registers_no_native_web_capability():
+    """``_build_web_capabilities`` reads the unfiltered tool list, so dropping
+    web_search from ``tools`` alone would leave it on the request provider-side.
+    No deny set here: the concierge's own deny of WebSearch would hide this."""
+    backend, seen = _exclusive_backend(pydantic_ai_native_web_tools=True)
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=frozenset({_OWN_ACTION}))
+    assert {"WebSearchTool", "WebFetchTool"} <= seen["native"], "control"
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=frozenset({_OWN_ACTION}), exclusive_tools=True)
+    assert not seen["native"], seen["native"]
+
+
+async def test_exclusive_tools_loads_no_skills(monkeypatch):
+    """An EMPTY skill set means every bundled skill, so exclusivity has to
+    switch skills off outright rather than pass no names."""
+    pytest.importorskip("pydantic_ai_skills", reason="pydantic-ai-skills not installed")
+    _fake_skills(monkeypatch, "demo")
+    backend, seen = _exclusive_backend(pydantic_ai_skills_enabled=True)
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=frozenset({_OWN_ACTION}))
+    assert "load_skill" in seen["function"], "control: skills load on an open run"
+
+    await _collect(backend, "hi", allow_mcp_tool_ids=frozenset({_OWN_ACTION}), exclusive_tools=True)
+    assert not {"list_skills", "load_skill"} & seen["function"], seen["function"]
+
+
 def test_instrumentation_is_off_by_default_and_configures_logfire_once():
     """One backend instance exists per agent, so a per-instance
     ``logfire.configure`` would reconfigure the process on every agent built."""
-    import pocketpaw.agents.pydantic_ai as mod
+    # The configure call moved to ``pocketpaw.observability`` so that STARTUP owns
+    # it: this method runs once per agent, and only in a process that builds a
+    # pydantic-ai agent, which under POCKETPAW_CLOUD_RUN_EXECUTOR=arq is the worker
+    # and never the web process. The idempotence this test names is unchanged, it
+    # is just guarded one module further out.
+    import pocketpaw.observability as mod
 
     assert "Instrumentation" not in {
         type(c).__name__ for c in PydanticAIBackend(_settings())._build_capabilities()
     }
 
     calls: list = []
-    original_flag = mod._LOGFIRE_CONFIGURED
-    mod._LOGFIRE_CONFIGURED = False
+    original_flag = mod._CONFIGURED
+    mod._CONFIGURED = False
     import sys
 
-    fake = SimpleNamespace(configure=lambda **kw: calls.append(kw))
+    # A fuller stub than ``configure`` alone: a fake missing ``ScrubbingOptions``
+    # makes the real call raise inside our own try/except, which warns and moves
+    # on — so the assertion below would fail for a reason that has nothing to do
+    # with what it is testing.
+    fake = SimpleNamespace(
+        configure=lambda **kw: calls.append(kw),
+        ScrubbingOptions=lambda **kw: SimpleNamespace(**kw),
+        instrument_pydantic_ai=lambda **kw: None,
+    )
     saved, sys.modules["logfire"] = sys.modules.get("logfire"), fake
     try:
         for _ in range(3):
@@ -3142,7 +3251,7 @@ def test_instrumentation_is_off_by_default_and_configures_logfire_once():
             sys.modules["logfire"] = saved
         else:
             sys.modules.pop("logfire", None)
-        mod._LOGFIRE_CONFIGURED = original_flag
+        mod._CONFIGURED = original_flag
 
     assert len(calls) == 1, f"logfire configured {len(calls)} times across 3 backends"
     assert calls[0]["send_to_logfire"] == "if-token-present", (
@@ -3154,15 +3263,17 @@ def test_a_broken_logfire_does_not_break_the_run():
     """Observability is never load-bearing."""
     import sys
 
-    import pocketpaw.agents.pydantic_ai as mod
+    import pocketpaw.observability as mod
 
     def _boom(**kw):
         raise RuntimeError("no exporter")
 
-    original_flag = mod._LOGFIRE_CONFIGURED
-    mod._LOGFIRE_CONFIGURED = False
+    original_flag = mod._CONFIGURED
+    mod._CONFIGURED = False
     saved = sys.modules.get("logfire")
-    sys.modules["logfire"] = SimpleNamespace(configure=_boom)
+    sys.modules["logfire"] = SimpleNamespace(
+        configure=_boom, ScrubbingOptions=lambda **kw: SimpleNamespace(**kw)
+    )
     try:
         caps = {
             type(c).__name__
@@ -3175,6 +3286,696 @@ def test_a_broken_logfire_does_not_break_the_run():
             sys.modules["logfire"] = saved
         else:
             sys.modules.pop("logfire", None)
-        mod._LOGFIRE_CONFIGURED = original_flag
+        mod._CONFIGURED = original_flag
 
     assert "Instrumentation" in caps, "a dead exporter must not drop instrumentation"
+
+
+# --- the per-send tool switch (2026-09-11) ----------------------------------
+#
+# Two reasons a caller turns tools off, both observed live: a gateway profile
+# that refuses the ``tools`` field outright and 400s the whole turn, and a
+# weaker model that fixates on a tool instead of answering. On the Otherhand
+# surface the page is written with ``page-ops`` in ordinary text, so a tool-less
+# turn still draws.
+
+
+def test_tools_off_puts_no_tool_on_the_wire():
+    """Measure what the MODEL is handed, not what the backend chose to build.
+
+    The first version of this test asserted only that ``_build_custom_tools``
+    was not called. It passed while ``write_plan``, ``read_tool_result``,
+    ``load_capability`` and ``search_tools`` still rode the request, because a
+    CAPABILITY registers its own toolset and capabilities were not gated. A
+    gateway profile that rejects the ``tools`` field kept answering 400
+    ``unsupported_capability`` with the switch off.
+
+    ``info.function_tools`` is everything pydantic-ai will map into the request,
+    whatever put it there. Empty here means the OpenAI mapper's ``tools or
+    OMIT`` drops the field entirely rather than sending ``tools: []`` — which is
+    what the gateway asked for ("Remove the field and resend").
+
+    Mutation that must break this: restore ``Planning()`` unconditionally in
+    ``_build_capabilities``.
+    """
+    seen: list[list[str]] = []
+
+    async def _spy(messages, info: AgentInfo):
+        params = info.model_request_parameters
+        # function tools AND native ones: a native web tool is not a function
+        # tool, and it is still a ``tools`` entry on the request.
+        seen.append(
+            sorted(t.name for t in info.function_tools)
+            + sorted(type(t).__name__ for t in getattr(params, "native_tools", ()))
+        )
+        yield "ok"
+
+    # Skills and native web tools are turned ON here on purpose: each
+    # contributes a tool through a CAPABILITY rather than the tool list, and
+    # at the helper's defaults the gate on each would be untested. A stream
+    # spy never calls a tool, so the retry loop the helper's default exists
+    # to avoid cannot happen.
+    backend = _backend_with_model(
+        FunctionModel(stream_function=_spy),
+        pydantic_ai_skills_enabled=True,
+        pydantic_ai_native_web_tools=True,
+    )
+    backend._custom_tools = None  # force the real builder to run if it is called
+
+    asyncio.run(_collect(backend, "hi", session_key="s1", tools_enabled=False))
+
+    assert seen == [[]], f"tools off still put {seen} on the wire"
+
+
+def test_tools_on_still_puts_the_capability_tools_on_the_wire():
+    """The other half of the gate: the default path is unchanged.
+
+    Without this, deleting ``Planning()`` outright would pass the tools-off
+    test and silently remove the todo toolset from every ordinary run.
+    """
+    seen: list[list[str]] = []
+
+    async def _spy(messages, info: AgentInfo):
+        seen.append(sorted(t.name for t in info.function_tools))
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=_spy))
+
+    asyncio.run(_collect(backend, "hi", session_key="s1"))
+
+    assert seen and "write_plan" in seen[0], f"the planning toolset vanished: {seen}"
+
+
+def test_tools_off_and_tools_on_do_not_share_a_cached_agent():
+    """The cache is ONE slot. Without the flag in the key, a tools-off turn is
+    served the agent built WITH tools and the switch does nothing."""
+    keys: list[tuple] = []
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    real = backend._get_or_create_agent
+
+    def _watch(*args, **kwargs):
+        agent = real(*args, **kwargs)
+        keys.append(backend._cached_agent_key)
+        return agent
+
+    backend._get_or_create_agent = _watch  # type: ignore[method-assign]
+
+    async def _go():
+        await _collect(backend, "hi", session_key="s1")
+        await _collect(backend, "hi", session_key="s1", tools_enabled=False)
+
+    asyncio.run(_go())
+
+    assert keys[0] != keys[1], "a tools-off turn was served the agent built with tools"
+
+
+def test_tools_default_to_on():
+    """The legacy path. Every existing caller omits the flag and must be
+    byte-identical — this is the assertion that says the default is not a
+    silent feature flag."""
+    built: list[object] = []
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    backend._build_custom_tools = lambda: built.append("built") or []  # type: ignore[method-assign]
+
+    asyncio.run(_collect(backend, "hi", session_key="s1"))
+
+    assert built == ["built"]
+
+
+def test_model_override_builds_the_model_it_names():
+    """The override is a model SPEC, so a bare name keeps the configured
+    provider — and on a BYOK gateway that means its base URL and its key are
+    kept while only the model changes. This is the trap the whole feature turns
+    on: ``build_settings_override`` pins ``pydantic_ai_model`` to the STORED
+    gateway model, and the per-send choice has to beat it without taking the
+    endpoint with it."""
+    backend = PydanticAIBackend(
+        _settings(
+            pydantic_ai_provider="openai_compatible",
+            pydantic_ai_model="stored/gpt-5.5",
+            openai_compatible_base_url="https://gateway.example/v1",
+            openai_compatible_api_key="sk-tenant",
+            openai_compatible_model="stored/gpt-5.5",
+        )
+    )
+    picked = backend._build_model("vendor/claude-opus-5")
+
+    assert picked.model_name == "vendor/claude-opus-5"
+    assert "gateway.example" in str(picked.base_url)
+
+
+def test_model_override_reaches_the_model_factory_and_the_agent_key():
+    """Two halves of one bug. Building the right model is not enough: the agent
+    cache holds ONE slot keyed on the configured model name, so a second turn
+    asking for a different model would have been served the first turn's agent
+    — with the first turn's model baked in."""
+    specs: list[str | None] = []
+
+    def _spy(spec=None):
+        specs.append(spec)
+        return TestModel(custom_output_text="ok")
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    backend._build_model = _spy  # type: ignore[method-assign]
+
+    keys: list[tuple] = []
+    real = backend._get_or_create_agent
+
+    def _watch(*args, **kwargs):
+        agent = real(*args, **kwargs)
+        keys.append(backend._cached_agent_key)
+        return agent
+
+    backend._get_or_create_agent = _watch  # type: ignore[method-assign]
+
+    async def _go():
+        await _collect(backend, "hi", session_key="s1", model_override="alpha-1")
+        await _collect(backend, "hi", session_key="s1", model_override="beta-2")
+
+    asyncio.run(_go())
+
+    assert specs == ["alpha-1", "beta-2"]
+    assert keys[0] != keys[1], "the agent cache served one model's agent to the other"
+    assert keys[0][0] == "alpha-1"
+
+
+def test_no_model_override_still_builds_the_configured_model():
+    """The legacy path, byte-identical: no override means no spec, so the
+    factory falls back to ``pydantic_ai_model`` exactly as before."""
+    specs: list[str | None] = []
+
+    def _spy(spec=None):
+        specs.append(spec)
+        return TestModel(custom_output_text="ok")
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    backend._build_model = _spy  # type: ignore[method-assign]
+
+    asyncio.run(_collect(backend, "hi", session_key="s1"))
+
+    assert specs == [None]
+
+
+def test_model_override_cannot_switch_provider():
+    """A per-send model picks a model WITHIN the configured provider, never a
+    provider.
+
+    ``_parse_provider_model`` splits on a colon when the prefix names a known
+    provider, so an unguarded override is a credential switch dressed as a
+    model id. The live case: a BYOK gateway turn runs on an isolated backend
+    holding the tenant's key, but it still carries the deployment's
+    ``litellm_api_key`` — a guest typing ``litellm:anything`` into the composer's
+    free-text field would resolve the proxy's own credential and bill the
+    platform for a turn the "no keyless turns" rule says cannot happen.
+    ``provider_allows_model`` does not catch it: on a gateway it passes
+    everything, because a gateway's model ids are its own namespace.
+    """
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    events = asyncio.run(_collect(backend, "hi", session_key="s1", model_override="litellm:sneaky"))
+
+    errors = [e for e in events if e.type == "error"]
+    assert errors, "a provider-prefixed override ran instead of being refused"
+    assert "provider" in errors[0].content.lower()
+
+
+def test_a_colon_in_a_model_name_is_still_allowed():
+    """The guard checks the PREFIX against known providers, not the colon.
+    OpenRouter spells variants ``:free``/``:nitro`` and Ollama spells tags
+    ``llama3.2:latest`` — banning the character would ban those."""
+    specs: list[str | None] = []
+
+    def _spy(spec=None):
+        specs.append(spec)
+        return TestModel(custom_output_text="ok")
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    backend._build_model = _spy  # type: ignore[method-assign]
+
+    events = asyncio.run(
+        _collect(backend, "hi", session_key="s1", model_override="minimax/minimax-m3:free")
+    )
+
+    assert [e for e in events if e.type == "error"] == []
+    assert specs == ["minimax/minimax-m3:free"]
+
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+
+def test_a_turn_with_no_images_sends_a_plain_string():
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    assert _user_prompt("draw me a cat", ()) == "draw me a cat"
+
+
+def test_a_turn_with_an_image_sends_the_text_and_the_picture():
+    from pydantic_ai import BinaryContent
+
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    prompt = _user_prompt("what did I write?", ((_PNG, "image/png"),))
+    assert isinstance(prompt, list)
+    assert prompt[0] == "what did I write?"
+    assert isinstance(prompt[1], BinaryContent)
+    assert prompt[1].data == _PNG
+    assert prompt[1].media_type == "image/png"
+
+
+def test_every_image_rides_the_same_turn():
+    # Book mode shows three pictures. Dropping the tail would leave the agent
+    # reading about a source page it was never shown.
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    prompt = _user_prompt("x", ((_PNG, "image/png"), (_PNG, "image/jpeg")))
+    assert len(prompt) == 3
+    assert [p.media_type for p in prompt[1:]] == ["image/png", "image/jpeg"]
+
+
+def test_an_empty_image_is_dropped_rather_than_sent():
+    # Some providers answer a zero-byte part with an opaque 400, which reads as
+    # the model being broken rather than the attachment being empty.
+    from pocketpaw.agents.pydantic_ai import _user_prompt
+
+    assert _user_prompt("x", ((b"", "image/png"),)) == "x"
+
+
+def test_the_backend_accepts_the_images_kwarg_the_pool_forwards():
+    import inspect
+
+    from pocketpaw.agents.pool import AgentPool
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+
+    assert "images" in inspect.signature(AgentPool.run).parameters
+    assert "images" in inspect.signature(PydanticAIBackend.run).parameters
+
+
+def test_the_seven_backends_that_cannot_take_images_are_never_handed_one():
+    """The forward is gated on the SIGNATURE, not on truthiness alone.
+
+    Seven backends take a narrower ``run`` with no ``**kwargs``, and the surface
+    that sends images sends them on EVERY turn. An unconditional forward would
+    not be a rare edge — it would be every Otherhand turn on a self-hosted
+    install (whose default backend is the Claude SDK) ending in ``TypeError:
+    run() got an unexpected keyword argument 'images'``. This file already
+    records that exact failure with a different kwarg and a different surface.
+    """
+    import inspect
+
+    from pocketpaw.agents.backend import _accepts_images_kwarg
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+
+    assert _accepts_images_kwarg(PydanticAIBackend.run)
+    # The one that would break: the OSS/self-hosted default.
+    assert not _accepts_images_kwarg(ClaudeSDKBackend.run)
+    assert "images" not in inspect.signature(ClaudeSDKBackend.run).parameters
+    assert not any(
+        p.kind is inspect.Parameter.VAR_KEYWORD
+        for p in inspect.signature(ClaudeSDKBackend.run).parameters.values()
+    ), "no **kwargs to absorb it, which is why the gate has to exist"
+
+
+async def test_a_retained_turn_never_replays_its_page_image():
+    """Turn N must carry ONE page — the one drawn now, not every earlier one.
+
+    ``_retain_session`` keeps pydantic-ai's own message objects, and with images
+    on the prompt that includes a ``UserPromptPart`` whose content is
+    ``[text, BinaryContent]``. ``_session_history`` prefers the retained
+    transcript over the cloud's text history, so without a strip on the way IN,
+    turn N ships N page snapshots: tokens against a feature whose whole point is
+    a per-turn byte budget, raw bytes held in a process-global map, and a model
+    shown every earlier version of the page with no way to tell which is
+    current.
+
+    Counting is what makes this test work. Asserting "no ``BinaryContent`` in
+    the messages" would fail even with the fix, because turn 2's own attachment
+    is supposed to be there.
+    """
+    from pydantic_ai import BinaryContent
+    from pydantic_ai.messages import UserPromptPart
+
+    seen: dict = {}
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        seen["messages"] = list(messages)
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+
+    await _collect(
+        backend, "what did I write?", images=((_PNG, "image/png"),), session_key="ws1:page"
+    )
+    await _collect(backend, "and now?", images=((_PNG, "image/png"),), session_key="ws1:page")
+
+    attached = [
+        item
+        for message in seen["messages"]
+        for part in getattr(message, "parts", ())
+        if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
+        for item in part.content
+        if isinstance(item, BinaryContent)
+    ]
+    assert len(attached) == 1, f"turn 2 replayed turn 1's page: {len(attached)} images on the wire"
+
+
+async def test_the_words_of_an_image_turn_survive_into_the_next_one():
+    """Stripping the bytes must not strip the sentence they arrived with.
+
+    The retained transcript is what turn 2 reasons over, so dropping the whole
+    part would trade a cost bug for an amnesia bug.
+    """
+    seen: dict = {}
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        seen["messages"] = str(messages)
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+
+    await _collect(
+        backend, "is this triangle right?", images=((_PNG, "image/png"),), session_key="ws1:page2"
+    )
+    await _collect(backend, "and now?", session_key="ws1:page2")
+
+    assert "is this triangle right?" in seen["messages"]
+
+
+# ── server-level MCP grants (fix/surface-external-mcp-grant, 2026-09-15) ────
+#
+# An EXTERNAL MCP server's tool names are not known until the client connects,
+# so ``claude_sdk._collect_mcp_tool_ids`` allow-lists one wholesale with a BARE
+# ``mcp__<server>`` id carrying no tool segment. This backend used to expand
+# that id through ``_normalize_tool_id`` into plain ``refero`` — matching no
+# tool the server exposes — so the SDK backend admitted every tool of a granted
+# server while this one silently dropped all of them.
+#
+# That asymmetry landed in the worst possible place: per ``_gate_mcp_toolsets``'
+# own docstring, THIS backend's MCP toolsets are "the user's EXTERNAL configured
+# servers". The grant was a no-op exactly where external servers live.
+
+
+class _FakeToolDef:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeToolset:
+    """Stands in for a ``PrefixedToolset(MCPToolset(client), cfg.name)``.
+
+    External servers are wrapped in ``PrefixedToolset`` with the server name, so
+    a tool arrives named ``<server>_<tool>`` — the same shape
+    ``_normalize_tool_id`` produces for a fully-qualified id. These names are
+    spelled that way on purpose; a flat ``search_styles`` would not exercise the
+    prefix match at all.
+    """
+
+    _NAMES = (
+        "refero_search_styles",
+        "refero_get_style",
+        "reference_search",  # shares a PREFIX STRING with "refero" but is not it
+        "fabric_query",
+        "sites_manager_publish",
+    )
+
+    def __init__(self) -> None:
+        # Starts as "everything kept". ``_gate_mcp_toolsets`` returns the
+        # toolsets UNTOUCHED when there is nothing to apply, so ``filtered`` is
+        # never called on that path — an empty start would read that no-op as
+        # "dropped everything".
+        self.kept: list[str] = list(self._NAMES)
+
+    def filtered(self, predicate):
+        self.kept = [n for n in self._NAMES if predicate(None, _FakeToolDef(n))]
+        return self
+
+
+def _gate(allow, *, deny=frozenset(), exclusive=False) -> list[str]:
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+
+    ts = _FakeToolset()
+    PydanticAIBackend._gate_mcp_toolsets([ts], deny, allow, exclusive)
+    return ts.kept
+
+
+def test_a_bare_server_grant_admits_that_servers_tools():
+    """``mcp__refero`` means "all of refero's tools" — the SDK convention."""
+    assert _gate(frozenset({"mcp__refero"})) == ["refero_search_styles", "refero_get_style"]
+
+
+def test_a_bare_server_grant_admits_only_the_server_it_names():
+    """The control that makes the test above worth having.
+
+    ``reference_search`` is in the list because ``"reference_search".startswith
+    ("refero")`` is True — a naive prefix check without the separator would
+    admit another server's tools. ``fabric_query`` proves an unrelated server
+    stays out.
+    """
+    kept = _gate(frozenset({"mcp__refero"}))
+    assert "reference_search" not in kept
+    assert "fabric_query" not in kept
+
+
+def test_without_the_grant_an_external_servers_tools_are_dropped():
+    """The pre-fix behaviour, pinned so the grant cannot quietly become a no-op.
+
+    A restrictive allow set that does NOT name the server must still drop it —
+    otherwise the fix would have widened the gate rather than taught it a new
+    spelling.
+    """
+    assert _gate(frozenset({"mcp__pocketpaw_sites_manager__publish"})) == []
+
+
+def test_a_fully_qualified_id_still_matches_on_its_own():
+    """The existing spelling is untouched by the server-level branch."""
+    assert _gate(frozenset({"mcp__refero__search_styles"})) == ["refero_search_styles"]
+
+
+def test_no_allow_set_still_keeps_everything():
+    assert _gate(None) == list(_FakeToolset._NAMES)
+
+
+def test_deny_still_beats_a_server_grant():
+    """Deny is the hard boundary — a server grant must not resurrect a denied id."""
+    kept = _gate(frozenset({"mcp__refero"}), deny=frozenset({"refero_get_style"}))
+    assert kept == ["refero_search_styles"]
+
+
+def test_an_exclusive_turn_with_no_grant_drops_the_server():
+    """An exclusive turn caps to what it declared; declaring nothing keeps nothing."""
+    assert _gate(None, exclusive=True) == []
+
+
+# ---------------------------------------------------------------------------
+# Prompt tool names are localized to this backend (feat/inspo-backend-parity)
+# ---------------------------------------------------------------------------
+#
+# Surface preambles are written for the SDK backend and name tools as
+# ``mcp__<server>__<tool>``. This backend bridges the same in-process servers
+# under ``<server>_<tool>`` (``tool_bridge.build_inprocess_mcp_toolsets``), and
+# ``_normalize_tool_id`` already translated the allow-list ids — but not the
+# prompt text, so the /sites preamble told the model to call tools it knew by a
+# different name.
+
+
+def test_prompt_tool_ids_are_rewritten_to_this_backends_names():
+    from pocketpaw.agents.pydantic_ai import _localize_tool_ids
+
+    text = (
+        "Call `mcp__pocketpaw_inspo__research_page_design` ONCE, then "
+        "`mcp__pocketpaw_refero__get_style`; photos via "
+        "mcp__pocketpaw_stock__search_stock_images."
+    )
+
+    assert _localize_tool_ids(text) == (
+        "Call `pocketpaw_inspo_research_page_design` ONCE, then "
+        "`pocketpaw_refero_get_style`; photos via "
+        "pocketpaw_stock_search_stock_images."
+    )
+
+
+def test_prompt_rewrite_leaves_everything_else_alone():
+    """Only fully-qualified ids move. A bare server grant has no tool name to
+    translate to, and native tool names already match."""
+    from pocketpaw.agents.pydantic_ai import _localize_tool_ids
+
+    text = "grant mcp__refero wholesale; call web_search or pocket_specialist__create"
+
+    assert _localize_tool_ids(text) == text
+
+
+async def test_the_run_puts_localized_tool_names_on_the_wire():
+    seen: list[str | None] = []
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        seen.append(messages[-1].instructions)
+        yield "ok"
+
+    backend = _backend_with_model(FunctionModel(stream_function=stream_fn))
+
+    await _collect(
+        backend,
+        "build me a landing site",
+        system_prompt="PHASE 1b: call `mcp__pocketpaw_inspo__research_page_design` once.",
+        session_key="cloud:session:ccc:agent1",
+    )
+
+    assert "`pocketpaw_inspo_research_page_design`" in (seen[0] or "")
+    assert "mcp__" not in (seen[0] or "")
+
+
+async def test_a_tool_returning_images_keeps_them_and_reports_text_only():
+    """The /sites preview tools return ``[caption, BinaryContent, ...]``. The
+    image must survive the harness char cap (which used to JSON-encode the list,
+    base64 and all, and replace it with a truncated string once the pictures
+    alone crossed the limit), and the UI event must show the caption and a
+    count, never the bytes."""
+    pytest.importorskip("pydantic_ai_harness", reason="harness not installed")
+    from pydantic_ai import BinaryContent
+    from pydantic_ai.messages import ToolReturnPart
+    from pydantic_ai.tools import Tool
+
+    png = b"PNG-" + b"x" * 5000
+    seen: list = []
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo):
+        if len(messages) == 1:
+            yield {0: DeltaToolCall(name="preview", json_args="{}", tool_call_id="c1")}
+            return
+        seen.extend(p for m in messages for p in m.parts if isinstance(p, ToolReturnPart))
+        yield "done"
+
+    async def preview() -> list:
+        """Render the draft."""
+        return ["Captured the draft.", BinaryContent(data=png, media_type="image/png")]
+
+    backend = _backend_with_model(
+        FunctionModel(stream_function=stream_fn), pydantic_ai_max_tool_output_chars=1000
+    )
+    backend._custom_tools = [Tool(preview, name="preview", description="Render the draft.")]
+
+    events = await _collect(backend, "show me the draft")
+
+    images = [item for item in seen[0].content if isinstance(item, BinaryContent)]
+    assert [(img.data, img.media_type) for img in images] == [(png, "image/png")]
+    result = next(e for e in events if e.type == "tool_result")
+    assert result.content == "Captured the draft. [+1 image]"
+
+
+# --------------------------------------------------------------------------
+# per-run usage limits (the early-access free-run bounds)
+# --------------------------------------------------------------------------
+
+
+def _record_usage_limits(monkeypatch) -> list[dict]:
+    """Spy on the ``UsageLimits`` the run builds, keeping the real class."""
+    import pydantic_ai.usage as usage_mod
+
+    seen: list[dict] = []
+    real = usage_mod.UsageLimits
+
+    def _spy(**kwargs):
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(usage_mod, "UsageLimits", _spy)
+    return seen
+
+
+async def test_per_run_limits_reach_usage_limits(monkeypatch):
+    """``max_requests`` tightens the deployment turn cap (never loosens it) and
+    ``total_tokens_limit`` rides beside it.
+
+    Mutation: ignore either kwarg, or let ``max_requests`` raise the cap.
+    """
+    seen = _record_usage_limits(monkeypatch)
+    backend = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=100)
+    await _collect(backend, "hi", max_requests=20, total_tokens_limit=5_000)
+    assert seen[-1] == {"request_limit": 20, "total_tokens_limit": 5_000}
+
+    await _collect(backend, "hi", max_requests=500)
+    assert seen[-1] == {"request_limit": 100}
+
+    await _collect(backend, "hi")
+    assert seen[-1] == {"request_limit": 100}
+
+
+async def test_a_surface_turn_cap_raises_a_paid_run_but_never_a_free_one(monkeypatch):
+    """``max_turns`` (a Sites app build's raised cap) can only raise
+    ``pydantic_ai_max_turns``, never lower it or limit an unlimited 0, and a free
+    run's ``max_requests`` is applied after it, so the free run stays at 20.
+
+    Mutation: apply ``max_requests`` before the raise, or let ``max_turns`` lower.
+    """
+    seen = _record_usage_limits(monkeypatch)
+    backend = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=100)
+    await _collect(backend, "hi", max_turns=300)
+    assert seen[-1] == {"request_limit": 300}
+
+    await _collect(backend, "hi", max_turns=20)
+    assert seen[-1] == {"request_limit": 100}
+
+    await _collect(backend, "hi", max_turns=300, max_requests=20, total_tokens_limit=5_000)
+    assert seen[-1] == {"request_limit": 20, "total_tokens_limit": 5_000}
+
+    seen.clear()
+    unlimited = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=0)
+    await _collect(unlimited, "hi", max_turns=300)
+    assert all("request_limit" not in limits for limits in seen)
+
+
+async def test_an_uncapped_app_build_has_no_request_limit_unless_free(monkeypatch):
+    """``max_turns=0`` is a Sites app build with no turn cap: a paid run gets no
+    ``request_limit`` at all, while a free run's ``max_requests`` still bounds it
+    at 20. ``None`` stays "no override" (the deployment's own cap).
+
+    Mutation: treat 0 as no override (the run stops at 100), or let the lift
+    skip a free run's bound.
+    """
+    seen = _record_usage_limits(monkeypatch)
+    backend = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=100)
+
+    seen.clear()
+    await _collect(backend, "hi", max_turns=0)
+    assert all("request_limit" not in limits for limits in seen)
+
+    await _collect(backend, "hi", max_turns=0, max_requests=20, total_tokens_limit=5_000)
+    assert seen[-1] == {"request_limit": 20, "total_tokens_limit": 5_000}
+
+    await _collect(backend, "hi", max_turns=None)
+    assert seen[-1] == {"request_limit": 100}
+
+
+async def test_a_token_limit_the_run_exceeds_stops_it_with_usage_first():
+    """A run over its token limit ends in an error, and its usage still reaches
+    the caller first so the tokens it did spend are billed."""
+    backend = _backend_with_model(TestModel(custom_output_text="hello world"))
+    events = await _collect(backend, "hi", total_tokens_limit=1)
+
+    kinds = [e.type for e in events]
+    assert "error" in kinds, kinds
+    assert "token_usage" in kinds[: kinds.index("error")], kinds
+    error = next(e for e in events if e.type == "error")
+    assert "limit" in error.content.lower()
+
+
+def test_only_a_caller_limited_run_gets_the_plain_usage_limit_text():
+    """A self-hosted or paid run that hits ``pydantic_ai_max_turns`` keeps the
+    raw text naming the limit to raise; only a run the caller limited gets the
+    plain sentence.
+
+    Mutation: return the plain sentence for every ``UsageLimitExceeded``.
+    """
+    from pydantic_ai.exceptions import UsageLimitExceeded
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    exc = UsageLimitExceeded("The next request would exceed the request_limit of 25")
+
+    raw = backend._explain_error(exc)
+    assert raw.startswith("Pydantic AI error:")
+    assert "request_limit of 25" in raw
+
+    plain = backend._explain_error(exc, per_run_limit=True)
+    assert "request_limit" not in plain
+    assert "usage limit" in plain

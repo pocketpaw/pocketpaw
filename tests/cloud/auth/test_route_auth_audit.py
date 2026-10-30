@@ -57,6 +57,10 @@ The general lesson is about the category rather than those routes.
 for the other three, and nothing distinguished them from the outside — which
 is why an entry here has to name the check it relies on, so the next reader
 can confirm it in one step instead of re-deriving it.
+
+2026-10-01 (feat/meetings-lobby, MC-3) — the four public meeting-link routes
+(``/meetings/by-code/{code}`` lookup, knock, knock status, knock cancel) join
+the allowlist; MC-2 shipped the lookup without an entry.
 """
 
 from __future__ import annotations
@@ -102,6 +106,24 @@ ROUTER_MODULES = [
     ("audit", "pocketpaw_ee.cloud.audit.router"),
     ("auth", "pocketpaw_ee.cloud.auth.router"),
     ("billing", "pocketpaw_ee.cloud.billing.router"),
+    # The post-checkout return hop: two public routes, on the allowlist below.
+    ("billing_checkout_return", "pocketpaw_ee.cloud.billing.checkout_return"),
+    # Added 2026-09-14 with the router that mounts it. Audited rather than
+    # pinned: every route under /platform carries require_platform, which is
+    # asserted directly in tests/cloud/platform/test_platform_guard.py rather
+    # than trusted here. This is the cross-tenant surface, so it is the last
+    # router that should be sitting in an unaudited backlog.
+    ("platform", "pocketpaw_ee.cloud.platform.router"),
+    # Growth › Social, mounted beside the growth router. Every route carries
+    # require_action_any_workspace("growth.*") and request_context.
+    ("growth_social", "pocketpaw_ee.cloud.growth.social.router"),
+    # Added 2026-09-08. Both mounted while the coverage pin was being
+    # written against an older base, so dev merged at 50 unaudited
+    # routers against a pin of 48. Every route on both carries a session
+    # guard, so auditing them brings the count back down rather than
+    # raising the pin — which is the point of the pin.
+    ("byok", "pocketpaw_ee.cloud.byok.router"),
+    ("other_hand", "pocketpaw_ee.cloud.other_hand.router"),
     ("chat", "pocketpaw_ee.cloud.chat.router"),
     ("chat_runs", "pocketpaw_ee.cloud.chat.runs.router"),
     ("codeagent", "pocketpaw_ee.cloud.codeagent.router"),
@@ -120,14 +142,49 @@ ROUTER_MODULES = [
     ("pocket_chat", "pocketpaw_ee.cloud.pockets.chat_router"),
     ("projects", "pocketpaw_ee.cloud.projects.router"),
     ("sessions", "pocketpaw_ee.cloud.sessions.router"),
+    ("site_templates", "pocketpaw_ee.cloud.site_templates.router"),
+    # A project site's files (2026-10-07): every route takes request_context and
+    # fabric.write, the same guards as the sites router's build-log routes.
+    ("site_files", "pocketpaw_ee.sites.files_router"),
     ("workspace", "pocketpaw_ee.cloud.workspace.router"),
+    # Mounted without joining this list while CI never ran the coverage
+    # ratchet. Every route on each was walked by hand: all are session-guarded
+    # except the public ones named in the allowlist below.
+    ("partners", "pocketpaw_ee.cloud.partners.router"),
+    ("studio_templates", "pocketpaw_ee.cloud.studio_templates.router"),
+    ("discover", "pocketpaw_ee.cloud.discover.router"),
+    ("ai_visibility", "pocketpaw_ee.cloud.ai_visibility.router"),
+    ("lead_notifications", "pocketpaw_ee.cloud.leads.notifications_router"),
+    ("lens", "pocketpaw_ee.cloud.lens.router"),
+    ("paw_bar_knowledge", "pocketpaw_ee.paw_bar.knowledge_routes"),
+    ("paw_bar_catalog", "pocketpaw_ee.paw_bar.catalog_routes"),
+    # Added with the router. Every route takes request_context; the pocket gate
+    # (edit to list, owner to write) is asserted in tests/ee/sites/test_site_secrets.py.
+    ("site_secrets", "pocketpaw_ee.sites.secrets_router"),
+    # Sites integrations. Owner routes take request_context; the three public ones
+    # are on the allowlist below. Authz is asserted in tests/ee/sites/test_integrations_*.
+    ("integrations", "pocketpaw_ee.integrations.router"),
+    # Early access (EA-7): one public route, on the allowlist below.
+    ("early_access", "pocketpaw_ee.cloud.early_access.router"),
 ]
+
+#: Modules that mount more than their ``router`` attribute. Anything not named
+#: here is audited through ``router`` alone.
+ROUTER_ATTRS: dict[str, tuple[str, ...]] = {
+    "pocketpaw_ee.cloud.ai_visibility.router": ("router", "site_router"),
+    "pocketpaw_ee.cloud.partners.router": ("router", "pros_router"),
+    "pocketpaw_ee.integrations.router": ("router", "public_router"),
+}
 
 #: Routes that are public BY DESIGN, each with the reason it has to be.
 #: Anything not here must require a session.
 ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     # You cannot hold a session before you have signed in.
     "POST /auth/login": "issues the session",
+    # BYOK-first onboarding (2026-09-01): a guest has no account yet by
+    # definition. Guarded by the per-IP mint rate limit + the provider key
+    # validation (a caller must present a working credential to get anything).
+    "POST /auth/guest": "mints the guest session; rate-limited per IP, key validated first",
     "POST /auth/bearer/login": "issues the session (native/API transport)",
     "POST /auth/register": "creates the account",
     "POST /auth/mfa/challenge": "second factor, carries its own short-lived mfa_token",
@@ -155,12 +212,76 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     "POST /workspaces/invites/{token}/decline": "same, declining must not need an account",
     "GET /pockets/shared/{token}": "public share link; the token IS the grant",
     "GET /codeconnect/github/callback": "GitHub redirect; carries a signed state",
+    # Meeting links (MC-2/MC-3): a guest opening /m/<code> has no account.
+    # Each is rate-limited per IP; the lookup returns six non-identifying fields,
+    # the knock status/cancel need the knock's own bearer secret.
+    "GET /meetings/by-code/{code}": "join-page lookup; rate-limited, no tenant data",
+    "POST /meetings/by-code/{code}/knock": "guest asks to join; rate-limited per IP + code",
+    "GET /meetings/by-code/{code}/knocks/{knock_id}": "guest poll; the knock secret authorises",
+    "DELETE /meetings/by-code/{code}/knocks/{knock_id}": "guest cancels; knock secret authorises",
     # --- static catalogues, no tenant data ---
     "GET /billing/plans": "public price list",
     "GET /billing/site-plans": "public price list",
+    # The gateway returns the buyer cross-site with no session (Razorpay POSTs).
+    # Redirect-only, no state change; `to` is held to the CORS allowlist.
+    "GET /billing/checkout/return/{outcome}": "post-checkout redirect to an allowlisted app",
+    "POST /billing/checkout/return/{outcome}": "same, for gateways that return with a form POST",
     "GET /agents/backends": "static list of backend names",
     "GET /pockets/builtin-widgets": "static widget catalogue",
     "GET /decisions/_ping": "liveness probe",
+    # --- public indexes and tools, each behind its own abuse control ---
+    "GET /discover": "public index of shareable items; per-IP limit (rate_limit_discover_public)",
+    "GET /discover/{id_or_slug}": "one public listing by id or slug; same per-IP limit",
+    "GET /pros/directory": (
+        "Find a Pro directory of active, opted-in partners; per-IP limit "
+        "(rate_limit_partner_public), allow-listed fields only"
+    ),
+    "GET /pros/{slug}": "one public Pro profile; same per-IP limit",
+    "POST /pros/apply": (
+        "apply to become a Pro; per-IP limit (rate_limit_partner_apply), a global "
+        "daily cap and Turnstile (refused in production when the secret is unset)"
+    ),
+    "POST /early-access/waitlist": (
+        "a visitor joins the waitlist while signups are paused, so has no account; "
+        "per-IP limit (rate_limit_early_access_waitlist), one row per email"
+    ),
+    "POST /tools/ai-check": (
+        "free AI check; per-IP limit (rate_limit_ai_check_public) and the daily USD "
+        "spend cap always apply, Turnstile when POCKETPAW_TURNSTILE_SECRET is set"
+    ),
+    "GET /lead-notifications/confirm/{token}": (
+        "emailed confirm link; the 7-day token is the credential, GET has no side effect"
+    ),
+    "POST /lead-notifications/confirm/{token}": "confirms; the emailed 7-day token authorises",
+    # --- Sites integrations: each carries its own credential ---
+    "GET /integrations/{provider}/start": (
+        "opens the connect popup; redeems a single-use, short-TTL ticket the "
+        "authenticated connect route minted, and binds this browser with a cookie"
+    ),
+    "GET /integrations/{provider}/callback": (
+        "provider redirect; single-use server-side state (_oauth_state) plus the "
+        "matching browser cookie set by /start"
+    ),
+    "POST /sites/{site_id}/x/{provider}/{action}": (
+        "site gateway; per-IP bucket, then the site's embed key + origin gate or its "
+        "PAW_GATEWAY_TOKEN (constant-time), Turnstile on writes, SiteRateCounter"
+    ),
+    "POST /integrations/webhooks/{provider}": "provider webhook; provider signature verified",
+    "GET /integrations/social/{provider}/authorize": (
+        "visitor sign-in consent page; the site must bind social_login with that "
+        "provider on, return_to must be the site's own host, per-IP counter"
+    ),
+    "POST /integrations/social/{provider}/authorize": (
+        "consent Continue / Cancel; single-use server token whose hash must match the "
+        "SameSite=Strict cookie the consent page set, per-IP counter"
+    ),
+    "GET /integrations/social/{provider}/callback": (
+        "provider redirect; single-use server-side state (_oauth_state) issued by authorize"
+    ),
+    "POST /integrations/social/redeem": (
+        "site Worker only; the site's PAW_GATEWAY_TOKEN (constant-time) plus a "
+        "single-use 60s ticket bound to the site and the visitor's cookie nonce"
+    ),
     # --- git smart-HTTP: authenticates in-handler, not via a FastAPI dep ---
     "GET /codegit/{owner}/{repo}/info/refs": "git protocol; own token auth in-handler",
     "POST /codegit/{owner}/{repo}/git-upload-pack": "git protocol; own token auth in-handler",
@@ -222,10 +343,11 @@ def _collect() -> list[tuple[str, str]]:
     unguarded: list[tuple[str, str]] = []
     for name, module_path in ROUTER_MODULES:
         try:
-            router = importlib.import_module(module_path).router
+            module = importlib.import_module(module_path)
+            routers = [getattr(module, a) for a in ROUTER_ATTRS.get(module_path, ("router",))]
         except Exception as exc:  # noqa: BLE001 — reported, not swallowed
             pytest.fail(f"router {name} ({module_path}) failed to import: {exc}")
-        for route in router.routes:
+        for route in (r for router in routers for r in router.routes):
             # WebSockets authenticate in-handler (ticket / JWT / cookie), since
             # a dependency cannot 401 a socket. Covered by the chat WS tests.
             if not isinstance(route, APIRoute):

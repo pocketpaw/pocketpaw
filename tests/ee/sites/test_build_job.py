@@ -27,6 +27,9 @@
 #      stderr tail and assert it reaches the log and not the row.
 #
 # Mutations in tests/mutations/sl2_build_job.json, run and caught.
+#
+# Changes (2026-10-01, CN-4): the arq pool moved to _core.redis_client, so the
+# unset-URL test resets it there.
 
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pocketpaw_ee.cloud._core import redis_client
 from pocketpaw_ee.cloud.models.site import Site
 from pocketpaw_ee.sites import build_job as bj
 from pocketpaw_ee.sites import build_state as bs
@@ -375,10 +379,11 @@ class TestTheJobCarriesItsOwnTimeout:
         assert site_build.coroutine is bj.run_site_build
         assert site_build.timeout_s == bj.site_build_job_timeout_seconds()
         assert site_build.timeout_s != registered["execute_workspace_job"].timeout_s
-        # A build is billed per attempt in a third-party sandbox, and the retry decision
-        # belongs to ``settle`` (which records why it gave up), not to a silent arq retry
-        # of a job whose row already reads ``failed``.
-        assert site_build.max_tries == 1
+        # A build is billed per attempt, so arq retries ONLY the job's own capacity
+        # ``Retry`` (Daytona's org limit was full and nothing ran): one try per delay.
+        from pocketpaw_ee.sites.capacity import CAPACITY_MAX_TRIES
+
+        assert site_build.max_tries == CAPACITY_MAX_TRIES
 
 
 # ---------------------------------------------------------------------------
@@ -967,7 +972,7 @@ class TestTheEnqueueNeedsRedisConfigured:
         self, beanie_test_db, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("POCKETPAW_REDIS_URL", raising=False)
-        bj._reset_for_tests()
+        redis_client._reset_for_tests()
         try:
             site = await _insert_site()
             with pytest.raises(RuntimeError, match="POCKETPAW_REDIS_URL"):
@@ -979,7 +984,7 @@ class TestTheEnqueueNeedsRedisConfigured:
             assert fresh.build_reason == "enqueue_failed:pool_or_enqueue_raised"
         finally:
             # A cached pool would outlive this test and be handed to every later enqueue.
-            bj._reset_for_tests()
+            redis_client._reset_for_tests()
 
 
 class TestTheBuildLaneCannotRollBackAConcurrentPublish:

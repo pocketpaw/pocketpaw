@@ -1,0 +1,38 @@
+[
+  {
+    "label": "ask_user: run_core misses the pydantic_ai spelling of the ask tool",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "                if name in _ASK_USER_TOOL_NAMES:\n",
+    "replace": "                if name == _ASK_USER_TOOL_ID:\n",
+    "tests": [
+      "tests/ee/agent/test_ask_mcp_server/test_mcp_tool.py"
+    ]
+  },
+  {
+    "label": "ask_user: an ask-only turn writes no Message",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "and not delivered_artifacts and ask_record is None):",
+    "replace": "and not delivered_artifacts):",
+    "tests": [
+      "tests/cloud/runs/test_run_ask_user_persist.py"
+    ]
+  },
+  {
+    "label": "ask_user: the completed reply drops the pending ask",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        persist_fields[\"ask_user\"] = ask_record\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/cloud/runs/test_run_ask_user_persist.py"
+    ]
+  },
+  {
+    "label": "ask_user: the user's reply never marks the ask answered",
+    "file": "ee/pocketpaw_ee/cloud/chat/message_service.py",
+    "find": "    await _answer_pending_ask(kind, scope_id, session_key, content)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/runs/test_run_ask_user_persist.py"
+    ]
+  }
+]

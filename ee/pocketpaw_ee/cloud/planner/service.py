@@ -73,7 +73,9 @@
 #   (``credits.guards.over_billing_limit``) after it finds ready tasks and BEFORE
 #   the claim + ``pool.run`` batch, so an over-budget tenant makes NO model call
 #   on the planner path. Tasks stay ``proposed`` and execute on a later tick once
-#   budget frees. Flag-gated no-op unless ``billing_enforced``.
+#   budget frees. Flag-gated no-op unless ``billing_enforced`` or
+#   ``credits_enforced``. Under the same flags an unpaid early-access workspace
+#   is skipped too (``early_access_denial``): planner runs are not billed.
 """Planner entity — business logic service.
 
 Public API (all module-level ``async def``):
@@ -1271,11 +1273,15 @@ async def _execute_ready_plan_tasks(
     # over-budget tenant can't pay for. Gating here (after we know there is work,
     # before the claim + ``pool.run`` batch) means NO model call fires while over
     # budget; the tasks stay ``proposed`` and execute on a later tick once budget
-    # frees. Flag-gated no-op unless ``billing_enforced``; there is no user-facing
-    # stream on this path, so a warning log is the terminal signal.
-    from pocketpaw_ee.cloud.credits.guards import over_billing_limit
+    # frees. Flag-gated no-op unless ``billing_enforced`` or ``credits_enforced``;
+    # there is no user-facing stream on this path, so a warning log is the terminal signal.
+    # An unpaid early-access workspace is skipped as well: planner runs are not
+    # billed, so its wallet would never run down.
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial, over_billing_limit
 
-    billing_reject = await over_billing_limit(workspace_id)
+    billing_reject = await over_billing_limit(workspace_id) or await early_access_denial(
+        workspace_id
+    )
     if billing_reject is not None:
         logger.warning(
             "_execute_ready_plan_tasks: workspace %s over billing limit (%s) — "

@@ -1,89 +1,18 @@
-"""Tests for MCP + Claude Agent SDK integration — Sprint 17.
+"""Tests for MCP + Claude Agent SDK integration.
 
-Updated: 2026-07-24 (feat/ship-17-databases) — ``_strip_builtin_servers`` now
-  also drops ``pocketpaw_ship`` (the /ship managed-deploy verbs, registered
-  always-on / ambient via the ``CloudShipMcpProvider`` mcp_servers entry point,
-  NOT in OPT_IN_MCP_SERVERS), so the external-config assertions stay focused.
-  Same regime as pocketpaw_belt / pocketpaw_workspace_admin: the /ship surface
-  profile's tool-scoping plus the Instinct gate are the boundary, not
-  registration (SHIP-4/8a drift, surfaced by the full ee suite).
-Updated: 2026-07-27 (fix/dev-ci) — ``_strip_builtin_servers`` now also drops
-  ``pocketpaw_code`` (the Code Mode delegate server: readFile / search /
-  listDir / writeFile), registered always-on via the ``code`` mcp_servers entry
-  point (``CloudCodeMcpProvider``) since #1763. That PR shipped the server and
-  its own test file but never taught this helper, so six assertions here counted
-  it as an external config and dev went red. Same regime as
-  ``pocketpaw_daytona``: ambient registration, scoped by the /code
-  SurfaceProfile allowlist rather than by being withheld.
+Covers how ``ClaudeAgentSDK`` assembles its MCP servers and tool allowlist:
+external MCP config (stdio / http servers from ``MCPServerConfig``), opt-in vs
+always-on in-process servers, ``TestMcpToolAllowlist`` (the resolved
+per-surface allow/deny reaching the SDK options), ``TestMcpProviderLoadFailures``
+(one broken ``pocketpaw.mcp_servers`` provider never takes the others down), and
+the start-flow-to-chat bridge, the planner MCP gate and the ambient pocket planner.
 
-  Two branches hit this and fixed it independently, which is the actual signal:
-  the list below is a dozen entries long, and every one of them was written
-  after an always-on server took six external-config assertions down with it.
-  "A builtin server landed" should fail somewhere more specific than here.
-Updated: 2026-07-06 (feat/paw-sites-stock-imagery) — ``_strip_builtin_servers``
-  now also drops ``pocketpaw_stock`` (search_stock_images: free Pexels +
-  Unsplash photo search for site imagery, registered always-on via the
-  ``stock`` mcp_servers entry point), so the external-config assertions stay
-  focused. Same regime as pocketpaw_media / pocketpaw_sites_manager.
-Updated: 2026-07-03 (integration/atlas AT-1) — ``_strip_builtin_servers`` now
-  also drops ``pocketpaw_atlas`` (the new always-on capability-atlas server:
-  atlas_search / atlas_describe, registered unconditionally in core
-  ``claude_sdk._get_mcp_servers``), so the external-config assertions stay
-  focused. ``test_startup_summary_no_servers`` additionally patches
-  ``build_atlas_context_server`` to None (same regime as the widgets server)
-  to keep the empty-server scenario truly empty.
-Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) —
-  ``_strip_builtin_servers`` now also drops ``pocketpaw_fabric`` (fabric_query /
-  fabric_stats) and ``pocketpaw_instinct`` (instinct_pending / instinct_audit),
-  the two new always-on read-only servers, so the external-config assertions
-  stay focused. Same regime as pocketpaw_external_actions / pocketpaw_belt.
-Updated: 2026-06-11 (feat/external-action-mcp-tool) — ``_strip_builtin_servers``
-  now also drops ``pocketpaw_external_actions`` (the new always-on gated
-  external-action proposal server: propose_external_action), so the
-  external-config assertions stay focused after that MCP server became
-  ambient. Same regime as pocketpaw_belt / pocketpaw_media.
-Updated: 2026-06-10 (integration/belt-thin-slice) — ``_strip_builtin_servers``
-  now also drops ``pocketpaw_belt`` (the always-on Belt gate server:
-  belt_propose_change — the bundled `belt` skill calls it without an explicit
-  opt-in) and, defensively, ``loom`` (settings-gated, but a developer's
-  POCKETPAW_LOOM_MODEL_PATH env would leak into Settings and register it).
-Updated: 2026-06-10 (feat/studio-code-migration) — ``_strip_builtin_servers``
-  now also drops ``pocketpaw_media`` (the new always-on STUDIO media-generation
-  server: image_generate / video_generate), so the external-config assertions
-  stay focused after the media MCP server became ambient. Same regime as
-  pocketpaw_sites_manager / pocketpaw_connectors.
-Updated: 2026-06-08 (feat/connector-mcp-execution / keystone) —
-  ``_strip_builtin_servers`` now also drops ``pocketpaw_connectors`` (the new
-  always-on connector-execution server: list_connector_actions /
-  connector_execute), so the external-config assertions stay focused after the
-  connector MCP server became ambient. Same regime as pocketpaw_sites_manager.
-Updated: 2026-06-01 (Phase 4 — chat→create-site) — ``_strip_builtin_servers``
-  now also drops ``pocketpaw_sites_manager`` (the new always-on Paw Sites
-  publish server), so the external-config assertions stay focused after the
-  sites MCP server became ambient.
-Updated: 2026-05-28 (#FU-F) — added ``TestMcpProviderLoadFailures``: a provider
-  that raises on ``build_server()`` must log at WARNING (not DEBUG), including
-  the provider class name and exception type. Also covers the startup INFO
-  summary log (``MCP servers registered: …`` / ``No MCP servers registered.``)
-  that fires after the entry-point loop so operators can confirm the registered
-  set at a glance.
-Updated: 2026-05-21 — refactor/gate-planner-mcp. Expanded the
-  ``_strip_builtin_servers`` docstring to explain why ``pocketpaw_planner``
-  is stripped even though it is opt-in rather than always-on. Added
-  ``TestPlannerMCPGate`` covering the opt-in gate: the planner loads only
-  when an injected ``ToolPolicy`` names it in ``mcp_servers_allow``.
-Updated: 2026-05-22 (#1174) — added ``TestMcpToolAllowlist``: the resolved
-  in-process MCP tool-id allowlist (``_collect_mcp_tool_ids``) includes the
-  cloud ``pocketpaw_pocket`` server's writable ``add_widget`` tool, so the
-  home-pocket agent on this backend can pin real widgets.
-Updated: 2026-05-31 (fix/bridge-start-flow-to-chat, RFC 13) — added
-  ``TestStartFlowReachable``: the RFC 13 M3 ``start_flow`` authoring tool must
-  be present in the cloud chat agent's ASSEMBLED tool set (the widgets server
-  is registered AND its ``start_flow`` id is on the in-process allowlist). M3
-  shipped ``start_flow`` only in the runtime builtin registry and its tests
-  imported the tool directly, so the gap — the tool being unreachable from the
-  cloud chat agent — went uncaught. This is the guard that catches it:
-  reachability, not just importability.
+``_strip_builtin_servers`` drops every ALWAYS-ON in-process server (atlas,
+widgets, studio, browser, timeline, craft, surfaces, rooms, files, inspo,
+refero, fx, site_media, stock, sites, ship, ...) before the external-config
+assertions, because those tests are about EXTERNAL config only. Registering a
+new always-on server fails HERE first, in a file whose name does not say so:
+add its ``SERVER_NAME`` to the strip list with a one-line note on its regime.
 
 All SDK imports are mocked.
 """
@@ -93,31 +22,44 @@ from unittest.mock import patch
 
 from pocketpaw_ee.agent.mcp_servers.ask import SERVER_NAME as _ASK_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.browser import SERVER_NAME as _BROWSER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.code import SERVER_NAME as _CODE_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.craft import SERVER_NAME as _CRAFT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.daytona import SERVER_NAME as _DAYTONA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.external_actions import (
     SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
 )
 from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.files import SERVER_NAME as _FILES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.fx import SERVER_NAME as _FX_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.growth import SERVER_NAME as _GROWTH_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.icons import SERVER_NAME as _ICONS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.inspo import SERVER_NAME as _INSPO_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.other_hand import (
+    SERVER_NAME as _OTHER_HAND_MCP_SERVER_NAME,
+)
 from pocketpaw_ee.agent.mcp_servers.palette import SERVER_NAME as _PALETTE_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.planner import (
     POCKET_PLANNER_SERVER_NAME as _POCKET_PLANNER_MCP_SERVER_NAME,
 )
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.refero import SERVER_NAME as _REFERO_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.rooms import SERVER_NAME as _ROOMS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.ship import SERVER_NAME as _SHIP_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.site_media import SERVER_NAME as _SITE_MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.stock_images import SERVER_NAME as _STOCK_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.surfaces import SERVER_NAME as _SURFACES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.timeline import SERVER_NAME as _TIMELINE_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.workspace_admin import (
     SERVER_NAME as _WORKSPACE_ADMIN_MCP_SERVER_NAME,
 )
@@ -157,6 +99,11 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_sites_manager`` is always-on too — the bundled
     # pocketpaw-create-site skill calls it without an explicit opt-in.
     out.pop(_SITES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_site_media`` is always-on too — the site-authoring skills call
+    # generate_site_image without an explicit opt-in. Registration is NOT the
+    # boundary here (the /sites allow-list defaults to no restriction); the tool
+    # checks the pocket belongs to the caller's workspace before it spends.
+    out.pop(_SITE_MEDIA_MCP_SERVER_NAME, None)
     # ``pocketpaw_connectors`` is always-on — the M3-derived connector skills
     # (gmail/github) call connector_execute without an explicit opt-in.
     out.pop(_CONNECTORS_MCP_SERVER_NAME, None)
@@ -167,13 +114,40 @@ def _strip_builtin_servers(result: dict) -> dict:
     # call search_stock_images for site imagery without an explicit opt-in.
     # Pure read (free Pexels + Unsplash photo search), no identity.
     out.pop(_STOCK_MCP_SERVER_NAME, None)
+    # ``pocketpaw_files`` is always-on too — list_uploads / read_upload are how
+    # ANY chat agent reaches a file the user uploaded. Uploads live in object
+    # storage and an attachment is inlined into the prompt only for the turn it
+    # arrived on, so gating these behind an opt-in would leave the default agent
+    # unable to answer "what did that document say?" from the next turn onward.
+    # Workspace-scoped from the ContextVar, and ``hide_from_ai`` is honoured on
+    # both doors, so registration is not the boundary here either.
+    out.pop(_FILES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_other_hand`` is always-on in the same sense as the servers
+    # above: it is REGISTERED for every agent so there is one road for every
+    # in-process server, and the Otherhand surface profile is the door that
+    # decides who may actually call `illustrate`. Stripping it here keeps the
+    # external-config assertions about EXTERNAL config.
+    out.pop(_OTHER_HAND_MCP_SERVER_NAME, None)
     # ``pocketpaw_icons`` / ``pocketpaw_palette`` / ``pocketpaw_ask`` are always-on
     # too — the /sites authoring toolbelt (icon search, palette derivation, and
     # the interactive ask_user question chips) is ambient, same regime as
     # stock/media. Pure read / in-process, no identity.
     out.pop(_ICONS_MCP_SERVER_NAME, None)
+    out.pop(_FX_MCP_SERVER_NAME, None)
     out.pop(_PALETTE_MCP_SERVER_NAME, None)
     out.pop(_ASK_MCP_SERVER_NAME, None)
+    # ``pocketpaw_inspo`` is always-on too — the /sites create preamble names
+    # research_page_design UNCONDITIONALLY, so the server has to be registered
+    # unconditionally or the prompt commands a tool that is not there. It shipped
+    # briefly as an opt-in EXTERNAL server and that is exactly what went wrong
+    # (#2204 → #2205). Pure read over a remote archive of shipped web pages, no
+    # identity, nothing persisted — same regime as stock. The /sites allow-list
+    # is the door that decides which surfaces may call it.
+    out.pop(_INSPO_MCP_SERVER_NAME, None)
+    # ``pocketpaw_refero`` is always-on for the same reason: the bundled site
+    # skills reach for Refero's design research without an opt-in, and the tools
+    # answer empty when no token is configured rather than disappearing.
+    out.pop(_REFERO_MCP_SERVER_NAME, None)
     # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
     # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
     # (loom_model_path unset -> not registered) but stripped defensively: a
@@ -233,6 +207,30 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``claude_sdk._get_mcp_servers`` so the default agent backend can scaffold
     # flow graphs. In-process, no external config.
     out.pop(_STUDIO_MCP_SERVER_NAME, None)
+    # ``pocketpaw_browser`` is always-on too — the /browser surface's agentic
+    # browser is registered unconditionally; every OTHER surface DENIES its tool
+    # ids via ``resolve_profile`` (deny is the boundary, not registration), the
+    # same regime as code / ship / studio. Stripped so this file measures
+    # EXTERNAL config only.
+    out.pop(_BROWSER_MCP_SERVER_NAME, None)
+    # ``pocketpaw_timeline`` is always-on too — the /studio/editor timeline
+    # verbs (edit_timeline / export_timeline) are registered unconditionally via
+    # the ``CloudTimelineMcpProvider`` entry point, NOT in
+    # ``OPT_IN_MCP_SERVERS``. Registration could not be the boundary anyway:
+    # both tools read a timeline ContextVar that is unset on every surface but
+    # the editor, so they refuse on their own everywhere else, and the
+    # STUDIO_EDITOR profile is what scopes them on. Same regime as its sibling
+    # ``pocketpaw_media`` / ``pocketpaw_studio``.
+    out.pop(_TIMELINE_MCP_SERVER_NAME, None)
+    # ``pocketpaw_craft`` (edit_vector / edit_photo / edit_design): same regime
+    # as the timeline server, inert off the studios because no projection is bound.
+    out.pop(_CRAFT_MCP_SERVER_NAME, None)
+    # ``pocketpaw_surfaces`` is always-on too — ``open_surface`` returns an
+    # envelope and touches nothing, registered via ``CloudSurfacesMcpProvider``.
+    out.pop(_SURFACES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_rooms`` is always-on too: read-only chat-room reads,
+    # registered via ``CloudRoomsMcpProvider``.
+    out.pop(_ROOMS_MCP_SERVER_NAME, None)
     return out
 
 

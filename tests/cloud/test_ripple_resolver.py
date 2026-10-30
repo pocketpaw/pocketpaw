@@ -108,46 +108,55 @@ async def test_multiple_markers_resolved_independently(ctx: ResolveCtx) -> None:
     assert out["state"]["missing"] is None
 
 
+class _FakePocketCollection:
+    """Stands in for ``_PocketDoc.get_pymongo_collection()``: records every
+    ``find(filter, projection)`` and yields raw rows, like the async cursor."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.find_calls: list[tuple] = []
+
+    def find(self, *args, **kwargs):
+        self.find_calls.append((args, kwargs))
+        rows = self._rows
+
+        async def _cursor():
+            for row in rows:
+                yield row
+
+        return _cursor()
+
+    @property
+    def query(self) -> dict:
+        assert len(self.find_calls) == 1, f"expected one find, got {self.find_calls!r}"
+        args, kwargs = self.find_calls[0]
+        return args[0] if args else kwargs["filter"]
+
+
+def _patch_pocket_collection(rows):
+    coll = _FakePocketCollection(rows)
+    return coll, patch(
+        "pocketpaw_ee.cloud.ripple_sources._PocketDoc.get_pymongo_collection",
+        return_value=coll,
+    )
+
+
 async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
     # Importing the sources module triggers @register side-effects.
     import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
-    fake_docs = [
-        type(
-            "D",
-            (),
-            {
-                "id": "p1",
-                "name": "Bookings",
-                "type": "business",
-                "icon": "calendar",
-                "color": "#0A84FF",
-            },
-        )(),
-        type(
-            "D",
-            (),
-            {
-                "id": "p2",
-                "name": "Notes",
-                "type": "deep-work",
-                "icon": "note",
-                "color": "#30D158",
-            },
-        )(),
+    rows = [
+        {
+            "_id": "p1",
+            "name": "Bookings",
+            "type": "business",
+            "icon": "calendar",
+            "color": "#0A84FF",
+        },
+        {"_id": "p2", "name": "Notes", "type": "deep-work", "icon": "note", "color": "#30D158"},
     ]
-
-    class _FakeFind:
-        def __init__(self, docs):
-            self._docs = docs
-
-        async def to_list(self):
-            return self._docs
-
-    with patch(
-        "pocketpaw_ee.cloud.ripple_sources._PocketDoc.find",
-        return_value=_FakeFind(fake_docs),
-    ) as find_mock:
+    coll, patcher = _patch_pocket_collection(rows)
+    with patcher:
         spec = {"state": {"all": {"$source": "workspace.pockets"}}}
         out = await resolve_ripple_spec(spec, ctx)
 
@@ -162,8 +171,7 @@ async def test_workspace_pockets_source_returns_metadata_for_workspace(ctx):
         {"id": "p2", "name": "Notes", "type": "deep-work", "icon": "note", "color": "#30D158"},
     ]
     # Tenancy invariant: every find call must scope by workspace.
-    args, kwargs = find_mock.call_args
-    query = args[0] if args else kwargs
+    query = coll.query
     assert "workspace" in str(query)
     assert "w1" in str(query)
 
@@ -175,27 +183,24 @@ async def test_workspace_pockets_source_strict_workspace_scoping(ctx: ResolveCtx
     even though the structural invariant 'every find call is workspace-scoped' must hold."""
     import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
-    class _FakeFind:
-        def __init__(self, docs):
-            self._docs = docs
-
-        async def to_list(self):
-            return self._docs
-
-    with patch(
-        "pocketpaw_ee.cloud.ripple_sources._PocketDoc.find",
-        return_value=_FakeFind([]),
-    ) as find_mock:
+    coll, patcher = _patch_pocket_collection([])
+    with patcher:
         spec = {"state": {"all": {"$source": "workspace.pockets"}}}
         await resolve_ripple_spec(spec, ctx)
 
-    args, kwargs = find_mock.call_args
-    query = args[0] if args else kwargs
+    query = coll.query
     # The top-level workspace key must be set to the ctx's workspace_id exactly.
     assert isinstance(query, dict), f"expected dict query, got {type(query).__name__}"
     assert query.get("workspace") == "w1", (
         f"workspace key must equal ctx.workspace_id; got query={query!r}"
     )
+    # Inside the workspace, only pockets the viewer owns, was shared, or that are
+    # workspace-visible (mirrors pockets.service.list_pockets).
+    assert query.get("$or") == [
+        {"owner": "u1"},
+        {"shared_with": "u1"},
+        {"visibility": "workspace"},
+    ], f"visibility filter drifted; got query={query!r}"
 
 
 async def test_workspace_pockets_source_other_workspace_ctx_scopes_to_other(
@@ -208,22 +213,12 @@ async def test_workspace_pockets_source_other_workspace_ctx_scopes_to_other(
 
     other_ctx = ResolveCtx(workspace_id="w2", user_id="u1", pocket_id=None)
 
-    class _FakeFind:
-        def __init__(self, docs):
-            self._docs = docs
-
-        async def to_list(self):
-            return self._docs
-
-    with patch(
-        "pocketpaw_ee.cloud.ripple_sources._PocketDoc.find",
-        return_value=_FakeFind([]),
-    ) as find_mock:
+    coll, patcher = _patch_pocket_collection([])
+    with patcher:
         spec = {"state": {"all": {"$source": "workspace.pockets"}}}
         await resolve_ripple_spec(spec, other_ctx)
 
-    args, kwargs = find_mock.call_args
-    query = args[0] if args else kwargs
+    query = coll.query
     assert query.get("workspace") == "w2", (
         f"workspace key must equal other_ctx.workspace_id 'w2'; got query={query!r}"
     )

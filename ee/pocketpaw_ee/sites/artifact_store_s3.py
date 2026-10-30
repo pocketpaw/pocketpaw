@@ -11,7 +11,9 @@
 # is a full ``bun install`` + SvelteKit build — 1-2 minutes on the prod box — so a miss is
 # not "slightly slower", it is the difference between an instant preview and one the user
 # gives up on. This store puts the same two-part key in blob storage instead, so the
-# artifact is shared across replicas and outlives the container.
+# artifact is shared across replicas and outlives the container. Beside each artifact
+# it also keeps the draft preview origin's files and token (``preview_origin``), so any
+# replica can serve any draft; the capture-key refusal below covers those files too.
 #
 # ┌───────────────────────────────────────────────────────────────────────────────────┐
 # │ THE PER-SITE CAPTURE KEY MUST NEVER REACH BLOB STORAGE.                            │
@@ -268,6 +270,138 @@ class S3ArtifactStore:
             logger.warning(
                 "sites.artifact_store_s3: write failed for pocket %s", pocket_id, exc_info=True
             )
+
+    # -- Draft preview origin (preview_origin.py) --------------------------------
+    # Same best-effort contract as read/write above. Keys sit beside the artifact:
+    # ``<pocket>/<hash>.dist.tgz`` (the draft's full file set), ``<pocket>/<hash>.token``
+    # (its preview token) and ``_preview_tokens/<token>.json`` (the reverse pointer).
+
+    def _put(self, key: str, data: bytes, content_type: str) -> bool:
+        try:
+            _run_coro(self._adapter.put(key, _bytes_stream(data), content_type), self._timeout)
+        except Exception:
+            logger.warning("sites.artifact_store_s3: write failed for %s", key, exc_info=True)
+            return False
+        return True
+
+    def _get(self, key: str) -> bytes | None:
+        try:
+            return _run_coro(_read_all(self._adapter.open(key)), self._timeout)
+        except Exception:
+            logger.debug("sites.artifact_store_s3: read miss for %s", key, exc_info=True)
+            return None
+
+    def write_dist(self, pocket_id: str, content_hash: str, data: bytes) -> bool:
+        """Store a draft's packed files. False when refused (a capture key, or a pack
+        past the preview ceilings) or the put failed; no URL is minted then."""
+        if _dist_carries_capture_key(data):
+            logger.warning(
+                "sites.artifact_store_s3: refusing to store draft files for pocket %s — "
+                "they carry a per-site capture key (or are unreadable / too large).",
+                pocket_id,
+            )
+            return False
+        return self._put(dist_key(pocket_id, content_hash), data, "application/gzip")
+
+    def read_dist(self, pocket_id: str, content_hash: str) -> bytes | None:
+        return self._get(dist_key(pocket_id, content_hash))
+
+    def write_preview_token(self, pocket_id: str, content_hash: str, token: str) -> bool:
+        """Reverse pointer, then forward key. True when both landed (the token resolves)."""
+        pointer = json.dumps({"pocket_id": pocket_id, "content_hash": content_hash})
+        # Pointer first: a token the forward key names must always resolve.
+        if not self._put(token_pointer_key(token), pointer.encode("utf-8"), "application/json"):
+            return False
+        return self._put(
+            f"{ARTIFACT_KEY_PREFIX}/{pocket_id}/{content_hash}.token",
+            token.encode("utf-8"),
+            "text/plain",
+        )
+
+    def read_preview_token(self, pocket_id: str, content_hash: str) -> str | None:
+        raw = self._get(f"{ARTIFACT_KEY_PREFIX}/{pocket_id}/{content_hash}.token")
+        if raw is None:
+            return None
+        return raw.decode("utf-8", "replace").strip() or None
+
+    def resolve_preview_token(self, token: str) -> tuple[str, str] | None:
+        from pocketpaw_ee.sites.preview_origin import TOKEN_RE
+
+        if not TOKEN_RE.fullmatch(token):
+            return None
+        raw = self._get(token_pointer_key(token))
+        if raw is None:
+            return None
+        try:
+            data = json.loads(raw)
+            pocket_id, content_hash = data["pocket_id"], data["content_hash"]
+        except (ValueError, KeyError, TypeError):
+            return None
+        if not isinstance(pocket_id, str) or not isinstance(content_hash, str):
+            return None
+        # The forward key must still name this token, same as the filesystem store: a
+        # stale or orphaned reverse pointer (a token re-minted after a failed write, or
+        # a bucket lifecycle rule that expired the draft first) must not serve.
+        if self.read_preview_token(pocket_id, content_hash) != token:
+            return None
+        return pocket_id, content_hash
+
+    def purge_previews(self, pocket_id: str) -> bool:
+        """Delete every preview token (forward key first, so the URL dies even if the
+        pointer delete fails) and draft file set of one pocket. Bundles stay. False
+        when the adapter cannot list or a delete failed (the sweeper retries)."""
+        browse = getattr(self._adapter, "browse", None)
+        if not callable(browse):
+            logger.warning(
+                "sites.artifact_store_s3: adapter cannot list; previews of %s kept", pocket_id
+            )
+            return False
+        prefix = f"{ARTIFACT_KEY_PREFIX}/{pocket_id}/"
+        try:
+            items = _run_coro(browse(prefix), self._timeout)
+        except Exception:
+            logger.warning("sites.artifact_store_s3: could not list %s", prefix, exc_info=True)
+            return False
+        ok = True
+        for item in items:
+            name = getattr(item, "name", "")
+            if getattr(item, "is_dir", False) or "/" in name:
+                continue
+            try:
+                if name.endswith(".token"):
+                    raw = self._get(f"{prefix}{name}")
+                    _run_coro(self._adapter.delete(f"{prefix}{name}"), self._timeout)
+                    token = raw.decode("utf-8", "replace").strip() if raw else ""
+                    if token:
+                        _run_coro(self._adapter.delete(token_pointer_key(token)), self._timeout)
+                elif name.endswith(".dist.tgz") and not name.endswith(".bundle.dist.tgz"):
+                    _run_coro(self._adapter.delete(f"{prefix}{name}"), self._timeout)
+            except Exception:
+                logger.warning(
+                    "sites.artifact_store_s3: delete failed for %s%s", prefix, name, exc_info=True
+                )
+                ok = False
+        return ok
+
+
+def dist_key(pocket_id: str, content_hash: str) -> str:
+    return f"{ARTIFACT_KEY_PREFIX}/{pocket_id}/{content_hash}.dist.tgz"
+
+
+def token_pointer_key(token: str) -> str:
+    return f"{ARTIFACT_KEY_PREFIX}/_preview_tokens/{token}.json"
+
+
+def _dist_carries_capture_key(data: bytes) -> bool:
+    """True when any file of a packed draft carries a capture key (see
+    :func:`carries_capture_key`). An unreadable pack counts as carrying one."""
+    from pocketpaw_ee.sites.preview_origin import unpack_files
+
+    try:
+        files = unpack_files(data)
+    except Exception:
+        return True
+    return any(carries_capture_key(b.decode("utf-8", "ignore")) for b in files.values())
 
 
 # --------------------------------------------------------------------------- #

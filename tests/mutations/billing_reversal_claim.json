@@ -1,0 +1,74 @@
+[
+  {
+    "label": "reversal: drop the cap from the claim filter (back to the $ne-only guard)",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "            \"$or\": [\n                {\"credits_reversed\": {\"$lte\": cap}},\n                {\"credits_reversed\": {\"$exists\": False}},\n            ],\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: cap ignores this delivery's own amount",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    cap = int(granted) - amount",
+    "replace": "    cap = int(granted)",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: a legacy row with no credits_reversed field is excluded",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "                {\"credits_reversed\": {\"$exists\": False}},",
+    "replace": "                {\"credits_reversed\": {\"$exists\": True}},",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: a claim refused by the cap is logged as a routine redelivery",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        if event.event_id in ((current or {}).get(\"reversal_event_ids\") or []):",
+    "replace": "        if True:",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: an orphaned claim reports the routine outcome instead of alarming",
+    "find": "    if event.event_id in (doc.reversal_event_ids or []):\n        if await credits_service.is_recorded(doc.workspace, event.event_id):",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "replace": "    if event.event_id in (doc.reversal_event_ids or []):\n        if True:",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: the redelivery check is moved below the remaining<=0 return",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    if event.event_id in (doc.reversal_event_ids or []):",
+    "replace": "    if False and event.event_id in (doc.reversal_event_ids or []):",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: a failed debit leaves its claim on the row",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "        await _release_reversal_claim(doc, event, amount)\n        raise",
+    "replace": "        raise",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  },
+  {
+    "label": "reversal: the release runs even when the money already moved",
+    "file": "ee/pocketpaw_ee/cloud/billing/service.py",
+    "find": "    try:\n        if await credits_service.is_recorded(doc.workspace, event.event_id):\n            return",
+    "replace": "    try:\n        if False:\n            return",
+    "tests": [
+      "tests/cloud/billing/test_reversals.py"
+    ]
+  }
+]

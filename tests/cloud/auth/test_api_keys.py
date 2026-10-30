@@ -1,3 +1,11 @@
+# 2026-10-03 (fix/paw-key-scopes): request_context enforces paw_ key scopes.
+#   The ctx probe moved under /chat (GET needs chat.read, which every key here
+#   holds). New probes and the real file-versions router cover: scope held ->
+#   200, scope missing -> 403, JWT member unchanged, unmapped family -> 403,
+#   write with no write scope -> 403, POST /files/search -> files.read.
+# 2026-10-01 (CN-2): the fail-open ee ``_core.context.require_scope`` is gone.
+#   The scope probe now uses the canonical fail-closed
+#   ``pocketpaw.api.deps.require_scope``; a guard test keeps the ee copy deleted.
 """Tests for workspace API keys + bearer resolver (Wave 3 Task 8)."""
 
 from __future__ import annotations
@@ -14,14 +22,20 @@ import pytest
 import pytest_asyncio
 from fastapi import APIRouter, Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud._core import context as context_module
 from pocketpaw_ee.cloud._core import redis_client
-from pocketpaw_ee.cloud._core.context import RequestContext, request_context, require_scope
+from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.auth import api_keys as api_keys_service
 from pocketpaw_ee.cloud.auth.core import UserCreate, UserManager, get_user_db
 from pocketpaw_ee.cloud.auth.router import router as auth_router
+from pocketpaw_ee.cloud.auth.scopes import AVAILABLE_SCOPES
+from pocketpaw_ee.cloud.file_versions.router import router as file_versions_router
+from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
+
+from pocketpaw.api.deps import require_scope
 
 _EMAIL_OWNER = "owner@example.com"
 _EMAIL_OUTSIDER = "outsider@example.com"
@@ -36,17 +50,29 @@ def _build_app() -> FastAPI:
 
     probe = APIRouter()
 
-    @probe.get("/probe/ctx")
+    @probe.get("/chat/probe-ctx")
     async def probe_ctx(ctx: RequestContext = Depends(request_context)) -> dict:
         return {"user_id": ctx.user_id, "workspace_id": ctx.workspace_id, "scopes": ctx.scopes}
 
     @probe.get("/probe/chat-send")
     async def probe_chat_send(
-        ctx: RequestContext = Depends(require_scope("chat.send")),
+        _scope: None = Depends(require_scope("chat.send")),
+        ctx: RequestContext = Depends(request_context),
     ) -> dict:
         return {"ok": True, "user_id": ctx.user_id, "scopes": ctx.scopes}
 
+    async def _ctx_out(ctx: RequestContext = Depends(request_context)) -> dict:
+        return {"user_id": ctx.user_id, "scopes": ctx.scopes}
+
+    # Probes for the paw_ key scope table (real request_context, real keys).
+    probe.add_api_route("/files/probe", _ctx_out, methods=["GET", "POST"])
+    probe.add_api_route("/files/search", _ctx_out, methods=["POST"])
+    probe.add_api_route("/workspaces/probe", _ctx_out, methods=["GET", "PATCH"])
+    probe.add_api_route("/probe/unmapped", _ctx_out, methods=["GET"])
+
     app.include_router(probe, prefix="/api/v1")
+    app.include_router(file_versions_router, prefix="/api/v1")
+    app.dependency_overrides[require_license] = lambda: None
     return app
 
 
@@ -182,7 +208,7 @@ async def test_bearer_with_paw_key_resolves(env) -> None:
     full = created.json()["fullKey"]
 
     resp = await client.get(
-        "/api/v1/probe/ctx",
+        "/api/v1/chat/probe-ctx",
         headers={"Authorization": f"Bearer {full}"},
     )
     assert resp.status_code == 200, resp.text
@@ -195,7 +221,7 @@ async def test_bearer_with_paw_key_resolves(env) -> None:
 async def test_bad_paw_token_returns_401(env) -> None:
     client = env["client"]
     resp = await client.get(
-        "/api/v1/probe/ctx",
+        "/api/v1/chat/probe-ctx",
         headers={"Authorization": "Bearer paw_deadbeefdeadbeefdeadbeefdeadbeef"},
     )
     assert resp.status_code == 401
@@ -214,7 +240,7 @@ async def test_revoked_key_rejects_subsequent_use(env) -> None:
     key_id = created.json()["id"]
 
     ok = await client.get(
-        "/api/v1/probe/ctx",
+        "/api/v1/chat/probe-ctx",
         headers={"Authorization": f"Bearer {full}"},
     )
     assert ok.status_code == 200
@@ -226,7 +252,7 @@ async def test_revoked_key_rejects_subsequent_use(env) -> None:
     assert revoke.status_code == 200
 
     blocked = await client.get(
-        "/api/v1/probe/ctx",
+        "/api/v1/chat/probe-ctx",
         headers={"Authorization": f"Bearer {full}"},
     )
     assert blocked.status_code == 401
@@ -250,21 +276,35 @@ async def test_expired_key_rejected(env) -> None:
     await doc.save()
 
     resp = await client.get(
-        "/api/v1/probe/ctx",
+        "/api/v1/chat/probe-ctx",
         headers={"Authorization": f"Bearer {full}"},
     )
     assert resp.status_code == 401
 
 
+def test_ee_context_has_no_require_scope() -> None:
+    """The ee copy let every JWT caller through (``ctx.scopes is None``). It is
+    deleted; ``pocketpaw.api.deps.require_scope`` is the only scope gate."""
+    assert not hasattr(context_module, "require_scope")
+    assert "require_scope" not in context_module.__all__
+
+
+@pytest.mark.enforce_scope
 @pytest.mark.asyncio
-async def test_require_scope_blocks_missing_and_allows_jwt(env) -> None:
+async def test_require_scope_fails_closed_for_api_key_and_plain_jwt(env) -> None:
+    """The canonical ``require_scope`` passes only ``full_access`` callers
+    (platform superusers, via the EE auth bridge), OSS API keys and OAuth
+    tokens carrying the scope. A workspace ``paw_`` API key never sets
+    ``request.state.api_key`` and a non-superuser JWT never gets
+    ``full_access``, so both are refused, whatever scopes the key holds."""
     client = env["client"]
     cookie = await _login(client, _EMAIL_OWNER)
-    # JWT auth — scopes is None → pass.
-    via_jwt = await client.get("/api/v1/probe/chat-send", cookies={"paw_auth": cookie})
-    assert via_jwt.status_code == 200
 
-    # API key without chat.send → 403.
+    # Plain JWT session (workspace owner, not a platform superuser) -> 403.
+    via_jwt = await client.get("/api/v1/probe/chat-send", cookies={"paw_auth": cookie})
+    assert via_jwt.status_code == 403
+
+    # API key missing the scope -> 403.
     created = await client.post(
         f"/api/v1/workspaces/{_WORKSPACE_ID}/api-keys",
         json={"name": "no-send", "scopes": ["chat.read"]},
@@ -277,18 +317,18 @@ async def test_require_scope_blocks_missing_and_allows_jwt(env) -> None:
     )
     assert blocked.status_code == 403
 
-    # API key with chat.send → pass.
+    # Even a key that lists the scope is refused: fail closed.
     created2 = await client.post(
         f"/api/v1/workspaces/{_WORKSPACE_ID}/api-keys",
         json={"name": "with-send", "scopes": ["chat.read", "chat.send"]},
         cookies={"paw_auth": cookie},
     )
     full2 = created2.json()["fullKey"]
-    allowed = await client.get(
+    also_blocked = await client.get(
         "/api/v1/probe/chat-send",
         headers={"Authorization": f"Bearer {full2}"},
     )
-    assert allowed.status_code == 200
+    assert also_blocked.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -316,20 +356,115 @@ async def test_last_used_at_rate_limited(env, monkeypatch) -> None:
 
     monkeypatch.setattr(api_keys_service, "time", _FakeTime)
 
-    r1 = await client.get("/api/v1/probe/ctx", headers={"Authorization": f"Bearer {full}"})
+    r1 = await client.get("/api/v1/chat/probe-ctx", headers={"Authorization": f"Bearer {full}"})
     assert r1.status_code == 200
     doc1 = await APIKey.get(key_id)
     assert doc1 is not None and doc1.last_used_at is not None
     t1 = doc1.last_used_at
 
     clock["now"] = 1010.0  # < 60s later
-    r2 = await client.get("/api/v1/probe/ctx", headers={"Authorization": f"Bearer {full}"})
+    r2 = await client.get("/api/v1/chat/probe-ctx", headers={"Authorization": f"Bearer {full}"})
     assert r2.status_code == 200
     doc2 = await APIKey.get(key_id)
     assert doc2 is not None and doc2.last_used_at == t1  # unchanged
 
     clock["now"] = 2000.0  # > 60s later
-    r3 = await client.get("/api/v1/probe/ctx", headers={"Authorization": f"Bearer {full}"})
+    r3 = await client.get("/api/v1/chat/probe-ctx", headers={"Authorization": f"Bearer {full}"})
     assert r3.status_code == 200
     doc3 = await APIKey.get(key_id)
     assert doc3 is not None and doc3.last_used_at != t1  # updated after >60s
+
+
+async def _mint(client: AsyncClient, cookie: str, scopes: list[str]) -> str:
+    created = await client.post(
+        f"/api/v1/workspaces/{_WORKSPACE_ID}/api-keys",
+        json={"name": "-".join(scopes) or "none", "scopes": scopes},
+        cookies={"paw_auth": cookie},
+    )
+    assert created.status_code in (200, 201), created.text
+    return created.json()["fullKey"]
+
+
+def _bearer(key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {key}"}
+
+
+@pytest.mark.asyncio
+async def test_paw_key_scope_gates_a_real_ee_route(env) -> None:
+    """GET /files/{id}/versions (file-versions router) needs files.read."""
+    client = env["client"]
+    cookie = await _login(client, _EMAIL_OWNER)
+    with_read = await _mint(client, cookie, ["files.read"])
+    without = await _mint(client, cookie, ["chat.read"])
+    client.cookies.clear()
+
+    url = "/api/v1/files/f_missing/versions"
+    denied = await client.get(url, headers=_bearer(without))
+    assert denied.status_code == 403
+    assert "files.read" in denied.text
+
+    allowed = await client.get(url, headers=_bearer(with_read))
+    assert allowed.status_code != 403, allowed.text
+
+
+@pytest.mark.asyncio
+async def test_paw_key_needs_read_scope_for_get_and_write_scope_for_post(env) -> None:
+    client = env["client"]
+    cookie = await _login(client, _EMAIL_OWNER)
+    reader = await _mint(client, cookie, ["files.read"])
+    writer = await _mint(client, cookie, ["files.write"])
+    other = await _mint(client, cookie, ["chat.read"])
+    client.cookies.clear()
+
+    assert (await client.get("/api/v1/files/probe", headers=_bearer(reader))).status_code == 200
+    missing = await client.get("/api/v1/files/probe", headers=_bearer(other))
+    assert missing.status_code == 403
+    assert "files.read" in missing.text
+
+    assert (await client.post("/api/v1/files/probe", headers=_bearer(reader))).status_code == 403
+    assert (await client.post("/api/v1/files/probe", headers=_bearer(writer))).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_paw_key_post_search_maps_to_read(env) -> None:
+    client = env["client"]
+    cookie = await _login(client, _EMAIL_OWNER)
+    reader = await _mint(client, cookie, ["files.read"])
+    writer = await _mint(client, cookie, ["files.write"])
+    client.cookies.clear()
+
+    assert (await client.post("/api/v1/files/search", headers=_bearer(reader))).status_code == 200
+    assert (await client.post("/api/v1/files/search", headers=_bearer(writer))).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_paw_key_refused_on_unmapped_family_and_writes_without_a_scope(env) -> None:
+    client = env["client"]
+    cookie = await _login(client, _EMAIL_OWNER)
+    key = await _mint(client, cookie, list(AVAILABLE_SCOPES))
+    client.cookies.clear()
+
+    unmapped = await client.get("/api/v1/probe/unmapped", headers=_bearer(key))
+    assert unmapped.status_code == 403
+    assert (await client.get("/api/v1/workspaces/probe", headers=_bearer(key))).status_code == 200
+    # workspace has no write scope, so no key can write there.
+    no_write = await client.patch("/api/v1/workspaces/probe", headers=_bearer(key))
+    assert no_write.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_jwt_member_is_not_gated_by_the_key_table(env) -> None:
+    client = env["client"]
+    cookie = await _login(client, _EMAIL_OWNER)
+    client.cookies.clear()
+    jar = {"paw_auth": cookie}
+    for method, url in (
+        ("GET", "/api/v1/files/probe"),
+        ("POST", "/api/v1/files/probe"),
+        ("GET", "/api/v1/probe/unmapped"),
+        ("PATCH", "/api/v1/workspaces/probe"),
+    ):
+        resp = await client.request(method, url, cookies=jar)
+        assert resp.status_code == 200, (method, url, resp.text)
+    resp = await client.get("/api/v1/files/f_missing/versions", cookies=jar)
+    assert resp.status_code != 403, resp.text

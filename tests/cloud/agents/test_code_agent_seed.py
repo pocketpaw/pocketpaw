@@ -97,7 +97,6 @@ async def test_seeded_code_agent_config_drives_exclusive_allowlist(monkeypatch) 
     built = await backend._build_options(
         "build me an employee management app, with components and a nice design",
         system_prompt=doc.config.system_prompt,
-        history=None,
         session_key=None,
         deny_mcp_tool_ids=frozenset(),
         allow_sdk_tools=frozenset(),

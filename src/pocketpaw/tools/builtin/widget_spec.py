@@ -141,7 +141,13 @@ class WidgetSpecTool(BaseTool):
                 "manifest carries."
             )
 
-        block = format_for_prompt({"widgets": matched})
+        block = format_for_prompt(
+            {
+                "widgets": matched,
+                "actions": manifest.get("actions"),
+                "motion": manifest.get("motion"),
+            }
+        )
         if missing:
             block += f"\n\n_Not in this deployment's manifest, do not emit: {', '.join(missing)}_"
         return self._success(block)

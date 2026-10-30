@@ -1,28 +1,32 @@
-# tests/cloud/test_paw_bar_concierge_settings.py — Paw Bar concierge settings +
-# kill switch (D1 / SS-6).
-# Created 2026-07-16: covers the owner's on/off toggle + greeting. Layers:
-#   * The shared resolver (resolve_site_key) — a disabled Site raises 403
-#     ``concierge_disabled`` before the origin gate; an enabled Site resolves a ctx.
-#   * The three public entry points fail closed on the kill switch: GET
-#     /paw-bar/frame, POST /paw-bar/chat, POST /paw-bar/action each 403 when
-#     ``concierge_enabled=False``, while a default (enabled=True) Site renders.
-#   * The greeting rides into the frame's ``window.__PAWBAR__`` config payload.
-#   * The admin settings surface: GET + PATCH /paw-bar/admin/site/{id}/settings
-#     round-trips the two fields, rejects a cross-tenant id (404), and a PATCH that
-#     flips the switch off silences the frame on the NEXT request (immediate effect).
-# Updated 2026-07-26 (concierge transcripts): a fifth layer covers the
-#   transcript-retention toggle — exposed on GET, writable via PATCH, defaults on,
-#   and fully independent of the kill switch in both directions.
-# Updated 2026-08-16 (fix/paw-bar-role-gates): the two admin settings routes moved
-#   off ``require_scope("admin")`` onto the ``paw_bar.read`` / ``paw_bar.manage``
-#   ROLE gate, so the app fixture now pins the caller's workspace ROLE (admin) and
-#   a sixth layer covers the gate itself: admin/owner can PATCH the kill switch
-#   (the reported bug — a cloud workspace admin used to get 403 "Missing required
-#   scope: admin", because the scope gate only accepts a full-access dashboard
-#   session / pp_ API key / ppat_ token and a workspace admin holds none of them),
-#   a member is refused on both the PATCH and the GET with nothing written, and a
-#   widget DELETE shows the same split even when the caller holds the per-widget
-#   owner token.
+# tests/cloud/test_paw_bar_concierge_settings.py — the Paw Bar concierge kill switch
+# and the owner settings surface.
+#
+# The Site builder defaults to a concierge its owner CREATED and switched on (CR-12:
+# a bare Site is "no concierge"); overrides still win. Layers:
+#   * The shared resolver (resolve_site_key) and the three public entry points
+#     (frame, chat, action) fail closed on ``concierge_enabled=False``.
+#   * The greeting rides into the frame's ``window.__PAWBAR__`` config.
+#   * GET + PATCH /paw-bar/admin/site/{id}/settings round-trip the fields, a
+#     cross-tenant id is 404, and a PATCH that switches the bar off silences the
+#     frame on the next request. The transcript-retention toggle defaults on and
+#     is independent of the kill switch.
+#   * The owner preview: preview-frame frames the site's own page as a sandboxed
+#     ``?pawbar=sniff`` scene (hosted: its url; connected: the verified origin,
+#     else the first allowed origin; never markup or a scheme from stored
+#     data); preview-tokens and preview-config render a draft and write
+#     nothing. preview-config returns the frame config subset built by
+#     the frame's own code path (equal to the preview frame's boot config for an
+#     empty draft), applies the branding entitlement to ``poweredBy`` and refuses
+#     a draft the settings PATCH would refuse (422).
+#   * Role gates: reads on ``paw_bar.read``, mutations (PATCH, preview-config,
+#     widget DELETE, widget spec) on ``paw_bar.manage``; a member is refused with
+#     nothing written, even holding the per-widget owner token.
+#   * PATCH /paw-bar/admin/site/{id}/widget/spec, the session-authed Catalog &
+#     Actions save (revision archived, identity keys pinned to the resolved
+#     widget, 404 cross-tenant / no widget, 422 invalid spec).
+#   * ``embed_snippet`` on GET/PATCH: built on PAW_CAPTURE_API_BASE, and "" when
+#     the concierge is off, the plan lacks it, the snippet raises, or the caller
+#     cannot read the site's pocket.
 
 from __future__ import annotations
 
@@ -53,6 +57,12 @@ async def _site(**ov: Any):
         allowed_origins=["brewco.com"],
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s
@@ -308,9 +318,13 @@ async def test_the_preview_frames_the_site_itself(client):
     assert res.status_code == 200, res.text
     assert 'class="pawbar-scene"' in res.text
     assert "https://s1.paw-sites.test" in res.text
-    # The page auto-embeds the PUBLIC bar. Without this the owner sees two, and
-    # the one that answers the controls is the one behind.
-    assert "pawbar=off" in res.text
+    # The page auto-embeds the PUBLIC bar. ``sniff`` keeps it down (or the owner
+    # sees two, and the one behind answers the controls) and has its loader post
+    # the site's theme to the preview instead.
+    assert "pawbar=sniff" in res.text
+    assert "pawbar=off" not in res.text
+    assert 'class="pawbar-scene"' in res.text
+    assert 'sandbox="allow-scripts allow-popups allow-forms"' in res.text
 
 
 @pytest.mark.asyncio
@@ -344,6 +358,129 @@ async def test_an_undeployed_site_previews_without_a_scene(client):
     assert "pawbar-scene" not in res.text
     # The bar is still previewable; that is the point of the pane.
     assert 'id="pawbar-root"' in res.text
+
+
+async def _verify(host: str, *, age_days: int = 0, workspace: str = "ws-1") -> None:
+    """Seed a VERIFIED ownership claim, ``age_days`` old, the way ``verify_origin``
+    leaves one."""
+    from datetime import UTC, datetime, timedelta
+
+    from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
+
+    stamp = datetime.now(UTC) - timedelta(days=age_days)
+    await SiteOriginClaim(
+        workspace=workspace,
+        host=host,
+        token="pawverify-seeded-for-the-preview-suite",
+        status="verified",
+        issued_at=stamp,
+        expires_at=stamp + timedelta(days=7),
+        verified_at=stamp,
+        method="well-known",
+    ).insert()
+
+
+def _scene_src(html: str) -> str | None:
+    """The scene iframe's ``src`` as served (still HTML-escaped), or None."""
+    import re
+
+    m = re.search(r'<iframe class="pawbar-scene" src="([^"]*)"', html)
+    return m.group(1) if m else None
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_site_scene_is_its_own_url(client):
+    """Hosted sites keep framing the url we composed, never an allowed origin."""
+    c, store = client
+    site = await _site(url="https://s1.paw-sites.test", allowed_origins=["brewco.com"])
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert _scene_src(res.text) == "https://s1.paw-sites.test?pawbar=sniff"
+
+
+@pytest.mark.asyncio
+async def test_a_connected_site_frames_its_verified_origin(client):
+    """A connected site (a concierge on the customer's own website) has no url.
+    Its scene is the one verified, fresh host — the host the screenshot and the
+    knowledge crawl use — even when it is not the first allowed origin."""
+    c, store = client
+    site = await _site(foreign_origin=True, allowed_origins=["shop.brewco.com", "brewco.com"])
+    await _verify("brewco.com")
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert _scene_src(res.text) == "https://brewco.com/?pawbar=sniff"
+    assert 'sandbox="allow-scripts allow-popups allow-forms"' in res.text
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_connected_site_frames_its_first_allowed_origin(client):
+    """No fresh proof (none at all, or a stale one): the owner still needs to see
+    their look, so the scene falls back to the first origin they entered."""
+    c, store = client
+    site = await _site(foreign_origin=True, allowed_origins=["brewco.com", "www.brewco.com"])
+    await _verify("www.brewco.com", age_days=400)  # stale: not a fresh proof
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert _scene_src(res.text) == "https://brewco.com/?pawbar=sniff"
+
+
+@pytest.mark.asyncio
+async def test_a_connected_site_with_no_origins_has_no_scene(client):
+    c, store = client
+    site = await _site(foreign_origin=True, allowed_origins=[])
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert "pawbar-scene" not in res.text
+    assert 'id="pawbar-root"' in res.text
+
+
+@pytest.mark.asyncio
+async def test_a_hostile_stored_origin_cannot_inject_into_the_scene(client):
+    """``allowed_origins`` is stored data. Whatever it holds, the scene is
+    ``https://<bare host[:port]>/?pawbar=sniff`` or nothing: no other scheme, no
+    stored path or query, no markup."""
+    c, store = client
+    hostile = [
+        'javascript:alert(1)//"><script>alert(2)</script>',
+        "data:text/html,<b>x</b>",
+        "brew co.com\r\nSet-Cookie: x",
+    ]
+    site = await _site(foreign_origin=True, allowed_origins=hostile)
+    await store.create_widget(_widget())
+
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert "pawbar-scene" not in res.text
+    assert "<script>alert(2)" not in res.text
+    assert "javascript:" not in res.text
+    assert "data:text/html" not in res.text
+
+    # A usable host behind a path / query keeps only the host.
+    site2 = await _site(
+        foreign_origin=True,
+        allowed_origins=['http://evil.example/"><img src=x onerror=alert(1)>?a=b'],
+        signed_key="site_key_" + "b" * 24,
+        pocket_id="pocket-2",
+    )
+    await store.create_widget(_widget(pocket_id="pocket-2", spec=_spec("pocket-2")))
+
+    res2 = await c.get(f"/paw-bar/admin/site/{site2.id}/preview-frame")
+
+    assert res2.status_code == 200, res2.text
+    assert _scene_src(res2.text) == "https://evil.example/?pawbar=sniff"
+    assert "onerror" not in res2.text
 
 
 @pytest.mark.asyncio
@@ -408,6 +545,51 @@ async def test_preview_tokens_renders_without_writing(client):
 
 
 @pytest.mark.asyncio
+async def test_preview_tokens_carries_the_dark_palette(client):
+    """The editor previews both palettes, so the dark one comes back too."""
+    c, _store = client
+    site = await _site()
+
+    res = await c.post(
+        f"/paw-bar/admin/site/{site.id}/appearance/preview-tokens",
+        json={"concierge_appearance": {"accent": "#ff5a36", "accent_dark": "#88aaff"}},
+    )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["tokens"]["--pawbar-accent"] == "#ff5a36"
+    assert body["tokens_dark"]["--pawbar-accent"] == "#88aaff"
+    assert body["concierge_appearance"]["accent_dark"] == "#88aaff"
+
+
+@pytest.mark.asyncio
+async def test_settings_patch_round_trips_the_look_fields(client):
+    """Launcher style, logo and the dark palette save and read back."""
+    c, _store = client
+    site = await _site()
+    look = {
+        "logo_url": "https://cdn.example.test/logo.png",
+        "accent_dark": "#88aaff",
+        "launcher": {"style": "icon", "position": "bottom-left"},
+        "colors_dark": {"surface": "#101018"},
+    }
+
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/settings", json={"concierge_appearance": look}
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["concierge_appearance"]["launcher"]["style"] == "icon"
+
+    got = (await c.get(f"/paw-bar/admin/site/{site.id}/settings")).json()
+    saved = got["concierge_appearance"]
+    assert saved["logo_url"] == "https://cdn.example.test/logo.png"
+    assert saved["accent_dark"] == "#88aaff"
+    assert saved["launcher"]["style"] == "icon"
+    assert saved["launcher"]["position"] == "bottom-left"
+    assert saved["colors_dark"]["surface"] == "#101018"
+
+
+@pytest.mark.asyncio
 async def test_preview_tokens_returns_the_clamped_value_not_the_typed_one(client):
     """The preview must not promise a look a save would not store.
 
@@ -456,6 +638,144 @@ async def test_preview_tokens_cross_tenant_is_404(client):
     assert res.status_code == 404
 
 
+# --------------------------------------------------------------------------- #
+# preview-config — a draft rendered to the frame config it would boot
+# --------------------------------------------------------------------------- #
+
+_ENTITLED = "pocketpaw_ee.sites.service.badge_removal_entitled"
+_PREVIEW_CONFIG_KEYS = {
+    "tokens",
+    "tokensDark",
+    "scheme",
+    "launcher",
+    "side",
+    "barSize",
+    "logo",
+    "launcherLabel",
+    "disclosure",
+    "privacyHref",
+    "consentRequired",
+    "voice",
+    "poweredBy",
+    "expandable",
+    "movable",
+}
+
+
+def _boot_config(html: str) -> dict[str, Any]:
+    import json
+
+    raw = html.split("window.__PAWBAR__ = ", 1)[1].split(";</script>", 1)[0]
+    return json.loads(raw)
+
+
+@pytest.mark.asyncio
+async def test_preview_config_renders_the_draft_over_the_stored_settings(client):
+    """Fields the draft carries win; the rest are the Site's. Nothing is written."""
+    from unittest.mock import AsyncMock, patch
+
+    c, _store = client
+    site = await _site(concierge_disclosure="Stored line", concierge_voice=False)
+
+    with patch(_ENTITLED, new=AsyncMock(return_value=False)):
+        res = await c.post(
+            f"/paw-bar/admin/site/{site.id}/preview-config",
+            json={
+                "concierge_appearance": {"accent": "#ff5a36", "size": "md", "radius": 99},
+                "concierge_disclosure": "Draft line",
+                "concierge_consent_required": True,
+            },
+        )
+
+    assert res.status_code == 200, res.text
+    body = res.json()
+    config = body["config"]
+    assert set(config) == _PREVIEW_CONFIG_KEYS
+    assert config["tokens"]["--pawbar-accent"] == "#ff5a36"
+    assert config["tokens"]["--pawbar-radius"] == "32px"
+    assert config["barSize"] == "md"
+    assert config["disclosure"] == "Draft line"
+    assert config["consentRequired"] is True
+    # Not in the draft: the stored value.
+    assert config["voice"] is False
+    # The validated echo shows the clamp.
+    assert body["concierge_appearance"]["radius"] == 32
+
+    got = (await c.get(f"/paw-bar/admin/site/{site.id}/settings")).json()
+    assert got["concierge_disclosure"] == "Stored line"
+    assert got["concierge_consent_required"] is False
+    assert got["concierge_appearance"]["accent"] == ""
+
+
+@pytest.mark.asyncio
+async def test_preview_config_of_no_draft_is_the_preview_frame_config(client):
+    """One builder: with nothing in the draft, the keys equal what the owner
+    preview frame boots with, value for value."""
+    from unittest.mock import AsyncMock, patch
+
+    c, store = client
+    site = await _site(
+        concierge_disclosure="Hello",
+        concierge_privacy_url="https://brewco.com/privacy",
+        concierge_expandable=False,
+        concierge_movable=False,
+    )
+    site.concierge_appearance.colors.surface = "#f7f7fb"
+    site.concierge_appearance.launcher.style = "icon"
+    await site.save()
+    await store.create_widget(_widget())
+
+    with patch(_ENTITLED, new=AsyncMock(return_value=True)):
+        res = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json={})
+        frame = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+
+    assert res.status_code == 200, res.text
+    assert frame.status_code == 200, frame.text
+    boot = _boot_config(frame.text)
+    assert res.json()["config"] == {k: boot[k] for k in _PREVIEW_CONFIG_KEYS}
+    assert boot["tokens"]["--pawbar-bg"] == "rgba(247, 247, 251, 0.78)"
+
+
+@pytest.mark.asyncio
+async def test_preview_config_shows_the_credit_a_non_entitled_site_cannot_hide(client):
+    from unittest.mock import AsyncMock, patch
+
+    c, _store = client
+    site = await _site()
+    draft = {"concierge_appearance": {"show_branding": False}}
+
+    with patch(_ENTITLED, new=AsyncMock(return_value=False)):
+        refused = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json=draft)
+    with patch(_ENTITLED, new=AsyncMock(return_value=True)):
+        allowed = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json=draft)
+
+    assert refused.json()["config"]["poweredBy"] is True
+    assert allowed.json()["config"]["poweredBy"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "draft",
+    [
+        {"concierge_disclosure": "x" * 141},
+        {"concierge_privacy_url": "http://brewco.com/privacy"},
+    ],
+)
+async def test_preview_config_refuses_what_a_save_would_refuse(client, draft):
+    c, _store = client
+    site = await _site()
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json=draft)
+    assert res.status_code == 422, res.text
+
+
+@pytest.mark.asyncio
+async def test_preview_config_cross_tenant_is_404(client):
+    c, _store = client
+    site = await _site(workspace="ws-other")
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json={})
+    assert res.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_settings_cross_tenant_is_404(client):
     """A site owned by another workspace 404s for the ws-1 admin session."""
@@ -483,12 +803,14 @@ async def test_settings_malformed_id_is_404(client):
 
 
 @pytest.mark.asyncio
-async def test_toggle_off_silences_frame_immediately(client):
-    """The frame renders while enabled, then 403s right after the owner PATCHes the
-    switch off — the gate re-reads the Site every request (no warm-client caching)."""
+async def test_toggle_off_silences_frame_within_its_ttl(client):
+    """The frame renders while enabled, keeps rendering from the memoised Site for
+    at most ``_FRAME_SITE_TTL_S`` after the owner PATCHes the switch off, then 403s
+    with the dead shell once the memo expires."""
+    from pocketpaw_ee.paw_bar import router as paw_bar_router
+
     c, _store = client
     site = await _site()
-
     ok = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
     assert ok.status_code == 200
 
@@ -498,6 +820,12 @@ async def test_toggle_off_silences_frame_immediately(client):
     )
     assert off.status_code == 200
 
+    within = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
+    assert within.status_code == 200
+
+    # Age the memo entry past its TTL (not the global clock: asyncio reads it too).
+    _expiry, memo_site = paw_bar_router._frame_site_memo[_VALID_KEY]
+    paw_bar_router._frame_site_memo[_VALID_KEY] = (0.0, memo_site)
     after = await c.get("/paw-bar/frame", params={"key": _VALID_KEY})
     assert after.status_code == 403
     # Blank shell, not an error payload — the body renders on the site.
@@ -630,6 +958,15 @@ async def test_admin_role_can_read_the_settings(client):
 
 
 @pytest.mark.asyncio
+async def test_member_role_cannot_render_a_preview_config(member_client, mongo_db):
+    """preview-config sits on the manage gate, like the settings PATCH."""
+    c, _store = member_client
+    site = await _site()
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/preview-config", json={})
+    assert res.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_member_role_cannot_read_the_settings(member_client, mongo_db):
     """A MEMBER is refused (403) on the GET too — the reads and writes on this
     surface are both ADMIN, so a member learns nothing about the site's config."""
@@ -689,3 +1026,410 @@ async def test_transcript_retention_is_independent_of_the_kill_switch(client):
         json={"concierge_enabled": False},
     )
     assert res2.json()["concierge_store_transcripts"] is False  # still off, not reset
+
+
+# --------------------------------------------------------------------------- #
+# Layer 7 — the owner saves the widget spec, and reads the embed snippet
+# (feat/pawbar-admin-widget-spec-route)
+#
+# The dashboard's Catalog & Actions editor had no route it could save through:
+# PATCH /paw-bar/widgets/{id} wants an X-Paw-Bar-Token the dashboard never holds
+# and has no ``spec`` field. And the settings response carried no snippet, so
+# the owner had nothing authoritative to copy. Both are pinned here.
+# --------------------------------------------------------------------------- #
+
+# A public base that is NOT the test client's host (http://t), so a snippet
+# built from the request's own URL cannot pass the equality checks below.
+_PUBLIC_BASE = "https://api.paw.example/api/v1"
+
+
+@pytest_asyncio.fixture
+async def real_pocket_client(tmp_path, mongo_db, monkeypatch):
+    """An ADMIN client whose paw_bar store backs BOTH the router and
+    ``agent_provisioning`` (the widget lookup ``embed.concierge_snippet`` runs).
+    Patching only the router would leave the snippet lookup on the real store,
+    where it finds nothing and every snippet reads "". Yields ``(client, store)``.
+
+    The pocket read gate is the REAL ``pockets_service.can_read``, so a test on
+    this fixture needs a real Pocket doc (``_real_pocket``)."""
+    from unittest.mock import patch
+
+    monkeypatch.setenv("PAW_CAPTURE_API_BASE", _PUBLIC_BASE)
+    app = _build_app(role="admin")
+    store = PawBarStore(tmp_path / "owner.db")
+    with (
+        patch("pocketpaw_ee.paw_bar.router._store", return_value=store),
+        patch("pocketpaw_ee.paw_bar.agent_provisioning._store", return_value=store),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            yield c, store
+
+
+@pytest_asyncio.fixture
+async def owner_client(real_pocket_client):
+    """``real_pocket_client`` with the pocket read gate satisfied.
+
+    The settings snippet asks ``pockets_service.can_read`` first, and "pocket-1"
+    is not an ObjectId, so the real predicate would read every snippet as "".
+    The gate itself is exercised both ways on ``real_pocket_client`` (same
+    pattern as ``test_foreign_concierge_endpoints``' ``_owned_pocket``)."""
+    from unittest.mock import AsyncMock, patch
+
+    with patch("pocketpaw_ee.cloud.pockets.service.can_read", new=AsyncMock(return_value=True)):
+        yield real_pocket_client
+
+
+def _new_spec_body(widget_id: str) -> dict[str, Any]:
+    return {
+        "spec": {
+            "widget_id": widget_id,
+            "pocket_id": "pocket-1",
+            "blocks": [{"type": "text", "content": "Now serving cold brew"}],
+            "catalog": [{"id": "cold-brew", "name": "Cold brew", "price_cents": 450}],
+            "checkout_url": "https://brewco.com/checkout",
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_needs_no_widget_token_and_archives(owner_client):
+    """THE REPORTED BUG. The owner saves the catalog with only their session (no
+    X-Paw-Bar-Token) and the write goes through the same archiving path as the
+    token-gated route: the old spec becomes revision 1, so it can be rolled back."""
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/widget/spec", json=_new_spec_body(widget.id)
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert set(body) == {"id", "spec"}
+    assert body["id"] == widget.id
+    assert body["spec"]["checkout_url"] == "https://brewco.com/checkout"
+
+    # A catalog in the body (an older editor) lands in the catalog store, not the spec.
+    stored = await store.get_widget(widget.id)
+    assert body["spec"]["catalog"] == [] and stored.spec.catalog == []
+    [item] = await store.get_catalog_items(widget.id, ["cold-brew"])
+    assert item.name == "Cold brew"
+    revision = await store.latest_spec_revision(widget.id)
+    assert revision is not None
+    number, archived = revision
+    assert number == 1
+    assert archived == _spec()  # the PRIOR spec, not the new one
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("currency", "headers", "status"),
+    [
+        ("KWD", {}, 409),  # an old client: refused, nothing converted
+        ("KWD", {"X-Paw-Money-Units": "iso4217"}, 200),
+        ("USD", {}, 200),  # two decimals: the same in both conventions
+    ],
+)
+async def test_admin_spec_save_needs_the_money_units_header_for_odd_exponents(
+    owner_client, currency, headers, status
+):
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    body = _new_spec_body(widget.id)
+    body["spec"]["catalog"][0]["currency"] = currency
+
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/widget/spec", json=body, headers=headers)
+    assert res.status_code == status, res.text
+    stored = (await store.get_widget(widget.id)).spec
+    if status == 409:
+        assert res.json()["detail"] == "currency_units_client_outdated"
+        assert stored == _spec()  # untouched
+    else:
+        # Stored as sent, in the catalog store (the spec no longer holds it).
+        assert stored.catalog == []
+        [item] = await store.get_catalog_items(widget.id, ["cold-brew"])
+        assert item.price_cents == 450
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_pins_widget_and_pocket_ids(owner_client):
+    """A body naming another widget / pocket inside ``spec`` saves with the
+    RESOLVED widget's own id and pocket_id; every other field lands as sent.
+    Overwritten rather than rejected: the editor spreads the spec it loaded, so
+    those two keys are not the owner's to edit."""
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    other = await store.create_widget(_widget(pocket_id="pocket-other"))
+    body = _new_spec_body("pp_foreign")
+    body["spec"]["pocket_id"] = "pocket-other"
+
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/widget/spec", json=body)
+    assert res.status_code == 200, res.text
+    saved = res.json()["spec"]
+    assert saved["widget_id"] == widget.id
+    assert saved["pocket_id"] == "pocket-1"
+
+    stored = (await store.get_widget(widget.id)).spec
+    expected = PawBarSpec.model_validate(
+        {**body["spec"], "widget_id": widget.id, "pocket_id": "pocket-1", "catalog": []}
+    )
+    # Nothing but the two ids differs from the body; its catalog went to the store.
+    assert stored == expected
+    assert await store.catalog_count(widget.id) == 1
+    # The widget the body named is untouched.
+    assert await store.latest_spec_revision(other.id) is None
+    assert (await store.get_widget(other.id)).spec == _spec()
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_cross_tenant_is_404(owner_client):
+    """A site in another workspace 404s, and its widget is not written."""
+    c, store = owner_client
+    site = await _site(workspace="ws-2")
+    widget = await store.create_widget(_widget(workspace_id="ws-2"))
+
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/widget/spec", json=_new_spec_body(widget.id)
+    )
+    assert res.status_code == 404, res.text
+    assert await store.latest_spec_revision(widget.id) is None
+    assert (await store.get_widget(widget.id)).spec == _spec()
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_without_a_widget_is_404(owner_client):
+    c, _store = owner_client
+    site = await _site()
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/widget/spec", json=_new_spec_body("x"))
+    assert res.status_code == 404, res.text
+    assert "no_concierge_widget" in res.text
+
+
+@pytest.mark.asyncio
+async def test_admin_spec_save_rejects_an_invalid_spec(owner_client):
+    """The same PawBarSpec validation the token route applies: duplicate action
+    verbs are a 422, and nothing is written."""
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    body = _new_spec_body(widget.id)
+    action = {"verb": "book_table", "label": "Book", "policy": "gated"}
+    body["spec"]["actions"] = [action, dict(action)]
+
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/widget/spec", json=body)
+    assert res.status_code == 422, res.text
+    assert await store.latest_spec_revision(widget.id) is None
+
+
+@pytest.mark.asyncio
+async def test_member_role_cannot_save_the_widget_spec(member_client, mongo_db):
+    """A MEMBER lacks paw_bar.manage: 403, and the spec is untouched."""
+    c, store = member_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/widget/spec", json=_new_spec_body(widget.id)
+    )
+    assert res.status_code == 403, res.text
+    assert "workspace.insufficient_role" in res.text
+    assert await store.latest_spec_revision(widget.id) is None
+
+
+@pytest.mark.asyncio
+async def test_token_spec_route_still_demands_the_token(owner_client):
+    """The legacy token-gated route is unchanged: no token, no write; with it,
+    the same archiving write the admin route now shares."""
+    c, store = owner_client
+    widget = await store.create_widget(_widget())
+    spec = _new_spec_body(widget.id)["spec"]
+    res = await c.patch(f"/paw-bar/widgets/{widget.id}/spec", json=spec)
+    assert res.status_code == 401, res.text
+    assert await store.latest_spec_revision(widget.id) is None
+
+    ok = await c.patch(
+        f"/paw-bar/widgets/{widget.id}/spec",
+        json=spec,
+        headers={"X-Paw-Bar-Token": widget.access_token},
+    )
+    assert ok.status_code == 200, ok.text
+    assert (await store.latest_spec_revision(widget.id))[0] == 1
+
+
+def _expected_snippet(widget_id: str) -> str:
+    from pocketpaw_ee.paw_bar.embed import build_embed_snippet
+
+    return build_embed_snippet(api_base=_PUBLIC_BASE, site_key=_VALID_KEY, widget_id=widget_id)
+
+
+@pytest.mark.asyncio
+async def test_settings_get_returns_the_publish_time_snippet(owner_client):
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    snippet = res.json()["embed_snippet"]
+    assert snippet == _expected_snippet(widget.id)
+    assert "http://t/" not in snippet  # never the dashboard request's own host
+
+
+@pytest.mark.asyncio
+async def test_settings_patch_returns_the_snippet(owner_client):
+    c, store = owner_client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    res = await c.patch(
+        f"/paw-bar/admin/site/{site.id}/settings", json={"concierge_greeting": "Hey"}
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == _expected_snippet(widget.id)
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_without_a_widget(owner_client):
+    c, _store = owner_client
+    site = await _site()
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_without_a_site_key(owner_client):
+    c, store = owner_client
+    site = await _site(signed_key="")
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# Layer 8 — the snippet's own gates (fix/pawbar-public-starters-sync-status)
+#
+# Review follow-ups on the embed_snippet above: the settings response must hand
+# out a snippet only when publish would inject one, and only to a caller who can
+# read the site's pocket (parity with sites.router's foreign-concierge surface).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_when_the_concierge_is_off(owner_client):
+    c, store = owner_client
+    site = await _site(concierge_enabled=False)
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_when_the_plan_lacks_the_concierge(owner_client):
+    from unittest.mock import patch
+
+    c, store = owner_client
+    site = await _site()
+    await store.create_widget(_widget())
+    with patch("pocketpaw_ee.cloud.auth.site_keys.concierge_plan_entitled", return_value=False):
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_asks_the_plan_and_the_switch_separately(owner_client):
+    """The snippet's ``concierge_entitled`` is the PLAN half, not "available".
+
+    A switched-off concierge on a plan that sells one is entitled; passing
+    ``concierge_available`` there would report it as unsold.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    c, store = owner_client
+    site = await _site(concierge_enabled=False)
+    await store.create_widget(_widget())
+    spy = AsyncMock(return_value="")
+    with (
+        patch("pocketpaw_ee.cloud.auth.site_keys.concierge_plan_entitled", return_value=True),
+        patch("pocketpaw_ee.paw_bar.embed.concierge_snippet", new=spy),
+    ):
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert spy.await_count == 1
+    assert spy.await_args.kwargs["concierge_entitled"] is True
+    assert spy.await_args.kwargs["concierge_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_failure_still_opens_the_page(owner_client):
+    from unittest.mock import AsyncMock, patch
+
+    c, store = owner_client
+    site = await _site()
+    await store.create_widget(_widget())
+    with patch(
+        "pocketpaw_ee.paw_bar.embed.concierge_snippet",
+        new=AsyncMock(side_effect=RuntimeError("store down")),
+    ):
+        res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["embed_snippet"] == ""
+    assert body["site_id"] == str(site.id)
+
+
+@pytest.mark.asyncio
+async def test_enabling_a_created_concierge_returns_the_snippet_without_binding(owner_client):
+    """PATCH {concierge_enabled: true} on a concierge the owner created returns
+    its snippet. It no longer provisions an agent on the way (CR-12): the marker
+    earns the bar, not a bound agent, so the widget stays exactly as it was."""
+    c, store = owner_client
+    site = await _site(concierge_enabled=False)
+    widget = await store.create_widget(_widget(agent_id=""))
+    res = await c.patch(f"/paw-bar/admin/site/{site.id}/settings", json={"concierge_enabled": True})
+    assert res.status_code == 200, res.text
+    assert (await store.get_widget(widget.id)).agent_id == "", "enable must not bind an agent"
+    assert res.json()["embed_snippet"] == _expected_snippet(widget.id)
+
+
+async def _real_pocket(**ov: Any) -> str:
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    d = dict(workspace="ws-1", name="Brew & Co", owner="someone-else", visibility="private")
+    d.update(ov)
+    doc = Pocket(**d)
+    await doc.insert()
+    return str(doc.id)
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_empty_for_a_pocket_the_caller_cannot_read(
+    real_pocket_client,
+):
+    """A workspace admin locked out of a private pocket gets no key or snippet,
+    as on sites.router's surface, but the settings page still opens."""
+    c, store = real_pocket_client
+    pocket_id = await _real_pocket()
+    site = await _site(pocket_id=pocket_id)
+    await store.create_widget(_widget(pocket_id=pocket_id, spec=_spec(pocket_id)))
+    for res in (
+        await c.get(f"/paw-bar/admin/site/{site.id}/settings"),
+        await c.patch(f"/paw-bar/admin/site/{site.id}/settings", json={"concierge_greeting": "Hi"}),
+    ):
+        assert res.status_code == 200, res.text
+        assert res.json()["embed_snippet"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_snippet_is_present_for_a_pocket_the_caller_owns(real_pocket_client):
+    """The same private pocket, owned by the caller: the real predicate says yes."""
+    c, store = real_pocket_client
+    pocket_id = await _real_pocket(owner="u1")
+    site = await _site(pocket_id=pocket_id)
+    widget = await store.create_widget(_widget(pocket_id=pocket_id, spec=_spec(pocket_id)))
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/settings")
+    assert res.status_code == 200, res.text
+    assert res.json()["embed_snippet"] == _expected_snippet(widget.id)

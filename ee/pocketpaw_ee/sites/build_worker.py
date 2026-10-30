@@ -1,42 +1,52 @@
 # ee/pocketpaw_ee/sites/build_worker.py — the site-build lane's OWN arq worker settings.
 #
-# Created 2026-09-04 (fix/queue-lanes, backend-perf C1). Until now every background lane
-# this product runs — chat runs, workspace jobs, both /ship jobs and both site builds —
-# shared arq's default queue, and therefore shared ONE ``max_jobs`` ceiling whose default
-# is 10. That is a cluster-wide number, not a per-lane one, and site builds are the worst
-# possible neighbour to share it with: a publish storm is one customer pressing Publish on
-# ten sites, and a single build's budget is 1020s at today's defaults. Ten of them left
-# chat with zero slots, and the eleventh request did not fail — it sat in Redis until the
-# stale-run sweeper marked it interrupted ten minutes later, while the user watched an SSE
-# stream deliver nothing but heartbeats.
+# WHY A SEPARATE LANE. Every background lane once shared arq's default queue and one
+# ``max_jobs`` ceiling (10). Site builds are the worst neighbour for that: a publish
+# storm is one customer pressing Publish on ten sites, each build budgeted at ~1020s,
+# which left chat with zero slots while its requests sat in Redis. This module is the
+# consumer of the split-off site queue. It is deliberately thin: job functions, the
+# bootstrap, the Redis resolver and the health-key period are the chat lane's objects,
+# imported rather than redefined. The lane owns only its concurrency ceiling.
 #
-# Splitting the queue is what fixes that, and a queue without a consumer is worse than no
-# split at all, so this module exists to BE that consumer. It is deliberately thin: every
-# job function, the bootstrap, the Redis resolver and the health-key period are the same
-# objects the chat lane uses, imported rather than redefined. The only thing this lane
-# owns is its own concurrency ceiling.
+# WHAT RUNS HERE. Site publish builds and preview builds (the chat lane's wrapped
+# functions), the html verify job (preview timeout, capacity-only ``max_tries`` from
+# ``sites.capacity``), the site delete cascade (its own timeout, ``max_tries=1``), the
+# AI visibility site check, and two crons: the AI visibility sweep and the build
+# sandbox reaper (``sandbox_reaper.reap_cron``, every 10 minutes), which deletes
+# ``paw-build-*`` / ``paw-verify-*`` Daytona boxes older than the longest sites job
+# budget so a leaked box cannot hold the org's memory cap.
 #
-# HOW IT RUNS. ``pocketpaw_ee.cloud.worker_supervisor`` starts this lane and the chat lane
-# as two arq Workers in ONE process, because the Coolify compose file cannot take a third
-# service that declares ``build:`` (Coolify base64s the Dockerfile into one SSH argv per
-# build service; a third one blew the argv limit and broke every deploy — paw-workspace
-# #193, reverted in #194). Running it standalone also works and needs no code change::
+# HOW IT RUNS. ``pocketpaw_ee.cloud.worker_supervisor`` starts this lane and the chat
+# lane as two arq Workers in ONE process, because the Coolify compose file cannot take
+# a third ``build:`` service (the base64'd Dockerfiles blew the SSH argv limit,
+# paw-workspace #193, reverted in #194). Standalone also works::
 #
 #     arq pocketpaw_ee.sites.build_worker.WorkerSettings
 #
-# WHY 4 AND NOT 10. A chat run spawns a Node subprocess per run on the default
-# ``claude_agent_sdk`` backend, so the chat lane's ceiling is bounded by container RAM. A
-# site build is not: the compile happens in a Daytona sandbox and what runs here is an
-# await on a remote exec. So these four slots cost the worker container almost nothing,
-# and the number is about how many sandboxes the account should be paying for at once
-# rather than about memory. Raise it with the Daytona quota, not with the memory limit.
-"""The site-build lane's arq WorkerSettings (backend-perf C1)."""
+# WHY 4 SLOTS. The compile happens in a Daytona sandbox; what runs here is an await on
+# a remote exec, so the slots cost this container almost nothing. Slots x replicas can
+# still ask for more memory than the Daytona org allows, so each build and verify also
+# takes a lease from ``sites.admission`` (budget ``PAW_SITES_DAYTONA_MEMORY_BUDGET_GIB``)
+# before it creates a sandbox; ``on_startup`` points that ledger at this worker's Redis
+# so all replicas share it. A slot waiting on a lease is cheap; raise the budget, not
+# the slots, when the Daytona plan grows.
+#
+# THERE IS EXACTLY ONE ``functions = [...]`` ASSIGNMENT IN THIS CLASS. A second one
+# silently wins over the first (``chat/runs/worker.py`` once registered neither ship
+# job that way). Adding a job means editing the existing list.
+"""The site lane's arq WorkerSettings (backend-perf C1): builds, previews, deletes,
+html verify, AI visibility site checks with their monthly sweep, and the build sandbox
+reaper cron."""
 
 from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
+from arq import func
+
+from pocketpaw_ee.cloud.ai_visibility.worker import site_check_fn, sweep_cron
 from pocketpaw_ee.cloud.chat.runs.worker import (
     arq_health_check_interval_seconds,
     arq_redis_settings,
@@ -45,7 +55,21 @@ from pocketpaw_ee.cloud.chat.runs.worker import (
     worker_shutdown,
     worker_startup,
 )
-from pocketpaw_ee.sites.build_job import SITE_BUILD_QUEUE_NAME, site_build_job_timeout_seconds
+from pocketpaw_ee.sites import admission
+from pocketpaw_ee.sites.build_job import (
+    HTML_VERIFY_ARQ_FUNCTION_NAME,
+    SITE_BUILD_QUEUE_NAME,
+    run_site_html_verify,
+    site_build_job_timeout_seconds,
+    site_preview_job_timeout_seconds,
+)
+from pocketpaw_ee.sites.capacity import CAPACITY_MAX_TRIES
+from pocketpaw_ee.sites.delete_job import (
+    SITE_DELETE_FUNCTION_NAME,
+    run_site_delete,
+    site_delete_job_timeout_seconds,
+)
+from pocketpaw_ee.sites.sandbox_reaper import reap_cron
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +110,46 @@ def _sites_max_jobs() -> int:
     return val
 
 
+# The DELETE job rides this same lane, wrapped like the build jobs and for the same
+# reasons: its OWN timeout (a cascade walks Cloudflare, D1 and R2 serially and must not be
+# clipped by a budget sized for a sandbox build), and ``max_tries=1``.
+#
+# ``max_tries=1`` is load-bearing here rather than conventional. ``run_cascade`` is
+# resumable from its ledger, but the resume belongs to a PERSON: a cascade that stopped
+# because Cloudflare was returning 500s would be re-entered by an automatic retry seconds
+# later, into the same outage, spending the one cheap resume on a failure that has not
+# cleared. The row settles at ``failed`` naming the step, and the owner pressing delete
+# again is what re-claims it — ``failed`` is deliberately not an in-flight status.
+_site_delete_fn = func(
+    run_site_delete,
+    name=SITE_DELETE_FUNCTION_NAME,
+    timeout=site_delete_job_timeout_seconds(),
+    max_tries=1,
+)
+
+
+# PP-2: the html browser check. Sized like the preview job (it is the preview job's
+# browser step without the build in front of it, so the preview budget is generous).
+_site_html_verify_fn = func(
+    run_site_html_verify,
+    name=HTML_VERIFY_ARQ_FUNCTION_NAME,
+    timeout=site_preview_job_timeout_seconds(),
+    max_tries=CAPACITY_MAX_TRIES,
+)
+
+
+async def _sites_startup(ctx: dict[str, Any]) -> None:
+    """The shared bootstrap, then share the sites memory budget through this worker's
+    Redis so every replica admits builds against one ledger (``sites.admission``)."""
+    await worker_startup(ctx)
+    admission.use_redis(ctx.get("redis"))
+
+
+async def _sites_shutdown(ctx: dict[str, Any]) -> None:
+    admission.use_redis(None)
+    await worker_shutdown(ctx)
+
+
 class WorkerSettings:
     """arq worker configuration for the site-build queue."""
 
@@ -94,9 +158,19 @@ class WorkerSettings:
     # carries its own timeout and ``max_tries=1``; re-wrapping them here would fork the
     # build timeout, and a build that arq cancels before its in-sandbox timeout fires is
     # recorded as lost infrastructure rather than as the slow-but-healthy build it was.
-    functions = [site_build_fn, site_preview_build_fn]
-    on_startup = worker_startup
-    on_shutdown = worker_shutdown
+    functions = [
+        site_build_fn,
+        site_preview_build_fn,
+        _site_delete_fn,
+        _site_html_verify_fn,
+        site_check_fn,
+    ]
+    # The AI visibility monthly sweep (a daily tick, opt-in through
+    # POCKETPAW_CLOUD_SCHEDULER_ENABLED; see ``cloud/ai_visibility/worker.py``), and the
+    # orphaned build-sandbox reaper (every 10 minutes; a no-op without Daytona).
+    cron_jobs = [sweep_cron, reap_cron]
+    on_startup = _sites_startup
+    on_shutdown = _sites_shutdown
     # No auto-retry, matching every other lane: a build is billed per attempt in a
     # third-party sandbox, and the retry decision belongs to ``build_state.settle``, which
     # records WHY it gave up, not to arq silently re-running a job whose row says failed.
@@ -105,6 +179,10 @@ class WorkerSettings:
     # because arq's ``worker.get_kwargs`` reads ``settings_cls.__dict__`` directly, which
     # bypasses the descriptor protocol and would hand a property object to the Worker.
     max_jobs = _sites_max_jobs()
+    # A superseded preview / html-verify job (a newer edit of the same pocket was
+    # queued) is aborted by ``build_job._supersede_previous_job``; arq only honours an
+    # abort on a worker that opts in.
+    allow_abort_jobs = True
     # Both wrapped functions carry their own per-function timeout, which is what actually
     # governs a build. This class-level value exists so the fallback is not arq's 300s
     # default, which would be under a third of a build's budget.

@@ -3,6 +3,11 @@
 # ``_operator_env_cleared`` fixture in this directory's conftest actually removes the
 # operator's ambient Cloudflare / Daytona environment, and that its list still covers
 # every ``PAW_CF_*`` variable the sites source reads.
+# Updated: 2026-09-24 (feat/sites-author-dependencies) — also pins the run-wide switch in
+# the ROOT conftest: no ``.env`` is read at all (dotenv disabled, Settings.env_file
+# dropped). The allowlist below only covers names someone thought of; a worktree under
+# ``pocketPaw/.worktrees/`` loaded the parent checkout's ``.env`` and leaked
+# ``POCKETPAW_SITES_BILLING_ENFORCED`` / ``PAW_SITES_GEN_CMD`` past it.
 #
 # WHY THIS FILE EXISTS. The guard it covers is invisible when it works: with no ``.env``
 # in the checkout there is nothing to delete, so a broken or deleted fixture leaves the
@@ -109,4 +114,28 @@ def test_cleared_list_covers_every_paw_cf_variable_in_the_sites_source() -> None
         f"these PAW_CF_* variables are read by the sites source but are not cleared "
         f"before tests: {sorted(missing)}. Add them to OPERATOR_ENV_VARS in "
         "tests/ee/sites/conftest.py."
+    )
+
+
+def test_the_run_reads_no_dotenv_file_at_all() -> None:
+    """The root conftest's run-wide switch, which the allowlist above cannot replace.
+
+    python-dotenv walks UP from the calling file, so a worktree nested in a checkout
+    with an operator ``.env`` read that file at import — and every variable in it that
+    is not on OPERATOR_ENV_VARS reached the tests (the custom-domain cap and the
+    concierge plan gate both went live via ``POCKETPAW_SITES_BILLING_ENFORCED``). CI has
+    no ``.env``, so only this assertion notices the switch going missing.
+    """
+    from dotenv.main import _load_dotenv_disabled
+
+    from pocketpaw.config import Settings
+
+    if os.environ.get("PYTHON_DOTENV_DISABLED", "1").casefold() in {"0", "false", "f", "no", "n"}:
+        pytest.skip("the developer opted back in with PYTHON_DOTENV_DISABLED=0")
+    assert _load_dotenv_disabled(), (
+        "PYTHON_DOTENV_DISABLED is not set in the test process — tests/conftest.py is "
+        "meant to set it before the first pocketpaw import."
+    )
+    assert Settings.model_config.get("env_file") is None, (
+        "Settings still reads the CWD's .env — tests/conftest.py is meant to drop it."
     )

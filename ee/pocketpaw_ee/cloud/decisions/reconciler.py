@@ -82,6 +82,8 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from pocketpaw_ee.cloud._core.periodic import sweep_tick
+
 logger = logging.getLogger(__name__)
 
 _TASK_KEY = "_decisions_reconciler_task"
@@ -403,7 +405,8 @@ class DecisionReconciler:
                 raise
 
             try:
-                await self.tick()
+                async with sweep_tick("decisions_reconciler", self._interval):
+                    await self.tick()
             except Exception:  # noqa: BLE001 — already logged in tick()
                 logger.exception("decisions.reconciler: tick raised")
 

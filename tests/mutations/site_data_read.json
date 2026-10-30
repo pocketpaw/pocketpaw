@@ -1,0 +1,93 @@
+[
+  {
+    "label": "legacy dynamic read stops quoting the table",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    ident = project_data.quote_ident(table)\n    sql = f\"SELECT * FROM {ident} LIMIT ?\"",
+    "replace": "    ident = table\n    sql = f\"SELECT * FROM {ident} LIMIT ?\"",
+    "tests": [
+      "tests/ee/sites/test_site_data_read.py::test_legacy_dynamic_read_quotes_the_table"
+    ]
+  },
+  {
+    "label": "search includes masked columns",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "if kinds[c.name] in (\"text\", \"longtext\") and c.name not in table.masked",
+    "replace": "if kinds[c.name] in (\"text\", \"longtext\")",
+    "tests": [
+      "tests/ee/sites/test_site_data_read.py::test_search_never_touches_masked_columns"
+    ]
+  },
+  {
+    "label": "masked columns become sortable and filterable",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "        if name in table.masked:\n            raise _bad(",
+    "replace": "        if False:\n            raise _bad(",
+    "tests": [
+      "tests/ee/sites/test_site_data_read.py::test_masked_column_is_not_filterable_or_sortable"
+    ]
+  },
+  {
+    "label": "a masked primary key becomes the row key",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "if len(pks) == 1 and pks[0].name not in masked:",
+    "replace": "if len(pks) == 1:",
+    "tests": [
+      "tests/ee/sites/test_site_data_read.py::test_a_masked_primary_key_never_becomes_the_row_key"
+    ]
+  },
+  {
+    "label": "an unknown project table reaches row SQL",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "if found is None and target.lane == \"project\":",
+    "replace": "if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_read.py::test_unknown_or_hidden_table_is_404_before_any_row_sql"
+    ]
+  },
+  {
+    "label": "search ignores the bound-parameter cap",
+    "file": "ee/pocketpaw_ee/sites/site_data/d1.py",
+    "find": "        if len(searchable) > room:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_read.py::test_bound_params_stay_within_100"
+    ]
+  },
+  {
+    "label": "another workspace's pocket resolves",
+    "file": "ee/pocketpaw_ee/sites/data_service.py",
+    "find": "if owner_ws and owner_ws != workspace_id:",
+    "replace": "if False:",
+    "tests": [
+      "tests/ee/sites/test_site_data_read.py::test_foreign_workspace_pocket_is_404"
+    ]
+  },
+  {
+    "label": "the budget never refuses",
+    "file": "ee/pocketpaw_ee/sites/site_data/budget.py",
+    "find": "    if wait > 0:\n        raise DataBusy(",
+    "replace": "    if False:\n        raise DataBusy(",
+    "tests": [
+      "tests/ee/sites/test_site_data_budget.py",
+      "tests/ee/sites/test_site_data_read.py::test_reads_spend_the_data_budget"
+    ]
+  },
+  {
+    "label": "a refused call charges the buckets anyway",
+    "file": "ee/pocketpaw_ee/sites/site_data/budget.py",
+    "find": "        if slot is not None and slot[0] >= limit:\n            return max(slot[1] - now, 0.001)",
+    "replace": "        if slot is not None and slot[0] >= limit:\n            for k, _l, w in buckets:\n                _local.setdefault(k, [0, now + w])[0] += 1\n            return max(slot[1] - now, 0.001)",
+    "tests": [
+      "tests/ee/sites/test_site_data_budget.py::test_a_refused_call_spends_nothing"
+    ]
+  },
+  {
+    "label": "the data client ignores the data token",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    api_token = os.environ.get(\"PAW_CF_DATA_API_TOKEN\")\n",
+    "replace": "    api_token = None\n",
+    "tests": [
+      "tests/ee/sites/test_site_data_read.py::test_data_client_prefers_the_data_token"
+    ]
+  }
+]

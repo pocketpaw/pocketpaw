@@ -3,6 +3,16 @@
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
 
+Updated: 2026-09-27 (fix/concierge-web-tool-deny) — adds
+``_accepts_exclusive_tools_kwarg``, the signature guard for the deny-by-default
+``exclusive_tools`` flag the public concierge sends.
+
+Updated: 2026-09-15 (feat/chat-image-wiring) — adds
+``_accepts_image_attachments_kwarg``, the fourth signature guard in this file and
+the third to be written because withholding-when-empty was not enough on its own.
+It gates ``image_attachments`` (a user's attached files) the way
+``_accepts_images_kwarg`` gates ``images`` (a surface's snapshot).
+
 Updated: 2026-08-03 (PA-7b, feat/prompt-assembler-channel) — the two signature
 guards that decide who RECEIVES ``system_prompt_digest`` moved here from
 ``AgentPool``, plus a ``forward_prompt_digest`` helper for callers holding a
@@ -148,6 +158,111 @@ def _accepts_prompt_digest_kwarg(func: Any) -> bool:
         return False
 
 
+def _accepts_images_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``images`` in its signature?
+
+    The same question ``_accepts_prompt_digest_kwarg`` asks, for the per-turn
+    picture attachments (2026-09-09, feat/other-hand-vision). It has to be
+    asked, not assumed: seven of the eight backends take a narrower signature
+    with no ``**kwargs``, and the surface that sends images sends them on EVERY
+    turn — so an unconditional forward would not be a rare edge, it would be
+    every Otherhand turn on a self-hosted install dying in a TypeError.
+    """
+    try:
+        return "images" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+def _accepts_image_attachments_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``image_attachments`` in its signature?
+
+    The same question ``_accepts_images_kwarg`` asks, for the files the USER
+    attached to a turn (2026-09-12, fix/chat-image-attachments). Two kwargs
+    carry pictures for two different reasons — ``images`` is a snapshot the
+    surface chose to show, ``image_attachments`` is what the user deliberately
+    attached — and only the two SDK backends translate the latter into a shape
+    a model can see.
+
+    Asked rather than assumed, for the reason the three guards above it were
+    each written the hard way: seven of the backends take a narrower signature
+    with no ``**kwargs``. An attachment is rarer than an Otherhand snapshot, but
+    rarity is not a guard — the first user to attach a photo on an install
+    running one of those backends would end their turn in ``TypeError: run() got
+    an unexpected keyword argument 'image_attachments'``. Withholding narrows
+    WHEN the kwarg is forwarded; only the signature narrows WHERE.
+    """
+    try:
+        return "image_attachments" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+def _accepts_tools_enabled_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``tools_enabled`` in its signature?
+
+    The same question ``_accepts_images_kwarg`` asks, for the per-send tool
+    switch (2026-09-11). Withhold-when-empty is NOT enough on its own, and this
+    is the second kwarg to learn that the hard way: only an explicit ``False``
+    rides, but the moment a user turns the switch OFF that False goes to
+    whatever backend the agent is configured for. A logged-in workspace runs on
+    ``claude_agent_sdk``, whose signature did not declare it, so every
+    tools-off turn died in ``TypeError: run() got an unexpected keyword
+    argument 'tools_enabled'``.
+
+    Withholding narrows WHEN the kwarg is forwarded; it never narrows WHERE.
+    Only the signature can do that.
+    """
+    try:
+        return "tools_enabled" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+def _accepts_exclusive_tools_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``exclusive_tools`` in its signature?
+
+    ``exclusive_tools`` (2026-09-27) asks a backend to offer ONLY the MCP tools
+    in ``allow_mcp_tool_ids``, dropping the PocketPaw builtins it bundles. Only
+    ``pydantic_ai`` bundles any outside MCP, so only it declares the parameter.
+    ``claude_sdk`` is covered by ``exclusive_mcp_tools``, which the same run
+    carries and which it DOES declare; a backend that declares neither fails on
+    that one, so a deny-by-default run never silently proceeds unrestricted.
+    """
+    try:
+        return "exclusive_tools" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
+def _accepts_run_limits_kwarg(func: Any) -> bool:
+    """Does ``func`` name both ``max_requests`` and ``total_tokens_limit``?
+
+    The per-run usage limits a platform-funded free run carries. Only
+    ``pydantic_ai`` declares them. The pool refuses a limited run on a backend
+    that does not, because a limit dropped on the floor is no limit.
+    """
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+    return "max_requests" in params and "total_tokens_limit" in params
+
+
+def _accepts_turn_context_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``turn_context`` in its signature?
+
+    Asked of a bound ``run`` by the pool. A backend that declares it takes the
+    per-turn prompt layers (KB, scope, uploads, recall) separately from the
+    system prompt, because it applies the system prompt only when a client
+    connects (the Claude SDK). Every other backend keeps the one assembled prompt.
+    """
+    try:
+        return "turn_context" in inspect.signature(func).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return False
+
+
 def forward_prompt_digest(backend: Any, run_kwargs: dict[str, Any], digest: str) -> dict[str, Any]:
     """Return ``run_kwargs`` carrying ``digest`` iff ``backend`` declares it.
 
@@ -167,6 +282,27 @@ def forward_prompt_digest(backend: Any, run_kwargs: dict[str, Any], digest: str)
     if not _accepts_prompt_digest(type(backend)):
         return run_kwargs
     return {**run_kwargs, "system_prompt_digest": digest}
+
+
+def forward_turn_context(
+    backend: Any, run_kwargs: dict[str, Any], turn_split: tuple[str, str] | None
+) -> dict[str, Any]:
+    """Route the per-turn prompt layers to ``turn_context`` iff ``backend`` takes it.
+
+    ``turn_split`` is ``(stable system prompt, per-turn layers)``. A backend whose
+    ``run`` declares ``turn_context`` (the Claude SDK, which applies the system
+    prompt only at connect) gets the stable text as ``system_prompt`` and the
+    per-turn text as ``turn_context``; any other backend keeps the full
+    ``system_prompt`` already in ``run_kwargs``. Asked per backend because the
+    router's fallback list and the failover chain mix both kinds.
+    """
+    if turn_split is None or not _accepts_turn_context_kwarg(getattr(backend, "run", None)):
+        return run_kwargs
+    stable, turn_context = turn_split
+    out = {**run_kwargs, "system_prompt": stable}
+    if turn_context:
+        out["turn_context"] = turn_context
+    return out
 
 
 class Capability(Flag):
@@ -266,6 +402,40 @@ class LeasedClient:
     busy: bool = False
 
 
+@dataclass(frozen=True)
+class ImageAttachment:
+    """One image the user attached to a turn, as bytes the model can see.
+
+    WHY THIS EXISTS. ``run``'s first parameter is ``message: str``, and that one
+    annotation is why an attached image never reached any model. Both SDKs under
+    us take images natively — the Claude Agent SDK as an ``{"type": "image",
+    "source": {"type": "base64", ...}}`` content block in streaming input mode,
+    pydantic-ai as a ``BinaryContent`` entry in a list prompt — but a turn was
+    flattened to a string before it got to either, so the cloud chat path filled
+    the gap by running OCR over the pixels and inlining whatever text came back.
+    A photo of a person or a place OCRs to nothing, which is how "the agent
+    cannot see my image" happened while every test passed.
+
+    Deliberately NOT either SDK's shape. This is the neutral middle the protocol
+    can carry; each backend translates it into its own native form, so a backend
+    that cannot take images simply never declares the parameter and is unaffected
+    (the withhold-when-empty contract below).
+
+    ``data`` is raw bytes, not base64 — the encoding is a property of the wire
+    format each backend targets, and doing it here would mean the pydantic-ai
+    path decodes what the Claude path encoded.
+
+    ``media_type`` must be one both the API and the backend accept: png, jpeg,
+    gif or webp. HEIC is what an iPhone shoots by default and is NOT on that
+    list, so the resolver transcodes before building one of these rather than
+    handing a backend bytes it will reject.
+    """
+
+    data: bytes
+    media_type: str
+    filename: str = ""
+
+
 @runtime_checkable
 class AgentBackend(Protocol):
     """Protocol that all agent backends must implement."""
@@ -291,6 +461,15 @@ class AgentBackend(Protocol):
         # accept it (the Claude SDK backend) let it win over their own model
         # selection; any other backend that grows the kwarg may simply ignore it.
         model_override: str | None = None,
+        # Images the user attached to this turn, passed to the model AS IMAGES.
+        # Rides the withhold-when-empty contract: ``AgentPool.run`` forwards it
+        # ONLY when non-empty, so a backend that cannot take images keeps the
+        # narrower signature and never receives it. Declaring the parameter is
+        # how a backend opts in — the same shape ``model_override`` uses, and
+        # for the same reason: there is no central list of which backends
+        # support what, so the signature IS the capability declaration and a
+        # new backend cannot silently drop images it never mentioned.
+        image_attachments: tuple[ImageAttachment, ...] = (),
         # PA-1 — the assembled system prompt's stable digest. The ONE kwarg here
         # that does not ride the withhold-when-empty contract: it is set on every
         # run, so ``AgentPool.run`` gates it on the backend's SIGNATURE instead

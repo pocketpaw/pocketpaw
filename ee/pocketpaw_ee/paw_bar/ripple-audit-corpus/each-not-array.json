@@ -1,0 +1,36 @@
+{
+  "about": "An each over a string, so it draws no rows. Core only.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "each",
+          "items": "{state.rows}",
+          "children": [
+            {
+              "type": "text",
+              "props": {
+                "text": "{item}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "state": {
+      "rows": "milk, eggs"
+    }
+  },
+  "expect": {
+    "core": [
+      {
+        "code": "eachNotArray",
+        "path": "/ui/children/0/items",
+        "message": "`state.rows` is a string; `each` needs an array"
+      }
+    ],
+    "python": []
+  }
+}

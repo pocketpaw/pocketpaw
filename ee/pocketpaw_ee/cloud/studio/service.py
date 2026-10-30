@@ -37,6 +37,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -47,12 +48,14 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw.config import get_config_dir
 from pocketpaw_ee.catalog import config as catalog_config
 from pocketpaw_ee.catalog import service as catalog_service
 from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
 from pocketpaw_ee.cloud.media import storage as media_storage
+from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
 
 from . import (
     camera_catalog,
@@ -160,15 +163,6 @@ _SIZE_MAP: dict[str, str] = {
 # gateway serves return one image per request; keeping count=1 is reliable and
 # matches how the agent-side media MCP already calls the endpoint).
 _MAX_GENERATED_ASSETS = 4
-
-
-def _history_path() -> Path:
-    """Get (and create) the generation-history JSONL path. History is persisted
-    per-deployment under ``~/.pocketpaw/studio/generations.jsonl`` so the /studio
-    gallery survives process restarts."""
-    d = get_config_dir() / "studio"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "generations.jsonl"
 
 
 # ── Model catalog mapping ────────────────────────────────────────────────────
@@ -416,71 +410,218 @@ def list_styles() -> list[schemas.StudioStyle]:
     return quick + curated
 
 
-# ── Generation history (JSONL persistence) ──────────────────────────────────
+# ── Generation history (Mongo, workspace-scoped) ────────────────────────────
+#
+# House rule (ee/pocketpaw_ee/cloud CLAUDE.md #1/#2): the service IS the
+# repository — there is no repositories.py, and ``models.studio_generation`` is
+# imported HERE and nowhere else in this package.
+#
+# These replace the ``~/.pocketpaw/studio/generations.jsonl`` helpers above.
+#
+# ``limit=None`` MEANS NO CAP, and that is the default ON PURPOSE. The JSONL's
+# problem was not the absence of a limit — it was decoding EVERY TENANT's entire
+# history out of one file on every request. A Mongo query filtered on an indexed
+# ``workspace`` already fixes that. Capping on top of it would silently drop the
+# older half of a real gallery, because the /studio page fetches this endpoint
+# once with no cursor and renders whatever comes back.
+DEFAULT_GENERATION_LIMIT = 50
 
 
-def _load_history() -> list[dict[str, Any]]:
-    """Read the persisted generation records (best-effort — a corrupt/missing
-    file degrades to an empty history, never a crash)."""
-    path = _history_path()
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
+def _to_schema(doc: StudioGeneration) -> schemas.Generation:
+    """Document → wire record. The wire shape is what the frontend already reads,
+    so it is deliberately unchanged by the store move."""
+    return schemas.Generation(
+        id=doc.generation_id,
+        prompt=doc.prompt,
+        status=doc.status,
+        kind=doc.kind,
+        model=doc.model,
+        params=schemas.GenerationParams.model_validate(doc.params),
+        assets=[schemas.GeneratedAsset.model_validate(a) for a in doc.assets],
+        createdAt=doc.created_at_ms,
+        error=doc.error,
+        sourceGenerationId=doc.sourceGenerationId,
+    )
+
+
+async def record_generation(
+    workspace_id: str,
+    generation: schemas.Generation,
+    *,
+    source: str = "studio",
+    pocket_id: str | None = None,
+) -> None:
+    """Persist a generation, or replace the record already under its id.
+
+    Upserting on (workspace, generation_id) rather than appending is what stops a
+    retry — or the ordinary queued→succeeded rewrite — from fanning out into
+    duplicate gallery tiles, which an append-only file could not prevent.
+    """
+    existing = await StudioGeneration.find_one(
+        StudioGeneration.workspace == workspace_id,
+        StudioGeneration.generation_id == generation.id,
+    )
+
+    fields = {
+        "prompt": generation.prompt,
+        "status": generation.status,
+        "kind": generation.kind,
+        "model": generation.model,
+        "params": generation.params.model_dump(),
+        "assets": [a.model_dump() for a in generation.assets],
+        "created_at_ms": generation.createdAt,
+        "error": generation.error,
+        "sourceGenerationId": generation.sourceGenerationId,
+        "source": source,
+        "pocket_id": pocket_id,
+    }
+
+    if existing is not None:
+        for key, value in fields.items():
+            setattr(existing, key, value)
+        await existing.save()
+        return
+
     try:
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except ValueError:
-                logger.warning("studio: skipping corrupt history line")
-    except OSError:
-        logger.warning("studio: could not read history file", exc_info=True)
-    return records
+        await StudioGeneration(
+            workspace=workspace_id,
+            generation_id=generation.id,
+            **fields,
+        ).insert()
+    except DuplicateKeyError:
+        # Lost the race: another process inserted this id between our find and
+        # our insert. The unique index is what turned that into a catchable error
+        # instead of a second tile, and the caller's intent was 'this generation
+        # should be recorded in this state' either way — so apply it to the row
+        # that won rather than failing a write the user already paid for.
+        winner = await StudioGeneration.find_one(
+            StudioGeneration.workspace == workspace_id,
+            StudioGeneration.generation_id == generation.id,
+        )
+        if winner is None:  # pragma: no cover — only if the row vanished again
+            raise
+        for key, value in fields.items():
+            setattr(winner, key, value)
+        await winner.save()
 
 
-def _append_history(record: dict[str, Any]) -> None:
-    """Append one record to the JSONL history (best-effort)."""
+async def update_generation(
+    workspace_id: str,
+    generation_id: str,
+    *,
+    status: str,
+    assets: list[schemas.GeneratedAsset] | None = None,
+    error: str | None = None,
+) -> bool:
+    """Move a generation along its lifecycle. Returns False when the workspace
+    does not own it — a miss, never a cross-tenant write."""
+    doc = await StudioGeneration.find_one(
+        StudioGeneration.workspace == workspace_id,
+        StudioGeneration.generation_id == generation_id,
+    )
+    if doc is None:
+        return False
+
+    doc.status = status
+    if assets is not None:
+        doc.assets = [a.model_dump() for a in assets]
+    if error is not None:
+        doc.error = error
+    await doc.save()
+    return True
+
+
+async def record_generation_best_effort(
+    workspace_id: str,
+    generation: schemas.Generation,
+    *,
+    source: str = "studio",
+    pocket_id: str | None = None,
+) -> None:
+    """Record a generation, but never fail the caller over it.
+
+    The JSONL appender swallowed ``OSError``, so a history failure could not lose
+    a generation the user had already paid for. Swapping it for a bare Mongo write
+    quietly removed that property: a write error would now raise AFTER the image
+    was generated, billed and stored, 500 the request, and orphan the asset with
+    no gallery row. The generation paths want the old semantics back.
+
+    Use this from the generation paths. Use ``record_generation`` where the caller
+    genuinely needs to know the write landed.
+    """
     try:
-        with _history_path().open("a") as fh:
-            fh.write(json.dumps(record) + "\n")
-    except OSError:
-        logger.warning("studio: could not append history", exc_info=True)
+        await record_generation(workspace_id, generation, source=source, pocket_id=pocket_id)
+    except Exception:  # noqa: BLE001 — a history miss must not cost a paid asset
+        logger.warning(
+            "studio: could not record generation %s for workspace %s",
+            generation.id,
+            workspace_id,
+            exc_info=True,
+        )
 
 
-def list_generations(workspace_id: str) -> list[schemas.Generation]:
-    """Return the workspace's generation history, newest first. Records are
-    tagged with the owning workspace so multi-tenant deployments never leak."""
-    records = _load_history()
-    mine = [
-        r for r in records if r.get("_workspace") == workspace_id or r.get("_workspace") is None
-    ]
-    mine.sort(key=lambda r: r.get("createdAt", 0), reverse=True)
-    return [schemas.Generation.model_validate(r) for r in mine]
+async def list_generations(
+    workspace_id: str,
+    *,
+    limit: int | None = None,
+    source: str | None = None,
+    pocket_id: str | None = None,
+) -> list[schemas.Generation]:
+    """The workspace's history, newest first.
+
+    ``limit=None`` returns everything the workspace has. Pass a number only when
+    the caller can actually page — the /studio gallery cannot, so a default cap
+    there would quietly hide the older half of someone's work.
+
+    ``source`` / ``pocket_id`` are what let the gallery separate a person's own
+    generations from the ones a site agent made while building a page.
+    """
+    query = [StudioGeneration.workspace == workspace_id]
+    if source is not None:
+        query.append(StudioGeneration.source == source)
+    if pocket_id is not None:
+        query.append(StudioGeneration.pocket_id == pocket_id)
+
+    cursor = StudioGeneration.find(*query).sort("-created_at_ms")
+    if limit is not None:
+        cursor = cursor.limit(limit)
+    docs = await cursor.to_list()
+    return [_to_schema(d) for d in docs]
 
 
-def get_generation(gen_id: str, workspace_id: str) -> schemas.Generation | None:
-    """Return one generation by id (scoped to the workspace), or None."""
-    for r in _load_history():
-        if r.get("id") != gen_id:
-            continue
-        if r.get("_workspace") not in (None, workspace_id):
-            continue
-        return schemas.Generation.model_validate(r)
-    return None
+async def get_generation(workspace_id: str, generation_id: str) -> schemas.Generation | None:
+    """One generation, or None. The id is guessable; the workspace is the boundary."""
+    doc = await StudioGeneration.find_one(
+        StudioGeneration.workspace == workspace_id,
+        StudioGeneration.generation_id == generation_id,
+    )
+    return _to_schema(doc) if doc is not None else None
 
 
-def tracked_generation_filenames() -> set[str]:
+async def tracked_generation_filenames() -> set[str]:
     """The set of media filenames owned by direct /studio generations. The /media
     list router uses this to EXCLUDE generation outputs so the gallery doesn't
     show a direct generation twice (once via /studio/generations and once via the
     /media file list). Agent-side generated files (media MCP) are NOT tracked here
-    and therefore still surface through /media."""
+    and therefore still surface through /media.
+
+    # global-read: deliberately spans every workspace. This set only EXCLUDES
+    # names from a listing that ``media.storage.visible_to`` has already scoped
+    # to the caller's owner token, so reading it globally cannot expose another
+    # tenant's file; it just keeps a generation from showing as two tiles.
+    """
     names: set[str] = set()
-    for r in _load_history():
-        for asset in r.get("assets") or []:
-            url = asset.get("url") or ""
+    # PROJECTION, not find_all(): this runs on every GET /api/v1/media, and the
+    # only field it reads is assets[].url. Hydrating whole documents here would
+    # reproduce failure #1 of the JSONL this store replaced — decoding every
+    # tenant's entire history on every request — against Mongo instead of a file.
+    cursor = StudioGeneration.get_pymongo_collection().find(
+        {"assets.url": {"$regex": "^/api/v1/media/"}},
+        {"assets.url": 1, "_id": 0},
+    )
+    async for row in cursor:
+        for asset in row.get("assets") or []:
+            url = (asset or {}).get("url") or ""
             if url.startswith("/api/v1/media/"):
                 names.add(url.rsplit("/", 1)[-1])
     return names
@@ -502,10 +643,9 @@ def _projects_path() -> Path:
     return d / "flow-projects.jsonl"
 
 
-def _load_projects() -> list[dict[str, Any]]:
-    """Read the persisted flow-project records (best-effort — a corrupt/missing
-    file degrades to an empty list, never a crash)."""
-    path = _projects_path()
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read a JSONL record file (best-effort — a corrupt/missing file degrades to
+    an empty list, never a crash)."""
     if not path.exists():
         return []
     records: list[dict[str, Any]] = []
@@ -517,20 +657,28 @@ def _load_projects() -> list[dict[str, Any]]:
             try:
                 records.append(json.loads(line))
             except ValueError:
-                logger.warning("studio: skipping corrupt flow-project line")
+                logger.warning("studio: skipping corrupt line in %s", path.name)
     except OSError:
-        logger.warning("studio: could not read flow projects", exc_info=True)
+        logger.warning("studio: could not read %s", path.name, exc_info=True)
     return records
 
 
-def _rewrite_projects(records: list[dict[str, Any]]) -> None:
-    """Full rewrite of the flow-projects JSONL (best-effort)."""
+def _rewrite_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    """Full rewrite of a JSONL record file (best-effort)."""
     try:
-        with _projects_path().open("w") as fh:
+        with path.open("w") as fh:
             for record in records:
                 fh.write(json.dumps(record) + "\n")
     except OSError:
-        logger.warning("studio: could not rewrite flow projects", exc_info=True)
+        logger.warning("studio: could not rewrite %s", path.name, exc_info=True)
+
+
+def _load_projects() -> list[dict[str, Any]]:
+    return _load_jsonl(_projects_path())
+
+
+def _rewrite_projects(records: list[dict[str, Any]]) -> None:
+    _rewrite_jsonl(_projects_path(), records)
 
 
 def list_flow_projects(workspace_id: str) -> list[schemas.FlowProject]:
@@ -597,6 +745,93 @@ def delete_flow_project(project_id: str, workspace_id: str) -> bool:
     if len(remaining) == len(records):
         return False
     _rewrite_projects(remaining)
+    return True
+
+
+# ── Editor timelines (JSONL persistence, workspace-scoped) ──────────────────
+# Same upsert-in-place shape as flow projects, with two deliberate differences:
+# the stored ``doc`` is the client's TimelineDoc kept OPAQUE (the backend is a
+# sync target, not a second renderer — the doc's schema evolves on the client
+# alone), and ``updatedAt`` is the CLIENT's edit clock rather than server-now,
+# because cross-device ordering and the staleness guard must read one clock.
+
+
+class TimelineConflict(Exception):
+    """A save arrived carrying an older edit clock than the stored record."""
+
+    def __init__(self, stored_updated_at: int) -> None:
+        super().__init__("timeline is stale")
+        self.stored_updated_at = stored_updated_at
+
+
+def _timelines_path() -> Path:
+    d = get_config_dir() / "studio"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "timelines.jsonl"
+
+
+def _load_timelines() -> list[dict[str, Any]]:
+    return _load_jsonl(_timelines_path())
+
+
+def list_timeline_projects(workspace_id: str) -> list[schemas.TimelineProject]:
+    mine = [r for r in _load_timelines() if r.get("_workspace") == workspace_id]
+    mine.sort(key=lambda r: r.get("updatedAt", 0), reverse=True)
+    return [schemas.TimelineProject.model_validate(r) for r in mine]
+
+
+def get_timeline_project(project_id: str, workspace_id: str) -> schemas.TimelineProject | None:
+    for r in _load_timelines():
+        if r.get("id") == project_id and r.get("_workspace") == workspace_id:
+            return schemas.TimelineProject.model_validate(r)
+    return None
+
+
+def save_timeline_project(
+    project_id: str,
+    workspace_id: str,
+    *,
+    name: str | None,
+    doc: dict[str, Any],
+    updated_at: int,
+) -> schemas.TimelineProject:
+    records = _load_timelines()
+    now = time_now_ms()
+    prior = next(
+        (r for r in records if r.get("id") == project_id and r.get("_workspace") == workspace_id),
+        None,
+    )
+    stored_clock = int((prior or {}).get("updatedAt", 0))
+    if prior is not None and updated_at and updated_at < stored_clock:
+        raise TimelineConflict(stored_clock)
+    record = {
+        "id": project_id,
+        "name": (name or (prior or {}).get("name") or "Timeline").strip() or "Timeline",
+        "createdAt": (prior or {}).get("createdAt", now),
+        "updatedAt": updated_at or now,
+        "doc": doc,
+        "_workspace": workspace_id,
+    }
+    remaining = [
+        r
+        for r in records
+        if not (r.get("id") == project_id and r.get("_workspace") == workspace_id)
+    ]
+    remaining.append(record)
+    _rewrite_jsonl(_timelines_path(), remaining)
+    return schemas.TimelineProject.model_validate(record)
+
+
+def delete_timeline_project(project_id: str, workspace_id: str) -> bool:
+    records = _load_timelines()
+    remaining = [
+        r
+        for r in records
+        if not (r.get("id") == project_id and r.get("_workspace") == workspace_id)
+    ]
+    if len(remaining) == len(records):
+        return False
+    _rewrite_jsonl(_timelines_path(), remaining)
     return True
 
 
@@ -736,12 +971,15 @@ async def _proxy_generate_image(
 
 
 async def _save_image_bytes(
-    image_bytes: bytes, *, mime: str = "image/png", ext: str = "png"
+    image_bytes: bytes, *, workspace_id: str, mime: str = "image/png", ext: str = "png"
 ) -> str:
-    """Persist one generated image through the media storage adapter and return
+    """Persist one generated asset through the media storage adapter and return
     its backend-relative URL (the /media router serves it). Shared with the
-    agent-side media MCP so every generated asset lands on the same storage."""
-    return await media_storage.save_generated(image_bytes, mime=mime, ext=ext)
+    agent-side media MCP so every generated asset lands on the same storage, and
+    stamped with ``workspace_id`` so the /media listing can scope it."""
+    return await media_storage.save_generated(
+        image_bytes, mime=mime, ext=ext, workspace_id=workspace_id
+    )
 
 
 def _find_style(style_id: str | None) -> dict[str, Any] | None:
@@ -975,7 +1213,7 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         assets.append(
             {
                 "id": _seq_id("asset"),
-                "url": await _save_image_bytes(image_bytes),
+                "url": await _save_image_bytes(image_bytes, workspace_id=workspace_id),
                 "mime": "image/png",
             }
         )
@@ -1003,7 +1241,7 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         status="succeeded",
     )
     # Persist with the owning workspace tag (dropped by the wire model on read).
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1036,7 +1274,9 @@ async def _generate_curated_image(
 
     assets: list[dict[str, Any]] = []
     for data, mime in results:
-        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        url = await _save_image_bytes(
+            data, mime=mime, ext=fal_edit.mime_to_ext(mime), workspace_id=workspace_id
+        )
         assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
 
     params: dict[str, Any] = {
@@ -1061,7 +1301,7 @@ async def _generate_curated_image(
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1103,7 +1343,9 @@ async def _generate_image_edit(
 
     assets: list[dict[str, Any]] = []
     for data, mime in results:
-        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        url = await _save_image_bytes(
+            data, mime=mime, ext=fal_edit.mime_to_ext(mime), workspace_id=workspace_id
+        )
         assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
 
     params: dict[str, Any] = {
@@ -1127,7 +1369,7 @@ async def _generate_image_edit(
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1173,7 +1415,7 @@ async def generate_music(req: schemas.MusicRequest, *, workspace_id: str) -> sch
 
     mime = audio_mime or "audio/mpeg"
     ext = _MUSIC_EXT_BY_MIME.get(mime, "mp3")
-    url = await _save_image_bytes(audio_bytes, mime=mime, ext=ext)
+    url = await _save_image_bytes(audio_bytes, mime=mime, ext=ext, workspace_id=workspace_id)
     assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": url, "mime": mime}]
 
     model = (req.model or "").strip() or fal_music.MUSIC_MODELS[fal_music.DEFAULT_MUSIC_MODEL]["id"]
@@ -1193,7 +1435,7 @@ async def generate_music(req: schemas.MusicRequest, *, workspace_id: str) -> sch
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1298,12 +1540,17 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
         raise StudioUpstreamError("fal video generation returned no data")
 
     mime = video_mime or "video/mp4"
-    video_url = await _save_image_bytes(video_bytes, mime=mime, ext=_video_ext(mime))
+    video_url = await _save_image_bytes(
+        video_bytes, mime=mime, ext=_video_ext(mime), workspace_id=workspace_id
+    )
     assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": video_url, "mime": mime}]
     if poster_bytes:
         poster_mime_val = poster_mime or "image/jpeg"
         poster_url = await _save_image_bytes(
-            poster_bytes, mime=poster_mime_val, ext=_video_poster_ext(poster_mime_val)
+            poster_bytes,
+            mime=poster_mime_val,
+            ext=_video_poster_ext(poster_mime_val),
+            workspace_id=workspace_id,
         )
         assets[0]["posterUrl"] = poster_url
 
@@ -1330,7 +1577,7 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1587,7 +1834,9 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
 
     assets: list[dict[str, Any]] = []
     for data, mime in results:
-        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        url = await _save_image_bytes(
+            data, mime=mime, ext=fal_edit.mime_to_ext(mime), workspace_id=workspace_id
+        )
         assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
 
     model = model_id or fal_edit.DEFAULT_EDIT_MODELS[op]
@@ -1606,7 +1855,7 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1675,12 +1924,17 @@ async def generate_video_elements(
         raise StudioUpstreamError("fal elements returned no video data")
 
     mime = video_mime or "video/mp4"
-    video_url_out = await _save_image_bytes(video_bytes, mime=mime, ext=_video_ext(mime))
+    video_url_out = await _save_image_bytes(
+        video_bytes, mime=mime, ext=_video_ext(mime), workspace_id=workspace_id
+    )
     assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": video_url_out, "mime": mime}]
     if poster_bytes:
         poster_mime_val = poster_mime or "image/jpeg"
         poster_url_out = await _save_image_bytes(
-            poster_bytes, mime=poster_mime_val, ext=_video_poster_ext(poster_mime_val)
+            poster_bytes,
+            mime=poster_mime_val,
+            ext=_video_poster_ext(poster_mime_val),
+            workspace_id=workspace_id,
         )
         assets[0]["posterUrl"] = poster_url_out
 
@@ -1701,7 +1955,7 @@ async def generate_video_elements(
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 
@@ -1735,7 +1989,8 @@ async def generate_video_motion(
         raise ValueError("a motion reference video is required for motion control")
 
     image_data_url, image_mime = await _resolve_source_data_url(image_url)
-    image_data_url, _ = _fit_character_image(image_data_url, image_mime)
+    # Pillow decode + resize + JPEG encode is CPU work: keep it off the loop.
+    image_data_url, _ = await asyncio.to_thread(_fit_character_image, image_data_url, image_mime)
 
     # The reference motion video is typically a PUBLIC URL (the hardcoded preset).
     # fal fetches public URLs directly (and re-encoding a multi-MB clip into a
@@ -1764,12 +2019,17 @@ async def generate_video_motion(
         raise StudioUpstreamError("fal motion-control returned no video data")
 
     mime = video_mime or "video/mp4"
-    video_url_out = await _save_image_bytes(video_bytes, mime=mime, ext=_video_ext(mime))
+    video_url_out = await _save_image_bytes(
+        video_bytes, mime=mime, ext=_video_ext(mime), workspace_id=workspace_id
+    )
     assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": video_url_out, "mime": mime}]
     if poster_bytes:
         poster_mime_val = poster_mime or "image/jpeg"
         poster_url_out = await _save_image_bytes(
-            poster_bytes, mime=poster_mime_val, ext=_video_poster_ext(poster_mime_val)
+            poster_bytes,
+            mime=poster_mime_val,
+            ext=_video_poster_ext(poster_mime_val),
+            workspace_id=workspace_id,
         )
         assets[0]["posterUrl"] = poster_url_out
 
@@ -1789,7 +2049,7 @@ async def generate_video_motion(
         assets=assets,
         status="succeeded",
     )
-    _append_history({**record.model_dump(), "_workspace": workspace_id})
+    await record_generation_best_effort(workspace_id, record)
     return record
 
 

@@ -1,9 +1,9 @@
 # ee/pocketpaw_ee/cloud/worker_supervisor.py — runs every arq lane in ONE process.
 #
-# Created 2026-09-04 (fix/queue-lanes, backend-perf C1). Splitting site builds onto their
-# own queue is only half the fix; a queue with no consumer is worse than a shared one,
-# because the job waits forever and nothing says so. This module is the consumer side:
-# it starts the chat lane and the site-build lane as two arq Workers on one event loop.
+# A queue with no consumer is worse than a shared one, because the job waits forever and
+# nothing says so. This module is the consumer side: it starts the chat lane, the
+# site-build lane and, when POCKETPAW_GROWTH_WORKER_ENABLED is on, the growth lane, as
+# arq Workers on one event loop.
 #
 # WHY ONE PROCESS AND NOT TWO CONTAINERS. Coolify ships the Dockerfile to the deploy host
 # by base64-encoding it into a single SSH command line, ONCE PER COMPOSE SERVICE THAT
@@ -12,13 +12,26 @@
 # deploy with ``posix_spawn() failed: Argument list too long``, raised by Coolify's PHP
 # before Docker ran at all, naming neither the service nor compose (paw-workspace #193,
 # reverted in #194). So a new lane cannot be a new service, and this is the supported
-# alternative: one container, one command, two lanes with independent ceilings.
+# alternative: one container, one command, lanes with independent ceilings.
 #
 # WHY NOT ``sh -c 'arq A & exec arq B'``. Backgrounding the first lane makes its death
 # invisible: the container stays up and healthy while site builds silently stop being
 # consumed, which is the same class of failure the split was meant to remove. This
 # supervisor treats ANY lane stopping as fatal to the process, so the container exits and
 # the restart policy brings both lanes back together.
+#
+# PAW-LENS. ``_monitored`` wraps every lane's job and cron functions (names unchanged,
+# so enqueuers still match) in ``automation_run("job", <name>)``: one check-in pair and
+# ``paw.automation.*`` span attributes per job. Interactive chat runs are excluded — they are
+# not automations, and ``execute_run`` stamps their workspace itself.
+#
+# DRAIN ON SIGTERM. A stop signal does not cancel running jobs. Every lane first stops
+# claiming new ones (arq's ``allow_pick_jobs``) and keeps its poll loop alive, so the
+# health key stays fresh, while in-flight jobs finish, for up to
+# ``POCKETPAW_WORKER_DRAIN_SECONDS`` (default 300; 0 = cancel at once). Whatever is still
+# running then is cancelled, after ``_core.shutdown.mark_stopping()`` so a cancelled chat
+# run knows the worker is going away and requeues itself for the next one. The container's
+# stop grace period must exceed the drain window, or Docker SIGKILLs mid-drain.
 #
 # EXIT CODES. 0 only when a signal asked us to stop. Non-zero when a lane ended on its
 # own, whether it raised or returned — an arq Worker's ``async_run`` is not supposed to
@@ -29,19 +42,81 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import os
 import signal
 import sys
 from typing import Any
 
 from arq.constants import default_queue_name
-from arq.worker import create_worker
+from arq.worker import create_worker, func
+
+from pocketpaw.lens_checkins import automation_run
+from pocketpaw.lens_checkins import flush as flush_lens_checkins
+from pocketpaw_ee.cloud._core import shutdown
 
 logger = logging.getLogger(__name__)
 
 #: Signals a container runtime uses to ask for a graceful stop. SIGINT is here for the
 #: interactive case; SIGTERM is the one Docker actually sends.
 _STOP_SIGNALS = ("SIGTERM", "SIGINT")
+
+_DRAIN_ENV = "POCKETPAW_WORKER_DRAIN_SECONDS"
+#: Five minutes covers nearly every chat run. Kept well short of the 30-minute job
+#: timeout on purpose: until the worker deploys separately, no new worker starts while
+#: this one drains, so new messages wait in the queue for the whole window.
+_DEFAULT_DRAIN_SECONDS = 300.0
+_DRAIN_POLL_SECONDS = 0.1
+
+
+def drain_seconds() -> float:
+    """How long a stop signal waits for in-flight jobs, from ``POCKETPAW_WORKER_DRAIN_SECONDS``.
+
+    Fail-soft like the other worker knobs: unparseable or negative falls back to the
+    default. ``0`` is honoured and means "cancel at once", the pre-drain behaviour.
+    """
+    raw = os.environ.get(_DRAIN_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_DRAIN_SECONDS
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; using %ss", _DRAIN_ENV, raw, _DEFAULT_DRAIN_SECONDS)
+        return _DEFAULT_DRAIN_SECONDS
+    if val < 0:
+        logger.warning("%s=%s is negative; using %ss", _DRAIN_ENV, val, _DEFAULT_DRAIN_SECONDS)
+        return _DEFAULT_DRAIN_SECONDS
+    return val
+
+
+def _in_flight(worker: Any) -> int:
+    """Jobs a lane is still running. arq keeps them in ``Worker.tasks`` until they end."""
+    return sum(not t.done() for t in (getattr(worker, "tasks", None) or {}).values())
+
+
+async def _drain(workers: list[Any], lane_tasks: list[asyncio.Task], timeout: float) -> None:
+    """Stop every lane taking jobs, then wait up to ``timeout`` for running ones to end.
+
+    Returns early when nothing is in flight, or when a lane dies (its jobs died with it
+    and there is nothing left to wait for on that lane).
+    """
+    for worker in workers:
+        worker.allow_pick_jobs = False
+    pending = sum(_in_flight(w) for w in workers)
+    if not pending or timeout <= 0:
+        return
+    logger.info("supervisor: draining %d in-flight job(s) for up to %ss", pending, timeout)
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if not any(_in_flight(w) for w in workers) or any(t.done() for t in lane_tasks):
+            break
+        await asyncio.sleep(_DRAIN_POLL_SECONDS)
+    left = sum(_in_flight(w) for w in workers)
+    if left:
+        logger.warning("supervisor: drain window over; cancelling %d job(s)", left)
+    else:
+        logger.info("supervisor: drained")
 
 
 def default_lanes() -> list[type]:
@@ -52,15 +127,22 @@ def default_lanes() -> list[type]:
     raise when ``POCKETPAW_REDIS_URL`` is unset, which is correct for a worker process
     and wrong for anything that merely imports the supervisor to inspect it.
 
-    The growth lane (``pocketpaw_ee.cloud.growth.worker``) is deliberately NOT here. It
-    has its own queue already and no consumer in the deployed compose file, so adding it
-    would not be a refactor — it would start executing outbound work that is currently
-    inert. That is a product decision, not a performance one.
+    The growth lane (``pocketpaw_ee.cloud.growth.worker``) runs only when
+    ``POCKETPAW_GROWTH_WORKER_ENABLED`` is on. It executes live outbound sends (email,
+    WhatsApp) and the daily follow-up cron, so it is opt-in. The same flag lets the web
+    process enqueue growth sends (``growth.executor``), so a deployment that sets it on
+    the backend must set it on the worker too, or approved sends queue with no consumer.
     """
     from pocketpaw_ee.cloud.chat.runs.worker import WorkerSettings as ChatWorkerSettings
+    from pocketpaw_ee.cloud.growth.executor import _growth_worker_enabled
     from pocketpaw_ee.sites.build_worker import WorkerSettings as SiteBuildWorkerSettings
 
-    return [ChatWorkerSettings, SiteBuildWorkerSettings]
+    lanes: list[type] = [ChatWorkerSettings, SiteBuildWorkerSettings]
+    if _growth_worker_enabled():
+        from pocketpaw_ee.cloud.growth.worker import WorkerSettings as GrowthWorkerSettings
+
+        lanes.append(GrowthWorkerSettings)
+    return lanes
 
 
 def lane_name(settings_cls: type) -> str:
@@ -107,6 +189,38 @@ async def _close_quietly(worker: Any, name: str) -> None:
         logger.warning("supervisor: closing lane %s failed", name, exc_info=True)
 
 
+#: Job names that are interactive runs, not automations; left unmonitored.
+_INTERACTIVE_JOBS = frozenset({"execute_run_job"})
+
+
+def _wrap(name: str, coroutine: Any) -> Any:
+    async def _job(ctx: Any, *args: Any, **kwargs: Any) -> Any:
+        async with automation_run("job", name):
+            return await coroutine(ctx, *args, **kwargs)
+
+    _job.__lens_monitor__ = ("job", name)  # type: ignore[attr-defined]
+    return _job
+
+
+def _monitored(settings_cls: type) -> dict[str, Any]:
+    """``create_worker`` overrides: the lane's functions and cron jobs, check-in wrapped."""
+    out: dict[str, Any] = {}
+    fns = [func(entry) for entry in getattr(settings_cls, "functions", None) or []]
+    if fns:
+        out["functions"] = [
+            f
+            if f.name in _INTERACTIVE_JOBS
+            else dataclasses.replace(f, coroutine=_wrap(f.name, f.coroutine))
+            for f in fns
+        ]
+    crons = getattr(settings_cls, "cron_jobs", None) or []
+    if crons:
+        out["cron_jobs"] = [
+            dataclasses.replace(c, coroutine=_wrap(c.name, c.coroutine)) for c in crons
+        ]
+    return out
+
+
 async def run_lanes(settings_classes: list[type] | None = None) -> int:
     """Run every lane until one stops or a stop signal arrives. Returns an exit code."""
     classes = list(default_lanes() if settings_classes is None else settings_classes)
@@ -116,7 +230,7 @@ async def run_lanes(settings_classes: list[type] | None = None) -> int:
     # ``handle_signals=False`` because each arq Worker would otherwise install its OWN
     # SIGTERM handler on the shared loop, where the last one registered silently replaces
     # every earlier one. The supervisor owns the signal and stops the lanes itself.
-    workers = [create_worker(cls, handle_signals=False) for cls in classes]
+    workers = [create_worker(cls, handle_signals=False, **_monitored(cls)) for cls in classes]
     names = [lane_name(cls) for cls in classes]
     logger.info("supervisor: starting %d lane(s): %s", len(names), ", ".join(names))
 
@@ -144,8 +258,12 @@ async def run_lanes(settings_classes: list[type] | None = None) -> int:
                 logger.error("supervisor: lane %s returned on its own; stopping the process", name)
         if exit_code == 0:
             logger.info("supervisor: stop requested; draining %d lane(s)", len(names))
+            await _drain(workers, lane_tasks, drain_seconds())
         return exit_code
     finally:
+        # Set before any job is cancelled: a chat run's cancel cleanup reads it to
+        # requeue itself rather than end ``interrupted``.
+        shutdown.mark_stopping()
         stop_task.cancel()
         for task in lane_tasks:
             task.cancel()
@@ -154,10 +272,19 @@ async def run_lanes(settings_classes: list[type] | None = None) -> int:
         await asyncio.gather(*lane_tasks, stop_task, return_exceptions=True)
         for worker, name in zip(workers, names, strict=True):
             await _close_quietly(worker, name)
+        # Deliver the last paw-lens check-ins; 1 s budget, never raises.
+        await flush_lens_checkins(timeout=1.0)
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO)
+    # setup_logging, not basicConfig: the worker is where money is spent and
+    # where provider SDKs surface credentials in exception text, and only
+    # setup_logging installs the secret / PII scrubbing filters. basicConfig
+    # gives the root logger a handler and nothing else, so the worker was
+    # logging unredacted to stdout where the platform's collector keeps it.
+    from pocketpaw.logging_setup import setup_logging
+
+    setup_logging(level=os.environ.get("POCKETPAW_LOG_LEVEL", "INFO"))
     return asyncio.run(run_lanes())
 
 

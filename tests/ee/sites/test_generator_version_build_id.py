@@ -83,11 +83,12 @@ def test_rebuilding_the_generator_changes_the_version(fake_generator: Path) -> N
 
 
 def test_a_same_size_rebuild_still_changes_the_version(fake_generator: Path) -> None:
-    """mtime carries the rebuild even when the bundle size lands identical.
+    """The content digest carries the rebuild even when the bundle size lands identical.
 
-    mtime is set explicitly rather than by writing twice: Windows' ~15.6ms clock
-    granularity can hand two quick writes the SAME mtime_ns, which would make this
-    assertion flaky for a reason that has nothing to do with the behaviour.
+    mtime is still bumped explicitly: the digest is memoised on stat, and Windows'
+    ~15.6ms clock granularity can hand two quick same-size writes the SAME mtime_ns,
+    which would serve the memo and make this assertion flaky for a reason that has
+    nothing to do with a real rebuild.
     """
     before = generator_version()
 
@@ -152,3 +153,17 @@ def test_the_format_epoch_still_participates(fake_generator: Path) -> None:
         assert generator_version() != before
     finally:
         generator_client._ARTIFACT_FORMAT_EPOCH = original
+
+
+def test_a_redeploy_with_identical_bytes_keeps_the_version(fake_generator: Path) -> None:
+    """A redeploy, image rebuild or fresh checkout writes the SAME generator bytes
+    with a NEW mtime. The built HTML cannot differ, so the cache key must not either:
+    keying on mtime made every routine deploy re-build every site's preview in a
+    Daytona sandbox the next time it was opened, with nothing about the site changed.
+    """
+    before = generator_version()
+
+    st = fake_generator.stat()
+    os.utime(fake_generator, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+
+    assert generator_version() == before

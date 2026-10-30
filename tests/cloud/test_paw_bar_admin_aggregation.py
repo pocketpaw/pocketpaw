@@ -1,4 +1,11 @@
 # tests/cloud/test_paw_bar_admin_aggregation.py — Paw Bar owner aggregation reads
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # (D2). Created 2026-07-16: covers the four per-site Concierge dashboard reads under
 # /paw-bar/admin/site/{site_id}/* — overview, conversations, decisions, handoffs.
 # Layers:
@@ -19,6 +26,10 @@
 #     status, created_at}.
 #   * Handoffs empty-but-well-shaped in v1 (no producer), and isolated by widget.
 #   * Conversations list (LISTABLE — grouped by customer_ref, unsupported=False).
+# Updated 2026-09-26 (fix/pawbar-frame-sandbox-header): the owner preview frame's
+#   CSP now ends in the same ``sandbox`` directive as the public frame, so the two
+#   exact-header assertions carry it and a new test pins the directive, the
+#   unchanged frame-ancestors, and the absence of top navigation.
 # Updated 2026-07-26 (concierge transcripts): a tenth layer covers two-sided
 #   transcripts — a run carrying ``user_text`` renders the visitor turn before the
 #   agent's, a run with no reply still shows what was asked, the question is
@@ -28,6 +39,10 @@
 #   knowledge endpoints — the read distinguishes "never synced" from a failure, the
 #   sync is awaited and returns its own counts, a failed sync surfaces as a status
 #   rather than a 500, and both are cross-tenant-404 and member-403.
+# Updated 2026-09-26 (fix/pawbar-public-starters-sync-status): a sync that CRASHES
+#   is run through the real safe path and must land on the Site as sync_failed,
+#   so the route (which reads status off the Site) stops reporting the previous
+#   clean sync.
 
 from __future__ import annotations
 
@@ -70,6 +85,12 @@ async def _site(**ov: Any):
         allowed_origins=["brewco.com"],
     )
     d.update(ov)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    d.setdefault("concierge_created_at", _dt.now(_UTC))
+    d.setdefault("concierge_enabled", True)
     s = Site(**d)
     await s.insert()
     return s
@@ -306,6 +327,33 @@ async def test_overview_shape_and_counts(client):
     assert body["counts"]["pending_decisions"] == 2
     assert body["counts"]["conversations"] == 2
     assert body["counts"]["handoffs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_overview_names_the_model_a_v2_concierge_answers_with(client, monkeypatch):
+    """v2 answers every turn through one model the owner can't otherwise see, so the
+    overview names it (the same resolution a turn makes). Legacy leaves it blank:
+    there the agent's own run answers."""
+    from pocketpaw_ee.paw_bar import concierge_runtime
+
+    seen: list[str] = []
+
+    async def _answer_model(widget, site, workspace_id):
+        seen.append(workspace_id)
+        return "anthropic:claude-sonnet-4-6"
+
+    monkeypatch.setattr(concierge_runtime, "answer_model", _answer_model)
+    c, store, _fabric = client
+    v2 = await _site(concierge_runtime="v2")
+    await store.create_widget(_widget())
+    legacy = await _site(pocket_id="pocket-legacy", concierge_runtime="legacy")
+
+    v2_body = (await c.get(f"/paw-bar/admin/site/{v2.id}/overview")).json()
+    legacy_body = (await c.get(f"/paw-bar/admin/site/{legacy.id}/overview")).json()
+
+    assert v2_body["answer_model"] == "anthropic:claude-sonnet-4-6"
+    assert legacy_body["answer_model"] == ""
+    assert seen == ["ws-1"]
 
 
 @pytest.mark.asyncio
@@ -776,7 +824,9 @@ async def test_preview_frame_csp_is_dashboard_origin(client, monkeypatch):
     # portless host-source matches only the default port. The REAL dashboard
     # origin carries one (localhost:5173) and is emitted as written; this
     # fixture omits it, so it picks up the any-port form.
-    assert res.headers["content-security-policy"] == "frame-ancestors dash.example.com:*"
+    assert res.headers["content-security-policy"] == (
+        "frame-ancestors dash.example.com:*; " + _STYLE_FONT + _SANDBOX_DIRECTIVE
+    )
     # The Site's public allowlist must NOT be the framer here.
     assert "brewco.com" not in res.headers["content-security-policy"]
 
@@ -788,7 +838,39 @@ async def test_preview_frame_default_dashboard_origin(client):
     site = await _site()
     await store.create_widget(_widget())
     res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
-    assert res.headers["content-security-policy"] == "frame-ancestors localhost:5173"
+    assert res.headers["content-security-policy"] == (
+        "frame-ancestors localhost:5173; " + _STYLE_FONT + _SANDBOX_DIRECTIVE
+    )
+
+
+# Literal on purpose: the bar loads the host site's Google Fonts sheet, and nothing
+# broader than these two hosts may be added.
+_STYLE_FONT = (
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+)
+# Literal on purpose: the paw-bar loader sets the same flags on its <iframe sandbox>.
+_SANDBOX_DIRECTIVE = (
+    "sandbox allow-scripts allow-same-origin allow-forms allow-popups "
+    "allow-popups-to-escape-sandbox allow-downloads"
+)
+
+
+@pytest.mark.asyncio
+async def test_preview_frame_is_sandboxed(client, monkeypatch):
+    """The owner preview is a frame document like the public one, so the browser
+    sandboxes it too — without touching its dashboard-only embedder gate."""
+    monkeypatch.setenv("PAWBAR_DASHBOARD_ORIGIN", "dash.example.com")
+    c, store, _fabric = client
+    site = await _site()
+    await store.create_widget(_widget())
+    res = await c.get(f"/paw-bar/admin/site/{site.id}/preview-frame")
+    assert res.status_code == 200
+    csp = res.headers["content-security-policy"]
+    directives = [d.strip() for d in csp.split(";")]
+    assert _SANDBOX_DIRECTIVE in directives
+    assert "frame-ancestors dash.example.com:*" in directives
+    assert "allow-top-navigation" not in csp
 
 
 @pytest.mark.asyncio
@@ -979,6 +1061,37 @@ async def test_knowledge_sync_surfaces_a_failure_instead_of_500ing(client, monke
     res = await c.post(f"/paw-bar/admin/site/{site.id}/knowledge/sync")
     assert res.status_code == 200
     assert res.json()["status"] == "sync_failed"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_sync_crash_is_recorded_and_reported(client, monkeypatch):
+    """The real safe path, with the sync itself crashing. The fake above sets
+    kb_sync_error by hand, which is exactly why the bug hid: the real crash path
+    returned sync_failed WITHOUT touching the Site, and this route reads its
+    status off the Site, so a crashed re-sync reported the previous clean state."""
+    c, _store, _fabric = client
+    site = await _site()
+    site.kb_article_ids = ["site-home"]
+    site.kb_synced_at = datetime(2026, 1, 1, tzinfo=UTC)
+    site.kb_sync_error = ""
+    await site.save()
+
+    async def _crash(target):
+        raise RuntimeError("kb exploded")
+
+    monkeypatch.setattr("pocketpaw_ee.sites.kb_ingest.sync_site_knowledge", _crash)
+
+    res = await c.post(f"/paw-bar/admin/site/{site.id}/knowledge/sync")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["status"] == "sync_failed"
+    assert body["article_count"] == 1  # the previous articles are kept
+    assert body["synced_at"] and not body["synced_at"].startswith("2026-01-01")
+
+    # And the stored Site says so too, so the next GET agrees.
+    again = (await c.get(f"/paw-bar/admin/site/{site.id}/knowledge")).json()
+    assert again["status"] == "sync_failed"
+    assert again["article_count"] == 1
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,23 @@
+[
+  {
+    "label": "accept an unsigned webhook again, the shipped state",
+    "file": "ee/pocketpaw_ee/cloud/meetings/providers/recall/webhooks.py",
+    "find": "        raise Forbidden(\n            \"meeting.webhook_unsigned\",\n            \"Recall webhook signature cannot be verified: RECALL_WEBHOOK_SECRET is not set.\",\n        )",
+    "replace": "        return",
+    "tests": ["tests/cloud/meetings/test_recall_webhook_fails_closed.py", "tests/cloud/meetings/test_recall_client.py"]
+  },
+  {
+    "label": "treat any present ALLOW_UNSIGNED value as truthy",
+    "file": "ee/pocketpaw_ee/cloud/meetings/providers/recall/webhooks.py",
+    "find": "        if os.environ.get(\"RECALL_WEBHOOK_ALLOW_UNSIGNED\", \"\").strip().lower() in (\n            \"1\",\n            \"true\",\n            \"yes\",\n            \"on\",\n        ):",
+    "replace": "        if \"RECALL_WEBHOOK_ALLOW_UNSIGNED\" in os.environ:",
+    "tests": ["tests/cloud/meetings/test_recall_webhook_fails_closed.py"]
+  },
+  {
+    "label": "undocument the secret in the env template",
+    "file": ".env.example",
+    "find": "# RECALL_WEBHOOK_SECRET=whsec_...",
+    "replace": "# (removed)",
+    "tests": ["tests/cloud/meetings/test_recall_webhook_fails_closed.py"]
+  }
+]

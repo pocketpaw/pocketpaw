@@ -1,0 +1,43 @@
+{
+  "title": "Key layers: inspector, drag and parent",
+  "wave": "W1",
+  "order": 20,
+  "status": "building",
+  "feature_issue": "#1036",
+  "covers": "#38, #207",
+  "waits_on": "foundation #777; #333",
+  "cells": {
+    "waits on (features)": "foundation #777",
+    "waits on (SuiteUI, creative-core)": "#333"
+  },
+  "depends": [
+    "foundation"
+  ],
+  "owned": [
+    "Sources/HaloModel/Live/LiveLayerPlacing.swift",
+    "Sources/HaloModel/Live/LivePropertyKeying.swift",
+    "Sources/HaloModel/Live/LiveViewerDragging.swift",
+    "Sources/HaloModel/HaloKeying.swift",
+    "Sources/HaloModel/HaloViewerDrag.swift",
+    "Sources/HaloModel/Availability/HaloAvailability+Keys.swift",
+    "Sources/HaloApp/HaloLayerInspector.swift",
+    "Sources/HaloApp/HaloViewerGestures.swift",
+    "Sources/HaloApp/HaloWindow+Keys.swift",
+    "Tests/HaloModelTests/LayerPlacingContractTests.swift",
+    "Tests/HaloModelTests/PropertyKeyingContractTests.swift",
+    "Tests/HaloModelTests/ViewerDraggingContractTests.swift",
+    "Tests/HaloModelTests/HaloKeyingTests.swift",
+    "Tests/HaloModelTests/HaloKeyByDragTests.swift",
+    "Tests/HaloModelTests/HaloKeysBudgetTests.swift",
+    "Tests/AppSnapshotTests/HaloInspectorSnapshots.swift",
+    "Tests/AppSnapshotTests/HaloKeyByDragSnapshots.swift",
+    "UITests/HaloJourneyTests+Drag.swift",
+    "UITests/HaloJourneyTests+Inspector.swift",
+    "UITests/HaloJourneyTests+Parent.swift"
+  ],
+  "core": "none",
+  "waits_ui": [
+    "#333 (journey files)"
+  ],
+  "note": "H-J5, H-J6, H-J23; HB-1, HB-3, HB-4; HF-3, HF-5."
+}

@@ -1,44 +1,28 @@
 # ee/pocketpaw_ee/sites/public_assets.py — the PUBLIC asset rail for Paw Sites.
-# Created 2026-08-31 (feat/sites-public-asset-uploads).
 #
-# WHY THIS EXISTS. A site we publish is read by anonymous visitors, so an image it
-# displays needs an address with no credential and no expiry. Neither URL this
-# codebase already mints qualifies:
+# A published site is read by anonymous visitors, so the media it shows needs an
+# address with no credential and no expiry. A presign expires (S3 caps it at 7
+# days) and ``/api/v1/uploads/{id}`` is auth-gated, and the bytes cannot ride the
+# build (``generator_client`` sends a text-only source map). This rail stores
+# stills and video on a world-readable bucket and hands back durable URLs, which
+# also keeps visitor-supplied bytes out of the build tree.
 #
-#   * ``StorageAdapter.presigned_get`` expires (S3 caps a presign at 7 days) —
-#     the site outlives the link and the image turns into a broken box.
-#   * ``/api/v1/uploads/{id}`` (what screenshot.py and the deliver MCP tool hand
-#     back) is auth-gated, so it 401s for exactly the visitor it is meant to serve.
+# ONLY PUBLISHABLE MEDIA lands here: PNG/JPEG/GIF/WebP and MP4/WebM, decided by
+# magic bytes. SVG (executes script), QuickTime and documents are refused; a PRD
+# is agent input and stays on the private rail. Images cap at 10 MiB, video at
+# 50 MiB (the S3 adapter buffers a whole body before it PUTs; raising the cap
+# means multipart upload first, not a config bump).
 #
-# And the bytes cannot ride the build instead: ``generator_client`` sends a
-# TEXT-ONLY ``source`` map, and its base64 ``assets`` sideband is rejected outright
-# by the generator for every engine except html (paw-sites ``src/index.ts``, the
-# ``assets is only supported with engine="html"`` throw). A URL is the only carrier
-# that works on all four engines, and it keeps visitor-supplied bytes OUT of the
-# build tree — which preserves the write-allowlist property that stops an edit
-# reaching ``package.json`` and routing around the release-age floor.
-#
-# WHAT IT DELIBERATELY DOES NOT DO. It does not store documents. A PRD is agent
-# INPUT, not site content; publishing a customer's requirements doc to an
-# unauthenticated bucket is a data leak, so documents stay on the private rail
-# (``EEUploadService``), where ``chat/agent_service._build_attachments_block``
-# already extracts their text into the model's context. Only PUBLISHABLE MEDIA —
-# the stills and video a page actually renders — lands here.
-#
-# Updated 2026-08-31 (video): the rail carries VIDEO as well as stills. A
-# scroll-driven background video is a mainstream landing-page form now, and it has
-# the same address problem a hero image does — worse, since a video element refetches
-# by range and a signed URL dying mid-scroll is a visibly broken page. Video gets its
-# own 50 MiB cap: the S3 adapter buffers a whole body in memory before it PUTs
-# (``_MEM_BUFFER_WARN_BYTES`` is 64 MiB), so a larger ceiling here would trip that
-# warning and eventually OOM a web worker. Raising it past 50 MiB means teaching the
-# adapter multipart upload first — that is the honest prerequisite, not a config bump.
-#
-# KEY LAYOUT: ``sites-assets/{workspace_id}/{pocket_id}/{sha256[:16]}-{stem}{ext}``
+# KEY LAYOUT: ``sites-assets/{workspace_id}/{pocket_id}/{sha256[:16]}-{stem}{ext}``.
 # Tenant-scoped so one workspace can never enumerate or overwrite another's, and
-# content-addressed so a key's bytes can never change — which is what makes the
-# year-long immutable Cache-Control on the object safe, and makes re-uploading the
-# same file free instead of duplicating it.
+# content-addressed so a key's bytes never change (safe for the year-long
+# immutable Cache-Control, and a repeat put is free).
+#
+# ``key_for_url`` + ``read`` let a caller turn one of this workspace's public URLs
+# back into bytes from storage, so nothing here ever fetches a URL. ``purge`` and
+# ``can_list`` serve the delete cascade: an orphan on this bucket is public
+# forever, and ``StorageAdapter.browse`` defaults to ``[]`` rather than raising,
+# which would make an unlistable adapter look like a site with no assets.
 
 from __future__ import annotations
 
@@ -267,6 +251,48 @@ class PublicAssetStore:
             kind=kind_for_mime(mime),
         )
 
+    def key_for_url(
+        self, url: str, *, workspace_id: str, pocket_id: str | None = None
+    ) -> str | None:
+        """Map a public URL back to its storage key, or ``None``.
+
+        Only a URL this adapter minted for an asset under ``workspace_id`` (and
+        ``pocket_id``, when given) maps; anything else — another tenant, another
+        host, a nested or dotted path, a query string — is ``None``. This is what
+        lets a caller read an asset back from storage instead of fetching a URL.
+        """
+        base = self._adapter.public_url("")
+        if not base or not url.startswith(base):
+            return None
+        key = url[len(base) :]
+        if ".." in key or any(c in key for c in "?#\\%"):
+            return None
+        parts = key.split("/")
+        if len(parts) != 4 or parts[0] != _KEY_PREFIX or parts[1] != workspace_id:
+            return None
+        if not parts[2] or not parts[3]:
+            return None
+        if pocket_id is not None and parts[2] != pocket_id:
+            return None
+        return key
+
+    async def read(self, key: str, *, max_bytes: int = MAX_ASSET_BYTES) -> bytes:
+        """Read one stored asset's bytes. Raises :class:`PublicAssetError` when it
+        is missing or larger than ``max_bytes``."""
+        from pocketpaw.uploads.errors import NotFound
+
+        buf = bytearray()
+        try:
+            async for chunk in self._adapter.open(key):
+                buf.extend(chunk)
+                if len(buf) > max_bytes:
+                    raise PublicAssetError(
+                        f"That file is over the {max_bytes // (1024 * 1024)} MB limit."
+                    )
+        except NotFound as exc:
+            raise PublicAssetError("That file is no longer in storage.") from exc
+        return bytes(buf)
+
     async def list(self, *, workspace_id: str, pocket_id: str) -> list[PublicAsset]:
         """Return every asset stored for one site. Empty on an unlistable adapter."""
         prefix = prefix_for(workspace_id, pocket_id)
@@ -302,6 +328,93 @@ class PublicAssetStore:
             # arbitrary-object delete against the whole bucket, across tenants.
             raise PublicAssetError("That asset does not belong to this site.")
         await self._adapter.delete(key)
+
+    def can_list(self) -> bool:
+        """Whether the underlying adapter actually implements prefix listing.
+
+        ``StorageAdapter.browse`` DEFAULTS TO RETURNING ``[]`` — it is a base-class
+        no-op that adapters override, not an abstract method that fails loudly. So an
+        adapter without listing is indistinguishable, from the outside, from a site
+        that has no assets. That ambiguity is harmless in :meth:`list`, which is
+        rendering a panel, and dangerous in :meth:`purge`, which reports what it
+        destroyed: an unlistable adapter would purge nothing, return zero, and the
+        caller would record a completed teardown over a bucket still holding every
+        asset. Checking the override is the only way to tell the two apart, so the
+        distinction lives here rather than in each caller's head."""
+        impl = getattr(type(self._adapter), "browse", None)
+        # Three cases, and only one of them can list: no ``browse`` at all (a
+        # duck-typed adapter), the base class no-op, or a real override.
+        return impl is not None and impl is not StorageAdapter.browse
+
+    async def purge(self, *, workspace_id: str, pocket_id: str) -> int:
+        """Delete EVERY asset under one site's prefix. Returns the number removed.
+
+        The teardown counterpart of :meth:`put`, and the reason it exists separately
+        from :meth:`delete` is that a site's assets outlive the record that lists
+        them: deleting a site removes the Site document, after which nothing can
+        enumerate what it left on a world-readable bucket. Those objects are served
+        with an immutable year-long cache from the bucket origin with no backend hop,
+        so an orphan here is public forever.
+
+        RAISES rather than returning 0 when the adapter cannot list. A silent zero is
+        the specific failure this method must not have — see :meth:`can_list`.
+
+        Deliberately does NOT reuse :meth:`list`. That method skips any item whose
+        ``public_url`` is falsy, which is correct when rendering a panel of openable
+        assets and wrong here: an object we cannot build a URL for is exactly one a
+        purge still has to remove. It also drops the per-key prefix guard, which stays
+        enforced because every key is rebuilt from ``prefix`` rather than taken from
+        the listing.
+
+        Idempotent: a prefix that is already empty returns 0 without erroring, so a
+        resumed teardown can re-run this step safely."""
+        if not self.can_list():
+            raise PublicAssetError(
+                "This deployment's storage adapter cannot list objects, so a site's "
+                "assets cannot be enumerated or removed. Purging would report success "
+                "over a bucket it never touched."
+            )
+        return await self.purge_prefix(prefix_for(workspace_id, pocket_id))
+
+    async def purge_prefix(self, prefix: str) -> int:
+        """Delete every object under an explicit prefix. Returns the number removed.
+
+        THIS EXISTS FOR TRANSFERRED SITES, and the reason is worth stating because
+        the obvious reading of :meth:`purge` is that it already covers everything.
+        It does not. It derives the prefix from the site's CURRENT workspace, and a
+        transferred site's images are still under the workspace that MINTED them —
+        the object key embeds that id and is baked into an immutable, year-cached
+        public URL inside the deployed HTML, so moving the bytes would blank the
+        images on a live site (``sites/transfer.py:_move_assets``). The prefixes
+        left behind are recorded on ``Site.asset_source_prefixes``.
+
+        So a teardown that only calls :meth:`purge` reclaims an EMPTY prefix and
+        leaves the real objects world-readable forever. A caller tearing a site down
+        must purge this site's own prefix AND each retained one.
+
+        Same two guarantees as :meth:`purge`: it raises rather than reporting a
+        silent zero when the adapter cannot list, and every key is rebuilt from the
+        passed prefix rather than taken from the listing, so a hostile or odd name
+        cannot walk outside it."""
+        if not self.can_list():
+            raise PublicAssetError(
+                "This deployment's storage adapter cannot list objects, so a site's "
+                "assets cannot be enumerated or removed. Purging would report success "
+                "over a bucket it never touched."
+            )
+        if not prefix.endswith("/"):
+            # A prefix that does not end in a separator matches sibling directories
+            # by string prefix, so "…/pk1" would also sweep "…/pk10".
+            prefix = f"{prefix}/"
+        removed = 0
+        for item in await self._adapter.browse(prefix):
+            if item.is_dir:
+                continue
+            # Rebuilt from the trusted prefix, never taken from the listing, so this
+            # cannot walk outside the site even if the adapter returns odd names.
+            await self._adapter.delete(f"{prefix}{item.name}")
+            removed += 1
+        return removed
 
 
 _MEDIA_EXT: dict[str, str] = {

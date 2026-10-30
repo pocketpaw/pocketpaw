@@ -1,45 +1,16 @@
-# tests/atlas/test_eval.py — intent→capability ranking-regression eval
-# harness for the atlas OS self-model (AT-2). Created: 2026-07-02
-# (feat/atlas-eval). Loads real-user intents from eval_cases.json and,
-# per case, asserts the expected entry id appears within ``rank_within``
-# results of ``AtlasStore.search``. Cases marked ``xfail`` are known
-# ranking misses kept on purpose (strict xfail — they fail loudly the
-# moment the ranking improves, forcing a baseline update). A summary test
-# pins the measured strict-hit score (expected id at rank 1) to a
-# recorded baseline so ranking changes can never silently regress.
+# tests/atlas/test_eval.py — intent -> entry ranking-regression eval for atlas.
+#
+# Loads real-user intents from eval_cases.json and, per case, asserts the
+# expected entry id appears within ``rank_within`` results of
+# ``AtlasStore.search`` (the unfiltered store, so role-gated capability cards
+# are hidden). Cases marked ``xfail`` are known ranking misses kept on purpose
+# (strict xfail: they fail loudly the moment the ranking improves). A summary
+# test pins the measured strict-hit score (expected id at rank 1) to
+# ``STRICT_HIT_BASELINE`` so a ranking change can never silently regress; when a
+# change RAISES the score, bump the constant in the same PR. Each case's
+# ``note`` in eval_cases.json says why it was added.
+#
 # Eval-only: this file must not require changes under src/pocketpaw.
-# Updated: 2026-07-03 — re-baselined against the full compiled model
-# (237 entries) + fixpoint stemmer: baseline 16/18 → 21/22 (cases
-# re-pointed / promoted / added in eval_cases.json; see its note fields).
-# Updated: 2026-07-03 (feat/workspace-admin-tools, WA-3) — the model grew to
-# 254 entries (17 role-gated admin ``capability`` cards added). Those cards
-# are hidden from the UNFILTERED store the eval uses, but their natural-phrase
-# names would have polluted rankings via bare stopwords; the store now drops a
-# tiny function-word stoplist (``store._STOPWORDS``). Net effect on the eval:
-# strict-hit baseline UNCHANGED at 21/22 (the "review the agent's edit" case
-# even tightened from rank 3 to rank 2, still within its rank_within budget).
-# Updated: 2026-07-05 (fix/atlas-data-accuracy-and-relevance) — the model grew
-# to 256 entries (two new authored surfaces: /settings/billing and /security).
-# Nine cases added pinning the data-accuracy + relevance fixes (billing /
-# deep-work / security surfaces, 'user' member vocabulary, the IDF name-weight
-# damper, the five new instruction-filler stopwords, the orientation query).
-# All nine measure rank 1, so the strict-hit baseline rises 21/22 → 30/31.
-# Updated: 2026-07-05 (fix/atlas-relevance-round2, Finding A) — five governance
-# paraphrase cases added. Four ("how do I approve what the agent does",
-# "sign-off", "gate the agent", "gate what the agent can do") measure rank 1
-# after the governance keywords on primitive:instinct + the store's kind-priority
-# bias (a management surface can no longer outrank the governing primitive at
-# equal overlap). The fifth ("approval gate") is pinned rank_within 2 — Instinct
-# co-answers behind the owner-only approval-LEVEL capability, which the small
-# kind bias deliberately does not overpower. Strict-hit baseline 30/31 → 34/36.
-# Updated: 2026-08-17 (feat/ast-1-atlas-primitives, AST-1) — the model grew to
-# 267 entries: two authored primitives (primitive:source-truth, the per-property
-# provenance / trust-ladder layer under Fabric; primitive:verify-loop, the
-# verify-on-completion outcome verdicts) and two member-level fabric capability
-# cards (provenance_read, conflict_steward). Eight cases added: four pin
-# source-truth #1, three pin verify-loop #1, one ("what is fabric") is a
-# regression pin proving the new neighbours do not steal primitive:fabric. All
-# eight measure rank 1; strict-hit baseline 35/36 → 43/44.
 
 from __future__ import annotations
 
@@ -69,7 +40,7 @@ _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 # gate" is still the single non-rank-1.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-STRICT_HIT_BASELINE = 43
+STRICT_HIT_BASELINE = 97
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit

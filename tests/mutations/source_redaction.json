@@ -1,0 +1,215 @@
+[
+  {
+    "label": "delete the redaction — serve source unconditionally",
+    "file": "ee/pocketpaw_ee/cloud/pockets/dto.py",
+    "find": "\"source\": getattr(p, \"source\", None) if source_visible else None,",
+    "replace": "\"source\": getattr(p, \"source\", None),",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_new_free_pocket_is_redacted",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_b_websocket_broadcast_payload_is_redacted",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_serializer_redacts_only_when_told_to"
+    ]
+  },
+  {
+    "label": "give source_visible a default — the gate fails open at every call site that forgets it",
+    "file": "ee/pocketpaw_ee/cloud/pockets/dto.py",
+    "find": "def pocket_to_wire_dict(p, *, source_visible: bool) -> dict:",
+    "replace": "def pocket_to_wire_dict(p, *, source_visible: bool = True) -> dict:",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_source_visible_is_required_and_has_no_default"
+    ]
+  },
+  {
+    "label": "D4 — let a share link serve source",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "return pocket_to_wire_dict(_pocket_to_domain(doc), source_visible=False)",
+    "replace": "return pocket_to_wire_dict(_pocket_to_domain(doc), source_visible=True)",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_c_share_link_strips_source_on_every_tier",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_c_share_link_ignores_access_level"
+    ]
+  },
+  {
+    "label": "ignore the site's tier — gate everyone in the cohort, paid sites included",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        pid: pid in billing\n        and entitlements_service.site_code_entitled(",
+    "replace": "        pid: False\n        and entitlements_service.site_code_entitled(",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_paid_site_is_unaffected",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_b_websocket_broadcast_is_unredacted_when_paid"
+    ]
+  },
+  {
+    "label": "D3 — drop the cohort check, so the flip retroactively gates existing pockets",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not getattr(doc, \"source_gated\", False) and not settings.sites_source_gate_retroactive:\n        return True",
+    "replace": "    if False:\n        return True",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_existing_free_pocket_keeps_its_source"
+    ]
+  },
+  {
+    "label": "never stamp the cohort at create — the gate can then never fire on the REST create path",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        source_gated=_source_gated_at_create(),\n        surface_profile=body.surface_profile,",
+    "replace": "        source_gated=False,\n        surface_profile=body.surface_profile,",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_new_free_pocket_is_redacted",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_cohort_stamp_is_persisted_not_inferred"
+    ]
+  },
+  {
+    "label": "redact in get too — the pipeline reader goes dark and the gated cohort stops building",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    doc = await _fetch_readable(pocket_id, user_id)\n    return await _unredacted_wire_dict(doc, user_id)",
+    "replace": "    doc = await _fetch_readable(pocket_id, user_id)\n    return await _resolved_wire_dict(doc, user_id)",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_d_edit_lane_still_reads_source",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_d_preview_pocket_still_serves_draft_content",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_d_draft_version_snapshot_survives_a_gated_edit"
+    ]
+  },
+  {
+    "label": "get_for_wire stops gating, so GET /pockets/{id} serves source to the whole cohort",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    doc = await _fetch_readable(pocket_id, user_id)\n    return await _resolved_wire_dict(doc, user_id)",
+    "replace": "    doc = await _fetch_readable(pocket_id, user_id)\n    return await _unredacted_wire_dict(doc, user_id)",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_new_free_pocket_is_redacted",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_d_the_two_readers_split_only_on_source"
+    ]
+  },
+  {
+    "label": "the flag lies — sourceVisible is hardcoded true beside a withheld source, so the client shows a Code tab over nothing",
+    "file": "ee/pocketpaw_ee/cloud/pockets/dto.py",
+    "find": "        \"sourceVisible\": source_visible,",
+    "replace": "        \"sourceVisible\": True,",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_tracks_the_payload_in_both_directions",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_cannot_be_computed_apart_from_the_payload",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_share_link_reports_the_flag_false"
+    ]
+  },
+  {
+    "label": "the flag is computed from the payload instead of the decision, so a ripple pocket with no source reports withheld",
+    "file": "ee/pocketpaw_ee/cloud/pockets/dto.py",
+    "find": "        \"sourceVisible\": source_visible,",
+    "replace": "        \"sourceVisible\": getattr(p, \"source\", None) is not None,",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_is_honest_in_the_gallery_list",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_tracks_the_payload_in_both_directions"
+    ]
+  },
+  {
+    "label": "restore the source-presence short-circuit, so a projected gallery row reports visible while the single-pocket read reports withheld",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    settings = get_settings()\n\n    if not settings.sites_source_gate_enabled:",
+    "replace": "    if getattr(doc, \"source\", None) is None:\n        return True\n\n    settings = get_settings()\n\n    if not settings.sites_source_gate_enabled:",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_flag_is_honest_in_the_gallery_list"
+    ]
+  },
+  {
+    "label": "the gallery resolves the entitlement per row instead of once per page, putting a workspace lookup and a Site read behind every card",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "                    source_entitled=source_entitled.get(str(d.id)),\n                    resolve_memo=resolve_memo,",
+    "replace": "                    resolve_memo=resolve_memo,",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_e_list_resolves_the_entitlement_once_for_the_page"
+    ]
+  },
+  {
+    "label": "never stamp the cohort on the home pocket, so the gate can never fire on anything ensure_home_pocket makes",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        source_gated=_source_gated_at_create(),\n    )\n    await doc.insert()",
+    "replace": "        source_gated=False,\n    )\n    await doc.insert()",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_g_ensure_home_pocket_stamps_the_cohort"
+    ]
+  },
+  {
+    "label": "never stamp the cohort on the inline ripple auto-create path, so a pocket that later grows a source map is outside the cohort forever",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            source_gated=_source_gated_at_create(),\n            # New agent-generated pockets start with no connectors allowed.",
+    "replace": "            source_gated=False,\n            # New agent-generated pockets start with no connectors allowed.",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_g_create_from_ripple_spec_stamps_the_cohort"
+    ]
+  },
+  {
+    "label": "never stamp the cohort in agent_create — the gate can then never fire on an agent-built Paw Site, which is every real one",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            source_gated=_source_gated_at_create(),\n            visibility=\"workspace\",\n        )\n        await doc.insert()",
+    "replace": "            source_gated=False,\n            visibility=\"workspace\",\n        )\n        await doc.insert()",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_g_agent_create_stamps_the_cohort"
+    ]
+  },
+  {
+    "label": "drop agent_create's stamp line altogether, which is how a NEW constructor would ship unstamped — only the structural test can see it",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            source_gated=_source_gated_at_create(),\n            visibility=\"workspace\",\n        )\n        await doc.insert()",
+    "replace": "            visibility=\"workspace\",\n        )\n        await doc.insert()",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_g_every_pocket_constructor_stamps_the_cohort"
+    ]
+  },
+  {
+    "label": "ignore the retroactive flag, so switching it on still gates nothing that already exists",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not getattr(doc, \"source_gated\", False) and not settings.sites_source_gate_retroactive:\n        return True",
+    "replace": "    if not getattr(doc, \"source_gated\", False):\n        return True",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_h_retroactive_gates_a_pre_flip_free_pocket",
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_h_gallery_and_single_read_agree_when_retroactive"
+    ]
+  },
+  {
+    "label": "let retroactive stand in for the master flag, so it gates pockets while the gate is off",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if not settings.sites_source_gate_enabled:\n        return True",
+    "replace": "    if not settings.sites_source_gate_enabled and not settings.sites_source_gate_retroactive:\n        return True",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_h_retroactive_is_inert_without_the_master_switch"
+    ]
+  },
+  {
+    "label": "ship retroactive on, so a deploy takes source away from every existing free site",
+    "file": "src/pocketpaw/config.py",
+    "find": "    sites_source_gate_retroactive: bool = Field(\n        default=False,",
+    "replace": "    sites_source_gate_retroactive: bool = Field(\n        default=True,",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_h_retroactive_ships_disabled"
+    ]
+  },
+  {
+    "label": "a pocket with no Site row is granted, so every draft and orphan pocket shows its code",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        pid: pid in billing\n        and entitlements_service.site_code_entitled(",
+    "replace": "        pid: pid not in billing\n        or entitlements_service.site_code_entitled(",
+    "tests": [
+      "tests/cloud/pockets/test_source_redaction_gate.py::test_a_pocket_with_no_site_row_resolves_denied_not_raising",
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_b_a_pocket_with_no_site_row_in_a_pro_max_workspace_is_hidden"
+    ]
+  },
+  {
+    "label": "the operator override is ignored, so a revocation leaves a paid site's code showing",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if ent.site_source_visible is not None:\n        return dict.fromkeys(pocket_ids, ent.site_source_visible)\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_f_override_false_hides_even_a_staff_site",
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_f_override_true_grants_a_free_site"
+    ]
+  },
+  {
+    "label": "the override's None is read as a revocation, so no site ever shows its code",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if ent.site_source_visible is not None:\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_c_a_paid_site_in_a_free_workspace_is_visible",
+      "tests/cloud/pockets/test_source_visibility_per_site.py::test_f_an_override_on_another_field_defers_to_the_site"
+    ]
+  }
+]

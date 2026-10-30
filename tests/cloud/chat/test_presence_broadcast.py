@@ -1,3 +1,5 @@
+# Changes (2026-10-01, CN-4): realtime imports point at _core.realtime; the
+# cloud.realtime re-export shim is deleted.
 """Tests for the presence broadcast wiring (Task 19, Cluster A sub-PR 4).
 
 The WebSocket endpoint is responsible for publishing ``presence.online`` on
@@ -15,8 +17,8 @@ from unittest.mock import patch
 import pytest
 
 chat_router = importlib.import_module("pocketpaw_ee.cloud.chat.router")
+from pocketpaw_ee.cloud._core.realtime.events import PresenceOffline  # noqa: E402
 from pocketpaw_ee.cloud.chat.ws import manager  # noqa: E402
-from pocketpaw_ee.cloud.realtime.events import PresenceOffline  # noqa: E402
 
 
 @pytest.mark.asyncio

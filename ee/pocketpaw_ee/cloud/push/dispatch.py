@@ -1,32 +1,22 @@
 # Notification dispatch + WS-vs-Web-Push dedupe (pocketpaw#1393).
-# Created: 2026-06-09 (feat/push-wire-events) — adds ``notify`` on top of the
-# #1392 ``send_to_user`` Web Push fan-out. ``notify`` is the single dispatch
-# product events call: it forks the transport so a user who has BOTH the
-# desktop app (live WebSocket) and a browser tab (Web Push) open is never
-# double-notified.
 #
-# The dedupe rule (issue #1393 "prefer WS when live, else push"):
-#   - LIVE WebSocket connection  → deliver a ``notification.push`` WS event
-#     the desktop/Tauri client already renders; do NOT also send Web Push.
-#   - No live connection         → fall back to ``send_to_user`` (Web Push),
-#     so a browser-only / backgrounded user still gets the notification.
+# ``notify`` is the single dispatch product events call. It forks the transport
+# so a user with BOTH the desktop app (live WebSocket) and a browser tab (Web
+# Push) open is never double-notified:
+#   - live WebSocket on THIS process   -> a ``notification.push`` WS frame; no
+#     Web Push. If zero sockets accept it (half-open sockets), fall through to
+#     Web Push in the same call (``ws_fallback_push``).
+#   - live WebSocket on ANOTHER process (``POCKETPAW_REALTIME_BUS=redis-streams``,
+#     answered by ``_core/realtime/presence.py``) -> the frame is relayed over the
+#     broadcast stream and the owning process delivers it; no Web Push. The
+#     zero-accept fallback does not cover remote sockets: the relay cannot report
+#     back how many accepted.
+#   - no live connection anywhere      -> Web Push (``send_to_user``).
 #
-# This module is a thin orchestrator — it imports the push *service* for the
-# Web Push leg and the chat WS ConnectionManager for the liveness check + WS
-# leg. It performs NO Beanie writes itself (the import-linter "Push — Beanie
-# writes only from service.py" contract stays satisfied: the only writer is
-# ``service.send_to_user`` which prunes dead rows as before). The liveness
-# check and the chosen transport are surfaced on a returned ``NotifyResult``
-# so the fork is observable and unit-testable without real sockets.
-#
-# Updated: 2026-08-11 (fix/notif-liveness-dispatch) — the dedupe used to trust
-# the liveness verdict absolutely, so a half-open socket (laptop asleep, NAT
-# timeout) took the WS leg into a dead pipe and the notification was lost: WS
-# delivered nothing, Web Push was skipped by the dedupe. The WS leg now reports
-# how many sockets ACCEPTED the frame; zero means "looked live, reached nobody"
-# and falls through to Web Push in the same call, recorded as the
-# ``ws_fallback_push`` transport. ``is_online`` itself got stricter upstream
-# (traffic-based liveness in chat/ws.py) — this is the safety net beneath it.
+# A thin orchestrator: the push service owns the Web Push leg (and the only
+# Beanie writes), the chat ConnectionManager the local liveness check and WS
+# leg. The chosen transport is returned on ``NotifyResult`` so the fork is
+# observable and testable without real sockets.
 
 from __future__ import annotations
 
@@ -75,6 +65,32 @@ class NotifyResult:
 # realtime bus fans WebSocket events through), imported lazily to avoid a
 # module-import cycle (chat.ws → schemas → ... → push at collection time).
 # ---------------------------------------------------------------------------
+
+
+async def _is_user_live_elsewhere(user_id: str) -> bool:
+    """True when another web process holds a live socket for the user. Always
+    False unless ``POCKETPAW_REALTIME_BUS=redis-streams``."""
+    from pocketpaw_ee.cloud._core.realtime import presence
+    from pocketpaw_ee.cloud.chat.ws import manager
+
+    return await presence.is_online_elsewhere(manager, user_id)
+
+
+async def _relay_over_ws(user_id: str, payload: PushPayload) -> None:
+    """Hand the notification frame to the other web processes, which deliver it
+    to the user's sockets they hold."""
+    from pocketpaw_ee.cloud._core.realtime import broadcast
+    from pocketpaw_ee.cloud.chat.ws import manager
+
+    channel = manager.relay_channel or broadcast.active_channel()
+    if channel is None:
+        return
+    await channel.publish_group(
+        f"notify:{user_id}",
+        [user_id],
+        WS_NOTIFICATION_TYPE,
+        payload.model_dump(exclude_none=True),
+    )
 
 
 def _is_user_live(user_id: str) -> bool:
@@ -132,6 +148,10 @@ async def notify(
     """
     payload = PushPayload.model_validate(payload)
 
+    live_elsewhere = await _is_user_live_elsewhere(user_id)
+    if live_elsewhere:
+        await _relay_over_ws(user_id, payload)
+
     if _is_user_live(user_id):
         # Live desktop/browser client → WS only, skip Web Push (the dedupe).
         try:
@@ -147,7 +167,7 @@ async def notify(
             )
             return NotifyResult(transport="ws", ws_delivered=False)
 
-        if delivered:
+        if delivered or live_elsewhere:
             return NotifyResult(transport="ws", ws_delivered=True)
 
         # Looked live, reached nobody — every socket was half-open and got
@@ -161,6 +181,10 @@ async def notify(
         )
         result = await push_service.send_to_user(workspace_id, user_id, payload)
         return NotifyResult(transport="ws_fallback_push", ws_delivered=False, send=result)
+
+    if live_elsewhere:
+        # Delivered by the process holding the user's sockets.
+        return NotifyResult(transport="ws", ws_delivered=True)
 
     # No live connection → Web Push fallback.
     result = await push_service.send_to_user(workspace_id, user_id, payload)

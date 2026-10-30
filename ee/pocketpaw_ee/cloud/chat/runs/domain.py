@@ -1,54 +1,22 @@
-"""Value objects for chat runs. ``RunSpec`` must survive an arq pickle
-round-trip — primitives only.
+"""Value objects and timing resolvers for chat runs.
 
-Changes: 2026-06-05 (fix/sites-surface-through-runspec) — ``RunSpec`` grows
-``surface`` + ``surface_meta``. The HTTP handler resolves the per-turn
-``SurfaceContext`` but submits a ``RunSpec`` to the run executor, which
-rebuilds its own ctx from this spec — so without these fields the surface
-hint was dropped at the boundary and the whole SurfaceProfile gate (tool-deny,
-ripple-block omission, preamble, create-svelte-site skill) silently no-oped on
-the real ``/agent`` path. Both default to the legacy shape (``None`` / ``{}``),
-which the resolver turns into a GENERIC context with an empty deny — so
-non-/sites and older clients are unchanged.
+``RunSpec`` is what the HTTP handler hands the run executor, and it must survive
+an arq pickle round-trip, so every field is a primitive. The executor rebuilds
+its own context from the spec, which is why per-turn choices the handler already
+resolved (``surface``/``surface_meta``, ``model_override``, ``tools_enabled``,
+``flow_context``, ``persist_user_text``) ride on it: a field left off is silently
+dropped at the submit boundary.
 
-Changes: 2026-07-08 (CS-13, feat/per-send-model-override) — ``RunSpec`` grows
-``model_override``: the optional per-send model id from ``CloudAgentChatRequest.model``.
-Same boundary reason as ``surface`` — the HTTP handler has the value but submits a
-``RunSpec`` to the executor, so without carrying it the executor's rebuilt ctx would
-never see the client's model choice. ``None`` (the default / older clients) leaves the
-backend's own model selection untouched, byte-identical to today. It's a bare ``str``,
-so it survives the pickle round-trip like every other field.
+``RunActivityRow`` and ``StrandedReply`` are Beanie-free read projections, so
+consumers outside this entity never import ``ChatRunDoc`` (EE Rule 2).
 
-Changes: 2026-07-28 (HR-12a, feat/cockpit-agent-activity) — added
-``RunActivityRow``, the read-side projection of a run. ``ChatRunDoc`` is owned by
-``chat.runs.service`` (EE Rule 1: Beanie only from service.py), so a consumer
-outside this entity — ``ee.cloud.agent_activity``, which answers "which of my
-agents are working right now" — reads runs as these Beanie-free value objects
-rather than importing the document class.
-
-Changes: 2026-09-04 (fix/unblock-event-loop, backend-perf M7) — this module also
-holds the per-run TIMEOUT resolver now. It used to be private to ``worker.py``,
-which meant the SSE reader in ``router.py`` could not see it: the stream loop
-had no maximum lifetime at all, so a run whose terminal event never arrived
-(worker OOM-killed after the events key existed, which defeats the
-``stream_exists`` fallback) heartbeated forever, holding a blocked Redis
-connection and a live asyncio task per abandoned client. The stream's natural
-bound is the run's own timeout, and the two must not drift apart — raising
-``POCKETPAW_CLOUD_RUN_JOB_TIMEOUT`` has to lengthen the stream cap too, or the
-cap starts killing streams of runs that are still legitimately working. So both
-read one resolver. It lives here rather than in ``worker.py`` because
-``router.py`` importing the worker would pull arq and the whole executor graph
-into the web process. Same reasoning, and the same shape, as
-``jobs/domain.py::job_timeout_seconds``.
-
-Changes: 2026-07-26 (concierge transcripts) — ``RunSpec`` grows
-``persist_user_text``: the user's message text to WRITE DOWN on the run doc, as
-opposed to ``content``, which is what the agent is asked. Every authed surface
-leaves it "" because it already persisted the user turn as its own Message row;
-the CONCIERGE surface sets it (when the site's retention toggle allows) because
-its anonymous visitor has no Message row, so the run doc is the only place the
-visitor half of a transcript can live. A bare ``str``, so it pickles like the
-rest."""
+The timing resolvers live here rather than in ``worker.py`` so the web process
+(the SSE reader, the sweeper, the arq executor) can read them without importing
+arq's worker graph. They derive from each other on purpose:
+``stream_max_lifetime_seconds`` is the job timeout plus a grace, and
+``queued_stream_ttl_seconds`` adds the queued cutoff on top, so raising one knob
+can never make a stream expire under a run that is still legitimately alive.
+"""
 
 from __future__ import annotations
 
@@ -73,6 +41,12 @@ DEFAULT_RUN_JOB_TIMEOUT_SECONDS = 1800  # 30 minutes
 # 15s slices — so a cap equal to the job timeout would race the very frame it is
 # waiting for and report a spurious error on a healthy run.
 STREAM_LIFETIME_GRACE_SECONDS = 120
+
+# How many times one chat run may be driven: the first attempt plus one automatic
+# retry when the WORKER killed it (deploy or restart past the drain window). Both the
+# run doc's ``attempt`` cap and arq's ``max_tries`` for ``execute_run_job`` read this,
+# so arq never re-runs a job the run doc would refuse, and vice versa.
+MAX_RUN_ATTEMPTS = 2
 
 
 def run_job_timeout_seconds() -> int:
@@ -114,6 +88,47 @@ def stream_max_lifetime_seconds() -> int:
     return run_job_timeout_seconds() + STREAM_LIFETIME_GRACE_SECONDS
 
 
+# How long a run may sit ``queued`` (waiting for a free worker slot) before the
+# web sweeper gives up on it and tells the client. Not tied to the heartbeat: a
+# queued run has no worker yet, so nothing beats for it.
+DEFAULT_QUEUED_TIMEOUT_MINUTES = 10
+_MIN_QUEUED_TIMEOUT_MINUTES = 1
+_QUEUED_TIMEOUT_ENV = "POCKETPAW_CLOUD_RUN_QUEUED_TIMEOUT_MINUTES"
+
+
+def queued_timeout_minutes() -> int:
+    """Resolve the queued-run cutoff from ``POCKETPAW_CLOUD_RUN_QUEUED_TIMEOUT_MINUTES``.
+
+    Defaults to 10. Unparseable falls back to the default; values under one
+    minute are clamped, since a tiny cutoff would interrupt every run that waits
+    even briefly behind a busy worker.
+    """
+    raw = os.environ.get(_QUEUED_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return DEFAULT_QUEUED_TIMEOUT_MINUTES
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not an int; using default %dm",
+            _QUEUED_TIMEOUT_ENV,
+            raw,
+            DEFAULT_QUEUED_TIMEOUT_MINUTES,
+        )
+        return DEFAULT_QUEUED_TIMEOUT_MINUTES
+    return max(val, _MIN_QUEUED_TIMEOUT_MINUTES)
+
+
+def queued_stream_ttl_seconds() -> int:
+    """TTL for a stream created by the ``queued`` frame at enqueue time.
+
+    Nothing else bounds the key until a terminal write refreshes it, so it must
+    outlive the longest legitimate path: waiting the full queued cutoff, then
+    running the full job timeout, then the reader's grace.
+    """
+    return queued_timeout_minutes() * 60 + stream_max_lifetime_seconds()
+
+
 class RunSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -149,6 +164,7 @@ class RunSpec(BaseModel):
     # must ride the spec to survive the submit. ``None`` = backend picks the model
     # (the legacy path). Validated at the HTTP edge before it ever reaches here.
     model_override: str | None = None
+    tools_enabled: bool | None = None
     # Studio Flow build context, mirrored from ``CloudAgentChatRequest.flow_context``
     # so the executor (which rebuilds its own ctx from this spec) can inject the
     # ACTIVE FLOW ID into the agent's prompt and drive ``build_studio_flow`` into
@@ -178,3 +194,25 @@ class RunActivityRow(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     ended_at: datetime | None = None
+
+
+class StrandedReply(BaseModel):
+    """Assistant text that a terminal run stored and no ``Message`` row carries.
+
+    The run document is the only copy, which is what makes this a REACHABILITY
+    projection rather than a recovery one — nothing has to be restored, only
+    read. ``status`` rides along because the history reader annotates the replay
+    with it: a reply the user deliberately stopped and one the provider killed
+    are both unfinished, and the model is told which.
+
+    ``text`` is the VERBATIM stored partial. Nothing is prepended or appended
+    here: the "this was cut off" marker is applied at read time by the history
+    shaping, so the wording can change without a migration and the UI can still
+    render the stored text truthfully.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    status: str
+    text: str
+    created_at: datetime

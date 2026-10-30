@@ -42,11 +42,12 @@ def build_adapter(local_root: Path) -> StorageAdapter:
     # Routers instantiate adapters at module import time, which happens before
     # the dashboard lifecycle loads .env. Call ``load_dotenv`` defensively so
     # S3_* / POCKETPAW_UPLOAD_ADAPTER are visible here regardless of order.
-    # ``load_dotenv`` is idempotent and won't override vars already in env.
+    # ``load_dotenv`` is idempotent and won't override vars already in env. Only
+    # the cwd's .env: a bare call walks parent directories for one.
     try:  # pragma: no cover — trivial guard
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(".env")
     except ImportError:
         pass
 
@@ -87,7 +88,7 @@ def build_public_adapter() -> StorageAdapter | None:
     try:  # pragma: no cover — trivial guard, mirrors build_adapter
         from dotenv import load_dotenv
 
-        load_dotenv()
+        load_dotenv(".env")
     except ImportError:
         pass
 

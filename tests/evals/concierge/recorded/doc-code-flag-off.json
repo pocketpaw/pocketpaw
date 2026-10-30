@@ -1,0 +1,10 @@
+{
+  "case_id": "doc-code-flag-off",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model: no real run was possible when CR-6 shipped. MISBEHAVING on purpose for this site: a verbatim quote, but the doc-code switch is off, so it must be replaced.. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "7ab89b5815bac36b",
+  "raw_model_output": "Install it with pip:\n```bash\npip install brewkit\nbrewkit init --site demo\n```"
+}

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 from pocketpaw.mission_control.models import AgentStatus
@@ -102,15 +103,18 @@ async def build_activity(
     now = now or datetime.now(UTC)
     since = now - RECENT_WINDOW
 
-    active_rows = await runs_service.find_active_runs_for_workspace(
-        workspace_id=workspace_id,
-        since=since,
-        limit=MAX_ACTIVE_RUNS_SCANNED,
-    )
-    recent_rows = await runs_service.find_recent_runs_for_workspace(
-        workspace_id=workspace_id,
-        since=since,
-        limit=MAX_RECENT_RUNS_SCANNED,
+    # Independent reads, so they run concurrently.
+    active_rows, recent_rows = await asyncio.gather(
+        runs_service.find_active_runs_for_workspace(
+            workspace_id=workspace_id,
+            since=since,
+            limit=MAX_ACTIVE_RUNS_SCANNED,
+        ),
+        runs_service.find_recent_runs_for_workspace(
+            workspace_id=workspace_id,
+            since=since,
+            limit=MAX_RECENT_RUNS_SCANNED,
+        ),
     )
 
     # The two reads overlap (an active run is also a recent run), so dedupe by

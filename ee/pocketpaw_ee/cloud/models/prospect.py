@@ -21,8 +21,15 @@
 # imported prospect. Plus a (workspace, source, createdAt) index: the monthly
 # discovery ceiling counts this workspace's discovered rows in the current
 # period, and that count runs on every discovery run.
+# ``research`` holds the structured profile from the last single-prospect
+# research run (a plain dict, validated by ``growth.dto.ProspectResearch`` on
+# the way in and out) and ``researched_at`` when it ran; both None until then.
+# ``whatsapp_opt_out_at`` is set when the prospect replies STOP on WhatsApp and
+# cleared by START; while it is set, no other reply turns ``opted_in`` back on.
 
 from __future__ import annotations
+
+from datetime import datetime
 
 from beanie import Indexed
 from pydantic import Field
@@ -54,6 +61,8 @@ class Prospect(TimestampedDocument):
     linkedin_url: str | None = None
     whatsapp_number: str | None = None
     opted_in: bool = False
+    # When the prospect replied STOP (or another opt-out keyword) on WhatsApp.
+    whatsapp_opt_out_at: datetime | None = None
     status: str = "new"  # new | qualified | drafted | in_sequence | replied | dead
     # The standing ICP that discovered this row, when discovery did. None on a
     # typed or imported prospect.
@@ -61,6 +70,8 @@ class Prospect(TimestampedDocument):
     # The pages the research read to produce this row — the audit trail for a
     # prospect nobody typed. Empty on a manually created one.
     source_urls: list[str] = Field(default_factory=list)
+    research: dict | None = None
+    researched_at: datetime | None = None
 
     class Settings:
         name = "growth_prospects"

@@ -173,7 +173,13 @@ class TestLoopArtifactEmission:
         meta = {"file_id": "fid1", "name": "chart.png", "mime": "image/png", "size": 42}
 
         async def run(
-            message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+            message,
+            *,
+            system_prompt=None,
+            history=None,
+            session_key=None,
+            system_prompt_digest="",
+            turn_split=None,
         ):
             yield AgentEvent(type="message", content="Here is your chart.")
             yield AgentEvent(
@@ -207,7 +213,13 @@ class TestLoopArtifactEmission:
         meta = {"file_id": "fid2", "name": "export.zip", "mime": "application/zip", "size": 9}
 
         async def run(
-            message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+            message,
+            *,
+            system_prompt=None,
+            history=None,
+            session_key=None,
+            system_prompt_digest="",
+            turn_split=None,
         ):
             yield AgentEvent(
                 type="tool_result",
@@ -232,7 +244,13 @@ class TestLoopArtifactEmission:
     @pytest.mark.asyncio
     async def test_no_media_no_artifact_and_no_attachment(self, mock_bus, mock_memory):
         async def run(
-            message, *, system_prompt=None, history=None, session_key=None, system_prompt_digest=""
+            message,
+            *,
+            system_prompt=None,
+            history=None,
+            session_key=None,
+            system_prompt_digest="",
+            turn_split=None,
         ):
             yield AgentEvent(type="message", content="Just a plain answer.")
             yield AgentEvent(type="done", content="")

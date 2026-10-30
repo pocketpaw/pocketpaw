@@ -1,0 +1,94 @@
+[
+  {
+    "label": "project publish in workers mode runs wrangler on the API host (author config executes there)",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        project_target = bundle_deploy.project_deploy_target(mode)\n        mode = \"workers\" if project_target == bundle_deploy.ACCOUNT_TARGET else \"wfp\"",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_publish_deploys_the_stored_manifest"
+    ]
+  },
+  {
+    "label": "a free site's worker binds R2 because the plan gate stops reading binding types",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "            and str(req.get(\"type\", \"\")).strip().lower() not in free_bindings",
+    "replace": "            and False",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_plan_gate",
+      "tests/ee/sites/test_project_engine.py::test_publish_refuses_paid_bindings_on_free"
+    ]
+  },
+  {
+    "label": "the build log is read across workspaces because the tenant check is gone",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if pocket.get(\"workspace\") != workspace_id:\n        raise NotFound(\"pocket\", pocket_id)",
+    "replace": "    pass",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_build_log_and_latest_are_scoped_to_the_pocket"
+    ]
+  },
+  {
+    "label": "the persisted build log keeps secrets and sandbox paths (no scrub before storing)",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "    clean = scrub_log_text(text or \"\")",
+    "replace": "    clean = text or \"\"",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_failed_build_records_a_redacted_log_and_the_cli_code"
+    ]
+  },
+  {
+    "label": "the worker bundle reaches the preview origin (server code served as a public file)",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "        if not name.startswith(prefix):\n            continue",
+    "replace": "        if False:\n            continue",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_worker_build_previews_static"
+    ]
+  },
+  {
+    "label": "a worker draft is reported as fully previewable",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "    return \"static\" if manifest_has_worker(dict(manifest)) else \"full\"",
+    "replace": "    return \"full\"",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_preview_mode",
+      "tests/ee/sites/test_project_engine.py::test_worker_build_previews_static"
+    ]
+  },
+  {
+    "label": "the API host builds a project itself (author install scripts run outside the sandbox)",
+    "file": "ee/pocketpaw_ee/sites/generator_client.py",
+    "find": "        if build_requires_sandbox(engine) or (",
+    "replace": "        if (",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_host_builds_are_refused"
+    ]
+  },
+  {
+    "label": "the build history is never written, so the builds list only shows the latest",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "        store.write(\n            pocket_id, verify_store.BUILD_HISTORY_KEY, {\"builds\": _fold_history(builds, record)}\n        )\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_builds_list_newest_first_with_trigger_times_and_hash"
+    ]
+  },
+  {
+    "label": "a finished build never gets its finish time",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "        prev[\"finished_at\"] = now\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_builds_list_newest_first_with_trigger_times_and_hash"
+    ]
+  },
+  {
+    "label": "the builds list reads another pocket's job ids",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await _project_pocket(workspace_id, user_id, pocket_id)\n    records = _records if _records is not None else verify_store.default_verify_store()\n    builds = [\n",
+    "replace": "    records = _records if _records is not None else verify_store.default_verify_store()\n    builds = [\n",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_builds_list_is_scoped_to_the_workspace_and_the_pocket"
+    ]
+  }
+]

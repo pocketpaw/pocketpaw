@@ -1,0 +1,110 @@
+---
+name: pocketpaw-site
+description: |
+  Build a NEW Paw Site: a repo started from a paw-sites template, `static`
+  (no build) for content pages or a framework template (Astro, TanStack Start,
+  Vite + React + Hono, Next, SvelteKit) for apps, games, npm packages, server
+  logic or a named framework. The platform contract: the build loop,
+  integrations (paw.js and the gateway), secrets and plan rules.
+---
+
+# Build a site
+
+Every tool below is on `mcp__pocketpaw_sites_manager__`. A site is a repo of
+files you edit: no rippleSpec, pocket specialist or `create_*_site` tool.
+
+## Pick the template
+
+Call `list_site_templates` and match `when_to_use`.
+- `static` only for content pages: landing, marketing, portfolio, brochure or
+  event pages, a little vanilla JS. No npm packages, no bundler.
+- A framework template when ANY hold: the site is an app, not a page (a game,
+  3D/WebGL or canvas, simulation, editor, tool, dashboard, client routing or
+  real state); it needs npm packages (three, @react-three/fiber, charts,
+  physics); it needs server logic, accounts or a database (data others see
+  later, e.g. bookings; never localStorage); or the user
+  named the framework. The named framework wins; for a client-heavy app with
+  no server needs, prefer `vite-react-hono`.
+- For something interactive, when unsure between `static` and a framework,
+  pick the framework.
+- State the template you chose and a one-line reason in your reply before
+  calling `start_site_from_template`.
+
+## Apps and games
+
+Load `sites-app-plan`: write `PLAN.md` before any UI file, then build every
+milestone, back to back.
+
+## The loop
+
+1. `start_site_from_template(slug, brief, name?)` ONCE. It returns `pocket_id`
+   and the repo's AGENTS.md. Never call it again for a change: that
+   makes a second site.
+2. Follow AGENTS.md over your habits: where pages, data, auth and tokens go,
+   which files are generated. Re-read it after a recipe adds a section.
+3. Recipes (framework templates): `list_site_recipes` (pass `template`), then
+   `apply_site_recipe` for each one the app needs, `requires` first. On a
+   conflict nothing was written: fix the files it names and apply again. Do its
+   `glue_tasks` in order.
+4. Connect integrations and request secrets (below).
+5. Design before the first UI file: run the research gate, state the locked
+   direction in one line, load `pocketpaw-design-taste`, then retheme the tokens
+   file AGENTS.md names with a real palette and font pairing. Never ship the
+   starter greys.
+6. Files: `list_site_files`, `read_site_files` before you change one,
+   `patch_site_file` with exact-once `{old, new}` blocks, `write_site_files` for
+   new or rewritten files, `delete_site_files`. Paths are from the repo root.
+7. `run_site_build` (instant on `static`); on `failed` read the log tail (or
+   `get_site_build_log`), fix, rebuild: three rounds, then say what fails.
+8. After EVERY `built`, look: `preview_site`, then `device: mobile`; `path`
+   for other routes, `wait_ms` for 3D or animation. Fix, look again. Never
+   describe what you have not seen; on an error say it was not visually
+   checked. `verify_site` once at the end; ready only on `passed`. On
+   `preview_mode: static`, say server routes run after publish.
+9. Everything saves to the DRAFT. Call `publish` only when the user asks; it
+   deploys the last build, so build first.
+
+## Integrations
+
+`list_site_integrations` lists the providers;
+`connect_site_integration(pocket_id, provider, purpose)` puts a
+Connect card in chat (built-ins like `newsletter` are on at once). Its reply
+says how to wire that provider: follow it. Never ask for an API key or use
+`request_site_secret` for one.
+
+Client, any page: the platform injects paw.js when a page uses it; never add the
+script yourself.
+- Buy button: `<button data-paw-checkout="<catalog product id>">` (Stripe;
+  `data-qty` for a fixed quantity). The price comes from the catalog, so a
+  printed price is display only.
+- Signup: `<form data-paw-subscribe>` with `<input type="email" name="email">`.
+- Anything else: `Paw.call(provider, action, args)` in a small script; set text
+  with `textContent`, never `innerHTML`.
+
+Server, framework templates: apply the `paw-integrations` recipe, then call
+`pawCall(env, provider, action, args)` from server code. The platform sets
+`env.PAW_GATEWAY_TOKEN`, `PAW_API_BASE` and `PAW_SITE_ID`; never request them.
+
+## Secrets
+
+For each secret NAME a recipe returns, call
+`request_site_secret(pocket_id, name, description)`; `list_site_secrets` shows
+which are set. If those tools are missing, tell the user which names to set.
+Never write a secret value into any file (`.env`, `.dev.vars`, wrangler.jsonc,
+source): only names go in `.dev.vars.example`.
+
+## Plans
+
+A recipe's plan refusal: tell the user and build the rest. A site
+tool's plan refusal: say so in one sentence with its next step and stop; never
+paste the site into chat or suggest another host.
+
+## Library docs
+
+AGENTS.md first; for a framework, library or embed API, search the web and
+fetch the current docs; never guess.
+
+## Do not
+
+- Edit generated files AGENTS.md names, or write under `_paw/`.
+- Put resource ids in wrangler.jsonc or any file.

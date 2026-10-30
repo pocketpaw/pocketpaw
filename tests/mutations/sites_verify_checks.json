@@ -1,0 +1,164 @@
+[
+  {
+    "label": "page checks fail the verdict: any warning turns a passed site into failed, so a placeholder or an em dash blocks the draft",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "    return {**verdict, \"checks\": checks}",
+    "replace": "    return {**verdict, \"checks\": checks, **({\"status\": \"failed\"} if checks[\"warnings\"] else {})}",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestVerdict::test_warnings_never_flip_a_passed_verdict"
+    ]
+  },
+  {
+    "label": "SC-LINK-01 off: a nav link to a section id that does not exist is never reported",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "            if fragment and fragment not in parsed.ids:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestLinks::test_anchor_without_target_is_link_01"
+    ]
+  },
+  {
+    "label": "SC-LINK-04 judges scripted pages: a framework form whose submit JS binds is reported as lost",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    if not parsed.has_script and not parsed.has_handlers:",
+    "replace": "    if True:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestLinks::test_forms_with_a_target_or_a_script_are_not_judged"
+    ]
+  },
+  {
+    "label": "visible-text filter gone: an em dash inside script, style, pre or code is reported as copy",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        if self._skip:\n            return\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestCopy::test_em_dash_outside_visible_text_is_clean"
+    ]
+  },
+  {
+    "label": "input placeholder attributes read as text: a form hint like [Your name] is reported as a leftover placeholder",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "_TEXT_ATTRS = (\"alt\", \"title\", \"aria-label\")",
+    "replace": "_TEXT_ATTRS = (\"alt\", \"title\", \"aria-label\", \"placeholder\")",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestHonest::test_input_placeholder_attribute_is_clean"
+    ]
+  },
+  {
+    "label": "warning cap removed: a large site floods the tool result with every warning",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "for w in warnings[:MAX_WARNINGS]]",
+    "replace": "for w in warnings]",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestReport::test_capped_with_an_omitted_count_and_strong_ids_first"
+    ]
+  },
+  {
+    "label": "project builds unread: a project site's verify never sees its built pages",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "        data = read_dist(pocket_id, project_build.bundle_key(content_hash))",
+    "replace": "        data = None",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestProject::test_project_build_bundle_is_checked_and_stays_unverified"
+    ]
+  },
+  {
+    "label": "client-routing exemption inferred on any engine: a one-page html site with a script never gets SC-LINK-03 for a missing page",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        engine in CLIENT_ROUTED_ENGINES\n        and ",
+    "replace": "        ",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestLinks::test_one_page_html_with_handlers_still_checks_page_links"
+    ]
+  },
+  {
+    "label": "hash routes read as anchors: a #/route link in a client app is reported as a missing id",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "if fragment and (_hash_route(fragment) or fragment.lower() == \"top\"):",
+    "replace": "if fragment and fragment.lower() == \"top\":",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestLinks::test_hash_routes_are_not_anchors"
+    ]
+  },
+  {
+    "label": "anchors wired as buttons reported: a toggle with href=\"#\" and role=button is called a dead link",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "            if not _wired_as_button(attrs):",
+    "replace": "            if True:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestLinks::test_anchor_wired_as_a_button_is_not_link_02"
+    ]
+  },
+  {
+    "label": "title and aria-hidden art counted as copy: an em dash in the tab title or decorative markup is reported",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        if not self._hidden_depth and not self._in_title:",
+    "replace": "        if True:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestCopy::test_title_and_aria_hidden_are_not_copy"
+    ]
+  },
+  {
+    "label": "server paths checked as assets: /_next and /api references on a Worker site are reported missing",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        if server_routes and norm.split(\"/\", 1)[0] in _SERVER_SEGMENTS:",
+    "replace": "        if False:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestLinks::test_server_routes_skip_page_links_and_server_paths_but_not_assets"
+    ]
+  },
+  {
+    "label": "react basics reported: the agent is told to fix a generator-owned index.html it cannot edit",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        if engine != \"react\":",
+    "replace": "        if True:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestBasics::test_react_index_is_the_generators_so_basics_are_skipped"
+    ]
+  },
+  {
+    "label": "no consolidation: one footer defect repeats once per page and fills the cap",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    warnings = _consolidate(warnings)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestReport::test_one_shared_defect_is_one_warning_with_a_page_count"
+    ]
+  },
+  {
+    "label": "no-page tree reads as clean: an SSR worker site shows zero warnings instead of saying nothing was checked",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    if not names:\n        return skipped(\"no_pages\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestReport::test_a_tree_with_no_pages_is_skipped"
+    ]
+  },
+  {
+    "label": "byte budget gone: a huge tree is parsed in full inside one verify",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "if len(pages) >= MAX_PAGES or len(text) > budget:",
+    "replace": "if len(pages) >= MAX_PAGES:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestReport::test_pages_past_the_byte_budget_are_counted"
+    ]
+  },
+  {
+    "label": "checks block the event loop: the artifact read and parsing run on the loop thread",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "await asyncio.to_thread(_page_checks, pocket, pocket_id, content_hash, artifacts)",
+    "replace": "_page_checks(pocket, pocket_id, content_hash, artifacts)",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestVerdict::test_checks_run_off_the_event_loop"
+    ]
+  },
+  {
+    "label": "upgraded cache hit not stored: every hit on an old verdict re-reads and re-parses the site",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "            _save(store, pocket_id, inputs.content_hash, hit)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks.py::TestVerdict::test_an_old_cached_verdict_is_upgraded_once"
+    ]
+  }
+]

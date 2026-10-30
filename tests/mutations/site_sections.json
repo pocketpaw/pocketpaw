@@ -1,0 +1,137 @@
+[
+  {
+    "label": "an unchanged section is compiled again on every re-sync",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "            if old is not None and old[\"hash\"] == section.hash:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/test_site_kb_sections.py::test_an_unchanged_page_is_not_recompiled"
+    ]
+  },
+  {
+    "label": "a section whose compile failed loses its article to the prune",
+    "file": "ee/pocketpaw_ee/sites/kb_ingest.py",
+    "find": "            if not ids[i] and old is not None:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/test_site_kb_sections.py::test_a_failed_section_compile_deletes_nothing"
+    ]
+  },
+  {
+    "label": "every section of a page shares one source, so kb-go cannot tell them apart",
+    "file": "ee/pocketpaw_ee/sites/page_sections.py",
+    "find": "                    source=f\"{doc.source}#{slug}\",",
+    "replace": "                    source=doc.source,",
+    "tests": [
+      "tests/cloud/test_site_kb_sections.py::test_a_long_docs_page_splits_at_its_headings"
+    ]
+  },
+  {
+    "label": "a repeated heading reuses its slug and overwrites the first section",
+    "file": "ee/pocketpaw_ee/sites/page_sections.py",
+    "find": "            if used[slug] > 1:",
+    "replace": "            if False:",
+    "tests": [
+      "tests/cloud/test_site_kb_sections.py::test_repeated_headings_get_unique_sources"
+    ]
+  },
+  {
+    "label": "a section hit is cited without its heading's anchor",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        fragment = f\"#{quote(anchor, safe=_PATH_SAFE)}\" if anchor else \"\"",
+    "replace": "        fragment = \"\"",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_a_section_hit_cites_its_page_and_anchor"
+    ]
+  },
+  {
+    "label": "the site's knowledge budget is ignored and every turn gets the default",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "        budget = knowledge_chars(site)\n",
+    "replace": "        budget = _KNOWLEDGE_CHARS\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_the_site_budget_changes_what_reaches_the_prompt"
+    ]
+  },
+  {
+    "label": "an item past the budget is dropped instead of cut to what is left",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            if cap < _MIN_ITEM_CHARS:\n                break",
+    "replace": "            if True:\n                break",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_items_are_cut_in_rank_order_to_what_is_left"
+    ]
+  },
+  {
+    "label": "the visitor's page section is picked by page order, not by the question",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    matched = sorted((i for i in range(len(found)) if scores[i] > 0), key=lambda i: -scores[i])",
+    "replace": "    matched = [i for i in range(len(found)) if scores[i] > 0]",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_the_best_matching_section_leads_not_the_first_in_page_order"
+    ]
+  },
+  {
+    "label": "the settings PATCH stores a knowledge budget outside its bounds",
+    "file": "ee/pocketpaw_ee/paw_bar/router.py",
+    "find": "    StrictInt, Field(ge=CONCIERGE_KNOWLEDGE_CHARS_MIN, le=CONCIERGE_KNOWLEDGE_CHARS_MAX)",
+    "replace": "    int, Field()",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_settings_patch_rejects_an_out_of_range_budget"
+    ]
+  },
+  {
+    "label": "the lead hit no longer brings the rest of its page, so a question that misses the answering section's words gets no answer",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    found = await _read_sections(scope, wanted) if wanted else []\n",
+    "replace": "    found = []\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_a_section_hit_brings_its_page_in_a_real_turn"
+    ]
+  },
+  {
+    "label": "every section of the visitor's page goes in, matched or not",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    for i in matched or [0]:",
+    "replace": "    for i in matched + [i for i in range(len(found)) if i not in matched]:",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_the_page_article_is_the_first_section_when_nothing_matches"
+    ]
+  },
+  {
+    "label": "the visitor's sectioned page leads again, ahead of the hit that answers the question (the home-page regression)",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if lead is None or not sectioned or not page_items:\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_from_the_home_page_the_answering_section_beats_the_page"
+    ]
+  },
+  {
+    "label": "the visitor page's sections are no longer held to a quarter of the budget behind a lead",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "_within_budget(page_items, budget // 4)",
+    "replace": "_within_budget(page_items, budget)",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_from_the_home_page_the_answering_section_beats_the_page"
+    ]
+  },
+  {
+    "label": "a message naming nothing still picks a lead, so 'how much is this?' loses the visitor's page",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "            and any(term in hit.text.lower() for term in terms)\n",
+    "replace": "            and True\n",
+    "tests": [
+      "tests/cloud/test_paw_bar_concierge_sections.py::test_a_deictic_question_keeps_the_visitors_page_first"
+    ]
+  },
+  {
+    "label": "site sections are compiled by kb-go when an API key is set",
+    "file": "ee/pocketpaw_ee/cloud/agents/knowledge.py",
+    "find": "        plain = [Section(title_hint=s.title, text=s.text) for s in sections]\n",
+    "replace": "        if os.environ.get(\"ANTHROPIC_API_KEY\"):\n            raise RuntimeError(\"kb-go compiles\")\n        plain = [Section(title_hint=s.title, text=s.text) for s in sections]\n",
+    "tests": [
+      "tests/cloud/test_site_kb_sections.py::test_with_an_api_key_kb_still_never_compiles"
+    ]
+  }
+]

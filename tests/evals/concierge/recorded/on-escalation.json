@@ -1,0 +1,10 @@
+{
+  "case_id": "on-escalation",
+  "mode": "recorded",
+  "authored_by": "hand",
+  "note": "HAND-AUTHORED, not captured from a model. well-behaved don't-know with the email route the visitor asked for. Replace with `run --real --record`.",
+  "model_spec": null,
+  "captured_at": null,
+  "prompt_fingerprint": "7ea8def5eec829e3",
+  "raw_model_output": "I don't have information about wholesale pricing. You can write to hello@brewco.test for a quote."
+}

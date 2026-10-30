@@ -2,6 +2,10 @@
 # ephemeral Daytona lane instead of shelling out to bun in the API container.
 # Created 2026-08-24.
 #
+# Updated 2026-09-24 (PP-2): the preview job result now also carries agent-only
+# diagnostics (the scaffold test asserts stderr still never appears anywhere in it),
+# and its arq timeout adds the browser step.
+#
 # WHAT BROKE, AND WHAT THIS PINS. ``get_native_artifact``'s cold miss used to call
 # ``generator.build`` → ``bun``. The deployed API container has no toolchain, so every
 # cold preview raised and reached the user as ``sites.generator_failed``. The PUBLISH
@@ -490,9 +494,25 @@ class TestReadingARefusedEnqueue:
             "scaffold_failed:generator_raised",
         )
 
-    async def test_a_job_that_raised_reads_as_a_lost_sandbox(self, monkeypatch) -> None:
-        """``run_site_preview_build`` re-raises for exactly one condition — a sandbox it
-        never reached. The exception text can name paths, so only the rung travels."""
+    async def test_a_job_that_never_got_a_sandbox_reads_as_a_lost_sandbox(
+        self, monkeypatch
+    ) -> None:
+        """The job wraps a sandbox it never reached in ``SandboxUnavailableError``. The
+        exception text can name paths, so only the rung travels."""
+        from arq.jobs import JobStatus
+
+        class _Info:
+            success = False
+            result = bj.SandboxUnavailableError("RuntimeError: Daytona is not configured")
+
+        self._patch_job(monkeypatch, status=JobStatus.complete, info=_Info())
+        status, reason = await bj._preview_job_outcome(object(), "j1")
+        assert status == "failed"
+        assert reason == f"{bj.RUNG_SANDBOX_UNAVAILABLE}:no_sandbox"
+        assert "Daytona" not in (reason or "")
+
+    async def test_a_job_that_crashed_reads_as_our_crash(self, monkeypatch) -> None:
+        """Any other raise is a bug on our side, not an unreachable build service."""
         from arq.jobs import JobStatus
 
         class _Info:
@@ -502,7 +522,7 @@ class TestReadingARefusedEnqueue:
         self._patch_job(monkeypatch, status=JobStatus.complete, info=_Info())
         status, reason = await bj._preview_job_outcome(object(), "j1")
         assert status == "failed"
-        assert reason == f"{bj.RUNG_SANDBOX_UNAVAILABLE}:job_raised"
+        assert reason == f"{bj.RUNG_JOB_CRASHED}:unhandled_exception"
         assert "Daytona" not in (reason or "")
 
     async def test_an_expired_result_reads_as_building_not_failed(self, monkeypatch) -> None:
@@ -619,12 +639,15 @@ class TestThePreviewJob:
             client=client,
         )
 
-        assert settlement == {
-            "status": "failed",
-            "reason": f"{bj.RUNG_SCAFFOLD_FAILED}:generator_raised",
-        }
+        assert settlement["status"] == "failed"
+        assert settlement["reason"] == f"{bj.RUNG_SCAFFOLD_FAILED}:generator_raised"
         assert client.calls == [], "a scaffold failure must not create a sandbox"
-        assert "bun: not found" not in settlement["reason"]
+        # PP-2: the result now carries agent diagnostics, and an UNSTRUCTURED raise's
+        # text is still not known to be safe, so it travels by class name only.
+        import json as _json
+
+        assert "bun: not found" not in _json.dumps(settlement)
+        assert settlement["layers"]["build"]["status"] == "failed"
 
     async def test_an_empty_scaffold_is_caught_before_a_sandbox_exists(self) -> None:
         client = _sandbox()
@@ -648,11 +671,50 @@ class TestThePreviewJob:
         assert store.data == {}
 
     async def test_a_lost_sandbox_re_raises_for_the_worker_log(self) -> None:
-        """The one condition the job does NOT swallow. ``_preview_job_outcome`` maps the
-        failed arq job back to the ``sandbox_unavailable`` rung, so a poller still gets a
-        terminal answer — but an operator needs the real exception in the log."""
-        with pytest.raises(Exception):
+        """The one condition the job does NOT swallow. It raises its own
+        ``SandboxUnavailableError`` so ``_preview_job_outcome`` can tell a sandbox we
+        never got (``sandbox_unavailable:no_sandbox``) from a crash, and a poller still
+        gets a terminal answer — but an operator needs the real exception in the log."""
+        with pytest.raises(bj.SandboxUnavailableError) as raised:
             await _run_preview_job(client=_sandbox(fail_at="create"))
+        assert raised.value.__cause__ is not None
+
+    async def test_a_timeout_our_own_code_raises_reads_as_a_crash(self, monkeypatch) -> None:
+        """arq's limit reaches the job as a cancellation, so a ``TimeoutError`` escaping
+        the body is ours (an SDK call, an await with its own deadline). It must not read
+        as ``timed_out:job_timeout``, which means arq stopped the job."""
+
+        def _slow(*_a: Any, **_k: Any) -> Any:
+            raise TimeoutError("an SDK call gave up")
+
+        monkeypatch.setattr(bj, "resolve_build_settlement", _slow)
+
+        with pytest.raises(Exception) as raised:
+            await _run_preview_job()
+
+        assert not isinstance(raised.value, TimeoutError)
+        assert isinstance(raised.value.__cause__, TimeoutError)
+        assert bj.raised_job_reason(raised.value) == f"{bj.RUNG_JOB_CRASHED}:unhandled_exception"
+
+    async def test_an_unexpected_raise_is_logged_with_its_traceback(
+        self, monkeypatch, caplog
+    ) -> None:
+        """A crash anywhere else in the job used to reach the worker log only through
+        arq's own logger, which nothing we read. The job logs it before it re-raises."""
+        import logging
+
+        def _boom(*_a: Any, **_k: Any) -> Any:
+            raise ValueError("settlement blew up")
+
+        monkeypatch.setattr(bj, "resolve_build_settlement", _boom)
+        caplog.set_level(logging.ERROR, logger=bj.logger.name)
+
+        with pytest.raises(ValueError):
+            await _run_preview_job(pocket_id="pk-crash")
+
+        hits = [r for r in caplog.records if "pk-crash" in r.getMessage() and r.exc_info]
+        assert hits, [r.getMessage() for r in caplog.records]
+        assert hits[0].exc_info[0] is ValueError
 
     async def test_an_unbuildable_engine_is_refused_before_a_sandbox(self) -> None:
         """A routing bug, not a build failure. ``get_native_artifact`` gates on
@@ -692,8 +754,11 @@ class TestTheWorkerRunsThePreviewLane:
         assert bj.PREVIEW_ARQ_FUNCTION_NAME in registered
         preview = registered[bj.PREVIEW_ARQ_FUNCTION_NAME]
         assert preview.coroutine is bj.run_site_preview_build
-        # Same budget as the publish build — it IS the same build; only what happens to
-        # the artifact differs.
-        assert preview.timeout_s == bj.site_build_job_timeout_seconds()
-        # A preview is billed per attempt too, so the retry decision is the caller's.
-        assert preview.max_tries == 1
+        # The publish build's budget PLUS the browser step (PP-2): it is the same build,
+        # followed by the harness in the same sandbox.
+        assert preview.timeout_s > bj.site_build_job_timeout_seconds()
+        assert preview.timeout_s == bj.site_preview_job_timeout_seconds()
+        # A preview is billed per attempt too: arq retries only the capacity ``Retry``.
+        from pocketpaw_ee.sites.capacity import CAPACITY_MAX_TRIES
+
+        assert preview.max_tries == CAPACITY_MAX_TRIES

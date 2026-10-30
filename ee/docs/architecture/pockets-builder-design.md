@@ -689,7 +689,7 @@ forbidden_modules =
 - `ee.cloud.pockets.domain` — for the existing `Pocket` / `Widget` value objects
 - `ee.cloud.pockets.agent_context` — for `_push_replace` style SSE mutation pushes
 - `ee.cloud.sessions.service` — for `attach_pocket_to_session_doc`
-- `ee.cloud.realtime.emit` + `ee.cloud.realtime.events` — for `SessionUpdated`
+- `ee.cloud._core.realtime.emit` + `ee.cloud._core.realtime.events` — for `SessionUpdated`
 - `pocketpaw.config.Settings` — for provider key access
 - Standard library + `pydantic` + `httpx` — always allowed
 

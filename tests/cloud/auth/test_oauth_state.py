@@ -78,6 +78,35 @@ async def test_consume_deletes_even_when_the_caller_never_looks_again(_fake_redi
     assert await _fake_redis.get(f"social_state:{state}") is None
 
 
+async def test_concurrent_consumers_get_the_state_exactly_once():
+    import asyncio
+
+    state = await _oauth_state.issue("social", {"a": 1})
+    results = await asyncio.gather(
+        *(_oauth_state.consume("social", state) for _ in range(20)), return_exceptions=True
+    )
+    assert sum(r == {"a": 1} for r in results) == 1
+    assert all(isinstance(r, Forbidden) for r in results if r != {"a": 1})
+
+
+async def test_consume_is_atomic_on_a_client_without_getdel(_fake_redis, monkeypatch):
+    class _NoGetdel:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name == "getdel":
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(redis_client, "get_redis", lambda: _NoGetdel(_fake_redis))
+    state = await _oauth_state.issue("social", {"a": 1})
+    assert await _oauth_state.consume("social", state) == {"a": 1}
+    assert await _fake_redis.get(f"social_state:{state}") is None
+    with pytest.raises(Forbidden):
+        await _oauth_state.consume("social", state)
+
+
 async def test_unknown_state_is_refused():
     with pytest.raises(Forbidden) as exc:
         await _oauth_state.consume("social", "never-issued")

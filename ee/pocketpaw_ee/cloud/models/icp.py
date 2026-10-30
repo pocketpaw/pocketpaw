@@ -1,11 +1,13 @@
 # ee/pocketpaw_ee/cloud/models/icp.py — the ICP record for the /growth
-# discovery engine: a STANDING description of who a workspace wants, plus the
-# cadence the discovery cron runs it on. Workspace-scoped. Only
-# ``ee.cloud.growth.service`` may import this doc class (import-linter "Growth"
-# contract).
+# discovery engine: a STANDING description of who a workspace wants, the
+# cadence the discovery cron runs it on, and the result of its last preview.
+# Workspace-scoped. Only ``ee.cloud.growth.service`` may import this doc class
+# (import-linter "Growth" contract).
 #
-# Created 2026-07-29 (feat/growth-discovery): first slice of the discovery
-# engine — the ICP store, its CRUD, and the research seam that reads it.
+# ``last_preview`` holds the last dry run as a plain dict (items / notes /
+# error, the ``IcpPreviewResponse`` shape minus ``icp_id``). It vouches for the
+# criteria it was run against, so the service clears it whenever criteria,
+# geography, exclusions or max_per_run change.
 #
 # NO unique index. Unlike ``Prospect`` (where ``domain`` is a real dedupe
 # identity), two ICPs in one workspace may legitimately share a name: an agency
@@ -47,6 +49,8 @@ class Icp(TimestampedDocument):
     # the cadence + the tick, not on this, so a missed tick is a missed tick
     # rather than a backlog that fires all at once on recovery.
     last_run_at: datetime | None = None
+    last_preview: dict | None = None
+    last_preview_at: datetime | None = None
 
     class Settings:
         name = "growth_icps"

@@ -19,5 +19,19 @@
     "find": "[options]\nexclude-newer = \"2026-08-10T00:00:00Z\"",
     "replace": "[options]",
     "tests": ["tests/test_supply_chain_floor.py::TestThePythonSupplyChainFloor"]
+  },
+  {
+    "label": "D2: a per-package cutoff is pushed into the future, so that one package resolves anything the index published today while the global floor still looks intact",
+    "file": "pyproject.toml",
+    "find": "exclude-newer-package = { claude-agent-sdk = \"2026-09-20T00:00:00Z\" }",
+    "replace": "exclude-newer-package = { claude-agent-sdk = \"2099-01-01T00:00:00Z\" }",
+    "tests": ["tests/test_supply_chain_floor.py::TestThePythonSupplyChainFloor"]
+  },
+  {
+    "label": "D2: the enterprise layer's per-package cutoff is dropped, so ee/uv.lock pins a release newer than the only floor it still declares",
+    "file": "ee/pyproject.toml",
+    "find": "exclude-newer-package = { claude-agent-sdk = \"2026-09-20T00:00:00Z\" }",
+    "replace": "",
+    "tests": ["tests/test_supply_chain_floor.py::TestThePythonSupplyChainFloor"]
   }
 ]

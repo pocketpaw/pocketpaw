@@ -198,3 +198,119 @@ async def test_client_record_is_tenant_scoped(beanie_test_db):
         await sites_service.record_site_invoice(
             workspace_id="ws-b", site_id=site_id, body=SiteInvoiceCreate(amount_cents=1)
         )
+
+
+# --------------------------------------------------------------------------- #
+# Money units: every new invoice is stamped "iso4217"; a legacy client's amount
+# (no X-Paw-Money-Units header, major x 100) is converted on the way in.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("minor_units", "currency", "sent", "stored"),
+    [
+        (True, "JPY", 1500, 1500),  # header: stored as sent
+        (False, "JPY", 150000, 1500),  # no header: legacy major x 100, converted
+        (True, "USD", 350, 350),
+        (False, "USD", 350, 350),  # two decimals: the same either way
+        (False, "KWD", 125, 1250),
+    ],
+)
+async def test_invoice_create_stamps_and_converts_only_a_legacy_amount(
+    beanie_test_db, minor_units, currency, sent, stored
+):
+    from collections import Counter
+
+    from tests.test_invoice_minor_units_migration import _load
+
+    site_id = await _make_site(pocket_id="pk-money-units")
+    rec = await sites_service.record_site_invoice(
+        workspace_id="ws1",
+        site_id=site_id,
+        body=SiteInvoiceCreate(amount_cents=sent, currency=currency),
+        minor_units=minor_units,
+    )
+    [inv] = rec.invoices
+    assert (inv.amount_cents, inv.amount_unit) == (stored, "iso4217")
+
+    # The migration leaves the stamped row alone, however often it runs.
+    from pocketpaw_ee.cloud.models.site import Site
+
+    site = await Site.get(site_id)
+    raw = await Site.get_pymongo_collection().find_one({"_id": site.id})
+    assert _load().convert_invoices(raw["client_invoices"], Counter()) is None
+
+
+async def test_a_legacy_row_stays_unstamped_when_a_new_invoice_lands(beanie_test_db):
+    """Recording an invoice rewrites the list; an old row must keep amount_unit ""
+    so the migration still converts it (and only it)."""
+    from pocketpaw_ee.cloud.models.site import Site
+
+    site_id = await _make_site(pocket_id="pk-money-legacy")
+    site = await Site.get(site_id)
+    legacy = {
+        "id": "inv_old",
+        "issued_at": site.createdAt,
+        "amount_cents": 150000,
+        "currency": "JPY",
+        "paid": True,
+        "note": "",
+    }
+    await Site.get_pymongo_collection().update_one(
+        {"_id": site.id}, {"$set": {"client_invoices": [legacy]}}
+    )
+    rec = await sites_service.record_site_invoice(
+        workspace_id="ws1",
+        site_id=site_id,
+        body=SiteInvoiceCreate(amount_cents=1500, currency="JPY"),
+        minor_units=True,
+    )
+    assert [(i.amount_cents, i.amount_unit) for i in rec.invoices] == [
+        (1500, "iso4217"),
+        (150000, ""),
+    ]
+
+
+async def test_invoice_route_reads_the_money_units_header(beanie_test_db):
+    from datetime import UTC, datetime
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+    from pocketpaw_ee.cloud._core.deps import current_workspace_id
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.sites.router import router as sites_router
+
+    from tests.ee.sites.test_delete_endpoint import _FakeUser
+
+    site_id = await _make_site(pocket_id="pk-money-route")
+    user = _FakeUser("ws1", "u1")
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(sites_router, prefix="/api/v1")
+
+    async def _ctx() -> RequestContext:
+        return RequestContext(
+            user_id="u1",
+            workspace_id="ws1",
+            request_id="test",
+            scope=ScopeKind.WORKSPACE,
+            started_at=datetime.now(UTC),
+        )
+
+    app.dependency_overrides[request_context] = _ctx
+    app.dependency_overrides[current_active_user] = lambda: user
+    app.dependency_overrides[current_workspace_id] = lambda: "ws1"
+    app.dependency_overrides[require_license] = lambda: None
+
+    url = f"/api/v1/sites/{site_id}/invoices"
+    body = {"amount_cents": 150000, "currency": "JPY"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        legacy = await c.post(url, json=body)
+        assert legacy.status_code == 200, legacy.text
+        current = await c.post(url, json=body, headers={"X-Paw-Money-Units": "iso4217"})
+        assert current.status_code == 200, current.text
+    amounts = [i["amount_cents"] for i in current.json()["invoices"]]
+    assert amounts == [150000, 1500]  # newest first: as sent, then the converted legacy one

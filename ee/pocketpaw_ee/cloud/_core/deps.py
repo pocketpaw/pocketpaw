@@ -6,16 +6,21 @@ access control. Domain-specific guards (group, agent, pocket) live in
 their owning modules; until those modules migrate, they remain in
 ``ee.cloud.shared.deps``.
 
-The action-based guard machinery (``require_action``, ``require_membership``)
+The action-based guard machinery (``require_action``, ``require_membership``,
+and the non-raising ``action_allowed_any_workspace``)
 delegates to ``pocketpaw.ee.guards`` (the platform-wide RBAC package) for
 the actual policy lookup. We translate platform ``GuardForbidden``
 exceptions to cloud-native ``Forbidden`` so the standard error envelope
 applies.
 
-Changes: added require_plan_feature dependency for plan-tier feature gating;
-current_workspace_id now falls back to the user's first membership (and
-persists it) instead of 400-ing when active_workspace is unset but the user
-is a member — fixes joined members being locked out of workspace reads.
+``current_workspace_id`` falls back to the user's first membership (and
+persists it) when ``active_workspace`` is unset, so a joined member is never
+locked out. ``require_plan_feature`` gates a route on the workspace's plan
+tier; its plan read is memoised per GET/HEAD request (``request_memo``) and
+shared with ``entitlements.service.resolve_entitlements``.
+``require_paid_or_early_access_allowed`` refuses an unpaid early-access
+workspace (403 ``early_access.not_available``) on routes whose spend the credit
+ledger does not meter; the decision lives in ``credits.guards``.
 """
 
 from __future__ import annotations
@@ -25,11 +30,12 @@ from typing import Any
 
 from fastapi import Depends, HTTPException
 
+from pocketpaw_ee.cloud._core.ee_auth_bridge import request_memo
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
 from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.guards.audit import log_denial
-from pocketpaw_ee.guards.deps import check_workspace_action
+from pocketpaw_ee.guards.deps import check_workspace_action, has_workspace_action
 from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
 
 # ---------------------------------------------------------------------------
@@ -112,7 +118,7 @@ def require_action(
         workspace_id: str = Depends(workspace_dep),
     ) -> User:
         try:
-            check_workspace_action(user, workspace_id, action)
+            await check_workspace_action(user, workspace_id, action)
         except GuardForbidden as exc:
             raise Forbidden(exc.code, exc.detail or "Access denied") from exc
         return user
@@ -128,6 +134,25 @@ def require_action_any_workspace(
     user's ``active_workspace``. Use when the route has no
     ``{workspace_id}`` path param."""
     return require_action(action, workspace_dep=current_workspace_id)
+
+
+def action_allowed_any_workspace(
+    action: str,
+) -> Callable[..., Coroutine[Any, Any, bool]]:
+    """Non-raising twin of ``require_action_any_workspace``: resolves to a bool.
+
+    For routes every member may call but whose response depends on the role
+    (e.g. agent-health content is redacted for non-admins). No denial is audited.
+    """
+
+    async def _allowed(
+        user: User = Depends(current_active_user),
+        workspace_id: str = Depends(current_workspace_id),
+    ) -> bool:
+        return await has_workspace_action(user, workspace_id, action)
+
+    _allowed.__name__ = f"action_allowed_{action.replace('.', '_')}"
+    return _allowed
 
 
 async def require_membership(
@@ -189,8 +214,12 @@ def require_plan_feature(feature: str) -> Callable[..., Coroutine[Any, Any, None
 
         # Re-raises on DB errors — better to surface 5xx than silently
         # downgrade an enterprise customer to the most restrictive plan
-        # during a transient Mongo flap.
-        plan = await workspace_service.get_workspace_plan(workspace_id)
+        # during a transient Mongo flap. Memoised per GET/HEAD request under
+        # the key resolve_entitlements uses, so the two share one read.
+        plan = await request_memo(
+            ("workspace_plan", workspace_id),
+            lambda: workspace_service.get_workspace_plan(workspace_id),
+        )
         if plan is None:
             raise NotFound("workspace", workspace_id)
         allowed_features = PLAN_FEATURES.get(plan, set())
@@ -204,6 +233,20 @@ def require_plan_feature(feature: str) -> Callable[..., Coroutine[Any, Any, None
     return _guard
 
 
+async def require_paid_or_early_access_allowed(
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    """FastAPI dependency: 403 ``early_access.not_available`` for an unpaid
+    early-access workspace while the credit gate is on; a no-op otherwise.
+
+    For routes that spend off the credit ledger (Belt, mandates, Studio
+    generation). Attach it beside ``require_plan_feature``.
+    """
+    from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed
+
+    await assert_early_access_allowed(workspace_id)
+
+
 __all__ = [
     "current_user",
     "current_user_id",
@@ -212,5 +255,6 @@ __all__ = [
     "require_action",
     "require_action_any_workspace",
     "require_membership",
+    "require_paid_or_early_access_allowed",
     "require_plan_feature",
 ]

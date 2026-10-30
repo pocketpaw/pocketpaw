@@ -33,7 +33,8 @@
 #        ``requested_by`` — so a forged blob can't nominate whose role gets
 #        re-checked.
 #   F3 — the growth routes carry real RBAC: reads MEMBER, writes MEMBER,
-#        the outbound propose verb ADMIN.
+#        the outbound propose verb ADMIN. The guard sweep covers the
+#        Growth › Social router too, and checks it carries the license gate.
 #
 # Harness: the growth router (RequestContext override per workspace, mongomock
 # Beanie via ``mongo_db``) and the REAL instinct router (fake admin user +
@@ -168,6 +169,13 @@ def authorized(monkeypatch) -> None:
         return True
 
     monkeypatch.setattr(growth_executor, "_proposer_still_authorized", _ok)
+
+
+@pytest.fixture(autouse=True)
+def _growth_worker_deployed(monkeypatch):
+    """These tests model a deployment that runs a growth worker; without one the
+    executor refuses to enqueue (see the refusal test below)."""
+    monkeypatch.setenv(growth_executor.GROWTH_WORKER_ENV, "true")
 
 
 @pytest.fixture(autouse=True)
@@ -529,6 +537,32 @@ async def test_enqueue_failure_marks_action_failed(
     assert "enqueue failed" in (action.error or "")
     # The approval stands on the draft; the failure is recorded on the Action.
     assert await _draft_status(w1, draft["id"]) == "approved"
+
+
+@pytest.mark.asyncio
+async def test_no_growth_worker_refuses_to_enqueue(
+    w1, tray_w1, gate_store, pool, authorized, monkeypatch
+):
+    """The deployed worker container runs no growth lane, so an enqueued send
+    would sit in Redis forever while the Action read "executed". Without the
+    opt-in env the approve fails the Action with a clear reason, enqueues
+    nothing, and leaves the draft ``proposed`` rather than approved-and-stuck.
+
+    Mutation: delete the ``_growth_worker_enabled`` guard and this fails on
+    ``pool.calls``."""
+    monkeypatch.delenv(growth_executor.GROWTH_WORKER_ENV, raising=False)
+
+    _, draft = await _drafted_prospect(w1)
+    body = await _propose(w1, draft["id"])
+
+    resp = await tray_w1.post(f"/instinct/actions/{body['proposal_id']}/approve")
+    assert resp.status_code == 200, resp.text
+
+    assert pool.calls == []
+    action = await gate_store.get_action(body["proposal_id"])
+    assert str(getattr(action.status, "value", action.status)) == "failed"
+    assert "no growth worker" in (action.error or "")
+    assert await _draft_status(w1, draft["id"]) == "proposed"
 
 
 @pytest.mark.asyncio
@@ -917,6 +951,12 @@ class TestGrowthRouteRbac:
         an RBAC guard fails here rather than shipping open (F3 was exactly that
         — the actions were registered but no route enforced them)."""
         from pocketpaw_ee.cloud.growth.router import router as _growth_router
+        from pocketpaw_ee.cloud.growth.social.router import router as _social_router
+        from pocketpaw_ee.cloud.license import require_license as _require_license
+
+        assert any(dep.dependency is _require_license for dep in _social_router.dependencies), (
+            "the Growth › Social router must carry the license gate"
+        )
 
         expected = {
             ("GET", "/growth/prospects"): "growth.read",
@@ -927,6 +967,10 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/prospects/bulk"): "growth.write",
             ("POST", "/growth/prospects/{prospect_id}/drafts"): "growth.write",
             ("PATCH", "/growth/prospects/{prospect_id}"): "growth.write",
+            ("POST", "/growth/prospects/bulk-delete"): "growth.write",
+            ("DELETE", "/growth/prospects/{prospect_id}"): "growth.write",
+            ("POST", "/growth/prospects/{prospect_id}/research"): "growth.write",
+            ("POST", "/growth/prospects/{prospect_id}/draft"): "growth.write",
             ("POST", "/growth/drafts/{draft_id}/status"): "growth.write",
             # Editing a draft's COPY is authoring, not outbound — and the
             # service refuses it past ``draft`` anyway, so it can never touch
@@ -955,10 +999,44 @@ class TestGrowthRouteRbac:
             # Preview writes nothing, but it spends a real research pass — not
             # the outbound verb (it cannot reach a prospect), not free either.
             ("POST", "/growth/icps/{icp_id}/preview"): "growth.write",
+            # Per-channel delivery queues. Reading one is ordinary; starting
+            # deliveries and switching mock delivery on decide what an
+            # approval does, so both sit at the outbound ADMIN tier.
+            ("GET", "/growth/queue/{channel}"): "growth.read",
+            ("POST", "/growth/queue/{channel}/deliver-approved"): "growth.manage",
+            ("GET", "/growth/settings"): "growth.read",
+            ("PATCH", "/growth/settings"): "growth.manage",
+            # Growth › Social. Nothing here leaves the workspace (no posting,
+            # no account connections), so reads are growth.read and every
+            # write — analysis and idea generation included — growth.write.
+            ("GET", "/growth/social/profiles"): "growth.read",
+            ("POST", "/growth/social/profiles"): "growth.write",
+            ("GET", "/growth/social/profile"): "growth.read",
+            ("PUT", "/growth/social/profile"): "growth.write",
+            ("POST", "/growth/social/profile/analyze"): "growth.write",
+            ("POST", "/growth/social/profile/complete"): "growth.write",
+            ("POST", "/growth/social/ideas/generate"): "growth.write",
+            ("GET", "/growth/social/ideas"): "growth.read",
+            ("PATCH", "/growth/social/ideas/{idea_id}"): "growth.write",
+            ("POST", "/growth/social/ideas/schedule"): "growth.write",
+            ("GET", "/growth/social/ideas/{idea_id}"): "growth.read",
+            ("POST", "/growth/social/ideas/{idea_id}/media"): "growth.write",
+            ("GET", "/growth/social/meme-formats"): "growth.read",
+            ("POST", "/growth/social/characters"): "growth.write",
+            ("DELETE", "/growth/social/characters/{character_id}"): "growth.write",
+            ("POST", "/growth/social/memes"): "growth.write",
+            ("GET", "/growth/icps/{icp_id}/pulse"): "growth.read",
+            ("POST", "/growth/icps/{icp_id}/pulse/refresh"): "growth.write",
+            ("POST", "/growth/icps/{icp_id}/pulse/prospects"): "growth.write",
+            ("POST", "/growth/prospects/{prospect_id}/signals"): "growth.write",
+            ("GET", "/growth/social/pulse"): "growth.read",
+            ("POST", "/growth/social/pulse/refresh"): "growth.write",
+            ("POST", "/growth/social/pulse/use"): "growth.write",
+            ("POST", "/growth/social/ideas/{idea_id}/unschedule"): "growth.write",
         }
 
         seen: dict[tuple[str, str], str] = {}
-        for route in _growth_router.routes:
+        for route in [*_growth_router.routes, *_social_router.routes]:
             names = [
                 getattr(dep.dependency, "__name__", "")
                 for dep in getattr(route, "dependencies", [])

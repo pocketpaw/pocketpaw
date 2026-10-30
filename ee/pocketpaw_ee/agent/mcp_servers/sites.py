@@ -1,125 +1,31 @@
-# sites.py — in-process MCP server exposing the Paw Sites publish action to
-# agent backends (claude_agent_sdk). Created: 2026-06-01 (Phase 4 — chat→
-# create-site). Mirrors the layout of the sibling mcp_servers (tasks.py /
-# pockets.py): a single ``create_sdk_mcp_server`` with an SDK import-guard, the
-# ``SERVER_NAME`` / ``*_TOOL_ID`` allowlist constants, and ContextVar-sourced
-# identity (the same ``current_workspace_id`` / ``current_user_id`` accessors in
-# ``ee.cloud.chat.agent_service`` the pocket specialist + tasks servers read).
-# Tool ids namespace as ``mcp__pocketpaw_sites_manager__<tool>`` so the Claude
-# Code allowlist machinery matches them. The create tools (create_landing_site /
-# create_svelte_site / create_dynamic_site) register on this SAME server object
-# via sites_create.py — a second create_sdk_mcp_server under this name would
-# clobber it (claude_sdk keys servers by name).
+# sites.py — the in-process ``pocketpaw_sites_manager`` MCP server: every Paw Sites
+# tool the chat agent can call, namespaced ``mcp__pocketpaw_sites_manager__<tool>``.
 #
-# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2): the
-# ``edit_svelte_component`` tool also registers on this SAME server (built via
-# the factory in sites_create.py). It rewrites ONE file of a published svelte
-# site's source map and republishes — so the create → publish → edit hops sit on
-# one allowlisted server. Its id rides ``SITES_TOOL_IDS``, so the per-surface
-# allowlist (extensions.py + surface/service.py) picks it up automatically.
+# This module owns ``publish``, ``get_site_build_status`` and ``list_site_assets``,
+# and registers on the SAME server object the create / edit / read / verify / preview
+# tools built in sites_create.py, ``play_test_site`` (sites_play_test.py) and the
+# twelve project-site tools built in sites_project.py (templates, recipes, generic
+# file tools, run_site_build / get_site_build_log). One server, because claude_sdk
+# keys servers by name and a second ``create_sdk_mcp_server`` under this name would
+# clobber the first.
 #
-# Updated 2026-06-14 (feat/dynamic-sites-authoring, RFC 12 A2): the
-# ``create_dynamic_site`` tool also registers on this SAME server. Dynamic sites
-# are ripple-engine sites whose spec carries live-data bindings; publish carries
-# those through to the paw-sites generator.
-#
-# Updated 2026-07-12 (feat/sites-html-create-tool, HE-6): the ``create_html_site``
-# tool also registers on this SAME server. An html site is a raw {path: contents}
-# HTML/CSS/JS map with no framework; publish materializes it and skips the Node
-# build. Its id rides ``SITES_TOOL_IDS`` so the per-surface allowlist picks it up
-# automatically. Opt-in — the default marketing brain stays create_landing_site
-# (ripple); the default flip to html is HE-12.
-#
-# Updated 2026-08-11 (RX-4 — the publish response tells the agent whether the site is
-# actually live): ``_publish_handler``'s success body hand-built five keys (id /
-# pocket_id / name / url / deployed) while ``_to_response`` — the wire the FRONTEND
-# polls — also carries ``build_status`` / ``build_reason`` / ``build_job_id``. The
-# agent got none of the three, and react is the one engine where that breaks the happy
-# path, because it is the only engine with ``build_runs_async(engine) is True``
-# unconditionally. Updated 2026-08-21 (SL-4): STATIC svelte answers True as well once
-# ``PAW_SITES_SVELTE_ASYNC_BUILD`` is on, so everything below now describes two engines
-# rather than one. Nothing here needed changing for that — the keys ride the response for
-# whatever the gate flips, which is why they were added to the response and not to a
-# react branch.
-#
-#   * FIRST publish — ``_enqueue_static_build`` creates the Site doc with ``url=""``
-#     and ``deployed=False``, honestly (nothing is serving yet; the worker flips both
-#     on success). Meanwhile ``pocketpaw-create-react-site`` STEP 4 tells the agent to
-#     "show the user the returned url". So it showed an empty string, or invented one.
-#   * RE-publish — ``url`` / ``deployed`` deliberately KEEP the previous deploy's
-#     values so a rebuild never reports a working site as down. Right for the
-#     frontend, which reads ``build_status`` beside them; for the agent it meant
-#     reporting the OLD url as though the edit were already live.
-#
-# So the body now carries the three raw fields VERBATIM (never normalised — see
-# ``_to_response``), plus ``build_in_progress`` and ``is_live``, plus a ``message``
-# stating the conclusion in prose. The derivation lives in
-# ``sites.service.build_wire_state`` and is SHARED with the new status tool, because
-# the two surfaces disagreeing about whether a site is live would be worse than either
-# being wrong alone. A boolean is not enough on its own here: the original defect was
-# narration, not data, so the message exists to be relayed.
-#
-# Also added the READ-ONLY ``get_site_build_status`` tool. Without it the queued state
-# is a dead end — an async publish returns before the build starts, so the agent could
-# learn a build was enqueued and never find out how it ended. It rides
-# ``SITES_TOOL_IDS`` like every other tool here; the /sites allow-list is a hard
-# whitelist that filters an absent id out silently.
-#
-# Updated 2026-08-19 (fix/sites-read-source-tool — the edit lane could write but not
-# read): added an ELEVENTH tool, the READ-ONLY ``read_site_source``. The surface could
-# WRITE a site's source three ways and READ it zero ways, which is not a missing
-# convenience but a hole the three edit tools fall through. Each of them PREFERS its
-# ``edits`` (search/replace) form, whose ``old_string`` must be copied VERBATIM from the
-# current file and match exactly once, and each description duly said "read it first" —
-# naming no tool, because none existed. ``get_pocket`` does carry ``source``, but it
-# lives on the ``pockets`` server and ``sites_allow`` is a hard whitelist
-# (SITES|STOCK|ICON|PALETTE|ASK), so on /sites it is filtered out with no
-# error; the profile separately drops the file/shell built-ins on the stated assumption
-# that "the source map is a tool ARGUMENT", which holds only while the agent still has
-# the source it just authored in context. So the only REACHABLE edit form was a
-# whole-file ``new_source`` composed from memory — precisely the shape the edit
-# descriptions warn about, which silently drops a ``<form>``'s ``action`` and its hidden
-# ``paw_site_id`` / ``paw_key`` / ``paw_redirect`` inputs and sends every future enquiry
-# nowhere. Two modes keep the fix from causing the problem it prevents: no ``file_path``
-# returns a manifest of paths + byte sizes (a react source map inlined whole would
-# swallow the context the edit needs), and a ``file_path`` returns that one file
-# verbatim. Engine-agnostic, unlike the edit tools — a read is safe everywhere and the
-# agent often does not know the engine until it looks.
-#
-# Updated 2026-08-11 (RX-3 — the react track gets an EDIT lane): the
-# ``edit_react_component`` tool also registers on this SAME server (built via the
-# factory in sites_create.py), so create → publish → edit sit together for react
-# exactly as they do for svelte. Before it, ``edit_svelte_component`` was the ONLY
-# edit tool on the server: a react site could be created and published but never
-# changed, so the agent answered "shorten the hero headline" by calling
-# ``create_react_site`` again and minting a SECOND site pocket. It writes ONE file
-# of the pocket's react source map as a reviewable DRAFT — no republish, no build
-# enqueued (a react publish is async, so there is no synchronous outcome to gate
-# on). Its id rides ``SITES_TOOL_IDS``, so the per-surface allowlist picks it up.
-#
-# Updated 2026-08-13 (HE-10 — the html track gets an EDIT lane): the
-# ``edit_html_file`` tool also registers on this SAME server, completing the set —
-# every engine that can be CREATED from chat can now be CHANGED from chat. It had
-# the same hole RX-3 closed for react, one engine over: ``edit_svelte_component``
-# raises ``pocket.not_svelte_site`` on an html pocket and ``edit_react_component``
-# raises ``pocket.not_react_site``, so no tool on this server would accept "change
-# the phone number in the footer" and the agent's only move was a second
-# ``create_html_site`` — a second pocket at a second url, leaving the site the user
-# was looking at untouched. It writes ONE file of the pocket's html source map as a
-# reviewable DRAFT and does NOT republish; html runs no build and therefore has no
-# smoke gate, so a republish here would push unvalidated markup straight to a live
-# site with nothing in between. Named ``edit_html_file`` rather than
-# ``edit_html_component`` because an html site genuinely has no component model —
-# its source map is the raw {path: contents} tree the edge serves verbatim.
-#
-# Updated 2026-08-07 (RX-2 — the agent can select the react engine): the
-# ``create_react_site`` tool also registers on this SAME server. A react site is a
-# {path: contents} map of hand-written React files; publish runs a Vite SSG build
-# that prerenders it to a static ``dist/`` and deploys it assets-only. Its id
-# rides ``SITES_TOOL_IDS``, so the per-surface allowlist picks it up automatically
-# — which is what makes the /sites react-create surface able to CALL the tool its
-# preamble names. Opt-in: the description steers the agent here only on an
-# explicit React request or a genuine interactivity need.
+# Invariants a reader must not break:
+#   * every registered tool's id is on ``SITES_TOOL_IDS``. It feeds the hard /sites
+#     allow-list (surface_registry) and the extension provider; an id missing there
+#     is filtered out silently and the tool is unreachable. ``test_mcp_tool`` pins
+#     the count, so a new id is a decision, not a side effect;
+#   * ``publish`` delegates to ``sites.service.publish_pocket``, the path the REST
+#     route uses, and its body carries ``build_status`` / ``build_reason`` /
+#     ``build_job_id`` verbatim plus ``build_in_progress`` / ``is_live`` / ``message``
+#     from ``build_wire_state`` (shared with ``get_site_build_status``). An async
+#     build (react, static svelte) returns before it runs, so ``is_live`` is the
+#     only honest "it is live" signal;
+#   * a publish refused by ``sites.migration_destructive`` files a request-publish
+#     review card (``request_publish_pocket``) and returns its id: only an owner's
+#     approve of that card confirms deleting data, never the agent;
+#   * identity comes from the per-stream ContextVars in ``ee.cloud.chat.
+#     agent_service``; outside a chat stream every tool errors instead of guessing
+#     a tenant.
 """Agent-side MCP surface for publishing a PocketPaw pocket as a Paw Site.
 
 A site is published FROM a pocket: the chat agent identifies the pocket to
@@ -153,6 +59,7 @@ import logging
 from typing import Any
 
 from ._audit import record_tool_call
+from .sites_project import SITES_PROJECT_TOOL_IDS, agent_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +124,27 @@ READ_SITE_SOURCE_TOOL_ID = f"mcp__{SERVER_NAME}__read_site_source"
 # and the tool is silently unreachable.
 LIST_SITE_ASSETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_assets"
 
+# PP-1 — declare / drop npm packages on a svelte, react or html site. The only writer
+# of ``paw.dependencies.json``. Must ride SITES_TOOL_IDS: an absent id is filtered out
+# of the /sites allow-list with no error, and the tool is silently unreachable.
+SET_SITE_DEPENDENCIES_TOOL_ID = f"mcp__{SERVER_NAME}__set_site_dependencies"
+# PP-2 — re-run the three-layer verification on a site's draft. Must ride
+# SITES_TOOL_IDS: an absent id is filtered out of the hard /sites allow-list.
+VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
+# Screenshot the draft so the agent sees what it built. Must ride SITES_TOOL_IDS.
+PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
+# Play the draft (keys, clicks, console errors) in a remote browser. Must ride
+# SITES_TOOL_IDS like every other tool on this server.
+PLAY_TEST_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__play_test_site"
+# Per-site secrets: request one from the owner by name, list names + status. Must
+# ride SITES_TOOL_IDS like every other tool on this server.
+REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
+LIST_SITE_SECRETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_secrets"
+# Sites integrations: list bindings, ask the owner to connect a provider. Must ride
+# SITES_TOOL_IDS like every other tool on this server.
+LIST_SITE_INTEGRATIONS_TOOL_ID = f"mcp__{SERVER_NAME}__list_site_integrations"
+CONNECT_SITE_INTEGRATION_TOOL_ID = f"mcp__{SERVER_NAME}__connect_site_integration"
+
 SITES_TOOL_IDS = (
     PUBLISH_TOOL_ID,
     LIST_SITE_ASSETS_TOOL_ID,
@@ -230,6 +158,17 @@ SITES_TOOL_IDS = (
     EDIT_HTML_FILE_TOOL_ID,
     GET_SITE_BUILD_STATUS_TOOL_ID,
     READ_SITE_SOURCE_TOOL_ID,
+    SET_SITE_DEPENDENCIES_TOOL_ID,
+    VERIFY_SITE_TOOL_ID,
+    PREVIEW_SITE_TOOL_ID,
+    PLAY_TEST_SITE_TOOL_ID,
+    REQUEST_SITE_SECRET_TOOL_ID,
+    LIST_SITE_SECRETS_TOOL_ID,
+    LIST_SITE_INTEGRATIONS_TOOL_ID,
+    CONNECT_SITE_INTEGRATION_TOOL_ID,
+    # The project engine's tools (sites_project.py): base templates, backend
+    # recipes, the generic file tools and the sandbox build. Must ride here too.
+    *SITES_PROJECT_TOOL_IDS,
 )
 
 
@@ -263,6 +202,41 @@ def _identity() -> tuple[str | None, str | None]:
         return current_workspace_id(), current_user_id()
     except Exception:  # noqa: BLE001
         return None, None
+
+
+async def _request_destructive_approval(
+    workspace_id: str, user_id: str, pocket_id: str, refusal: Exception
+) -> dict:
+    """A publish refused for a destructive migration becomes a review card in the
+    Tray (``request_publish_pocket`` records the migrations, tables and statements).
+    Returns the card's id and what it lists; falls back to the refusal text when the
+    card cannot be filed."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        action = await sites_service.request_publish_pocket(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        )
+    except Exception:  # noqa: BLE001 - the refusal still reaches the agent
+        logger.warning("sites publish: could not file the destructive review", exc_info=True)
+        return _error_response(f"{refusal} Ask the owner to publish from the publish dialog.")
+    blob = (getattr(action, "parameters", None) or {}).get("_artifact_change") or {}
+    return _success_response(
+        {
+            "ok": False,
+            "approval_required": True,
+            "action_id": str(action.id),
+            "destructive_migrations": blob.get("destructive_migrations") or [],
+            "message": (
+                "Not published. This publish runs a database migration that would "
+                "permanently delete data the site holds, so it was sent to the owner "
+                "for approval in the Tray. Tell the user which tables and statements "
+                "are listed in `destructive_migrations` and that the site goes live "
+                "when they approve that card. Do not retry the publish and never try "
+                "to confirm the deletion yourself."
+            ),
+        }
+    )
 
 
 async def _publish_handler(args: dict) -> dict:
@@ -309,10 +283,16 @@ async def _publish_handler(args: dict) -> dict:
             name=name,
         )
     except CloudError as exc:
+        if exc.code == "sites.migration_destructive":
+            # Deleting stored rows is the owner's call. File the review card that
+            # names what would be lost; approving that card is the only thing that
+            # confirms it. The agent never confirms.
+            return await _request_destructive_approval(workspace_id, user_id, pocket_id, exc)
         # NotFound / Forbidden from the pockets service surface here — relay the
         # code + message so the agent can tell the user the pocket is missing or
-        # not theirs, instead of reporting a phantom publish.
-        return _error_response(f"{exc.code}: {exc.message}")
+        # not theirs, instead of reporting a phantom publish. A Durable Objects
+        # refusal also carries its next step (data loss is the owner's call).
+        return _error_response(agent_error_text(exc.code, exc.message))
     except Exception as exc:  # noqa: BLE001
         logger.warning("sites publish failed", exc_info=True)
         return _error_response(f"publish failed: {exc}")
@@ -653,6 +633,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # separate create_sdk_mcp_server) because the claude_sdk registration loop
     # keys servers by name and a second server under this name would clobber it.
     from pocketpaw_ee.agent.mcp_servers.sites_create import (
+        make_connect_site_integration_tool,
         make_create_dynamic_site_tool,
         make_create_html_site_tool,
         make_create_landing_site_tool,
@@ -661,7 +642,13 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
         make_edit_html_file_tool,
         make_edit_react_component_tool,
         make_edit_svelte_component_tool,
+        make_list_site_integrations_tool,
+        make_list_site_secrets_tool,
+        make_preview_site_tool,
         make_read_site_source_tool,
+        make_request_site_secret_tool,
+        make_set_site_dependencies_tool,
+        make_verify_site_tool,
     )
 
     create_landing_site = make_create_landing_site_tool(tool)
@@ -699,6 +686,28 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     # `old_string` has to be copied out of the CURRENT file, and this is the only
     # thing on /sites that can hand the agent that file.
     read_site_source = make_read_site_source_tool(tool)
+    # PP-1 — the dependency setter. Same server, so declare → edit → publish sit
+    # together on one allow-listed server.
+    set_site_dependencies = make_set_site_dependencies_tool(tool)
+    # PP-2 — re-verify a draft (static, build, browser). Same server.
+    verify_site = make_verify_site_tool(tool)
+    # Look at the draft (a screenshot the agent can see). Same server.
+    preview_site = make_preview_site_tool(tool)
+    # Play the draft in Cloudflare's remote browser. Same server.
+    from pocketpaw_ee.agent.mcp_servers.sites_play_test import make_play_test_site_tool
+
+    play_test_site = make_play_test_site_tool(tool)
+    # Site secrets: ask the owner for one by name; list names + status. Same server.
+    request_site_secret = make_request_site_secret_tool(tool)
+    list_site_secrets = make_list_site_secrets_tool(tool)
+    # Site integrations: list bindings, ask the owner to connect one. Same server.
+    list_site_integrations = make_list_site_integrations_tool(tool)
+    connect_site_integration = make_connect_site_integration_tool(tool)
+    # The project engine's twelve tools. Same server, so a project site's create,
+    # recipes, file edits, builds and publish sit on one allow-listed server.
+    from pocketpaw_ee.agent.mcp_servers.sites_project import make_project_tools
+
+    project_tools = make_project_tools(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -716,14 +725,26 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             edit_react_component,
             edit_html_file,
             read_site_source,
+            set_site_dependencies,
+            verify_site,
+            preview_site,
+            play_test_site,
+            request_site_secret,
+            list_site_secrets,
+            list_site_integrations,
+            connect_site_integration,
+            *project_tools,
         ],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
+    "CONNECT_SITE_INTEGRATION_TOOL_ID",
     "CREATE_DYNAMIC_SITE_TOOL_ID",
     "LIST_SITE_ASSETS_TOOL_ID",
+    "LIST_SITE_INTEGRATIONS_TOOL_ID",
+    "LIST_SITE_SECRETS_TOOL_ID",
     "CREATE_HTML_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_REACT_SITE_TOOL_ID",
@@ -732,9 +753,14 @@ __all__ = [
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "GET_SITE_BUILD_STATUS_TOOL_ID",
+    "PLAY_TEST_SITE_TOOL_ID",
+    "PREVIEW_SITE_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "READ_SITE_SOURCE_TOOL_ID",
+    "REQUEST_SITE_SECRET_TOOL_ID",
     "SERVER_NAME",
+    "SET_SITE_DEPENDENCIES_TOOL_ID",
     "SITES_TOOL_IDS",
+    "VERIFY_SITE_TOOL_ID",
     "build_sites_manager_server",
 ]

@@ -1,5 +1,58 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-10-03 (AV-3, feat/ai-visibility-core) — added ``AiVisibilityCheck``
+(one stored "do AI assistants name this business?" check) and ``AiVisibilitySite``
+(a site's questions and latest check state). Kept out of ``__all__``: only
+``ee.cloud.ai_visibility.service`` / ``service_admin`` import them.
+
+Updated: 2026-10-02 (feat/studio-templates) — added ``StudioTemplate`` (a Studio
+generation published as a template; see studio_templates/service.py).
+
+Updated: 2026-10-01 (DS-1, feat/discover-index) — added ``DiscoverListing`` (one
+public Discover card per source item; see discover/service_admin.py).
+Updated: 2026-10-01 (CN-3, fix/canon-daily-caps) — the six per-meter daily
+counters (``FileComprehensionUsage``, ``FileTranscriptionUsage``,
+``GuestTurnUsage``, ``IllustrationUsage``, ``WorkspaceTurnUsage``,
+``WorkspaceUploadUsage``) are gone, replaced by ONE ``DailyUsage`` doc keyed
+``(subject_type, subject_id, meter, day)`` in the ``daily_usage`` collection.
+Kept out of ``__all__``: only ``ee.cloud.metering.service`` imports it.
+Registering it is load-bearing — an unregistered doc makes
+``get_pymongo_collection()`` raise inside the fail-closed meters, so every
+comprehension / transcription / illustration / guest turn would be refused.
+
+Updated: 2026-10-01 (MC-3, feat/meetings-lobby) — added ``MeetingKnock`` (a guest
+asking to join a meeting; see meetings/lobby_service.py).
+
+Updated: 2026-09-23 (VS-4, feat/sites-rename) — added ``ReleasedSlug`` (a site
+address given up by a rename, held 30 days for the workspace that released it)
+to the imports and ``get_all_documents()`` so the ``released_slugs`` collection
+is wired into ``init_beanie``. Kept out of ``__all__``: only
+``pocketpaw_ee.sites.service`` imports the doc class directly.
+
+Updated: 2026-08-29 (T2 "Audio/video transcription at ingest") — added
+``FileTranscriptionUsage`` (one row per workspace per UTC day, the atomic
+counter behind the media-transcription daily cap) to the imports and
+``get_all_documents()`` so the ``file_transcription_usage`` collection is wired
+into ``init_beanie``. Kept out of ``__all__``: only
+``ee.cloud.uploads.transcription_budget`` imports the doc class directly.
+Registering it here is load-bearing — an unregistered document makes
+``get_pymongo_collection()`` raise inside that budget's fail-CLOSED except, so
+every transcription is refused and the feature reads as switched off.
+
+Updated: 2026-09-11 (feat/abuse-budgets) — added ``WorkspaceUploadUsage`` and
+``WorkspaceTurnUsage`` (one row per workspace per UTC day each, the atomic
+counters behind the upload and agent-run daily caps) to the imports and
+``get_all_documents()`` so both collections are wired into ``init_beanie``.
+Kept out of ``__all__``: only ``ee.cloud.uploads.upload_budget`` and
+``ee.cloud.chat.runs.turn_budget`` import the doc classes directly.
+
+Updated: 2026-08-28 (FC-3 "File comprehension") — added
+``FileComprehensionUsage`` (one row per workspace per UTC day, the atomic
+counter behind the comprehension daily cap) to the imports and
+``get_all_documents()`` so the ``file_comprehension_usage`` collection is
+wired into ``init_beanie``. Kept out of ``__all__``: only
+``ee.cloud.uploads.comprehension_budget`` imports the doc class directly.
+
 Updated: 2026-09-04 (IR-2a, feat/sites-import-design-brief) — added
 ``SiteDesignBrief`` (the captured design brief a rebuild-mode site import
 generates from) to the imports, ``__all__`` and ``get_all_documents()`` so the
@@ -171,12 +224,16 @@ from __future__ import annotations
 
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
 from pocketpaw_ee.cloud.models.agent_session_runtime import AgentSessionRuntimeDoc
+from pocketpaw_ee.cloud.models.ai_visibility_check import AiVisibilityCheck
+from pocketpaw_ee.cloud.models.ai_visibility_site import AiVisibilitySite
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
+from pocketpaw_ee.cloud.models.belt_run_feed import BeltRunFeed
 from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
 from pocketpaw_ee.cloud.models.builtin_widget import BuiltInWidget, BuiltInWidgetPosition
+from pocketpaw_ee.cloud.models.byok_key import ByokProviderKey
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.code_connection import CodeConnection
 from pocketpaw_ee.cloud.models.code_project import CodeProject
@@ -185,7 +242,9 @@ from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
+from pocketpaw_ee.cloud.models.daily_usage import DailyUsage
 from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
+from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.cloud.models.draft import Draft
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestConfig,
@@ -212,11 +271,22 @@ from pocketpaw_ee.cloud.models.icp import Icp
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.instinct_workspace_config import InstinctWorkspaceConfig
+from pocketpaw_ee.cloud.models.integration import (
+    IntegrationConnection,
+    IntegrationDemoRecord,
+    IntegrationWebhookEvent,
+    NewsletterSubscriber,
+    SiteIntegration,
+    SiteOrder,
+)
 from pocketpaw_ee.cloud.models.invite import Invite, MeetingInvite
+from pocketpaw_ee.cloud.models.launch_controls import LaunchControlsDoc
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
+from pocketpaw_ee.cloud.models.lead_notifications import SiteNotificationSettings
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
+    MeetingKnock,
     MeetingProviderCredentials,
     MeetingsSettings,
     MeetingTranscript,
@@ -226,14 +296,22 @@ from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reac
 from pocketpaw_ee.cloud.models.message_log import MessageLog
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.notification_delivery import NotificationDeliveryConfig
+from pocketpaw_ee.cloud.models.notification_outbox import (
+    NotificationOutboxItem,
+    NotificationRateMarker,
+)
+from pocketpaw_ee.cloud.models.partner_application import PartnerApplication
 from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
+from pocketpaw_ee.cloud.models.platform_audit import PlatformAuditEvent
+from pocketpaw_ee.cloud.models.platform_rollup import PlatformDailyRollup
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.prospect import Prospect
 from pocketpaw_ee.cloud.models.push_subscription import PushSubscription
 from pocketpaw_ee.cloud.models.read_state import ReadState
+from pocketpaw_ee.cloud.models.released_slug import ReleasedSlug
 from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
@@ -241,8 +319,19 @@ from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
 from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
+from pocketpaw_ee.cloud.models.site_do_teardown import SiteDoTeardown
+from pocketpaw_ee.cloud.models.site_draft_worker import SiteDraftWorker
+from pocketpaw_ee.cloud.models.site_export import SiteExport
+from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.site_secret import SiteSecret
+from pocketpaw_ee.cloud.models.site_template import SiteTemplate
+from pocketpaw_ee.cloud.models.social_idea import SocialIdea
+from pocketpaw_ee.cloud.models.social_profile import SocialProfile
+from pocketpaw_ee.cloud.models.social_pulse import SocialPulse
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
+from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
+from pocketpaw_ee.cloud.models.studio_template import StudioTemplate
 from pocketpaw_ee.cloud.models.subscription import Subscription
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.models.task_attachment import TaskAttachment
@@ -250,6 +339,7 @@ from pocketpaw_ee.cloud.models.task_event import TaskEvent
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
+from pocketpaw_ee.cloud.models.waitlist import WaitlistEntry
 from pocketpaw_ee.cloud.models.web_sandbox import WebSandbox
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_automation_config import WorkspaceAutomationConfig
@@ -259,6 +349,9 @@ from pocketpaw_ee.cloud.models.workspace_vm import WorkspaceVm
 # Lazy import to avoid circular imports
 FileUpload: type = None  # type: ignore[assignment]
 FileFolder: type = None  # type: ignore[assignment]
+# Multipart upload sessions. Lazy-loaded with FileUpload (same package) so
+# init_beanie registers it without ee.cloud.models hard-importing uploads.
+MultipartUpload: type = None  # type: ignore[assignment]
 # FL-12b public share links. Lazy-loaded with FileUpload (same package) so
 # init_beanie registers it without ee.cloud.models hard-importing uploads.
 ShareLink: type = None  # type: ignore[assignment]
@@ -279,15 +372,19 @@ _ArtifactVersionDoc: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
-    global FileUpload, FileFolder, ShareLink
+    global FileUpload, FileFolder, ShareLink, MultipartUpload
     if FileUpload is None:
         from pocketpaw_ee.cloud.uploads.models import FileFolder as _FileFolder
         from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUpload
+        from pocketpaw_ee.cloud.uploads.multipart_models import (
+            MultipartUpload as _MultipartUpload,
+        )
         from pocketpaw_ee.cloud.uploads.share_models import ShareLink as _ShareLink
 
         FileUpload = _FileUpload
         FileFolder = _FileFolder
         ShareLink = _ShareLink
+        MultipartUpload = _MultipartUpload
     return FileUpload
 
 
@@ -339,8 +436,10 @@ __all__ = [
     "AgentConfig",
     "Attachment",
     "AuditEvent",
+    "PlatformAuditEvent",
     "AuditWebhook",
     "AuthSession",
+    "BeltRunFeed",
     "BeltWorkspaceConfig",
     "BuiltInWidget",
     "BuiltInWidgetPosition",
@@ -361,6 +460,7 @@ __all__ = [
     "FileObj",
     "FileUpload",
     "FileVersionDoc",
+    "MultipartUpload",
     "ShareLink",
     "ForesightBacktest",
     "ForesightPredictionRecord",
@@ -378,11 +478,13 @@ __all__ = [
     "MeetingInvite",
     "Lead",
     "LeadSource",
+    "ByokProviderKey",
     "LiteLLMTenantKey",
     "ShipApp",
     "ShipBox",
     "ShipDeploy",
     "Meeting",
+    "MeetingKnock",
     "MeetingProviderCredentials",
     "MeetingsSettings",
     "MeetingTranscript",
@@ -391,6 +493,9 @@ __all__ = [
     "Message",
     "Notification",
     "NotificationDeliveryConfig",
+    "NotificationOutboxItem",
+    "NotificationRateMarker",
+    "SiteNotificationSettings",
     "NotificationSource",
     "OAuthAccount",
     "Payment",
@@ -407,9 +512,24 @@ __all__ = [
     "AgentSessionRuntimeDoc",
     "Site",
     "SiteDesignBrief",
+    "SiteDoTeardown",
+    "SiteDraftWorker",
+    "SiteExport",
     "SiteDomain",
+    "SiteOriginClaim",
     "SiteRateCounter",
+    "SiteSecret",
+    "IntegrationConnection",
+    "IntegrationDemoRecord",
+    "IntegrationWebhookEvent",
+    "NewsletterSubscriber",
+    "SiteIntegration",
+    "SiteOrder",
+    "SiteTemplate",
+    "StudioTemplate",
+    "DiscoverListing",
     "SpendReconciliation",
+    "StudioGeneration",
     "Subscription",
     "WorkspaceSensePreference",
     "Task",
@@ -458,12 +578,29 @@ def get_all_documents():
         # Per-workspace external-delivery config (Slack + generic webhook).
         # Only ``ee.cloud.notifications`` service/delivery import it.
         NotificationDeliveryConfig,
+        # External-delivery outbox (email / signed webhook / Slack). Only
+        # ``ee.cloud.notifications.outbox`` reads or writes it.
+        NotificationOutboxItem,
+        NotificationRateMarker,
+        # Per-site owner-notification settings. Only
+        # ``ee.cloud.leads.notification_settings`` writes it.
+        SiteNotificationSettings,
         FileObj,
         FileUpload,
         FileFolder,
         # Public file share links (FL-12b). Only ``uploads.share_store``
         # writes these; the public GET /share/{token} route reads by token.
         ShareLink,
+        # In-flight multipart upload sessions. Only
+        # ``ee.cloud.uploads.multipart_store`` reads/writes these. Separate
+        # collection from FileUpload on purpose — a session is not a file and
+        # must never appear in a library listing; see the model docstring.
+        MultipartUpload,
+        # Every daily cap's counter: one row per (subject, meter, UTC day).
+        # Only ``ee.cloud.metering.service`` reads/writes this. Meters stay
+        # separate rows, so a bulk photo import cannot exhaust the ceiling
+        # that exists to stop a podcast library.
+        DailyUsage,
         # file_versions edit history (ART-1). Only ``file_versions.service``
         # imports this class (import-linter "FileVersions" contract).
         FileVersionDoc,
@@ -483,6 +620,7 @@ def get_all_documents():
         Subscription,
         # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
         # ``ee.cloud.llm_provisioning.service`` writes this.
+        ByokProviderKey,
         LiteLLMTenantKey,
         # Managed-deploy boxes + their apps and deploy attempts (SHIP-2/SHIP-3).
         # Only ``ee.cloud.ship.store`` reads/writes these.
@@ -509,6 +647,7 @@ def get_all_documents():
         # Shadow-compare reconciliation rows (WU-F). One per tenant per window
         # during shadow mode. Only ``ee.cloud.llm_provisioning.service`` writes it.
         SpendReconciliation,
+        StudioGeneration,
         Task,
         TaskAttachment,
         TemporalSweepStateDoc,
@@ -516,6 +655,7 @@ def get_all_documents():
         Project,
         PlanSession,
         Meeting,
+        MeetingKnock,
         MeetingTranscript,
         MeetingProviderCredentials,
         MeetingsSettings,
@@ -534,8 +674,50 @@ def get_all_documents():
         ChatRunDoc,
         Lead,
         Site,
+        # User-saved site templates. Only ``ee.cloud.site_templates.service``
+        # writes it.
+        SiteTemplate,
+        # Discover index (DS-1): one public card per source item. Only
+        # ``ee.cloud.discover.service`` / ``service_admin`` write it.
+        DiscoverListing,
+        # Public partner applications, reviewed by operators. Only
+        # ``ee.cloud.partners.service_admin`` reads or writes it.
+        PartnerApplication,
+        # Studio generations published as templates. Only
+        # ``ee.cloud.studio_templates.service`` / ``service_admin`` write it.
+        StudioTemplate,
+        # AI visibility checks and per-site check state. Only
+        # ``ee.cloud.ai_visibility.service`` / ``service_admin`` write them.
+        AiVisibilityCheck,
+        AiVisibilitySite,
         SiteDesignBrief,
+        SiteExport,
+        # SF-8 — the proof that a workspace controls an origin. The later
+        # concierge crawl reads it before fetching anyone's pages.
+        SiteOriginClaim,
         SiteRateCounter,
+        # Per-site secrets (encrypted at rest). Only ``sites.site_secrets`` touches it.
+        SiteSecret,
+        # Sites integrations (vault, bindings, orders, webhook dedupe, newsletter).
+        # Only ``pocketpaw_ee.integrations`` touches them.
+        IntegrationConnection,
+        SiteIntegration,
+        SiteOrder,
+        IntegrationWebhookEvent,
+        NewsletterSubscriber,
+        IntegrationDemoRecord,
+        # Draft Workers of site pockets. Only ``sites.draft_worker`` touches it.
+        SiteDraftWorker,
+        # Durable Object teardowns a site delete could not finish, retried by
+        # ``sites.do_metering.sweep_do_teardowns``. Only that module touches it.
+        SiteDoTeardown,
+        # VS-4 — an address a renamed site gave up, held 30 days for its old
+        # workspace. Only ``pocketpaw_ee.sites.service`` reads/writes it.
+        ReleasedSlug,
+        # Early-access launch switches (singleton) and the paused-signup waitlist.
+        # Only ``ee.cloud.launch_controls`` and ``ee.cloud.early_access`` touch them.
+        LaunchControlsDoc,
+        WaitlistEntry,
         # Growth prospect store (G-1) — the /growth outbound engine's
         # workspace-scoped, domain-deduped prospect record. Only
         # ``ee.cloud.growth.service`` imports this doc directly (import-linter
@@ -553,14 +735,26 @@ def get_all_documents():
         # a workspace wants, and the cadence the discovery cron runs it on.
         # Same import boundary as Prospect / Draft / MessageLog.
         Icp,
+        # Growth › Social — the per-workspace company profile and its post
+        # ideas. Only ``ee.cloud.growth.social.service`` imports these.
+        SocialProfile,
+        SocialIdea,
+        SocialPulse,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,
         AuditEvent,
+        PlatformAuditEvent,
+        # Platform-wide per-tenant daily spend rollup (chunk 8, Paw Admin
+        # PRD). Read by ee.cloud.platform.stats; nothing writes it in this
+        # PR (the nightly backfill job is a follow-up — see stats.py).
+        PlatformDailyRollup,
         AuditWebhook,
         AuthSession,
         APIKey,
         BeltWorkspaceConfig,
+        # A Belt run stage's step feed. Only ``ee.cloud.belt.service`` writes it.
+        BeltRunFeed,
         TaskEvent,
         # Workspace jobs — durable status record for ARQ-backed pocket jobs
         # (pp#1459). Only ``ee.cloud.jobs.service`` writes it.

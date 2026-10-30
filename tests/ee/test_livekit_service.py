@@ -110,18 +110,32 @@ class TestService:
         mock_api_instance.__aenter__ = AsyncMock(return_value=mock_api_instance)
         mock_api_instance.__aexit__ = AsyncMock(return_value=False)
 
-        # Patch at the import site in the service module
-        patcher = patch(
-            "pocketpaw_ee.cloud.livekit.service.LiveKitAPI", return_value=mock_api_instance
-        )
-        patcher.start()
+        # Patch at the import site in the service module. The agent spawn is
+        # patched too: unpatched, create_room() launches the real
+        # ``python -m pocketpaw_ee.cloud.livekit.agent`` child, which never exits
+        # under pytest (tests/conftest.py refuses that spawn outright).
+        patchers = [
+            patch("pocketpaw_ee.cloud.livekit.service.LiveKitAPI", return_value=mock_api_instance),
+            patch(
+                "pocketpaw_ee.cloud.livekit.service._spawn_agent_process",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.livekit.service._reap_agent_process",
+                new_callable=AsyncMock,
+            ),
+        ]
+        for p in patchers:
+            p.start()
 
         yield mock_room_svc
 
         # Clean up any agents / spawn locks created during the test
         _active_agents.clear()
         _spawn_locks.clear()
-        patcher.stop()
+        for p in reversed(patchers):
+            p.stop()
 
     @pytest.mark.asyncio
     @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_URL", "wss://test.livekit.cloud")
@@ -141,6 +155,29 @@ class TestService:
         assert result["url"] == "wss://test.livekit.cloud"
         assert "bot_token" in result
         mock_lk_context.create_room.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_URL", "wss://test.livekit.cloud")
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_KEY", "test-key")
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_SECRET", "test-secret")
+    async def test_create_room_bot_token_may_publish_microphone_only(self, mock_lk_context):
+        """Ask Paw voices answers on the bot's mic track: mic yes, camera/screen/data no."""
+        import jwt
+        from pocketpaw_ee.cloud.livekit.service import create_room
+
+        mock_room = MagicMock()
+        mock_room.name = "group-call-test123"
+        mock_lk_context.create_room = AsyncMock(return_value=mock_room)
+
+        result = await create_room("test123")
+
+        claims = jwt.decode(result["bot_token"], options={"verify_signature": False})
+        assert claims["sub"] == "call-bot"
+        video = claims["video"]
+        assert video["canPublish"] is True
+        assert video["canPublishSources"] == ["microphone"]
+        assert video["canPublishData"] is False
+        assert video["canSubscribe"] is True
 
     @pytest.mark.asyncio
     @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_URL", "wss://test.livekit.cloud")

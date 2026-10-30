@@ -128,18 +128,29 @@ def test_an_unset_or_unknown_tier_is_not_entitled():
         ), f"the {tier!r} tier bought analytics"
 
 
-def test_an_org_key_stored_on_a_site_is_not_entitled():
-    """``studio`` and ``agency`` DO resell analytics, and they are still refused here.
-    An org flat is bought once for many sites and its key is not a legal
-    ``Site.plan_tier``, so finding one on a single site means a bug, a hand-edit or a
-    replayed webhook. ``site_scoped_tier`` refuses it, which is what keeps this
-    predicate from reading an org-wide entitlement off one site's field."""
+def test_a_retired_org_key_stored_on_a_site_is_not_entitled():
+    """``studio`` and ``agency`` resold analytics and were refused here anyway, because
+    an org flat is bought once for many sites and its key was never a legal
+    ``Site.plan_tier``. Both were RETIRED on 2026-09-06, and a document written before
+    then still holds the key — so the refusal still has to hold, for a second reason.
+
+    What changed is WHICH mechanism refuses it, and the distinction is worth keeping
+    straight because the docstring here used to name the wrong one. It was
+    ``site_scoped_tier`` rejecting an org SCOPE. Now the key is not in the catalog at
+    all, so ``get_site_plan`` resolves it to None a step earlier and the scope guard
+    never runs. The ANSWER is identical either way, which is the property this test
+    exists for; the assertion below is deliberately written on the answer rather than
+    on the mechanism, so it does not have to be rewritten again if an org-scoped tier
+    ever returns."""
     for tier in ("studio", "agency"):
-        assert site_plans.ANALYTICS_FEATURE in site_plans.get_site_plan(tier).cloudflare_features
+        # The catalog lookup no longer resolves these at all — asserting on the tier's
+        # features here (as this test did while they shipped) would now AttributeError
+        # on None, which is a different failure from the one being guarded.
+        assert site_plans.get_site_plan(tier) is None
         assert (
             entitlements.site_analytics_entitled(plan_tier=tier, subscription_status="active")
             is False
-        ), f"the org-scoped {tier!r} key entitled a single site"
+        ), f"the retired {tier!r} key entitled a single site"
 
 
 def test_a_legacy_tier_key_still_resolves():
@@ -166,7 +177,10 @@ def test_the_catalog_still_pairs_the_feature_name_with_the_paid_tiers():
         for tier in site_plans.list_site_plans()
         if site_plans.ANALYTICS_FEATURE in tier.cloudflare_features
     }
-    assert entitled == {"site", "staff", "studio", "agency"}
+    # ``studio`` and ``agency`` were in this set until they were retired on
+    # 2026-09-06. The set is spelled out rather than derived so that a tier
+    # silently gaining or losing analytics fails here.
+    assert entitled == {"site", "staff"}
 
 
 # ── 2. the deploy shape ──────────────────────────────────────────────────────

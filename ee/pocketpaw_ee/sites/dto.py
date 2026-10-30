@@ -1,228 +1,22 @@
 # ee/pocketpaw_ee/sites/dto.py — request/response DTOs for the Sites control
-# plane. Distinct request and response shapes per the cloud 4-file rules.
-# Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
+# plane. Distinct request and response shapes per the cloud 4-file rules: a body
+# model (``*Request`` / ``*Update``) is never reused as a response.
 #
-# Updated 2026-09-04 (AD-4 — the overview chart's data): added
-# ``SiteAnalyticsSeriesPoint`` / ``SiteAnalyticsSeries`` and ``SiteAnalyticsResponse.series``,
-# the per-bucket views and visitors the chart under the headline numbers draws. Two things
-# about it are contracts rather than implementation detail. EVERY bucket in the range is
-# present, including the ones nobody visited, because a chart handed only the buckets that
-# had traffic draws a straight line across a quiet Sunday and reports it as no Sunday at
-# all. And every ``bucket`` stamp is UTC, said out loud on the model, because an axis
-# labelled ``1PM`` that means UTC is five and a half hours wrong for a reader in Mumbai and
-# nothing on the screen would say so.
-#
-# Updated 2026-09-04 (AD-2 — the visit metrics on the wire): added
-# ``SiteAnalyticsVisits`` and ``SiteAnalyticsResponse.visits``, the visits / bounce rate /
-# visit duration block the overview leads with. It carries this model's absence rule
-# further than the metrics above it needed to: a bounce rate over zero visits and a mean
-# duration over zero measurable visits are both None rather than 0.0, because a ratio of
-# nothing is not a result of nothing. And the block ITSELF is None, with ``"visits"`` named
-# in ``unrecorded``, when every row in the window was written before the counter learned to
-# stamp a visit id — the FOURTH empty state, which is the device class's problem one metric
-# over.
-#
-# Updated 2026-09-02 (SA-4 — the visitor-analytics read): added
-# ``SiteAnalyticsResponse`` / ``SiteAnalyticsBreakdown`` and the three
-# ``ANALYTICS_STATUS_*`` constants, backing GET /sites/{site_id}/analytics. The
-# shape is a discriminated one because the alternative renders three different
-# customer situations as the same panel of zeros: not on a plan that buys
-# analytics, on one but never republished since, and genuinely no traffic. Every
-# metric is None unless the status says the numbers are real, and a FAILED read is
-# not a status value at all — it is an error response, so an outage can never arrive
-# looking like a quiet week.
-#
-# Updated 2026-09-02 (SA-5 — the entitlement on the wire): added
-# ``SiteEntitlementsResponse.analytics``, resolved by the same predicate the publish
-# seam and the read endpoint use. Without it the dashboard's only way to learn that
-# a site's plan excludes analytics was to request the numbers and read the refusal,
-# which is the exact shape this response type was created to stop.
-#
-# Updated 2026-08-24 (SP-2 — draft preview joins the ephemeral build lane):
-# ``NativeArtifactResponse`` gained ``build_status`` / ``build_reason`` /
-# ``build_job_id`` and defaulted ``body_html`` / ``css`` to empty strings. A cold
-# native-artifact read no longer builds in the request — it queues a sandbox build and
-# returns a handle — so the model now carries both shapes. The status vocabulary is the
-# publish lane's, reused verbatim rather than re-minted: a client already treats an
-# unrecognised ``build_status`` as in-progress, and a second set of names for the same
-# idea is how a failure comes to read as progress.
-#
-# Updated 2026-08-12 (sites Settings consolidation — the client record gets a
-# backend): added ``SiteClientResponse`` / ``SiteClientUpdate`` / ``SiteInvoiceOut``
-# / ``SiteInvoiceCreate``, backing GET+PATCH /sites/{site_id}/client and
-# POST /sites/{site_id}/invoices. The builder's Settings surface had held the
-# owner's client details and manual receipts in COMPONENT STATE with a comment
-# saying persistence was a later task, so every value typed there was gone on
-# reload and on a site switch — the panel demonstrated its own contract without
-# honouring it. ``SiteClientUpdate`` is three-way (absent ≠ empty) so a partial
-# edit cannot blank a field the caller never sent, and money is integer minor
-# units end to end so no receipt is ever a float on the wire.
-#
-# Updated 2026-08-10 (SL-3 — the build lane reaches the wire): added
-# ``SiteResponse.build_reason`` and put all three build fields
-# (``build_status`` / ``build_reason`` / ``build_job_id``) on ``SiteStatusResponse``
-# too.
-#
-# SG-9i DECLARED ``build_status`` AND ``build_job_id`` ON ``SiteResponse`` AND NOTHING
-# EVER POPULATED THEM. ``service._to_response`` builds the DTO field by field and never
-# passed either, so every response carried the field DEFAULTS: ``build_status`` was
-# frozen at "none" for every site, no matter what the row said, and there was no
-# ``build_reason`` field at all. The frontend build-status UI reads all three — so it was
-# polling a value that could not change, which looks exactly like a build that never
-# starts. The populating half is in ``service.py``; this file only ever declared the
-# shape, which is why the gap survived a review: both halves looked complete alone.
-#
-# Updated 2026-06-01 (Phase 3 — local fake-deploy): SiteResponse carries ``url``,
-# the deployed site's openable address. LOCAL mode returns the localhost URL the
-# per-site static server serves so the caller (and the cmux smoke) can open the
-# published site directly. Empty in the CF path in v1 (reached via custom
-# domain). The frontend Site type mirrors this in Phase 4.
-#
-# Updated 2026-06-17 (pocketpaw#1345 backend half — by-pocket preview + status):
-# added SitePreviewResponse and SiteStatusResponse, the two by-pocket read DTOs
-# the #432 frontend already calls (getSitePreviewByPocket / getSiteStatusByPocket
-# in core/sites/api.ts). Field names/types mirror the frontend types.ts EXACTLY:
-# preview is {pocket_id, engine, content} (content optional — absent when nothing
-# drafted; a rippleSpec for engine="ripple", a {path: contents} source map for
-# engine="svelte"); status is {pocket_id, status, is_live} plus the optional
-# site_id the frontend type also declares. Without these, every Preview-tab fetch
-# 404'd and the builder showed "Nothing to preview yet".
-# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): added
-# MakeEditableRequest (the body for POST /sites/by-pocket/{pocket_id}/editable;
-# builder_origin optional) and SiteResponse.builder_origin so the UI can tell
-# whether a published site carries the edit-bridge (non-empty = editable).
-# Updated 2026-06-18 (feat/branch-primitive-sites-draft, BP-2 / pocketpaw#1345):
-# SiteStatusResponse gains ``has_unpublished_changes`` — the Branch primitive now
-# derives draft/published from the version pointers (versions.get_draft /
-# get_published), so a pocket can carry a draft NEWER than its published version.
-# This flag (default False, backward-compatible) lets the builder badge "has
-# unpublished edits" without inferring it from the Site doc. ``status``/``is_live``
-# semantics are unchanged in shape; only their derivation moves onto versions.
-# Updated 2026-06-18 (feat/sites-stable-identity, PERF-1): SiteStatusResponse gains
-# ``url`` — the canonical live address of the pocket's deployed site. With stable
-# per-pocket identity (one Site doc per pocket) pocket_status reads the ONE
-# canonical doc and surfaces its non-null url, so the builder/gallery link to the
-# address the latest build actually serves at instead of a stale dupe's url=None.
-# Optional (default None, backward-compatible) — None when no deployed site exists.
-# Updated 2026-06-18 (feat/branch-primitive-revert-history, BP-4): added two DTOs
-# for the Branch-primitive surfaces — SiteVersionResponse + VersionHistoryResponse
-# (the ordered version timeline GET /sites/by-pocket/{pocket_id}/versions returns)
-# and RequestPublishResponse (the Action created by POST
-# /sites/by-pocket/{pocket_id}/request-publish, the clean entry to the merge gate
-# so the client never hand-builds the Instinct proposal).
-# Updated 2026-06-18 (feat/branch-primitive-audit, BP-7): added AuditFinding +
-# AuditResponse — the response shape for POST /sites/by-pocket/{pocket_id}/audit
-# (the first non-editor PRODUCER). Each finding carries a ``fix_prompt`` the UI
-# feeds to the EXISTING edit path so the fix lands as a reviewable draft; there is
-# NO new apply endpoint (BP-7 reuses edit_svelte_component / refine).
-# Updated 2026-06-19 (P2b-backend — "Last Deployed"): SiteResponse and
-# SiteStatusResponse gain ``deployed_at`` — the ISO-8601 string of the pocket's most
-# recent successful live deploy (the Site doc's ``deployed_at``), or None before the
-# first deploy. The builder/gallery surface a "Last deployed <time>" label without a
-# second fetch. Optional (default None) so the field is backward-compatible.
-# Updated 2026-06-20 (DS-1a — surface dynamic-site pattern): SiteResponse and
-# SiteStatusResponse gain ``pattern`` — the SOURCE pocket's authoring pattern
-# ("dynamic" for a live-data site, "landing" for a marketing page, "" / other for
-# the rest). It lives on ``Pocket.pattern``, not the Site, so the service resolves
-# it from the source pocket (sites/service.py: patterns_for_pockets) per list +
-# status response. The frontend uses it to badge dynamic sites in the gallery.
-# Default "" so the field is backward-compatible and empty-safe (a pocket with no
-# pattern, or a missing/cross-tenant pocket, reads "").
-# Updated 2026-06-20 (DS-3 — read a dynamic site's D1 data): added the read-only
-# DTOs the operator data-view (DS-4 FE) consumes:
-#   * SiteDataTableInfo — one declared table {name, fields, primary_key} from the
-#     dynamic pocket's spec ``objects``. Always available (it comes from the spec),
-#     even when the live D1 data is not reachable.
-#   * SiteDataTablesResponse — the response of
-#     GET /sites/by-pocket/{pocket_id}/data: {pocket_id, available, reason, tables}.
-#     ``available`` is False with ``reason="live_on_cloudflare_only"`` in local/dev
-#     mode (no live D1 to read), but ``tables`` is still listed from the spec so the
-#     UI degrades cleanly instead of erroring.
-#   * SiteDataRowsResponse — the response of
-#     GET /sites/by-pocket/{pocket_id}/data/{table}: {pocket_id, table, available,
-#     reason, columns, rows}. ``rows`` is the D1 rows (capped); ``columns`` is the
-#     table's declared field names. In local mode ``available`` is False and ``rows``
-#     is empty, but ``columns`` is still listed from the spec.
-# These are READ-ONLY views (no request DTO — the inputs are path params); the
-# data view never writes through this surface.
-# Updated 2026-06-24 (feat/charge-first-sites): ``SiteResponse`` gains
-# ``checkout_url`` — the Dodo annual-checkout link a PAID-tier publish returns.
-# A paid publish defers the live deploy: it creates the site as PENDING
-# (deployed=False) and returns this link the caller redirects the buyer to; the
-# site deploys + goes live only when the ``subscription.active`` webhook confirms
-# payment. None for a free/base publish (which deploys immediately) and for any
-# non-publish response (default None, backward-compatible).
-# Updated 2026-06-24 (S2 review fix): ``DomainRequest.hostname`` now carries a
-# permissive DNS-hostname validator (label-dot-label, letters/digits/hyphens, no
-# leading/trailing/double dots, total length capped) so an obviously-malformed
-# host is rejected at the DTO (422) before it reaches Cloudflare. Kept permissive
-# — it accepts any real registrable hostname, it only blocks garbage.
-# Updated 2026-07-01 (NE-4b — native-editing leaf-edit persist): added the request
-# / response models for POST /sites/by-pocket/{pocket_id}/leaf-edits — LeafEdit
-# ({uid, op}), LeafEditsRequest ({edits}), LeafEditVerdict ({uid, applied, reason?})
-# and LeafEditsResponse ({pocket_id, results}). The native editor forwards its
-# already-rendered {uid, op} edits and the endpoint returns one verdict per edit.
-# ``op`` rides as an open dict — its {kind:setText|setProp,...} shape is validated
-# downstream by the paw-sites apply-leaf-edit CLI, not at this DTO boundary.
-# Updated 2026-07-09 (DP0-4 — publish async split): ``SiteResponse`` gains
-# ``provision_status`` (none | provisioning | provisioned | failed) and
-# ``provision_job_id``. A DYNAMIC-site publish no longer deploys inline — it enqueues
-# the durable ``provision_site`` job and returns immediately with
-# ``provision_status="provisioning"`` / ``deployed=False`` and the enqueued job id;
-# the site goes live only when the job finalizes. Both default to "none" / None so a
-# static publish and every non-publish response stay backward-compatible.
-# Updated 2026-07-01 (NE-5b — native-artifact endpoint): added NativeArtifactResponse
-# ({pocket_id, body_html, css}) — the response of GET
-# /sites/by-pocket/{pocket_id}/native-artifact. ``body_html`` is the armed svelte
-# build's ``<body>`` inner HTML (the data-uid-stamped leaves + the embedded
-# ``paw-edit-manifest`` script); ``css`` is the built stylesheet(s) concatenated into
-# one string. The native editor injects both into a shadow root to render the site
-# natively instead of framing an iframe.
-# Updated 2026-07-09 (SR-9 — surface each site's ENGINE): ``SiteResponse`` and
-# ``SiteStatusResponse`` gain ``engine`` ("svelte" | "ripple"; "" when unresolved) —
-# the sibling of DS-1a's ``pattern``, resolved from the source Pocket.engine so the
-# gallery can badge each card's engine (Custom vs Ripple) without a per-site fetch.
-# Updated 2026-07-22 (SI-4 — feat/sites-import-endpoint): ``SiteResponse`` gains
-# ``import_report`` (the persisted import summary — None for non-imported sites),
-# and two new DTOs back the import surface: ImportFromUrlRequest ({url}, shape-
-# validated in the service) and ImportFromUrlResponse ({site_id, pocket_id,
-# status:"queued"} — the 202 body; the crawler is the next stacked slice). The zip
-# import endpoint reuses SiteResponse (it publishes live through the html path).
-# Updated 2026-08-07 (SC-1 — a site's card shows its own screenshot):
-# ``SiteResponse`` (which IS the gallery list item — GET /sites is
-# ``response_model=list[SiteResponse]``) and ``SiteStatusResponse`` gain
-# ``preview_image_url`` — the stored URL of a screenshot of the site's live page,
-# resolved from the Site doc's own field. The sibling of ``pattern`` / ``engine``
-# in role: one more thing the card needs that would otherwise cost a per-card
-# fetch. None when no screenshot has landed (never deployed, no public url,
-# capture failed, Cloudflare unconfigured) — the card then falls back to its text
-# layout, so the field is optional, empty-safe and backward-compatible.
-# Updated 2026-08-07 (SC-3 — the card stops lying after a republish): the refresh
-# POLICY is now written onto both ``preview_image_url`` fields instead of being
-# inferrable only from where the capture is called — re-captured on every
-# successful deploy (so a republish updates the card), plus an explicit refresh, no
-# TTL, and a different uploads link every capture. New DTO
-# ``SitePreviewRefreshResponse`` ({site_id, preview_image_url}) backs that explicit
-# path, POST /sites/{site_id}/preview-refresh. It is deliberately its own response
-# rather than a reused ``SiteResponse``: the call answers one question ("what is
-# the new picture"), and unlike every deploy-triggered capture it REPORTS failure
-# — a person asked for it and is waiting on the answer.
-# Updated 2026-09-02 (the card's MARK): both DTOs gain ``favicon_url`` — the site's
-# own icon, for the chip that had been a hard-coded globe on every card alike. It sits
-# beside ``preview_image_url`` and answers a different question ("whose site is this"
-# rather than "what does it look like"), and it differs from it in one way worth
-# knowing before reading either field: this one carries a data: URI INLINE rather than
-# an uploads link. An icon is a few KB, so paying for a blob row and a per-card auth
-# grant to serve it would cost more than the bytes; ``sites.favicon`` holds the cap
-# that keeps a list response bounded and drops anything over it. None whenever the
-# site declares no icon we can use, so the card falls back to the globe.
+# ``SiteResponse`` is the one wire shape for a site, mapped from the document in
+# ``service._to_response``; every field defaults so rows written before it existed
+# still serialize. Owner switches (``badge_hidden``, ``ai_training_allowed``) are the
+# stored PREFERENCE and reach the live page on the next publish. Status and
+# analytics responses carry counts and states only, never diagnostics text.
+# Length caps on owner-typed text live here, so an over-long value is a 422 at the
+# edge rather than a silently truncated record.
 
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class PublishRequest(BaseModel):
@@ -235,6 +29,14 @@ class PublishRequest(BaseModel):
     # features when a custom domain is later added.
     pocket_id: str
     site_plan_key: str | None = None
+    # A project site's pending D1 migration that would delete rows the site holds
+    # (DROP TABLE / DROP COLUMN / DELETE without WHERE) is refused unless the owner
+    # confirms it with this. See ``sites.project_d1``.
+    confirm_destructive_migrations: bool = False
+    # Durable Object classes whose stored data the owner agreed to delete (a pending
+    # ``deleted_classes`` / ``renamed_classes`` migration). Only the owner's publish
+    # dialog sends it. See ``sites.durable_objects``.
+    confirm_do_data_loss: list[str] = Field(default_factory=list)
 
 
 class SitePlanRequestBody(BaseModel):
@@ -244,6 +46,47 @@ class SitePlanRequestBody(BaseModel):
 
     pocket_id: str
     site_plan_key: str
+
+
+class EnhancePromptAnswer(BaseModel):
+    """One answer to a question a previous enhance call asked."""
+
+    question: str = Field(max_length=300)
+    answer: str = Field(max_length=1000)
+
+
+class EnhancePromptRequest(BaseModel):
+    """Body for POST /sites/enhance-prompt: the composer text, plus answers when
+    the user is replying to the questions a thin prompt came back with.
+
+    ``model`` is the composer's picked model, validated like the chat body's
+    per-send ``model`` (it can reach a CLI launch); ``None`` runs the agent's
+    own model. ``agent_id`` names the agent to run on; ``None`` is the
+    workspace's default agent, the one a Sites chat turn talks to."""
+
+    prompt: str = Field(min_length=1, max_length=4000)
+    answers: list[EnhancePromptAnswer] | None = Field(default=None, max_length=5)
+    model: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9._:/-]+$")
+    agent_id: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class EnhancePromptResponse(BaseModel):
+    """``prompt`` is the brief to put back in the composer (the original when
+    ``changed`` is false); ``questions`` is non-empty only when the prompt was too
+    thin to enhance without asking. ``reason`` says why: ``enhanced`` (changed),
+    ``questions``, ``unchanged`` (the model had nothing to add), ``failed`` (no
+    agent, backend error, timeout, bad reply, guard failure), ``rate_limited`` or
+    ``billing`` (out of credits, over quota, or a model early access can't use).
+    ``sources`` lists the links in the prompt whose page was read and used for an
+    enhanced brief (empty otherwise)."""
+
+    prompt: str
+    questions: list[str] = Field(default_factory=list)
+    changed: bool = False
+    reason: Literal["enhanced", "questions", "unchanged", "failed", "rate_limited", "billing"] = (
+        "unchanged"
+    )
+    sources: list[str] = Field(default_factory=list)
 
 
 class SitePlanRequestResponse(BaseModel):
@@ -273,10 +116,20 @@ class SiteResponse(BaseModel):
     id: str
     pocket_id: str
     name: str
+    # SM-1: the owner's blurb, or "" when they have not written one. The card
+    # falls back to the host / script name, so empty is a normal state and not a
+    # missing value.
+    description: str = ""
     script_name: str
     deployed: bool
     signed_key: str
     url: str = ""
+    # VS-4: the name-based address this site serves at (``acme-bakery``), or None for a
+    # site still on ``paw-site-<id>``.
+    slug: str | None = None
+    # VS-4: the address a rename reserved, which goes live on the site's NEXT publish.
+    # None when no rename is waiting.
+    slug_pending: str | None = None
     # SE-2b: the builder origin the site was published with, or "" for a normal
     # (non-editable) site. Non-empty means the page carries the edit-bridge.
     builder_origin: str = ""
@@ -306,12 +159,17 @@ class SiteResponse(BaseModel):
     # Ripple) without a second per-site fetch. "" when the pocket predates the
     # engine field or could not be resolved (the card shows no engine badge).
     engine: str = ""
+    # The site's edit/build flags (``engines.site_capabilities``): {select, text,
+    # code, build_log, design, sections, structure, upgradable, has_database,
+    # data_viewer}. Set
+    # on the list read for every resolved pocket, whatever its engine; None where
+    # ``engine`` is "".
+    capabilities: dict[str, bool] | None = None
     # charge-first: the Dodo annual-checkout link for a PAID-tier publish. A paid
     # publish creates the site as PENDING (deployed=False) and returns this link
     # the caller redirects the buyer to; the site deploys + goes live only after
     # the ``subscription.active`` webhook confirms payment. None for a free/base
     # publish (which deploys immediately) and for any non-publish response.
-    checkout_url: str | None = None
     # DP0-4: where a dynamic site sits in the durable D1 provision job
     # ---- per-site billing state (BC-9) -------------------------------------
     # The frontend has declared and branched on these since BC-9: SiteSummary types
@@ -329,6 +187,34 @@ class SiteResponse(BaseModel):
     plan_tier: str = ""
     subscription_status: str = "none"
     renewal_date: str | None = None
+    # WHAT THIS PERIOD HAS ALREADY BEEN PAID FOR, in whole USD, so the builder can
+    # show what switching plans actually costs instead of the tier's sticker price.
+    #
+    # The two numbers differ for every move except a first purchase: an upgrade
+    # charges only the difference against this, and a downgrade charges nothing.
+    # Without it on the wire the plan cards can only show the full monthly price,
+    # which for a site already on a paid rung is never the amount that will be
+    # taken — so the one screen where a customer is deciding how to spend money
+    # quotes them a figure the publish will not charge.
+    period_paid_usd: int = 0
+    # Is this plan already scheduled to close at ``renewal_date``?
+    #
+    # Without it the Billing tab cannot tell the two states apart: a site running
+    # normally and a site whose last month is running out both read as an active
+    # paid plan with a renewal date, because that is exactly what they are. The
+    # difference is whether that date is the next charge or the end — and showing
+    # "renews on the 14th" to somebody who cancelled is how a cancellation gets
+    # made twice, or gets escalated as one that did not take.
+    plan_cancels_at_period_end: bool = False
+    # VS-3: the owner's "hide the PocketPaw badge" preference, read straight off the
+    # doc. It is only the PREFERENCE: whether the published page actually carries
+    # the badge also depends on the plan (``GET /sites/{id}/entitlements`` ->
+    # ``badge_required``). A free site can read True here and still be badged. True
+    # for every row that predates the field, matching the model default.
+    badge_hidden: bool = True
+    # AV-1: whether the generated robots.txt lets AI TRAINING crawlers in. False (the
+    # default) blocks them; search/assistant crawlers are allowed either way.
+    ai_training_allowed: bool = False
     # (none | provisioning | provisioned | failed). A DYNAMIC-site publish does NOT
     # deploy inline — it enqueues the ``provision_site`` job and returns immediately
     # with ``provision_status="provisioning"`` (``deployed=False``); the site goes
@@ -418,6 +304,186 @@ class SiteResponse(BaseModel):
     # not be read, or the icon was over the cap; the card falls back to the globe,
     # which is exactly the pre-existing card, so this is never a gate on anything.
     favicon_url: str | None = None
+    # A CONNECTED site: a Paw Bar concierge on a website the customer hosts
+    # themselves (``mint_foreign_site``). There is no Worker behind it, so
+    # ``deployed`` is False and ``url`` is "" for its whole life. Without this flag
+    # the gallery reads such a row as a draft that was never published and opens
+    # it in the builder over an empty pocket. ``allowed_origins`` names the hosts
+    # the embed answers on, which is what the card shows instead of a URL. Neither
+    # is a secret: the origins are public by construction.
+    foreign_origin: bool = False
+    allowed_origins: list[str] = Field(default_factory=list)
+    # A connected site's own page title (<title>, else og:title), read from its
+    # verified origin, whitespace-collapsed and capped at 200 chars. "" for hosted
+    # sites, before the first read, and for rows that predate the field. The owner's
+    # ``name`` is never overwritten with it; the card shows name || this || host.
+    origin_title: str = ""
+
+
+class SiteExportResponse(BaseModel):
+    """One export of a site's data — the copy its owner keeps after a delete.
+
+    ``status`` is the field to read first and the only one the delete cascade acts
+    on: it treats ONLY ``ready`` as satisfying its precondition, so a ``failed``
+    export blocks the destroy rather than letting it proceed over data nobody kept.
+    ``size_bytes`` and the counts come from the export itself, not from a re-read of
+    a database that is about to be deleted.
+    """
+
+    id: str
+    site_id: str
+    pocket_id: str = ""
+    site_name: str = ""
+    # pending | ready | failed. An unrecognised value must be treated as NOT ready.
+    status: str = "pending"
+    # A sentence we wrote, never a raw driver or Cloudflare error — every site
+    # reader in the workspace can see it.
+    error: str = ""
+    size_bytes: int = 0
+    table_counts: dict[str, int] = Field(default_factory=dict)
+    lead_count: int = 0
+    # "sql" when the download includes a full SQL dump of the site's own D1 database
+    # (``database.sql`` in the bundle); "" when it has none.
+    database_dump: str = ""
+    created_at: str | None = None
+    # When the sweeper will purge these bytes. Surfaced so the UI can say how long
+    # the owner has to download it rather than implying it is kept forever.
+    expires_at: str | None = None
+
+
+class SiteDeleteQueuedResponse(BaseModel):
+    """Answer of ``DELETE /sites/{site_id}`` — 202, with the job handle.
+
+    202 AND NOT 204. The site is still serving when this returns: the teardown is a
+    durable job over an ordered cascade, and a 204 would be a simpler contract and a
+    lie. The client polls ``GET /sites/{site_id}/delete-status`` from here.
+
+    ``status`` is typed ``str`` rather than a literal for the same reason the poll's
+    is — see :class:`SiteDeleteStatusResponse`.
+    """
+
+    site_id: str
+    #: ``"queued"`` on the happy path. A request that arrives while an earlier attempt
+    #: still holds the slot reports THAT attempt's status instead, because the site is
+    #: already being deleted and a conflict the caller cannot act on would be noise.
+    status: str = "queued"
+    #: Mirrors ``Site.delete_job_id``. Persisted rather than transient because a queued
+    #: destructive job is exactly when someone reloads the page.
+    job_id: str | None = None
+
+
+class SiteDeleteStatusResponse(BaseModel):
+    """Answer of ``GET /sites/{site_id}/delete-status``.
+
+    THIS ENDPOINT 404s ON SUCCESS, and that is the contract rather than an edge case.
+    The cascade's last step deletes the Site document, and ``delete_status`` is a field
+    on that document — so a completed delete has nothing left to report a status on.
+    There is deliberately no terminal ``"deleted"`` value here; adding one would mean
+    keeping the row the delete exists to remove, and the shipped client reads the 404
+    as its success signal.
+
+    ``delete_status`` is a plain ``str`` on purpose. The client treats any value it
+    does not recognise as STILL RUNNING, which only works if an unknown value can
+    reach it — a stricter type here would push a future status through validation and
+    turn "we added a phase" into "the poll stops on a live teardown".
+    """
+
+    site_id: str
+    #: none | queued | exporting | tearing_down | failed. Read via the client's
+    #: helpers, never by comparing the string at a call site.
+    delete_status: str = "none"
+    #: WHY a delete stopped, as ``"<step>:<cause>"`` — the same two-part shape
+    #: ``build_reason`` uses, so a consumer parses it once. The cause half is a fixed
+    #: machine token from ``delete_cascade._classify``, never raw provider text.
+    delete_reason: str | None = None
+    #: Step name -> outcome: the resume ledger. A re-entered job skips every step
+    #: recorded here, which is what makes a retry a resume rather than a repeat.
+    delete_ledger: dict[str, str] = Field(default_factory=dict)
+    #: The ``SiteExport`` holding the customer's data, captured before anything was
+    #: destroyed. An ID and not a URL: the export outlives the site precisely because
+    #: it is NOT stored on the document the cascade deletes.
+    delete_export_id: str = ""
+    delete_job_id: str | None = None
+
+
+class SlugAvailability(BaseModel):
+    """``GET /sites/slug-available``: may this address be taken, and if not, why.
+
+    ``normalized`` is what the raw input becomes (``Acme Bakery!`` -> ``acme-bakery``)
+    and is what ``PUT /sites/{id}/slug`` would reserve. ``reason`` is None when
+    ``available``; otherwise ``invalid`` (shape), ``reserved`` (a name the platform
+    keeps, including anything under ``paw-``), ``taken`` (another site has it or is
+    moving to it, or a Worker by that name exists) or ``held`` (another workspace gave
+    it up within the last 30 days). ``suggestion`` is a free alternative, when one is
+    found."""
+
+    available: bool
+    normalized: str
+    reason: Literal["invalid", "reserved", "taken", "held"] | None = None
+    suggestion: str | None = None
+
+
+class SlugRenameRequest(BaseModel):
+    """``PUT /sites/{id}/slug``: the address to move this site to on its next publish.
+    Raw input; the service normalizes it exactly as the availability check does."""
+
+    slug: str = Field(..., max_length=200)
+
+
+class SiteMetadataUpdate(BaseModel):
+    """PATCH body for a site's own title and blurb.
+
+    THREE-WAY, exactly like ``SiteClientUpdate``: a field absent from the body is
+    left alone, while an explicitly-sent empty string clears it. ``model_fields_set``
+    is what tells the two apart, so the service must read the un-dumped model — a
+    caller editing only the description cannot blank the name it never sent.
+
+    A name of only whitespace is refused rather than accepted-and-trimmed-to-empty.
+    The name is the site's identity in the gallery AND the string the delete
+    confirmation asks the owner to type back; a site that renders as "" there would
+    make the type-to-confirm gate unsatisfiable.
+    """
+
+    name: str | None = None
+    description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not v.strip():
+            raise ValueError("name cannot be empty")
+        if len(v) > 200:
+            raise ValueError("name must be 200 characters or fewer")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def _cap_description(cls, v: str | None) -> str | None:
+        if v is not None and len(v) > 500:
+            raise ValueError("description must be 500 characters or fewer")
+        return v
+
+
+class SiteBrandingUpdate(BaseModel):
+    """PATCH body for a site's branding switches (VS-3).
+
+    One REQUIRED field rather than the three-way shape ``SiteMetadataUpdate`` uses:
+    there is a single switch, so an empty body has nothing to mean and is a 422.
+    ``badge_hidden=True`` needs a plan that grants badge removal (402 otherwise);
+    ``False`` is always accepted.
+    """
+
+    badge_hidden: bool
+
+
+class SiteAiVisibilityUpdate(BaseModel):
+    """PATCH body for a site's AI-crawler policy (AV-1). One required switch:
+    ``ai_training_allowed`` opts the site in to AI-training crawlers in its generated
+    robots.txt. Search and assistant crawlers are never blocked."""
+
+    ai_training_allowed: bool
 
 
 class SitePreviewRefreshResponse(BaseModel):
@@ -458,6 +524,23 @@ class DevPreviewResponse(BaseModel):
     url: str
 
 
+class SiteVerificationSummary(BaseModel):
+    """PP-2: the ``/status`` view of a site's verification (contract §6).
+
+    ``status`` is passed | failed | unverified | pending | none (never verified, or the
+    source changed since). ``content_hash`` names the render it describes. Deliberately
+    has NO field that could carry a message: ``extra="forbid"`` makes adding one a
+    visible schema change, not a quiet leak.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = "none"
+    error_count: int = 0
+    checked_at: str | None = None
+    content_hash: str | None = None
+
+
 class SiteStatusResponse(BaseModel):
     """Authoritative draft/published + is_live state for a pocket, so the builder
     labels accurately even before the site appears in the gallery list. ``status``
@@ -491,6 +574,9 @@ class SiteStatusResponse(BaseModel):
     # from Pocket.engine — the same field the list response carries, so a by-pocket
     # status read can badge the engine too. "" when unresolved / pre-engine row.
     engine: str = ""
+    # The same ``capabilities`` the list row carries (``engines.site_capabilities``).
+    # None when the pocket could not be resolved.
+    capabilities: dict[str, bool] | None = None
     # SC-1: the stored URL of a screenshot of the pocket's live site — the same
     # field the list response carries, so a by-pocket status read can show the
     # page too. None until a capture lands (and whenever one failed, the site has
@@ -521,6 +607,68 @@ class SiteStatusResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+    # ── The site's BILLING state on the by-pocket read ──────────────────────────
+    #
+    # The frontend has declared these on its own ``SiteStatusResponse`` since BC-11
+    # and the Billing tab prefers them over the gallery summary row — "the
+    # authoritative status", its comment says. This DTO never carried them, so
+    # every one of those reads was ``undefined`` and silently fell through to the
+    # summary. Nothing broke, which is why it survived: the fallback is the same
+    # data one fetch staler. It stops being harmless now that applying a plan
+    # changes these fields and the panel re-reads them to price the NEXT change —
+    # a stale ``period_paid_usd`` quotes an upgrade at a month the customer has
+    # already paid.
+    #
+    # Defaults are the "no plan" values, so a pocket with no Site doc and every
+    # pre-field row read as a free site rather than as an error.
+    plan_tier: str = ""
+    subscription_status: str = "none"
+    renewal_date: str | None = None
+    period_paid_usd: int = 0
+    plan_cancels_at_period_end: bool = False
+    # WHICH RAIL IS PAYING: "plan" (the workspace subscription carries this site),
+    # "credits" (the wallet bought it), "addon"/"subscription" (sold before the
+    # 2026-09-05 cutover), or "" (free floor).
+    #
+    # On the wire because the Billing tab cannot otherwise tell the two paid
+    # states apart: a carried site and a bought site both read tier ``staff``,
+    # status ``active``. Only the rail says whether the number beside it is a
+    # price the customer pays or an inclusion they already have, and showing
+    # "$19/month" against a site their plan carries is the kind of wrong that
+    # generates a support ticket about a charge that never happened.
+    billing_rail: str = ""
+    # THE WORKSPACE'S SITE SLOTS: how many the plan carries and how many are taken.
+    # ``plan_sites_included`` is None for an uncapped plan (Enterprise) and 0 for
+    # one that carries none.
+    #
+    # Here rather than on ``/entitlements`` because the storefront needs BOTH
+    # halves to price the next publish, and the used count is a question about
+    # sites — it belongs with the read that already owns them. Costs one indexed
+    # count on a read that already does several.
+    plan_sites_used: int = 0
+    plan_sites_included: int | None = None
+    # "Paw Pro" — the WORKSPACE plan's display name, so the Billing tab can say
+    # "included in Paw Pro" rather than "included in your plan".
+    #
+    # Sent from here rather than looked up on the client: the client would have to
+    # fetch the plan catalog on a page that needs nothing else from it, and the
+    # obvious shortcut — title-casing the key — turns "pro_max" into "Pro Max"
+    # while the product is called "Paw Pro Max". The catalog is the only place
+    # that mapping is right. "" when it cannot be resolved, and every consumer
+    # falls back to a generic phrase rather than rendering an empty name.
+    workspace_plan_name: str = ""
+    # PP-2 — verification of the CURRENT draft source (contract §6). Counts only: the
+    # per-error messages are agent-only and never reach this response. Defaults to
+    # ``none`` so a pocket that was never verified reads as such.
+    verification: SiteVerificationSummary = Field(default_factory=lambda: SiteVerificationSummary())
+
+
+class OpenDraftResponse(BaseModel):
+    """``POST /sites/by-pocket/{pocket_id}/open-draft``. ``opened`` is False when the
+    pocket already showed a draft (a no-op success)."""
+
+    pocket_id: str
+    opened: bool
 
 
 class SiteVersionResponse(BaseModel):
@@ -705,6 +853,26 @@ class LeafEditsResponse(BaseModel):
     results: list[LeafEditVerdict]
 
 
+class HtmlArmedSourceResponse(BaseModel):
+    """Response of GET /sites/by-pocket/{pocket_id}/html-armed-source (HE-9).
+
+    ``source`` is the pocket's html source map with ``data-uid`` stamped on every
+    editable leaf — the document the builder should render in its srcdoc so a click
+    resolves to a uid the write path can address. Stamping is an offset splice, so it
+    is byte-identical to the authored source apart from the inserted attributes.
+
+    ``manifest`` is the leaf list behind those uids (file, spans, edit kind), which the
+    browser adapter reads to know what is editable and how.
+
+    Both are re-derived per call. A cached manifest is stale the moment an edit lands,
+    because spans shift under a splice — callers re-arm, they do not cache.
+    """
+
+    pocket_id: str
+    source: dict[str, str]
+    manifest: list[dict[str, Any]]
+
+
 class ImportFromUrlRequest(BaseModel):
     """Body for POST /sites/import/from-url (SI-4): the site URL to crawl-import.
     Shape validation (http(s), real host, length cap) runs in the import service so
@@ -769,7 +937,8 @@ class ImportBriefStatusResponse(BaseModel):
 
 class SiteInvoiceOut(BaseModel):
     """One manual receipt on the site's client record. ``amount_cents`` is integer
-    MINOR units — the wire never carries a float for money, so the reading client
+    ISO 4217 minor units of ``currency`` (¥1,500 is 1500, $3.50 is 350; the name is
+    historical) — the wire never carries a float for money, so the reading client
     formats it and nothing rounds in transit."""
 
     id: str
@@ -778,6 +947,7 @@ class SiteInvoiceOut(BaseModel):
     currency: str
     paid: bool
     note: str = ""
+    amount_unit: str = ""  # "iso4217", or "" for a legacy row not yet migrated
 
 
 class SiteEntitlementsResponse(BaseModel):
@@ -791,19 +961,20 @@ class SiteEntitlementsResponse(BaseModel):
     The two fields that are NOT on ``SiteEntitlements`` are the ones that make the
     difference between a usable message and a useless one:
 
-    * ``domained_sites_used`` — how many sites in this workspace already spend the
-      floor allowance. "You cannot add a domain" and "your one free domain is on
-      another site" are different sentences, and only the count separates them.
+    * ``domained_sites_used`` — retained on the wire for older clients and always
+      0. It used to count sites across the workspace; the free allowance is now
+      per site, so there is nothing to count.
     * ``domain_slots_available`` — the same answer ``add_domain`` will give,
-      computed by the SAME function it calls (``_domain_cap_exceeded``), so the
+      computed by the SAME function it calls (``_hostname_cap_exceeded``), so the
       button's enabled state and the endpoint's verdict cannot drift apart. A
       second copy of the rule here would eventually disagree with the gate, and
-      the UI would confidently offer a button that 402s.
+      the UI would confidently offer a button that 402s. It closes only when THIS
+      site holds its free apex + ``www``; sibling sites never affect it.
 
-    ``max_domained_sites`` is None for an uncapped (paid) tier, mirroring the
-    catalog. ``subscription_active`` distinguishes a lapsed paid site from a site
-    that never had the capability — the tier stays recorded, only the payment
-    stopped, and the UI should say so.
+    ``max_domained_sites`` is the plan's per-site grant (1 on free, None for an
+    uncapped paid tier), mirroring the catalog. ``subscription_active``
+    distinguishes a lapsed paid site from a site that never had the capability —
+    the tier stays recorded, only the payment stopped, and the UI should say so.
 
     ``analytics`` says whether this site's plan buys visitor counting. It is what
     lets the panel disable itself with a reason BEFORE the call, and it is
@@ -812,6 +983,16 @@ class SiteEntitlementsResponse(BaseModel):
     include this" from "it does, and you have not republished since you upgraded".
     Those need different sentences and different buttons. This field is the cheap
     pre-check; the endpoint is the answer.
+
+    ``project_download`` says whether this site's plan buys taking the project away
+    as an archive. Like ``analytics`` it is echoed straight off the resolver with no
+    second condition ANDed in, and like every field here it exists so the Download
+    button can disable itself with a reason instead of 402ing when pressed.
+
+    The builder's Code tab (``sourceVisible`` on the pocket wire dict) is resolved off
+    the same per-site predicate, so the two normally agree. They can still differ
+    when a platform operator overrides source visibility for the whole workspace, so
+    the Download button reads this field, never ``sourceVisible``.
     """
 
     site_id: str
@@ -825,6 +1006,7 @@ class SiteEntitlementsResponse(BaseModel):
     analytics: bool = False
     concierge_entitled: bool = False
     concierge_enabled: bool = False
+    project_download: bool = False
 
 
 class SiteClientResponse(BaseModel):
@@ -877,7 +1059,10 @@ class SiteClientUpdate(BaseModel):
 class SiteInvoiceCreate(BaseModel):
     """POST body for recording one manual receipt against the client record.
 
-    ``amount_cents`` is a non-negative integer in minor units. It is bounded on BOTH
+    ``amount_cents`` is a non-negative integer in ISO 4217 minor units of
+    ``currency`` (the name is historical) when the request carries
+    ``X-Paw-Money-Units: iso4217``; without it the service reads major × 100, the
+    pre-2026-10-01 client convention, and converts. It is bounded on BOTH
     ends on purpose: negative would let a receipt reverse the running total, and the
     upper bound stops a typo (or a paste of an id into an amount field) from writing
     a number no currency has a use for. ``currency`` is normalized to upper case and
@@ -916,11 +1101,12 @@ class SiteInvoiceCreate(BaseModel):
 
 
 class NativeArtifactResponse(BaseModel):
-    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the armed
-    svelte build's body + CSS, so the native editor can shadow-render the site
-    instead of framing an iframe. ``body_html`` is the built page's ``<body>`` INNER
-    HTML — the data-uid-stamped editable leaves plus the embedded
-    ``<script id="paw-edit-manifest">`` — which the FE injects into a shadow root.
+    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the draft's
+    ``preview_url`` on the preview origin, plus (svelte/react) the armed build's body +
+    CSS, so the native editor can shadow-render the site instead of framing an iframe.
+    ``body_html`` is the built page's ``<body>`` INNER HTML — the data-uid-stamped
+    editable leaves plus the embedded ``<script id="paw-edit-manifest">`` — which the
+    FE injects into a shadow root.
     ``css`` is the built stylesheet(s) concatenated into one string the FE injects as
     a single ``<style>``.
 
@@ -943,6 +1129,84 @@ class NativeArtifactResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+    # Absolute URL of the draft's site root on the cookieless preview origin
+    # (``https://<token>.<PAW_SITES_PREVIEW_BASE_URL host>/``, which serves index.html),
+    # the full draft with its <head> and JS. Every engine including html. ``None``
+    # while the build is pending or failed, and for a project draft whose
+    # ``preview_mode`` is ``"server_only"``. Append ``?paw_edit=1`` to load the edit
+    # bridge; it starts in select mode, and an ``arm {mode: "browse"}`` command turns
+    # it inert without a reload (acked with ``paw-edit-armed {mode}``).
+    preview_url: str | None = None
+    # project engine only (None elsewhere): "full" when the preview is the whole site
+    # (static assets, or a draft Worker running its server code), "static" when it has
+    # server routes the preview does not run (assets only), "server_only" when nothing
+    # can be previewed (``preview_url`` is None), "published" when the source is
+    # exactly what is live and its drafts were purged (``preview_url`` is the live
+    # site's URL, or None). None until a build finished.
+    preview_mode: str | None = None
+    # The site's edit/build capability flags (``engines.site_capabilities``):
+    # {select, text, code, build_log, design, sections, structure, upgradable,
+    # has_database, data_viewer}, on every engine's answer. ``preview_mode`` above stays a
+    # sibling: it is a property of a finished build, not of the engine.
+    capabilities: dict[str, bool] | None = None
+
+
+class SiteBuildResponse(BaseModel):
+    """GET /sites/by-pocket/{pocket_id}/builds/latest: a project pocket's newest draft
+    build. ``status`` is ``queued`` / ``building`` / ``built`` / ``failed``; ``reason``
+    is a rung on failure, never build output. ``current`` is True when this build is
+    of the pocket's current files. Poll this (no realtime event exists for builds)."""
+
+    pocket_id: str
+    job_id: str
+    status: str
+    reason: str | None = None
+    preview_mode: str | None = None
+    framework: str | None = None
+    updated_at: str | None = None
+    current: bool = False
+
+
+class SiteBuildSummary(BaseModel):
+    """One build in the builds list: never its log. ``trigger`` is ``draft`` (an
+    owner or editor: the preview, a Code view save, a visual edit) or ``agent``;
+    null for a build recorded before triggers were. ``started_at`` is null while
+    queued, ``finished_at`` until it is ``built`` / ``failed``."""
+
+    job_id: str
+    status: str
+    reason: str | None = None
+    trigger: str | None = None
+    content_hash: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    updated_at: str | None = None
+
+
+class SiteBuildListResponse(BaseModel):
+    """GET /sites/by-pocket/{pocket_id}/builds: the pocket's recent builds, newest
+    first, one page (``limit`` from ``offset``) of ``total``."""
+
+    pocket_id: str
+    builds: list[SiteBuildSummary] = Field(default_factory=list)
+    total: int = 0
+    limit: int
+    offset: int
+
+
+class SiteBuildLogResponse(BaseModel):
+    """GET /sites/by-pocket/{pocket_id}/builds/{job_id}/log: one project build's
+    install / build / dry-run output, secrets redacted and capped to the last 64 KiB
+    (``log_truncated`` says when the head was cut). Empty while the build runs."""
+
+    pocket_id: str
+    job_id: str
+    status: str
+    reason: str | None = None
+    log: str = ""
+    log_truncated: bool = False
+    preview_mode: str | None = None
+    updated_at: str | None = None
 
 
 class SiteAssetResponse(BaseModel):
@@ -975,6 +1239,61 @@ class SiteAssetDeleteRequest(BaseModel):
     """The storage key to remove. Validated against the site's own prefix."""
 
     key: str
+
+
+class SiteAssetGenerateRequest(BaseModel):
+    """Generate media with Studio and publish it for the site.
+
+    ``count`` applies to images only. ``image_url``, ``duration`` and ``engine``
+    apply to video only: ``image_url`` turns it into image-to-video and must be
+    one of this site's public asset URLs or a ``/api/v1/media/<name>`` this
+    workspace owns — never an arbitrary URL. ``engine`` is ``auto`` (fal when the
+    server has a key, else motion), ``generative`` (fal footage) or ``motion``
+    (animated graphics rendered from HTML). ``aspect_ratio`` defaults to 16:9;
+    images take 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3 and video takes 16:9, 9:16, 1:1.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["image", "video"]
+    prompt: str = Field(min_length=1, max_length=2000)
+    count: int = Field(default=1, ge=1, le=4)
+    aspect_ratio: str | None = None
+    image_url: str | None = Field(default=None, max_length=2048)
+    duration: Literal[5, 10] | None = None
+    engine: Literal["auto", "generative", "motion"] | None = None
+
+    @field_validator("prompt")
+    @classmethod
+    def _prompt_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Describe what to generate.")
+        return value
+
+
+class SiteAssetFromStudioRequest(BaseModel):
+    """Copy one existing Studio generation of this workspace onto the site."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    generation_id: str = Field(min_length=1, max_length=200)
+
+
+class SiteMediaAssetsResponse(BaseModel):
+    """Media just published to the site's rail, from a generation or a copy.
+
+    ``assets`` uses the same shape as list/upload. For a video, ``assets`` holds
+    the clip and ``poster`` its poster frame (also on the rail, so it appears in
+    the asset list too); ``poster`` is null for images or when there is no frame.
+    ``errors`` names image attempts that failed while others succeeded.
+    ``generation_id`` is the Studio history id (a new one for ``/generate``, the
+    source one for ``/from-studio``).
+    """
+
+    assets: list[SiteAssetResponse]
+    poster: SiteAssetResponse | None = None
+    generation_id: str
+    errors: list[str] = Field(default_factory=list)
 
 
 # ── SA-4: the visitor-analytics read ────────────────────────────────────────
@@ -1140,3 +1459,388 @@ class SiteAnalyticsResponse(BaseModel):
     countries: list[SiteAnalyticsBreakdown] | None = None
     devices: list[SiteAnalyticsBreakdown] | None = None
     unrecorded: list[str] = []
+
+
+# --- Wave 3: transferring a site to another workspace ----------------------
+#
+# Request and response stay separate, per the DTO rule — the offer takes one field
+# the client supplies, and the response carries several the client must never set.
+
+
+class SiteTransferOfferRequest(BaseModel):
+    """Offer this site to ``destination_workspace_id``."""
+
+    # The only thing the sender supplies. Everything else about the offer — who made
+    # it, when, from where — is read from the request context, because a client that
+    # can name the offerer can forge one.
+    destination_workspace_id: str = Field(min_length=1)
+
+
+class SiteTransferResponse(BaseModel):
+    """One transfer offer, from either end of it.
+
+    DELIBERATELY THIN, and that is a tenancy decision rather than an oversight. The
+    destination reads this for a site that still belongs to somebody else, so it
+    carries only what somebody needs to decide whether to accept: which site, where
+    it is now, who offered it. Not the signed key, not the capture config, not the
+    lead count, not the client record — those stay with the workspace that still
+    owns the site until the offer is answered.
+    """
+
+    site_id: str
+    name: str
+    url: str = ""
+    from_workspace_id: str
+    to_workspace_id: str = ""
+    offered_by: str = ""
+    offered_at: datetime | None = None
+    status: str = "none"
+
+
+class SiteTransferListResponse(BaseModel):
+    """Everything offered TO the calling workspace."""
+
+    transfers: list[SiteTransferResponse] = []
+
+
+# --- SF-8: proving a workspace controls an origin --------------------------
+#
+# Request and response stay separate per the DTO rule. The request carries the one
+# field the client supplies; everything else — the token, the deadline, the proven
+# status — is minted server-side, because a client that can name them can forge a
+# proof.
+
+
+class OriginClaimRequest(BaseModel):
+    """The domain a workspace claims to control. Body of BOTH origin endpoints.
+
+    Claim and verify take the same single field, so they share a shape rather
+    than carrying two identical models. If either ever grows a field the other
+    does not want, split them then — not before.
+
+    A BARE HOST, never a URL. The service normalizes and refuses (lowercase, no
+    scheme/port/path/credentials, no single-label name, no literal IP); this cap
+    only stops an absurd value from reaching it.
+    """
+
+    host: str = Field(min_length=1, max_length=253)
+
+
+class OriginClaimResponse(BaseModel):
+    """A pending claim, with everything the owner needs to publish the proof.
+
+    ``token`` IS A SECRET and this is the only shape that carries it. It is
+    readable by the workspace that asked for it and nobody else — do not add this
+    model to a list endpoint, a gallery card, or any response a different tenant
+    can reach.
+    """
+
+    host: str
+    token: str
+    status: str
+    expires_at: datetime
+    # The two places the owner may publish it, rendered rather than described, so
+    # the panel can offer a copy button instead of an instruction to interpret.
+    well_known_url: str
+    meta_tag: str
+    verified_at: datetime | None = None
+    method: str = ""
+
+
+class OriginVerificationResponse(BaseModel):
+    """The outcome of a verification attempt that SUCCEEDED.
+
+    It carries no token: by the time this is returned the secret has done its job,
+    and echoing it back widens the number of places it can leak from. A failed
+    attempt is an error response (``sites.origin_token_missing`` /
+    ``_token_mismatch`` / ``_claim_expired`` / ``_probe_failed``), not a status on
+    this model — a client must not be able to read a refusal as a mild success.
+    """
+
+    host: str
+    status: str
+    method: str
+    verified_at: datetime | None = None
+
+
+class ForeignConciergeBindRequest(BaseModel):
+    """Buy (or re-resolve) the one foreign concierge for a pocket.
+
+    ``allowed_origins`` applies to the FIRST bind only — the service returns an
+    existing concierge untouched rather than widening its allowlist, because a
+    call that reads as "make sure this exists" must not be a way around the
+    verified-origin gate one bind at a time. Every host named here must already
+    carry a fresh verified ownership claim for the workspace.
+
+    THERE IS DELIBERATELY NO ``scopes`` FIELD. ``bind_foreign_concierge`` accepts
+    a scope override, and the Site model's concierge baseline is what a
+    world-visible embed key is allowed to do. Letting a request widen that would
+    put the ceiling on the public key in the caller's hands, so the override stays
+    reachable only from in-process callers.
+    """
+
+    allowed_origins: list[str] = Field(min_length=1, max_length=10)
+    name: str = Field(default="", max_length=200)
+
+
+class ForeignConciergeRebindRequest(BaseModel):
+    """Point an existing concierge's bar at a different agent.
+
+    ``agent_id`` is required in practice: an empty one is a 422
+    (``sites.agent_required``). It used to mean RE-PROVISION, minting the
+    canonical agent, and CR-12 removed that because a rebind must not be a way to
+    create a concierge. The field keeps its default so the error is the service's
+    domain code rather than a bare schema 422. ``widget_id`` picks the bar when a
+    pocket carries more than one.
+    """
+
+    agent_id: str = Field(default="", max_length=64)
+    widget_id: str = Field(default="", max_length=64)
+
+
+class ForeignConciergeOrigin(BaseModel):
+    """One host on a concierge's allowlist, with the state of its ownership proof.
+
+    Three fields rather than one boolean because the three states need different
+    sentences from the owner: never proved, proved and still good, and proved too
+    long ago to act on. A panel that collapses the last two shows a working
+    concierge that will refuse its next crawl and says nothing about why.
+    """
+
+    host: str
+    verified: bool
+    verified_at: datetime | None = None
+    verification_fresh: bool = False
+
+
+class ForeignConciergeResponse(BaseModel):
+    """The state of a pocket's foreign concierge — the shape the setup UI renders.
+
+    ``exists`` IS THE ANSWER, not the HTTP status. The read answers 200 with
+    ``exists: false`` for a pocket that has never been bound, because "no
+    concierge yet" is the normal first state of the panel rather than an error —
+    a 404 there would make the happy path indistinguishable from a wrong pocket
+    id. The two mutations that need a concierge to act on (rotate, rebind) DO 404,
+    since for them a missing row is a real failure.
+
+    ``embed_snippet`` IS AUTHORITATIVE and ``""`` is meaningful: it is the answer
+    from ``paw_bar.embed.concierge_snippet``, which is the one definition of the
+    five gates a site must pass to earn a bar. ``widget_id`` / ``agent_id`` are
+    diagnostics for the empty case, not inputs to it — an empty snippet beside a
+    bound agent means the owner's kill switch or the plan, and an empty snippet
+    beside an empty ``agent_id`` means provisioning has not completed.
+
+    ``site_key`` is the world-visible embed credential — it ships inside the
+    snippet on a public page, and ``SiteResponse`` already carries it for the same
+    reason. It is not a secret; ``OriginClaimResponse.token`` is, and nothing here
+    carries that.
+
+    EVERY TIMESTAMP HERE IS UTC AND ARRIVES WITHOUT A ZONE, said out loud because
+    a client that parses ``verified_at`` as local time renders a proof that
+    expires a day early or late. Mongo stores UTC and hands back naive datetimes,
+    so ``verified_at`` and ``renewal_date`` serialize as ``2026-09-01T10:22:04``
+    with no trailing ``Z`` — the same shape every other datetime on this router
+    has. ``verification_fresh`` is computed server-side against the same 30-day
+    rule the bind enforces, so a panel never has to do that arithmetic itself.
+
+    NO "created" / "charged" FLAG, and its absence is deliberate. A bind is
+    idempotent, so only the call that actually minted spent money — and the
+    router cannot tell whether it was the one, because a pre-read outside the
+    service's lock reports "nothing here" to both of two concurrent first binds
+    while only one of them charges. A field that lies about money on a race is
+    worse than no field: read this endpoint before binding, and ``exists``
+    answers the same question honestly.
+    """
+
+    exists: bool
+    site_id: str = ""
+    pocket_id: str = ""
+    name: str = ""
+    site_key: str = ""
+    embed_snippet: str = ""
+    widget_id: str = ""
+    agent_id: str = ""
+    origins: list[ForeignConciergeOrigin] = Field(default_factory=list)
+    plan_tier: str = ""
+    subscription_status: str = "none"
+    renewal_date: datetime | None = None
+    # The resolver's own answer to "would a visitor get a bar that talks?" —
+    # ``auth.site_keys.concierge_available``, the predicate every public paw-bar
+    # seam asks. Kept beside the snippet because they can disagree for one
+    # legitimate reason: entitled and enabled, but the agent is not bound yet.
+    # It is the AND of the three fields below, so it cannot say WHICH is missing;
+    # a panel explaining an empty snippet reads those instead.
+    concierge_available: bool = False
+    # Does the plan sell a concierge (``site_keys.concierge_plan_entitled``)?
+    # True whenever sites billing is not enforced.
+    concierge_entitled: bool = False
+    # The owner's switch. CR-12 creates every concierge switched OFF.
+    concierge_enabled: bool = False
+    # Has the owner created the concierge (``site_keys.concierge_exists``)?
+    concierge_exists: bool = False
+
+
+# --- Project files (GET/PUT/DELETE /sites/by-pocket/{pocket_id}/files) -------------
+# The HTTP twin of the agent's project file tools; both call ``sites.project_tools``.
+
+
+class ProjectFileEntry(BaseModel):
+    path: str
+    size: int
+
+
+class ProjectFileListResponse(BaseModel):
+    pocket_id: str
+    files: list[ProjectFileEntry]
+    file_count: int
+
+
+class ProjectFileContentResponse(BaseModel):
+    """One file, whole. ``hash`` is the sha256 hex of its UTF-8 text: send it back as
+    the file's base on the next write so a change made since is a 409, not lost."""
+
+    path: str
+    size: int
+    content: str
+    hash: str
+
+
+class ProjectFilesWriteRequest(BaseModel):
+    """``{files: {path: full contents}}``; every path is checked before any is saved.
+
+    ``base_hashes`` (optional, per path) is the ``hash`` the client last read: a file
+    whose stored hash differs is a 409 ``sites.project_file_conflict`` and nothing is
+    saved. ``null`` means "this file must not exist yet". A path left out is written
+    unchecked, as is every path when the field is absent (older clients)."""
+
+    files: dict[str, str]
+    base_hashes: dict[str, str | None] | None = None
+
+
+class ProjectFilePatchEdit(BaseModel):
+    old: str
+    new: str
+
+
+class ProjectFilePatchRequest(BaseModel):
+    """One file, ``edits`` applied in order; each ``old`` must match exactly once."""
+
+    path: str
+    edits: list[ProjectFilePatchEdit] = Field(min_length=1)
+    # The file's ``hash`` as the client last read it; a mismatch is a 409. Optional.
+    base_hash: str | None = Field(default=None, max_length=128)
+
+
+class ProjectFilesDeleteRequest(BaseModel):
+    paths: list[str] = Field(min_length=1)
+
+
+class ProjectFileWriteResponse(BaseModel):
+    """What every write answers. ``verification`` is the queued draft build of the new
+    source: ``{status: "pending", build: "pending", job_id}`` (``passed`` when that
+    exact source already built; ``failed`` / ``unverified`` with a ``reason``).
+    ``lockfile_removed`` lists lockfiles a package.json dependency change made stale.
+    A refused base hash is a 409 ``sites.project_file_conflict`` whose
+    ``details.conflicts`` lists ``{path, current_hash, current_content}`` per file
+    (both null for a file that is gone)."""
+
+    pocket_id: str
+    written: list[str] = Field(default_factory=list)
+    created: list[str] = Field(default_factory=list)
+    deleted: list[str] = Field(default_factory=list)
+    path: str | None = None
+    lockfile_removed: list[str] = Field(default_factory=list)
+    # The new ``hash`` of every written or patched file: the client's next base.
+    hashes: dict[str, str] = Field(default_factory=dict)
+    verification: dict[str, Any]
+
+
+class SiteUpgradeRecord(BaseModel):
+    """``site_meta.upgraded_from`` as the upgrade answers it: the old engine, when,
+    the digest of the source right after the upgrade (undo needs it unchanged) and
+    the draft version holding the source from before."""
+
+    engine: str
+    at: str
+    source_hash: str
+    version_id: str
+    version_no: int
+
+
+class SiteUpgradeResponse(BaseModel):
+    """POST /sites/by-pocket/{pocket_id}/upgrade. ``added`` is the starter files the
+    upgrade wrote; ``verification`` is the first draft build (the no-build lane, so
+    normally ``passed`` at once), the same shape a project file write answers."""
+
+    pocket_id: str
+    engine: str
+    template: str
+    added: list[str]
+    upgraded_from: SiteUpgradeRecord
+    verification: dict[str, Any]
+
+
+class SiteTokensRewriteResponse(BaseModel):
+    """POST /sites/by-pocket/{pocket_id}/upgrade/tokens. ``rewritten`` is the files the
+    re-run changed (empty, with ``changed`` false, when nothing was left to point at
+    the tokens); ``verification`` is the draft build of the current source."""
+
+    pocket_id: str
+    changed: bool
+    rewritten: list[str]
+    verification: dict[str, Any]
+
+
+class SiteUpgradeRevertResponse(BaseModel):
+    """POST /sites/by-pocket/{pocket_id}/upgrade/revert. ``version_no`` is the
+    snapshot version the source was restored from."""
+
+    pocket_id: str
+    engine: str
+    version_no: int
+
+
+class VisualEditRequest(BaseModel):
+    """POST /sites/by-pocket/{pocket_id}/visual-edit. ``src`` is the clicked element's
+    ``data-paw-src`` (``<file>:<line>:<col>``); ``value`` by ``kind``: text / class a
+    string, attr ``{name: src|href|alt|title, value}``, delete / duplicate null, move
+    ``up`` / ``down`` (checked in ``visual_edit.check_value``). ``base_hash`` is the
+    sha256 of the file as the client last saw it (a ``file_hash``); a mismatch is 409."""
+
+    src: str = Field(min_length=5, max_length=600)
+    kind: Literal["text", "class", "attr", "delete", "duplicate", "move"]
+    value: Any = None
+    base_hash: str | None = Field(default=None, max_length=128)
+
+
+class EditSessionResponse(NativeArtifactResponse):
+    """``POST /sites/by-pocket/{pocket_id}/edit-session``: the project draft for an
+    editing builder (the native-artifact shape, source-tagged once its build lands)
+    plus until when the session lasts. Renew it before ``expires_at`` while a select /
+    design tool stays on."""
+
+    editing: bool = True
+    expires_at: str
+
+
+class EditSessionEndResponse(BaseModel):
+    """``DELETE /sites/by-pocket/{pocket_id}/edit-session``: the session is over."""
+
+    pocket_id: str
+    editing: bool = False
+
+
+class VisualEditResponse(BaseModel):
+    """One applied visual edit: the file it changed, that file's new ``file_hash``,
+    whether the text changed at all, and the queued draft build (``build_status``:
+    ``pending`` / ``passed`` (a no-build site, already built) / ``failed`` /
+    ``unverified``; ``verification`` is the same object every file write answers)."""
+
+    ok: bool
+    pocket_id: str
+    file: str
+    file_hash: str
+    changed: bool
+    build_status: str | None = None
+    job_id: str | None = None
+    verification: dict[str, Any]

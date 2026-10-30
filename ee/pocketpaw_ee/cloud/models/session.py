@@ -93,4 +93,10 @@ class Session(TimestampedDocument):
             # Sidebar listing per (workspace, owner, surface) — the /chat
             # frontend's filtered query path.
             [("workspace", 1), ("owner", 1), ("surface", 1), ("lastActivity", -1)],
+            # Agent DM rooms: ``GET /sessions?agent_id=`` and ``/by-agents``.
+            [("workspace", 1), ("owner", 1), ("agent", 1), ("lastActivity", -1)],
+            # The guest session cap counts by owner across every workspace
+            # (``sessions_service.count_owned``), so it cannot use the
+            # workspace-led indexes above.
+            [("owner", 1), ("lastActivity", -1)],
         ]

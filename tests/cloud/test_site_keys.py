@@ -1,4 +1,11 @@
 # tests/cloud/test_site_keys.py — Paw Bar concierge key resolver (T1).
+#
+# Updated 2026-09-28 (feat/concierge-manual-create, CR-12): the Site builder
+# defaults to a concierge its owner has CREATED and switched on
+# (``concierge_created_at`` stamped, ``concierge_enabled=True``). CR-12 makes the
+# marker a requirement at every public seam and flips the switch's default to
+# False, so a bare Site is now "no concierge"; overrides still win.
+#
 # Created 2026-07-14: covers auth.site_keys.resolve_site_key end-to-end against a
 # live Beanie Site (the mongo_db fixture), plus the sites.service.mint_foreign_site
 # → resolve round-trip that proves the credential works for a FOREIGN site whose
@@ -48,6 +55,12 @@ async def _site(**overrides) -> Site:
         allowed_origins=["brewco.com"],
     )
     defaults.update(overrides)
+    # CR-12: a live concierge is one its owner created and switched on.
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    defaults.setdefault("concierge_created_at", _dt.now(_UTC))
+    defaults.setdefault("concierge_enabled", True)
     site = Site(**defaults)
     await site.insert()
     return site
@@ -189,23 +202,78 @@ async def test_key_check_is_constant_time(mongo_db, monkeypatch):
 # --------------------------------------------------------------------------- #
 # mint_foreign_site → resolve round-trip (T1.2 + T1.3 together)
 #
-# mint_foreign_site now runs the pockets-service ownership check first (review
-# FIX 1), so these mock ``pockets_service.get`` — an OWNED pocket returns a wire
-# dict; the cross-tenant test makes it raise Forbidden.
+# mint_foreign_site runs the pockets-service ownership check first and then
+# compares the pocket's OWN workspace against the minting one, so these mock
+# ``pockets_service.get``: an owned pocket returns a wire dict carrying the
+# tenant under test; the cross-tenant test makes it raise Forbidden.
 # --------------------------------------------------------------------------- #
 
-_OWNED_POCKET = {"name": "Shop", "rippleSpec": {}}
+
+def _owned_pocket(workspace_id: str) -> dict:
+    """The wire dict that gate returns for a pocket owned in ``workspace_id``.
+
+    The ``workspace`` key is not decoration. That gate denies only a PRIVATE
+    pocket and the model defaults visibility to "workspace", so the mint asks a
+    second question the dict has to be able to answer.
+    """
+    return {"name": "Shop", "rippleSpec": {}, "workspace": workspace_id}
+
+
+async def _buyable(workspace_id: str, host: str) -> None:
+    """Make ``mint_foreign_site`` able to complete for (workspace, host).
+
+    The mint became a PURCHASE gated on a proved origin (feat/foreign-site-mint):
+    it debits a month of the ``staff`` rung from the workspace wallet and refuses
+    a host the workspace has not verified. This suite is about the KEY the mint
+    hands back, not about the money or the proof, so it seeds both preconditions
+    directly — the ones that own them are tests/cloud/sites/test_foreign_site_mint.py
+    and tests/ee/sites/test_domain_ownership.py.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
+
+    await credits_service.grant(
+        workspace=workspace_id,
+        amount=5000,
+        cause="top_up",
+        idempotency_key=f"seed-{workspace_id}",
+    )
+    now = datetime.now(UTC)
+    await SiteOriginClaim(
+        workspace=workspace_id,
+        host=host,
+        token="pawverify-seeded-for-the-key-suite",
+        status="verified",
+        issued_at=now,
+        expires_at=now + timedelta(days=7),
+        verified_at=now,
+        method="well-known",
+    ).insert()
 
 
 @pytest.mark.asyncio
+async def _owner_creates_concierge(site) -> None:
+    """What the owner's ``POST /paw-bar/admin/site/{id}/concierge`` plus turning it
+    on leave on the row (CR-12). The endpoint is covered in
+    tests/cloud/test_paw_bar_concierge_manual_create.py."""
+    from datetime import UTC, datetime
+
+    site.concierge_created_at = datetime.now(UTC)
+    site.concierge_enabled = True
+    await site.save()
+
+
 async def test_mint_foreign_site_then_resolve(mongo_db):
     """A foreign site (script_name="") minted by the service resolves by its
     signed_key — proving the lookup does NOT depend on script_name."""
     from unittest.mock import AsyncMock, patch
 
+    await _buyable("ws-2", "shop.example.com")
     with patch(
         "pocketpaw_ee.cloud.pockets.service.get",
-        new=AsyncMock(return_value=_OWNED_POCKET),
+        new=AsyncMock(return_value=_owned_pocket("ws-2")),
     ) as mock_get:
         site = await sites_service.mint_foreign_site(
             workspace_id="ws-2",
@@ -222,6 +290,13 @@ async def test_mint_foreign_site_then_resolve(mongo_db):
     assert site.signed_key.startswith("site_key_")
     assert site.allowed_origins == ["shop.example.com"]
 
+    # CR-12: a bought connection has no concierge until its owner creates one,
+    # so the key is refused as "off" until then.
+    with pytest.raises(HTTPException) as exc:
+        await resolve_site_key(site.signed_key, "https://shop.example.com", "cust-9")
+    assert exc.value.detail == "concierge_disabled"
+    await _owner_creates_concierge(site)
+
     ctx = await resolve_site_key(site.signed_key, "https://shop.example.com", "cust-9")
     assert ctx.scope is ScopeKind.CONCIERGE
     assert ctx.workspace_id == "ws-2"
@@ -234,9 +309,10 @@ async def test_mint_foreign_site_then_resolve(mongo_db):
 async def test_mint_foreign_site_scope_override(mongo_db):
     from unittest.mock import AsyncMock, patch
 
+    await _buyable("ws-3", "shop.example.com")
     with patch(
         "pocketpaw_ee.cloud.pockets.service.get",
-        new=AsyncMock(return_value=_OWNED_POCKET),
+        new=AsyncMock(return_value=_owned_pocket("ws-3")),
     ):
         site = await sites_service.mint_foreign_site(
             workspace_id="ws-3",
@@ -245,6 +321,7 @@ async def test_mint_foreign_site_scope_override(mongo_db):
             allowed_origins=["shop.example.com"],
             scopes=["chat"],
         )
+    await _owner_creates_concierge(site)
     ctx = await resolve_site_key(site.signed_key, "https://shop.example.com", "cust-1")
     assert ctx.scopes == ["chat"]
 

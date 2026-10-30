@@ -1,4 +1,6 @@
 # tests/ee/sites/conftest.py
+# Updated 2026-09-24 (PP-2): added the autouse ``edit_verifier`` fixture (and
+#   ``verdict_with``) — svelte edits now run the verify pipeline, which tests stub.
 # Created: 2026-06-18 (feat/sites-dedupe-migration, PERF-2).
 # Updated 2026-08-24 (feat/sites-s3-artifact-store, SP-4): ``_artifact_store_tmp`` also
 #   clears PAW_SITES_ARTIFACT_STORE. PAW_SITES_ARTIFACT_DIR only points the store
@@ -123,12 +125,17 @@ OPERATOR_ENV_VARS: tuple[str, ...] = (
     "PAW_CF_ZONE_ID",
     "PAW_CF_ACCOUNT_ID",
     "PAW_CF_API_TOKEN",
+    "PAW_CF_DATA_API_TOKEN",
     "PAW_CF_CNAME_TARGET",
     "PAW_CF_WORKERS_SUBDOMAIN",
     "PAW_CF_DISPATCH_NAMESPACE",
     "PAW_CF_SITES_DOMAIN",
     "PAW_CF_WRANGLER_CMD",
     "PAW_CF_MIGRATE_TIMEOUT_SEC",
+    "PAW_CF_D1_TT_DAYS",
+    "PAW_SITES_PROJECT_DEPLOY_TARGET",
+    "PAW_SITES_DRAFT_WORKERS",
+    "PAW_SITES_DRAFT_ENV_TAG",
     "DAYTONA_API_KEY",
     "DAYTONA_API_URL",
 )
@@ -252,6 +259,17 @@ def _site_pages_are_serving(monkeypatch):
     monkeypatch.setattr(screenshot_mod, "_url_is_serving", _serving)
     monkeypatch.setattr(screenshot_mod, "_READY_DELAYS", ())
     monkeypatch.setattr(screenshot_mod, "_READY_DELAYS_MANUAL", ())
+
+    # A connected site's card refresh reads the customer's homepage. Keep it
+    # offline: background refreshes are closed unrun, and an inline one (the
+    # preview-refresh path) resolves no DNS. test_connected_card.py patches both.
+    from pocketpaw_ee.sites import connected_card
+
+    async def _offline(host: str) -> list[str]:
+        raise OSError(f"tests are offline ({host})")
+
+    monkeypatch.setattr(connected_card, "_default_card_scheduler", lambda coro: coro.close())
+    monkeypatch.setattr(connected_card, "_resolver", _offline)
     yield
 
 
@@ -385,3 +403,113 @@ async def _fake_run_import(monkeypatch):
         return stub_import_result(files, **kw)
 
     monkeypatch.setattr(generator_client, "run_import", _run)
+
+
+# ── PP-2 (feat/sites-verify-pipeline) ───────────────────────────────────────────
+# ``edit_svelte_component`` now VERIFIES the edited draft (static check, sandbox build,
+# browser) instead of building locally. Left real, every edit test would shell out to
+# ``paw-sites-gen check`` and reach for Redis. This autouse fixture swaps the service's
+# default verifier for a recorder returning a PASSED verdict; a test that wants a failing
+# layer requests ``edit_verifier`` by name and sets ``.verdict`` (see ``verdict_with``).
+def verdict_with(**layer_status: str) -> dict[str, Any]:
+    """A §5 verdict whose layers default to passed; ``build="failed"`` etc. overrides."""
+    layers = [
+        {"name": name, "status": layer_status.get(name, "passed")}
+        for name in ("static", "build", "browser")
+    ]
+    statuses = [layer["status"] for layer in layers]
+    status = (
+        "failed" if "failed" in statuses else "unverified" if "unverified" in statuses else "passed"
+    )
+    return {
+        "status": status,
+        "content_hash": "c" * 64,
+        "layers": layers,
+        "errors": (
+            [{"layer": "build", "code": "build_error", "message": "boom"}]
+            if status == "failed"
+            else []
+        ),
+        "warnings": [],
+    }
+
+
+class EditVerifier:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.verdict: dict[str, Any] = verdict_with()
+        #: The pocket's source at the moment the verifier ran — what was verified.
+        self.seen_sources: list[dict[str, Any]] = []
+
+    async def __call__(self, *, workspace_id: str, user_id: str, pocket_id: str) -> dict:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        self.calls.append(
+            {"workspace_id": workspace_id, "user_id": user_id, "pocket_id": pocket_id}
+        )
+        wire = await pockets_service.get(pocket_id, user_id)
+        self.seen_sources.append(dict(wire.get("source") or {}))
+        return self.verdict
+
+
+@pytest.fixture(autouse=True)
+def edit_verifier(monkeypatch) -> EditVerifier:
+    from pocketpaw_ee.sites import service as sites_service
+
+    verifier = EditVerifier()
+    monkeypatch.setattr(sites_service, "_default_edit_verifier", verifier)
+    return verifier
+
+
+# ── one site model: imports land on the ``static`` starter ───────────────────────
+#: The ``static`` starter files ``project_tools.copy_template("static")`` returns.
+STATIC_STARTER = {
+    "paw.template.json": (
+        '{"slug": "static", "name": "Static HTML", "target": "assets", '
+        '"backend": {"builtin": []}, "secrets": [], '
+        '"customization": {"tokens": "styles/tokens.css"}, "build": "none"}'
+    ),
+    "AGENTS.md": "# Static site\nEdit the html files.\n",
+    "index.html": "<html><body>starter</body></html>",
+    "styles/tokens.css": ":root {\n  color-scheme: light dark;\n  --background: #fff;\n}\n",
+}
+
+
+@pytest.fixture
+def _fake_static_starter(monkeypatch) -> list[str]:
+    """``project_tools.copy_template`` without the paw-sites CLI (records slugs)."""
+    from pocketpaw_ee.sites import project_tools
+
+    asked: list[str] = []
+
+    async def _copy(slug: str) -> dict[str, str]:
+        asked.append(slug)
+        return dict(STATIC_STARTER)
+
+    monkeypatch.setattr(project_tools, "copy_template", _copy)
+    return asked
+
+
+@pytest.fixture
+def public_assets_put(monkeypatch) -> list[str]:
+    """A public asset rail that takes PNG/JPEG only and hands back cdn.test URLs."""
+    from pocketpaw_ee.sites import public_assets
+
+    stored: list[str] = []
+
+    class _Store:
+        async def put(self, data, *, filename, workspace_id, pocket_id):
+            if not data.startswith((b"\x89PNG", b"\xff\xd8")):
+                raise public_assets.PublicAssetError("not media")
+            stored.append(filename)
+            return public_assets.PublicAsset(
+                key=f"k/{filename}",
+                url=f"https://cdn.test/{pocket_id}/{filename}",
+                mime="image/png",
+                size=len(data),
+                filename=filename,
+                sha256="0" * 64,
+            )
+
+    monkeypatch.setattr(public_assets, "public_asset_store", lambda: _Store())
+    return stored

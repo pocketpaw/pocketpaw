@@ -1,138 +1,61 @@
 """Workspace domain — business logic service.
 
+Paw Partners writes live here too: the platform-only partner-profile writer
+(``platform_set_partner_profile``, beside ``platform_set_workspace_overrides``)
+and two targeted ``$set`` helpers called only by ``partners.service`` —
+``set_partner_tier`` (compare-and-set of the system-owned volume tier plus the
+monthly review stamp) and ``set_partner_public_profile`` (the partner's own
+public-profile fields).
+
 Sole owner of writes to the ``Workspace`` and ``Invite`` Beanie documents.
-Module-level ``async def`` API. Membership operations touch the User
-document (members are stored as embedded ``WorkspaceMembership`` rows on
-User), so workspace-scoped User queries live here too.
+Module-level ``async def`` API. Members are embedded ``WorkspaceMembership``
+rows on User, so workspace-scoped User queries live here too.
 
-Public API:
-- ``create(ctx, body)``, ``get(ctx, workspace_id)``, ``update(ctx, ...)``,
-  ``delete(ctx, ...)``, ``list_for_user(ctx)``
-- ``list_members(ctx, workspace_id)``, ``update_member_role(...)``,
-  ``remove_member(...)``
-- ``list_invites(workspace_id)``, ``create_invite(...)``,
-  ``validate_invite(token)``, ``accept_invite(...)``,
-  ``revoke_invite(...)``
-- ``list_member_ids(workspace_id)``, ``list_admin_ids(workspace_id)``,
-  ``list_peer_ids(user_id)`` — used as function refs by the realtime
-  audience resolver
-- ``get_default_workspace_id()`` — id of the instance's first-created
-  (operator) workspace; used by the OSS operational-alert bridge
-  (``notifications/bridges/alerts.py``) to route instance-scoped alerts
-  that carry no tenant attribution (added 2026-08-06, T-10)
-- ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
-  the plan-feature gate dependency; returns None when the workspace is
-  missing/soft-deleted/malformed (the gate maps that to a 404) and
-  re-raises DB errors rather than silently downgrading a paying customer.
-- ``set_workspace_plan(workspace_id, plan)`` — set the workspace's plan
-  tier (BC-7). The billing subscription webhook is the only caller: a
-  verified ``subscription.active`` upgrades to the subscribed tier and a
-  ``subscription.cancelled`` reverts to ``free``. Returns True on a write,
-  False when the workspace is missing/soft-deleted.
-- ``raise_seats_for_plan(workspace_id, plan_key)`` — UPGRADE-ONLY resync of
-  the stored ``Workspace.seats`` up to the new plan's ``max_seats`` (never
-  down). The subscription.active webhook calls it after set_workspace_plan so
-  an upgrade actually lifts the seat cap; a downgrade/cancel never strips
-  seats a workspace already has.
+Surface: workspace CRUD (``create`` also rejects reserved slugs via
+``slug_reason``, which backs the live slug-available check), members, invites,
+retention, branding, the instinct approval level, plan/seat/override helpers,
+and the id lists the realtime audience resolver uses as function refs.
+``get_settings`` / ``patch_settings`` expose the settings block alone, for a
+feature that owns one setting and gates its own route (growth's
+``growth_mock_delivery``); the patch merges.
 
-Changes: added get_workspace_plan helper for plan-feature gate dep; added
-slug_reason() (format + reserved + uniqueness) backing the live
-slug-available check, and create() now also rejects reserved slugs.
-2026-06-07: _mint_invite_for_email now maps a DuplicateKeyError on insert to
-a ConflictError (409) instead of letting it escape as an unhandled 500 — the
-leftover unique index on the nullable legacy ``token`` column made every
-second invite collide on ``token=null``.
-2026-06-08 (Phase B chunk 7): remove_member now runs a 4th best-effort cascade
-— purge_member_data — so an offboarded member's personal Gmail/calendar (their
-private ``user:{id}`` KB scope), per-user OAuth tokens, connector rows, and
-ingest-state are deleted. The purge counts land in the audit row's cascade
-metadata.
-2026-06-09: accept_invite is now self-healing. The atomic claim and the
-membership write aren't transactional, so an accept interrupted mid-flight
-(backend restart) could leave an invite accepted=True with no membership,
-locking the invitee out of every workspace read. Both already_accepted
-raise-sites now route through _heal_or_conflict: a rightful invitee missing
-the membership gets it added (idempotent) instead of a 409; a genuine
-duplicate (already a member) still raises invite.already_accepted.
-2026-06-14 (WB-1): update() now accepts an optional branding patch. A
-BrandingPatch merges onto the workspace's existing Branding (partial patches
-don't wipe set fields). logo_asset / favicon_asset are ownership-checked
-against the workspace via _assert_asset_owned (mirrors the uploads
-workspace-scoped lookup) — a cross-workspace or unknown asset ref raises
-Forbidden (workspace.branding_asset_not_owned). accent_color format is
-validated upstream by BrandingPatch (422). _workspace_to_domain now carries
-branding through to the domain object so it serializes onto WorkspaceOut.
-2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
-set_instinct_approval_level() — the dedicated, OWNER-gated writer for a
-workspace's layered-Instinct-gate triager level. Validates against the
-ApprovalLevel enum (422 on a bad value, nothing written), kept off the
-general update() path on purpose (a non-ASK level enables auto-approval of
-agent writes), and emits a WARNING-severity append-only audit event with the
-old→new level. The write goes through this service per the import-linter
-Beanie-writes-only-from-service contract.
-2026-06-26 (feat/litellm-billing-cutover, WU-F): create() now also fires the
-per-tenant LiteLLM key provisioning trigger — a BEST-EFFORT, NON-BLOCKING
-ensure_tenant_key(workspace) call. A proxy outage / mint failure is logged and
-swallowed (workspace creation NEVER fails on a provisioning error); the call is
-idempotent, so a later workspace touch can mint a key that didn't mint here.
-Mirrors the best-effort seed_default_agent step.
-2026-09-02 (fix/bill-workspaces-the-sweep-cannot-see): the note above used to say
-the billing-cutover sweep back-filled a key that failed to mint here. It never
-did — the sweep started from the workspaces that ALREADY had one, so a swallowed
-mint failure meant a workspace nothing swept, and its chat spend was served free.
-The sweep now discovers such a workspace from the proxy's customer list and bills
-it without a key, so a failed mint costs the tenant their per-key budget ceiling
-rather than costing us the entire bill. Minting is still not retried here.
-2026-07-05 (fix/atlas-admin-security-hardening, FINDING A): privilege-escalation
-guard on ownership. ``update_member_role`` now refuses to GRANT the ``owner``
-role unless the ACTOR already holds owner (code ``owner_grant_requires_owner``),
-and ``remove_member`` refuses to REMOVE an owner-role member unless the actor
-holds owner (code ``owner_removal_requires_owner``). The admin-tool RBAC action
-(workspace.member.role_change / .remove) is only ADMIN-gated, so without the
-actor-role check an ADMIN could self-promote to owner or evict a sitting owner on
-approval. The guard lives in the service so every caller (admin tool, executor,
-route) inherits it; it mirrors the existing "an invite can never mint an owner"
-rule. The last-owner + cannot_demote/remove-doc-owner guards are unchanged.
-2026-07-10 (compliance-starter): retention setting is now real. update()'s
-settings write MERGES via ``_merge_settings`` instead of the destructive
-``WorkspaceSettings(**body.settings)`` full-replace (a partial patch no longer
-wipes sibling settings — recon-flagged bug). Added ``get_retention`` /
-``set_retention`` (the clean, no-clobber compliance read/write for
-``settings.retention_days``, owner/admin-gated at the route) and
-``enforce_retention`` (again-callable purge of audit rows older than the
-policy cutoff; delegates the delete to ``audit.service.purge_workspace_audit``
-so the AuditEvent-write contract stays in the audit module).
-2026-07-08 (feat/billing-smb-caps): the three seat gates (create_invite,
-bulk_create_invites, accept_invite) now source their ceiling from the workspace's
-RESOLVED PLAN, not the flat ``doc.seats`` alone. ``_effective_seat_limit`` returns
-``max(doc.seats, plan.max_seats)`` (an uncapped Enterprise plan keeps the
-negotiated ``doc.seats``) so a plan upgrade lifts the cap while a workspace that
-already carries a higher custom seat count never regresses. Seat enforcement stays
-ALWAYS-ON (not behind ``billing_enforced``), unchanged from before; the Free
-``max_seats`` == the model default (5) means a free tenant sees the identical
-limit. ``raise_seats_for_plan`` (upgrade-only) keeps the stored ``doc.seats`` in
-step with the plan on a subscription.active.
-2026-08-08 (feat/billing-rbac-member-caps): the seat gate became plan-AUTHORITATIVE.
-``_effective_seat_limit`` now returns the resolved plan's ``max_seats`` directly
-(only an uncapped Enterprise plan defers to ``doc.seats``), so the approved
-CONSUMER member caps hold on downgrade too: Free = 0 (no invitations allowed),
-Paw Go = 5, Paw Pro = 10, Paw Pro Max = 50 total workspace members (owner
-included). A Free workspace — even one that still holds members from a cancelled
-plan — can no longer invite anyone new; existing members are never removed.
-``raise_seats_for_plan`` is unchanged (upgrade-only, keeps the persisted
-``doc.seats`` display ceiling in step).
-2026-08-20 (feat/coupling-alerts-to-bell review): get_default_workspace_id now
-filters ``deleted_at == None`` so a soft-deleted first workspace is skipped and
-the next-oldest LIVE workspace receives instance-scoped alerts, instead of
-routing them to a tombstone.
+Invariants a reader must not break:
+- ``create`` seeds the default agent inline and mints the LiteLLM tenant key in
+  a background task (``llm_provisioning.schedule_ensure_tenant_key``). Both are
+  best-effort; neither may fail or stall workspace creation. The owner's
+  one-time early access grant (``credits.service.grant_early_access_best_effort``)
+  is best-effort too: a failure is logged and the next sign-in retries it.
+- Only an owner actor may grant the owner role or remove an owner
+  (``owner_grant_requires_owner`` / ``owner_removal_requires_owner``). The
+  guard lives here so every caller inherits it.
+- Seat gates use ``_effective_seat_limit``: the resolved plan's ``max_seats`` is
+  authoritative (Free = 0 blocks all invites); only an uncapped plan defers to
+  ``doc.seats``. Always on, not gated on ``billing_enforced``.
+  ``raise_seats_for_plan`` is upgrade-only.
+- ``update`` merges settings via ``_merge_settings``; a partial patch never
+  wipes sibling settings. Branding assets are ownership-checked. The instinct
+  approval level is written only by the owner-gated
+  ``set_instinct_approval_level``, never through ``update``.
+- ``accept_invite`` self-heals an accepted invite that lost its membership
+  (``_heal_or_conflict``). ``remove_member`` cascades ``purge_member_data``.
+- ``get_workspace_plan`` and ``get_workspace_overrides`` stay separate calls:
+  ``resolve_entitlements`` tests mock the former on non-ObjectId ids.
+- ``platform_*`` helpers take no membership check and are listed in
+  test_platform_boundary.py's ``_CROSS_TENANT_HELPERS``.
+- ``get_default_workspace_id`` skips soft-deleted workspaces.
+- ``delete`` releases a partner's public slug (and unlists it) so the partial
+  unique index on ``partner.slug`` never keeps a dead workspace's slug.
+- ``get_delete_preview``'s ``room_count`` leaves out hidden ``type="meeting"``
+  rooms (2026-10-01, feat/meetings-instant): users never see them as rooms.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from beanie import PydanticObjectId
 from pydantic import ValidationError as PydanticValidationError
@@ -145,6 +68,7 @@ from pocketpaw_ee.cloud._core.errors import (
     NotFound,
     SeatLimitError,
     ValidationError,
+    WorkspaceLimitError,
 )
 from pocketpaw_ee.cloud._core.realtime.bus import get_resolver
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -170,8 +94,12 @@ from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
 from pocketpaw_ee.cloud.models.workspace import Branding as _BrandingDoc
+from pocketpaw_ee.cloud.models.workspace import (
+    PartnerProfile,
+    WorkspaceOverrides,
+    WorkspaceSettings,
+)
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
-from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.shared.events import event_bus
@@ -383,7 +311,45 @@ async def slug_reason(slug: str) -> SlugReason | None:
     return "taken" if existing is not None else None
 
 
+#: How many workspaces one account may OWN (feat/abuse-budgets, 2026-09-11).
+#:
+#: Not a plan feature and not priced — an abuse ceiling. Every per-workspace
+#: bound in the product (the daily upload and turn budgets, the plan storage
+#: cap, the guest limits) is keyed on the workspace, so an account that can
+#: mint workspaces in a loop has no bound at all: each new one arrives with a
+#: fresh empty counter. This is what makes those ceilings mean something.
+#:
+#: ``0`` means uncapped, matching the budget modules and for the same reason —
+#: an env typo must not stop people creating a workspace. Owning is what counts:
+#: being INVITED to many workspaces is normal collaboration and is governed by
+#: the inviter's seat limit, not by this.
+_ENV_MAX_OWNED = "POCKETPAW_MAX_OWNED_WORKSPACES"
+_DEFAULT_MAX_OWNED = 10
+
+
+def max_owned_workspaces() -> int:
+    """Workspaces one account may own. ``0`` means uncapped."""
+    raw = (os.environ.get(_ENV_MAX_OWNED) or "").strip()
+    if not raw:
+        return _DEFAULT_MAX_OWNED
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("%s is not an integer (%r) — using the default", _ENV_MAX_OWNED, raw)
+        return _DEFAULT_MAX_OWNED
+
+
 async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace:
+    # Abuse ceiling on owned workspaces, checked BEFORE the slug work so a
+    # capped account never claims a slug it cannot use. Soft-deleted rows are
+    # excluded where the model carries the field, so deleting a workspace frees
+    # its slot.
+    cap = max_owned_workspaces()
+    if cap > 0:
+        owned = await _WorkspaceDoc.find({"owner": ctx.user_id, "deleted_at": None}).count()
+        if owned >= cap:
+            raise WorkspaceLimitError(cap)
+
     # Format is already enforced by the DTO validator; this catches reserved
     # handles and the uniqueness race so create() agrees with the live
     # slug-available check the UI runs first.
@@ -398,6 +364,16 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
 
     await _add_member(str(doc.id), ctx.user_id, role="owner", set_active=True)
 
+    # One-time early access credits. Idempotent per user, so only the first
+    # owned workspace of a verified user receives them; guests and unverified
+    # users get nothing here (the guest social upgrade grants instead).
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    if PydanticObjectId.is_valid(ctx.user_id):
+        owner = await _UserDoc.get(PydanticObjectId(ctx.user_id))
+        if owner is not None:
+            await credits_service.grant_early_access_best_effort(owner)
+
     # Seed the default "pocketpaw" agent so the new workspace has a DM target
     # immediately. Idempotent; non-fatal — the boot-time back-fill is the
     # safety net if this raises. Mirrors auth/core.py:seed_workspace().
@@ -408,20 +384,20 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
     except Exception as exc:
         logger.warning("Failed to seed default agent for workspace %s (non-fatal): %s", doc.id, exc)
 
-    # Provision the per-tenant LiteLLM virtual key (WU-F / MCG-8). BEST-EFFORT and
-    # NON-BLOCKING: if the proxy is unreachable or the mint fails, log + continue —
-    # workspace creation must NEVER fail on a provisioning error. ``ensure_tenant_key``
-    # is idempotent, so the cutover sweep (which iterates provisioned tenants) and a
-    # later workspace touch both back-fill a key that didn't get minted here. Lazy
-    # import keeps the workspace service free of an llm_provisioning dependency at
-    # module load.
+    # Mint the per-tenant LiteLLM virtual key in a BACKGROUND task, off the
+    # request path: a mint is one proxy round trip, up to the admin client's 30 s
+    # timeout when the proxy is down. Best-effort — the task logs a failure and
+    # never raises into this request. This is the only mint point and nothing
+    # retries it; until a key exists, media/studio fall back to the master key.
+    # Lazy import keeps the workspace service free of an llm_provisioning
+    # dependency at module load.
     try:
         from pocketpaw_ee.cloud.llm_provisioning import service as llm_provisioning_service
 
-        await llm_provisioning_service.ensure_tenant_key(str(doc.id))
+        llm_provisioning_service.schedule_ensure_tenant_key(str(doc.id))
     except Exception as exc:  # noqa: BLE001 — provisioning is best-effort, never fatal
         logger.warning(
-            "Failed to provision LiteLLM tenant key for workspace %s (non-fatal): %s",
+            "Failed to schedule LiteLLM tenant key mint for workspace %s (non-fatal): %s",
             doc.id,
             exc,
         )
@@ -598,6 +574,41 @@ async def set_retention(
     return _workspace_to_domain(doc, member_count=count)
 
 
+async def get_settings(workspace_id: str) -> WorkspaceSettings:
+    """Read a workspace's settings block. NotFound for a missing,
+    soft-deleted or malformed id. Callers that own one setting (growth's
+    mock-delivery toggle) read through here rather than the doc class."""
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    return doc.settings
+
+
+async def patch_settings(ctx: RequestContext, workspace_id: str, patch: dict) -> WorkspaceSettings:
+    """Merge a partial settings patch, preserving sibling fields.
+
+    Same merge + re-validation as ``update`` (``_merge_settings``), without
+    the rest of the workspace update surface, for a caller that owns one
+    setting and gates its own route. Audited and emitted like ``update``.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    doc.settings = _merge_settings(doc.settings, patch)
+    await doc.save()
+
+    await emit(WorkspaceUpdated(data={"workspace_id": workspace_id, "settings": patch}))
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.settings_updated",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"patched": patch},
+    )
+    return doc.settings
+
+
 async def enforce_retention(workspace_id: str) -> dict:
     """Purge records older than the workspace's ``retention_days`` policy.
 
@@ -748,6 +759,12 @@ async def delete(ctx: RequestContext, workspace_id: str) -> None:
         raise NotFound("workspace", workspace_id)
 
     doc.deleted_at = datetime.now(UTC)
+    if doc.partner is not None and doc.partner.slug is not None:
+        # The partial unique index on partner.slug ignores deleted_at, so a
+        # soft-deleted partner would hold its public slug forever: the service
+        # pre-check says free, the write raises, 409 every time. Release it.
+        doc.partner.slug = None
+        doc.partner.public = False
     await doc.save()
 
     # Cascade: strip workspace from every member's User.workspaces
@@ -791,7 +808,10 @@ async def get_delete_preview(workspace_id: str) -> dict:
         raise NotFound("workspace", workspace_id)
 
     member_count = await _count_members(workspace_id)
-    room_count = await _GroupDoc.find({"workspace": workspace_id}).count()
+    # Meeting rooms are hidden behind their meetings; not counted as rooms.
+    room_count = await _GroupDoc.find(
+        {"workspace": workspace_id, "type": {"$ne": "meeting"}}
+    ).count()
     agent_count = await _AgentDoc.find({"workspace": workspace_id}).count()
     file_count = await _FileUploadDoc.find({"workspace": workspace_id, "deleted_at": None}).count()
     invite_count = await _InviteDoc.find(
@@ -1937,6 +1957,61 @@ async def get_workspace_plan(workspace_id: str) -> str | None:
     return doc.plan
 
 
+async def get_workspace_overrides(workspace_id: str) -> WorkspaceOverrides | None:
+    """Return a workspace's operator entitlement overrides, or None.
+
+    Sibling to ``get_workspace_plan`` with the identical by-id / soft-delete
+    contract — an invalid id or a soft-deleted workspace resolves to ``None``,
+    same as "no override set". Added (corrected 2026-09-16, Paw Admin chunk 7)
+    as the second half of ``entitlements.service.resolve_entitlements``'s
+    override overlay, kept deliberately separate from ``get_workspace_plan``
+    rather than combined into one fetch: every existing test that drives that
+    resolver monkeypatches ``get_workspace_plan`` alone against a workspace id
+    that is not a real Mongo id, and a combined fetch's own doc lookup would
+    fail on that id and null out the mocked plan along with the overrides. Two
+    independent calls cost one extra round trip but leave every such mock
+    intact — this one simply answers "no override" for the same ids.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return None
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return None
+    return doc.overrides
+
+
+async def get_workspace_plan_and_overrides(
+    workspace_id: str,
+) -> tuple[str | None, WorkspaceOverrides | None]:
+    """Return (plan, overrides) for a workspace in one fetch.
+
+    Sibling to ``get_workspace_plan`` with the identical by-id / soft-delete
+    contract — an invalid id or a soft-deleted workspace resolves to
+    ``(None, None)``. Added for the platform entitlements route
+    (``cloud/platform/entitlements.py``, Paw Admin chunk 7), which always
+    addresses a real workspace doc by path parameter and wants "does it exist"
+    and "what overrides does it carry" off one round trip.
+
+    NOT used by ``entitlements.service.resolve_entitlements`` — that resolver
+    calls ``get_workspace_plan`` and ``get_workspace_overrides`` separately
+    instead, because its callers monkeypatch ``get_workspace_plan`` alone
+    against workspace ids that are not real Mongo ids, and this combined
+    fetch's doc lookup would null out a plan the mock already answered. See
+    ``entitlements.service``'s module changelog for the failure that taught
+    this.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return None, None
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return None, None
+    return doc.plan, doc.overrides
+
+
 async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
     """Set a workspace's plan tier (BC-7 subscription lifecycle).
 
@@ -1961,6 +2036,44 @@ async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
         return False
     doc.plan = plan
     await doc.save()
+
+    # THE PLAN CARRIES SITES NOW (2026-09-06), so moving it can strand them. Go
+    # carries 1, Pro 3, Pro Max 10; a workspace dropping from Pro Max to Go has
+    # nine sites riding a slot its plan no longer has, and nothing else would ever
+    # ask again — they would stay free permanently. Not an overspend somebody sees
+    # on a bill: hosting the customer stopped paying for, invisible both ways.
+    #
+    # Wired HERE rather than beside each caller, and that is the point. Four places
+    # write a plan today (subscription.active, cancelled, the recovery path, the
+    # grace sweep) and the admin MCP and proposal executor reach this function too.
+    # A reconcile bolted onto the webhook would have covered the first four and
+    # silently missed the rest, and the fifth writer somebody adds next.
+    #
+    # BEST-EFFORT, always. The plan move is the thing the customer paid for and it
+    # has already landed; a failure to tidy sites must not undo it or 500 a webhook
+    # that will never be redelivered. The renewal sweep re-runs this for every
+    # workspace carrying a site (``reconcile_all_plan_carried_sites``) on each
+    # tick, so a failure here costs a delay rather than the outcome.
+    try:
+        from pocketpaw_ee.sites import service as sites_service
+
+        counts = await sites_service.reconcile_plan_carried_sites(workspace_id)
+        if counts.get("released"):
+            logger.info(
+                "workspace.set_workspace_plan: workspace=%s moved to %s — released %d "
+                "site(s) the new plan does not carry",
+                workspace_id,
+                plan,
+                counts["released"],
+            )
+    except Exception:
+        logger.exception(
+            "workspace.set_workspace_plan: could not reconcile plan-carried sites for "
+            "workspace=%s after moving to %s — the plan move STANDS; the sites sweep "
+            "will converge it",
+            workspace_id,
+            plan,
+        )
     return True
 
 
@@ -2200,6 +2313,13 @@ async def set_member_action_permissions(
         {"$set": {"action_permissions": perms}},
     )
 
+    # The guard layer caches this read. Without invalidation an admin's change
+    # would not take effect until the TTL expired, which is exactly the kind of
+    # "I granted it and nothing happened" the broken lookup used to produce.
+    from pocketpaw_ee.guards.deps import invalidate_action_overrides
+
+    invalidate_action_overrides(workspace_id, user_id)
+
     logger.info(
         "action_permissions.set",
         extra={"workspace_id": workspace_id, "user_id": user_id, "actions": clean},
@@ -2223,6 +2343,13 @@ async def clear_member_action_permissions(
         {"$set": {"action_permissions": perms}},
     )
 
+    # The guard layer caches this read. Without invalidation an admin's change
+    # would not take effect until the TTL expired, which is exactly the kind of
+    # "I granted it and nothing happened" the broken lookup used to produce.
+    from pocketpaw_ee.guards.deps import invalidate_action_overrides
+
+    invalidate_action_overrides(workspace_id, user_id)
+
     logger.info(
         "action_permissions.clear",
         extra={"workspace_id": workspace_id, "user_id": user_id},
@@ -2239,6 +2366,366 @@ async def get_member_action_overrides(
         return []
     perms: dict[str, list[str]] = dict(doc.action_permissions or {})
     return perms.get(user_id, [])
+
+
+# ---------------------------------------------------------------------------
+# Platform (cross-tenant) reads — Paw Admin only.
+#
+# EVERY function below deliberately ignores tenancy. They exist for the
+# operator console and are the ONLY place in this module where a workspace is
+# not derived from the caller's session. That inversion is the whole point of
+# the /api/v1/platform namespace, and it is why these carry a `platform_`
+# prefix: the name is the warning, and it is greppable.
+#
+# DO NOT call these from a tenant route. A test in
+# tests/cloud/platform/test_tenant_directory.py asserts that nothing outside
+# the platform package imports them, so a tenant route that reaches for one
+# fails CI rather than quietly serving another customer's data.
+#
+# They take no RequestContext on purpose. Accepting one would invite the
+# reading that they are scoped by it.
+# ---------------------------------------------------------------------------
+
+
+def _escape_regex(value: str) -> str:
+    """Escape user input before it reaches a Mongo ``$regex``.
+
+    An unescaped search box is a query-injection surface: a caller typing
+    ``.*`` matches everything, and a pathological pattern makes the server do
+    the backtracking. Operators are trusted, but "trusted" is not a reason to
+    hand them a regex engine by accident.
+    """
+    import re
+
+    return re.escape(value)
+
+
+# Hard ceiling on the owner-email fan-out. Without one, `?q=a` loads every user
+# whose address contains "a" into process memory and then builds an `$in` out of
+# their ids — either exhausting the shared cloud process or blowing past Mongo's
+# 16MB query-document limit. Reachable at the SUPPORT rung, which is the lowest
+# one and the likeliest to be phished, so it is an availability hole rather than
+# a theoretical one.
+_PLATFORM_OWNER_MATCH_CAP = 500
+
+# A member list is bounded by one tenant's size, which is not the same as small.
+# The console paginates nothing here yet, so the cap is what stops a single
+# enterprise row from being a memory event.
+_PLATFORM_MEMBER_LIST_CAP = 1000
+
+
+async def _platform_user_ids_matching_email(fragment: str) -> list[str]:
+    """User ids whose email contains ``fragment``, for owner-email search.
+
+    Capped. A fragment matching more owners than the cap returns only the first
+    page of them, so the owner-email LIMB of a search is best-effort on a very
+    broad query — slug and name matching are unaffected. That is the right
+    trade: a broad query is a typo or a probe, and a precise one (a full address,
+    which is what a support request carries) never approaches the cap.
+    """
+    pattern = _escape_regex(fragment)
+    users = (
+        await _UserDoc.find({"email": {"$regex": pattern, "$options": "i"}})
+        .limit(_PLATFORM_OWNER_MATCH_CAP)
+        .to_list()
+    )
+    return [str(u.id) for u in users]
+
+
+async def _platform_count_members_bulk(workspace_ids: list[str]) -> dict[str, int]:
+    """``{workspace_id: member_count}`` for a page, in one query.
+
+    Does NOT reuse ``_count_members_bulk`` above, which does the same job with a
+    ``$aggregate``. Two reasons, in order of weight:
+
+      1. Aggregation cursors do not survive mongomock-motor, so every test that
+         touched this path would have to be skipped — and this is the first
+         cross-tenant read surface in the codebase, which is the last place that
+         should ship with its query untested. ``_count_members_bulk``'s only
+         other caller, ``list_for_user``, has no test at all for exactly this
+         reason.
+      2. The page here is bounded (``limit`` caps at 200), so the fan-out is
+         bounded with it.
+
+    The cost is real and worth naming: memberships live on the USER document, so
+    counting members per workspace always means touching users. This fetches the
+    users belonging to the page's workspaces and tallies in Python rather than
+    asking the server to. If the tenant count grows enough for that to hurt, the
+    fix is a denormalised counter on the workspace, not a cleverer query.
+    """
+    if not workspace_ids:
+        return {}
+
+    wanted = set(workspace_ids)
+    counts: dict[str, int] = dict.fromkeys(workspace_ids, 0)
+
+    users = await _UserDoc.find({"workspaces.workspace": {"$in": workspace_ids}}).to_list()
+    for user in users:
+        for membership in user.workspaces:
+            if membership.workspace in wanted:
+                counts[membership.workspace] += 1
+
+    return counts
+
+
+async def platform_search_workspaces(
+    *,
+    q: str | None = None,
+    plan: str | None = None,
+    include_deleted: bool = False,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> tuple[list[Workspace], str | None]:
+    """Search every workspace on the deployment. Returns (page, next_cursor).
+
+    ``q`` matches slug, name, or the OWNER'S EMAIL — the three things a support
+    request actually arrives with. Owner email costs a second query because
+    email lives on the user document, not the workspace.
+
+    Soft-deleted workspaces are excluded unless asked for. An operator
+    investigating "my account vanished" needs to see them, so the switch
+    exists; the default matches every other read in this module.
+
+    PAGINATION IS BY ``_id``, not by a timestamp. ObjectIds are monotonic and
+    unique, so a strict cursor can never skip a row or return one twice. A
+    createdAt cursor would do both: two workspaces created inside the same
+    clock tick share a timestamp, and on Windows that tick is ~15.6ms, which is
+    wide enough to hold a bulk import.
+    """
+    query: dict = {}
+    if not include_deleted:
+        query["deleted_at"] = None
+    if plan:
+        query["plan"] = plan
+
+    if q:
+        pattern = _escape_regex(q)
+        alternatives: list[dict] = [
+            {"slug": {"$regex": pattern, "$options": "i"}},
+            {"name": {"$regex": pattern, "$options": "i"}},
+        ]
+        owner_ids = await _platform_user_ids_matching_email(q)
+        if owner_ids:
+            alternatives.append({"owner": {"$in": owner_ids}})
+        query["$or"] = alternatives
+
+    if cursor:
+        try:
+            query["_id"] = {"$lt": PydanticObjectId(cursor)}
+        except Exception as exc:
+            # (code, message) — CloudError subclasses take both, and the
+            # central handler renders the code onto the wire.
+            raise ValidationError(
+                "platform.malformed_cursor",
+                "Cursor is not a valid workspace id.",
+            ) from exc
+
+    # One extra row tells us whether another page exists without a count().
+    docs = await _WorkspaceDoc.find(query).sort("-_id").limit(limit + 1).to_list()
+
+    has_more = len(docs) > limit
+    page = docs[:limit]
+
+    counts = await _platform_count_members_bulk([str(d.id) for d in page])
+    workspaces = [_workspace_to_domain(d, member_count=counts.get(str(d.id), 0)) for d in page]
+
+    next_cursor = str(page[-1].id) if has_more and page else None
+    return workspaces, next_cursor
+
+
+async def platform_get_workspace(workspace_id: str) -> Workspace:
+    """One workspace, by id, with no membership check.
+
+    Unlike ``_fetch_workspace`` this does NOT treat a soft-deleted workspace as
+    missing. An operator looking at a deleted tenant is answering a question
+    about why it is deleted, and hiding the row would make that unanswerable
+    from the console — which is the situation this PRD exists to end.
+    """
+    try:
+        doc = await _WorkspaceDoc.get(PydanticObjectId(workspace_id))
+    except Exception:
+        doc = None
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    member_count = await _count_members(workspace_id)
+    return _workspace_to_domain(doc, member_count=member_count)
+
+
+async def platform_set_workspace_overrides(
+    workspace_id: str, overrides: WorkspaceOverrides | None
+) -> _WorkspaceDoc:
+    """Set (or clear, with ``overrides=None``) a workspace's entitlement overrides.
+
+    Platform-only mutator (Paw Admin chunk 7) — no membership check, and
+    ``workspace_id`` arrives as a caller-supplied path parameter rather than
+    session context, same inversion as ``platform_get_workspace`` beside it.
+    Listed in ``_CROSS_TENANT_HELPERS`` (test_platform_boundary.py) so nothing
+    outside ``cloud/platform/`` can reach for it.
+
+    Returns the raw document (not the domain object) so the route can build
+    both the audit ``before``/``after`` dicts and the read-back response from
+    the one write it already made, with no extra fetch.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception as exc:
+        raise NotFound("workspace", workspace_id) from exc
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    doc.overrides = overrides
+    await doc.save()
+
+    # An ``included_sites`` override moves the site allowance exactly like a plan
+    # does, so clearing or lowering one must release the overflow the same way
+    # ``set_workspace_plan`` does. Best-effort: the override write stands, and the
+    # renewal sweep converges whatever this misses.
+    try:
+        from pocketpaw_ee.sites import service as sites_service
+
+        reconciled = await sites_service.reconcile_plan_carried_sites(workspace_id)
+        if reconciled.get("released"):
+            logger.info(
+                "workspace.platform_set_workspace_overrides: workspace=%s released %d "
+                "site(s) the new allowance does not carry",
+                workspace_id,
+                reconciled["released"],
+            )
+    except Exception:
+        logger.exception(
+            "workspace.platform_set_workspace_overrides: could not reconcile plan-carried "
+            "sites for workspace=%s — the override write STANDS; the sites sweep will "
+            "converge it",
+            workspace_id,
+        )
+    return doc
+
+
+async def platform_set_partner_profile(
+    workspace_id: str, profile: PartnerProfile | None
+) -> _WorkspaceDoc:
+    """Set (or clear, with ``profile=None``) a workspace's Paw Partners profile.
+
+    Platform-only mutator (Paw Partners PH-1), same shape as
+    ``platform_set_workspace_overrides`` above: no membership check, a
+    caller-supplied ``workspace_id``, listed in ``_CROSS_TENANT_HELPERS``
+    (test_platform_boundary.py). An ``active`` profile switches the per-site
+    billing seams on for this workspace (``billing.enforcement``).
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception as exc:
+        raise NotFound("workspace", workspace_id) from exc
+    # global-read: platform operator write; workspace_id is the path target.
+    doc = await _WorkspaceDoc.find_one({"_id": oid, "deleted_at": None})
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+    doc.partner = profile
+    await doc.save()
+    # no-event: platform write, recorded by the platform audit row at the route.
+    return doc
+
+
+async def set_partner_tier(
+    workspace_id: str, *, expected: str, tier: str, reviewed_at: datetime | None = None
+) -> bool:
+    """Set ``partner.tier`` (and ``partner.tier_reviewed_at`` when given) — PH-15.
+
+    Compare-and-set on the tier as read (``expected``), so a concurrent operator
+    PUT or another recompute is never stomped; False when nothing matched (the
+    caller's next recompute re-reads). A targeted ``$set``, never a doc save, so
+    the rest of the profile is untouched. Called by ``partners.service`` with the
+    workspace of a sale / payment it is handling, or by the tier sweep.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return False
+    fields: dict = {"partner.tier": tier}
+    if reviewed_at is not None:
+        fields["partner.tier_reviewed_at"] = reviewed_at
+    res = await _WorkspaceDoc.get_pymongo_collection().update_one(
+        {"_id": oid, "deleted_at": None, "partner.tier": expected}, {"$set": fields}
+    )
+    # no-event: the tier is read on demand (/partners/me); nothing subscribes to it.
+    return res.matched_count == 1
+
+
+async def set_partner_public_profile(workspace_id: str, fields: dict[str, Any]) -> bool:
+    """``$set`` the partner's public-profile fields (``partner.<name>``) in one write.
+
+    Matches only a workspace that IS a partner, so a non-partner never gets a
+    partial ``partner`` subdocument; False when nothing matched. Called only by
+    ``partners.service.update_public_profile`` with the caller's own workspace.
+    Raises ``DuplicateKeyError`` when the slug lost the unique-index race.
+    """
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return False
+    res = await _WorkspaceDoc.get_pymongo_collection().update_one(
+        {"_id": oid, "deleted_at": None, "partner": {"$ne": None}},
+        {"$set": {f"partner.{k}": v for k, v in fields.items()}},
+    )
+    # no-event: partners.service emits PartnerProfileUpdated after this returns.
+    return res.matched_count == 1
+
+
+async def platform_list_members(workspace_id: str) -> list[WorkspaceMember]:
+    """Members of any workspace, with no membership check on the caller.
+
+    Mirrors ``list_members`` exactly apart from the dropped role lookup. It is
+    a separate function rather than a flag on that one: a boolean that turns
+    off a tenancy check is the kind of parameter that eventually gets passed
+    ``True`` from somewhere it should not be.
+    """
+    members = (
+        await _UserDoc.find({"workspaces.workspace": workspace_id})
+        .limit(_PLATFORM_MEMBER_LIST_CAP)
+        .to_list()
+    )
+    out: list[WorkspaceMember] = []
+    for member in members:
+        membership = next((m for m in member.workspaces if m.workspace == workspace_id), None)
+        if membership is None:
+            continue
+        out.append(
+            WorkspaceMember(
+                user_id=str(member.id),
+                email=member.email,
+                name=member.full_name,
+                avatar=member.avatar,
+                role=membership.role,
+                joined_at=membership.joined_at,
+            )
+        )
+    return out
+
+
+async def platform_find_users(
+    *, email: str, limit: int = 25
+) -> list[tuple[str, str, str, list[tuple[str, str]]]]:
+    """Users whose email matches, with the workspaces each one belongs to.
+
+    Returns ``(user_id, email, full_name, [(workspace_id, role), ...])``. The
+    memberships come off the user document, so this is one query — and it
+    answers the support question "which accounts does this person have" without
+    knowing a workspace first.
+    """
+    pattern = _escape_regex(email)
+    users = (
+        await _UserDoc.find({"email": {"$regex": pattern, "$options": "i"}}).limit(limit).to_list()
+    )
+    return [
+        (
+            str(u.id),
+            u.email,
+            u.full_name,
+            [(m.workspace, m.role) for m in u.workspaces],
+        )
+        for u in users
+    ]
 
 
 __all__ = [
@@ -2275,6 +2762,10 @@ __all__ = [
     "set_member_action_permissions",
     "set_member_connector_permissions",
     "set_member_route_permissions",
+    "platform_find_users",
+    "platform_get_workspace",
+    "platform_list_members",
+    "platform_search_workspaces",
     "set_instinct_approval_level",
     "update",
     "update_member_role",

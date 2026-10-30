@@ -4,6 +4,20 @@
 # WITHOUT clone access to the private paw-sites repo (the PAW_SITES_SOURCE=vendor
 # path, mirroring paw-enterprise/scripts/vendor-ripple.sh).
 #
+# Updated 2026-09-24 (feat/sites-verify-pipeline, PP-2): also copies the browser
+# verification harness (``harness/browser-check.mjs`` + its package.json, bun.lock and
+# bunfig.toml — never node_modules) to ``deploy/paw-sites/harness/``. pocketpaw uploads
+# it into the Daytona sandbox for the browser layer (``pocketpaw_ee.sites.browser_check``,
+# which reads it from /opt/paw-sites/harness). Missing harness is a WARNING: the browser
+# layer then reports ``unverified`` / ``harness_unavailable``, never a pass.
+#
+# Updated 2026-09-24 (feat/sites-author-dependencies, PP-1): also writes
+# ``deploy/paw-sites/allowlist.json`` — the output of ``paw-sites-gen allowlist`` —
+# next to the vendored generator. ``pocketpaw_ee.sites.vetted_pins`` reads its pins
+# from there (the downloadable project zip and the motion rewrite used to carry
+# hand-mirrored copies). Missing or unreadable, the Python side falls back to its
+# constants, so an older generator without the subcommand only prints a warning.
+#
 # Created 2026-06-25 (feat/paw-sites-prod-deploy, DEP-4). The Sites publish path
 # shells out to ``paw-sites-gen`` (the generator CLI) at publish time; the
 # enterprise image needs that binary on PATH. paw-sites is a SIBLING repo OUTSIDE
@@ -65,5 +79,32 @@ mkdir -p "$DEST"
 cp "$SRC/package.json" "$DEST/package.json"
 cp -R "$SRC/dist" "$DEST/dist"
 cp -R "$SRC/templates" "$DEST/templates"
+
+# The base app templates and backend recipes (template-copy / apply-recipe). git
+# archive ships tracked files only, so no node_modules, .wrangler or .paw tags along.
+git -C "$SRC" archive HEAD starters recipes | tar -x -C "$DEST"
+
+# PP-2 — the browser verification harness. Only the four files the sandbox installs
+# from; node_modules is installed IN the sandbox from the frozen lockfile.
+if [ -f "$SRC/harness/browser-check.mjs" ]; then
+  mkdir -p "$DEST/harness"
+  for f in browser-check.mjs package.json bun.lock bunfig.toml; do
+    if [ -f "$SRC/harness/$f" ]; then cp "$SRC/harness/$f" "$DEST/harness/$f"; fi
+  done
+  echo "[vendor-paw-sites] vendored harness/"
+else
+  echo "[vendor-paw-sites] WARN: $SRC/harness/browser-check.mjs missing; the browser verify layer will report harness_unavailable" >&2
+fi
+
+# The toolchain pins, straight from the generator, so pocketpaw stops hand-mirroring
+# them (see the header). node first (the generator is pure Node), bun as the fallback.
+RUNNER="$(command -v node || command -v bun || true)"
+if [ -n "$RUNNER" ] && "$RUNNER" "$DEST/dist/cli.js" allowlist > "$DEST/allowlist.json.tmp" 2>/dev/null    && [ -s "$DEST/allowlist.json.tmp" ]; then
+  mv "$DEST/allowlist.json.tmp" "$DEST/allowlist.json"
+  echo "[vendor-paw-sites] wrote allowlist.json"
+else
+  rm -f "$DEST/allowlist.json.tmp"
+  echo "[vendor-paw-sites] WARN: could not run 'paw-sites-gen allowlist'; pocketpaw falls back to its pinned constants" >&2
+fi
 
 echo "[vendor-paw-sites] done. deploy/paw-sites/ is ready for a PAW_SITES_SOURCE=vendor build."

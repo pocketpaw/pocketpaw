@@ -2,44 +2,51 @@
   {
     "label": "the origin pin becomes an unconditional gate again (JSON path)",
     "file": "ee/pocketpaw_ee/cloud/leads/router.py",
-    "find": "    if site.enforce_origin and not origin_allowed(_effective_origins(site), origin or None):",
-    "replace": "    if not origin_allowed(_effective_origins(site), origin or None):",
+    "find": "    if site.enforce_origin and not origin_allowed(known, origin or None):",
+    "replace": "    if not origin_allowed(known, origin or None):",
     "tests": ["tests/cloud/leads/test_router.py"]
   },
   {
     "label": "the opt-in gate is removed entirely (enforce_origin does nothing)",
     "file": "ee/pocketpaw_ee/cloud/leads/router.py",
-    "find": "    if site.enforce_origin and not origin_allowed(_effective_origins(site), origin or None):\n        raise HTTPException(403, \"Origin not allowed for this site\")",
+    "find": "    if site.enforce_origin and not origin_allowed(known, origin or None):\n        raise HTTPException(403, \"Origin not allowed for this site\")",
     "replace": "    return",
     "tests": ["tests/cloud/leads/test_router.py"]
   },
   {
     "label": "the 303 echoes the caller's claimed Origin (open redirect)",
     "file": "ee/pocketpaw_ee/cloud/leads/router.py",
-    "find": "    if origin and origin_allowed(_effective_origins(site), origin):\n        return origin.rstrip(\"/\")\n    return (site.url or \"\").rstrip(\"/\")",
-    "replace": "    return origin.rstrip(\"/\")",
+    "find": "    if origin and origin_allowed(known, origin):\n        return origin.rstrip(\"/\")\n    if site.url or not site.foreign_origin:",
+    "replace": "    return origin.rstrip(\"/\")\n    if site.url or not site.foreign_origin:",
     "tests": ["tests/cloud/leads/test_router.py"]
   },
   {
     "label": "the 303 always uses the site url (a custom-domain visitor is bounced away)",
     "file": "ee/pocketpaw_ee/cloud/leads/router.py",
-    "find": "    if origin and origin_allowed(_effective_origins(site), origin):\n        return origin.rstrip(\"/\")\n    return (site.url or \"\").rstrip(\"/\")",
-    "replace": "    return (site.url or \"\").rstrip(\"/\")",
+    "find": "    if origin and origin_allowed(known, origin):\n        return origin.rstrip(\"/\")\n    if site.url or not site.foreign_origin:",
+    "replace": "    if site.url or not site.foreign_origin:",
     "tests": ["tests/cloud/leads/test_router.py"]
   },
   {
     "label": "the known-host set is not derived (a site's own deployed host reads as foreign)",
-    "file": "ee/pocketpaw_ee/cloud/leads/router.py",
-    "find": "    hosts = list(site.allowed_origins)\n    candidates = [site.url or \"\"]\n    candidates.extend(d.hostname for d in (site.domains or []) if d.hostname)",
-    "replace": "    hosts = list(site.allowed_origins)\n    candidates: list[str] = []",
+    "file": "ee/pocketpaw_ee/cloud/leads/intake.py",
+    "find": "    candidates.append(site.url or \"\")\n    candidates.extend(d.hostname for d in (site.domains or []) if d.hostname)",
+    "replace": "    pass",
     "tests": ["tests/cloud/leads/test_router.py"]
   },
   {
     "label": "attached custom domains are dropped from the derived set",
-    "file": "ee/pocketpaw_ee/cloud/leads/router.py",
+    "file": "ee/pocketpaw_ee/cloud/leads/intake.py",
     "find": "    candidates.extend(d.hostname for d in (site.domains or []) if d.hostname)",
     "replace": "    pass",
     "tests": ["tests/cloud/leads/test_router.py"]
+  },
+  {
+    "label": "owner-added intake hosts are ignored by the capture gate",
+    "file": "ee/pocketpaw_ee/cloud/leads/intake.py",
+    "find": "    for extra in getattr(site, \"lead_intake_origins\", None) or []:",
+    "replace": "    for extra in []:",
+    "tests": ["tests/cloud/leads/test_lead_intake.py"]
   },
   {
     "label": "the origin is never recorded on the lead",
@@ -79,8 +86,8 @@
   {
     "label": "an enforcing site stops failing closed on a missing Origin",
     "file": "ee/pocketpaw_ee/cloud/leads/router.py",
-    "find": "    if site.enforce_origin and not origin_allowed(_effective_origins(site), origin or None):",
-    "replace": "    if site.enforce_origin and origin and not origin_allowed(_effective_origins(site), origin):",
+    "find": "    if site.enforce_origin and not origin_allowed(known, origin or None):",
+    "replace": "    if site.enforce_origin and origin and not origin_allowed(known, origin):",
     "tests": ["tests/cloud/leads/test_router.py"]
   },
   {
@@ -89,5 +96,26 @@
     "find": "    enforce_origin: bool = False",
     "replace": "    enforce_origin: bool = True",
     "tests": ["tests/cloud/leads/test_router.py"]
+  },
+  {
+    "label": "a connected site counts an unproved allowed_origins entry as its own",
+    "file": "ee/pocketpaw_ee/cloud/leads/intake.py",
+    "find": "        if await ownership.verified_origin_record(site.workspace, host) is not None:",
+    "replace": "        if True:",
+    "tests": ["tests/cloud/leads/test_connected_capture.py"]
+  },
+  {
+    "label": "a connected site's 303 drops its verified host (a relative Location lands on the API host)",
+    "file": "ee/pocketpaw_ee/cloud/leads/router.py",
+    "find": "    return f\"https://{verified[0]}\" if verified else \"\"",
+    "replace": "    return \"\"",
+    "tests": ["tests/cloud/leads/test_connected_capture.py"]
+  },
+  {
+    "label": "a connected site's leads are filed under an empty site id (lead.captured is ignored)",
+    "file": "ee/pocketpaw_ee/cloud/leads/domain.py",
+    "find": "    if getattr(site, \"foreign_origin\", False) and getattr(site, \"id\", None) is not None:",
+    "replace": "    if False:",
+    "tests": ["tests/cloud/leads/test_connected_capture.py"]
   }
 ]

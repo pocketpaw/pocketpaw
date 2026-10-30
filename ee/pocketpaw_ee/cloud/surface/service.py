@@ -1,92 +1,29 @@
 # service.py — Surface context resolver and handler dispatch.
 #
-# Created: 2026-05-24 — ``resolve_surface_context(workspace_id, user_id,
-# body)`` validates the client's ``{surface, meta}`` hint, maps the
-# string to a ``SurfaceKind``, and dispatches to a per-kind handler that
-# builds the preamble. Per Rule 5 of the cloud entity rules, this is a
-# module-level async function (not a class) and validation runs at entry
-# via ``SurfaceRequest.model_validate``.
+# ``resolve_surface_context(workspace_id, user_id, body)`` validates the client's
+# ``{surface, meta}`` hint (``SurfaceRequest.model_validate`` at entry), maps it
+# to a ``SurfaceKind`` and dispatches to that kind's handler from the
+# surface_registry ``SURFACES`` table, carrying the handler's own cache key out
+# on ``SurfaceContext.preamble_cache_key``. Failure stays inert: any handler
+# error logs and returns a GENERIC context with an empty preamble and a ``None``
+# key, so a surface failure never breaks a chat send.
 #
-# Failure stays inert: any handler error logs and returns a
-# ``GENERIC`` context with empty preamble. The chat path is the consumer
-# — never let a surface failure break a chat send.
+# ``resolve_profile(kind, meta)`` is a PURE, sync lookup of the per-surface
+# policy from the registry rows (incl. the meta-aware /sites resolver). It folds
+# the agentic-browser tool ids into ``deny_mcp_tool_ids`` for every surface but
+# BROWSER at this one chokepoint, so the unmapped default case is covered too.
 #
-# Changes: 2026-06-05 (feat/surface-profile-bias-kill) — added
-# ``resolve_profile(surface_kind, meta) -> SurfaceProfile``, the resolver
-# for the new per-surface policy descriptor (the data backbone of the
-# "ripple-default bias" fix). It is a PURE lookup (sync — no I/O), so unlike
-# ``resolve_surface_context`` it never touches Mongo or a handler.
-# Changes: 2026-06-05 (feat/sites-svelte-engine) — make ``resolve_profile``
-# META-AWARE on the /sites row. PR 1's static ``_PROFILES[SITES]`` entry turned
-# ripple OFF for EVERY /sites meta, but /sites carries THREE modes and only the
-# svelte-CREATE one should lose ripple. The resolver now special-cases SITES and
-# branches on ``meta``:
-#   * create + svelte  (``meta.engine == "svelte"``, no ``pocket_id``) → ripple
-#     OFF, deny the two ripple-create tools, surface the create-svelte-site skill
-#     (hand-authored SvelteKit — the "default to ui-spec" LAW is wrong here);
-#   * create + ripple  (``engine`` None/"ripple", no ``pocket_id``) → DEFAULT
-#     profile (ripple ON, no deny) — it AUTHORS a ripple landing page;
-#   * refine           (``meta.pocket_id`` set, ANY engine) → DEFAULT profile —
-#     it EDITS the existing ripple landing spec via ``pocket_specialist__edit``.
-# Refine WINS over engine: a ``pocket_id`` present means refine even when
-# ``engine="svelte"`` is also stamped. Every non-sites kind AND any unmapped kind
-# still falls through to ``_DEFAULT_PROFILE`` (ripple on) — today's behavior, zero
-# regression. The deny set on the svelte row is now ENFORCED end-to-end (it is
-# threaded to the OSS backend's ``run`` via ``deny_mcp_tool_ids`` — see
-# ``run_core._drive_agent_loop`` → ``AgentPool.run`` → ``ClaudeSDKBackend.run``).
-# Changes: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①)
-# — added ``compose_entity_profile(base, override)``, the PURE (no-I/O) helper
-# that folds an entity pocket's ``PocketSurfaceProfile`` override (the
-# JSON-shaped dict from ``Pocket.surface_profile``, lists not frozensets) OVER a
-# base ``SurfaceProfile`` resolved from the surface kind. Precedence: ripple_mode
-# entity-wins-if-set else base; deny_mcp_tool_ids UNION (hard cap grows);
-# allowed_sdk_tools / skill_names UNION; system_message_override entity-wins-if-set.
-# A ``None`` / empty override returns the base unchanged → zero regression for the
-# no-pocket / legacy path. ``resolve_profile`` stays PURE/no-I/O (the hot lookup);
-# the actual once-per-run async pocket load that supplies the override dict lives
-# tenant-scoped in ``run_core.execute_run`` (entity I/O never enters this module).
-# Changes: 2026-06-10 (feat/studio-code-migration) — registered the STUDIO and
-# CODE surfaces: their handlers (``studio.build_preamble`` / ``code.build_preamble``)
-# join ``_load_handlers``, and ``_build_profiles`` gives both a ripple-OFF
-# ``SurfaceProfile`` so the agent generates media / edits code instead of
-# defaulting to a ripple ui-spec dashboard. STUDIO scopes ``allow_mcp_tool_ids``
-# to the media tools (``MEDIA_TOOL_IDS`` loaded as a plain frozenset[str] inside
-# the existing try/except — no EE symbol crosses into OSS) and surfaces the
-# ``studio`` skill; CODE sets an ``allowed_sdk_tools`` allowlist (Bash/Read/Write/
-# Edit/Glob/Grep) and surfaces the ``code`` skill. Both are plain ``by_kind``
-# entries (not meta-aware like /sites).
-# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) —
-# ``resolve_surface_context`` carries the handler's cache key out on
-# ``SurfaceContext.preamble_cache_key``. The preamble is a prompt LAYER now
-# (``pocketpaw.prompt.surface``), and a layer keys the digest a backend uses to
-# decide whether its cached agent still matches the prompt it was built for.
-# The key is the HANDLER's, not this module's: the tempting central version —
-# ``f"{kind}:{meta.pocket_id}:{meta.intent}"``, everything already in hand and
-# zero handler changes — cannot see a pocket being edited between two turns,
-# which is the one drift on this surface a user would actually notice. The
-# error absorption is unchanged: every fall-back path still renders GENERIC
-# with an empty preamble, now paired with a ``None`` key.
-# Changes: 2026-06-10 (feat/belt-surface, BS-2 Belt & Pulley stations thin
-# slice) — registered the BELT surface (the develop station). Its handler
-# (``belt.build_preamble``) joins ``_load_handlers``, and ``_build_profiles``
-# gives it a ripple-OFF ``SurfaceProfile`` so the agent runs the station loop
-# instead of building a dashboard: ``allowed_sdk_tools`` = the coding built-ins
-# (Bash/Read/Write/Edit/Glob/Grep), ``skill_names`` = {"belt"}, and
-# ``allow_mcp_tool_ids`` = the loom orientation tools (``LOOM_TOOL_IDS``, loaded
-# in the existing try/except as a plain frozenset[str]) UNION the Instinct gate
-# tool (``_BELT_GATE_TOOL_IDS``). The gate tool id is a literal here because its
-# constant lives in a SIBLING branch's ``agent/mcp_servers/belt.py`` — the
-# import reconciles when both PRs land.
-# Changes: 2026-07-23 (feat/ship-surface-kind, SHIP-8a) — the declarative
-# ``SURFACES`` registry gains the SHIP row (the managed-deploy control plane).
-# ``resolve_profile`` sources it like every other row (SR-2): SHIP carries a
-# ``profile_resolver`` (``_ship_profile``) because it needs the lazily-loaded
-# ``SHIP_TOOL_IDS`` allow-list, so it joins FORESIGHT / FILES / STUDIO / BELT as
-# the ripple-OFF, MCP-scoped surfaces resolved off the registry — no code change
-# in this module (the registry is the single source of truth).
+# ``compose_entity_profile(base, override)`` folds a pocket's
+# ``PocketSurfaceProfile`` over the base: ripple_mode and the system-message
+# override entity-wins-if-set, deny / allowed-tools / skills UNION,
+# ``exclusive_tools`` ORed. The async pocket load lives in run_core.
+#
+# ``_meta_from_request`` passes ``SurfaceMeta`` hints through FIELD BY FIELD: a
+# new hint not listed there validates in the DTO and is then dropped silently.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any
 
@@ -183,12 +120,41 @@ def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProf
     """
     spec = _spec_by_kind().get(surface_kind)
     if spec is None:
-        return _DEFAULT_PROFILE
-    if spec.profile_resolver is not None:
-        return spec.profile_resolver(meta)
-    if spec.profile is not None:
-        return spec.profile
-    return _DEFAULT_PROFILE
+        profile = _DEFAULT_PROFILE
+    elif spec.profile_resolver is not None:
+        profile = spec.profile_resolver(meta)
+    elif spec.profile is not None:
+        profile = spec.profile
+    else:
+        profile = _DEFAULT_PROFILE
+    return _deny_browser_off_surface(surface_kind, profile)
+
+
+def _deny_browser_off_surface(surface_kind: SurfaceKind, profile: SurfaceProfile) -> SurfaceProfile:
+    """Add the agentic-browser tool ids to the deny set of every NON-browser surface.
+
+    The browser drives a real Chromium as the tenant. It belongs on /browser and
+    nowhere else — least of all /chat, which is otherwise unrestricted
+    (``allow_mcp_tool_ids=None``) and carries the send-capable connector tools.
+    An allow-list alone cannot express that: the surfaces that need blocking are
+    exactly the ones that declare no allow-list.
+
+    Applied HERE rather than row-by-row deliberately. This is the one chokepoint
+    every ``(kind, meta)`` passes through, so it also covers ``_DEFAULT_PROFILE``,
+    an unmapped/future kind, and any row added later without a thought for the
+    browser. Deny is subtracted from ``allowed_tools`` before the SDK launches
+    (``claude_sdk``), so the tools are physically unreachable, not discouraged.
+    """
+    if surface_kind is SurfaceKind.BROWSER:
+        return profile
+    from pocketpaw_ee.cloud.surface.surface_registry import browser_tool_ids
+
+    ids = browser_tool_ids()
+    if not ids:
+        # The tool-id import degraded; there is nothing to deny (and nothing to
+        # allow either — the BROWSER profile's allow is None on the same path).
+        return profile
+    return dataclasses.replace(profile, deny_mcp_tool_ids=profile.deny_mcp_tool_ids | ids)
 
 
 def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None) -> SurfaceProfile:
@@ -212,6 +178,8 @@ def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None
         (no surface restriction); an empty frozenset would wrongly deny all.
       * ``skill_names`` — UNION (the entity adds its skills to the base set).
       * ``system_message_override`` — entity wins WHEN SET, else base.
+      * ``exclusive_tools`` — OR. Like deny, a cap that can only tighten.
+      * ``max_turns`` — the base's, always (an entity cannot raise a turn cap).
 
     ``override`` of ``None`` (no per-entity profile) returns ``base`` unchanged —
     the no-pocket / legacy path, byte-identical to today's behavior.
@@ -257,6 +225,12 @@ def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None
         deny_mcp_tool_ids=deny,
         skill_names=skills,
         system_message_override=sys_override,
+        # A hard cap, like deny: OR, so an entity can lock a surface down but
+        # never unlock one. Dropping it here would hand a concierge whose site
+        # pocket carries any override every builtin back.
+        exclusive_tools=base.exclusive_tools or bool(override.get("exclusive_tools")),
+        # The surface's own turn cap; an entity override cannot set one.
+        max_turns=base.max_turns,
     )
 
 
@@ -330,6 +304,17 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         workspace_vm=req.workspace_vm,
         pawbar_actions=req.pawbar_actions,
         pawbar_catalog=req.pawbar_catalog,
+        timeline=req.timeline,
+        vector=req.vector,
+        photo=req.photo,
+        design=req.design,
+        snapshot_path=req.snapshot_path,
+        free_y=req.free_y,
+        book_path=req.book_path,
+        mark_box=req.mark_box,
+        mark_image_path=req.mark_image_path,
+        mark_text=req.mark_text,
+        scene=req.scene,
     )
 
 
@@ -421,8 +406,9 @@ async def resolve_surface_context(
     # invent for it.
     if isinstance(rendered, SurfacePreamble):
         preamble, cache_key = rendered.text, rendered.cache_key
+        images = rendered.images
     else:
-        preamble, cache_key = (rendered or ""), None
+        preamble, cache_key, images = (rendered or ""), None, ()
 
     return SurfaceContext(
         workspace_id=workspace_id,
@@ -431,6 +417,7 @@ async def resolve_surface_context(
         meta=meta,
         preamble=preamble or "",
         preamble_cache_key=cache_key,
+        preamble_images=images,
     )
 
 

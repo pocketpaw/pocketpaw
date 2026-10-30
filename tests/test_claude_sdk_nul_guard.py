@@ -150,7 +150,6 @@ async def test_build_options_strips_a_nul_before_it_can_reach_the_spawn(monkeypa
     built = await backend._build_options(
         "hello",
         system_prompt="You are helpful.\x00 Be brief.",
-        history=None,
         session_key=None,
         deny_mcp_tool_ids=frozenset(),
         allow_sdk_tools=frozenset(),

@@ -1,65 +1,34 @@
-# ee/pocketpaw_ee/paw_bar/agent_provisioning.py — auto-provision a DEDICATED
-# concierge agent per Paw Site.
+# ee/pocketpaw_ee/paw_bar/agent_provisioning.py — every Paw Site's concierge is
+# answered by an agent that exists FOR that site, never a shared/universal one.
 #
-# Updated 2026-08-01 (default booking action): a widget MINTED by
-# ``ensure_site_widget`` now declares one gated ``booking_request`` action
-# (``_default_booking_action``). An empty ``spec.actions`` means the concierge
-# preamble renders NO form-card instructions (see the concierge handler), so
-# every from-scratch published site shipped a chat-only concierge that declined
-# bookings — found live 2026-08-01 on a hosted deploy. MINT-ONLY: an existing
-# widget's actions are never touched (owners may have removed or customized
-# them), and the dashboard widget-create path is untouched too — its spec is
-# authored by the caller, never synthesized here.
+# Nothing here runs automatically: a concierge is never created as a side effect.
+# The owner's explicit create (``POST /paw-bar/admin/site/{id}/concierge``) calls
+# ``ensure_site_widget_row`` (resolve-or-mint the bar, empty spec, no actions) and,
+# on the legacy runtime, ``ensure_site_agent`` (bind the site's dedicated agent).
+# ``rebind_site_agent`` points a bar at a different, named agent (an empty id is a
+# 422). ``sync_concierge_identity`` keeps the dedicated agent's name and persona in
+# step with the owner's ``Site.concierge_name``.
 #
-# Updated 2026-07-30 (Paw Bar inbox D5): added ``widget_for_agent(agent_id,
-# workspace_id)`` — the REVERSE of the bind ``ensure_site_agent`` writes. D5 lets a
-# concierge run read its own ``agent:<id>`` knowledge scope, which makes "is this
-# agent answering public site visitors?" a question the agent Knowledge surface has
-# to answer out loud (``agents.service.is_visible_to_site_visitors`` is its one
-# caller). It reads the real binding — ``widget.agent_id`` — rather than sniffing
-# the deterministic ``concierge-<site_id>`` slug, so a MANUALLY bound agent (which
-# the provisioner never renames) is recognised too.
-#
-# Updated 2026-07-30 (publish-time provisioning): added ``ensure_site_widget`` —
-# the missing THIRD trigger. A site created AND published by the agent in one
-# conversation never passes through widget-create (a dashboard flow) or a
-# concierge-enable TRANSITION (the model defaults to enabled), so neither
-# existing trigger fired, the publish-time embed's four-gate check failed
-# silently, and a brand-new site shipped bar-less with no dedicated agent.
-# ``ensure_site_widget`` runs at publish (from ``sites.service._embed_concierge_bar``):
-# resolve-or-mint the site's paw-bar widget, then funnel into ``ensure_site_agent``.
-# Idempotent + failure-soft like its siblings. Found live in the 2026-07-30 smoke.
-#
-# Updated 2026-07-30 (feat/paw-bar-autoembed): extracted ``site_widget(pocket_id,
-# workspace_id)`` — the "which paw-bar widget belongs to this site's pocket"
-# lookup that ``provision_on_concierge_enable`` used to do inline. The publish
-# path now needs the SAME answer (to decide whether a site has earned an embedded
-# concierge bar and which widget id to put in the snippet), and two copies of a
-# tenancy-scoped lookup is exactly the kind of pair that drifts apart. Behaviour is
-# unchanged: the same workspace-scoped ``list_widgets(limit=1)``, the same
-# empty-pocket_id guard that keeps a blank pocket from widening the query onto a
-# sibling's widget.
-#
-# Created 2026-07-23 (feat/site-dedicated-agent): every site's concierge is
-# answered by an agent that exists FOR that site — never a shared/universal
-# agent. ``ensure_site_agent(site, widget)`` is idempotent: a widget already
-# bound to a LIVE agent is returned unchanged (manual binds are never
-# overwritten); otherwise ONE dedicated agent is created (via the agents service
-# — never a direct Beanie write) and bound to the widget through the paw-bar
-# store's ``update_fields`` path. THREE triggers funnel here: widget-create (no
-# agent_id + the pocket resolves to a Site), concierge-enable (the site's widget
-# is still unbound), and ``ensure_site_widget`` — the publish-time path that
-# covers a site whose widget never existed at all. All are FAILURE-SOFT — a
-# provisioning failure logs
-# and leaves the widget unbound rather than 500-ing the caller (chat still 409s;
-# the dashboard offers a manual create).
-#
-# ASG-1 identity fields (welcome_message, conversation_starters) and agent
-# ``tags`` do NOT exist on the Agent/AgentConfig model on this branch, so the
-# seeding of those degrades gracefully to a no-op (see ``_seed_identity`` /
-# ``_seed_tags``). The derivation helpers still run + are unit-tested so the wire
-# is in place the moment the fields land; the derived values are logged, never
-# dropped silently.
+# INVARIANTS:
+#   * IDEMPOTENT. A widget already bound to a LIVE agent is returned unchanged,
+#     so a manual bind is never overwritten and a retry never mints a second
+#     agent. Only ``rebind_site_agent`` replaces a live bind, and only because a
+#     caller asked for that by name.
+#   * THE SLUG IS DETERMINISTIC on the site id (``concierge-<site_id>``), so a
+#     create that races or retries after a failed bind RESOLVES the same agent
+#     instead of duplicating it. The slug and the ``concierge`` + ``site:<id>``
+#     tags are also what keeps the agent off tenant listings
+#     (``agents.service.is_concierge_agent``).
+#   * AGENTS ARE CREATED THROUGH THE AGENTS SERVICE, never by a direct Beanie
+#     write, and in the SITE's workspace owned by the site's owner — the bind is
+#     workspace-scoped at every step so it can never reach across tenants.
+#   * A RENAME TOUCHES ONLY GENERATED VALUES. ``sync_concierge_identity`` changes
+#     the dedicated agent's name or persona only while it still reads as the one
+#     this module generated, so an owner's own edit and a hand-bound agent are
+#     never overwritten.
+#   * ``widget_for_agent`` is the REVERSE lookup and reads the real binding
+#     (``widget.agent_id``), not the slug, so a hand-bound agent counts too;
+#     ``site_for_agent`` follows it to the site that bar is on.
 
 from __future__ import annotations
 
@@ -99,35 +68,55 @@ def concierge_slug(site_id: str) -> str:
     return f"concierge-{site_id}"
 
 
-def concierge_name(site_name: str) -> str:
-    """The agent display name: ``<Site name> Concierge`` (``Site Concierge`` when
-    the site has no name). Truncated to the Agent.name cap."""
+def concierge_name(site_name: str, guided_name: str = "") -> str:
+    """The agent display name: the owner's guided name (``Site.concierge_name``)
+    when set, else ``<Site name> Concierge`` (``Site Concierge`` when the site has
+    no name). Truncated to the Agent.name cap."""
+    chosen = " ".join((guided_name or "").split())
+    if chosen:
+        return chosen[:_MAX_AGENT_NAME]
     stripped = (site_name or "").strip()
     name = f"{stripped} Concierge" if stripped else "Site Concierge"
     return name[:_MAX_AGENT_NAME]
 
 
-def concierge_persona(site_name: str) -> str:
-    """The soul persona seeded on the concierge agent."""
+def concierge_persona(site_name: str, guided_name: str = "") -> str:
+    """The soul persona seeded on the concierge agent. It names the concierge
+    when the owner gave it a name, so it introduces itself by that name."""
     subject = (site_name or "").strip() or "this site"
+    chosen = " ".join((guided_name or "").split())[:_MAX_AGENT_NAME]
+    if chosen:
+        return (
+            f"You are {chosen}, the concierge for {subject}. Introduce yourself as "
+            f"{chosen}. You answer visitors' questions about this site, grounded in "
+            "its own knowledge."
+        )
     return (
         f"You are the concierge for {subject}. You answer visitors' questions "
         "about this site, grounded in its own knowledge."
     )
 
 
-def derive_conversation_starters(widget: Any) -> list[str]:
-    """Derive up to four plain visitor questions from the widget spec.
+def _guided_name(site: Any) -> str:
+    return str(getattr(site, "concierge_name", "") or "")
+
+
+def derive_conversation_starters(widget: Any, *, catalog_count: int | None = None) -> list[str]:
+    """Derive up to four plain visitor questions from the widget.
 
     Rules (order preserved, capped at ``_MAX_STARTERS``):
-      * a non-empty catalog adds ``"What do you sell?"``;
+      * a non-empty catalog adds ``"What do you sell?"``. ``catalog_count`` is the
+        catalog store's count; without it a (deprecated) spec catalog decides;
       * each GATED action carrying a label adds ``"<label>?"`` (e.g. a
         ``book_table`` action labelled "Book a table" → "Book a table?");
       * if nothing derived, a single generic ``"What can you help me with?"``.
     """
     spec = getattr(widget, "spec", None)
     starters: list[str] = []
-    if spec is not None and getattr(spec, "catalog", None):
+    has_catalog = (
+        catalog_count > 0 if catalog_count is not None else bool(getattr(spec, "catalog", None))
+    )
+    if has_catalog:
         starters.append("What do you sell?")
     for action in getattr(spec, "actions", None) or []:
         if len(starters) >= _MAX_STARTERS:
@@ -140,18 +129,16 @@ def derive_conversation_starters(widget: Any) -> list[str]:
     return starters[:_MAX_STARTERS]
 
 
-def _seed_identity(body: Any, site: Any, widget: Any) -> None:
+def _seed_identity(body: Any, site: Any, widget: Any, catalog_count: int | None = None) -> None:
     """Seed the ASG-1 identity fields on a create body IF the model supports them.
 
     ``welcome_message`` ← ``Site.concierge_greeting`` (when non-empty),
-    ``conversation_starters`` ← ``derive_conversation_starters(widget)``. On this
-    branch the Agent create DTO carries NEITHER field, so this is a no-op beyond a
-    debug log — do NOT add the fields here (that is an Agent-model change, out of
-    scope). When the agent-studio identity fields land, this seeds them with no
-    other change.
+    ``conversation_starters`` ← ``derive_conversation_starters(widget)``. The
+    Agent create DTO carries both fields, so both are seeded; the ``hasattr``
+    guards only matter for a body that lacks one, which degrades to a debug log.
     """
     greeting = (getattr(site, "concierge_greeting", "") or "").strip()
-    starters = derive_conversation_starters(widget)
+    starters = derive_conversation_starters(widget, catalog_count=catalog_count)
 
     seeded = False
     if greeting and hasattr(body, "welcome_message"):
@@ -173,9 +160,9 @@ def _seed_identity(body: Any, site: Any, widget: Any) -> None:
 
 def _seed_tags(body: Any, site_id: str) -> None:
     """Stamp the ``["concierge", "site:<id>"]`` tags IF the create DTO supports a
-    free-form ``tags`` field. The Agent model on this branch has no such field
-    (``scopes`` is a hierarchical SCOPE-tag list with its own validator, NOT a
-    label bag), so this is a graceful no-op here."""
+    free-form ``tags`` field. The create DTO and the Agent model carry one (ASG-1;
+    not to be confused with ``scopes``, a hierarchical SCOPE-tag list with its own
+    validator), so this stamps them; a body without the field is a logged no-op."""
     if hasattr(body, "tags"):
         body.tags = ["concierge", f"site:{site_id}"]
     else:
@@ -242,15 +229,21 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
 
     if agent is None:
         body = CreateAgentRequest(
-            name=concierge_name(site.name),
+            name=concierge_name(site.name, _guided_name(site)),
             slug=slug,
             visibility="workspace",
-            persona=concierge_persona(site.name),
+            persona=concierge_persona(site.name, _guided_name(site)),
             soul_archetype=_CONCIERGE_ARCHETYPE,
             # soul_enabled defaults True — the concierge carries a soul.
         )
         _seed_tags(body, site_id)
-        _seed_identity(body, site, widget)
+        catalog_count: int | None = None
+        if getattr(widget, "id", ""):
+            try:
+                catalog_count = await _store().catalog_count(widget.id)
+            except Exception:  # noqa: BLE001 — a starter is cosmetic; never block the bind
+                logger.warning("paw-bar concierge: catalog count failed for %s", widget.id)
+        _seed_identity(body, site, widget, catalog_count)
         try:
             agent = await agents_service.create(ctx, workspace_id, body)
         except ConflictError:
@@ -281,6 +274,53 @@ async def ensure_site_agent(site: Any, widget: Any) -> str | None:
     return agent.id
 
 
+async def sync_concierge_identity(site: Any, previous_name: str) -> None:
+    """Carry a change of ``Site.concierge_name`` onto the site's dedicated agent.
+
+    The legacy runtime answers through that agent, and its name and persona are
+    what the dashboard and the agent's soul show. Only the DEDICATED agent (slug
+    ``concierge-<site_id>``, in the site's workspace) is touched, never an agent
+    the owner bound by hand, and each of the two fields only while it still equals
+    what this module generated from ``previous_name``: an owner who renamed the
+    agent or rewrote its persona keeps their edit.
+
+    Failure-soft: the settings save has already happened, so a missing agent or a
+    failed write is logged, never raised.
+    """
+    from pocketpaw_ee.cloud._core.errors import NotFound
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.cloud.agents.dto import UpdateAgentRequest
+
+    workspace_id = str(getattr(site, "workspace", "") or "")
+    site_id = str(getattr(site, "id", "") or "")
+    if not workspace_id or not site_id:
+        return
+    try:
+        agent = await agents_service.get_by_slug(workspace_id, concierge_slug(site_id))
+    except NotFound:
+        return
+    site_name = str(getattr(site, "name", "") or "")
+    new_name = _guided_name(site)
+    body = UpdateAgentRequest()
+    if agent.name == concierge_name(site_name, previous_name):
+        body.name = concierge_name(site_name, new_name)
+    if agent.config.soul_persona == concierge_persona(site_name, previous_name):
+        body.persona = concierge_persona(site_name, new_name)
+    if body.name in (None, agent.name) and body.persona in (None, agent.config.soul_persona):
+        return
+    try:
+        # The agent is the site owner's; the caller already passed the site's
+        # manage gate, so the write is made as the agent's owner.
+        ctx = agents_service.legacy_ctx(str(agent.owner), workspace_id)
+        await agents_service.update(ctx, agent.id, body)
+    except Exception:  # noqa: BLE001 — the settings are saved; the agent can lag
+        logger.warning(
+            "paw-bar concierge: could not rename the concierge agent for site %s",
+            site_id,
+            exc_info=True,
+        )
+
+
 def _schedule_knowledge_sync(site: Any) -> None:
     """Fire the background site→pocket-KB sync, swallowing everything. Imported
     lazily so provisioning keeps working even if the sites KB module cannot be
@@ -295,55 +335,6 @@ def _schedule_knowledge_sync(site: Any) -> None:
             getattr(site, "id", "?"),
             exc_info=True,
         )
-
-
-async def _canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> Any | None:
-    """The canonical Site doc for (workspace, pocket_id), or None (dedupe-aware).
-
-    Reuses the sites service's canonical resolver so a pocket that still carries
-    pre-dedupe duplicate Site docs resolves the SAME live doc the rest of the
-    stack uses. Best-effort import: if the sites service can't be reached, no
-    site is resolved (provisioning is skipped, the widget stays a plain widget).
-    """
-    if not pocket_id:
-        return None
-    try:
-        from pocketpaw_ee.sites import service as sites_service
-
-        return await sites_service.canonical_site_for_pocket(workspace_id, pocket_id)
-    except Exception:  # noqa: BLE001 — never fail the caller on a resolver hiccup
-        logger.warning(
-            "paw-bar concierge: site resolution failed for pocket %s", pocket_id, exc_info=True
-        )
-        return None
-
-
-async def provision_widget_on_create(widget: Any, workspace_id: str) -> Any:
-    """Widget-create trigger: provision a concierge agent when the widget's pocket
-    is a published Site and the widget is unbound.
-
-    Returns the widget with ``agent_id`` set on success, or the ORIGINAL widget
-    unchanged when there is no site for the pocket (plain widgets stay possible)
-    or when provisioning fails. FAILURE-SOFT: any error logs and returns the
-    original widget so widget-create never 500s on a provisioning problem.
-    """
-    if getattr(widget, "agent_id", ""):
-        return widget
-    try:
-        site = await _canonical_site_for_pocket(workspace_id, widget.pocket_id)
-        if site is None:
-            return widget  # no site for this pocket — a plain widget, not a concierge
-        await ensure_site_agent(site, widget)
-        refreshed = await _store().get_widget(widget.id, workspace_id=workspace_id)
-        return refreshed or widget
-    except Exception:  # noqa: BLE001 — provisioning must never 500 widget-create
-        logger.warning(
-            "paw-bar concierge: auto-provision on widget-create failed for widget %s "
-            "(returning unbound)",
-            getattr(widget, "id", "?"),
-            exc_info=True,
-        )
-        return widget
 
 
 async def site_widget(pocket_id: str, workspace_id: str) -> Any | None:
@@ -390,111 +381,156 @@ async def widget_for_agent(agent_id: str, workspace_id: str) -> Any | None:
     return None
 
 
-def _default_booking_action() -> Any:
-    """The one action a MINTED site widget declares: a gated booking request.
+async def site_for_agent(agent_id: str, workspace_id: str) -> Any | None:
+    """The live Site whose bar is bound to ``agent_id`` in ``workspace_id``, or
+    ``None``. ``widget_for_agent`` then the site on that widget's pocket, both
+    workspace-scoped. Lets the agent editor show the same knowledge as the site's
+    Paw Bar → Knowledge tab."""
+    widget = await widget_for_agent(agent_id, workspace_id)
+    pocket_id = str(getattr(widget, "pocket_id", "") or "")
+    if not pocket_id:
+        return None
+    from pocketpaw_ee.cloud.models.site import Site
 
-    A spec with no gated-with-args actions renders no form-card instructions in
-    the concierge preamble, leaving the agent unable to take a booking at all —
-    a service site's one job. ``gated`` never executes; it raises an Instinct
-    proposal for the owner (SS-2: ``auto`` is reserved for visitor-scoped
-    verbs). Applied ONLY when minting: an existing widget's actions belong to
-    its owner.
-    """
-    from pocketpaw.paw_bar.models import PawBarActionSpec
-
-    return PawBarActionSpec(
-        verb="booking_request",
-        policy="gated",
-        args={
-            "name": "str",
-            "phone": "str",
-            "address": "str",
-            "issue": "str",
-            "preferred_window": "str",
-        },
-        label="Book a service visit",
+    return await Site.find_one(
+        {"workspace": workspace_id, "pocket_id": pocket_id, "archived": {"$ne": True}}
     )
 
 
-async def ensure_site_widget(site: Any, workspace_id: str) -> Any | None:
-    """Publish-time trigger: a concierge-enabled site must HAVE a paw-bar widget.
+async def ensure_site_widget_row(site: Any, workspace_id: str) -> Any:
+    """Resolve-or-mint the paw-bar widget for ``site``'s pocket. Binds NO agent.
 
-    Resolve-or-mint the widget for ``site``'s pocket, then ensure its dedicated
-    agent. This is the third trigger beside widget-create and concierge-enable:
-    a site created and published by the agent in one conversation hits neither
-    (there is no dashboard widget-create, and ``concierge_enabled`` defaults to
-    True so no enable transition ever fires) — without this, the publish-time
-    embed found no widget and silently shipped the site bar-less.
+    Called only by the owner's explicit create. An existing widget is returned
+    untouched, actions and all: they belong to its owner. A minted one carries an
+    empty spec — no blocks, no catalog and NO actions. The publish-time mint used
+    to add a gated ``booking_request`` so a service site could take bookings; a
+    concierge's actions are now something its owner declares, not a default the
+    platform picks for them.
 
-    Idempotent: an existing widget is returned as-is (after a best-effort agent
-    bind if it is unbound). FAILURE-SOFT: any error logs and returns ``None`` —
-    a site going live matters more than its bar.
+    Not failure-soft, unlike the triggers it replaced: the caller is an owner
+    who asked for exactly this, so a store error should reach them as an error.
     """
-    try:
-        existing = await site_widget(site.pocket_id, workspace_id)
-        if existing is not None:
-            if not getattr(existing, "agent_id", ""):
-                await ensure_site_agent(site, existing)
-                refreshed = await _store().get_widget(existing.id, workspace_id=workspace_id)
-                return refreshed or existing
-            return existing
+    existing = await site_widget(site.pocket_id, workspace_id)
+    if existing is not None:
+        return existing
 
-        from pocketpaw.paw_bar.models import PawBarSpec, PawBarWidget
+    from pocketpaw.paw_bar.models import PawBarSpec, PawBarWidget
 
-        site_name = str(getattr(site, "name", "") or "").strip() or "This site"
-        widget = PawBarWidget(
-            pocket_id=site.pocket_id,
-            owner=str(getattr(site, "owner", "") or "site"),
-            workspace_id=workspace_id,
-            name=f"{site_name} concierge",
-            # The glass bar renders its own chat surface; blocks stay empty. The
-            # spec ships with the default gated booking action — an empty
-            # ``actions`` yields a concierge that cannot take a booking.
-            spec=PawBarSpec(
-                widget_id="pending",
-                pocket_id=site.pocket_id,
-                blocks=[],
-                actions=[_default_booking_action()],
-            ),
+    site_name = str(getattr(site, "name", "") or "").strip() or "This site"
+    widget = PawBarWidget(
+        pocket_id=site.pocket_id,
+        owner=str(getattr(site, "owner", "") or "site"),
+        workspace_id=workspace_id,
+        name=f"{site_name} concierge",
+        # The glass bar renders its own chat surface; blocks stay empty.
+        spec=PawBarSpec(widget_id="pending", pocket_id=site.pocket_id, blocks=[]),
+    )
+    created = await _store().create_widget(widget)
+    logger.info(
+        "paw-bar concierge: minted widget %s for site %s on explicit create",
+        created.id,
+        getattr(site, "id", "?"),
+    )
+    return created
+
+
+async def rebind_site_agent(
+    site: Any,
+    workspace_id: str,
+    *,
+    agent_id: str = "",
+    widget_id: str = "",
+) -> str | None:
+    """Point a site's bar at a DIFFERENT agent, or re-run the funnel for it.
+
+    The one path allowed to REPLACE a live bind. ``ensure_site_agent`` refuses to
+    (a manual bind is somebody's deliberate choice), so an owner who wants a
+    different concierge — or who wants a bar re-provisioned after deleting its
+    agent — has no way through the funnel. This is that way, and it is explicit
+    rather than a flag on the funnel so nothing reaches it by accident.
+
+    ``agent_id`` names the replacement. It is resolved through
+    ``get_for_viewer(agent_id, workspace_id, None)``, so an agent in another
+    tenant raises ``NotFound`` and the bind is refused — a rebind is the obvious
+    place to try to attach a victim tenant's agent to a bar you control, and an
+    unchecked id here would serve that agent's answers to your visitors.
+
+    ``agent_id`` is REQUIRED. An empty one used to mean RE-PROVISION (clear the
+    bind and mint the canonical agent again); CR-12 removed that arm, because a
+    rebind that can mint an agent is a way to create a concierge nobody asked
+    for. It raises ``ValidationError`` before anything is read or written.
+
+    ``widget_id`` picks the bar explicitly; omitted, the site's pocket resolves
+    it (``site_widget``). Either way the bar must belong to the SITE'S pocket —
+    the store scopes a widget lookup to the workspace and no further, so an
+    explicit id could otherwise name a colleague's bar and the re-provision arm
+    would repoint their published page at this site's concierge.
+
+    Nothing about the Site row is touched either way — the
+    ``signed_key`` the customer has already embedded, the tier they paid for and
+    the subscription all survive a rebind, which is the whole point: swapping the
+    answering agent must never cost the buyer their credential or their month.
+
+    Returns the newly bound agent id, or ``None`` when there is no widget to bind
+    or the rebind could not complete.
+    """
+    from pocketpaw_ee.cloud._core.errors import Forbidden, ValidationError
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
+    if not agent_id:
+        raise ValidationError(
+            "sites.agent_required",
+            "Name the agent this bar should use. A rebind no longer creates one.",
         )
-        created = await _store().create_widget(widget)
-        logger.info(
-            "paw-bar concierge: minted widget %s for site %s at publish",
-            created.id,
-            getattr(site, "id", "?"),
-        )
-        await ensure_site_agent(site, created)
-        refreshed = await _store().get_widget(created.id, workspace_id=workspace_id)
-        return refreshed or created
-    except Exception:  # noqa: BLE001 — provisioning must never break a publish
+
+    if widget_id:
+        widget = await _store().get_widget(widget_id, workspace_id=workspace_id)
+    else:
+        widget = await site_widget(site.pocket_id, workspace_id)
+    if widget is None:
         logger.warning(
-            "paw-bar concierge: publish-time widget provisioning failed for site %s",
+            "paw-bar concierge: rebind found no widget for site %s",
             getattr(site, "id", "?"),
-            exc_info=True,
         )
         return None
 
-
-async def provision_on_concierge_enable(site: Any, workspace_id: str) -> None:
-    """Concierge-enable trigger: provision the site's widget when it is unbound.
-
-    Resolves the site's paw-bar widget (workspace-scoped) and provisions a
-    dedicated agent when that widget exists and carries no agent yet. FAILURE-SOFT:
-    any error logs and returns so the settings PATCH never 500s. A no-op when the
-    site has no widget yet (the concierge is wired later) or the widget already has
-    an agent (manual or previously provisioned).
-    """
-    try:
-        widget = await site_widget(site.pocket_id, workspace_id)
-        if widget is None or getattr(widget, "agent_id", ""):
-            return
-        await ensure_site_agent(site, widget)
-    except Exception:  # noqa: BLE001 — provisioning must never 500 the settings PATCH
+    # THE BAR MUST BE THIS SITE'S BAR. ``get_widget`` is scoped to the workspace
+    # and no further, so a caller-supplied ``widget_id`` could name a COLLEAGUE'S
+    # bar and repoint it at this site's concierge agent. The published page it
+    # belongs to would then be answered by a concierge grounded in somebody else's
+    # pocket, with nothing in the response saying so. The agent is tenancy-gated
+    # below; the bar is gated only here.
+    if str(getattr(widget, "pocket_id", "") or "") != str(getattr(site, "pocket_id", "") or ""):
         logger.warning(
-            "paw-bar concierge: auto-provision on concierge-enable failed for site %s",
+            "paw-bar concierge: refused a rebind of widget %s (pocket %s) to site %s (pocket %s)",
+            widget_id,
+            getattr(widget, "pocket_id", "?"),
             getattr(site, "id", "?"),
-            exc_info=True,
+            getattr(site, "pocket_id", "?"),
         )
+        # Forbidden rather than the module's usual NotFound-for-a-stranger. Both
+        # rows are inside ONE workspace and the caller can list the bars in it
+        # anyway, so hiding the widget buys no secrecy — while "that bar is not
+        # this site's" is a mistake a UI can correct and a 404 is not.
+        raise Forbidden(
+            "sites.widget_pocket_mismatch",
+            "That bar belongs to a different pocket and cannot be bound to this concierge.",
+        )
+
+    # Tenancy gate. Raises NotFound for a cross-workspace or unreadable
+    # agent, which is deliberately indistinguishable from a missing one.
+    await agents_service.get_for_viewer(agent_id, workspace_id, None)
+    updated = await _store().update_fields(
+        widget.id, {"agent_id": agent_id}, workspace_id=workspace_id
+    )
+    if updated is None:
+        logger.warning(
+            "paw-bar concierge: rebind of widget %s to agent %s wrote no row",
+            widget.id,
+            agent_id,
+        )
+        return None
+    return agent_id
 
 
 __all__ = [
@@ -503,9 +539,9 @@ __all__ = [
     "concierge_slug",
     "derive_conversation_starters",
     "ensure_site_agent",
-    "ensure_site_widget",
-    "provision_on_concierge_enable",
-    "provision_widget_on_create",
+    "ensure_site_widget_row",
+    "rebind_site_agent",
     "site_widget",
+    "sync_concierge_identity",
     "widget_for_agent",
 ]

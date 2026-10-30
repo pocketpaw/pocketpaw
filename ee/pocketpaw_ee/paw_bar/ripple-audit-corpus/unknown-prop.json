@@ -1,0 +1,30 @@
+{
+  "about": "A prop the text widget does not have. Core warns and does not count it; the Python walk passes it.",
+  "spec": {
+    "version": "1.0",
+    "ui": {
+      "type": "card",
+      "children": [
+        {
+          "type": "text",
+          "props": {
+            "text": "Hi",
+            "colour": "red"
+          }
+        }
+      ]
+    },
+    "state": {}
+  },
+  "expect": {
+    "core": [],
+    "python": [],
+    "warnings": [
+      {
+        "code": "unknownProp",
+        "path": "/ui/children/0/props/colour",
+        "message": "text has no prop `colour`; it is ignored"
+      }
+    ]
+  }
+}

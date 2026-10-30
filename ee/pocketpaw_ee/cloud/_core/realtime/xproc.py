@@ -14,20 +14,19 @@ The stream + consumer group survives both worker and web restarts: arq
 workers keep XADD-ing; the web's consumer group XACKs each delivered entry,
 so a fresh web process resumes from the last unacked cursor.
 
-Changes: 2026-09-04 (fix/concurrent-dispatch, backend-perf H2) — the consumer
-dispatches a batch by ORDERING LANE instead of strictly one envelope at a
-time. Every worker-originated realtime frame in the deployment flows through
-this one loop, so a single slow dispatch stalled delivery for every tenant on
-the box, not just the one that caused it — one workspace with a back-pressured
-socket made agent replies appear frozen for every other customer.
+Bus envelopes stay on this stream's SHARED consumer group, so exactly one web
+process runs each event's handlers; with N web processes that is what stops one
+worker event from starting N agent runs or sending N push notifications. WS
+envelopes take the same path by default; with ``POCKETPAW_REALTIME_BUS=
+redis-streams`` the worker sends them to ``broadcast``'s per-process groups
+instead, so every web process reaches its own sockets.
 
-The lane split is what makes that safe. These envelopes carry streamed agent
-output, so the chunks of one reply must arrive in the order they were
-produced; a plain ``gather`` over the batch would remove the stall and
-scramble the answer instead. Envelopes sharing a lane still run in stream
-order, and ``_ordering_lane`` falls back to the event type when it cannot
-identify a scope, so an unfamiliar envelope stays serial rather than being
-parallelised on a guess.
+The consumer dispatches a batch by ORDERING LANE. Every worker-originated frame
+flows through this one loop, so dispatching strictly one envelope at a time let
+one tenant's slow socket stall delivery for every other tenant. Envelopes carry
+streamed agent output whose chunks must arrive in order, so concurrency is only
+ever across lanes; ``_ordering_lane`` falls back to the event type when it
+cannot identify a scope, keeping an unfamiliar envelope serial.
 """
 
 from __future__ import annotations
@@ -40,9 +39,10 @@ from typing import Literal
 
 from redis import exceptions as redis_exceptions
 
+from pocketpaw_ee.cloud._core.realtime import broadcast
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
 from pocketpaw_ee.cloud._core.realtime.events import Event, rebuild_event
-from pocketpaw_ee.cloud._core.redis_client import get_redis
+from pocketpaw_ee.cloud._core.redis_client import get_blocking_redis, get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +97,17 @@ async def publish_ws_envelope(
     ws_type: str,
     ws_data: dict,
 ) -> None:
-    """Worker → web: ship a WS broadcast for ``manager.broadcast_to_group``."""
+    """Worker → web: ship a WS broadcast for ``manager.broadcast_to_group``.
+
+    With cross-process broadcast on, the frame goes to the broadcast stream so
+    EVERY web process delivers it to the sockets it holds. Otherwise it goes to
+    the shared group, where exactly one web process picks it up.
+    """
     if not is_worker():
+        return
+    channel = broadcast.active_channel()
+    if channel is not None:
+        await channel.publish_group(scope_id, recipients, ws_type, ws_data)
         return
     envelope = {
         "kind": "ws",
@@ -137,7 +146,7 @@ async def run_consumer(
     to transient Redis/dispatch errors (logged, brief backoff, loop continues).
     Cancellation propagates out so the lifecycle hook can stop it cleanly.
     """
-    redis = get_redis()
+    redis = get_blocking_redis()
     try:
         await redis.xgroup_create(XPROC_STREAM, XPROC_GROUP, id="$", mkstream=True)
     except redis_exceptions.ResponseError as exc:

@@ -2,9 +2,8 @@
 # role-scaled color palette from a reference image URL, for the claude_agent_sdk
 # cloud chat backend.
 #
-# Created: 2026-07-06 (feat/sites-crew-palette, SC-7). The Svelte-track
-# site-authoring skill (pocketpaw-create-svelte-site) runs on the
-# claude_agent_sdk backend, which only sees in-process MCP servers — a plain
+# The Svelte-track site-authoring skill (pocketpaw-create-svelte-site) runs on
+# the claude_agent_sdk backend, which only sees in-process MCP servers — a plain
 # BaseTool is invisible to it (same reason media.py / stock_images.py / icons.py
 # exist). A generated site needs a coherent color system the same way it needs
 # real photography and iconography; the "taste lever" from our design-system
@@ -28,13 +27,13 @@
 # expanded into a full 50–900 lightness scale by the pure, dependency-free,
 # unit-testable ``scale_from_base`` helper (fixed HSL lightness stops holding
 # the base hue/saturation, so the scale is deterministic and monotonic
-# lightest→darkest). Fail-soft: an empty/non-http url, a download/HTTP error, or
-# bytes PIL can't open all return an ``_error_response`` and never raise into the
-# agent.
+# lightest→darkest). The Pillow work runs in ``asyncio.to_thread`` so decoding a
+# large image never blocks the event loop. Fail-soft: an empty/non-http url, a
+# download/HTTP error, or bytes PIL can't open all return an ``_error_response``
+# and never raise into the agent.
 #
-# Updated: 2026-07-06 (feat/sites-crew-scale-from-color, SC-7c) — added a SECOND
-# tool ``scale_from_color`` for the custom-color path: it exposes the pure
-# ``scale_from_base`` helper directly, turning ONE brand hex the user supplied
+# A second tool, ``scale_from_color``, serves the custom-color path: it exposes
+# the pure ``scale_from_base`` helper directly, turning ONE brand hex the user supplied
 # into a full 50–900 scale (no image needed) so a user can override a design
 # system's palette from an exact color. Same fail-soft contract — a malformed hex
 # returns an ``_error_response``. Tool id namespaces as
@@ -43,6 +42,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import colorsys
 import json
 import logging
@@ -286,7 +286,8 @@ async def _extract_handler(args: dict) -> dict:
         return _error_response(f"palette extraction failed: image download error: {exc}")
 
     try:
-        base_colors = _extract_role_colors(data)
+        # Pillow decode + quantize is CPU work; keep it off the event loop.
+        base_colors = await asyncio.to_thread(_extract_role_colors, data)
     except Exception as exc:  # noqa: BLE001 — PIL open/decode failure → soft error
         logger.warning("palette: extraction failed for %r", url, exc_info=True)
         return _error_response(f"palette extraction failed: {exc}")

@@ -12,6 +12,19 @@ import from this module:
 
 A future cleanup pass can flip the canonical home if/when the
 chat-unify references are migrated.
+
+Updated: 2026-09-27 (fix/chat-run-heartbeat) — ``message_to_wire_dict`` emits
+``runStatus`` for an agent reply persisted from a run that did not complete, so
+the client can mark it as cut off. The key is absent on every other message,
+keeping those payloads byte-identical.
+
+Updated: 2026-09-28 (feat/persist-tool-steps) — ``message_to_wire_dict`` emits
+``steps`` / ``stepsOmitted`` (the agent's recorded thinking and tool calls) via
+the shared ``steps_wire_fields``, only when non-empty.
+
+A reply quote's ``replyPreview`` carries the parent's first media attachment
+(``preview_attachment``), so a reply to a photo, video or file has something to
+show when the parent has no text.
 """
 
 from __future__ import annotations
@@ -20,6 +33,7 @@ from typing import Any
 
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.chat.domain import Group, Message
+from pocketpaw_ee.cloud.chat.runs.steps import steps_wire_fields
 from pocketpaw_ee.cloud.chat.schemas import (  # noqa: F401
     AddGroupAgentRequest,
     AddGroupMembersRequest,
@@ -51,7 +65,7 @@ def message_to_wire_dict(m: Message, *, parent: Message | None = None) -> dict[s
     supplied, ``replyPreview`` is populated so the FE can render the
     inline quote without a second fetch.
     """
-    return {
+    wire: dict[str, Any] = {
         "_id": m.id,
         "group": m.group,
         "sender": m.sender,
@@ -77,9 +91,24 @@ def message_to_wire_dict(m: Message, *, parent: Message | None = None) -> dict[s
         "deleted": m.deleted,
         "createdAt": iso_utc(m.created_at),
     }
+    if m.run_status:
+        wire["runStatus"] = m.run_status
+    wire.update(steps_wire_fields(m.steps, m.steps_omitted))
+    return wire
 
 
 _REPLY_PREVIEW_CHARS = 140
+
+
+_PREVIEW_ATTACHMENT_TYPES = frozenset({"file", "image", "audio"})
+
+
+def preview_attachment(attachments: Any) -> dict[str, Any] | None:
+    """The first file/image/audio attachment, trimmed for a reply quote."""
+    for a in attachments or ():
+        if a.type in _PREVIEW_ATTACHMENT_TYPES:
+            return {"type": a.type, "url": a.url, "name": a.name, "mime": dict(a.meta).get("mime")}
+    return None
 
 
 def _reply_preview(parent: Message | None) -> dict[str, Any] | None:
@@ -98,6 +127,7 @@ def _reply_preview(parent: Message | None) -> dict[str, Any] | None:
         "sender": parent.sender,
         "senderType": parent.sender_type,
         "agent": parent.agent,
+        "attachment": preview_attachment(parent.attachments),
     }
 
 

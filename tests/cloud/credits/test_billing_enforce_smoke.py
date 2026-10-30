@@ -29,7 +29,9 @@ def _flag(on: bool):
     """Patch the guard's own settings source so the REAL guard sees the flag."""
     return patch(
         "pocketpaw_ee.cloud.credits.guards.get_settings",
-        new=lambda: SimpleNamespace(billing_enforced=on),
+        new=lambda: SimpleNamespace(
+            billing_enforced=on, credits_enforced=False, payments_open=False
+        ),
     )
 
 
@@ -85,7 +87,11 @@ async def test_smoke_bridge_proceeds_funded_wallet(mongo_db):  # noqa: ARG001 â€
     from pocketpaw_ee.cloud.credits import service as credits_service
     from pocketpaw_ee.cloud.shared import agent_bridge
 
-    await credits_service.grant("ws-funded", 500, cause="smoke.seed", idempotency_key="smoke-f1")
+    # A top-up, so the workspace is paid: an unpaid one is refused on this path
+    # (early_access.not_available), funded or not.
+    await credits_service.grant(
+        "ws-funded", 500, cause="top_up", idempotency_key="smoke-f1", kind="top_up"
+    )
     assert await credits_service.balance("ws-funded") == 500
 
     should_spy = AsyncMock(return_value=False)  # returns False so no agent actually runs

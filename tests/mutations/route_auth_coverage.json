@@ -1,0 +1,38 @@
+[
+  {
+    "label": "mount a router in a form the derivation cannot follow",
+    "file": "ee/pocketpaw_ee/cloud/__init__.py",
+    "find": "    app.include_router(media_router, prefix=\"/api/v1\")",
+    "replace": "    app.include_router(globals()[\"media_router\"], prefix=\"/api/v1\")",
+    "tests": [
+      "tests/cloud/auth/test_route_auth_coverage.py::test_every_mounted_router_resolves_or_is_named_inline"
+    ]
+  },
+  {
+    "label": "drop an audited router from ROUTER_MODULES, widening the gap",
+    "file": "tests/cloud/auth/test_route_auth_audit.py",
+    "find": "    (\"pockets\", \"pocketpaw_ee.cloud.pockets.router\"),",
+    "replace": "",
+    "tests": [
+      "tests/cloud/auth/test_route_auth_coverage.py::test_the_coverage_gap_is_measured_and_does_not_grow"
+    ]
+  },
+  {
+    "label": "audit a router that is not mounted",
+    "file": "tests/cloud/auth/test_route_auth_audit.py",
+    "find": "    (\"workspace\", \"pocketpaw_ee.cloud.workspace.router\"),",
+    "replace": "    (\"workspace\", \"pocketpaw_ee.cloud.workspace.router\"),\n    (\"ghost\", \"pocketpaw_ee.cloud.ghost.router\"),",
+    "tests": [
+      "tests/cloud/auth/test_route_auth_coverage.py::test_the_hand_typed_audit_list_names_only_routers_that_are_mounted"
+    ]
+  },
+  {
+    "label": "let the guard walk treat require_license as authentication",
+    "file": "tests/cloud/auth/test_route_auth_coverage.py",
+    "find": "GUARD_QUALNAMES = frozenset({\"require_scope.<locals>._check\"})",
+    "replace": "GUARD_QUALNAMES = frozenset({\"require_scope.<locals>._check\", \"require_license\"})",
+    "tests": [
+      "tests/cloud/auth/test_route_auth_coverage.py::test_require_license_does_not_count_as_authentication"
+    ]
+  }
+]

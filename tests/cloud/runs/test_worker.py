@@ -1,6 +1,10 @@
 """Tier 2 arq worker: ``execute_run_job`` rehydrates a ``RunSpec`` and
 delegates to ``execute_run``; ``_startup`` sweeps runs orphaned by the
-previous worker."""
+previous worker.
+
+Updated: 2026-09-28 (fix/chat-run-heartbeat) — the boot-sweep orphan is aged past
+``_boot_sweep_older_than_seconds()`` instead of a fixed 30s, now that the cutoff
+is three heartbeat intervals rather than 5 seconds."""
 
 from __future__ import annotations
 
@@ -88,7 +92,10 @@ async def test_startup_runs_short_cutoff_sweep(mongo_db, monkeypatch):  # noqa: 
         client_message_id="c-orphan",
         user_message_id="um1",
         status="running",  # type: ignore[arg-type]
-        createdAt=datetime.now(UTC) - timedelta(seconds=30),
+        # Just past the boot cutoff, which is three heartbeat intervals (so a
+        # booting replica leaves runs another replica is still beating alone).
+        createdAt=datetime.now(UTC)
+        - timedelta(seconds=worker._boot_sweep_older_than_seconds() + 30),
     )
     await orphan.insert()
 
@@ -134,7 +141,10 @@ async def test_startup_skips_sweep_when_gate_off(mongo_db, monkeypatch):  # noqa
 
 
 async def test_worker_settings_exposes_execute_run_job():
-    assert worker.execute_run_job in worker.WorkerSettings.functions
+    chat = [
+        f for f in worker.WorkerSettings.functions if getattr(f, "name", "") == "execute_run_job"
+    ]
+    assert [f.coroutine for f in chat] == [worker.execute_run_job]
     assert worker.WorkerSettings.max_tries == 1
     assert worker.WorkerSettings.on_startup is worker._startup
     assert worker.WorkerSettings.on_shutdown is worker._shutdown

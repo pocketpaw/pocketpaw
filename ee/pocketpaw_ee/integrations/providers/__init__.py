@@ -1,0 +1,79 @@
+# ee/pocketpaw_ee/integrations/providers/__init__.py: the provider registry.
+#
+# ``_PROVIDERS`` is a tuple of module-level instances, in catalog order. To add a
+# provider: one import line (ruff keeps the block sorted, so lanes land on
+# different lines) and one line in the tuple below its marker comment.
+#
+# ``all_providers()`` is read per call, so the env switch that gates the ``demo``
+# provider (``POCKETPAW_INTEGRATIONS_DEMO=1``) takes effect without a restart in
+# tests. A provider that is not registered does not exist anywhere: not in the
+# catalog, not at the connect routes, not at the gateway.
+#
+# ``_INTERNAL`` providers own vault rows the platform writes for itself (the
+# lead-notification webhook URLs). They are never in ``all_providers`` or
+# ``get_provider``; ``internal_ids()`` lets the vault hide their rows.
+
+from __future__ import annotations
+
+from pocketpaw_ee.integrations.providers.airtable import AirtableProvider
+from pocketpaw_ee.integrations.providers.base import IntegrationProvider
+from pocketpaw_ee.integrations.providers.brevo import BrevoProvider
+from pocketpaw_ee.integrations.providers.demo import DemoProvider, demo_enabled
+from pocketpaw_ee.integrations.providers.google_sheets import GoogleSheetsProvider
+from pocketpaw_ee.integrations.providers.hubspot import HubSpotProvider
+from pocketpaw_ee.integrations.providers.lead_webhook import LeadWebhookProvider
+from pocketpaw_ee.integrations.providers.mailchimp import MailchimpProvider
+from pocketpaw_ee.integrations.providers.newsletter import NewsletterProvider
+from pocketpaw_ee.integrations.providers.notion import NotionProvider
+from pocketpaw_ee.integrations.providers.razorpay import RazorpayProvider
+from pocketpaw_ee.integrations.providers.resend import ResendProvider
+from pocketpaw_ee.integrations.providers.scheduling import CalComProvider, CalendlyProvider
+from pocketpaw_ee.integrations.providers.shopify import ShopifyProvider
+from pocketpaw_ee.integrations.providers.social_login import SocialLoginProvider
+from pocketpaw_ee.integrations.providers.stripe import StripeProvider
+from pocketpaw_ee.integrations.providers.supabase import SupabaseProvider
+from pocketpaw_ee.integrations.providers.turnstile import TurnstileProvider
+from pocketpaw_ee.integrations.providers.zoho_crm import ZohoCrmProvider
+
+_PROVIDERS: tuple[IntegrationProvider, ...] = (
+    NewsletterProvider(),
+    CalendlyProvider(),
+    CalComProvider(),
+    # ---- add new providers below, one per line ----
+    TurnstileProvider(),
+    GoogleSheetsProvider(),
+    HubSpotProvider(),
+    StripeProvider(),
+    SocialLoginProvider(),
+    ZohoCrmProvider(),
+    RazorpayProvider(),
+    ShopifyProvider(),
+    MailchimpProvider(),
+    BrevoProvider(),
+    NotionProvider(),
+    AirtableProvider(),
+    SupabaseProvider(),
+    ResendProvider(),
+)
+
+_INTERNAL = (LeadWebhookProvider(),)
+
+_DEMO = DemoProvider()
+
+
+def all_providers() -> list[IntegrationProvider]:
+    providers = list(_PROVIDERS)
+    if demo_enabled():
+        providers.append(_DEMO)
+    return providers
+
+
+def get_provider(provider_id: str) -> IntegrationProvider | None:
+    return next((p for p in all_providers() if p.id == provider_id), None)
+
+
+def internal_ids() -> frozenset[str]:
+    return frozenset(p.id for p in _INTERNAL)
+
+
+__all__ = ["all_providers", "get_provider", "internal_ids"]

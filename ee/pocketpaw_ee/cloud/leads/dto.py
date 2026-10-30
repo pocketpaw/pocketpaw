@@ -1,13 +1,12 @@
-# ee/pocketpaw_ee/cloud/leads/dto.py — request/response DTOs for the capture
-# entity. CaptureRequest is the public ingest shape (drained from the edge
-# Queue). LeadOut is the read shape for the Leads view.
-#
-# Created 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.4): wire DTOs for
-# the capture ingest + tenant-scoped leads router.
+# ee/pocketpaw_ee/cloud/leads/dto.py — request/response DTOs for the leads
+# routes. CaptureRequest is the public ingest shape (drained from the edge
+# Queue). LeadOut is the Leads view's read shape (list and PATCH). LeadUpdate is
+# the owner's PATCH body (status and/or read); ReadAllResponse counts what
+# read-all marked.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -39,7 +38,26 @@ class LeadOut(BaseModel):
     # lead the owner can judge for themselves rather than one we silently refused.
     origin: str = ""
     origin_unrecognized: bool = False
+    # How it arrived: form | concierge | handoff | booking ("form" for old rows).
+    source_kind: str = "form"
+    # "<widget_id>:<customer_ref>" for a concierge / handoff lead, else "".
+    conversation_ref: str = ""
+    status: str = "new"
+    # ISO-8601 UTC of the first time the owner marked it read; None = unread.
+    read_at: str | None = None
     created_at: str | None = None
+
+
+class LeadUpdate(BaseModel):
+    """PATCH body. Send either or both; ``read`` true marks it read (keeping the
+    first read time), false marks it unread."""
+
+    status: Literal["new", "contacted", "won", "lost", "booked"] | None = None
+    read: bool | None = None
+
+
+class ReadAllResponse(BaseModel):
+    updated: int
 
 
 def lead_to_dto(lead: Lead) -> LeadOut:
@@ -50,8 +68,19 @@ def lead_to_dto(lead: Lead) -> LeadOut:
         properties=lead.properties,
         origin=lead.origin,
         origin_unrecognized=lead.origin_unrecognized,
+        source_kind=lead.source_kind,
+        conversation_ref=lead.conversation_ref,
+        status=lead.status,
+        read_at=iso_utc(lead.read_at),
         created_at=iso_utc(lead.created_at),
     )
 
 
-__all__ = ["CaptureRequest", "CaptureResponse", "LeadOut", "lead_to_dto"]
+__all__ = [
+    "CaptureRequest",
+    "CaptureResponse",
+    "LeadOut",
+    "LeadUpdate",
+    "ReadAllResponse",
+    "lead_to_dto",
+]

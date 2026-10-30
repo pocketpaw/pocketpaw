@@ -4,6 +4,17 @@ Scope is personal to the current user within the current workspace. Ownership
 drives RBAC: the owner has full CRUD; workspace admins get manage; everyone
 else is read-only.
 
+2026-08-28 (FC-1 "File comprehension"): ``_to_entry`` also surfaces ``summary``
+— the one-or-two-sentence statement of what the file IS, written by the
+comprehension pass on ingest. Same defensive ``doc.get`` read as the FL-1
+fields, for the same reason: rows written before the column exists.
+
+2026-08-29 (BA-1 "Make an agent of this book"): ``_to_entry`` also surfaces
+``agent_id`` — the dedicated co-reader agent made from this file — so the
+library can render "Open the agent" instead of "Make an agent of this book"
+without asking per row. Defensive read like the FL-1 fields: a dict row
+without the key maps to ``None``. Folder entries never carry one.
+
 2026-07-03 (FL-1 "Library metadata"): ``_to_entry`` now surfaces the file's
 ``collections`` and ``hide_from_ai`` metadata (alongside the pre-existing
 ``tags``) onto the ``FileEntry`` so the unified /files listing carries them.
@@ -152,6 +163,10 @@ class UploadsProvider(BaseFolderProvider):
             tags=list(doc.get("tags", [])),
             collections=list(doc.get("collections", [])),
             hide_from_ai=bool(doc.get("hide_from_ai", False)),
+            # FC-1. ``.get`` not ``["summary"]``: the store row predates the
+            # column on legacy documents and on any dict a test hand-builds.
+            summary=doc.get("summary"),
+            agent_id=doc.get("agent_id"),
             created_at=doc["created_at"],
             updated_at=doc.get("updated_at", doc["created_at"]),
             source_ref={},

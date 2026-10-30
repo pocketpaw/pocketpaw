@@ -218,8 +218,9 @@ class TestArtifactChangeDispatch:
         client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
         calls: dict = {}
 
-        async def _fake_merge(action, *, human_event_id=None):
+        async def _fake_merge(action, *, human_event_id=None, confirm_destructive=False):
             calls["merge"] = action.id
+            calls["confirm_destructive"] = confirm_destructive
 
         monkeypatch.setattr(
             "pocketpaw_ee.versions.instinct_executor.execute_approved_change", _fake_merge
@@ -234,8 +235,9 @@ class TestArtifactChangeDispatch:
             resp = client.post(f"/instinct/actions/{action_id}/approve")
             assert resp.status_code == 200, resp.text
             assert resp.json()["action"]["status"] == "approved"
-            # The MERGE executor fired for this action.
+            # The MERGE executor fired for this action, as a single deliberate approve.
             assert calls.get("merge") == action_id
+            assert calls.get("confirm_destructive") is True
 
     def test_same_workspace_reject_dispatches_discard(
         self, router_store: InstinctStore, monkeypatch

@@ -6,16 +6,26 @@ active project subdirectory (when a ``project_name`` is available via the
 
 Returns ``None`` when no sandbox is found — the caller falls back to local FS.
 
-Updated: 2026-07-10 — workspace-level VM; legacy per-project sandbox removed.
-Updated: 2026-07-15 (fix/workspace-vm-map-to-db) — the store's workspace-VM
-    accessors are now async + DB-backed; ``await`` the two lookups here.
+A stopped or archived VM (its idle auto-stop / auto-archive) is started before the
+context is returned, so the agent never sees a VM that went to sleep between turns. A
+VM caught mid-transition is waited for first (stopping/archiving until it rests, then
+started; starting/restoring until it runs), within one bounded budget, and only a VM
+seen ``started`` is cached as running.
+The first resolve per process also re-applies ``store.workspace_vm_lifecycle`` (auto-stop,
+auto-archive, never-delete) to the VM, so a VM created under an older lifecycle (the
+60-hour auto-stop, the one-day archive) converges without re-provisioning.
+The store's workspace-VM accessors are async and DB-backed. ``last_resolved_at``
+exposes this process's last resolve of a VM so idle-VM eviction can respect it.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -146,6 +156,8 @@ async def resolve_daytona_context(
             logger.debug("resolve_daytona_context: Daytona not configured")
             return None
 
+        await _ensure_started(client, sandbox_id)
+        await _ensure_lifecycle(client, sandbox_id, workspace_id)
         try:
             project_dir = await client.get_project_dir(sandbox_id)
         except Exception as exc:
@@ -179,6 +191,104 @@ async def resolve_daytona_context(
         project_name,
     )
     return None
+
+
+#: States a persistent workspace VM reaches on its own (auto-stop, then auto-archive)
+#: and that ``start`` brings back with the disk intact.
+_RESUMABLE_STATES = frozenset({"stopped", "archived"})
+#: On the way to a resumable state: wait for it to rest, then start it. ``start`` on a
+#: VM still stopping or archiving is refused.
+_SETTLING_STATES = frozenset({"stopping", "archiving"})
+#: On the way to ``started`` already: wait, do not start again.
+_BOOTING_STATES = frozenset({"starting", "restoring", "resuming", "creating"})
+#: The whole resume budget, settling included. An archived VM restores from object
+#: storage first, so give it longer than a boot.
+_RESUME_TIMEOUT_SECONDS = 300.0
+#: Poll interval while a VM settles.
+_SETTLE_POLL_SECONDS = 2.0
+#: A VM seen running this recently is not re-checked: context resolution runs per tool
+#: call, and auto-stop needs far more idle time than this to fire.
+_STARTED_TTL_SECONDS = 60.0
+_last_seen_started: dict[str, float] = {}
+
+
+async def _ensure_started(client: DaytonaClient, sandbox_id: str) -> None:
+    """Make sure the workspace VM is running before a tool call uses it.
+
+    The VM stops after ~30 idle minutes (``store.workspace_vm_lifecycle``) so it does
+    not hold the org's Daytona memory limit; this is what makes that safe for the
+    agent. Stopped/archived: start it. Stopping/archiving: wait for it to rest, then
+    start it. Starting/restoring: wait for it. All within ``_RESUME_TIMEOUT_SECONDS``.
+    Only a VM seen ``started`` is cached. Never raises: a failed resume leaves the next
+    call to report the error."""
+    now = time.monotonic()
+    if now - _last_seen_started.get(sandbox_id, float("-inf")) < _STARTED_TTL_SECONDS:
+        return
+    deadline = now + _RESUME_TIMEOUT_SECONDS
+    try:
+        state = (await client.get_sandbox_by_id(sandbox_id)).state
+        while state in _SETTLING_STATES:
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "resolve_daytona_context: workspace VM %s still %s after %.0fs",
+                    sandbox_id,
+                    state,
+                    _RESUME_TIMEOUT_SECONDS,
+                )
+                return
+            await asyncio.sleep(_SETTLE_POLL_SECONDS)
+            state = (await client.get_sandbox_by_id(sandbox_id)).state
+        if state == "started":
+            _last_seen_started[sandbox_id] = time.monotonic()
+            return
+        if state in _RESUMABLE_STATES:
+            logger.info("resolve_daytona_context: resuming %s workspace VM %s", state, sandbox_id)
+            await client.start_sandbox(sandbox_id)
+        elif state not in _BOOTING_STATES:
+            logger.warning(
+                "resolve_daytona_context: workspace VM %s is %s, not resumable", sandbox_id, state
+            )
+            return
+        await client.wait_for_sandbox(
+            sandbox_id,
+            target_state="started",
+            timeout=max(1.0, deadline - time.monotonic()),
+        )
+        _last_seen_started[sandbox_id] = time.monotonic()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resolve_daytona_context: could not resume VM %s: %s", sandbox_id, exc)
+
+
+def last_resolved_at(sandbox_id: str, *, now: datetime | None = None) -> datetime | None:
+    """Wall-clock time this process last resolved (so last used) ``sandbox_id``, to within
+    ``_STARTED_TTL_SECONDS``; ``None`` if it never did. Process-local: a resolve in
+    another replica is invisible here. ``sites.admission`` uses it so idle-VM eviction
+    never stops a VM an agent just used through this process."""
+    seen = _last_seen_started.get(sandbox_id)
+    if seen is None:
+        return None
+    now = now or datetime.now(UTC)
+    return now - timedelta(seconds=max(0.0, time.monotonic() - seen))
+
+
+#: VMs whose lifecycle this process already re-applied.
+_lifecycle_applied: set[str] = set()
+
+
+async def _ensure_lifecycle(client: DaytonaClient, sandbox_id: str, workspace_id: str) -> None:
+    """Re-apply the workspace VM's idle lifecycle once per process (a failed set is
+    retried on the next resolve). Never raises."""
+    if sandbox_id in _lifecycle_applied:
+        return
+    from pocketpaw_ee.cloud.daytona.store import get_workspace_vm_config, workspace_vm_lifecycle
+
+    try:
+        config = await get_workspace_vm_config(workspace_id)
+        await client.set_sandbox_lifecycle(sandbox_id, **workspace_vm_lifecycle(config))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resolve_daytona_context: lifecycle not applied to %s: %s", sandbox_id, exc)
+        return
+    _lifecycle_applied.add(sandbox_id)
 
 
 async def resolve_daytona_context_for_project(

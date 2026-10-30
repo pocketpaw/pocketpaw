@@ -249,9 +249,19 @@ def test_install_includes_design_taste(tmp_path: Path) -> None:
     assert "MOTION_INTENSITY" in body
     assert "VISUAL_DENSITY" in body
 
-    # The Creative Director engine + Trend Engine identities are present.
+    # The Creative Director engine + the aesthetic direction families are
+    # present. This asserted "Tactile Brutalism" until 2026-09-12, a name from
+    # the deleted Trend Engine menu that survived only in a stray parenthetical
+    # -- so the test went green on the one orphan reference rather than on the
+    # system it meant to pin.
     assert "Vision Ledger" in body
-    assert "Tactile Brutalism" in body
+    assert "Aesthetic direction families" in body
+    assert "MODULE 0: SCOPE" in body
+
+    # Structural variety (2.E) replaced the deleted sites-theme-system skill: the
+    # nav and footer are picked by genre, not rotated through a numbered list.
+    assert "Variety is structural" in body
+    assert "Pick the nav by genre" in body
 
     # The static-prerender resting-state rule survives (folded-in Svelte track).
     assert "onMount" in body
@@ -261,6 +271,16 @@ def test_install_includes_design_taste(tmp_path: Path) -> None:
     # presented as authoritative.
     assert "$state" in body
     assert '"use client"' not in body
+
+    # The taste rewrite: one precedence order, the idea sentence, one motion
+    # moment and the calibration clusters, and none of the legacy engine flags
+    # the project templates do not use.
+    assert "Precedence, stated once" in body
+    assert "The idea sentence" in body
+    assert "then content is just there" in body
+    assert "How to use the clusters" in body
+    for legacy in ("set_site_dependencies", "keepsClientBundle", "sites_keep_client_bundle"):
+        assert legacy not in body, legacy
 
 
 # ---------------------------------------------------------------------------

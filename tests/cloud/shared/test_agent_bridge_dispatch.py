@@ -49,6 +49,7 @@ async def test_dispatch_agent_responses_runs_agents_sequentially() -> None:
         group_members: list[str],
         attachments: list[dict] | None = None,
         response_label: str | None = None,
+        trigger_message_id: str | None = None,
     ) -> None:
         nonlocal active, max_active
         run_order.append(("start", agent_id))

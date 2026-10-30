@@ -142,7 +142,6 @@ async def test_file_tools_reach_the_effective_allowlist_and_the_builtins_do_not(
     built = await ClaudeSDKBackend(get_settings())._build_options(
         "refactor this",
         system_prompt="you are on the code surface",
-        history=None,
         session_key=None,
         deny_mcp_tool_ids=profile.deny_mcp_tool_ids,
         allow_sdk_tools=profile.allowed_sdk_tools or frozenset(),
@@ -185,7 +184,6 @@ async def _build_with(backend, *, allow, exclusive):
     return await backend._build_options(
         "refactor this",
         system_prompt="you are on the code surface",
-        history=None,
         session_key=None,
         deny_mcp_tool_ids=frozenset(),
         allow_sdk_tools=frozenset(),

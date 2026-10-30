@@ -1,0 +1,139 @@
+[
+  {
+    "label": "non-Staff sites can run paid checks",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if not site_plan_allows_check(site):\n        raise Forbidden(\n            \"ai_visibility.plan_required\", \"AI visibility checks come",
+    "replace": "    if False:\n        raise Forbidden(\n            \"ai_visibility.plan_required\", \"AI visibility checks come",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_check_needs_staff_questions_and_a_day_between"
+    ]
+  },
+  {
+    "label": "plan gate reads the tier without an active subscription",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "        subscription_status=site.subscription_status,\n        concierge_enabled=True,",
+    "replace": "        subscription_status=\"active\",\n        concierge_enabled=True,",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_empty_card"
+    ]
+  },
+  {
+    "label": "24-hour limit never trips",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if requested is not None and requested > now - CHECK_COOLDOWN:",
+    "replace": "    if requested is not None and requested > now + CHECK_COOLDOWN:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_check_needs_staff_questions_and_a_day_between"
+    ]
+  },
+  {
+    "label": "queue_check does not stamp requested_at - the sweep queues a site every tick",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    state.status, state.requested_at, state.error = \"pending\", now, \"\"",
+    "replace": "    state.status, state.error = \"pending\", \"\"",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_sweep_queues_only_due_staff_sites"
+    ]
+  },
+  {
+    "label": "sweep ignores the 30-day window",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service_admin.py",
+    "find": "            \"$or\": [{\"requested_at\": None}, {\"requested_at\": {\"$lt\": cutoff}}],",
+    "replace": "            \"$or\": [{\"requested_at\": None}, {\"requested_at\": {\"$ne\": None}}],",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_sweep_queues_only_due_staff_sites"
+    ]
+  },
+  {
+    "label": "sweep queues non-Staff sites",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service_admin.py",
+    "find": "        if site is not None and service.site_plan_allows_check(site):",
+    "replace": "        if site is not None:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_sweep_queues_only_due_staff_sites"
+    ]
+  },
+  {
+    "label": "cron tick ignores the scheduler opt-in",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/worker.py",
+    "find": "    if not service.scheduler_enabled():",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_cron_tick_is_opt_in"
+    ]
+  },
+  {
+    "label": "apply-fix republishes for fixes on other sites",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if body.fix_id not in APPLICABLE_FIXES:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix",
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix_needs_the_latest_checks_fix"
+    ]
+  },
+  {
+    "label": "apply-fix republish passes a plan key - could change the site's plan",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "            workspace_id=workspace_id, user_id=user_id, pocket_id=site.pocket_id\n",
+    "replace": "            workspace_id=workspace_id, user_id=user_id, pocket_id=site.pocket_id, site_plan_key=\"free\"\n",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix"
+    ]
+  },
+  {
+    "label": "site read drops the workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    doc = await _SiteDoc.find_one({\"_id\": oid, \"workspace\": workspace_id}) if oid else None",
+    "replace": "    doc = await _SiteDoc.find_one({\"_id\": oid}) if oid else None",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_other_workspace_site_is_404"
+    ]
+  },
+  {
+    "label": "timed-out job leaves the row running forever",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "        await state.set({\"status\": \"failed\", \"error\": \"the check timed out\"})\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_timed_out_job_is_marked_failed"
+    ]
+  },
+  {
+    "label": "apply-fix republishes for non-Staff sites",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if not site_plan_allows_check(site):\n        raise Forbidden(\n            \"ai_visibility.plan_required\", \"AI visibility fixes come",
+    "replace": "    if False:\n        raise Forbidden(\n            \"ai_visibility.plan_required\", \"AI visibility fixes come",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix_needs_staff"
+    ]
+  },
+  {
+    "label": "apply-fix ignores the latest check's fix",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "    if last is None or (last.fix or {}).get(\"id\") != body.fix_id:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix",
+      "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix_needs_the_latest_checks_fix"
+    ]
+  },
+  {
+    "label": "card promises a monthly check with the scheduler off",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
+    "find": "ran_at + CHECK_INTERVAL if allows and ran_at and scheduler_enabled() else None",
+    "replace": "ran_at + CHECK_INTERVAL if allows and ran_at else None",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_job_writes_a_check_the_card_maps"
+    ]
+  },
+  {
+    "label": "sweep matches a site from another workspace",
+    "file": "ee/pocketpaw_ee/cloud/ai_visibility/service_admin.py",
+    "find": "        site = sites.get((state.site_id, state.workspace))",
+    "replace": "        site = next((d for d in docs if str(d.id) == state.site_id), None)",
+    "tests": [
+      "tests/cloud/ai_visibility/test_site_card.py::test_sweep_queues_only_due_staff_sites"
+    ]
+  }
+]
