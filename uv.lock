@@ -8,6 +8,9 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 
+[manifest]
+build-constraints = [{ name = "hatchling", specifier = "<1.30" }]
+
 [[package]]
 name = "aiofiles"
 version = "24.1.0"
@@ -6369,7 +6372,7 @@ wheels = [
 
 [[package]]
 name = "soul-protocol"
-version = "0.3.4"
+version = "0.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -6378,10 +6381,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/96/06/79e48a44d8a213791c78b087f1c57f679514c83d64f21de0d5673749fb11/soul_protocol-0.3.4.tar.gz", hash = "sha256:846ade5d0d155b60d1697e5a0af6fd87b99ee87b5ba6a7c499ff5e7a728d10a6", size = 1548587, upload-time = "2026-04-24T06:58:46.739Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/15/07/7e23e2f18eeca117d6c6ea0bcb884ac2de8bc5b1e7d054c955684ed80047/soul_protocol-0.3.4-py3-none-any.whl", hash = "sha256:37cfb06948fc8a381cdf8f3860e343a5a0a62a7630892410a4b3504a03f6a0d4", size = 338080, upload-time = "2026-04-24T06:58:45.19Z" },
-]
+sdist = { url = "https://files.pythonhosted.org/packages/b6/e7/1799cfc9c83c0a12b7e3d403190d01794c2c685917ec63bb3c4741183ca7/soul_protocol-0.3.1.tar.gz", hash = "sha256:1885b4878b09f3ff766080d13edb698581d564353cdb04ed8f186a5ade0d786d", size = 1506135, upload-time = "2026-04-14T18:32:03.919Z" }
 
 [[package]]
 name = "soupsieve"
