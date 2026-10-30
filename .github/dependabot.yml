@@ -1,0 +1,26 @@
+# Dependabot version updates for the Python deps (uv.lock) and GitHub Actions.
+# PRs go to dev, where development happens. cooldown holds a new release back
+# for 7 days, matching the team's minimum-release-age rule for supply-chain safety.
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "monthly"
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
