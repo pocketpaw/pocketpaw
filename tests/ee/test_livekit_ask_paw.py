@@ -1266,3 +1266,16 @@ async def test_group_chat_keeps_people_and_none_of_the_call_bots_posts(redis, gr
     assert "Meeting Notes" not in system
     assert "I don't have that." not in system and "README ships today." not in system
     assert "Sam: \u200b" not in system
+
+
+async def test_the_newest_chat_line_is_marked(redis, grounding) -> None:
+    grounding.chat.return_value = [
+        _msg("Both Pulse PRs are open.", sender="u2"),
+        _msg("Hunts README attached.", sender="u2"),
+    ]
+    grounding.names.return_value = {"u2": "Sam"}
+
+    system, _ = await _ask(redis, "what was the last message")
+
+    assert "Sam: Both Pulse PRs are open.\nSam: Hunts README attached. (newest message)" in system
+    assert "(newest message)" in " ".join(assistant.ASK_PAW_PROMPT.split())

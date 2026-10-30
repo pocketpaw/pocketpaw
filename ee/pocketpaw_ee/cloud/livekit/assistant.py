@@ -476,6 +476,8 @@ async def _group_chat(group_id: str) -> str:
         budget -= len(line) + 1
         lines.append(line)
     lines.reverse()
+    if lines:
+        lines[-1] += " (newest message)"
     return "\n".join(lines)
 
 
