@@ -68,6 +68,8 @@ _TRANSCRIPT_TAIL_SEGMENTS = 2000
 _KB_MAX_CHARS = 4000
 _MEMORY_FETCH_LIMIT = 200
 _MEMORY_TOP_K = 8
+_MIN_QUERY_TERMS = 2
+_FALLBACK_QUERY_LINES = 3
 _SHARED_MEMORY_USER_IDS = (None, "", "default")
 
 _PLAYBACK_BASE_SECONDS = 4.0
@@ -396,6 +398,18 @@ def _terms(text: str) -> set[str]:
     return {w for w in _WORD.findall(text.lower()) if len(w) > 2 and w not in _STOPWORDS}
 
 
+def _lookup_query(question: str, call: str) -> str:
+    """The question, plus the latest call lines when it has too few words to search on."""
+    if len(_terms(question)) >= _MIN_QUERY_TERMS:
+        return question
+    recent = [
+        line.removeprefix("- ").split(": ", 1)[-1]
+        for line in call.splitlines()
+        if line.strip() and not line.endswith(":")
+    ][-_FALLBACK_QUERY_LINES:]
+    return " ".join([question.strip(), *recent]).strip()
+
+
 async def _memory_facts(workspace_id: str, question: str) -> list[str]:
     from pocketpaw_ee.cloud.memory.mongo_store import MongoMemoryStore
 
@@ -480,12 +494,11 @@ async def answer_call_question(
             raise _AskStopped
         await emit_assistant_state(state="thinking", question=question, **who)
 
-        call, kb, facts = await asyncio.gather(
-            _bounded("live transcript", read_live_transcript(group_id), ""),
-            _bounded(
-                "knowledge base", _kb_context(workspace_id, question), "", _KB_TIMEOUT_SECONDS
-            ),
-            _bounded("memory facts", _memory_facts(workspace_id, question), []),
+        call = await _bounded("live transcript", read_live_transcript(group_id), "")
+        query = _lookup_query(question, call)
+        kb, facts = await asyncio.gather(
+            _bounded("knowledge base", _kb_context(workspace_id, query), "", _KB_TIMEOUT_SECONDS),
+            _bounded("memory facts", _memory_facts(workspace_id, query), []),
         )
         gathered = time.monotonic()
 

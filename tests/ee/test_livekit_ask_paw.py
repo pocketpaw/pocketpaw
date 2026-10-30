@@ -1083,3 +1083,34 @@ async def test_a_greeting_gets_a_recap_rule_not_a_request_for_the_question(
     flat = " ".join(system.split()).lower()
     assert "greeting" in flat and "recap" in flat
     assert "never ask them to repeat" in flat
+
+
+async def test_a_question_with_no_search_terms_looks_up_the_latest_call_lines(
+    redis, grounding
+) -> None:
+    await redis.rpush(
+        f"livekit:transcript:{GROUP}",
+        json.dumps(
+            {"speaker": "Sam", "text": "We still need to finalise the pricing page.", "ts": 1}
+        ),
+    )
+    grounding.store.list_facts_in_workspace.return_value = [
+        _fact("The pricing page owner is Priya.", "default")
+    ]
+
+    _, user = await _ask(redis, "hi")
+
+    query = grounding.kb.await_args.args[1]
+    assert "hi" in query and "pricing page" in query
+    assert "The pricing page owner is Priya." in user
+
+
+async def test_a_real_question_is_looked_up_as_asked(redis, grounding) -> None:
+    await redis.rpush(
+        f"livekit:transcript:{GROUP}",
+        json.dumps({"speaker": "Sam", "text": "Unrelated chatter about lunch.", "ts": 1}),
+    )
+
+    await _ask(redis, "When is the launch date?")
+
+    assert grounding.kb.await_args.args[1] == "When is the launch date?"
