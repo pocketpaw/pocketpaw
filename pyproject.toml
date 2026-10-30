@@ -165,7 +165,7 @@ copilot-sdk = [
 ]
 deep-agents = [
     "deepagents>=0.5.8,<0.6.0",
-    "langchain-mcp-adapters>=0.2.2,<0.3.0",
+    "langchain-mcp-adapters>=0.2.2,<0.4.0",
     # Required for openai/openai_compatible/openrouter/litellm provider paths
     # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
     # langchain-google-genai, so this fills the gap.
@@ -425,7 +425,7 @@ all = [
     "google-adk>=1.0.0",
     "github-copilot-sdk>=0.1.0",
     "deepagents>=0.5.8,<0.6.0",
-    "langchain-mcp-adapters>=0.2.2,<0.3.0",
+    "langchain-mcp-adapters>=0.2.2,<0.4.0",
     # Required for openai/openai_compatible/openrouter/litellm provider paths
     # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
     # langchain-google-genai, so this fills the gap.
@@ -468,7 +468,7 @@ dev = [
     "google-adk>=1.0.0",
     "github-copilot-sdk>=0.1.0",
     "deepagents>=0.5.8,<0.6.0",
-    "langchain-mcp-adapters>=0.2.2,<0.3.0",
+    "langchain-mcp-adapters>=0.2.2,<0.4.0",
     # Required for openai/openai_compatible/openrouter/litellm provider paths
     # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
     # langchain-google-genai, so this fills the gap.
@@ -595,7 +595,7 @@ dev = [
     "google-adk>=1.0.0",
     "github-copilot-sdk>=0.1.0",
     "deepagents>=0.5.8,<0.6.0",
-    "langchain-mcp-adapters>=0.2.2,<0.3.0",
+    "langchain-mcp-adapters>=0.2.2,<0.4.0",
     # Required for openai/openai_compatible/openrouter/litellm provider paths
     # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
     # langchain-google-genai, so this fills the gap.
