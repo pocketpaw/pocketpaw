@@ -1,129 +1,46 @@
 # code.py — /code surface preamble.
 #
-# Changes: 2026-08-02 (PA-2, feat/prompt-assembler-seam) — returns a
-# ``SurfacePreamble`` keyed on the route plus ``meta.project_name``. Nothing
-# mutable is read (the CD-3 rewrite is what made that true — the four storage
-# hints it used to branch on are gone), so those two inputs ARE the preamble
-# and the key is exact. The user's code changing does NOT move it, which is
-# right: this block orients the agent toward the file tools, it never claimed
-# to describe the project's contents.
+# Orients the chat agent on the /code surface so it writes code instead of
+# building a pocket. Two shapes:
 #
-# Created: 2026-06-10 (feat/studio-code-migration) — Orients the chat agent when
-# the user is on the /code surface. Without it the surface falls back to GENERIC
-# and the agent builds a dashboard pocket instead of writing code — the same
-# drift the /sites preamble was created to fix. Static orientation — no live data
-# to fake.
+# - Default (Daytona, WebContainer, hosted): the project is reached ONLY through
+#   the browser-delegated file tools (readFile / search / listDir / editFile /
+#   writeFile). The agent has no filesystem of its own here.
+# - Local folder (desktop app, opt-in via ``code_local_native_tools``): the
+#   client stamps the folder's absolute path as ``current_dir``, the agent reads
+#   it with native Read / Grep / Glob, and writes still go through editFile /
+#   writeFile. ``local_code_root`` is the single gate; the profile resolver in
+#   ``surface_registry.py`` reads it too, so preamble and tools always agree.
 #
-# Rewritten: 2026-07-22 (feat/code-surface-profile, CD-3) — the original
-# preamble pointed the agent at the WRONG MACHINE, and did so silently.
+# Enforcement lives in the profile (tool allow/deny sets), not in this prose.
+# If the profile changes, change this text to match.
 #
-# It branched on four ``SurfaceMeta`` hints (``workspace_vm`` /
-# ``is_cloud_storage`` / ``current_dir`` / ``storage_root``) into three storage
-# flavours: a Daytona-VM branch naming MCP tools (read_file / write_file / shell
-# / run_python / sync_to_s3 / start_server / preview_url), an S3 branch pointing
-# at ``/cloud/projects/{name}/files/*``, and a local-disk branch. All three were
-# stale. The current /code page stamps NONE of those hints, so every real turn
-# fell through to the local-disk branch and told the agent "your working
-# directory is the workspace root" — which is the BACKEND SERVER's filesystem,
-# not the user's project. The agent would read and write the server's disk and
-# report success. Nothing routes to the main agent on /code yet, so the failure
-# was latent rather than observed; this rewrite removes it before that lands.
-# The Daytona MCP tools were equally stale — they address an older cloud-projects
-# model that knows nothing of the current ``codeproject`` + ``CodeFileSession``
-# runtime (nothing under ``cloud/daytona/`` so much as mentions either).
-#
-# The preamble states the single truth of this surface: the user's code is
-# reachable ONLY through the file tools (``readFile`` / ``search`` / ``listDir`` /
-# ``writeFile``), and the agent has no filesystem of its own here. Updated
-# 2026-07-24 (feat/code-mode-file-tools): the surface used to expose ONE coarse
-# ``code_mode`` tool that handed a task to a browser sub-agent; that sub-agent is
-# gone and the MAIN agent now drives the work itself over these four per-call file
-# tools. It also tells the agent to act IMMEDIATELY when the user's edit is scoped
-# to a selection they already made — no re-reading the project first, since the
-# selection plus its file are already in context.
-#
-# Changed: 2026-07-25 — ``writeFile`` SAVES. It used to stage a proposal behind a
-# per-hunk review panel, and this preamble carried two paragraphs keeping the
-# agent from claiming a write that had not happened. The gate is gone, so the
-# claim is true and the paragraphs went with it. What replaced them is the
-# warning that actually matters on a whole-file write: what you send replaces the
-# file, so read it first.
-#
-# Changed: 2026-07-22 (fix/code-surface-denies-pocket-authoring) — the procedure
-# block gained a paragraph on what "build an app" MEANS here. Reported from a
-# live session: with a React project open, "Let's build an employee management
-# app, with components, nice design etc" made the agent create a pocket and
-# author a ripple ui-spec. The orientation already said "do not create a pocket"
-# and lost anyway — the request's vocabulary ("app", "components", "design")
-# matches the create-pocket skill more strongly than a blanket prohibition
-# repels it. The new paragraph re-points those exact words at their ordinary
-# front-end meaning instead of restating the ban. The ENFORCEMENT is the profile's
-# widened deny set (``_CODE_POCKET_DENY``), which withholds the pocket / planner /
-# widget tools; this prose exists so the agent knows why they are absent rather
-# than discovering it as a tool error mid-turn.
-#
-# Changed: 2026-07-28 (fix/code-truncated-read-destroys-file) — two paragraphs,
-# both against the same reported symptom: the agent "fabricating things from
-# another session instead of reading the files".
-#
-# The first is the EDIT paragraph. This preamble used to say "to change the code,
-# call `writeFile` with the file's COMPLETE new contents… so `readFile` before
-# changing something you have not read this turn." On any file past the browser's
-# 30_000-char read window that instruction cannot be followed — and the model
-# followed it anyway, sending back the head with the tail reconstructed. The
-# surface now leads with ``editFile`` and states plainly that a partial read
-# forbids a whole-file write. The ENFORCEMENT is in the browser
-# (``delegate.ts``/``lossyWriteRefusal``), as it must be: this text explains a
-# refusal that already happens rather than requesting good behaviour, which is
-# the same division of labour the profile note below describes.
-#
-# The second is the ORIENTATION paragraph. Nothing told the agent to read a
-# project's own conventions, so it filled the gap from priors — which is the
-# other half of what "fabricating" described. It now reads ``CLAUDE.md`` /
-# ``AGENTS.md`` / ``.cursorrules`` / ``CONTRIBUTING.md`` / ``README.md`` before
-# working in a project it does not know. Deliberately an instruction rather than
-# an injection: a repo's ``CLAUDE.md`` can be tens of KB, and spending that on
-# every turn to serve the first one is the wrong trade. Auto-stamping the file
-# into ``SurfaceMeta`` at project open is the stronger version and is a follow-up.
-#
-# Mirrors the layout of handlers/sites.py and handlers/belt.py: an async
-# ``build_preamble`` returning an XML-ish ``<surface>`` + ``<orientation>`` +
-# ``<procedure>`` block.
-#
-# Enforcement lives in the profile, not in this prose — a preamble that merely
-# ASKS the agent not to touch the disk is not a control. The /code
-# ``SurfaceProfile`` (see ``surface_registry.py``) sets ``ripple_mode="off"`` so
-# the agent doesn't inherit the ~20k-char "default to ui-spec" ripple LAW, DENIES
-# the file/shell built-ins AND ``Agent`` outright, and scopes the MCP surface to
-# the file tools (``_CODE_FILE_TOOL_IDS``). This text is the explanation the agent
-# gets for a restriction already applied; the two must agree, so if the profile
-# changes, change this too. The profile also carries NO skill: the `code` skill
-# taught only the denied built-ins, and its edit→run→verify discipline now lives
-# in this preamble and ``CODE_SYSTEM_PROMPT``, retargeted onto the file tools.
+# The cache key is exact: route, project name and (local only) the root are the
+# only inputs.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+from pocketpaw.config import get_settings
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta, SurfacePreamble
 from pocketpaw_ee.cloud.surface.handlers._helpers import meta_key
 
 
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> SurfacePreamble:
-    """Render the /code surface preamble — code reached only via the file tools.
-
-    Static: the preamble does not vary with storage flavour, working
-    directory, or sandbox state, because none of those are the agent's
-    concern on this surface. The file tools (readFile / search / listDir /
-    writeFile) reach the project; the browser that runs them owns the sandbox
-    and the file session. The only thing read from ``meta`` is ``project_name``,
-    and purely so the agent can name the project the user is looking at.
-
-    That makes the cache key exact rather than a digest: the route and the
-    project name are the only two inputs, so naming them names the preamble.
-    Switching projects moves the key; the user editing their code does not,
-    which is correct — the file tools read the project live and this block
-    never claimed to describe its contents.
-    """
+    """Render the /code surface preamble: the local-folder shape when
+    ``local_code_root`` allows it, otherwise the delegated-file-tools shape."""
     route = meta.route_path or "/code"
+    root = local_code_root(meta)
+    if root is not None:
+        return SurfacePreamble(
+            text=(
+                f'<surface kind="code" route="{route}" />\n'
+                f"{_local_orientation(meta.project_name, root)}{_local_procedure(root)}"
+            ),
+            cache_key=meta_key("code", route, meta.project_name, str(root)),
+        )
     return SurfacePreamble(
         text=(
             f'<surface kind="code" route="{route}" />\n'
@@ -131,6 +48,26 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         ),
         cache_key=meta_key("code", route, meta.project_name),
     )
+
+
+def local_code_root(meta: SurfaceMeta) -> Path | None:
+    """The local project folder the agent may read natively, or None."""
+    if os.environ.get("POCKETPAW_REQUIRE_WORKSPACE_SCOPE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
+    try:
+        if not get_settings().code_local_native_tools or not meta.current_dir:
+            return None
+        root = Path(meta.current_dir)
+        if not root.is_absolute() or root == Path(root.anchor) or not root.is_dir():
+            return None
+        return root
+    except (OSError, ValueError):
+        return None
 
 
 def _orientation(project_name: str | None) -> str:
@@ -222,4 +159,46 @@ def _procedure() -> str:
     return "\n".join(lines) + "\n"
 
 
-__all__ = ["build_preamble"]
+def _local_orientation(project_name: str | None, root: Path) -> str:
+    lines = [
+        "<code-orientation>",
+        "The user is on the CODE surface, a coding workspace. You write and "
+        "change code here on the user's behalf. This is NOT a dashboard — do not "
+        "build widgets, charts, or a ui-spec, and do not create a pocket. The "
+        "deliverable is working CODE: real changes to the user's project.",
+        f"The project is a folder on this machine at `{root}`. Every path you "
+        "read is under that folder.",
+    ]
+    if project_name:
+        lines.append(
+            f"The project the user is looking at is **{project_name}** — refer to it by name."
+        )
+    lines.append("</code-orientation>")
+    return "\n".join(lines) + "\n"
+
+
+def _local_procedure(root: Path) -> str:
+    lines = [
+        "<code-procedure>",
+        f"Read with `Glob`, `Grep` and `Read`, using ABSOLUTE paths under `{root}`. "
+        "Before changing a project you have not worked in, read whichever of "
+        "`CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `CONTRIBUTING.md`, `README.md` "
+        "it has, and match its conventions.",
+        "Change files ONLY with `editFile` (exact text to replace, and its "
+        "replacement) and `writeFile` (create a file, or replace a small one you "
+        "have read in full). Give both a path RELATIVE to the project root, "
+        "e.g. `src/app.ts`. `Bash`, `Write` and `Edit` are not available here.",
+        "If the user's request is scoped to a selection they have ALREADY made, "
+        "act on it immediately; the selection and its file are already in your "
+        "context.",
+        "Read a request to BUILD something as a request to build it in CODE, "
+        "never as a pocket, dashboard or ripple ui-spec.",
+        "Report what the tools actually told you. Writing code is not the same "
+        "as it working; do not call a test passing or a feature done when "
+        "nothing checked it.",
+        "</code-procedure>",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+__all__ = ["build_preamble", "local_code_root"]
