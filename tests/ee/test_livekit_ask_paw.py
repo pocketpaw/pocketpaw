@@ -1060,6 +1060,8 @@ async def test_kb_gets_a_longer_budget_than_the_other_sources(redis, grounding) 
         "knowledge base": 3.0,
         "memory facts": 1.5,
         "group chat": 1.5,
+        "previous question": 1.5,
+        "remember question": 1.5,
     }
 
 
@@ -1279,3 +1281,25 @@ async def test_the_newest_chat_line_is_marked(redis, grounding) -> None:
 
     assert "Sam: Both Pulse PRs are open.\nSam: Hunts README attached. (newest message)" in system
     assert "(newest message)" in " ".join(assistant.ASK_PAW_PROMPT.split())
+
+
+async def test_a_follow_up_sees_the_previous_question(redis, grounding) -> None:
+    await _ask(redis, "what are we doing on growth social pulse")
+    key = f"livekit:ask:previous:{GROUP}"
+    assert await redis.get(key) == "Ann: what are we doing on growth social pulse"
+    assert 0 < await redis.ttl(key) <= 6 * 3600
+
+    system, _ = await _ask(redis, "can you go in some detail")
+
+    assert (
+        "<previous-question>\nAnn: what are we doing on growth social pulse\n</previous-question>"
+        in system
+    )
+    flat = " ".join(assistant.ASK_PAW_PROMPT.split()).lower()
+    assert "previous-question" in flat and "follow-up" in flat
+
+
+async def test_the_first_question_has_no_previous_question(redis, grounding) -> None:
+    system, _ = await _ask(redis, "hi")
+
+    assert "<previous-question>\n(none)\n</previous-question>" in system

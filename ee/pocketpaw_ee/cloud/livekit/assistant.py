@@ -64,6 +64,8 @@ ASK_STOPPED_TTL_SECONDS = 120
 ASK_RATE_KEY = "livekit:ask:rate:{user_id}"
 ASK_RATE_LIMIT = 10
 ASK_RATE_WINDOW_SECONDS = 60
+ASK_PREVIOUS_KEY = "livekit:ask:previous:{group_id}"
+ASK_PREVIOUS_TTL_SECONDS = 6 * 3600
 
 _GATHER_TIMEOUT_SECONDS = 1.5
 # kb-go is a subprocess per search; spawn plus search often runs past 1.5s.
@@ -505,8 +507,27 @@ def _who(group_id: str, ask_id: str, user_id: str, asked_by_name: str) -> dict[s
     }
 
 
+async def _previous_question(group_id: str) -> str:
+    return str(await _redis().get(ASK_PREVIOUS_KEY.format(group_id=group_id)) or "")
+
+
+async def _remember_question(group_id: str, asked_by_name: str, question: str) -> None:
+    await _redis().set(
+        ASK_PREVIOUS_KEY.format(group_id=group_id),
+        f"{_one_line(asked_by_name)}: {_one_line(question)}",
+        ex=ASK_PREVIOUS_TTL_SECONDS,
+    )
+
+
 def _build_prompts(
-    *, question: str, asked_by_name: str, call: str, chat: str, kb: str, facts: list[str]
+    *,
+    question: str,
+    asked_by_name: str,
+    call: str,
+    chat: str,
+    kb: str,
+    facts: list[str],
+    previous: str = "",
 ) -> tuple[str, str]:
     """(system, user): the context rides in the system prompt, the user turn is the question.
 
@@ -516,6 +537,7 @@ def _build_prompts(
     """
     sections = [
         ASK_PAW_PROMPT.rstrip(),
+        f"<previous-question>\n{previous or '(none)'}\n</previous-question>",
         f"<call-context>\n{call or '(nothing transcribed yet)'}\n</call-context>",
         f"<group-chat>\n{chat or '(none)'}\n</group-chat>",
         f"<workspace-knowledge>\n{kb or '(none found)'}\n</workspace-knowledge>",
@@ -552,7 +574,10 @@ async def answer_call_question(
             raise _AskStopped
         await emit_assistant_state(state="thinking", question=question, **who)
 
-        call = await _bounded("live transcript", read_live_transcript(group_id), "")
+        call, previous = await asyncio.gather(
+            _bounded("live transcript", read_live_transcript(group_id), ""),
+            _bounded("previous question", _previous_question(group_id), ""),
+        )
         query = _lookup_query(question, call)
         kb, facts, chat = await asyncio.gather(
             _bounded("knowledge base", _kb_context(workspace_id, query), "", _KB_TIMEOUT_SECONDS),
@@ -565,6 +590,7 @@ async def answer_call_question(
             question=question,
             asked_by_name=asked_by_name,
             call=call,
+            previous=previous,
             chat=chat,
             kb=kb,
             facts=facts,
@@ -583,6 +609,9 @@ async def answer_call_question(
         answer = " ".join(spoken).strip()
         if not answer:
             raise RuntimeError("empty answer")
+        await _bounded(
+            "remember question", _remember_question(group_id, asked_by_name, question), None
+        )
         logger.info(
             "Ask Paw: answered %s in group %s (gather %.0fms, first sentence %.0fms, total %.0fms)",
             ask_id,

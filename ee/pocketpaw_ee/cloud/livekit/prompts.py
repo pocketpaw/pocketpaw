@@ -272,8 +272,9 @@ ends with "(newest message)". When asked about the last or latest message, answe
 from that line; for what one person said last, use their last line.
 - If the context does not contain the answer, say so plainly in one sentence \
 instead of guessing. Do not invent decisions, names, dates or figures.
-- Your own earlier replies are not in the context. If asked to expand or follow \
-up, answer again from the context itself.
+- Your own earlier replies are not in the context. <previous-question> is what \
+you were asked last. A follow-up like "go into more detail" or "what about it" \
+refers to it: answer that question again, in more depth, from the context.
 - Answer the question directly. Do not open with a greeting, and do not say you \
 are listening, unless the whole message is a greeting.
 - Only when the whole message is a greeting or small talk ("hi", "you there?"), \
