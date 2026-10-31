@@ -16,7 +16,8 @@
 # the partial filter to mongomock).
 #
 # The source also owns ``tags`` (``_core.tags`` dialect), ``show_creator`` (the
-# owner opted in to their name on the public card) and ``remixed_from_source_id``
+# owner opted in to their name and picture on the public card; ``False`` for a
+# row that predates the field) and ``remixed_from_source_id``
 # (the item, in the same source, this one was made from).
 #
 # ``withdrawn`` is a tombstone: when the source item goes private or is deleted

@@ -8,8 +8,10 @@
 # on ``PublicCreator`` / ``RemixedFrom``) makes adding one by accident a
 # construction error rather than a leak. ``slug`` is the stable URL handle (see
 # the listing model); the public item route takes it in place of the id.
-# ``creator`` is the owner's display name only, and only when the source set
-# ``show_creator``; ``remixed_from`` names the listing this item was made from.
+# ``creator`` is the owner's display name and picture (``avatar_url``, an
+# absolute http(s) URL or ``null``) and nothing else, and only when the source
+# set ``show_creator``; ``remixed_from`` names the listing this item was made
+# from.
 #
 # ``UpsertListingRequest`` is what a source sync writes; ``extra="forbid"`` so a
 # source can't smuggle a Discover-owned field. Tags are normalised on write by
@@ -129,11 +131,13 @@ class UpsertListingRequest(BaseModel):
 
 
 class PublicCreator(BaseModel):
-    """Who made a listing, as the public sees it: a display name, nothing else."""
+    """Who made a listing, as the public sees it: a display name and picture,
+    nothing else. ``avatar_url`` is an absolute http(s) URL or ``None``."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    avatar_url: str | None = None
 
 
 class RemixedFrom(BaseModel):

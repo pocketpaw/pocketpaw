@@ -1,14 +1,16 @@
 # tests/cloud/studio_templates/test_studio_templates.py — studio templates (ST-2).
 #
-# Created 2026-10-02 (feat/studio-templates). Pins: publish snapshots one asset of
-# a succeeded generation (cover from the asset, recipe with input-image fields
-# stripped, ``uses_input_images`` from ``inputImageCount``, audio -> music);
-# another workspace's generation and an unknown asset are NotFound, a queued /
-# failed one is a conflict; the Discover sync lists a public template with
-# absolute media URLs and unlists it on PATCH -> private and DELETE; three
-# Discover reports hide the listing AND the template; ``use`` returns the recipe
-# and writes nothing to studio; ``reindex("studio_template")`` rebuilds listings;
-# PATCH / DELETE are owner-only.
+# Pins: publish snapshots one asset of a succeeded generation (cover from the
+# asset, recipe with input-image fields stripped, ``uses_input_images`` from
+# ``inputImageCount``, audio -> music); another workspace's generation and an
+# unknown asset are NotFound, a queued / failed one is a conflict; the Discover
+# sync lists a public template with absolute media URLs and unlists it on PATCH
+# -> private and DELETE; three Discover reports hide the listing AND the
+# template; ``use`` returns the recipe and writes nothing to studio;
+# ``reindex("studio_template")`` rebuilds listings; PATCH / DELETE are
+# owner-only; a new template shows its creator (name and picture) by default, a
+# PATCH without ``show_creator`` keeps it, and a template saved before the field
+# existed stays anonymous through a reindex.
 #
 # ``RecordingBus.subscribe`` is a no-op, so the sync tests replay the recorded
 # studio-template events into the real Discover handler.
@@ -22,6 +24,7 @@ from pocketpaw_ee.cloud.discover import listeners, service, service_admin
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.cloud.models.studio_generation import StudioGeneration
 from pocketpaw_ee.cloud.models.studio_template import StudioTemplate
+from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.studio_templates import service as templates
 
 pytestmark = [pytest.mark.usefixtures("mongo_db"), pytest.mark.asyncio]
@@ -284,3 +287,81 @@ async def test_reindex_rebuilds_studio_listings() -> None:
     assert (await _listing(public["id"])).media_url == f"{BASE}/api/v1/media/fox.png"
     again = await service_admin.reindex("studio_template")
     assert (again["created"], again["updated"], again["unchanged"]) == (0, 0, 1)
+
+
+# ---------------------------------------------------------------------------
+# show_creator
+# ---------------------------------------------------------------------------
+
+
+async def _maker() -> str:
+    user = User(email="maker@example.com", hashed_password="x", is_active=True, is_verified=True)
+    user.full_name = "Ada Baker"
+    user.avatar = "https://cdn.example/ada.png"
+    await user.insert()
+    return str(user.id)
+
+
+async def _card(template_id: str) -> dict:
+    return await service_admin.get_public(str((await _listing(template_id)).id))
+
+
+async def test_a_new_studio_template_shows_its_creator_by_default(recording_bus) -> None:
+    owner = await _maker()
+    await _generation()
+    meta = await templates.publish_template(
+        WS, owner, {"generation_id": "g1", "title": "Fox", "visibility": "public"}
+    )
+    await _sync(recording_bus)
+    assert meta["show_creator"] is True
+    card = await _card(meta["id"])
+    assert card["creator"] == {"name": "Ada Baker", "avatar_url": "https://cdn.example/ada.png"}
+    assert owner not in repr(card) and "maker@example.com" not in repr(card)
+
+    # A PATCH that doesn't name the field keeps it; one that does turns it off.
+    kept = await templates.update_template(WS, owner, meta["id"], {"title": "Red fox"})
+    await _sync(recording_bus)
+    assert kept["show_creator"] is True
+    assert (await _card(meta["id"]))["creator"] is not None
+    off = await templates.update_template(WS, owner, meta["id"], {"show_creator": False})
+    await _sync(recording_bus)
+    assert off["show_creator"] is False
+    assert (await _card(meta["id"]))["creator"] is None
+
+
+async def test_a_studio_template_published_with_show_creator_off_stays_anonymous(
+    recording_bus,
+) -> None:
+    owner = await _maker()
+    await _generation()
+    meta = await templates.publish_template(
+        WS,
+        owner,
+        {"generation_id": "g1", "title": "Fox", "visibility": "public", "show_creator": False},
+    )
+    await _sync(recording_bus)
+    assert (await _card(meta["id"]))["creator"] is None
+
+
+async def test_a_studio_template_saved_before_show_creator_stays_anonymous(recording_bus) -> None:
+    owner = await _maker()
+    await _generation()
+    meta = await templates.publish_template(
+        WS, owner, {"generation_id": "g1", "title": "Fox", "visibility": "public"}
+    )
+    await _sync(recording_bus)
+    # Rewind both rows to before the field existed.
+    await StudioTemplate.get_pymongo_collection().update_one(
+        {"_id": (await StudioTemplate.get(meta["id"])).id}, {"$unset": {"show_creator": ""}}
+    )
+    await DiscoverListing.get_pymongo_collection().update_one(
+        {"source": "studio_template", "source_id": meta["id"]}, {"$unset": {"show_creator": ""}}
+    )
+    assert (await _card(meta["id"]))["creator"] is None
+
+    counts = await service_admin.reindex("studio_template")
+    assert (counts["created"], counts["updated"], counts["unchanged"]) == (0, 0, 1)
+    await templates.update_template(WS, owner, meta["id"], {"description": "A fox"})
+    await _sync(recording_bus)
+    assert (await _listing(meta["id"])).show_creator is False
+    assert (await _card(meta["id"]))["creator"] is None

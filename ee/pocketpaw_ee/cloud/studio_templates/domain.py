@@ -1,8 +1,8 @@
 # Studio templates — domain value object.
 #
-# Created 2026-10-02 (feat/studio-templates): frozen, built in service.py from a
-# StudioTemplate doc. Tenancy (``workspace_id``) and ``owner`` are required with
-# no defaults. Reports never enter it.
+# Frozen, built in service.py from a StudioTemplate doc. Tenancy
+# (``workspace_id``) and ``owner`` are required with no defaults. Reports never
+# enter it.
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ class StudioTemplateMeta:
     cover: dict[str, Any] = field(default_factory=dict)
     recipe: dict[str, Any] = field(default_factory=dict)
     uses_input_images: bool = False
+    show_creator: bool = False
     hidden: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
