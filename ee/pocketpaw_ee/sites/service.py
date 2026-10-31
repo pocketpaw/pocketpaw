@@ -5996,6 +5996,15 @@ def _site_paid(site: Any) -> bool:
     )
 
 
+def _requested_secret_names(requests: Any) -> list[str]:
+    """The names of a build's ``secret`` binding requests."""
+    return [
+        str(r.get("name"))
+        for r in (requests if isinstance(requests, list) else [])
+        if isinstance(r, dict) and str(r.get("type", "")).lower() == "secret" and r.get("name")
+    ]
+
+
 def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None = None) -> Any:
     """The ``provision`` callback ``bundle_deploy.deploy_bundle`` runs: the site's
     plan decides what it may bind, and the resource ids are saved with ``$set`` so a
@@ -6037,6 +6046,13 @@ def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None =
 
         await integration_bindings.ensure_gateway_token_if_linked(
             str(getattr(site, "workspace", "") or ""), str(getattr(site, "pocket_id", "") or "")
+        )
+        # Session-signing secrets the build asks for are the platform's to mint, never
+        # the owner's to type, so the missing-secrets check below never names one.
+        await site_secrets.ensure_signing_secrets(
+            workspace_id=str(getattr(site, "workspace", "") or ""),
+            pocket_id=str(getattr(site, "pocket_id", "") or ""),
+            names=_requested_secret_names(requests),
         )
         # The owner's secrets ride as secret_text bindings (values never logged).
         return replace(res, secrets=await site_secrets.secrets_for_deploy(site))

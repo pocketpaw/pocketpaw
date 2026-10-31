@@ -66,6 +66,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.sites.site_secrets import PLATFORM_SIGNING_SECRETS
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +87,9 @@ GUARD_MODULE = "__paw_draft_guard.mjs"
 DRAFT_KEY_BINDING = "PAW_DRAFT_KEY"
 DRAFT_KEY_HEADER = "x-paw-draft-key"
 
-#: Session-signing secrets a draft never shares with production.
-SIGNING_SECRETS = ("BETTER_AUTH_SECRET", "AUTH_SECRET", "SESSION_SECRET")
+#: Session-signing secrets a draft never shares with production (the platform
+#: mints the live ones at publish, so no owner is asked for them).
+SIGNING_SECRETS = PLATFORM_SIGNING_SECRETS
 #: ``NAME__DRAFT`` binds as ``NAME`` in a draft, in place of the live value.
 DRAFT_SUFFIX = "__DRAFT"
 #: Platform env set to the draft's preview origin; wins over owner values.

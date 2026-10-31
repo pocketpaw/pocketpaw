@@ -542,7 +542,10 @@ class TestRecipes:
         out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
         assert not out.get("is_error"), out
         body = _body(out)
-        assert body["secret_names"] == ["BETTER_AUTH_SECRET"]
+        # A signing secret is Paw's to create: it is never among the names to request.
+        assert body["secret_names"] == []
+        assert body["platform_secret_names"] == ["BETTER_AUTH_SECRET"]
+        assert body["secrets"][0]["set_by"] == "paw"
         assert body["glue_tasks"] == [{"task": "Wire getUser.", "file": "src/server/auth/index.ts"}]
         assert "request_site_secret" in body["message"]
         assert "never write" in body["message"].lower()
