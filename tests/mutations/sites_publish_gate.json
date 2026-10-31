@@ -56,7 +56,7 @@
   {
     "label": "placeholders not reported: [Address] passes the checks",
     "file": "ee/pocketpaw_ee/sites/verify_checks.py",
-    "find": "    holes = _hits(_PLACEHOLDER_RE, parsed.text + parsed.contact_refs)\n",
+    "find": "    holes = _hits(_BLOCK_PLACEHOLDER_RE, parsed.copy_text)\n",
     "replace": "    holes: list[str] = []\n",
     "tests": [
       "tests/ee/sites/test_verify_checks_blocking.py::TestPlaceholders::test_placeholder_copy_is_an_error"
@@ -68,13 +68,13 @@
     "find": "        if not self._prompt_depth:\n            self.copy_text.append(value)\n",
     "replace": "        self.copy_text.append(value)\n",
     "tests": [
-      "tests/ee/sites/test_verify_checks_blocking.py::TestPlaceholders::test_form_labels_are_not_placeholders"
+      "tests/ee/sites/test_verify_checks_blocking.py::TestPlaceholders::test_generic_or_prompt_text_only_warns"
     ]
   },
   {
     "label": "sequential numbers allowed: 9876543210 ships on a live page",
     "file": "ee/pocketpaw_ee/sites/verify_checks.py",
-    "find": "    if len(digits) >= 9 and _longest_run(digits) >= 8:\n",
+    "find": "    if len(digits) >= 9 and _longest_run(digits) >= 9:\n",
     "replace": "    if False:\n",
     "tests": [
       "tests/ee/sites/test_verify_checks_blocking.py::TestInventedNumbers::test_made_up_numbers_are_errors"
@@ -258,6 +258,69 @@
     "replace": "        parameters[\"_artifact_change\"] = dict(blob)\n",
     "tests": [
       "tests/ee/sites/test_publish_gate_approval.py::test_an_approve_with_findings_publishes_nothing"
+    ]
+  },
+  {
+    "label": "phone context ignored: an order number like 9876543210 blocks publish",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "            if needs_context and not _PHONE_CONTEXT_RE.search(lead):\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestInventedNumbers::test_real_looking_numbers_are_clean"
+    ]
+  },
+  {
+    "label": "IPs read as phones: a server address next to 'Phone' blocks publish",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    if _IP_RE.match(raw):\n        return False\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestInventedNumbers::test_real_looking_numbers_are_clean"
+    ]
+  },
+  {
+    "label": "labels block: a '[Phone]' field label is reported as a placeholder in copy",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    holes = _hits(_BLOCK_PLACEHOLDER_RE, parsed.copy_text)\n",
+    "replace": "    holes = _hits(_BLOCK_PLACEHOLDER_RE, parsed.text)\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestPlaceholders::test_generic_or_prompt_text_only_warns"
+    ]
+  },
+  {
+    "label": "mailto example.com allowed: a contact link to hello@example.com goes live",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    holes += [h for h in _hits(_EXAMPLE_EMAIL_RE, parsed.contact_refs) if h not in holes]\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestPlaceholders::test_an_example_address_in_a_mailto_is_an_error"
+    ]
+  },
+  {
+    "label": "time budget gone: one huge tree holds a verify or a publish for as long as it takes",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "or len(text) > budget or time.monotonic() >= deadline:",
+    "replace": "or len(text) > budget:",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestBounded::test_a_tree_past_the_time_budget_is_counted_not_finished"
+    ]
+  },
+  {
+    "label": "fetch not counted: a form a click handler sends with fetch() is reported dead",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    r\"|fetch\\s*\\(|xmlhttprequest|axios|\\$\\.ajax|\\$\\.post|sendbeacon\",\n",
+    "replace": "    r\"\",\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestDeadForms::test_a_button_wired_to_fetch_counts_as_bound"
+    ]
+  },
+  {
+    "label": "example regex unbounded: a long dotted run makes the check quadratic",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    r\"(?<![\\w.+\\-])(?!johndoe@)[\\w.+\\-]{1,64}@example\\.(?:com|org|net)\\b\"\n",
+    "replace": "    r\"(?!johndoe@)[\\w.+\\-]+@example\\.(?:com|org|net)\\b\"\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestBounded::test_adversarial_input_runs_in_bounded_time"
     ]
   }
 ]

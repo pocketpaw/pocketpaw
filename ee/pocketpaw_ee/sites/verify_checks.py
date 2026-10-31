@@ -12,12 +12,14 @@
 #
 # Blocking: SC-LINK-04 a form that submits back to its own page with nothing to receive
 # it (see :func:`_dead_forms` for what counts as handled: conservative on scripted
-# pages), SC-HONEST-07 placeholder copy ([Address], [Phone], lorem ipsum, example.com
-# addresses, "Your Name" outside labels, XXXXX XXXXX), SC-HONEST-03 made-up phone
-# numbers (sequential or repeated digits, 555, 07700 900xxx; see :func:`_invented`).
-# Warn: SC-LINK-01 anchor target (hash routes ``#/`` ``#!`` skipped), SC-LINK-02
-# empty action (not on an anchor wired as a button), SC-LINK-03 internal path,
-# SC-COPY-01 em dash in visible copy (not the title, not aria-hidden),
+# pages), SC-HONEST-07 bracketed placeholder tokens ([Address], [Phone], [Your Name])
+# in body copy (not labels, buttons or inputs), lorem ipsum, an example.com
+# ``mailto:``, SC-HONEST-03 made-up numbers in tel: / WhatsApp links or right after a
+# phone word (all one digit, a run of nine, US 555, 07700 900xxx; :func:`_invented`).
+# Warn: SC-HONEST-07 generic copy ("Your Business", "[Your Guide]", XXXX masks,
+# example.com format hints), SC-LINK-01 anchor target (hash routes ``#/`` ``#!``
+# skipped), SC-LINK-02 empty action (not on an anchor wired as a button), SC-LINK-03
+# internal path, SC-COPY-01 em dash in visible copy (not the title, not aria-hidden),
 # SC-HONEST-03 default people, SC-BUILD-12 title / description /
 # og:title / og:description / favicon / generator (skipped on react, whose index.html
 # the generator owns), SC-A11Y-06 exactly one h1.
@@ -30,12 +32,14 @@
 # regex over tags; regexes run only over extracted text. ``audit.py`` is the regex
 # audit of AUTHORED source with fix prompts; the one definition shared with it is the
 # empty-href set. No supplied-copy exemption: verify never sees the brief. Work is
-# bounded by :data:`MAX_PAGES` and :data:`MAX_TOTAL_BYTES`; pages past either are
-# counted in ``pages_skipped``.
+# bounded by :data:`MAX_PAGES`, :data:`MAX_TOTAL_BYTES` and the cooperative
+# :data:`MAX_CHECK_SECONDS`; pages past any are counted in ``pages_skipped``. Every
+# regex is linear on adversarial text (bounded repeats, anchored starts).
 from __future__ import annotations
 
 import posixpath
 import re
+import time
 from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import Any
@@ -93,25 +97,43 @@ _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 _EM_DASH = "\u2014"
 #: The placeholders the platform tells the agent to write (``_FACTS_RULE``, design-taste,
 #: sites-check), never "any bracketed word": ``[sic]`` and ``[Smith 2020]`` are real.
-_PLACEHOLDER_RE = re.compile(
+#: BLOCKS when read in body copy (labels, buttons and options excluded).
+_BLOCK_PLACEHOLDER_RE = re.compile(
     r"\[NEED:[^\]\n]{0,60}\]"
     r"|(?i:\[(?:phone|phone number|price|prices|client name|role|email|email address"
     r"|address|hours|opening hours|name|company|business name|metric to confirm"
     r"|testimonial|logo|city|postcode|zip|zip code|whatsapp|whatsapp number|instagram"
-    r"|website|street|owner name)\])"
-    r"|(?i:\[your [^\]\n]{1,30}\])"
-    r"|\bYour (?:Studio|Company|Business)\b"
+    r"|website|street|owner name|your (?:name|phone|phone number|email|email address"
+    r"|address|business name|company|company name|city|whatsapp|whatsapp number))\])"
     r"|(?i:\blorem ipsum\b)"
-    r"|\b(?!johndoe@)[\w.+\-]+@example\.(?:com|org|net)\b"
+)
+#: An example.com address. BLOCKS inside a ``mailto:``; in visible text it is often a
+#: format hint ("you@example.com"), so it only warns there. Bounded local part, and
+#: anchored on what precedes it, so a long dotted run cannot make it quadratic.
+_EXAMPLE_EMAIL_RE = re.compile(
+    r"(?<![\w.+\-])(?!johndoe@)[\w.+\-]{1,64}@example\.(?:com|org|net)\b"
+)
+#: Copy that is often a placeholder and often real ("Grow Your Business", a card mask
+#: "XXXX XXXX", a "[Your Guide]" title): WARN only.
+_WARN_PLACEHOLDER_RE = re.compile(
+    r"(?i:\[your [^\]\n]{1,30}\])"
+    r"|\bYour (?:Studio|Company|Business|Name|Address|City|Email|Phone(?: Number)?)\b"
     r"|(?<!\w)X{3,5}[\s.\-]X{3,5}(?:[\s.\-]X{2,5})?(?!\w)"
 )
-#: "Your Name" as copy ("Your Name, founder"). Read over text outside labels, legends,
-#: buttons and options, where "Your name" is a field prompt, not a hole.
-_YOUR_X_RE = re.compile(r"\bYour (?:Name|Address|City|Email|Phone(?: Number)?)\b")
 _PROMPTONYM_RE = re.compile(
     r"\b(?:Sarah Chen|Elena Vasquez|Elara Voss|John Doe|Jane Doe)\b"
     r"|\bjohndoe@example\.com\b"
 )
+#: Words that say the number next to them is a phone number. A run of digits in body
+#: copy is judged only within 40 characters after one of these (a tel: / wa.me link
+#: always is), so order numbers, IPs and counts never read as phones.
+_PHONE_CONTEXT_RE = re.compile(
+    r"phone|call|whats\s?app|\btel\b|mobile|\bring\b|\btext\b|\bsms\b|contact|\u260e|\U0001f4de",
+    re.IGNORECASE,
+)
+_IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+#: US fictional formats: (555) 234-5678, 555-234-5678, 555-01xx.
+_US_555_RE = re.compile(r"^\(555\)|^555[-.\s]\d{3}[-.\s]\d{4}$|^555[-.\s]?01\d{2}$")
 #: A run that could be a phone number: digits with spaces, dots, dashes or brackets
 #: between. :func:`_invented` decides whether it is made up.
 _PHONE_RE = re.compile(r"(?<![\w+#(])\+?\(?\d[\d\s().\-]{5,18}\d(?![\w-])")
@@ -127,9 +149,13 @@ _COLLECT_NAME_RE = re.compile(
 _COLLECT_TYPES = frozenset({"email", "tel", "password", "textarea", "file"})
 #: Script text that can bind a form's submit without naming the form.
 _SUBMIT_HINT_RE = re.compile(
-    r"submit|formdata|document\.forms|urlsearchparams|location\.search|serialize",
+    r"submit|formdata|document\.forms|urlsearchparams|location\.search|serialize"
+    r"|fetch\s*\(|xmlhttprequest|axios|\$\.ajax|\$\.post|sendbeacon",
     re.IGNORECASE,
 )
+#: Wall-clock budget for one :func:`run_checks`; pages past it are counted, not read.
+#: Cooperative, so a timed-out check never leaves a worker thread running.
+MAX_CHECK_SECONDS = 5.0
 #: Script bytes read across a tree when looking for a submit binding; past it, a form
 #: on a scripted page is assumed bound.
 MAX_SCRIPT_BYTES = 4 * 1024 * 1024
@@ -165,7 +191,7 @@ class _PageParser(HTMLParser):
         self.text: list[str] = []
         self.copy: list[str] = []
         self.contact_refs: list[str] = []
-        #: Visible text outside labels, legends, buttons and options (``_YOUR_X_RE``).
+        #: Visible text outside labels, legends, buttons and options (blocking placeholders).
         self.copy_text: list[str] = []
         #: Inline executable script bodies, external script srcs, and ``on*`` values.
         self.scripts: list[str] = []
@@ -390,27 +416,38 @@ def _longest_run(digits: str) -> int:
 
 
 def _invented(raw: str) -> bool:
-    """A phone number nobody was given: sequential or repeated digits, a US 555 number,
-    or the UK's drama mobile range (07700 900xxx). These ring real strangers or nobody."""
+    """A phone number nobody was given: every digit the same, a run of nine or more
+    consecutive digits (9876543210, 1234567890), a US 555 number written the US way
+    or with +1, or the UK drama mobile range (07700 900xxx). IPs and digits spaced
+    one by one are not phone numbers."""
+    raw = raw.strip()
+    if _IP_RE.match(raw):
+        return False
+    groups = [g for g in re.split(r"[\s().\-]+", raw.lstrip("+")) if g]
+    if groups and max(len(g) for g in groups) == 1:
+        return False
     digits = re.sub(r"\D", "", raw)
     if not 7 <= len(digits) <= 15:
         return False
     national = _national(digits)
-    if len(national) >= 9 and (len(set(national)) == 1 or re.search(r"(\d)\1{7}", national)):
+    if len(national) >= 9 and len(set(national)) == 1:
         return True
-    if len(digits) >= 9 and _longest_run(digits) >= 8:
+    if len(digits) >= 9 and _longest_run(digits) >= 9:
         return True
-    if len(national) == 7 and national.startswith("55501"):
-        return True
-    if len(national) == 10 and national.startswith("555"):
+    if _US_555_RE.match(raw) or (len(digits) == 11 and digits.startswith("1555")):
         return True
     return len(national) == 11 and national.startswith("07700900")
 
 
-def _phone_hits(chunks: list[str]) -> list[str]:
+def _phone_hits(chunks: list[str], *, links: list[str]) -> list[str]:
+    """Made-up numbers in ``links`` (tel: / sms: / WhatsApp hrefs, always judged) and in
+    ``chunks`` of body text (judged only right after a phone word)."""
     seen: dict[str, None] = {}
-    for chunk in chunks:
+    for chunk, needs_context in [(c, True) for c in chunks] + [(c, False) for c in links]:
         for m in _PHONE_RE.finditer(chunk):
+            lead = chunk[max(0, m.start() - 40) : m.start()]
+            if needs_context and not _PHONE_CONTEXT_RE.search(lead):
+                continue
             if _invented(m.group(0)):
                 seen.setdefault(_clip(m.group(0).strip(), 40), None)
     return list(seen)
@@ -448,6 +485,7 @@ class _ScriptCorpus:
         self._tree = tree
         self._text: str | None = None
         self._over = False
+        self._hinted: bool | None = None
 
     def text(self) -> str | None:
         """All the tree's own JS (``None`` when it is over :data:`MAX_SCRIPT_BYTES`)."""
@@ -468,12 +506,22 @@ class _ScriptCorpus:
             self._text = "\n".join(parts)
         return None if self._over else self._text
 
+    def hinted(self) -> bool:
+        """Whether the tree's JS can bind a submit without naming the form. Searched
+        once per run, however many pages share the tree."""
+        if self._hinted is None:
+            text = self.text()
+            self._hinted = text is None or bool(_SUBMIT_HINT_RE.search(text))
+        return self._hinted
 
-def _page_js(page: str, parsed: _PageParser, corpus: _ScriptCorpus) -> str | None:
+
+def _page_js(page: str, parsed: _PageParser, corpus: _ScriptCorpus) -> tuple[str, bool] | None:
     """The script text that runs on ``page``, or ``None`` when some of it cannot be
     read (a script from another host, a server path, an over-budget tree): then any
-    form there may be bound and none is judged. The platform's ``/_paw/paw.js`` only
-    binds ``data-paw-*`` forms, which count as handled on their own, so it is skipped."""
+    form there may be bound and none is judged. Otherwise ``(own, needs_tree)``: the
+    page's inline script and handler text, and whether the tree's JS runs there too.
+    The platform's ``/_paw/paw.js`` only binds ``data-paw-*`` forms, which count as
+    handled on their own, so it is skipped."""
     parts = [*parsed.scripts, *parsed.handler_code]
     needs_tree = any("import" in s for s in parsed.scripts)
     for src in parsed.script_srcs:
@@ -483,12 +531,9 @@ def _page_js(page: str, parsed: _PageParser, corpus: _ScriptCorpus) -> str | Non
         if _target(page, src) is None:
             return None
         needs_tree = True
-    if needs_tree:
-        tree_js = corpus.text()
-        if tree_js is None:
-            return None
-        parts.append(tree_js)
-    return "\n".join(parts)
+    if needs_tree and corpus.text() is None:
+        return None
+    return "\n".join(parts), needs_tree
 
 
 def _dead_forms(
@@ -508,8 +553,15 @@ def _dead_forms(
     ``FormData`` / ``document.forms`` text and no mention of its id or name)."""
     scripted = parsed.has_script or bool(parsed.handler_code)
     page_js: str | None = ""
+    hinted = False
     if scripted:
-        page_js = _page_js(page, parsed, corpus)
+        found = _page_js(page, parsed, corpus)
+        if found is None:
+            page_js = None
+        else:
+            own, needs_tree = found
+            hinted = bool(_SUBMIT_HINT_RE.search(own)) or (needs_tree and corpus.hinted())
+            page_js = own + ("\n" + (corpus.text() or "") if needs_tree else "")
     out: list[tuple[str, str]] = []
     for form in parsed.forms:
         attrs = form["attrs"]
@@ -526,7 +578,7 @@ def _dead_forms(
         if scripted:
             if page_js is None or not collects or _is_search(form):
                 continue
-            if _SUBMIT_HINT_RE.search(page_js):
+            if hinted:
                 continue
             if any(attrs.get(k) and attrs[k] in page_js for k in ("id", "name")):
                 continue
@@ -643,15 +695,22 @@ def _check_page(
 
     if people := _hits(_PROMPTONYM_RE, parsed.text + parsed.contact_refs):
         warn("SC-HONEST-03", "default name or fake contact: " + _listed(people))
-    if numbers := _phone_hits(parsed.text + parsed.contact_refs):
+    if numbers := _phone_hits(parsed.text, links=parsed.contact_refs):
         block(
             "SC-HONEST-03",
             "made-up phone number (it may ring a real stranger; ask the owner for theirs): "
             + _listed(numbers),
             numbers,
         )
-    holes = _hits(_PLACEHOLDER_RE, parsed.text + parsed.contact_refs)
-    holes += [h for h in _hits(_YOUR_X_RE, parsed.copy_text) if h not in holes]
+    holes = _hits(_BLOCK_PLACEHOLDER_RE, parsed.copy_text)
+    holes += [h for h in _hits(_EXAMPLE_EMAIL_RE, parsed.contact_refs) if h not in holes]
+    soft = _hits(_BLOCK_PLACEHOLDER_RE, parsed.text) + _hits(
+        _WARN_PLACEHOLDER_RE, parsed.text + parsed.contact_refs
+    )
+    soft += _hits(_EXAMPLE_EMAIL_RE, parsed.text)
+    soft = [h for h in dict.fromkeys(soft) if h not in holes]
+    if soft:
+        warn("SC-HONEST-07", "possible placeholder (check with the owner): " + _listed(soft))
     if holes:
         block(
             "SC-HONEST-07",
@@ -723,9 +782,10 @@ def run_checks(
     pages: dict[str, _PageParser] = {}
     budget = MAX_TOTAL_BYTES
     unread = 0
+    deadline = time.monotonic() + MAX_CHECK_SECONDS
     for name in names:
         text = _decode(tree[name])
-        if len(pages) >= MAX_PAGES or len(text) > budget:
+        if len(pages) >= MAX_PAGES or len(text) > budget or time.monotonic() >= deadline:
             unread += 1
             continue
         budget -= len(text)
@@ -745,6 +805,9 @@ def run_checks(
     warnings: list[dict[str, Any]] = []
     corpus = _ScriptCorpus(tree)
     for name, parsed in pages.items():
+        if time.monotonic() >= deadline:
+            unread += 1
+            continue
         warnings.extend(
             _check_page(
                 name,
@@ -769,7 +832,10 @@ def run_checks(
     }
     if unread:
         out["pages_skipped"] = unread
-        out["note"] = f"{unread} pages not checked (over the {MAX_PAGES}-page or 8 MB budget)"
+        out["note"] = (
+            f"{unread} pages not checked (over the {MAX_PAGES}-page, 8 MB or "
+            f"{MAX_CHECK_SECONDS:g}s time budget)"
+        )
     return out
 
 

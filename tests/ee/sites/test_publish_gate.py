@@ -86,7 +86,7 @@ class TestEnforce:
         await publish_gate.enforce(_html(_CAFE), pocket_id="p1")
 
     async def test_findings_past_the_cap_are_counted(self, monkeypatch) -> None:
-        many = "".join(f"<p>[Phone] {'x' * i}</p><p>[Your thing {i}]</p>" for i in range(30))
+        many = "".join(f"<p>[Phone] {'x' * i}</p><p>[NEED: item {i}]</p>" for i in range(30))
         with pytest.raises(publish_gate.PublishBlocked) as info:
             await publish_gate.enforce(_html(_doc(many)), pocket_id="p1")
         details = info.value.details

@@ -124,6 +124,14 @@ class TestDeadForms:
         }
         assert "SC-LINK-04" not in _ids(_run(files, **kw))
 
+    def test_a_button_wired_to_fetch_counts_as_bound(self) -> None:
+        body = (
+            '<form id="signup-form"><input type="email" name="email">'
+            '<button type="button" id="go">Join</button></form>'
+            "<script>go.addEventListener('click', () => fetch('/api/join'))</script>"
+        )
+        assert "SC-LINK-04" not in _ids(_run({"index.html": _doc(body)}))
+
     def test_a_scripted_page_with_a_non_collecting_form_is_not_judged(self) -> None:
         body = "<form><button>Send</button></form>" + _NAV_SCRIPT
         assert "SC-LINK-04" not in _ids(_run({"index.html": _doc(body)}))
@@ -143,15 +151,34 @@ class TestPlaceholders:
             "[Opening hours]",
             "[Your Business Name]",
             "Lorem ipsum dolor",
-            "hello@example.com",
-            "Your Name, founder",
-            "WhatsApp XXXXX XXXXX",
         ],
     )
     def test_placeholder_copy_is_an_error(self, text: str) -> None:
         out = _run({"index.html": _doc(f"<p>{text}</p>")})
         assert _error_ids(out) == ["SC-HONEST-07"]
         assert _errors(out)[0]["items"]
+
+    def test_an_example_address_in_a_mailto_is_an_error(self) -> None:
+        out = _run({"index.html": _doc('<a href="mailto:hello@example.com">Email us</a>')})
+        assert _error_ids(out) == ["SC-HONEST-07"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "<p>Grow Your Business Online</p>",
+            "<p>Your Name, founder</p>",
+            "<p>WhatsApp XXXXX XXXXX</p>",
+            "<label>Phone (XXX-XXX-XXXX)</label>",
+            "<p>Card XXXX XXXX XXXX 4242</p>",
+            "<span>Your Email</span>",
+            "<p>Use the format you@example.com</p>",
+            "<p>[Your Guide] to the coast</p>",
+            '<input placeholder="[Address]">',
+            "<label>[Phone]</label>",
+        ],
+    )
+    def test_generic_or_prompt_text_only_warns(self, body: str) -> None:
+        assert _errors(_run({"index.html": _doc(body)})) == []
 
     @pytest.mark.parametrize(
         "body",
@@ -163,7 +190,7 @@ class TestPlaceholders:
     )
     def test_form_labels_are_not_placeholders(self, body: str) -> None:
         out = _run({"index.html": _doc(body), "t.html": _doc("ok")})
-        assert "SC-HONEST-07" not in _ids(out)
+        assert _errors(out) == []
 
 
 class TestInventedNumbers:
@@ -195,15 +222,45 @@ class TestInventedNumbers:
             "Order #1001",
             "Open 9-5, 7 days",
             "Call 020 7946 1234",
+            "Call 55 5280 1234",
+            "Call 98111 11111",
+            "Call 1800 0123 4567",
+            "Server 123.45.67.89",
+            "Phone 123.45.67.89",
+            "Steps 1 2 3 4 5 6 7 8 9",
+            "Ref 9876543210",
+            "Batch 1234567890",
         ],
     )
     def test_real_looking_numbers_are_clean(self, text: str) -> None:
-        assert _ids(_run({"index.html": _doc(f"<p>{text}</p>")})) == []
+        assert _errors(_run({"index.html": _doc(f"<p>{text}</p>")})) == []
 
     def test_default_names_stay_a_warning(self) -> None:
         out = _run({"index.html": _doc("<p>Sarah Chen, owner</p>")})
         assert _ids(out) == ["SC-HONEST-03"]
         assert _errors(out) == []
+
+
+class TestBounded:
+    @pytest.mark.parametrize(
+        "body",
+        ["a" * 200_000, "a." * 100_000 + "@", "1 " * 100_000, "[" * 200_000, "X X " * 50_000],
+        ids=["letters", "dotted-local-part", "digit-runs", "brackets", "x-runs"],
+    )
+    def test_adversarial_input_runs_in_bounded_time(self, body: str) -> None:
+        import time
+
+        started = time.monotonic()
+        _run({"index.html": _doc(f"<p>{body}</p>")})
+        assert time.monotonic() - started < 3.0
+
+    def test_a_tree_past_the_time_budget_is_counted_not_finished(self, monkeypatch) -> None:
+        monkeypatch.setattr(verify_checks, "MAX_CHECK_SECONDS", 0.0)
+        pages = {f"p{i}.html": _doc("<p>ok</p>") for i in range(3)}
+        out = _run(pages)
+        assert out["pages"] == 0
+        assert out["pages_skipped"] == 3
+        assert "time budget" in out["note"]
 
 
 class TestReportOrder:

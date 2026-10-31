@@ -20,7 +20,7 @@
   {
     "label": "SC-LINK-04 ignores submit scripts: a framework form whose submit JS binds is reported as lost",
     "file": "ee/pocketpaw_ee/sites/verify_checks.py",
-    "find": "            if _SUBMIT_HINT_RE.search(page_js):\n                continue\n",
+    "find": "            if hinted:\n                continue\n",
     "replace": "",
     "tests": [
       "tests/ee/sites/test_verify_checks_blocking.py::TestDeadForms::test_handled_forms_are_clean"
@@ -137,8 +137,8 @@
   {
     "label": "byte budget gone: a huge tree is parsed in full inside one verify",
     "file": "ee/pocketpaw_ee/sites/verify_checks.py",
-    "find": "if len(pages) >= MAX_PAGES or len(text) > budget:",
-    "replace": "if len(pages) >= MAX_PAGES:",
+    "find": "or len(text) > budget or time.monotonic() >= deadline:",
+    "replace": "or time.monotonic() >= deadline:",
     "tests": [
       "tests/ee/sites/test_verify_checks.py::TestReport::test_pages_past_the_byte_budget_are_counted"
     ]
