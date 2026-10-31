@@ -54,8 +54,8 @@ milestone, back to back.
 6. Files: `list_site_files`, `read_site_files` before you change one,
    `patch_site_file` with exact-once `{old, new}` blocks, `write_site_files` for
    new or rewritten files, `delete_site_files`.
-7. `run_site_build` (instant on `static`); on `failed` read the log tail (or
-   `get_site_build_log`), fix, rebuild: three rounds, then say what fails.
+7. `run_site_build`; on `failed` read the log tail (or `get_site_build_log`),
+   fix, rebuild: three rounds, then say what fails.
 8. After EVERY `built`, look: `preview_site`, then `device: mobile`; `path`
    for other routes, `wait_ms` for 3D or animation. Fix, look again. Never
    describe what you have not seen; on an error say it was not visually
@@ -93,8 +93,7 @@ Paw creates signing secrets (`BETTER_AUTH_SECRET`, `SESSION_SECRET`,
 `AUTH_SECRET`); never request them. For other NAMEs, call
 `request_site_secret(pocket_id, name, description)` in plain words;
 `list_site_secrets` shows which are set.
-Never write a secret value into any file (`.env`, `.dev.vars`, wrangler.jsonc,
-source): only names go in `.dev.vars.example`.
+Never write a secret value into any file: only names go in `.dev.vars.example`.
 
 ## Plans
 
