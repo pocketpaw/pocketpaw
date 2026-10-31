@@ -183,8 +183,8 @@
   {
     "label": "the export response reads created_at again — the snake_case field no document declares — so every export call raises AttributeError and the whole export surface 500s",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        created_at=doc.createdAt.isoformat() if doc.createdAt else None,",
-    "replace": "        created_at=doc.created_at.isoformat() if doc.created_at else None,",
+    "find": "        created_at=utc_iso(doc.createdAt),",
+    "replace": "        created_at=utc_iso(doc.created_at),",
     "tests": [
       "tests/ee/sites/test_site_export_service.py"
     ]
