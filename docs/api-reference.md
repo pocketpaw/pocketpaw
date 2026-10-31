@@ -1046,7 +1046,11 @@ gave or that does not work. The check reads what goes live: the html or no-build
 files, or the stored build of the current content (a project publish deploys exactly
 that build and returns `409 sites.project_build_required` without it). A svelte or
 react draft with no stored build is checked on the build the publish makes, before
-anything deploys. Only a checker crash lets a publish through (logged as
+anything deploys. On the async build lane (react, static svelte) the publish returns
+at once and the check runs in the worker: a refusal deploys nothing, the site's
+`build_status` becomes `failed` with `build_reason` `deploy_failed:publish_blocked`,
+and the agent's `get_site_build_status` carries `publish_blocked`, the same `details`
+object as the 409 (no REST route returns those details yet). Only a checker crash lets a publish through (logged as
 `metric=sites_publish_gate_fail_open`). Previews are never gated.
 
 `confirm_placeholders: boolean` (default `false`) publishes past the findings: the

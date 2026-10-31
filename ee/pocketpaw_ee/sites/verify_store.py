@@ -79,6 +79,8 @@ BUILD_HISTORY_KEY = "build-history"
 EDIT_SESSION_KEY = "edit-session"
 #: The content hash that last passed the publish gate or was confirmed (``publish_gate``).
 PUBLISH_GATE_KEY = "publish-gate"
+#: The async build lane's last publish-gate refusal for the pocket (``publish_gate``).
+PUBLISH_BLOCKED_KEY = "publish-blocked"
 
 #: Pointer records: one per pocket, never evicted to make room for hash records.
 _POINTER_KEYS = frozenset(
@@ -89,6 +91,7 @@ _POINTER_KEYS = frozenset(
         BUILD_HISTORY_KEY,
         EDIT_SESSION_KEY,
         PUBLISH_GATE_KEY,
+        PUBLISH_BLOCKED_KEY,
     }
 )
 

@@ -295,3 +295,64 @@ async def test_the_approval_executor_audits_a_publish_anyway(monkeypatch, pocket
     args, _kw = record.await_args
     assert args[:3] == ("w", "owner-1", "sites.publish_gate_overridden")
     assert deploys[0]["machine_republish"] is True
+
+
+# ── a skipped or partial check never vouches for content ───────────────────────
+
+
+@pytest.mark.parametrize(
+    "checks",
+    [
+        {"warnings": [], "skipped": "no_built_output"},
+        {"warnings": [], "skipped": "check_crashed"},
+        {"warnings": [], "pages_skipped": 3, "note": "3 pages not checked"},
+    ],
+    ids=["no-build", "crashed", "pages-skipped"],
+)
+async def test_an_incomplete_check_puts_the_hash_on_hold(pocket, published, monkeypatch, checks):
+    pocket["source"] = {"index.html": _CLEAN}
+    monkeypatch.setattr(verify, "publish_checks", lambda *_a, **_k: checks)
+    with pytest.raises(_Published):
+        await sites_service.publish_pocket(workspace_id="w", user_id="u", pocket_id="p1")
+    assert publish_gate.last_gated("p1") == ""
+
+
+async def test_the_tray_path_does_not_vouch_for_an_unchecked_draft(monkeypatch, pocket) -> None:
+    from pocketpaw_ee.versions import instinct_executor
+    from pocketpaw_ee.versions import service as versions
+
+    class _Store:
+        async def mark_executed(self, *_a: Any) -> None:
+            return None
+
+        async def mark_failed(self, *_a: Any) -> None:
+            return None
+
+        async def update_parameters(self, *_a: Any) -> None:
+            return None
+
+    class _Action:
+        id = "act-2"
+        approved_by = "owner-1"
+        parameters = {
+            "_artifact_change": {
+                "scope_type": "pocket",
+                "scope_id": "p1",
+                "to_version_id": "v2",
+                "workspace": "w",
+                "user_id": "u",
+            }
+        }
+
+    async def _deploy(**_kw: Any) -> None:
+        return None
+
+    pocket["source"] = {"index.html": _CLEAN}
+    monkeypatch.setattr(
+        verify, "publish_checks", lambda *_a, **_k: {"warnings": [], "skipped": "no_built_output"}
+    )
+    monkeypatch.setattr(versions, "publish", AsyncMock())
+    monkeypatch.setattr(sites_service, "publish_pocket", _deploy)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: _Store())
+    await instinct_executor.execute_approved_change(_Action())
+    assert publish_gate.last_gated("p1") == ""

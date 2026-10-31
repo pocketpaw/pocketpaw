@@ -87,14 +87,15 @@ async def _publish_blocked(
     as vetted, so the deploy's own gate (a machine republish) does not run twice."""
     from pocketpaw_ee.sites import publish_gate, verify
 
-    pocket, findings = await publish_gate.pocket_check(pocket_id=scope_id, user_id=author)
+    pocket, findings, skipped = await publish_gate.pocket_check(pocket_id=scope_id, user_id=author)
     if findings and confirmed:
         approver = str(getattr(action, "approved_by", None) or author)
         await publish_gate.audit_override(
             workspace_id=workspace_id, actor_id=approver, pocket_id=scope_id, findings=findings
         )
     if not findings or confirmed:
-        if pocket is not None:
+        # A skipped or partial check vouches for nothing: the deploy then gates again.
+        if pocket is not None and (not skipped or confirmed):
             try:
                 publish_gate.remember_gated(scope_id, verify.publish_content_hash(pocket))
             except Exception:  # noqa: BLE001 — the deploy then gates again; harmless

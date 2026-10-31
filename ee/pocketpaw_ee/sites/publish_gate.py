@@ -16,8 +16,10 @@
 # source, or the stored build of the current content (a project publish deploys exactly
 # that bundle and refuses without it), plus the stored form-exercise record. A svelte /
 # react draft with no stored build is checked on the build the publish makes, right
-# before the deploy (:func:`check_built_output`). Only a checker CRASH lets a publish
-# through, logged with :data:`FAIL_OPEN_METRIC`.
+# before the deploy (:func:`check_built_output`); on the async build lane that check
+# runs in the worker's deploy, and a refusal there is kept for the build status
+# (:func:`record_blocked`). Only a checker CRASH lets a publish through, logged with
+# :data:`FAIL_OPEN_METRIC`.
 #
 # WHO MAY OVERRIDE. Only the owner: ``confirm_placeholders`` from the REST publish or an
 # individual Tray approve, written to the audit log with the findings
@@ -136,7 +138,8 @@ async def evaluate(
 ) -> tuple[list[dict[str, Any]], str]:
     """``(findings, skipped)``: the draft's owner-worded blocking findings, and why the
     page checks had nothing to read (``""`` when they ran). A checker crash is
-    ``check_crashed`` with no findings, logged with :data:`FAIL_OPEN_METRIC`. The checks
+    ``check_crashed`` with no findings, logged with :data:`FAIL_OPEN_METRIC`; pages left
+    unread by the budget are ``pages_skipped``. Only ``""`` vouches for the content. The checks
     run in a worker thread under their own cooperative time budget
     (``verify_checks.MAX_CHECK_SECONDS``), so nothing is left running afterwards."""
     from pocketpaw_ee.sites import verify, verify_checks
@@ -156,6 +159,9 @@ async def evaluate(
         return [], "check_crashed"
     findings = owner_findings(verify_checks.blocking(checks))
     skipped = str(checks.get("skipped") or "")
+    if not skipped and checks.get("pages_skipped"):
+        # Some pages were not read: the findings are real, but nothing vouches for the rest.
+        skipped = "pages_skipped"
     logger.info(
         "sites.publish_gate: pocket=%s blocking=%d skipped=%s elapsed_ms=%d",
         pocket_id,
@@ -178,28 +184,28 @@ async def blocking_findings(
 
 async def pocket_check(
     *, pocket_id: str, user_id: str, artifacts: Any = None, store: Any = None
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """``(pocket, findings)`` for a pocket read by id as ``user_id`` (the review card
-    and the approve path hold ids). A pocket that cannot be read is ``(None, [])``; the
-    publish that follows reads it again and fails on its own."""
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str]:
+    """``(pocket, findings, skipped)`` for a pocket read by id as ``user_id`` (the review
+    card and the approve path hold ids). A pocket that cannot be read is
+    ``(None, [], "pocket_unreadable")``; the publish that follows reads it again."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     try:
         pocket = await pockets_service.get(pocket_id, user_id)
     except Exception:  # noqa: BLE001 — same fail-open rule as the checks
         logger.warning("sites.publish_gate: could not read pocket %s", pocket_id, exc_info=True)
-        return None, []
-    findings = await blocking_findings(
+        return None, [], "pocket_unreadable"
+    findings, skipped = await evaluate(
         pocket, pocket_id=pocket_id, artifacts=artifacts, store=store
     )
-    return pocket, findings
+    return pocket, findings, skipped
 
 
 async def pocket_findings(
     *, pocket_id: str, user_id: str, artifacts: Any = None, store: Any = None
 ) -> list[dict[str, Any]]:
     """The findings half of :func:`pocket_check`."""
-    _pocket, findings = await pocket_check(
+    _pocket, findings, _skipped = await pocket_check(
         pocket_id=pocket_id, user_id=user_id, artifacts=artifacts, store=store
     )
     return findings
@@ -224,7 +230,9 @@ def last_gated(pocket_id: str, *, store: Any = None) -> str:
 
 def remember_gated(pocket_id: str, content_hash: str, *, store: Any = None) -> None:
     """Remember ``content_hash`` as vetted, so a machine republish of exactly this
-    content needs no second check. Best effort: a lost record costs one re-check."""
+    content needs no second check. Call it ONLY when the check ran in full
+    (``skipped == ""``) or the owner confirmed. Best effort: a lost record costs one
+    re-check."""
     from pocketpaw_ee.sites import verify_store
 
     if not content_hash:
@@ -238,6 +246,35 @@ def remember_gated(pocket_id: str, content_hash: str, *, store: Any = None) -> N
         )
     except Exception:  # noqa: BLE001
         logger.warning("sites.publish_gate: could not remember the gated hash for %s", pocket_id)
+
+
+def record_blocked(pocket_id: str, details: Any, *, store: Any = None) -> None:
+    """Keep the async lane's refusal (``PublishBlocked.details``) where the build status
+    reads it. Best effort."""
+    from pocketpaw_ee.sites import verify_store
+
+    if not pocket_id:
+        return
+    store = store if store is not None else verify_store.default_verify_store()
+    try:
+        store.write(
+            pocket_id, verify_store.PUBLISH_BLOCKED_KEY, {"details": details, "at": time.time()}
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("sites.publish_gate: could not record the refusal for %s", pocket_id)
+
+
+def read_blocked(pocket_id: str, *, store: Any = None) -> dict[str, Any] | None:
+    """The last async-lane refusal's ``details`` for this pocket, or None."""
+    from pocketpaw_ee.sites import verify_store
+
+    store = store if store is not None else verify_store.default_verify_store()
+    try:
+        record = store.read(pocket_id, verify_store.PUBLISH_BLOCKED_KEY) or {}
+    except Exception:  # noqa: BLE001
+        return None
+    details = record.get("details")
+    return details if isinstance(details, dict) else None
 
 
 async def audit_override(
@@ -366,6 +403,8 @@ __all__ = [
     "page_label",
     "pocket_check",
     "pocket_findings",
+    "read_blocked",
+    "record_blocked",
     "refusal",
     "remember_gated",
 ]

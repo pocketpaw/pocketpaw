@@ -86,7 +86,7 @@
     "find": "    return len(national) == 11 and national.startswith(\"07700900\")\n",
     "replace": "    return False\n",
     "tests": [
-      "tests/ee/sites/test_verify_checks_blocking.py::TestInventedNumbers::test_made_up_numbers_are_errors"
+      "tests/ee/sites/test_verify_checks_blocking.py::TestReReviewNegatives::test_a_drama_number_in_a_tel_link_blocks"
     ]
   },
   {
@@ -263,8 +263,8 @@
   {
     "label": "phone context ignored: an order number like 9876543210 blocks publish",
     "file": "ee/pocketpaw_ee/sites/verify_checks.py",
-    "find": "            if needs_context and not _PHONE_CONTEXT_RE.search(lead):\n                continue\n",
-    "replace": "",
+    "find": "            if _PHONE_CONTEXT_RE.search(lead) and _invented(m.group(0)):\n",
+    "replace": "            if _invented(m.group(0)):\n",
     "tests": [
       "tests/ee/sites/test_verify_checks_blocking.py::TestInventedNumbers::test_real_looking_numbers_are_clean"
     ]
@@ -528,6 +528,60 @@
     "replace": "",
     "tests": [
       "tests/ee/sites/test_play_test_forms.py::TestReReview::test_a_draft_that_does_not_answer_is_unchecked"
+    ]
+  },
+  {
+    "label": "fictional ranges need a phone word: a bare 555-0142 or 07700 900123 ships",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        for m in _STRONG_FAKE_RE.finditer(chunk):\n            seen.setdefault(_clip(m.group(0).strip(), 40), None)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestReReviewNegatives::test_invented_numbers_found_without_or_beside_a_phone_word"
+    ]
+  },
+  {
+    "label": "context stops at the chunk: a dt 'Phone' above a dd 9876543210 passes",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "            lead = (previous[-40:] + \" \" + chunk[: m.start()])[-40:]\n",
+    "replace": "            lead = chunk[: m.start()][-40:]\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestReReviewNegatives::test_invented_numbers_found_without_or_beside_a_phone_word"
+    ]
+  },
+  {
+    "label": "partial check vouches: pages the budget skipped are remembered as vetted",
+    "file": "ee/pocketpaw_ee/sites/publish_gate.py",
+    "find": "    if not skipped and checks.get(\"pages_skipped\"):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_hardening.py::test_an_incomplete_check_puts_the_hash_on_hold"
+    ]
+  },
+  {
+    "label": "Tray path poisons the pointer: an unchecked draft is remembered as vetted",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "        if pocket is not None and (not skipped or confirmed):\n",
+    "replace": "        if pocket is not None:\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_hardening.py::test_the_tray_path_does_not_vouch_for_an_unchecked_draft"
+    ]
+  },
+  {
+    "label": "async lane drops the flag: a react draft with no stored build ships [Address]",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if gate_built_output:\n        deploy_inputs[\"gate_built_output\"] = True\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_async_lane.py::test_the_job_carries_the_flag_in_its_deploy_inputs"
+    ]
+  },
+  {
+    "label": "async refusal crashes the job: the owner sees a deploy error, not the findings",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        except PublishBlocked as refusal:\n",
+    "replace": "        except ZeroDivisionError as refusal:\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_async_lane.py::test_a_worker_refusal_settles_the_row_and_reaches_the_owner"
     ]
   }
 ]

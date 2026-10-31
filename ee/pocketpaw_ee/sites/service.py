@@ -3145,13 +3145,6 @@ async def _deploy_site_doc(
     # actually be deployed from it. A prebuilt dir means the worker already ran this
     # build and is calling back in to finish the publish, so it must NOT re-fork.
     if prebuilt_project_dir is None and build_runs_async(engine, source=source, pattern=pattern):
-        if gate_built_output:
-            logger.warning(
-                "sites.publish_gate: %s reason=async_build_lane pocket=%s engine=%s",
-                "metric=sites_publish_gate_fail_open",
-                pocket_id,
-                engine,
-            )
         return await _enqueue_static_build(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -3167,6 +3160,7 @@ async def _deploy_site_doc(
             pattern=pattern,
             builder_origin=builder_origin,
             keeps_client_bundle=keeps_client_bundle,
+            gate_built_output=gate_built_output,
         )
 
     gen = generator or GeneratorClient()
@@ -5433,8 +5427,13 @@ async def _enqueue_static_build(
     pattern: str | None,
     builder_origin: str | None,
     keeps_client_bundle: bool,
+    gate_built_output: bool = False,
 ) -> _SiteDoc:
     """Enqueue a static site's build and return immediately (SL-3).
+
+    ``gate_built_output`` rides the job's ``deploy_inputs`` to the worker, whose deploy
+    (``deploy_prebuilt_site``) then runs the publish gate on the built tree before
+    anything goes live; a refusal settles the row ``deploy_failed:publish_blocked``.
 
     The async half of ``_deploy_site_doc``. It ensures the ONE canonical Site doc for
     ``(workspace, pocket_id)`` exists, stamps the build lifecycle onto it, and hands the
@@ -5522,6 +5521,8 @@ async def _enqueue_static_build(
         "builder_origin": builder_origin,
         **turnstile_kwargs,
     }
+    if gate_built_output:
+        deploy_inputs["gate_built_output"] = True
 
     # An enqueue failure PROPAGATES. The helper rolls the row to a terminal status
     # first, so the site stays republishable, and the raise becomes the 5xx the user
@@ -5872,11 +5873,22 @@ async def site_build_status(*, workspace_id: str, pocket_id: str) -> dict[str, A
         "site_id": str(doc.id) if doc is not None else None,
         "name": doc.name if doc is not None else "",
         "published": doc is not None,
+        # The async lane's publish gate refused the build (owner-worded findings, the
+        # same ``details`` a sync 409 carries); None otherwise.
+        "publish_blocked": _publish_blocked_details(doc, pocket_id),
         # A saved rename waiting for the next publish: the live ``url`` changes to it
         # then, and the old address stops working. The agent quotes ``url`` until then.
         "slug_pending": getattr(doc, "slug_pending", None) if doc is not None else None,
         **state,
     }
+
+
+def _publish_blocked_details(doc: _SiteDoc | None, pocket_id: str) -> dict[str, Any] | None:
+    if doc is None or getattr(doc, "build_reason", None) != "deploy_failed:publish_blocked":
+        return None
+    from pocketpaw_ee.sites import publish_gate
+
+    return publish_gate.read_blocked(pocket_id)
 
 
 async def canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:

@@ -267,6 +267,7 @@ from pocketpaw_ee.sites.daytona_runner import (
     run_build,
 )
 from pocketpaw_ee.sites.engines import needs_node_build, normalize_engine, static_output_rel
+from pocketpaw_ee.sites.publish_gate import PublishBlocked
 from pocketpaw_ee.sites.sandbox_reaper import label_value
 from pocketpaw_ee.sites.verify_diagnostics import finalize, parse_build_stderr
 
@@ -772,6 +773,23 @@ async def run_site_build(
                 deployer=_deployer,
                 output_rel=artifact_rel,
             )
+        except PublishBlocked as refusal:
+            # The publish gate refused the built tree. Not a crash and not retryable:
+            # nothing deployed, and the owner reads the findings on the build status.
+            from pocketpaw_ee.sites import publish_gate
+
+            logger.info("sites.build: publish gate refused site %s after a clean build", site_id)
+            publish_gate.record_blocked(str(deploy_inputs.get("pocket_id") or ""), refusal.details)
+            await _record(
+                site,
+                _settlement(
+                    RUNG_DEPLOY_FAILED,
+                    "publish_blocked",
+                    retryable=False,
+                    attempts_left=attempts_left,
+                ),
+            )
+            return
         except Exception:
             # The build worked and the deploy did not, so this is NOT a build failure —
             # but from the publisher's side nothing went live, and the row is the only
