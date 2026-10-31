@@ -110,8 +110,8 @@
   {
     "label": "preview lane: reading a raised job logs nothing, so the worker's exception is invisible again",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "        _log_raised_result(job_id, info)\n        return \"failed\", raised_job_reason(info.result)",
-    "replace": "        return \"failed\", raised_job_reason(info.result)",
+    "find": "        _log_raised_result(job_id, info, superseded=superseded)\n        return \"failed\", raised_job_reason(info.result, superseded=superseded)",
+    "replace": "        return \"failed\", raised_job_reason(info.result, superseded=superseded)",
     "tests": [
       "tests/ee/sites/test_preview_infra_retry.py"
     ]
@@ -137,7 +137,7 @@
   {
     "label": "preview lane: the retry path reads a raised result without logging what was raised",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "        if not info.success and kind != \"aborted\":\n            _log_raised_result(job_id, info)\n",
+    "find": "        if not info.success and kind != \"aborted\":\n            _log_raised_result(job_id, info, superseded=sup)\n",
     "replace": "",
     "tests": [
       "tests/ee/sites/test_preview_infra_retry.py"
@@ -211,7 +211,7 @@
   {
     "label": "verify: arq's job timeout (re-raised by Job.result) reads as our wait running out",
     "file": "ee/pocketpaw_ee/sites/verify.py",
-    "find": "            if info is not None and not info.success:\n                return build_job.raised_job_reason(info.result)\n",
+    "find": "            if info is not None and not info.success:\n                superseded = await build_job._result_superseded(pool, job_id, info)\n                return build_job.raised_job_reason(info.result, superseded=superseded)\n",
     "replace": "",
     "tests": [
       "tests/ee/sites/test_sandbox_capacity.py"
@@ -269,6 +269,24 @@
     "replace": "    return f\"{_RETRY_COUNTER_PREFIX}{job_id}\"",
     "tests": [
       "tests/ee/sites/test_preview_infra_retry.py"
+    ]
+  },
+  {
+    "label": "preview lane: every cancelled job reads superseded again, so a job lost to a worker shutdown or a stale abort mark tells the owner a newer edit replaced it",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        return SUPERSEDED_REASON if superseded else JOB_CANCELLED_REASON",
+    "replace": "        return SUPERSEDED_REASON",
+    "tests": [
+      "tests/ee/sites/test_cancel_is_not_superseded.py"
+    ]
+  },
+  {
+    "label": "preview lane: a cancel is retried unbudgeted whether or not anything superseded it",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        if isinstance(info.result, asyncio.CancelledError) and superseded:",
+    "replace": "        if isinstance(info.result, asyncio.CancelledError):",
+    "tests": [
+      "tests/ee/sites/test_cancel_is_not_superseded.py"
     ]
   }
 ]

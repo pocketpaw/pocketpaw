@@ -297,6 +297,11 @@ class TestSupersede:
 
         monkeypatch.setattr(bj, "_supersede_previous_job", _noop)
 
+        async def _replaced(*_a: Any, **_k: Any) -> bool:
+            return True
+
+        monkeypatch.setattr(bj, "was_superseded", _replaced)
+
         class _Pool(_PointerPool):
             def __init__(self) -> None:
                 super().__init__()
@@ -324,6 +329,11 @@ class TestSupersede:
             raise asyncio.CancelledError
 
         monkeypatch.setattr(bj.Job, "result", _result)
+
+        async def _replaced(*_a: Any, **_k: Any) -> bool:
+            return True
+
+        monkeypatch.setattr(bj, "was_superseded", _replaced)
 
         out = await bj.wait_for_preview_result(object(), "j1", timeout=1)
 
