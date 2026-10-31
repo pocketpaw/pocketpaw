@@ -803,6 +803,10 @@ _GATED_IMMUTABLE_FIELDS: frozenset[str] = frozenset(
         # turns these into the migrator's confirm, so an edit must never widen them
         "destructive_migrations",
         "destructive_check",
+        # what the publish gate found on the draft (shown on the card) and why an
+        # approve was refused: the owner's evidence, never editable away
+        "publish_findings",
+        "publish_blocked",
     }
 )
 
@@ -1241,6 +1245,10 @@ class ApproveRequest(BaseModel):
     category: ActionCategory | None = None
     priority: ActionPriority | None = None
     parameters: dict[str, Any] | None = None
+    # A site publish card (``_artifact_change``) whose draft still shows placeholders,
+    # made-up numbers or broken forms: the owner chose "Publish anyway". Only this
+    # single-Action approve carries it; bulk approve never does (``publish_gate``).
+    confirm_placeholders: bool = False
 
 
 class EditProposalRequest(BaseModel):
@@ -2837,7 +2845,10 @@ async def approve_action(
             # A single, deliberate approve: the destructive migrations the card showed
             # are confirmed. Bulk approve never passes this.
             await artifact_executor.execute_approved_change(
-                approved, human_event_id=human_event_id, confirm_destructive=True
+                approved,
+                human_event_id=human_event_id,
+                confirm_destructive=True,
+                confirm_placeholders=bool(req is not None and req.confirm_placeholders),
             )
         except Exception:
             logger.exception("artifact-change merge after approval failed (non-fatal)")

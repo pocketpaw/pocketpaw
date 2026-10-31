@@ -18,12 +18,12 @@
     ]
   },
   {
-    "label": "SC-LINK-04 judges scripted pages: a framework form whose submit JS binds is reported as lost",
+    "label": "SC-LINK-04 ignores submit scripts: a framework form whose submit JS binds is reported as lost",
     "file": "ee/pocketpaw_ee/sites/verify_checks.py",
-    "find": "    if not parsed.has_script and not parsed.has_handlers:",
-    "replace": "    if True:",
+    "find": "            if hinted:\n                continue\n",
+    "replace": "",
     "tests": [
-      "tests/ee/sites/test_verify_checks.py::TestLinks::test_forms_with_a_target_or_a_script_are_not_judged"
+      "tests/ee/sites/test_verify_checks_blocking.py::TestDeadForms::test_handled_forms_are_clean"
     ]
   },
   {
@@ -137,8 +137,8 @@
   {
     "label": "byte budget gone: a huge tree is parsed in full inside one verify",
     "file": "ee/pocketpaw_ee/sites/verify_checks.py",
-    "find": "if len(pages) >= MAX_PAGES or len(text) > budget:",
-    "replace": "if len(pages) >= MAX_PAGES:",
+    "find": "or len(text) > budget or time.monotonic() >= deadline:",
+    "replace": "or time.monotonic() >= deadline:",
     "tests": [
       "tests/ee/sites/test_verify_checks.py::TestReport::test_pages_past_the_byte_budget_are_counted"
     ]
@@ -146,8 +146,8 @@
   {
     "label": "checks block the event loop: the artifact read and parsing run on the loop thread",
     "file": "ee/pocketpaw_ee/sites/verify.py",
-    "find": "await asyncio.to_thread(_page_checks, pocket, pocket_id, content_hash, artifacts)",
-    "replace": "_page_checks(pocket, pocket_id, content_hash, artifacts)",
+    "find": "await asyncio.to_thread(\n        _page_checks, pocket, pocket_id, content_hash, artifacts, store\n    )",
+    "replace": "_page_checks(pocket, pocket_id, content_hash, artifacts, store)",
     "tests": [
       "tests/ee/sites/test_verify_checks.py::TestVerdict::test_checks_run_off_the_event_loop"
     ]

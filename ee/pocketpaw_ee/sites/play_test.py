@@ -7,7 +7,9 @@
 # (``CloudflareClient.browser_run_cdp``), opens the draft, plays the steps and
 # returns a ``PlayResult``: a step log, console errors and warnings, uncaught page
 # errors, failed requests, an approximate frame rate and viewport screenshots with
-# a blank-canvas flag each.
+# a blank-canvas flag each. With ``exercise_forms`` it then submits each form on the
+# page with obviously fake data (``exercise_page_forms``) and ``judge_form`` says
+# whether each one was sent AND confirmed (``FormOutcome``).
 #
 # Invariants a reader must not break:
 #   * Chromium never runs in our process. The draft's JS is untrusted and our
@@ -22,10 +24,13 @@
 #     deduped, capped per list and truncated here before it reaches the model.
 #   * A failed step is logged and the run goes on; only a closed page stops it.
 #   * Screenshots stay in memory and are never logged.
+#   * A form test never reaches the owner's real data: same-origin submits go to the
+#     draft (draft-only storage), gateway posts are stubbed, other hosts are aborted.
 from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import re
 import time
@@ -33,6 +38,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +112,172 @@ _CANVAS_RECT_JS = """
 """
 
 
+#: Forms one run submits, each on a fresh load of the page.
+MAX_FORMS = 4
+#: How long a submit gets to answer and the page to show its result.
+FORM_SETTLE_MS = 2_500
+#: A form is not started with less than this left in the run budget.
+FORM_MIN_S = 8.0
+#: Test data that passes common format checks and reaches nobody: example.com never
+#: delivers; phones follow the site's region (``_FILL_FORM_JS`` picks it from the page)
+#: and use a fictional range (US 555-01xx, UK Ofcom 07700 900xxx) or, for India where no
+#: fictional range exists, a valid-format number. They never leave the draft: every
+#: off-site request is aborted while a form is tested.
+TEST_DATA: dict[str, Any] = {
+    "name": "Paw Draft Test",
+    "email": "paw.draft.test@example.com",
+    "text": "Paw draft test, please ignore",
+    "phones": {
+        "in": ["+919000000001", "9000000001", "09000000001"],
+        "gb": ["07700900123", "+447700900123"],
+        "us": ["5550100123", "+15550100123", "555-010-0123"],
+    },
+}
+#: The Paw integration gateway paw.js posts to (``/sites/<id>/x/<integration>/<action>``):
+#: a test submit gets a stub answer there, so no real subscriber, lead or order is made.
+_GATEWAY_RE = re.compile(r"/sites/[^/]+/x/([^/]+)/([^/]+)/?$")
+#: The only off-site requests allowed while a form is tested: fonts and stylesheets
+#: (a thank-you page's look). Images, scripts and media are blocked too, because a
+#: tracking pixel or a JSONP endpoint carries the entry in its query string. Requests
+#: made by the page load BEFORE a form is armed are not affected.
+_STATIC_TYPES = frozenset({"font", "stylesheet"})
+#: Options for every browser context that plays a draft: no service worker may sit
+#: between the page and the router.
+CONTEXT_OPTIONS: dict[str, Any] = {"service_workers": "block"}
+#: What a same-origin redirect to another host is answered with instead of following
+#: it (Playwright does not route redirect hops, so a 307 would re-POST the entry).
+_REDIRECT_STUB = "<!doctype html><title>Stopped</title><p>Stopped before leaving the draft.</p>"
+#: Captcha hosts: a challenge means the test could not tell, never that the form broke.
+_CAPTCHA_RE = re.compile(r"challenges\.cloudflare\.com|recaptcha|hcaptcha", re.IGNORECASE)
+#: Statuses that are certainly a broken form for a visitor. Other 4xx refuse the test
+#: entry (auth, validation, rate limits) and read as unchecked.
+_BROKEN = frozenset({404, 405})
+#: Words a page shows once an entry went through, counted before and after the submit.
+#: One signal among several (state, alerts, any visible change), so not English-only.
+_SUCCESS_RE = re.compile(
+    r"thank|success|received|confirmed|you'?re (?:on|in|booked|all set)|booked|subscribed"
+    r"|\bsent\b|see you|be in touch|got it|on the list|added|gracias|merci|danke|grazie"
+    r"|obrigad|dhanyavad|shukriya|धन्यवाद",
+    re.IGNORECASE,
+)
+
+#: Fill form ``i`` (document order, dialogs skipped) with the test data through the
+#: native value setters, so framework-controlled inputs see it, remember what the page
+#: looked like near the form, and mark it for the submit. Returns what the judge needs,
+#: or null when there is no form ``i``.
+_FILL_FORM_JS = """
+(args) => {
+  const [i, data] = args;
+  const forms = [...document.querySelectorAll('form')]
+    .filter(f => (f.getAttribute('method') || '').toLowerCase() !== 'dialog');
+  const f = forms[i];
+  if (!f) return null;
+  const name = f.id || f.getAttribute('name') || f.getAttribute('aria-label') || `form ${i + 1}`;
+  const body = document.body ? document.body.innerText : '';
+  const lang = (document.documentElement.lang || '').toLowerCase();
+  const region = (/₹|\\+91/.test(body) || /-in$/.test(lang)) ? 'in'
+    : (/£|\\+44/.test(body) || /-gb$/.test(lang)) ? 'gb' : 'us';
+  const phones = [...data.phones[region], ...data.phones.us, ...data.phones.gb, ...data.phones.in];
+  const set = (el, v) => {
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+    if (desc && desc.set) desc.set.call(el, v); else el.value = v;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const fit = (el, v) => (el.maxLength > 0 ? String(v).slice(0, el.maxLength) : String(v));
+  const day = new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10);
+  const skip = ['hidden', 'submit', 'button', 'reset', 'image', 'file', 'range', 'color'];
+  const radios = new Set();
+  const fields = [];
+  for (const el of f.elements) {
+    const t = (el.type || '').toLowerCase();
+    const n = (el.name || el.id || '').toLowerCase();
+    if (el.disabled || el.readOnly || skip.includes(t)) continue;
+    if (el.name) fields.push(el.name);
+    if (el.tagName === 'SELECT') {
+      const opt = [...el.options].find(o => o.value && !o.disabled);
+      if (opt) set(el, opt.value);
+    } else if (t === 'checkbox') {
+      if (el.required && !el.checked) el.click();
+    } else if (t === 'radio') {
+      if (!radios.has(el.name)) { radios.add(el.name); if (!el.checked) el.click(); }
+    } else if (t === 'email') set(el, fit(el, data.email));
+    else if (t === 'tel' || /phone|mobile|whatsapp/.test(n)) {
+      let re = null;
+      try { re = el.pattern ? new RegExp(`^(?:${el.pattern})$`) : null; } catch (e) {}
+      set(el, fit(el, phones.find(p => !re || re.test(p)) || phones[0]));
+    } else if (t === 'number') set(el, el.min || '1');
+    else if (t === 'date') set(el, el.min && el.min > day ? el.min : day);
+    else if (t === 'time') set(el, '12:00');
+    else if (t === 'datetime-local') set(el, `${day}T12:00`);
+    else if (t === 'month') set(el, day.slice(0, 7));
+    else if (t === 'url') set(el, 'https://example.com');
+    else if (t === 'password') set(el, 'PawDraftTest-123!');
+    else if (/name/.test(n)) set(el, fit(el, data.name));
+    else set(el, fit(el, data.text));
+  }
+  f.setAttribute('data-paw-exercise', '1');
+  let external = '';
+  try {
+    const u = new URL(f.getAttribute('action') || location.href, location.href);
+    if (u.protocol === 'mailto:') external = 'an email app (mailto:)';
+    else if (u.protocol === 'tel:' || u.protocol === 'sms:') external = `a phone (${u.protocol})`;
+    else if (u.protocol !== 'http:' && u.protocol !== 'https:') external = `a ${u.protocol} link`;
+    else if (u.origin !== location.origin) external = u.host;
+  } catch (e) {}
+  const live = () => [...document.querySelectorAll('[role=status],[role=alert],[aria-live]')]
+    .map(e => (e.innerText || '').trim()).filter(Boolean).join('|');
+  window.__pawBefore = {
+    formText: (f.innerText || '').trim(),
+    live: live(),
+    visible: f.offsetParent !== null && !f.hidden,
+  };
+  const invalid = f.checkValidity() ? [] : [...f.elements]
+    .filter(e => e.willValidate && !e.validity.valid).slice(0, 3)
+    .map(e => `${e.name || e.id || e.type}: ${e.validationMessage}`);
+  const search = (f.getAttribute('role') || '').toLowerCase() === 'search'
+    || [...f.elements].some(e => (e.type || '').toLowerCase() === 'search');
+  return { name, count: forms.length, fields, invalid, external, search, region,
+           text: body.slice(0, 20000) };
+}
+"""
+_SUBMIT_FORM_JS = """
+() => {
+  const f = document.querySelector('form[data-paw-exercise]');
+  if (!f) return false;
+  if (f.requestSubmit) f.requestSubmit(); else f.submit();
+  return true;
+}
+"""
+#: The page after the submit: the form's paw state, whether anything visible changed
+#: near it (the form hidden or replaced, its text changed, a status / alert / live
+#: region updated), and whether a captcha appeared.
+_FORM_STATE_JS = """
+() => {
+  const f = document.querySelector('form[data-paw-exercise]');
+  const b = window.__pawBefore || null;
+  const live = [...document.querySelectorAll('[role=status],[role=alert],[aria-live]')]
+    .map(e => (e.innerText || '').trim()).filter(Boolean).join('|');
+  const visible = !!(f && f.isConnected && f.offsetParent !== null && !f.hidden);
+  const formText = f ? (f.innerText || '').trim() : '';
+  let changed = false;
+  if (b) {
+    changed = (b.visible && !visible) || (live !== b.live && live.length > 0)
+      || (!!f && formText !== b.formText) || !f;
+  }
+  const captcha = !!document.querySelector(
+    'iframe[src*="challenges.cloudflare.com"],iframe[src*="recaptcha"],' +
+    'iframe[src*="hcaptcha"],[data-paw-turnstile]');
+  return {
+    state: f ? f.getAttribute('data-paw-state') : null,
+    url: location.href,
+    text: document.body ? document.body.innerText.slice(0, 20000) : '',
+    changed, captcha,
+  };
+}
+"""
+
+
 class PlayTestUnavailable(RuntimeError):
     """The remote browser could not be reached (not configured, not installed, or
     the connect failed). Never a statement about the site."""
@@ -132,6 +304,107 @@ class PlayResult:
     timed_out: bool = False
     page_closed: bool = False
     elapsed_s: float = 0.0
+    forms: list[FormOutcome] = field(default_factory=list)
+    forms_note: str = ""
+
+
+@dataclass
+class FormOutcome:
+    """One form's test submit. ``status``: ``ok`` (sent and confirmed), ``failed`` (a
+    defect a visitor certainly hits: an echo into the address bar, a 404 / 405 / 5xx,
+    or nothing sent) or ``unchecked`` (the test could not tell: a refused test entry,
+    a captcha, a post to another service, a popup, no visible confirmation).
+    ``outcome`` is safe to show the owner; ``detail`` is for the agent."""
+
+    name: str
+    status: str
+    outcome: str
+    detail: str = ""
+
+
+def _same_page(a: str, b: str) -> bool:
+    ua, ub = urlsplit(a), urlsplit(b)
+    return (ua.netloc, ua.path.rstrip("/")) == (ub.netloc, ub.path.rstrip("/"))
+
+
+def judge_form(
+    info: dict[str, Any],
+    state: dict[str, Any] | None,
+    sent: list[dict[str, Any]],
+    base_url: str,
+    new_errors: list[str] | None = None,
+    dialogs: list[str] | None = None,
+) -> FormOutcome:
+    """Decide what one test submit showed. ``info`` is the fill result, ``state`` the
+    page after it (``None`` when unreadable), ``sent`` what the submit caused
+    (``{kind, method, url, status, resource_type?}``; ``kind`` is ``site``,
+    ``gateway``, ``external``, ``navigation`` or ``popup``), ``dialogs`` any alert text."""
+    name = clean_text(info.get("name") or "form", 40)
+    lines = [f"{s['kind']} {s.get('method', '')} {s['url']} -> {s.get('status')}" for s in sent]
+    lines += [f"page error: {e}" for e in new_errors or ()]
+    lines += [f"alert: {d}" for d in dialogs or ()]
+    detail = clean_text("; ".join(lines), MAX_EVENT_CHARS) if lines else "no request was sent"
+
+    def unchecked(outcome: str) -> FormOutcome:
+        return FormOutcome(name, "unchecked", outcome, detail)
+
+    if info.get("external"):
+        return unchecked(f"it sends to {info['external']}, which the test does not contact")
+    if info.get("invalid"):
+        why = clean_text(", ".join(info["invalid"]), 160)
+        return FormOutcome(
+            name, "unchecked", "the form's own checks refused the test entry", f"invalid: {why}"
+        )
+    page = state or {}
+    external = [s for s in sent if s["kind"] == "external"]
+    if page.get("captcha") or any(_CAPTCHA_RE.search(s["url"]) for s in external):
+        return unchecked("a captcha check stopped the test")
+    offsite = [s for s in sent if s.get("offsite_redirect")]
+    if offsite:
+        return unchecked(
+            f"it redirects off-site to {offsite[0]['offsite_redirect']}, so the test stopped there"
+        )
+    if any(s.get("error") for s in sent):
+        return unchecked("the draft did not answer the test submit")
+    posted = [s for s in sent if s["kind"] in ("site", "gateway")]
+    navs = [s for s in sent if s["kind"] == "navigation"]
+    codes = [int(s["status"]) for s in posted + navs if s.get("status")]
+    broken = [c for c in codes if c in _BROKEN or c >= 500]
+    if broken:
+        return FormOutcome(
+            name, "failed", f"the site answered with an error (HTTP {broken[0]})", detail
+        )
+    refused = [c for c in codes if 400 <= c < 500]
+    if refused:
+        return unchecked(f"the site refused the test entry (HTTP {refused[0]})")
+    fields = [f for f in info.get("fields") or () if f]
+    for nav in navs:
+        query = parse_qs(urlsplit(nav["url"]).query)
+        if _same_page(nav["url"], base_url) and any(f in query for f in fields):
+            return FormOutcome(
+                name,
+                "failed",
+                "nothing was saved: what was typed ended up in the address bar",
+                detail,
+            )
+    left = [s for s in external if s.get("resource_type") == "document" or not posted]
+    if left:
+        host = urlsplit(left[0]["url"]).netloc
+        return unchecked(f"it sends to {host}, which the test does not contact")
+    if any(s["kind"] == "popup" for s in sent):
+        return unchecked("it opens a new window, so the test could not see the result")
+    if not posted and not navs:
+        if page.get("changed"):
+            return unchecked("the form moved to another step, which the test does not fill in")
+        return FormOutcome(name, "failed", "nothing was sent and the page did not change", detail)
+    before = len(_SUCCESS_RE.findall(info.get("text") or ""))
+    after = len(_SUCCESS_RE.findall(page.get("text") or ""))
+    moved = any(not _same_page(n["url"], base_url) for n in navs)
+    if page.get("state") == "error":
+        return unchecked("the form showed an error for the test entry")
+    if page.get("state") == "success" or dialogs or page.get("changed") or moved or after > before:
+        return FormOutcome(name, "ok", "sent and confirmed", detail)
+    return unchecked("it was sent, but nothing on the page changed to confirm it")
 
 
 # ── validation ──────────────────────────────────────────────────────────────
@@ -454,6 +727,180 @@ async def _do(page: Any, step: dict, mobile: bool, mouse: list[float], result: P
     return "skipped (unknown action)"
 
 
+def _gateway_stub(path: str) -> str:
+    """The answer paw.js expects from the gateway for a test submit: ``{ok, result}``,
+    with a checkout URL for Stripe (paw.js then navigates there, which is aborted)."""
+    m = _GATEWAY_RE.search(path)
+    action = m.group(2) if m else ""
+    if action == "create_checkout":
+        result: dict[str, Any] = {"url": "https://checkout.example.com/paw-draft-test"}
+    else:
+        result = {"ok": True}
+    return json.dumps({"ok": True, "result": result})
+
+
+def _origin(url: str) -> str:
+    return urlsplit(url)._replace(path="", query="", fragment="").geturl()
+
+
+async def exercise_page_forms(page: Any, url: str, result: PlayResult, deadline: float) -> None:
+    """Submit each form on ``url`` (up to :data:`MAX_FORMS`, a fresh load each) with
+    :data:`TEST_DATA` and judge what happened (:func:`judge_form`).
+
+    Where the entries go. A form whose action is another host is never submitted.
+    While a form is tested, every request of the browser CONTEXT (popups included) is
+    routed: same-origin requests the submit makes are fetched without following
+    redirects and answered as fetched, so a hop to another host comes back through the
+    router; the Paw gateway gets a stub; every other off-site request is aborted,
+    whatever its method, except static subresources (fonts, styles, images, scripts).
+    Popups are closed and alerts accepted. So the browser sends nothing off-site; the
+    draft's own server code still runs and may call outside services itself. Same-origin
+    entries land in the draft (a project draft Worker has draft-only D1 / KV / R2 that
+    publish purges). Search boxes are not submitted."""
+    origin = _origin(url)
+    sent: list[dict[str, Any]] = []
+    dialogs: list[str] = []
+    pending: list[Any] = []
+    armed = [False]
+    target = getattr(page, "context", None)
+    if target is None or not callable(getattr(target, "route", None)):
+        target = page
+
+    async def route(r: Any) -> None:
+        req = r.request
+        if not armed[0]:
+            await r.continue_()
+            return
+        method = (getattr(req, "method", "GET") or "GET").upper()
+        kind = getattr(req, "resource_type", "") or ""
+        address = req.url
+        if _GATEWAY_RE.search(urlsplit(address).path):
+            sent.append({"kind": "gateway", "method": method, "url": address, "status": 200})
+            await r.fulfill(
+                status=200,
+                content_type="application/json",
+                body=_gateway_stub(urlsplit(address).path),
+            )
+            return
+        if _origin(address) != origin:
+            if method == "GET" and kind in _STATIC_TYPES:
+                await r.continue_()
+                return
+            sent.append(
+                {"kind": "external", "method": method, "url": address, "resource_type": kind}
+            )
+            await r.abort()
+            return
+        if method in ("GET", "HEAD") and kind not in ("document", "xhr", "fetch"):
+            await r.continue_()
+            return
+        entry = {
+            "kind": "navigation" if method == "GET" and kind == "document" else "site",
+            "method": method,
+            "url": address,
+            "status": None,
+        }
+        sent.append(entry)
+        try:
+            response = await r.fetch(max_redirects=0)
+        except Exception as exc:  # noqa: BLE001 — the draft did not answer the test
+            entry["error"] = clean_text(exc, 120)
+            await r.abort()
+            return
+        entry["status"] = response.status
+        location = ""
+        if 300 <= response.status < 400:
+            location = urljoin(address, (response.headers or {}).get("location", ""))
+        if location and _origin(location) != origin:
+            # Never follow it: the browser would re-send the entry to that host.
+            entry["offsite_redirect"] = urlsplit(location).netloc
+            await r.fulfill(status=200, content_type="text/html", body=_REDIRECT_STUB)
+            return
+        await r.fulfill(response=response)
+
+    async def route_socket(ws: Any) -> None:
+        address = getattr(ws, "url", "") or ""
+        socket_origin = urlsplit(address).netloc
+        if armed[0] and socket_origin != urlsplit(url).netloc:
+            sent.append(
+                {"kind": "external", "method": "WS", "url": address, "resource_type": "websocket"}
+            )
+            await ws.close()
+            return
+        await ws.connect()
+
+    def on_page(popup: Any) -> None:
+        if not armed[0]:
+            return
+        sent.append({"kind": "popup", "url": getattr(popup, "url", "") or ""})
+        pending.append(asyncio.ensure_future(popup.close()))
+
+    def on_dialog(dialog: Any) -> None:
+        dialogs.append(clean_text(getattr(dialog, "message", ""), 160))
+        pending.append(asyncio.ensure_future(dialog.accept()))
+
+    try:
+        await target.route("**/*", route)
+        if callable(getattr(target, "route_web_socket", None)):
+            await target.route_web_socket(lambda _url: True, route_socket)
+    except Exception as exc:  # noqa: BLE001
+        result.forms_note = f"forms were not exercised: {clean_text(exc, 120)}"
+        return
+    if target is not page and callable(getattr(target, "on", None)):
+        target.on("page", on_page)
+    page.on("dialog", on_dialog)
+    for i in range(MAX_FORMS):
+        if deadline - time.monotonic() < FORM_MIN_S:
+            result.forms_note = "the run budget ran out before every form was tried"
+            result.timed_out = True
+            break
+        armed[0] = False
+        sent.clear()
+        dialogs.clear()
+        try:
+            await page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_MS)
+            await page.wait_for_timeout(SETTLE_MS)
+            info = await page.evaluate(_FILL_FORM_JS, [i, TEST_DATA])
+        except Exception as exc:  # noqa: BLE001
+            result.forms_note = f"the page did not load for form {i + 1}: {clean_text(exc, 120)}"
+            break
+        if not info:
+            if i == 0:
+                result.forms_note = "this page has no forms"
+            break
+        if i == 0 and int(info.get("count") or 0) > MAX_FORMS:
+            result.forms_note = f"only the first {MAX_FORMS} of {info['count']} forms were tried"
+        if info.get("search"):
+            name = clean_text(info.get("name") or "form", 40)
+            result.forms.append(FormOutcome(name, "unchecked", "a search box, not submitted"))
+            continue
+        errors_before = len(result.page_errors)
+        state = None
+        if not info.get("invalid") and not info.get("external"):
+            armed[0] = True
+            try:
+                await page.evaluate(_SUBMIT_FORM_JS)
+            except Exception:  # noqa: BLE001 — a navigating submit tears the context down
+                logger.debug("play_test: submit evaluate interrupted", exc_info=True)
+            try:
+                await page.wait_for_load_state("load", timeout=FORM_SETTLE_MS)
+            except Exception:  # noqa: BLE001
+                pass
+            await page.wait_for_timeout(FORM_SETTLE_MS)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+                pending.clear()
+            try:
+                state = await page.evaluate(_FORM_STATE_JS)
+            except Exception:  # noqa: BLE001
+                state = None
+            armed[0] = False
+        new_errors = result.page_errors[errors_before:]
+        result.forms.append(
+            judge_form(info, state, list(sent), url, new_errors, dialogs=list(dialogs))
+        )
+
+
 def _describe(step: dict) -> str:
     return clean_text(", ".join(f"{k}={v!r}" for k, v in step.items()), 120)
 
@@ -466,8 +913,11 @@ async def _play(
     steps: list[dict],
     result: PlayResult,
     deadline: float,
+    exercise_forms: bool = False,
 ) -> None:
-    context = await browser.new_context(viewport=dict(viewport), has_touch=mobile, is_mobile=mobile)
+    context = await browser.new_context(
+        viewport=dict(viewport), has_touch=mobile, is_mobile=mobile, **CONTEXT_OPTIONS
+    )
     try:
         await context.add_init_script(RAF_COUNTER_JS)
         page = await context.new_page()
@@ -511,6 +961,8 @@ async def _play(
             if isinstance(frames, dict) and frames.get("ms"):
                 result.frames = int(frames.get("frames") or 0)
                 result.fps = round(result.frames / (float(frames["ms"]) / 1000), 1)
+        if exercise_forms and not result.page_closed:
+            await exercise_page_forms(page, url, result, deadline)
     finally:
         try:
             await asyncio.wait_for(context.close(), 5)
@@ -528,10 +980,13 @@ async def run_play_test(
     headers: dict[str, str],
     opener: Callable[[str, dict[str, str]], Any] | None = None,
     budget_s: float = RUN_BUDGET_S,
+    exercise_forms: bool = False,
 ) -> PlayResult:
-    """Play ``steps`` on ``url`` in the remote browser at ``ws_url``. Raises
-    ``PlayTestUnavailable`` when the browser cannot be reached; otherwise returns
-    whatever was observed, partial when the budget ran out."""
+    """Play ``steps`` on ``url`` in the remote browser at ``ws_url``, then, with
+    ``exercise_forms``, submit each form on the page with test data
+    (:func:`exercise_page_forms`). Raises ``PlayTestUnavailable`` when the browser
+    cannot be reached; otherwise returns whatever was observed, partial when the
+    budget ran out."""
     started = time.monotonic()
     deadline = started + budget_s
     result = PlayResult(url=url)
@@ -539,7 +994,7 @@ async def run_play_test(
     try:
         async with asyncio.timeout(budget_s):
             async with open_browser(ws_url, headers) as browser:
-                await _play(browser, url, viewport, mobile, steps, result, deadline)
+                await _play(browser, url, viewport, mobile, steps, result, deadline, exercise_forms)
     except TimeoutError:
         result.timed_out = True
     result.elapsed_s = round(time.monotonic() - started, 1)
@@ -547,6 +1002,8 @@ async def run_play_test(
 
 
 __all__ = [
+    "FormOutcome",
+    "MAX_FORMS",
     "MAX_SCREENSHOTS",
     "MAX_STEPS",
     "KEEP_ALIVE_MS",
@@ -556,6 +1013,8 @@ __all__ = [
     "Shot",
     "blank_canvas",
     "clean_text",
+    "exercise_page_forms",
+    "judge_form",
     "open_cdp_browser",
     "run_play_test",
     "to_jpeg",

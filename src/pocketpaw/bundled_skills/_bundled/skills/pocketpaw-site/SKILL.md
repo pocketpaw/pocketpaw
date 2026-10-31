@@ -11,7 +11,7 @@ description: |
 # Build a site
 
 Every tool below is on `mcp__pocketpaw_sites_manager__`. A site is a repo of
-files you edit: no rippleSpec, pocket specialist or `create_*_site` tool.
+files you edit, never a rippleSpec.
 
 ## Pick the template
 
@@ -22,9 +22,9 @@ Call `list_site_templates` and match `when_to_use`.
   3D/WebGL or canvas, simulation, editor, tool, dashboard, client routing or
   real state); it needs npm packages (three, @react-three/fiber, charts,
   physics); it needs server logic, accounts or a database (data others see
-  later, e.g. bookings; never localStorage); or the user
-  named the framework. The named framework wins; for a client-heavy app with
-  no server needs, prefer `vite-react-hono`.
+  later, e.g. bookings; never localStorage); or the user named the framework.
+  The named framework wins; for a client-heavy app with no server needs,
+  prefer `vite-react-hono`.
 - For something interactive, when unsure between `static` and a framework,
   pick the framework.
 - State the template you chose and a one-line reason in your reply before
@@ -41,7 +41,7 @@ milestone, back to back.
    and the repo's AGENTS.md. Never call it again for a change: that
    makes a second site.
 2. Follow AGENTS.md over your habits: where pages, data, auth and tokens go,
-   which files are generated. Re-read it after a recipe adds a section.
+   which files are generated; re-read it after a recipe.
 3. Recipes (framework templates): `list_site_recipes` (pass `template`), then
    `apply_site_recipe` for each one the app needs, `requires` first. On a
    conflict nothing was written: fix the files it names and apply again. Do its
@@ -53,16 +53,18 @@ milestone, back to back.
    starter greys.
 6. Files: `list_site_files`, `read_site_files` before you change one,
    `patch_site_file` with exact-once `{old, new}` blocks, `write_site_files` for
-   new or rewritten files, `delete_site_files`. Paths are from the repo root.
-7. `run_site_build` (instant on `static`); on `failed` read the log tail (or
-   `get_site_build_log`), fix, rebuild: three rounds, then say what fails.
+   new or rewritten files, `delete_site_files`.
+7. `run_site_build`; on `failed` read the log tail (or `get_site_build_log`),
+   fix, rebuild: three rounds, then say what fails.
 8. After EVERY `built`, look: `preview_site`, then `device: mobile`; `path`
    for other routes, `wait_ms` for 3D or animation. Fix, look again. Never
    describe what you have not seen; on an error say it was not visually
-   checked. `verify_site` once at the end; ready only on `passed`. On
-   `preview_mode: static`, say server routes run after publish.
+   checked. At the end: `verify_site`, and `play_test_site` with
+   `exercise_forms: true` on each page with a form; ready only when both pass.
+   On `preview_mode: static`, say server routes run after publish.
 9. Everything saves to the DRAFT. Call `publish` only when the user asks; it
-   deploys the last build, so build first.
+   deploys the last build and refuses placeholders, made-up numbers and broken
+   forms.
 
 ## Integrations
 

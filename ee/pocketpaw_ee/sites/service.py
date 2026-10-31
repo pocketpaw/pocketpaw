@@ -2616,6 +2616,8 @@ async def publish(
     preview: bool = False,
     confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
+    # The publish gate found no stored build to read: check the build made here.
+    gate_built_output: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -2855,6 +2857,7 @@ async def publish(
         workers_deploy=_workers_deploy,
         confirm_destructive_migrations=confirm_destructive_migrations,
         confirm_do_data_loss=confirm_do_data_loss,
+        gate_built_output=gate_built_output,
     )
 
 
@@ -3052,6 +3055,9 @@ async def _deploy_site_doc(
     # growing a second copy of the deploy tail. One deploy path, two places the build
     # can have happened.
     prebuilt_project_dir: str | None = None,
+    # ``publish_gate.check_built_output`` runs on the inline build before anything
+    # deploys (the gate had no stored build of this content to read).
+    gate_built_output: bool = False,
     # A project publish may run migrations that delete data the site holds only when
     # the owner confirmed it (``project_d1``). Ignored by every other engine.
     confirm_destructive_migrations: bool | list[str] = False,
@@ -3154,6 +3160,7 @@ async def _deploy_site_doc(
             pattern=pattern,
             builder_origin=builder_origin,
             keeps_client_bundle=keeps_client_bundle,
+            gate_built_output=gate_built_output,
         )
 
     gen = generator or GeneratorClient()
@@ -3198,6 +3205,15 @@ async def _deploy_site_doc(
             # rollback in edit_svelte_component are unchanged — a broken edit never
             # reaches the live deploy.
             smoke=True,
+        )
+
+    # The publish gate had no stored build of this content: check the one just made,
+    # before anything below touches or deploys it.
+    if gate_built_output:
+        from pocketpaw_ee.sites import publish_gate
+
+        await asyncio.to_thread(
+            publish_gate.check_built_output, build.project_dir, engine, pocket_id=pocket_id
         )
 
     # Grow the concierge onto the built pages BEFORE they deploy, so the artifact
@@ -5411,8 +5427,13 @@ async def _enqueue_static_build(
     pattern: str | None,
     builder_origin: str | None,
     keeps_client_bundle: bool,
+    gate_built_output: bool = False,
 ) -> _SiteDoc:
     """Enqueue a static site's build and return immediately (SL-3).
+
+    ``gate_built_output`` rides the job's ``deploy_inputs`` to the worker, whose deploy
+    (``deploy_prebuilt_site``) then runs the publish gate on the built tree before
+    anything goes live; a refusal settles the row ``deploy_failed:publish_blocked``.
 
     The async half of ``_deploy_site_doc``. It ensures the ONE canonical Site doc for
     ``(workspace, pocket_id)`` exists, stamps the build lifecycle onto it, and hands the
@@ -5500,6 +5521,8 @@ async def _enqueue_static_build(
         "builder_origin": builder_origin,
         **turnstile_kwargs,
     }
+    if gate_built_output:
+        deploy_inputs["gate_built_output"] = True
 
     # An enqueue failure PROPAGATES. The helper rolls the row to a terminal status
     # first, so the site stays republishable, and the raise becomes the 5xx the user
@@ -5850,8 +5873,22 @@ async def site_build_status(*, workspace_id: str, pocket_id: str) -> dict[str, A
         "site_id": str(doc.id) if doc is not None else None,
         "name": doc.name if doc is not None else "",
         "published": doc is not None,
+        # The async lane's publish gate refused the build (owner-worded findings, the
+        # same ``details`` a sync 409 carries); None otherwise.
+        "publish_blocked": _publish_blocked_details(doc, pocket_id),
+        # A saved rename waiting for the next publish: the live ``url`` changes to it
+        # then, and the old address stops working. The agent quotes ``url`` until then.
+        "slug_pending": getattr(doc, "slug_pending", None) if doc is not None else None,
         **state,
     }
+
+
+def _publish_blocked_details(doc: _SiteDoc | None, pocket_id: str) -> dict[str, Any] | None:
+    if doc is None or getattr(doc, "build_reason", None) != "deploy_failed:publish_blocked":
+        return None
+    from pocketpaw_ee.sites import publish_gate
+
+    return publish_gate.read_blocked(pocket_id)
 
 
 async def canonical_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
@@ -8054,6 +8091,12 @@ async def publish_pocket(
     # Owner confirmed a project migration that deletes data (``project_d1``).
     confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
+    # Owner chose to go live despite placeholders / made-up contacts / broken forms
+    # (``publish_gate``); audited.
+    confirm_placeholders: bool = False,
+    # A republish the platform makes (plan sale, payment restamp, AI-visibility fix, an
+    # approved plan request): exempt from the gate only for content that last passed it.
+    machine_republish: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -8061,6 +8104,15 @@ async def publish_pocket(
 ) -> _SiteDoc:
     """Publish a pocket as a site by id — the shared path for the REST router
     and the in-process MCP tool.
+
+    PUBLISH GATE: a LIVE publish first runs ``publish_gate.gate_publish`` over what goes
+    live (the stored build of the current content, or the build made here when there
+    is none) and raises ``PublishBlocked`` (409 ``sites.publish_blocked``, owner-worded
+    findings in ``details``) while it still shows placeholder copy, a made-up phone
+    number, or a form that saves nothing or failed its test submit.
+    ``confirm_placeholders=True`` (the owner) publishes anyway and is audited;
+    ``machine_republish=True`` is exempt only for content that last passed. Previews
+    skip it.
 
     BC-9 (per-site annual plan — the Webflow model): a published site carries its
     OWN recurring annual plan on a tier. ``site_plan_key`` selects the tier from
@@ -8126,6 +8178,18 @@ async def publish_pocket(
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     pocket = await pockets_service.get(pocket_id, user_id)
+    gate_built_output = False
+    if not preview:
+        from pocketpaw_ee.sites import publish_gate
+
+        gate_built_output = await publish_gate.gate_publish(
+            pocket,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            confirmed=confirm_placeholders,
+            machine_republish=machine_republish,
+        )
     ripple_spec = pocket.get("rippleSpec") or {}
     theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
     # Paw Sites "Svelte track" — the pocket carries which generation engine it
@@ -8668,6 +8732,7 @@ async def publish_pocket(
         preview=False,
         confirm_destructive_migrations=confirm_destructive_migrations,
         confirm_do_data_loss=confirm_do_data_loss,
+        gate_built_output=gate_built_output,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
@@ -8794,6 +8859,8 @@ async def sell_site_plan(
             pocket_id=doc.pocket_id,
             site_plan_key=tier_key,
             purchase_authorized=True,
+            # A plan sale republishes the site's content; exempt only if it was vetted.
+            machine_republish=True,
         )
         completed = True
     finally:
@@ -9225,7 +9292,13 @@ async def redeploy_site(site_id: str) -> None:
     doc = await _SiteDoc.find_one({"_id": ObjectId(site_id)})
     if doc is None or not doc.pocket_id:
         return
-    await publish_pocket(workspace_id=doc.workspace, user_id=doc.owner, pocket_id=doc.pocket_id)
+    await publish_pocket(
+        workspace_id=doc.workspace,
+        user_id=doc.owner,
+        pocket_id=doc.pocket_id,
+        # A restamp after a payment; exempt only for content that was vetted.
+        machine_republish=True,
+    )
 
 
 async def _apply_site_plan(
@@ -13198,10 +13271,21 @@ async def request_publish_pocket(
     )
     blob["destructive_migrations"] = destructive
     blob["destructive_check"] = destructive_check
+    # What the publish gate would refuse, worded for the owner, so the card says it
+    # before anyone approves. The approve checks again (the draft may change); only an
+    # individual approve with ``confirm_placeholders`` publishes past it.
+    from pocketpaw_ee.sites import publish_gate
+
+    findings = await publish_gate.pocket_findings(pocket_id=pocket_id, user_id=user_id)
+    blob["publish_findings"] = findings
     description = (
         "Take the current draft of this site live. Approving merges the "
         "reviewed version and deploys it."
     )
+    if findings:
+        description += " NOT READY YET: " + " ".join(f["message"] for f in findings[:10])
+        if len(findings) > 10:
+            description += f" (and {len(findings) - 10} more)"
     if destructive:
         lost = ", ".join(sorted({d["table"] for d in destructive}))
         description += (
@@ -13216,11 +13300,16 @@ async def request_publish_pocket(
     store = get_instinct_store(workspace_id=workspace_id or None)
     action = await store.propose(
         pocket_id=pocket_id,
-        title="Publish site changes" + (" (deletes data)" if destructive else ""),
+        title="Publish site changes"
+        + (" (deletes data)" if destructive else "")
+        + (" (needs fixes)" if findings else ""),
         description=description,
         recommendation=(
             "Check the data the migrations delete, then approve this card on its own."
             if destructive
+            else "Fix what the card lists and ask again, or choose Publish anyway to take "
+            "it live as it is."
+            if findings
             else "Review the draft, then approve to publish."
         ),
         trigger=ActionTrigger(

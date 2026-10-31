@@ -2,13 +2,18 @@
 # MCP server: the agent PLAYS its own template-built draft (keys, clicks, mouse
 # moves, waits, screenshots) in Cloudflare's remote browser and reads back what the
 # page did: a step log, uncaught errors, console errors, failed requests, a rough
-# frame rate and screenshots with a blank-canvas flag. The browser work lives in
+# frame rate and screenshots with a blank-canvas flag. ``exercise_forms`` also submits
+# every form on the page with fake data; failures are recorded against the draft's
+# content (``verify.record_form_results``, SC-FORM-01), where verify_site shows them and
+# the publish gate refuses to go live on them. The browser work lives in
 # ``sites/play_test.py``; this module is the gate in front of it.
 #
 # Invariants a reader must not break:
-#   * the page is ONLY the pocket's own draft ``preview_url`` (resolved by
-#     ``sites_create._project_draft_url``, the same as ``preview_site``) plus a
-#     ``path`` validated by ``_preview_path``. No argument can name a host;
+#   * the page is ONLY the pocket's own draft ``preview_url`` (the native artifact
+#     through ``sites_create._project_preview_target``, the same as ``preview_site``)
+#     plus a ``path`` validated by ``_preview_path``. No argument can name a host;
+#   * forms are exercised only on a ``full`` draft: never on the live site shown for
+#     ``published`` content (real data), nor a ``static`` draft without server routes;
 #   * steps are validated before anything is connected or counted;
 #   * identity, ``record_tool_call`` and the sites plan gate run first, like every
 #     sites tool, and the result carries the previous edit's verdict
@@ -38,7 +43,7 @@ from .sites_create import (
     _identity,
     _join_preview_url,
     _preview_path,
-    _project_draft_url,
+    _project_preview_target,
     _require_sites_plan_or_error,
     _with_previous_verification,
 )
@@ -59,6 +64,97 @@ _UNAVAILABLE = (
     "look at the draft, and tell the user gameplay was not play-tested. This does not "
     "mean the site is broken."
 )
+
+
+#: Forms are exercised ONLY on a draft of this ``preview_mode`` (the draft is the
+#: whole site, its own server included). Anything else, including a mode added later,
+#: is refused, with the reason below or :data:`_FORMS_REFUSED_DEFAULT`.
+_FORMS_MODE = "full"
+_FORMS_REFUSED_DEFAULT = (
+    "this draft cannot run the whole site here, so its forms were not tried end to end. "
+    "verify_site still checks every form for a real handler (SC-LINK-04); tell the owner "
+    "the forms were checked but not tried."
+)
+#: Why forms are not exercised on a draft of this ``preview_mode``.
+_FORMS_REFUSED = {
+    "published": (
+        "the builder is showing the LIVE site (there is no draft of this content), and "
+        "test entries would land in the owner's real data. Make an edit to get a draft, "
+        "then exercise the forms."
+    ),
+    "static": (
+        "this draft serves its pages without the site's server routes, so a submit "
+        "cannot reach the code that saves it here. verify_site still checks every form "
+        "for a real handler (SC-LINK-04); tell the owner the forms were checked but not "
+        "tried end to end."
+    ),
+}
+
+
+def _norm_path(path: str) -> str:
+    """One key per page: ``/``, ``/index.html`` and ``""`` are ``/``; ``/join/`` and
+    ``/join/index.html`` are ``/join``."""
+    clean = (path or "/").split("?", 1)[0].split("#", 1)[0].strip("/")
+    if clean == "index.html" or clean.endswith("/index.html"):
+        clean = clean[: -len("index.html")].rstrip("/")
+    return "/" + clean
+
+
+def _page_for(path: str) -> str:
+    """The served page a draft path names (``/`` → ``index.html``)."""
+    clean = _norm_path(path).strip("/")
+    return f"{clean}/index.html" if clean else "index.html"
+
+
+def _record_forms(pocket: dict, pocket_id: str, path: str, result: Any) -> None:
+    """Store this path's failed forms against the draft's content, where verify_site
+    and the publish gate read them (SC-FORM-01); a clean run clears the path."""
+    from pocketpaw_ee.sites import verify
+    from pocketpaw_ee.sites.publish_gate import FORM_RULE
+
+    page = _page_for(path)
+    entries = [
+        {
+            "id": FORM_RULE,
+            "page": page,
+            "detail": f"form '{f.name}' failed its test submit: {f.outcome} ({f.detail})",
+            "level": "error",
+            "items": [f.name],
+            "outcome": f.outcome,
+        }
+        for f in result.forms
+        if f.status == "failed"
+    ]
+    if not entries and not result.forms:
+        return
+    verify.record_form_results(
+        pocket_id, verify.publish_content_hash(pocket), _norm_path(path), entries
+    )
+
+
+def _forms_summary(result: Any) -> str:
+    out = ["Form test (each form submitted once with test data):"]
+    if result.forms_note:
+        out.append(f"  note: {result.forms_note}")
+    for f in result.forms:
+        out.append(f"  - {f.name}: {f.status.upper()}: {f.outcome}. {f.detail}".rstrip())
+    failed = [f for f in result.forms if f.status == "failed"]
+    if failed:
+        out.append(
+            "A FAILED form blocks publishing until it works. Make it POST to a real handler "
+            "that saves the entry and shows a thank-you, then run play_test_site with "
+            "exercise_forms again. Do not tell the owner the site is ready before it passes."
+        )
+    elif result.forms and all(f.status == "ok" for f in result.forms):
+        out.append("Every form saved its test entry and showed a confirmation.")
+    out.append(
+        "Test entries went to this draft (its own database, cleared when the site is "
+        "published). The browser blocked off-site requests while testing; the draft's own "
+        "server code may still call outside services (an email provider, a webhook), so "
+        "check what it calls before you say no one was contacted. UNCHECKED forms do not "
+        "block publishing; say plainly they were not confirmed."
+    )
+    return "\n".join(out)
 
 
 def _semaphore() -> asyncio.Semaphore:
@@ -190,6 +286,7 @@ async def _play_test_site_handler(args: dict) -> dict:
     steps, bad = play_test.validate_steps(args.get("steps"))
     if bad:
         return _error_response(bad + " Nothing was played.")
+    exercise_forms = args.get("exercise_forms") is True
 
     if (gate := await _require_sites_plan_or_error(workspace_id, tool=_TOOL)) is not None:
         return gate
@@ -214,15 +311,24 @@ async def _play_test_site_handler(args: dict) -> dict:
             "this site has none. Use preview_site, and tell the user gameplay was not "
             "play-tested. This does not mean the site is broken."
         )
+    from pocketpaw_ee.sites import service as sites_service
+
     try:
-        url, reason = await _project_draft_url(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, tool=_TOOL
+        artifact = await sites_service.get_native_artifact(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
         )
+        url, reason = _project_preview_target(artifact, _TOOL)
     except Exception as exc:  # noqa: BLE001
         logger.warning("sites.play_test_site: draft lookup failed", exc_info=True)
         return _error_response(f"could not find the draft's address: {exc}")
     if not url:
         return _error_response(reason)
+    forms_refused = ""
+    if exercise_forms:
+        mode = artifact.get("preview_mode")
+        if mode != _FORMS_MODE:
+            forms_refused = _FORMS_REFUSED.get(mode or "", _FORMS_REFUSED_DEFAULT)
+        exercise_forms = mode == _FORMS_MODE
 
     try:
         from pocketpaw_ee.sites.service import _cf_client
@@ -248,6 +354,7 @@ async def _play_test_site_handler(args: dict) -> dict:
             steps=steps,
             ws_url=ws_url,
             headers=headers,
+            exercise_forms=exercise_forms,
         )
     except play_test.PlayTestUnavailable as exc:
         logger.warning("sites.play_test_site: remote browser unavailable: %s", exc)
@@ -271,6 +378,11 @@ async def _play_test_site_handler(args: dict) -> dict:
         result.elapsed_s,
     )
     summary = _summary(result, pocket_id=pocket_id, path=path, device=device)
+    if exercise_forms:
+        _record_forms(pocket, pocket_id, path, result)
+        summary += "\n" + _forms_summary(result)
+    elif forms_refused:
+        summary += "\nForms were NOT exercised: " + forms_refused
     return {"content": _content(result, summary)}
 
 
@@ -320,6 +432,16 @@ def make_play_test_site_tool(tool: Any) -> Any:
                     "maxItems": play_test.MAX_STEPS,
                     "items": {"type": "object"},
                     "description": "Actions to play in order. " + step_help,
+                },
+                "exercise_forms": {
+                    "type": "boolean",
+                    "description": (
+                        "After the steps, submit every form on this page (up to 4) with "
+                        "obviously fake data and report whether each one saved and "
+                        "showed a confirmation. Run it on every page with a form before "
+                        "telling the owner the site is ready; a failed form blocks "
+                        "publishing. Entries go to the draft; off-site requests are blocked."
+                    ),
                 },
             },
             "required": ["pocket_id"],

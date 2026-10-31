@@ -1037,6 +1037,101 @@ read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site
 and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
 Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
 
+## Sites — publish gate
+
+### `POST /sites/publish`: `confirm_placeholders`
+
+A live publish is refused while the draft still shows something the owner never
+gave or that does not work. The check reads what goes live: the html or no-build
+files, or the stored build of the current content (a project publish deploys exactly
+that build and returns `409 sites.project_build_required` without it). A svelte or
+react draft with no stored build is checked on the build the publish makes, before
+anything deploys. On the async build lane (react, static svelte) the publish returns
+at once and the check runs in the worker: a refusal deploys nothing, the site's
+`build_status` becomes `failed` with `build_reason` `deploy_failed:publish_blocked`,
+and the agent's `get_site_build_status` carries `publish_blocked`, the same `details`
+object as the 409 (no REST route returns those details yet). Only a checker crash lets a publish through (logged as
+`metric=sites_publish_gate_fail_open`). Previews are never gated.
+
+`confirm_placeholders: boolean` (default `false`) publishes past the findings: the
+owner saw the list and chose to go live anyway. The override is written to the
+workspace audit log (`sites.publish_gate_overridden`, target the pocket, metadata
+`{count, findings: [{rule, reason, page, text}]}`). Only the owner's publish dialog
+sends it; the agent's publish tool cannot (it files a Tray card instead, see below).
+
+Platform republishes (a plan sale, a payment restamp, an AI-visibility fix, an
+approved plan request) skip the check only when the content is exactly what last
+passed it or was confirmed; otherwise they are refused the same way.
+
+Refusal: `409`, code `sites.publish_blocked`.
+
+```json
+{
+  "error": {
+    "code": "sites.publish_blocked",
+    "message": "Your site isn't ready to go live yet. Your site still shows \"[Address]\" on the home page. (and 2 more things to fix) Fix these, or publish anyway if you meant to.",
+    "details": {
+      "findings": [
+        {
+          "rule": "SC-HONEST-07",
+          "reason": "placeholder",
+          "page": "index.html",
+          "page_label": "the home page",
+          "text": "[Address]",
+          "message": "Your site still shows \"[Address]\" on the home page."
+        }
+      ],
+      "more": 0,
+      "override": "confirm_placeholders"
+    }
+  }
+}
+```
+
+- `findings` holds at most 20 entries, one per offending text; `more` counts the rest.
+- `message` is written for the owner and safe to show as is. `page_label` is "the home
+  page" or `the "about" page`; it gains "and N other pages" inside `message` when the
+  same text repeats.
+- `reason` values:
+
+| `reason` | `rule` | What it means |
+|---|---|---|
+| `placeholder` | `SC-HONEST-07` | Placeholder copy: `[Address]`, `[Phone]`, `[Your …]`, lorem ipsum, an example.com address, "Your Name" outside a label, `XXXXX XXXXX`. |
+| `invented_contact` | `SC-HONEST-03` | A phone number that looks made up (sequential or repeated digits such as 9876543210, a 555 number, 07700 900xxx). It may ring a stranger. |
+| `form_saves_nothing` | `SC-LINK-04` | A form that submits back to its own page with nothing to receive it, so what visitors type is lost. |
+| `form_failed` | `SC-FORM-01` | The agent submitted test data to the form on the draft (`play_test_site` with `exercise_forms`) and it failed. |
+
+Send the same request again with `"confirm_placeholders": true` to publish anyway.
+
+### Approval path (`request_publish_pocket` → Tray → approve)
+
+When the agent asks to publish, it files a review card instead (an Instinct Action
+with an `_artifact_change` blob). The same gate applies:
+
+- **At request time** the card carries the findings:
+  `parameters._artifact_change.publish_findings` is the same list of finding objects
+  as above (`[]` when clean). When it is not empty, the title ends in
+  `(needs fixes)`, the description lists the owner messages after `NOT READY YET:`,
+  and the recommendation offers "Publish anyway". The approver cannot edit these
+  fields away.
+- **At approve time** the gate runs again on the current draft, BEFORE anything is
+  merged. A plain approve (`POST /instinct/actions/{id}/approve` with no flag) or any
+  bulk approve of a draft with findings publishes nothing: no version is promoted, no
+  deploy runs, the draft stays a draft. The Action ends `failed` with
+  `error` = `sites.publish_blocked: <the refusal message>`, and
+  `parameters._artifact_change.publish_blocked` = the same `details` object as the
+  409 (`findings`, `more`, `override`).
+- **Publish anyway:** `POST /instinct/actions/{id}/approve` with body
+  `{"confirm_placeholders": true}` merges and deploys past the findings. Only the
+  single-Action approve accepts it; bulk approve never does. The override is audited
+  under the approver (`sites.publish_gate_overridden`).
+- When the owner tells the agent to publish anyway, the agent's publish tool files
+  this same card (`approval_required: true`, `action_id`, `publish_findings`) instead
+  of publishing; the owner's "Publish anyway" on it is the only override.
+- A failed Action cannot be approved again. After fixing, the agent files a new
+  request; or the owner uses "Publish anyway" on a card that already shows the
+  findings.
+
 ## Sites — Durable Objects
 
 Project sites may declare SQLite-backed Durable Objects, behind

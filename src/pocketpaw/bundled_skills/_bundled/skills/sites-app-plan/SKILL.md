@@ -194,6 +194,38 @@ instead of scenes, empty / loading / error states instead of game over.
 Charts, tables and figures show the user's data or clear placeholders, never
 invented numbers presented as real.
 
+## 6. Ready means it works
+
+The owner hears "ready" once. Before you say it:
+
+- **Every form saves.** Each form POSTs to a real handler: a server route or
+  action that writes the entry, `data-paw-subscribe` for a mailing list, or a
+  submit script that sends it. Never a bare `<form>` that reloads the page (a
+  GET puts the entry in the address bar and saves nothing). After success the
+  page says so ("Thanks, you're on the list"). Then run `play_test_site` with
+  `exercise_forms: true` on every page with a form and fix each FAILED form
+  until the run is clean. Test entries stay in the draft. If forms cannot be
+  exercised there, say they were checked but not tried end to end.
+- **No invented contact details.** Address, phone, WhatsApp, email and opening
+  hours come from the owner. Ask for them in the plan question. If they are
+  still missing, leave a marked placeholder (`[Address]`) and tell the owner
+  plainly that publishing waits for it. Never make up a number: 9876543210
+  belongs to someone.
+- **Statuses move forward.** An order or booking flow has one direction (New,
+  Packed, Delivered; or Booked, Attended). The primary button is the next
+  state only; never offer "Mark packed" on a delivered order. Going back is a
+  separate, quieter action (Undo, Reopen) if the owner needs it.
+- **The owner's admin page is reachable** from a footer link and named in the
+  final report, with what it shows.
+
+Sharing, when the owner asks: the live address is the link. They can rename it
+in Settings › General › Address › Change; the new name takes over at the next
+publish and the old link stops working then, so tell them to share the new one.
+The Share button copies the link. There is no QR maker for the site link (the
+Discover WhatsApp QR card opens a WhatsApp chat, not the site): never point to
+one or to an outside link shortener. Check the product before you name any
+feature; if it does not exist, say so.
+
 ## Checklist
 
 ```
@@ -204,6 +236,9 @@ invented numbers presented as real.
 [ ] M2 built, previewed, play-tested clean, ticked
 [ ] M3 built, previewed, play-tested clean, ticked
 [ ] M4 built, previewed, play-tested clean, ticked
+[ ] Every form exercised with play_test_site (exercise_forms) and passing
+[ ] No invented address, phone, WhatsApp, email or hours; missing ones listed
+[ ] Status buttons offer only the next state
 [ ] No stop between milestones; short progress lines while building
 [ ] One final report: what was checked and played, and what the user should try
 ```

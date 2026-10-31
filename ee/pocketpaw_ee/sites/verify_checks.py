@@ -2,18 +2,25 @@
 # runs over a site's SERVED files, each reported under its ``sites-check`` rule id
 # (src/pocketpaw/bundled_skills/_bundled/skills/sites-check/SKILL.md).
 #
-# WARN-ONLY. :func:`run_checks` returns ``{"warnings": [{id, page, detail[, pages]}],
-# "omitted", "pages"}`` (or :func:`skipped`) and nothing here can fail a verdict:
-# ``verify._with_checks`` attaches it as ``checks`` after the status is decided. A check
-# that cannot tell says nothing rather than guess. The same defect on several pages is
-# one warning with a ``pages`` count, so a shared footer cannot fill the cap alone.
+# NEVER A VERDICT. :func:`run_checks` returns ``{"warnings": [{id, page, detail[, pages]
+# [, level, items]}], "omitted", "pages"}`` (or :func:`skipped`) and nothing here can
+# fail a verdict: ``verify._with_checks`` attaches it as ``checks`` after the status is
+# decided. Entries with ``level: "error"`` (and ``items``, the exact text) BLOCK A
+# PUBLISH instead (``publish_gate``, read via :func:`blocking`); they sort first so the
+# cap never drops one. A check that cannot tell says nothing rather than guess. The same
+# defect on several pages is one entry with a ``pages`` count.
 #
-# Checked: SC-LINK-01 anchor target (hash routes ``#/`` ``#!`` skipped), SC-LINK-02
-# empty action (not on an anchor wired as a button), SC-LINK-03 internal path,
-# SC-LINK-04 form with no target (only on pages with no script and no handlers),
-# SC-COPY-01 em dash in visible copy (not the title, not aria-hidden), SC-HONEST-07
-# the platform's placeholder tokens, lorem ipsum and example.com addresses,
-# SC-HONEST-03 default people and fake numbers, SC-BUILD-12 title / description /
+# Blocking: SC-LINK-04 a form that submits back to its own page with nothing to receive
+# it (see :func:`_dead_forms` for what counts as handled: conservative on scripted
+# pages), SC-HONEST-07 bracketed placeholder tokens ([Address], [Phone], [Your Name])
+# in body copy (not labels, buttons or inputs), lorem ipsum, an example.com
+# ``mailto:``, SC-HONEST-03 made-up numbers in tel: / WhatsApp links or right after a
+# phone word (all one digit, a run of nine, US 555, 07700 900xxx; :func:`_invented`).
+# Warn: SC-HONEST-07 generic copy ("Your Business", "[Your Guide]", XXXX masks,
+# example.com format hints), SC-LINK-01 anchor target (hash routes ``#/`` ``#!``
+# skipped), SC-LINK-02 empty action (not on an anchor wired as a button), SC-LINK-03
+# internal path, SC-COPY-01 em dash in visible copy (not the title, not aria-hidden),
+# SC-HONEST-03 default people, SC-BUILD-12 title / description /
 # og:title / og:description / favicon / generator (skipped on react, whose index.html
 # the generator owns), SC-A11Y-06 exactly one h1.
 #
@@ -25,12 +32,14 @@
 # regex over tags; regexes run only over extracted text. ``audit.py`` is the regex
 # audit of AUTHORED source with fix prompts; the one definition shared with it is the
 # empty-href set. No supplied-copy exemption: verify never sees the brief. Work is
-# bounded by :data:`MAX_PAGES` and :data:`MAX_TOTAL_BYTES`; pages past either are
-# counted in ``pages_skipped``.
+# bounded by :data:`MAX_PAGES`, :data:`MAX_TOTAL_BYTES` and the cooperative
+# :data:`MAX_CHECK_SECONDS`; pages past any are counted in ``pages_skipped``. Every
+# regex is linear on adversarial text (bounded repeats, anchored starts).
 from __future__ import annotations
 
 import posixpath
 import re
+import time
 from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import Any
@@ -88,20 +97,79 @@ _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 _EM_DASH = "\u2014"
 #: The placeholders the platform tells the agent to write (``_FACTS_RULE``, design-taste,
 #: sites-check), never "any bracketed word": ``[sic]`` and ``[Smith 2020]`` are real.
-_PLACEHOLDER_RE = re.compile(
+#: BLOCKS when read in body copy (labels, buttons and options excluded).
+_BLOCK_PLACEHOLDER_RE = re.compile(
     r"\[NEED:[^\]\n]{0,60}\]"
-    r"|(?i:\[(?:phone|price|prices|client name|role|email|address|hours|name|company"
-    r"|business name|metric to confirm|testimonial|logo)\])"
-    r"|\bYour (?:Studio|Company|Business)\b"
+    r"|(?i:\[(?:phone|phone number|price|prices|client name|role|email|email address"
+    r"|address|hours|opening hours|name|company|business name|metric to confirm"
+    r"|testimonial|logo|city|postcode|zip|zip code|whatsapp|whatsapp number|instagram"
+    r"|website|street|street address|owner name|company name|brand name|brand"
+    r"|your (?:name|phone|phone number|email|email address"
+    r"|address|business name|company|company name|city|whatsapp|whatsapp number))\])"
     r"|(?i:\blorem ipsum\b)"
-    r"|\b(?!johndoe@)[\w.+\-]+@example\.(?:com|org|net)\b"
+)
+#: An example.com address. BLOCKS inside a ``mailto:``; in visible text it is often a
+#: format hint ("you@example.com"), so it only warns there. Bounded local part, and
+#: anchored on what precedes it, so a long dotted run cannot make it quadratic.
+_EXAMPLE_EMAIL_RE = re.compile(
+    r"(?<![\w.+\-])(?!johndoe@)[\w.+\-]{1,64}@example\.(?:com|org|net)\b"
+)
+#: Copy that is often a placeholder and often real ("Grow Your Business", a card mask
+#: "XXXX XXXX", a "[Your Guide]" title): WARN only.
+_WARN_PLACEHOLDER_RE = re.compile(
+    r"(?i:\[your [^\]\n]{1,30}\])"
+    r"|\bYour (?:Studio|Company|Business|Name|Address|City|Email|Phone(?: Number)?)\b"
+    r"|(?<!\w)X{3,5}[\s.\-]X{3,5}(?:[\s.\-]X{2,5})?(?!\w)"
 )
 _PROMPTONYM_RE = re.compile(
     r"\b(?:Sarah Chen|Elena Vasquez|Elara Voss|John Doe|Jane Doe)\b"
     r"|\bjohndoe@example\.com\b"
-    r"|\b555[-.\s]?01\d{2}\b"
-    r"|\(555\)\s?\d{3}[-.\s]?\d{4}"
 )
+#: Words that say the number next to them is a phone number. A run of digits in body
+#: copy is judged only within 40 characters after one of these (a tel: / wa.me link
+#: always is), so order numbers, IPs and counts never read as phones.
+_PHONE_CONTEXT_RE = re.compile(
+    r"phone|call|whats\s?app|\btel\b|mobile|\bmob\b|\bph\b|\bring\b|\btext\b|\bsms\b"
+    r"|contact|reach|hotline|helpline|(?<![a-z])t\.?\s*:|\u260e|\U0001f4de",
+    re.IGNORECASE,
+)
+#: Fictional ranges that are made up wherever they appear, phone word or not: US
+#: 555-01xx and (555) numbers, UK Ofcom drama mobiles 07700 900xxx.
+_STRONG_FAKE_RE = re.compile(
+    r"(?<!\d)555[-.\s]01\d{2}(?!\d)"
+    r"|\(555\)\s?\d{3}[-.\s]?\d{4}(?!\d)"
+    r"|(?<!\d)(?:\+44\s?7700|07700)\s?900\s?\d{3}(?!\d)"
+)
+_IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+#: US fictional formats: (555) 234-5678, 555-234-5678, 555-01xx.
+_US_555_RE = re.compile(r"^\(555\)|^555[-.\s]\d{3}[-.\s]\d{4}$|^555[-.\s]?01\d{2}$")
+#: A run that could be a phone number: digits with spaces, dots, dashes or brackets
+#: between. :func:`_invented` decides whether it is made up.
+_PHONE_RE = re.compile(r"(?<![\w+#(])\+?\(?\d[\d\s().\-]{5,18}\d(?![\w-])")
+#: Text inside these is a field prompt or a control label, never placeholder copy.
+_PROMPT_TAGS = frozenset({"label", "legend", "button", "option", "select"})
+#: Form attributes a script, framework or platform binds submit through.
+_FORM_HOOK_PREFIXES = ("on", "hx-", "x-", "v-", "@", ":", "data-", "wire:", "up-", "netlify")
+#: Field names that collect a visitor's details (the entry a dead form loses).
+_COLLECT_NAME_RE = re.compile(
+    r"e-?mail|phone|mobile|whatsapp|\btel\b|message|comment|enquiry|inquiry|address|name",
+    re.IGNORECASE,
+)
+_COLLECT_TYPES = frozenset({"email", "tel", "password", "textarea", "file"})
+#: Script text that can bind a form's submit without naming the form.
+_SUBMIT_HINT_RE = re.compile(
+    r"submit|formdata|document\.forms|urlsearchparams|location\.search|serialize"
+    r"|fetch\s*\(|xmlhttprequest|axios|\$\.ajax|\$\.post|sendbeacon",
+    re.IGNORECASE,
+)
+#: Wall-clock BACKSTOP for one :func:`run_checks`; pages past it are counted, not read.
+#: Generous on purpose: :data:`MAX_PAGES` and :data:`MAX_TOTAL_BYTES` decide what is
+#: read, so the result does not depend on machine load. Cooperative, so a timed-out
+#: check never leaves a worker thread running.
+MAX_CHECK_SECONDS = 30.0
+#: Script bytes read across a tree when looking for a submit binding; past it, a form
+#: on a scripted page is assumed bound.
+MAX_SCRIPT_BYTES = 4 * 1024 * 1024
 
 
 def _clip(text: str, limit: int = 60) -> str:
@@ -134,7 +202,15 @@ class _PageParser(HTMLParser):
         self.text: list[str] = []
         self.copy: list[str] = []
         self.contact_refs: list[str] = []
+        #: Visible text outside labels, legends, buttons and options (blocking placeholders).
+        self.copy_text: list[str] = []
+        #: Inline executable script bodies, external script srcs, and ``on*`` values.
+        self.scripts: list[str] = []
+        self.script_srcs: list[str] = []
+        self.handler_code: list[str] = []
         self._skip = 0
+        self._prompt_depth = 0
+        self._in_script = False
         self._in_title = False
         self._hidden_tag = ""
         self._hidden_depth = 0
@@ -149,6 +225,8 @@ class _PageParser(HTMLParser):
 
     def _add_text(self, value: str) -> None:
         self.text.append(value)
+        if not self._prompt_depth:
+            self.copy_text.append(value)
         if not self._hidden_depth and not self._in_title:
             self.copy.append(value)
 
@@ -173,7 +251,8 @@ class _PageParser(HTMLParser):
         if tag == "a" and "href" in a:
             label: list[str] = []
             self.anchors.append((a["href"], label, a))
-            if a["href"].strip().lower().startswith(("mailto:", "tel:")):
+            href = a["href"].strip().lower()
+            if href.startswith(("mailto:", "tel:", "sms:")) or _whatsapp_link(href):
                 self.contact_refs.append(a["href"])
             if not closes:
                 self._open_anchors.append(label)
@@ -186,15 +265,30 @@ class _PageParser(HTMLParser):
         if tag == "script":
             if (a.get("type") or "").strip().lower() not in _NON_EXEC_SCRIPT_TYPES:
                 self.has_script = True
-        if any(k.startswith("on") for k in a):
+                if a.get("src", "").strip():
+                    self.script_srcs.append(a["src"].strip())
+                elif not closes:
+                    self._in_script = True
+        handlers = [v for k, v in a.items() if k.startswith("on")]
+        if handlers:
             self.has_handlers = True
         if tag == "form":
-            self._open_form = {"attrs": a, "formaction": False}
+            self._open_form = {"attrs": a, "formaction": False, "fields": [], "handled": False}
             self.forms.append(self._open_form)
             if closes:
                 self._open_form = None
-        elif self._open_form is not None and a.get("formaction"):
-            self._open_form["formaction"] = True
+        elif self._open_form is not None:
+            if a.get("formaction"):
+                self._open_form["formaction"] = True
+            if handlers:
+                self._open_form["handled"] = True
+            if tag in ("input", "textarea", "select"):
+                kind = "textarea" if tag == "textarea" else (a.get("type") or "text").lower()
+                self._open_form["fields"].append((kind, a.get("name", "") or a.get("id", "")))
+        if handlers and (self._open_form is None or tag == "form"):
+            self.handler_code.extend(handlers)
+        if tag in _PROMPT_TAGS and not closes:
+            self._prompt_depth += 1
         if tag == "title" and not closes:
             self.title = []
             self._in_title = True
@@ -217,6 +311,10 @@ class _PageParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if self._hidden_depth and tag == self._hidden_tag:
             self._hidden_depth -= 1
+        if tag in _PROMPT_TAGS and self._prompt_depth:
+            self._prompt_depth -= 1
+        if tag == "script":
+            self._in_script = False
         if tag in _SKIP_TEXT_TAGS and self._skip:
             self._skip -= 1
         elif tag == "a" and self._open_anchors:
@@ -229,6 +327,8 @@ class _PageParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._in_title and self.title is not None:
             self.title.append(data)
+        if self._in_script:
+            self.scripts.append(data)
         if self._skip:
             return
         self._add_text(data)
@@ -302,6 +402,211 @@ def _wired_as_button(attrs: Mapping[str, str]) -> bool:
     return any(k.startswith("on") or (k.startswith("data-") and "toggle" in k) for k in attrs)
 
 
+def _whatsapp_link(href: str) -> bool:
+    return "wa.me/" in href or ("whatsapp.com/" in href and "phone=" in href)
+
+
+def _national(digits: str) -> str:
+    """The national part of a number written with a +91 / +44 / +1 prefix."""
+    if len(digits) == 12 and digits.startswith(("91", "44")):
+        return digits[2:] if digits.startswith("91") else "0" + digits[2:]
+    if len(digits) == 11 and digits.startswith("1"):
+        return digits[1:]
+    return digits
+
+
+def _longest_run(digits: str) -> int:
+    """The longest run of consecutive digits stepping by one, up or down
+    (``1234567890`` and ``9876543210`` are runs of 10)."""
+    best = up = down = 1
+    for a, b in zip(digits, digits[1:], strict=False):
+        up = up + 1 if (int(b) - int(a)) % 10 == 1 else 1
+        down = down + 1 if (int(a) - int(b)) % 10 == 1 else 1
+        best = max(best, up, down)
+    return best
+
+
+def _invented(raw: str) -> bool:
+    """A phone number nobody was given: every digit the same, a run of nine or more
+    consecutive digits (9876543210, 1234567890), a US 555 number written the US way
+    or with +1, or the UK drama mobile range (07700 900xxx). IPs and digits spaced
+    one by one are not phone numbers."""
+    raw = raw.strip()
+    if _IP_RE.match(raw):
+        return False
+    groups = [g for g in re.split(r"[\s().\-]+", raw.lstrip("+")) if g]
+    if groups and max(len(g) for g in groups) == 1:
+        return False
+    digits = re.sub(r"\D", "", raw)
+    if not 7 <= len(digits) <= 15:
+        return False
+    national = _national(digits)
+    if len(national) >= 9 and len(set(national)) == 1:
+        return True
+    if len(digits) >= 9 and _longest_run(digits) >= 9:
+        return True
+    if _US_555_RE.match(raw) or (len(digits) == 11 and digits.startswith("1555")):
+        return True
+    return len(national) == 11 and national.startswith("07700900")
+
+
+def _phone_hits(chunks: list[str], *, links: list[str]) -> list[str]:
+    """Made-up numbers in ``links`` (tel: / sms: / WhatsApp hrefs, always judged), in body
+    text right after a phone word (the 40 characters before the number, reaching back
+    into the previous text chunk for a dt/dd or a label above it), and the fictional
+    ranges of :data:`_STRONG_FAKE_RE` anywhere in body text."""
+    seen: dict[str, None] = {}
+    previous = ""
+    for chunk in chunks:
+        for m in _STRONG_FAKE_RE.finditer(chunk):
+            seen.setdefault(_clip(m.group(0).strip(), 40), None)
+        for m in _PHONE_RE.finditer(chunk):
+            lead = (previous[-40:] + " " + chunk[: m.start()])[-40:]
+            if _PHONE_CONTEXT_RE.search(lead) and _invented(m.group(0)):
+                seen.setdefault(_clip(m.group(0).strip(), 40), None)
+        if chunk.strip():
+            previous = chunk
+    for link in links:
+        for m in _PHONE_RE.finditer(link):
+            if _invented(m.group(0)):
+                seen.setdefault(_clip(m.group(0).strip(), 40), None)
+    return list(seen)
+
+
+def _self_action(page: str, action: str, tree: Mapping[str, Any]) -> bool:
+    """The form submits back to the page it is on: no action, ``#``, a bare query, or
+    a path that serves this same page."""
+    if not action or action.startswith(("#", "?")):
+        return True
+    norm = _target(page, action)
+    return norm is not None and _resolve(tree, norm) == page
+
+
+def _collects(form: Mapping[str, Any]) -> bool:
+    """The form asks for a visitor's details (email, phone, a message, a name)."""
+    for kind, name in form["fields"]:
+        if kind in ("hidden", "submit", "button", "reset", "image", "search"):
+            continue
+        if kind in _COLLECT_TYPES or _COLLECT_NAME_RE.search(name):
+            return True
+    return False
+
+
+def _is_search(form: Mapping[str, Any]) -> bool:
+    if form["attrs"].get("role", "").lower() == "search":
+        return True
+    return any(kind == "search" for kind, _name in form["fields"])
+
+
+class _ScriptCorpus:
+    """Every script file in the tree, read once and only when a page needs it."""
+
+    def __init__(self, tree: Mapping[str, Any]) -> None:
+        self._tree = tree
+        self._text: str | None = None
+        self._over = False
+        self._hinted: bool | None = None
+
+    def text(self) -> str | None:
+        """All the tree's own JS (``None`` when it is over :data:`MAX_SCRIPT_BYTES`)."""
+        if self._text is None and not self._over:
+            parts: list[str] = []
+            size = 0
+            for name, data in self._tree.items():
+                if not name.lower().endswith((".js", ".mjs", ".cjs")):
+                    continue
+                if name.split("/", 1)[0] in _PLATFORM_SEGMENTS or name == "paw.js":
+                    continue
+                body = _decode(data)
+                size += len(body)
+                if size > MAX_SCRIPT_BYTES:
+                    self._over = True
+                    return None
+                parts.append(body)
+            self._text = "\n".join(parts)
+        return None if self._over else self._text
+
+    def hinted(self) -> bool:
+        """Whether the tree's JS can bind a submit without naming the form. Searched
+        once per run, however many pages share the tree."""
+        if self._hinted is None:
+            text = self.text()
+            self._hinted = text is None or bool(_SUBMIT_HINT_RE.search(text))
+        return self._hinted
+
+
+def _page_js(page: str, parsed: _PageParser, corpus: _ScriptCorpus) -> tuple[str, bool] | None:
+    """The script text that runs on ``page``, or ``None`` when some of it cannot be
+    read (a script from another host, a server path, an over-budget tree): then any
+    form there may be bound and none is judged. Otherwise ``(own, needs_tree)``: the
+    page's inline script and handler text, and whether the tree's JS runs there too.
+    The platform's ``/_paw/paw.js`` only binds ``data-paw-*`` forms, which count as
+    handled on their own, so it is skipped."""
+    parts = [*parsed.scripts, *parsed.handler_code]
+    needs_tree = any("import" in s for s in parsed.scripts)
+    for src in parsed.script_srcs:
+        path = src.split("?", 1)[0].split("#", 1)[0]
+        if "/_paw/" in f"/{path.lstrip('/')}" or path.rsplit("/", 1)[-1] == "paw.js":
+            continue
+        if _target(page, src) is None:
+            return None
+        needs_tree = True
+    if needs_tree and corpus.text() is None:
+        return None
+    return "\n".join(parts), needs_tree
+
+
+def _dead_forms(
+    page: str,
+    parsed: _PageParser,
+    tree: Mapping[str, Any],
+    corpus: _ScriptCorpus,
+    *,
+    server_routes: bool,
+) -> list[tuple[str, str]]:
+    """``(form name, method)`` for each form whose submit goes nowhere useful: back to
+    this page with nothing to receive it. Handled, and never reported: a real action
+    or ``formaction``, ``method=dialog``, an ``on*`` / ``data-*`` / framework hook on the
+    form or a handler inside it, a POST to the page on a site with a Worker, and a GET
+    on such a site unless it collects details. On a page with script, only a form that
+    collects details is judged, and only when no script can bind it (no ``submit`` /
+    ``FormData`` / ``document.forms`` text and no mention of its id or name)."""
+    scripted = parsed.has_script or bool(parsed.handler_code)
+    page_js: str | None = ""
+    hinted = False
+    if scripted:
+        found = _page_js(page, parsed, corpus)
+        if found is None:
+            page_js = None
+        else:
+            own, needs_tree = found
+            hinted = bool(_SUBMIT_HINT_RE.search(own)) or (needs_tree and corpus.hinted())
+            page_js = own + ("\n" + (corpus.text() or "") if needs_tree else "")
+    out: list[tuple[str, str]] = []
+    for form in parsed.forms:
+        attrs = form["attrs"]
+        method = attrs.get("method", "").strip().lower() or "get"
+        if method == "dialog" or form["formaction"] or form["handled"]:
+            continue
+        if any(k.startswith(_FORM_HOOK_PREFIXES) for k in attrs):
+            continue
+        if not _self_action(page, attrs.get("action", "").strip(), tree):
+            continue
+        collects = _collects(form)
+        if server_routes and (method == "post" or not collects):
+            continue
+        if scripted:
+            if page_js is None or not collects or _is_search(form):
+                continue
+            if hinted:
+                continue
+            if any(attrs.get(k) and attrs[k] in page_js for k in ("id", "name")):
+                continue
+        name = attrs.get("id") or attrs.get("name") or attrs.get("aria-label") or "form"
+        out.append((_clip(name, 30), method))
+    return out
+
+
 def _hits(regex: re.Pattern[str], chunks: list[str]) -> list[str]:
     seen: dict[str, None] = {}
     for chunk in chunks:
@@ -339,11 +644,15 @@ def _check_page(
     engine: str,
     server_routes: bool,
     client_routed: bool,
-) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
+    corpus: _ScriptCorpus,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
 
     def warn(rule: str, detail: str) -> None:
         out.append({"id": rule, "page": page, "detail": detail})
+
+    def block(rule: str, detail: str, items: list[str]) -> None:
+        out.append({"id": rule, "page": page, "detail": detail, "level": "error", "items": items})
 
     missing_ids: list[str] = []
     empty: list[str] = []
@@ -390,28 +699,44 @@ def _check_page(
     if broken:
         warn("SC-LINK-03", "not in the build: " + _listed(sorted(set(broken), key=broken.index)))
 
-    # Only a page with no script and no handlers can be judged: either may bind submit.
-    if not parsed.has_script and not parsed.has_handlers:
-        for form in parsed.forms:
-            attrs = form["attrs"]
-            action = attrs.get("action", "").strip()
-            if action not in ("", "#") or form["formaction"]:
-                continue
-            if attrs.get("method", "").lower() == "dialog":
-                continue
-            if any(k.startswith(("hx-", "x-", "v-", "@", "data-paw")) for k in attrs):
-                continue
-            name = attrs.get("id") or attrs.get("name") or attrs.get("aria-label") or "form"
-            warn(
-                "SC-LINK-04",
-                f"<form> '{_clip(name, 30)}' has no action and the page has no script, "
-                "so a submit reloads the page and the entry is lost",
-            )
+    for name, method in _dead_forms(page, parsed, tree, corpus, server_routes=server_routes):
+        lost = (
+            "the entry ends up in the address bar"
+            if method == "get"
+            else "nothing on the site receives the POST"
+        )
+        block(
+            "SC-LINK-04",
+            f"<form> '{name}' submits back to this page ({method.upper()}) and nothing "
+            f"handles it, so {lost} and is lost. POST it to a real handler (a server "
+            "route, a data-paw-* hook or a submit script) and exercise it",
+            [name],
+        )
 
     if people := _hits(_PROMPTONYM_RE, parsed.text + parsed.contact_refs):
         warn("SC-HONEST-03", "default name or fake contact: " + _listed(people))
-    if holes := _hits(_PLACEHOLDER_RE, parsed.text + parsed.contact_refs):
-        warn("SC-HONEST-07", "placeholder left (list it for the owner): " + _listed(holes))
+    if numbers := _phone_hits(parsed.text, links=parsed.contact_refs):
+        block(
+            "SC-HONEST-03",
+            "made-up phone number (it may ring a real stranger; ask the owner for theirs): "
+            + _listed(numbers),
+            numbers,
+        )
+    holes = _hits(_BLOCK_PLACEHOLDER_RE, parsed.copy_text)
+    holes += [h for h in _hits(_EXAMPLE_EMAIL_RE, parsed.contact_refs) if h not in holes]
+    soft = _hits(_BLOCK_PLACEHOLDER_RE, parsed.text) + _hits(
+        _WARN_PLACEHOLDER_RE, parsed.text + parsed.contact_refs
+    )
+    soft += _hits(_EXAMPLE_EMAIL_RE, parsed.text)
+    soft = [h for h in dict.fromkeys(soft) if h not in holes]
+    if soft:
+        warn("SC-HONEST-07", "possible placeholder (check with the owner): " + _listed(soft))
+    if holes:
+        block(
+            "SC-HONEST-07",
+            "placeholder left (ask the owner for the real detail): " + _listed(holes),
+            holes,
+        )
     if dash := _em_dash_detail(parsed.copy):
         warn("SC-COPY-01", dash)
 
@@ -477,9 +802,10 @@ def run_checks(
     pages: dict[str, _PageParser] = {}
     budget = MAX_TOTAL_BYTES
     unread = 0
+    deadline = time.monotonic() + MAX_CHECK_SECONDS
     for name in names:
         text = _decode(tree[name])
-        if len(pages) >= MAX_PAGES or len(text) > budget:
+        if len(pages) >= MAX_PAGES or len(text) > budget or time.monotonic() >= deadline:
             unread += 1
             continue
         budget -= len(text)
@@ -497,7 +823,11 @@ def run_checks(
         and any(p.has_script for p in pages.values())
     )
     warnings: list[dict[str, Any]] = []
+    corpus = _ScriptCorpus(tree)
     for name, parsed in pages.items():
+        if time.monotonic() >= deadline:
+            unread += 1
+            continue
         warnings.extend(
             _check_page(
                 name,
@@ -507,12 +837,14 @@ def run_checks(
                 engine=engine,
                 server_routes=server_routes,
                 client_routed=client_routed,
+                corpus=corpus,
             )
         )
     rank = {rule: i for i, rule in enumerate(_ORDER)}
     warnings = _consolidate(warnings)
-    warnings.sort(key=lambda w: rank.get(w["id"], len(rank)))
-    kept = [{**w, "detail": scrub_text(w["detail"])} for w in warnings[:MAX_WARNINGS]]
+    # Publish-blocking entries lead, so the cap never drops one.
+    warnings.sort(key=lambda w: (w.get("level") != "error", rank.get(w["id"], len(rank))))
+    kept = [_scrubbed(w, scrub_text) for w in warnings[:MAX_WARNINGS]]
     out: dict[str, Any] = {
         "warnings": kept,
         "omitted": max(0, len(warnings) - MAX_WARNINGS),
@@ -520,8 +852,25 @@ def run_checks(
     }
     if unread:
         out["pages_skipped"] = unread
-        out["note"] = f"{unread} pages not checked (over the {MAX_PAGES}-page or 8 MB budget)"
+        out["note"] = (
+            f"{unread} pages not checked (over the {MAX_PAGES}-page, 8 MB or "
+            f"{MAX_CHECK_SECONDS:g}s time budget)"
+        )
     return out
+
+
+def _scrubbed(entry: dict[str, Any], scrub: Any) -> dict[str, Any]:
+    out = {**entry, "detail": scrub(entry["detail"])}
+    if "items" in out:
+        out["items"] = [scrub(i) for i in out["items"]]
+    return out
+
+
+def blocking(checks: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """The entries of a ``checks`` value that block a publish (``level: "error"``)."""
+    if not isinstance(checks, Mapping):
+        return []
+    return [w for w in checks.get("warnings") or () if w.get("level") == "error"]
 
 
 def skipped(reason: str) -> dict[str, Any]:
@@ -529,4 +878,4 @@ def skipped(reason: str) -> dict[str, Any]:
     return {"warnings": [], "omitted": 0, "pages": 0, "skipped": reason}
 
 
-__all__ = ["MAX_TOTAL_BYTES", "MAX_WARNINGS", "run_checks", "skipped"]
+__all__ = ["MAX_TOTAL_BYTES", "MAX_WARNINGS", "blocking", "run_checks", "skipped"]

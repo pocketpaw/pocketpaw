@@ -282,7 +282,10 @@ class TestPublishHandler:
         assert body["site"]["pocket_id"] == "pk_1"
         # Identity flows from the ContextVars, not the args.
         mock_publish.assert_awaited_once_with(
-            workspace_id="ws_1", user_id="u_1", pocket_id="pk_1", name="Bright Smile Dental"
+            workspace_id="ws_1",
+            user_id="u_1",
+            pocket_id="pk_1",
+            name="Bright Smile Dental",
         )
 
     @pytest.mark.asyncio
@@ -304,7 +307,10 @@ class TestPublishHandler:
 
         assert not out.get("is_error")
         mock_publish.assert_awaited_once_with(
-            workspace_id="ws_1", user_id="u_1", pocket_id="pk_1", name=""
+            workspace_id="ws_1",
+            user_id="u_1",
+            pocket_id="pk_1",
+            name="",
         )
 
     @pytest.mark.asyncio
