@@ -18,12 +18,12 @@
     ]
   },
   {
-    "label": "SC-LINK-04 judges scripted pages: a framework form whose submit JS binds is reported as lost",
+    "label": "SC-LINK-04 ignores submit scripts: a framework form whose submit JS binds is reported as lost",
     "file": "ee/pocketpaw_ee/sites/verify_checks.py",
-    "find": "    if not parsed.has_script and not parsed.has_handlers:",
-    "replace": "    if True:",
+    "find": "            if _SUBMIT_HINT_RE.search(page_js):\n                continue\n",
+    "replace": "",
     "tests": [
-      "tests/ee/sites/test_verify_checks.py::TestLinks::test_forms_with_a_target_or_a_script_are_not_judged"
+      "tests/ee/sites/test_verify_checks_blocking.py::TestDeadForms::test_handled_forms_are_clean"
     ]
   },
   {
