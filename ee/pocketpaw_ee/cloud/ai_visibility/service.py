@@ -587,7 +587,11 @@ async def apply_fix(workspace_id: str, user_id: str, site_id: str, body: ApplyFi
     # No plan key: a keyless republish keeps the site's plan (a content edit).
     task = asyncio.create_task(
         sites_service.publish_pocket(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=site.pocket_id
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=site.pocket_id,
+            # A visibility fix on a live site, not the owner taking new content live.
+            confirm_placeholders=True,
         )
     )
     _republishes.add(task)

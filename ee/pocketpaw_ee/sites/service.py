@@ -8054,6 +8054,9 @@ async def publish_pocket(
     # Owner confirmed a project migration that deletes data (``project_d1``).
     confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
+    # Owner chose to go live despite placeholders / made-up contacts / broken forms
+    # (``publish_gate``). Machine republishes of content already live pass True.
+    confirm_placeholders: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -8061,6 +8064,12 @@ async def publish_pocket(
 ) -> _SiteDoc:
     """Publish a pocket as a site by id — the shared path for the REST router
     and the in-process MCP tool.
+
+    PUBLISH GATE: a LIVE publish first runs ``publish_gate.enforce`` over the draft's
+    stored build (never a rebuild) and raises ``PublishBlocked`` (409
+    ``sites.publish_blocked``, owner-worded findings in ``details``) while it still
+    shows placeholder copy, a made-up phone number, or a form that saves nothing or
+    failed its test submit. ``confirm_placeholders=True`` skips it. Previews skip it.
 
     BC-9 (per-site annual plan — the Webflow model): a published site carries its
     OWN recurring annual plan on a tier. ``site_plan_key`` selects the tier from
@@ -8126,6 +8135,10 @@ async def publish_pocket(
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     pocket = await pockets_service.get(pocket_id, user_id)
+    if not preview:
+        from pocketpaw_ee.sites import publish_gate
+
+        await publish_gate.enforce(pocket, pocket_id=pocket_id, confirmed=confirm_placeholders)
     ripple_spec = pocket.get("rippleSpec") or {}
     theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
     # Paw Sites "Svelte track" — the pocket carries which generation engine it
@@ -8794,6 +8807,8 @@ async def sell_site_plan(
             pocket_id=doc.pocket_id,
             site_plan_key=tier_key,
             purchase_authorized=True,
+            # A plan sale republishes the site's content as it is; not a go-live.
+            confirm_placeholders=True,
         )
         completed = True
     finally:
@@ -9225,7 +9240,13 @@ async def redeploy_site(site_id: str) -> None:
     doc = await _SiteDoc.find_one({"_id": ObjectId(site_id)})
     if doc is None or not doc.pocket_id:
         return
-    await publish_pocket(workspace_id=doc.workspace, user_id=doc.owner, pocket_id=doc.pocket_id)
+    await publish_pocket(
+        workspace_id=doc.workspace,
+        user_id=doc.owner,
+        pocket_id=doc.pocket_id,
+        # Restamping a live site after a payment is not the owner taking it live.
+        confirm_placeholders=True,
+    )
 
 
 async def _apply_site_plan(

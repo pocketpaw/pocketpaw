@@ -1037,6 +1037,59 @@ read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site
 and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
 Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
 
+## Sites — publish gate
+
+### `POST /sites/publish`: `confirm_placeholders`
+
+A live publish is refused while the draft still shows something the owner never
+gave or that does not work. The check reads the draft's stored build (or its
+no-build files) and never rebuilds; when it cannot run (no build yet, a crash, over
+15 s) the publish goes ahead. Previews are never gated.
+
+`confirm_placeholders: boolean` (default `false`) skips it: the owner saw the list
+and chose to go live anyway. Only the owner's publish dialog (or the agent, after the
+owner said so in chat) sends it.
+
+Refusal: `409`, code `sites.publish_blocked`.
+
+```json
+{
+  "error": {
+    "code": "sites.publish_blocked",
+    "message": "Your site isn't ready to go live yet. Your site still shows \"[Address]\" on the home page. (and 2 more things to fix) Fix these, or publish anyway if you meant to.",
+    "details": {
+      "findings": [
+        {
+          "rule": "SC-HONEST-07",
+          "reason": "placeholder",
+          "page": "index.html",
+          "page_label": "the home page",
+          "text": "[Address]",
+          "message": "Your site still shows \"[Address]\" on the home page."
+        }
+      ],
+      "more": 0,
+      "override": "confirm_placeholders"
+    }
+  }
+}
+```
+
+- `findings` holds at most 20 entries, one per offending text; `more` counts the rest.
+- `message` is written for the owner and safe to show as is. `page_label` is "the home
+  page" or `the "about" page`; it gains "and N other pages" inside `message` when the
+  same text repeats.
+- `reason` values:
+
+| `reason` | `rule` | What it means |
+|---|---|---|
+| `placeholder` | `SC-HONEST-07` | Placeholder copy: `[Address]`, `[Phone]`, `[Your …]`, lorem ipsum, an example.com address, "Your Name" outside a label, `XXXXX XXXXX`. |
+| `invented_contact` | `SC-HONEST-03` | A phone number that looks made up (sequential or repeated digits such as 9876543210, a 555 number, 07700 900xxx). It may ring a stranger. |
+| `form_saves_nothing` | `SC-LINK-04` | A form that submits back to its own page with nothing to receive it, so what visitors type is lost. |
+| `form_failed` | `SC-FORM-01` | The agent submitted test data to the form on the draft (`play_test_site` with `exercise_forms`) and it failed. |
+
+Send the same request again with `"confirm_placeholders": true` to publish anyway.
+
 ## Sites — Durable Objects
 
 Project sites may declare SQLite-backed Durable Objects, behind

@@ -239,6 +239,25 @@ async def _request_destructive_approval(
     )
 
 
+def _publish_blocked_text(exc: Any) -> str:
+    """The publish gate's refusal, as the next step for the agent: fix each finding (or
+    ask the owner for the real detail), never pass the override on its own."""
+    details = exc.details or {}
+    lines = [f"- {f.get('message', '')}" for f in details.get("findings") or ()]
+    if details.get("more"):
+        lines.append(f"- and {details['more']} more")
+    return (
+        "sites.publish_blocked: NOT published. The draft is not ready to go live:\n"
+        + "\n".join(lines)
+        + "\nFix each one: ask the owner for any real detail you do not have (address, "
+        "phone, WhatsApp, email, hours) and never invent one; make every form POST to a "
+        "real handler and exercise it with play_test_site (exercise_forms: true). Then "
+        "publish again. Tell the owner plainly what is missing. Pass "
+        "`confirm_placeholders: true` ONLY after you listed these to the owner and they "
+        "said, in their own words, to publish anyway."
+    )
+
+
 async def _publish_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__publish``.
 
@@ -271,6 +290,7 @@ async def _publish_handler(args: dict) -> dict:
         )
     name_raw = args.get("name")
     name = name_raw if isinstance(name_raw, str) else ""
+    confirm_placeholders = args.get("confirm_placeholders") is True
 
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites import service as sites_service
@@ -281,8 +301,11 @@ async def _publish_handler(args: dict) -> dict:
             user_id=user_id,
             pocket_id=pocket_id,
             name=name,
+            confirm_placeholders=confirm_placeholders,
         )
     except CloudError as exc:
+        if exc.code == "sites.publish_blocked":
+            return _error_response(_publish_blocked_text(exc))
         if exc.code == "sites.migration_destructive":
             # Deleting stored rows is the owner's call. File the review card that
             # names what would be lost; approving that card is the only thing that
@@ -543,6 +566,14 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
                     "type": "string",
                     "description": (
                         "Optional site name. Defaults to the pocket's own name when omitted."
+                    ),
+                },
+                "confirm_placeholders": {
+                    "type": "boolean",
+                    "description": (
+                        "Go live although the site still shows placeholders, a made-up "
+                        "number or a broken form. ONLY after the owner saw that list and "
+                        "told you to publish anyway. Never on your own."
                     ),
                 },
             },

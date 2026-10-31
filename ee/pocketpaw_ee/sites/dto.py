@@ -57,6 +57,10 @@ class PublishRequest(BaseModel):
     # ``deleted_classes`` / ``renamed_classes`` migration). Only the owner's publish
     # dialog sends it. See ``sites.durable_objects``.
     confirm_do_data_loss: list[str] = Field(default_factory=list)
+    # The owner chose to go live although the draft still shows placeholders, a
+    # made-up phone number or a form that saves nothing (409 ``sites.publish_blocked``
+    # lists them). See ``sites.publish_gate``.
+    confirm_placeholders: bool = False
 
 
 class SitePlanRequestBody(BaseModel):

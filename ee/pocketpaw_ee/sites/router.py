@@ -207,6 +207,7 @@ async def publish_site(
         prewarm_origin=request.headers.get("origin") or None,
         confirm_destructive_migrations=body.confirm_destructive_migrations,
         confirm_do_data_loss=list(body.confirm_do_data_loss),
+        confirm_placeholders=body.confirm_placeholders,
     )
     return sites_service._to_response(doc)
 

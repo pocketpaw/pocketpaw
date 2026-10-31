@@ -12,6 +12,9 @@
 #   * ``verdict-<hash>`` — written by ``verify.verify_site``: the full §5 verdict. Read
 #     back as the cache hit for an unchanged source, and summarised (counts only) by
 #     ``/sites/by-pocket/{id}/status``.
+#   * ``forms-<hash>`` — written by ``play_test_site`` when it submits test data to the
+#     draft's forms: the failed forms per path, merged into the page checks (SC-FORM-01)
+#     and read by the publish gate.
 #   * a ``pending`` verdict — the in-flight marker ``/status`` reports as ``pending``.
 #     It carries its start time and goes stale after :data:`PENDING_STALE_SECONDS`, so a
 #     crashed verify cannot pin a site in "pending" forever.
@@ -86,6 +89,11 @@ def sandbox_key(content_hash: str) -> str:
 
 def verdict_key(content_hash: str) -> str:
     return f"verdict-{content_hash}"
+
+
+def forms_key(content_hash: str) -> str:
+    """The form-exercise record ``play_test_site`` writes for this content."""
+    return f"forms-{content_hash}"
 
 
 def _safe(segment: str) -> bool:
@@ -206,6 +214,7 @@ def default_verify_store() -> Any:
 
 
 __all__ = [
+    "forms_key",
     "EDIT_SESSION_KEY",
     "KEEP_PER_POCKET",
     "LATEST_KEY",
