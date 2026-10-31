@@ -6,11 +6,13 @@ on:
     paths:
       - "docs/**"
       - "installer/**"
+      - "web/**"
   pull_request:
     branches: [main]
     paths:
       - "docs/**"
       - "installer/**"
+      - "web/**"
   workflow_dispatch:
 
 permissions:
@@ -41,6 +43,9 @@ jobs:
         run: |
           cp installer/install.sh ./dist/install.sh
           cp installer/install.ps1 ./dist/install.ps1
+
+      - name: Copy standalone web pages into build output
+        run: cp web/*.html ./dist/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

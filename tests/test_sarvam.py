@@ -3,6 +3,14 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+# These tests patch sarvamai.SarvamAI directly, which requires the optional
+# `sarvamai` extra (pip install 'pocketpaw[sarvam]') to even be importable;
+# skip the module instead of failing every test with ModuleNotFoundError
+# when it's not installed (#715).
+sarvamai = pytest.importorskip("sarvamai")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
