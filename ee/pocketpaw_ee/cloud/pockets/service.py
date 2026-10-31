@@ -2327,9 +2327,12 @@ def site_meta_snapshot(site_meta: Any) -> dict[str, Any] | None:
             else [],
         }
     }
-    admin_path = site_meta.get("admin_path")
-    if isinstance(admin_path, str) and admin_path:
-        snapshot["admin_path"] = admin_path
+    from pocketpaw_ee.sites.project_tools import admin_path_or_error
+
+    try:
+        snapshot["admin_path"] = admin_path_or_error(site_meta.get("admin_path"))
+    except ValueError:
+        pass  # absent or not a plain site path: the copy carries none
     return snapshot
 
 

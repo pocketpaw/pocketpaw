@@ -1203,3 +1203,21 @@ def test_a_copy_keeps_the_owner_page_path_and_nothing_else_new() -> None:
         "admin_path": "/owner",
     }
     assert "admin_path" not in site_meta_snapshot({"project": {}, "admin_path": 5})
+    # A stored value that is not a plain site path never crosses into a copy.
+    for bad in ["//evil.example", "https://evil.example/admin", "admin", "/../x"]:
+        assert "admin_path" not in site_meta_snapshot({"project": {}, "admin_path": bad})
+
+
+async def test_a_bad_recorded_owner_page_path_is_replaced_by_the_default(
+    cli, identity, builds, beanie_test_db, recording_bus
+) -> None:
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    pocket_id = await _start(cli)
+    doc = await Pocket.get(ObjectId(pocket_id))
+    doc.site_meta = {**(doc.site_meta or {}), "admin_path": "https://evil.example/admin"}
+    await doc.save()
+    out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
+    assert not out.get("is_error"), out
+    assert (await _doc(pocket_id)).site_meta["admin_path"] == "/admin"

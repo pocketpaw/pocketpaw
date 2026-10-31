@@ -557,9 +557,13 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
             return _error_response(f"{tool}: {exc} Nothing was changed.")
     if recipe_id in project_tools.OWNER_PAGE_RECIPES and admin_path is None:
         meta = pocket.get("siteMeta") or pocket.get("site_meta") or {}
-        recorded = meta.get("admin_path") if isinstance(meta, dict) else None
-        admin_path = recorded if isinstance(recorded, str) and recorded else None
-        admin_path = admin_path or project_tools.DEFAULT_ADMIN_PATH
+        try:
+            admin_path = project_tools.admin_path_or_error(
+                meta.get("admin_path") if isinstance(meta, dict) else None
+            )
+        except ValueError:
+            # Nothing recorded, or a value that is not a plain site path.
+            admin_path = project_tools.DEFAULT_ADMIN_PATH
     if recipe_id not in project_tools.OWNER_PAGE_RECIPES:
         admin_path = None
 
