@@ -150,6 +150,19 @@ class OrdersPage(BaseModel):
     next_cursor: str | None = None
 
 
+class NewsletterSubscriberView(BaseModel):
+    email: str
+    # ISO-8601 in UTC with an offset; None for a row with no stamp.
+    subscribed_at: str | None = None
+
+
+class NewsletterSubscribers(BaseModel):
+    """A site's newsletter list at a glance: the total and the newest few."""
+
+    count: int = 0
+    latest: list[NewsletterSubscriberView] = Field(default_factory=list)
+
+
 class ConnectBody(BaseModel):
     pocket_id: str | None = None
     # Values for the provider's ``connect_params`` (refused for providers with none).
