@@ -13,10 +13,30 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
+
+
+def utc_iso(moment: datetime | None) -> str | None:
+    """A stamp as ISO-8601 in UTC with an explicit offset, or None.
+
+    Mongo stores datetimes with no zone, so a value written tz-aware reads back
+    NAIVE; it was UTC when written, so a naive value is tagged UTC. A zone-less ISO
+    string on the wire is parsed by the browser as LOCAL time, which put "Last
+    deployed" hours off for anyone outside UTC. Every timestamp the sites API
+    returns goes through here (string fields) or ``UtcDateTime`` (typed fields).
+    """
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat()
+
+
+# A datetime field that serializes as ``utc_iso`` does: UTC with an offset.
+UtcDateTime = Annotated[datetime, PlainSerializer(utc_iso, return_type=str, when_used="json")]
 
 
 class PublishRequest(BaseModel):
@@ -1493,7 +1513,7 @@ class SiteTransferResponse(BaseModel):
     from_workspace_id: str
     to_workspace_id: str = ""
     offered_by: str = ""
-    offered_at: datetime | None = None
+    offered_at: UtcDateTime | None = None
     status: str = "none"
 
 
@@ -1538,12 +1558,12 @@ class OriginClaimResponse(BaseModel):
     host: str
     token: str
     status: str
-    expires_at: datetime
+    expires_at: UtcDateTime
     # The two places the owner may publish it, rendered rather than described, so
     # the panel can offer a copy button instead of an instruction to interpret.
     well_known_url: str
     meta_tag: str
-    verified_at: datetime | None = None
+    verified_at: UtcDateTime | None = None
     method: str = ""
 
 
@@ -1560,7 +1580,7 @@ class OriginVerificationResponse(BaseModel):
     host: str
     status: str
     method: str
-    verified_at: datetime | None = None
+    verified_at: UtcDateTime | None = None
 
 
 class ForeignConciergeBindRequest(BaseModel):
@@ -1609,7 +1629,7 @@ class ForeignConciergeOrigin(BaseModel):
 
     host: str
     verified: bool
-    verified_at: datetime | None = None
+    verified_at: UtcDateTime | None = None
     verification_fresh: bool = False
 
 
@@ -1663,7 +1683,7 @@ class ForeignConciergeResponse(BaseModel):
     origins: list[ForeignConciergeOrigin] = Field(default_factory=list)
     plan_tier: str = ""
     subscription_status: str = "none"
-    renewal_date: datetime | None = None
+    renewal_date: UtcDateTime | None = None
     # The resolver's own answer to "would a visitor get a bar that talks?" —
     # ``auth.site_keys.concierge_available``, the predicate every public paw-bar
     # seam asks. Kept beside the snippet because they can disagree for one
