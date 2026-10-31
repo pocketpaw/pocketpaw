@@ -6044,18 +6044,28 @@ def _bundle_provisioner(site: _SiteDoc, cf: Any, *, d1_database_id: str | None =
         # A site with a linked integration always deploys with its gateway token.
         from pocketpaw_ee.integrations import bindings as integration_bindings
 
-        await integration_bindings.ensure_gateway_token_if_linked(
-            str(getattr(site, "workspace", "") or ""), str(getattr(site, "pocket_id", "") or "")
-        )
-        # Session-signing secrets the build asks for are the platform's to mint, never
-        # the owner's to type, so the missing-secrets check below never names one.
+        workspace_id = str(getattr(site, "workspace", "") or "")
+        pocket_id = str(getattr(site, "pocket_id", "") or "")
+        requested = _requested_secret_names(requests)
+        await integration_bindings.ensure_gateway_token_if_linked(workspace_id, pocket_id)
+        # A build that reads the gateway token (Paw integrations, owner sign-in) gets one.
+        if integration_bindings.GATEWAY_TOKEN_NAME in requested:
+            await integration_bindings.ensure_gateway_token(workspace_id, pocket_id)
+        # Session-signing secrets are the platform's to mint, never the owner's to type,
+        # so the missing-secrets check below never names one.
         await site_secrets.ensure_signing_secrets(
-            workspace_id=str(getattr(site, "workspace", "") or ""),
-            pocket_id=str(getattr(site, "pocket_id", "") or ""),
-            names=_requested_secret_names(requests),
+            workspace_id=workspace_id, pocket_id=pocket_id, names=requested
         )
         # The owner's secrets ride as secret_text bindings (values never logged).
-        return replace(res, secrets=await site_secrets.secrets_for_deploy(site))
+        secrets = await site_secrets.secrets_for_deploy(site)
+        res = replace(res, secrets=secrets)
+        if integration_bindings.GATEWAY_TOKEN_NAME in secrets:
+            # The token is useless without where to call and who is calling.
+            res = replace(
+                res,
+                plain_text={**res.plain_text, **integration_bindings.platform_vars(site)},
+            )
+        return res
 
     return _provision
 

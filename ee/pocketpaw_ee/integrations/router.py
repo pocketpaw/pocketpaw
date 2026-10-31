@@ -15,6 +15,8 @@
 #   GET    /sites/by-pocket/{pocket_id}/orders?limit&cursor
 #   POST   /sites/by-pocket/{pocket_id}/orders/{order_id}/refunds
 #          {amount_minor?, idempotency_key} -> OrderView (pocket owner or admin)
+#   POST   /sites/by-pocket/{pocket_id}/owner-sign-in   {next?} -> {url, role, expires_in}
+#          (edit access; owner_sign_in.py)
 #
 # ``public_router`` (no session by design; each names its own credential):
 #   GET  /integrations/{provider}/start      one-time ticket -> browser cookie -> provider
@@ -30,6 +32,8 @@
 #   GET  /integrations/social/{provider}/callback    single-use broker state
 #   POST /integrations/social/redeem          PAW_GATEWAY_TOKEN + ticket + nonce
 #                                            (all three: social_broker.py)
+#   POST /integrations/owner-sign-in/redeem   PAW_GATEWAY_TOKEN + ticket
+#                                            (owner_sign_in.py)
 #
 # Wire shapes are pinned by the Wave 0 contract and its Wave 1 / Wave 2 addenda;
 # see dto.py. Mounted in ``cloud.mount_cloud``; both routers are in
@@ -46,10 +50,12 @@ from pocketpaw_ee.cloud._core.deps import (
     require_action_any_workspace,
     require_plan_feature,
 )
+from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.integrations import (
     bindings,
     gateway,
     oauth,
+    owner_sign_in,
     refunds,
     social_broker,
     vault,
@@ -388,3 +394,25 @@ async def social_callback(
 async def social_redeem(request: Request) -> JSONResponse:
     """The site Worker trades a ticket (+ its nonce) for the visitor's profile."""
     return await social_broker.redeem(request)
+
+
+@router.post(_SITE + "/owner-sign-in", response_model=owner_sign_in.OwnerSignInLink)
+async def owner_sign_in_link(
+    pocket_id: str,
+    body: owner_sign_in.OwnerSignInBody,
+    response: Response,
+    ctx: RequestContext = Depends(request_context),
+    user: object = Depends(current_active_user),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> owner_sign_in.OwnerSignInLink:
+    """A one-time link that signs this Paw user in to the site's owner page."""
+    response.headers["Cache-Control"] = "no-store"
+    return await owner_sign_in.issue(
+        workspace_id=ctx.workspace_id or "", user=user, pocket_id=pocket_id, next_path=body.next
+    )
+
+
+@public_router.post("/integrations/owner-sign-in/redeem")
+async def owner_sign_in_redeem(request: Request) -> JSONResponse:
+    """The site Worker trades an owner-page ticket for the owner identity, once."""
+    return await owner_sign_in.redeem(request)

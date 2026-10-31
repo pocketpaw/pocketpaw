@@ -671,6 +671,15 @@ async def ensure_gateway_token(workspace_id: str, pocket_id: str) -> None:
         logger.warning("integrations: could not mint the gateway token", exc_info=True)
 
 
+def platform_vars(site: Any) -> dict[str, str]:
+    """The plain-text vars a Worker holding ``PAW_GATEWAY_TOKEN`` needs to use it:
+    ``PAW_API_BASE`` (the public API, ending in /api/v1) and ``PAW_SITE_ID``. Read by
+    paw-sites' ``pawCall``, the social sign-in and the owner sign-in routes."""
+    from pocketpaw_ee.integrations import oauth
+
+    return {"PAW_API_BASE": f"{oauth.callback_base()}/api/v1", "PAW_SITE_ID": str(site.id)}
+
+
 async def ensure_gateway_token_if_linked(workspace_id: str, pocket_id: str) -> bool:
     """Before a site's Worker deploys: make sure a site with any linked integration
     has its ``PAW_GATEWAY_TOKEN`` (a link whose mint failed, or one made before the

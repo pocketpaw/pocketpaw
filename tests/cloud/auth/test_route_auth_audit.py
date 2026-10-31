@@ -282,6 +282,10 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
         "site Worker only; the site's PAW_GATEWAY_TOKEN (constant-time) plus a "
         "single-use 60s ticket bound to the site and the visitor's cookie nonce"
     ),
+    "POST /integrations/owner-sign-in/redeem": (
+        "site Worker only; the site's PAW_GATEWAY_TOKEN (constant-time) plus a "
+        "single-use 60s owner ticket bound to the site id, minted for a Paw session"
+    ),
     # --- git smart-HTTP: authenticates in-handler, not via a FastAPI dep ---
     "GET /codegit/{owner}/{repo}/info/refs": "git protocol; own token auth in-handler",
     "POST /codegit/{owner}/{repo}/git-upload-pack": "git protocol; own token auth in-handler",
