@@ -34,6 +34,7 @@
 #                                            (all three: social_broker.py)
 #   POST /integrations/owner-sign-in/redeem   PAW_GATEWAY_TOKEN + ticket
 #   POST /integrations/owner-sign-in/check    PAW_GATEWAY_TOKEN + account id -> role
+#   POST /integrations/owner-sign-in/peek     PAW_GATEWAY_TOKEN + ticket -> who (unspent)
 #                                            (both: owner_sign_in.py)
 #
 # Wire shapes are pinned by the Wave 0 contract and its Wave 1 / Wave 2 addenda;
@@ -423,3 +424,9 @@ async def owner_sign_in_redeem(request: Request) -> JSONResponse:
 async def owner_sign_in_check(request: Request) -> JSONResponse:
     """The site Worker re-checks a site account's role (owner, staff or none)."""
     return await owner_sign_in.check(request)
+
+
+@public_router.post("/integrations/owner-sign-in/peek")
+async def owner_sign_in_peek(request: Request) -> JSONResponse:
+    """The site Worker asks who a ticket would sign in, without spending it."""
+    return await owner_sign_in.peek(request)

@@ -7,20 +7,27 @@
 #           {site_id, ticket} -> {ok, result: {account_id, email, email_verified, name, role}}
 #   check   POST /integrations/owner-sign-in/check   Bearer PAW_GATEWAY_TOKEN
 #           {site_id, account_id} -> {ok, result: {role}}   (role is null when gone)
+#   peek    POST /integrations/owner-sign-in/peek    Bearer PAW_GATEWAY_TOKEN
+#           {site_id, ticket} -> {ok, result: {name, email, role}}   (does NOT spend it)
 #
-# WHO: the pocket owner is "owner"; the owner's explicit collaborators (pocket.team /
-# shared_with) are "staff". A workspace member who can merely see a workspace-visible
-# pocket gets nothing. The Paw email must be VERIFIED: the site links an existing
-# account by that email (and strips its password), so an unverified address would be
-# an account takeover. Anyone who can edit the site can also change its code, so the
-# people given a role are trusted with it. The site re-asks ``check`` every few minutes
-# (paw-sites paw-owner-auth.ts), so a removed collaborator or a transferred pocket
-# loses the role within that window.
+# WHO: the pocket owner is "owner"; people on the pocket's team (pocket.team) are
+# "staff". A shared_with share stores no access level (a view share looks like an edit
+# share), so it gives no site role until levels are stored. A workspace member who can
+# merely see a workspace-visible pocket gets nothing. Every person must also be an
+# ACTIVE, VERIFIED user who is still a member of the site's workspace, checked at issue
+# and on every ``check``: removing someone from the workspace, deactivating them or
+# un-verifying them ends their site role even if a pocket still lists them. The Paw
+# email must be verified because the site links an existing account by that email (and
+# strips its other ways in). Anyone who can edit the site can also change its code, so
+# the people given a role are trusted with it. The site re-asks ``check`` every few
+# minutes (paw-sites paw-owner-auth.ts), so a lost role ends within that window.
 #
 # The link is ``https://<site host>/api/paw-owner/callback#ticket=...&next=...`` (a live
 # custom domain first, else the site's url). The ticket rides in the FRAGMENT: browsers
 # never send it, so no request log (ours, Cloudflare's Workers Logs) and no Referer ever
-# carries it. A tiny page on the site posts it to its own callback, which redeems it.
+# carries it. A tiny page on the site ``peek``s it to show "Continue as <name> (<email>)"
+# and redeems it only when the person presses Continue, so a crafted link cannot sign
+# someone in to a stranger's account without them seeing whose it is.
 #
 # THE TICKET (threat model in paw-sites recipes/README.md, "Owner sign-in"):
 #   * opaque, 32 random bytes, stored server-side (``_oauth_state``, namespace
@@ -117,14 +124,38 @@ def _member_ids(members: Any) -> list[str]:
 
 
 def role_of(pocket: Any, user_id: str) -> str | None:
-    """ "owner" for the pocket owner, "staff" for an explicit collaborator, else None."""
+    """ "owner" for the pocket owner, "staff" for its team, else None. shared_with gives
+    nothing: it stores no access level, so a view share would otherwise become staff."""
     if not user_id:
         return None
     if pocket.owner == user_id:
         return ROLE_OWNER
-    if user_id in _member_ids(pocket.team) or user_id in _member_ids(pocket.shared_with):
+    if user_id in _member_ids(pocket.team):
         return ROLE_STAFF
     return None
+
+
+def in_good_standing(user: Any, workspace_id: str) -> bool:
+    """An active, verified user who is still a member of ``workspace_id``."""
+    if user is None or getattr(user, "is_active", False) is not True:
+        return False
+    if getattr(user, "is_verified", False) is not True:
+        return False
+    return any(
+        str(getattr(m, "workspace", "")) == workspace_id
+        for m in getattr(user, "workspaces", None) or []
+    )
+
+
+async def _load_user(user_id: str) -> Any:
+    from beanie import PydanticObjectId
+
+    from pocketpaw_ee.cloud.models.user import User
+
+    try:
+        return await User.get(PydanticObjectId(user_id))
+    except Exception:  # noqa: BLE001 - a malformed id is a missing user
+        return None
 
 
 def owner_host(site: Any) -> str | None:
@@ -189,6 +220,11 @@ async def issue(*, workspace_id: str, user: Any, pocket_id: str, next_path: str)
         raise ValidationError(
             "sites.owner_page_unverified",
             "Verify your email in Paw first, then open the owner page.",
+        )
+    if not in_good_standing(user, workspace_id):
+        raise Forbidden(
+            "sites.owner_page_not_collaborator",
+            "Only the site's owner and the people they shared it with can open its owner page.",
         )
     site = await sites_service._canonical_site_doc(workspace_id, pocket_id)
     host = owner_host(site) if site is not None and not site.revoked else None
@@ -328,11 +364,34 @@ async def check(request: Request) -> JSONResponse:
     except Exception:  # noqa: BLE001 - a malformed id is a missing pocket
         pocket = None
     if pocket is not None and pocket.workspace == site.workspace:
-        people = [pocket.owner, *_member_ids(pocket.team), *_member_ids(pocket.shared_with)]
+        people = [pocket.owner, *_member_ids(pocket.team)]
         for user_id in dict.fromkeys(p for p in people if p):
             if hmac.compare_digest(account_id(str(site.id), user_id), body["account_id"]):
-                role = role_of(pocket, user_id)
+                if in_good_standing(await _load_user(user_id), site.workspace):
+                    role = role_of(pocket, user_id)
                 break
     return JSONResponse(
         {"ok": True, "result": {"role": role}}, headers={"Cache-Control": "no-store"}
     )
+
+
+async def peek(request: Request) -> JSONResponse:
+    """``{site_id, ticket}`` + the site's gateway token -> who the ticket would sign in
+    (name, email, role), WITHOUT spending it: the site shows "Continue as ..." first."""
+    from pocketpaw_ee.cloud.auth import _oauth_state
+
+    body = await _body(request, "site_id", "ticket")
+    if body is None:
+        return _error("invalid_request")
+    site, refused = await _authenticated_site(request, body["site_id"])
+    if refused is not None:
+        return refused
+    if not await _within("owner_check", f"{site.workspace}:{site.id}", CHECK_SITE_PER_MIN):
+        return _error("rate_limited")
+    payload = await _oauth_state.peek(TICKET_NAMESPACE, body["ticket"])
+    if payload is None or not hmac.compare_digest(
+        str(payload.get("site_id", "")).encode(), str(site.id).encode()
+    ):
+        return _error("invalid_ticket")
+    result = {k: str(payload.get(k) or "") for k in ("name", "email", "role")}
+    return JSONResponse({"ok": True, "result": result}, headers={"Cache-Control": "no-store"})

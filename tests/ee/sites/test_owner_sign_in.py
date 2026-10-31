@@ -1,7 +1,8 @@
 # tests/ee/sites/test_owner_sign_in.py: "Open owner page" (integrations/owner_sign_in.py).
 #
-# A VERIFIED Paw user who owns a published site, or is one of its explicit collaborators
-# (pocket.team / shared_with), gets a one-time link that signs them in to the site's own
+# A VERIFIED, active Paw user, still a member of the site's workspace, who owns a published
+# site or is on its team (pocket.team; a shared_with share stores no access level, so it
+# gives no site role yet) gets a one-time link that signs them in to the site's own
 # better-auth as "owner" or "staff". Plain workspace members get nothing. The ticket rides
 # in the URL fragment, so no server or request log ever sees it. The site's Worker
 # trades it for the identity with its PAW_GATEWAY_TOKEN, and re-checks the role with
@@ -70,6 +71,7 @@ def _app(
     workspace_id: str = WS,
     email: str = "asha@example.com",
     verified: bool = True,
+    member: bool = True,
 ) -> FastAPI:
     from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
     from pocketpaw_ee.cloud._core.deps import current_workspace_id
@@ -83,8 +85,9 @@ def _app(
         email=email,
         full_name="Asha Rao",
         is_verified=verified,
+        is_active=True,
         active_workspace=workspace_id,
-        workspaces=[_Membership(workspace_id)],
+        workspaces=[_Membership(workspace_id)] if member else [],
     )
     app = FastAPI()
     add_error_handler(app)
@@ -215,11 +218,32 @@ async def test_a_live_custom_domain_is_preferred(beanie_test_db):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("field", ["team", "shared_with"])
-async def test_an_explicit_collaborator_gets_a_staff_link(beanie_test_db, field):
+async def test_a_view_only_share_gets_no_site_role(beanie_test_db):
+    """shared_with stores no access level, so a view share must not become staff."""
     pid = await _pocket()
     await _site(pid)
-    await _with_team(pid, **{field: [TEAMMATE]})
+    await _with_team(pid, shared_with=[TEAMMATE])
+    async with _client(TEAMMATE) as c:
+        resp = await _link(c, pid)
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "sites.owner_page_not_collaborator"
+
+
+@pytest.mark.asyncio
+async def test_someone_no_longer_in_the_workspace_gets_no_link(beanie_test_db):
+    pid = await _pocket()
+    await _site(pid)
+    await _with_team(pid, team=[TEAMMATE])
+    async with _client(TEAMMATE, member=False) as c:
+        resp = await _link(c, pid)
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_a_team_member_gets_a_staff_link(beanie_test_db):
+    pid = await _pocket()
+    await _site(pid)
+    await _with_team(pid, team=[TEAMMATE])
     async with _client(TEAMMATE, email="ravi@example.com") as c:
         resp = await _link(c, pid)
         ticket = _ticket(resp)
@@ -468,38 +492,76 @@ async def test_a_revoked_site_cannot_redeem(beanie_test_db):
 # --------------------------------------------------------------------- check
 
 
-async def _account_for(user: str, pid: str, site) -> str:
-    async with _client(user) as c:
+async def _user(email: str, *, active: bool = True, verified: bool = True, member: bool = True):
+    from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
+
+    user = User(
+        email=email,
+        hashed_password="x",
+        is_active=active,
+        is_verified=verified,
+        workspaces=[WorkspaceMembership(workspace=WS)] if member else [],
+    )
+    await user.insert()
+    return user
+
+
+async def _account_for(user_id: str, pid: str, site) -> str:
+    async with _client(user_id) as c:
         ticket = _ticket(await _link(c, pid))
         resp = await _redeem(c, await _token(site), site_id=str(site.id), ticket=ticket)
     return resp.json()["result"]["account_id"]
+
+
+async def _roles(site, *accounts: str) -> list:
+    token, sid = await _token(site), str(site.id)
+    async with _client() as c:
+        return [
+            (await _check(c, token, site_id=sid, account_id=a)).json()["result"]["role"]
+            for a in accounts
+        ]
 
 
 @pytest.mark.asyncio
 async def test_check_answers_the_current_role_and_drops_removed_people(beanie_test_db):
     from pocketpaw_ee.cloud.models.pocket import Pocket
 
-    pid = await _pocket()
+    owner, mate = await _user("asha@example.com"), await _user("ravi@example.com")
+    pid = await _pocket(owner=str(owner.id))
     site = await _site(pid)
-    await _with_team(pid, team=[TEAMMATE])
-    owner_acct = await _account_for(OWNER, pid, site)
-    mate_acct = await _account_for(TEAMMATE, pid, site)
-    token, sid = await _token(site), str(site.id)
-    async with _client() as c:
-        owner_now = await _check(c, token, site_id=sid, account_id=owner_acct)
-        mate_now = await _check(c, token, site_id=sid, account_id=mate_acct)
-        await _with_team(pid)  # the teammate is removed
-        gone = await _check(c, token, site_id=sid, account_id=mate_acct)
-        doc = await Pocket.get(pid)
-        doc.owner = "user-new-owner"  # the pocket is transferred
-        await doc.save()
-        moved = await _check(c, token, site_id=sid, account_id=owner_acct)
-        unknown = await _check(c, token, site_id=sid, account_id="f" * 64)
-    assert owner_now.json()["result"] == {"role": "owner"}
-    assert mate_now.json()["result"] == {"role": "staff"}
-    assert gone.json()["result"] == {"role": None}
-    assert moved.json()["result"] == {"role": None}
-    assert unknown.json()["result"] == {"role": None}
+    await _with_team(pid, team=[str(mate.id)])
+    owner_acct = await _account_for(str(owner.id), pid, site)
+    mate_acct = await _account_for(str(mate.id), pid, site)
+    assert await _roles(site, owner_acct, mate_acct, "f" * 64) == ["owner", "staff", None]
+
+    await _with_team(pid)  # the teammate is taken off the team
+    doc = await Pocket.get(pid)
+    doc.owner = "user-new-owner"  # the pocket is transferred
+    await doc.save()
+    assert await _roles(site, owner_acct, mate_acct) == [None, None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "offboard",
+    ["removed from the workspace", "deactivated", "unverified"],
+)
+async def test_check_gives_an_offboarded_teammate_no_role(beanie_test_db, offboard):
+    owner, mate = await _user("asha@example.com"), await _user("ravi@example.com")
+    pid = await _pocket(owner=str(owner.id))
+    site = await _site(pid)
+    await _with_team(pid, team=[str(mate.id)])  # still on the pocket's team
+    mate_acct = await _account_for(str(mate.id), pid, site)
+    assert await _roles(site, mate_acct) == ["staff"]
+
+    if offboard == "removed from the workspace":
+        mate.workspaces = []
+    elif offboard == "deactivated":
+        mate.is_active = False
+    else:
+        mate.is_verified = False
+    await mate.save()
+    assert await _roles(site, mate_acct) == [None]
 
 
 @pytest.mark.asyncio
@@ -514,6 +576,50 @@ async def test_check_needs_the_sites_own_token(beanie_test_db):
     assert (wrong.status_code, _err(wrong)) == (401, "unauthorized")
     assert (none.status_code, _err(none)) == (401, "unauthorized")
     assert (bad.status_code, _err(bad)) == (400, "invalid_request")
+
+
+# ---------------------------------------------------------------------- peek
+
+
+async def _peek(c: AsyncClient, token: str | None, **body):
+    headers = {"authorization": f"Bearer {token}"} if token is not None else {}
+    return await c.post("/api/v1/integrations/owner-sign-in/peek", json=body, headers=headers)
+
+
+@pytest.mark.asyncio
+async def test_peek_shows_who_without_spending_the_ticket(beanie_test_db):
+    pid = await _pocket()
+    site = await _site(pid)
+    async with _client() as c:
+        ticket = _ticket(await _link(c, pid))
+        token, sid = await _token(site), str(site.id)
+        peeked = await _peek(c, token, site_id=sid, ticket=ticket)
+        redeemed = await _redeem(c, token, site_id=sid, ticket=ticket)
+    assert peeked.status_code == 200
+    assert peeked.json()["result"] == {
+        "name": "Asha Rao",
+        "email": "asha@example.com",
+        "role": "owner",
+    }
+    assert "account_id" not in peeked.json()["result"]
+    assert redeemed.status_code == 200  # the peek did not spend it
+
+
+@pytest.mark.asyncio
+async def test_peek_needs_the_sites_token_and_its_own_ticket(beanie_test_db):
+    pid_a, pid_b = await _pocket(), await _pocket()
+    site_a = await _site(pid_a)
+    site_b = await _site(pid_b, url="https://other.pawsites.example", script="other-1")
+    async with _client() as c:
+        ticket = _ticket(await _link(c, pid_a))
+        wrong = await _peek(c, "x" * 43, site_id=str(site_a.id), ticket=ticket)
+        cross = await _peek(c, await _token(site_b), site_id=str(site_b.id), ticket=ticket)
+        gone = await _peek(c, await _token(site_a), site_id=str(site_a.id), ticket="t" * 43)
+        still = await _redeem(c, await _token(site_a), site_id=str(site_a.id), ticket=ticket)
+    assert (wrong.status_code, _err(wrong)) == (401, "unauthorized")
+    assert (cross.status_code, _err(cross)) == (400, "invalid_ticket")
+    assert (gone.status_code, _err(gone)) == (400, "invalid_ticket")
+    assert still.status_code == 200  # neither peek spent it
 
 
 # -------------------------------------------------------------------- deploy
