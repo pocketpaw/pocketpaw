@@ -862,9 +862,13 @@ async def test_newsletter_subscribers_lists_count_and_latest_to_the_owner_only(b
     assert body["latest"][0]["subscribed_at"].endswith("+00:00")
     assert resp.headers["cache-control"] == "no-store"
 
-    async with _client(WS, EDITOR) as c:
-        denied = await c.get(url)
+    from unittest.mock import patch
+
+    with patch("pocketpaw_ee.guards.audit.log_denial") as log_denial:
+        async with _client(WS, EDITOR) as c:
+            denied = await c.get(url)
     assert denied.status_code == 403
+    assert log_denial.call_args.kwargs["action"] == "sites.integration.newsletter.list"
 
 
 @pytest.mark.asyncio

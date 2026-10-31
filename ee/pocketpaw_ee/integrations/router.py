@@ -192,7 +192,9 @@ async def newsletter_subscribers(
     from pocketpaw_ee.sites.dto import utc_iso
 
     workspace_id = ctx.workspace_id or ""
-    await bindings.require_owner(workspace_id, ctx.user_id, pocket_id)
+    await bindings.require_owner(
+        workspace_id, ctx.user_id, pocket_id, action="sites.integration.newsletter.list"
+    )
     latest = await latest_subscribers(workspace_id, pocket_id)
     response.headers["Cache-Control"] = "no-store"
     return NewsletterSubscribers(
