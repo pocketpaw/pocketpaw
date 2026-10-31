@@ -1090,6 +1090,31 @@ Refusal: `409`, code `sites.publish_blocked`.
 
 Send the same request again with `"confirm_placeholders": true` to publish anyway.
 
+### Approval path (`request_publish_pocket` → Tray → approve)
+
+When the agent asks to publish, it files a review card instead (an Instinct Action
+with an `_artifact_change` blob). The same gate applies:
+
+- **At request time** the card carries the findings:
+  `parameters._artifact_change.publish_findings` is the same list of finding objects
+  as above (`[]` when clean). When it is not empty, the title ends in
+  `(needs fixes)`, the description lists the owner messages after `NOT READY YET:`,
+  and the recommendation offers "Publish anyway". The approver cannot edit these
+  fields away.
+- **At approve time** the gate runs again on the current draft, BEFORE anything is
+  merged. A plain approve (`POST /instinct/actions/{id}/approve` with no flag) or any
+  bulk approve of a draft with findings publishes nothing: no version is promoted, no
+  deploy runs, the draft stays a draft. The Action ends `failed` with
+  `error` = `sites.publish_blocked: <the refusal message>`, and
+  `parameters._artifact_change.publish_blocked` = the same `details` object as the
+  409 (`findings`, `more`, `override`).
+- **Publish anyway:** `POST /instinct/actions/{id}/approve` with body
+  `{"confirm_placeholders": true}` merges and deploys past the findings. Only the
+  single-Action approve accepts it; bulk approve never does.
+- A failed Action cannot be approved again. After fixing, the agent files a new
+  request; or the owner uses "Publish anyway" on a card that already shows the
+  findings.
+
 ## Sites — Durable Objects
 
 Project sites may declare SQLite-backed Durable Objects, behind

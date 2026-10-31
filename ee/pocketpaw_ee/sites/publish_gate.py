@@ -7,6 +7,11 @@
 # form that failed when ``play_test_site`` submitted test data to it (SC-FORM-01). The
 # owner can still take it live on purpose: ``confirm_placeholders=True`` skips the gate.
 #
+# The approval path runs it too: ``service.request_publish_pocket`` stores the findings
+# on the review card (``publish_findings``), and ``versions.instinct_executor`` checks
+# again BEFORE it merges, failing the Action with them unless that one approve said
+# ``confirm_placeholders``.
+#
 # Fast and never a rebuild: the findings come from ``verify.publish_checks``, which
 # reads the draft's stored build output (or an html/no-build source) plus the stored
 # form-exercise record for the same content hash. A check that cannot run (no build
@@ -145,6 +150,27 @@ async def blocking_findings(
     return findings
 
 
+async def pocket_findings(
+    *, pocket_id: str, user_id: str, artifacts: Any = None, store: Any = None
+) -> list[dict[str, Any]]:
+    """:func:`blocking_findings` for a pocket read by id as ``user_id`` (the review card
+    and the approve path hold ids, not the wire dict). A pocket that cannot be read
+    has no findings here; the publish that follows reads it again and fails on its own."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except Exception:  # noqa: BLE001 — same fail-open rule as the checks
+        logger.warning("sites.publish_gate: could not read pocket %s", pocket_id, exc_info=True)
+        return []
+    return await blocking_findings(pocket, pocket_id=pocket_id, artifacts=artifacts, store=store)
+
+
+def refusal(findings: list[dict[str, Any]]) -> PublishBlocked:
+    """The :class:`PublishBlocked` for ``findings``, capped like :func:`enforce`."""
+    return PublishBlocked(findings[:MAX_FINDINGS], more=max(0, len(findings) - MAX_FINDINGS))
+
+
 async def enforce(
     pocket: dict[str, Any],
     *,
@@ -161,7 +187,7 @@ async def enforce(
         pocket, pocket_id=pocket_id, artifacts=artifacts, store=store
     )
     if findings:
-        raise PublishBlocked(findings[:MAX_FINDINGS], more=max(0, len(findings) - MAX_FINDINGS))
+        raise refusal(findings)
 
 
 __all__ = [
@@ -173,4 +199,6 @@ __all__ = [
     "enforce",
     "owner_findings",
     "page_label",
+    "pocket_findings",
+    "refusal",
 ]

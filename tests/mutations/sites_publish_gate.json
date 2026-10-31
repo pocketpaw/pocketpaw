@@ -196,5 +196,68 @@
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_play_test_site.py::TestExerciseForms::test_failed_forms_are_recorded_for_verify_and_publish"
     ]
+  },
+  {
+    "label": "approval path ungated: a Tray approve merges and deploys a page showing [Address]",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "    if scope_type in _DEPLOYABLE_SCOPES and await _publish_blocked(\n",
+    "replace": "    if False and await _publish_blocked(\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_an_approve_with_findings_publishes_nothing"
+    ]
+  },
+  {
+    "label": "publish anyway ignored on approve: the owner who chose it is still refused",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "    if confirmed:\n        return False\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_an_approve_with_publish_anyway_goes_live"
+    ]
+  },
+  {
+    "label": "approve route drops publish anyway: the Tray button never takes the site live",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "                confirm_placeholders=bool(req is not None and req.confirm_placeholders),\n",
+    "replace": "                confirm_placeholders=False,\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_the_router_publishes_only_on_publish_anyway"
+    ]
+  },
+  {
+    "label": "bulk approve says publish anyway: a batch click ships placeholders unseen",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "                await artifact_executor.execute_approved_change(\n                    action, human_event_id=human_event_id\n                )\n",
+    "replace": "                await artifact_executor.execute_approved_change(\n                    action, human_event_id=human_event_id, confirm_placeholders=True\n                )\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_the_router_publishes_only_on_publish_anyway"
+    ]
+  },
+  {
+    "label": "review card blind: the owner approves without seeing [Address]",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    blob[\"publish_findings\"] = findings\n",
+    "replace": "    blob[\"publish_findings\"] = []\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_the_review_card_carries_the_findings"
+    ]
+  },
+  {
+    "label": "card findings editable: an approve-time edit wipes the owner's evidence",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "        \"publish_findings\",\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_an_approve_time_edit_cannot_clear_the_findings"
+    ]
+  },
+  {
+    "label": "refused approve keeps no findings: the Tray shows a bare failure",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "        parameters[\"_artifact_change\"] = {**blob, \"publish_blocked\": refusal.details}\n",
+    "replace": "        parameters[\"_artifact_change\"] = dict(blob)\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_an_approve_with_findings_publishes_nothing"
+    ]
   }
 ]

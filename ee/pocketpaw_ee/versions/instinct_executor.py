@@ -18,6 +18,10 @@
 #     passes ``confirm_destructive=True``, which the single-Action approve route
 #     does and bulk approve does not: a migration that deletes data is approved one
 #     card at a time, by someone who saw it.
+#     The publish gate runs BEFORE the merge: blocking findings (placeholders, made-up
+#     numbers, broken forms) fail the Action with the owner-worded refusal and record
+#     them on the blob as ``publish_blocked``; nothing is promoted or deployed.
+#     ``confirm_placeholders=True`` (an individual approve's "publish anyway") skips it.
 #   * discard_rejected_change(action) — REJECT = DISCARD: every draft above the
 #     published pointer is discarded in one pass (``discard_all_drafts``); the
 #     published pointer is untouched and nothing deploys. Best effort.
@@ -65,8 +69,37 @@ def _confirmed_migration_keys(blob: dict[str, Any]) -> list[str]:
     return sorted({str(d["key"]) for d in found if isinstance(d, dict) and d.get("key")})
 
 
+async def _publish_blocked(
+    store: Any, action: Any, blob: dict[str, Any], scope_id: str, author: str, confirmed: bool
+) -> bool:
+    """Run the publish gate on the pocket about to go live. On blocking findings
+    (and no ``confirm_placeholders``) record them on the Action's blob as
+    ``publish_blocked``, fail the Action with the owner-worded refusal, and return
+    True: nothing is merged and nothing deploys."""
+    from pocketpaw_ee.sites import publish_gate
+
+    if confirmed:
+        return False
+    findings = await publish_gate.pocket_findings(pocket_id=scope_id, user_id=author)
+    if not findings:
+        return False
+    refusal = publish_gate.refusal(findings)
+    try:
+        parameters = dict(getattr(action, "parameters", None) or {})
+        parameters["_artifact_change"] = {**blob, "publish_blocked": refusal.details}
+        await store.update_parameters(action.id, parameters)
+    except Exception:  # noqa: BLE001 — the error text still carries every finding
+        logger.warning("artifact-change merge: could not record findings on %s", action.id)
+    await store.mark_failed(action.id, f"{refusal.code}: {refusal.message}")
+    return True
+
+
 async def execute_approved_change(
-    action: Any, *, human_event_id: Any | None = None, confirm_destructive: bool = False
+    action: Any,
+    *,
+    human_event_id: Any | None = None,
+    confirm_destructive: bool = False,
+    confirm_placeholders: bool = False,
 ) -> None:
     """MERGE an approved artifact-change Action (BP-3).
 
@@ -105,6 +138,13 @@ async def execute_approved_change(
             action.id,
             "artifact-change merge: blob missing scope_type/scope_id/workspace/to_version_id",
         )
+        return
+
+    # The publish gate BEFORE the merge: a refused publish promotes no version, so the
+    # draft stays the draft and the owner can fix it and ask again.
+    if scope_type in _DEPLOYABLE_SCOPES and await _publish_blocked(
+        store, action, blob, scope_id, str(author or "system"), confirm_placeholders
+    ):
         return
 
     try:
@@ -158,6 +198,8 @@ async def execute_approved_change(
                 workspace_id=workspace_id,
                 user_id=str(author or "system"),
                 pocket_id=scope_id,
+                # Checked above, before the merge (or the owner chose publish anyway).
+                confirm_placeholders=True,
                 **confirm_kw,
             )
             deploy_note = " + deploy triggered"

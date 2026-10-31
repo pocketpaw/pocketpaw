@@ -13222,10 +13222,21 @@ async def request_publish_pocket(
     )
     blob["destructive_migrations"] = destructive
     blob["destructive_check"] = destructive_check
+    # What the publish gate would refuse, worded for the owner, so the card says it
+    # before anyone approves. The approve checks again (the draft may change); only an
+    # individual approve with ``confirm_placeholders`` publishes past it.
+    from pocketpaw_ee.sites import publish_gate
+
+    findings = await publish_gate.pocket_findings(pocket_id=pocket_id, user_id=user_id)
+    blob["publish_findings"] = findings
     description = (
         "Take the current draft of this site live. Approving merges the "
         "reviewed version and deploys it."
     )
+    if findings:
+        description += " NOT READY YET: " + " ".join(f["message"] for f in findings[:10])
+        if len(findings) > 10:
+            description += f" (and {len(findings) - 10} more)"
     if destructive:
         lost = ", ".join(sorted({d["table"] for d in destructive}))
         description += (
@@ -13240,11 +13251,16 @@ async def request_publish_pocket(
     store = get_instinct_store(workspace_id=workspace_id or None)
     action = await store.propose(
         pocket_id=pocket_id,
-        title="Publish site changes" + (" (deletes data)" if destructive else ""),
+        title="Publish site changes"
+        + (" (deletes data)" if destructive else "")
+        + (" (needs fixes)" if findings else ""),
         description=description,
         recommendation=(
             "Check the data the migrations delete, then approve this card on its own."
             if destructive
+            else "Fix what the card lists and ask again, or choose Publish anyway to take "
+            "it live as it is."
+            if findings
             else "Review the draft, then approve to publish."
         ),
         trigger=ActionTrigger(
