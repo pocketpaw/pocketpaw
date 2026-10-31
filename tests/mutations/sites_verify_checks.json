@@ -146,8 +146,8 @@
   {
     "label": "checks block the event loop: the artifact read and parsing run on the loop thread",
     "file": "ee/pocketpaw_ee/sites/verify.py",
-    "find": "await asyncio.to_thread(_page_checks, pocket, pocket_id, content_hash, artifacts)",
-    "replace": "_page_checks(pocket, pocket_id, content_hash, artifacts)",
+    "find": "await asyncio.to_thread(\n        _page_checks, pocket, pocket_id, content_hash, artifacts, store\n    )",
+    "replace": "_page_checks(pocket, pocket_id, content_hash, artifacts, store)",
     "tests": [
       "tests/ee/sites/test_verify_checks.py::TestVerdict::test_checks_run_off_the_event_loop"
     ]

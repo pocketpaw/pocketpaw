@@ -208,7 +208,8 @@ class TestInventedNumbers:
 
 class TestReportOrder:
     def test_errors_survive_the_cap_and_lead(self) -> None:
-        pages = {f"p{i}.html": _doc(f"<p>a{i} — b</p>") for i in range(40)}
+        # Dead anchors rank above placeholders, so only the error-first sort keeps it.
+        pages = {f"p{i}.html": _doc(f'<a href="#nope{i}">x</a>') for i in range(40)}
         pages["z.html"] = _doc("<p>Find us at [Address]</p>")
         out = _run(pages)
         assert len(out["warnings"]) == verify_checks.MAX_WARNINGS

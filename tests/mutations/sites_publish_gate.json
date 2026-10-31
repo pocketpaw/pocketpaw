@@ -1,0 +1,200 @@
+[
+  {
+    "label": "publish gate gone: a live publish of a page showing [Address] goes out",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        await publish_gate.enforce(pocket, pocket_id=pocket_id, confirmed=confirm_placeholders)\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate.py::TestPublishPocket::test_live_publish_is_refused_before_any_build"
+    ]
+  },
+  {
+    "label": "override ignored: an owner who confirmed is still refused",
+    "file": "ee/pocketpaw_ee/sites/publish_gate.py",
+    "find": "    if confirmed:\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_publish_gate.py::TestEnforce::test_owner_confirmation_skips_the_gate"
+    ]
+  },
+  {
+    "label": "previews gated: every draft build is refused while the owner is still writing",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not preview:\n        from pocketpaw_ee.sites import publish_gate\n",
+    "replace": "    if True:\n        from pocketpaw_ee.sites import publish_gate\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate.py::TestPublishPocket::test_a_preview_is_never_gated"
+    ]
+  },
+  {
+    "label": "gate fails closed: an artifact store outage blocks every publish",
+    "file": "ee/pocketpaw_ee/sites/publish_gate.py",
+    "find": "        logger.warning(\"sites.publish_gate: checks did not run for %s\", pocket_id, exc_info=True)\n        return []\n",
+    "replace": "        raise\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate.py::TestEnforce::test_a_check_that_cannot_run_lets_the_publish_through"
+    ]
+  },
+  {
+    "label": "failed form exercise not read: a form that 500s on the draft still goes live",
+    "file": "ee/pocketpaw_ee/sites/verify.py",
+    "find": "    if forms := stored_form_findings(pocket_id, content_hash, store=store):\n",
+    "replace": "    if forms := []:\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate.py::TestEnforce::test_a_failed_form_exercise_blocks"
+    ]
+  },
+  {
+    "label": "agent override loosened: any truthy value from the model skips the gate",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
+    "find": "    confirm_placeholders = args.get(\"confirm_placeholders\") is True\n",
+    "replace": "    confirm_placeholders = bool(args.get(\"confirm_placeholders\"))\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate.py::TestAgentTool::test_the_override_is_only_a_literal_true"
+    ]
+  },
+  {
+    "label": "placeholders not reported: [Address] passes the checks",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    holes = _hits(_PLACEHOLDER_RE, parsed.text + parsed.contact_refs)\n",
+    "replace": "    holes: list[str] = []\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestPlaceholders::test_placeholder_copy_is_an_error"
+    ]
+  },
+  {
+    "label": "labels read as copy: a booking form's 'Your Name' label blocks publish",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        if not self._prompt_depth:\n            self.copy_text.append(value)\n",
+    "replace": "        self.copy_text.append(value)\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestPlaceholders::test_form_labels_are_not_placeholders"
+    ]
+  },
+  {
+    "label": "sequential numbers allowed: 9876543210 ships on a live page",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    if len(digits) >= 9 and _longest_run(digits) >= 8:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestInventedNumbers::test_made_up_numbers_are_errors"
+    ]
+  },
+  {
+    "label": "drama range allowed: 07700 900123 ships on a live page",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    return len(national) == 11 and national.startswith(\"07700900\")\n",
+    "replace": "    return False\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestInventedNumbers::test_made_up_numbers_are_errors"
+    ]
+  },
+  {
+    "label": "id lookups ignored: a form a script binds by id is reported dead",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "            if any(attrs.get(k) and attrs[k] in page_js for k in (\"id\", \"name\")):\n                continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestDeadForms::test_handled_forms_are_clean"
+    ]
+  },
+  {
+    "label": "non-collecting forms judged on scripted pages: a bare button form blocks publish",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "            if page_js is None or not collects or _is_search(form):\n",
+    "replace": "            if page_js is None or _is_search(form):\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestDeadForms::test_a_scripted_page_with_a_non_collecting_form_is_not_judged"
+    ]
+  },
+  {
+    "label": "server POST judged: SvelteKit and Astro actions are reported dead",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        if server_routes and (method == \"post\" or not collects):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestDeadForms::test_handled_forms_are_clean"
+    ]
+  },
+  {
+    "label": "paw.js counted as unknown script: a dead form beside paw.js is never reported",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "        if \"/_paw/\" in f\"/{path.lstrip('/')}\" or path.rsplit(\"/\", 1)[-1] == \"paw.js\":\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestDeadForms::test_platform_script_alone_does_not_count_as_a_handler"
+    ]
+  },
+  {
+    "label": "errors not sorted first: the cap drops a placeholder behind 40 dead anchors",
+    "file": "ee/pocketpaw_ee/sites/verify_checks.py",
+    "find": "    warnings.sort(key=lambda w: (w.get(\"level\") != \"error\", rank.get(w[\"id\"], len(rank))))\n",
+    "replace": "    warnings.sort(key=lambda w: rank.get(w[\"id\"], len(rank)))\n",
+    "tests": [
+      "tests/ee/sites/test_verify_checks_blocking.py::TestReportOrder::test_errors_survive_the_cap_and_lead"
+    ]
+  },
+  {
+    "label": "GET to self passes the form test: the yoga mailing list reads as working",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "        if _same_page(nav[\"url\"], base_url) and any(f in query for f in fields):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestJudge::test_get_to_the_same_page_is_a_failure"
+    ]
+  },
+  {
+    "label": "no confirmation needed: a form that silently empties reads as working",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "    if confirmed or moved:\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestJudge::test_a_send_without_a_confirmation_is_a_failure"
+    ]
+  },
+  {
+    "label": "success words already on the page count: 'Thank you for visiting' confirms any send",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "    confirmed = page.get(\"state\") == \"success\" or after > before\n",
+    "replace": "    confirmed = page.get(\"state\") == \"success\" or after > 0\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestJudge::test_a_success_word_already_on_the_page_does_not_count"
+    ]
+  },
+  {
+    "label": "gateway not stubbed: a form test adds a real newsletter subscriber",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "            await r.fulfill(status=200, content_type=\"application/json\", body='{\"ok\":true}')\n",
+    "replace": "            await r.continue_()\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestExercise::test_test_entries_never_leave_the_draft"
+    ]
+  },
+  {
+    "label": "other hosts not blocked: a form test emails the owner through Formspree",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "            await r.abort()\n",
+    "replace": "            await r.continue_()\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestExercise::test_test_entries_never_leave_the_draft"
+    ]
+  },
+  {
+    "label": "forms exercised on the live site: test entries land in the owner's real data",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_play_test.py",
+    "find": "        exercise_forms = not forms_refused\n",
+    "replace": "        exercise_forms = True\n",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_play_test_site.py::TestExerciseForms::test_a_live_or_serverless_draft_is_never_exercised"
+    ]
+  },
+  {
+    "label": "form failures not recorded: publish never hears that a form failed its test",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_play_test.py",
+    "find": "        _record_forms(pocket, pocket_id, path, result)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_play_test_site.py::TestExerciseForms::test_failed_forms_are_recorded_for_verify_and_publish"
+    ]
+  }
+]
