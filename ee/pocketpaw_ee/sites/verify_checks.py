@@ -103,7 +103,8 @@ _BLOCK_PLACEHOLDER_RE = re.compile(
     r"|(?i:\[(?:phone|phone number|price|prices|client name|role|email|email address"
     r"|address|hours|opening hours|name|company|business name|metric to confirm"
     r"|testimonial|logo|city|postcode|zip|zip code|whatsapp|whatsapp number|instagram"
-    r"|website|street|owner name|your (?:name|phone|phone number|email|email address"
+    r"|website|street|street address|owner name|company name|brand name|brand"
+    r"|your (?:name|phone|phone number|email|email address"
     r"|address|business name|company|company name|city|whatsapp|whatsapp number))\])"
     r"|(?i:\blorem ipsum\b)"
 )
@@ -128,8 +129,16 @@ _PROMPTONYM_RE = re.compile(
 #: copy is judged only within 40 characters after one of these (a tel: / wa.me link
 #: always is), so order numbers, IPs and counts never read as phones.
 _PHONE_CONTEXT_RE = re.compile(
-    r"phone|call|whats\s?app|\btel\b|mobile|\bring\b|\btext\b|\bsms\b|contact|\u260e|\U0001f4de",
+    r"phone|call|whats\s?app|\btel\b|mobile|\bmob\b|\bph\b|\bring\b|\btext\b|\bsms\b"
+    r"|contact|reach|hotline|helpline|(?<![a-z])t\.?\s*:|\u260e|\U0001f4de",
     re.IGNORECASE,
+)
+#: Fictional ranges that are made up wherever they appear, phone word or not: US
+#: 555-01xx and (555) numbers, UK Ofcom drama mobiles 07700 900xxx.
+_STRONG_FAKE_RE = re.compile(
+    r"(?<!\d)555[-.\s]01\d{2}(?!\d)"
+    r"|\(555\)\s?\d{3}[-.\s]?\d{4}(?!\d)"
+    r"|(?<!\d)(?:\+44\s?7700|07700)\s?900\s?\d{3}(?!\d)"
 )
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 #: US fictional formats: (555) 234-5678, 555-234-5678, 555-01xx.
@@ -153,9 +162,11 @@ _SUBMIT_HINT_RE = re.compile(
     r"|fetch\s*\(|xmlhttprequest|axios|\$\.ajax|\$\.post|sendbeacon",
     re.IGNORECASE,
 )
-#: Wall-clock budget for one :func:`run_checks`; pages past it are counted, not read.
-#: Cooperative, so a timed-out check never leaves a worker thread running.
-MAX_CHECK_SECONDS = 5.0
+#: Wall-clock BACKSTOP for one :func:`run_checks`; pages past it are counted, not read.
+#: Generous on purpose: :data:`MAX_PAGES` and :data:`MAX_TOTAL_BYTES` decide what is
+#: read, so the result does not depend on machine load. Cooperative, so a timed-out
+#: check never leaves a worker thread running.
+MAX_CHECK_SECONDS = 30.0
 #: Script bytes read across a tree when looking for a submit binding; past it, a form
 #: on a scripted page is assumed bound.
 MAX_SCRIPT_BYTES = 4 * 1024 * 1024
@@ -440,14 +451,23 @@ def _invented(raw: str) -> bool:
 
 
 def _phone_hits(chunks: list[str], *, links: list[str]) -> list[str]:
-    """Made-up numbers in ``links`` (tel: / sms: / WhatsApp hrefs, always judged) and in
-    ``chunks`` of body text (judged only right after a phone word)."""
+    """Made-up numbers in ``links`` (tel: / sms: / WhatsApp hrefs, always judged), in body
+    text right after a phone word (the 40 characters before the number, reaching back
+    into the previous text chunk for a dt/dd or a label above it), and the fictional
+    ranges of :data:`_STRONG_FAKE_RE` anywhere in body text."""
     seen: dict[str, None] = {}
-    for chunk, needs_context in [(c, True) for c in chunks] + [(c, False) for c in links]:
+    previous = ""
+    for chunk in chunks:
+        for m in _STRONG_FAKE_RE.finditer(chunk):
+            seen.setdefault(_clip(m.group(0).strip(), 40), None)
         for m in _PHONE_RE.finditer(chunk):
-            lead = chunk[max(0, m.start() - 40) : m.start()]
-            if needs_context and not _PHONE_CONTEXT_RE.search(lead):
-                continue
+            lead = (previous[-40:] + " " + chunk[: m.start()])[-40:]
+            if _PHONE_CONTEXT_RE.search(lead) and _invented(m.group(0)):
+                seen.setdefault(_clip(m.group(0).strip(), 40), None)
+        if chunk.strip():
+            previous = chunk
+    for link in links:
+        for m in _PHONE_RE.finditer(link):
             if _invented(m.group(0)):
                 seen.setdefault(_clip(m.group(0).strip(), 40), None)
     return list(seen)

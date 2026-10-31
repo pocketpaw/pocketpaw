@@ -276,3 +276,59 @@ class TestReportOrder:
     def test_warn_entries_keep_their_shape(self) -> None:
         out = _run({"index.html": _doc('<a href="#nope">x</a>')})
         assert set(out["warnings"][0]) == {"id", "page", "detail"}
+
+
+class TestReReviewNegatives:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "[Company Name]",
+            "[Brand Name]",
+            "[Street Address]",
+            "[City]",
+            "[Zip]",
+            "[Postcode]",
+            "[Business Name]",
+        ],
+    )
+    def test_more_bracketed_tokens_block(self, text: str) -> None:
+        out = _run({"index.html": _doc(f"<p>Visit {text}</p>")})
+        assert _error_ids(out) == ["SC-HONEST-07"]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "<p>555-0142</p>",
+            "<p>(555) 123-4567</p>",
+            "<p>07700 900123</p>",
+            "<p>+44 7700 900123</p>",
+            "<p>Reach us 9876543210</p>",
+            "<p>Hotline 1234567890</p>",
+            "<p>Helpline: 9999999999</p>",
+            "<p>Ph 9876543210</p>",
+            "<p>Mob. 9876543210</p>",
+            "<p>T: 9876543210</p>",
+            "<dl><dt>Phone</dt><dd>9876543210</dd></dl>",
+            "<p>WhatsApp</p><p>9876543210</p>",
+        ],
+    )
+    def test_invented_numbers_found_without_or_beside_a_phone_word(self, body: str) -> None:
+        assert _error_ids(_run({"index.html": _doc(body)})) == ["SC-HONEST-03"]
+
+    @pytest.mark.parametrize(
+        "text",
+        ["Order 123456789", "Invoice 987654321", "Tracking 1234567890", "Ref 9999999999"],
+    )
+    def test_long_runs_outside_phone_context_pass(self, text: str) -> None:
+        assert _errors(_run({"index.html": _doc(f"<p>{text}</p>")})) == []
+
+    def test_the_page_cap_decides_not_the_clock(self, monkeypatch) -> None:
+        monkeypatch.setattr(verify_checks, "MAX_PAGES", 2)
+        pages = {f"p{i}.html": _doc("<p>ok</p>") for i in range(5)}
+        out = _run(pages)
+        assert (out["pages"], out["pages_skipped"]) == (2, 3)
+        assert verify_checks.MAX_CHECK_SECONDS >= 20
+
+    def test_a_drama_number_in_a_tel_link_blocks(self) -> None:
+        out = _run({"index.html": _doc('<a href="tel:+447700900123">Call us</a>')})
+        assert _error_ids(out) == ["SC-HONEST-03"]
