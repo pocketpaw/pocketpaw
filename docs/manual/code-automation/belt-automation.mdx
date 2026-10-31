@@ -1,0 +1,52 @@
+---
+title: "Belt — hand off coding work"
+description: "Belt is a station that takes a coding task, works it on a copy of your code, and proposes the change back to you."
+---
+
+# Belt — hand off coding work
+
+**What it is.** Belt is a station that takes a coding task, works it on a copy of your code, and proposes the change back to you. You review and approve before anything ships. You can hand it a one-off task, or set up a standing job that runs on a schedule and waits for your approval each time.
+
+**When you'd use it.** Use it when you want a fix, a small feature, or a refactor done on a real repository — with a human approval step before any change lands.
+
+## Point Belt at your code
+1. Go to **Belt**.
+2. At the top, pick a **Repo** and a **Base branch** from the dropdowns.
+3. No repos listed yet? Click **Add local folder…**, paste the full path to the folder, and click **Add**.
+4. To start a brand-new project, click **New repository…**, fill in **Repository name** and **Location root**, optionally tick **Create GitHub remote (private)**, then click **Create repository**.
+
+## Hand off a one-off task
+1. With a repo picked, open the **Develop station** chat panel on the right.
+2. In the box that reads **"Describe the coding task you want the station to run…"**, type what you want done. For example: "A test is failing in this repo. Reproduce it, find the cause, fix it, and open a pull request."
+3. Press Enter. The station runs the task on its own copy of the code.
+4. The result comes back as a change for you to approve — nothing ships on its own.
+
+## Set up a standing job
+1. With a repo picked, open the **Jobs** tab.
+2. Click to start a **New mandate** (a standing job the station holds for you).
+3. Pick a starting template, then fill in the charter:
+   - **Mandate name** and **Goal** — what the job is for.
+   - **KPIs** — what the job should move.
+   - **Boundaries** — limits, one per line.
+   - **Max tasks / shift** and **Gate-minutes / week** — how much it can do and how much of your time it can ask for.
+   - **Cadence** — **Weekly** (pick a day and time) or **Manual**.
+   - **Senses** — the checks that feed the job (for example, watching dependencies or errors).
+4. Read the "what happens next" line at the bottom, then click **Create mandate**.
+
+## Review and approve a plan
+1. When a job has work to propose, the **Gate** tab shows a count and the proposed plan.
+2. The plan opens with a one-line summary, then a card per task with the reasoning, the expected result, and the cost.
+3. For each task, choose **approve**, **edit**, or **reject**. A reject asks for a one-line reason — that reason teaches the job for next time.
+4. Click **Approve all** to accept the plan, or **Submit decisions** if you changed or rejected anything.
+5. If the job proposes no work this time, it says so — click **Acknowledge** and move on.
+
+## Tips
+- Belt speaks in **repos**, not "projects" — when you're choosing where it runs, look for the Repo dropdown.
+- The **Gate** tab is the one to watch. Plans wait there for your approval, and nothing runs until you approve it.
+- The day-0 ladder walks you through it in order: run one task, add a standing watch, then a full standing job. Each rung unlocks the next.
+- Rejecting and editing plans is not just a "no" — it's how the job gets better at proposing the right work.
+
+## If something's off
+- The page works even when the automation backend isn't connected yet: the tabs will show their empty "what will appear here" states and lists will look empty. That's expected, not an error — full task running needs the backend wired up. Treat any "live" run as unverified until you've confirmed it end to end in your install.
+- The station never pushes or merges on its own. If you expected a change to "just ship," remember every change waits at the **Gate** for your approval first.
+- One internal label needs a human check before publishing: the plan review refers to the planner as the **Foreman** (as in "Foreman proposes N tasks"). Confirm that's the wording you want customers to see. See notes.

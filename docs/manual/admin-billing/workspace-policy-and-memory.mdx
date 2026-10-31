@@ -1,0 +1,44 @@
+---
+title: "Workspace policy and memory"
+description: "Two admin-only pages that set workspace-wide defaults."
+---
+
+# Workspace policy and memory
+
+**What it is.** Two admin-only pages that set workspace-wide defaults. **Policy** covers security guardrails — rate limits, prompt-injection scanning, and how personal data is handled. **Memory** sets the default long-term memory backend that agents use unless an individual agent overrides it.
+
+**When you'd use it.** Tune these once when you stand up the workspace, then revisit when your security or data-handling needs change.
+
+## Open the Policy page
+1. Open Settings, then under Workspace pick **Policy**. (You need the admin or owner role — it's marked admin-only.)
+2. The page is grouped into cards: **Rate limiting**, **Prompt injection**, and **PII protection**.
+
+## Set rate limits
+1. On the Policy page, find the **Rate limiting** card.
+2. **Session TTL (hours)** — how long a signed-in session stays valid.
+3. **Rate limit (req/min)** — how many requests one API key can make per minute.
+
+## Turn on prompt-injection scanning
+1. On the Policy page, find the **Prompt injection** card.
+2. Switch on **LLM deep scan** to inspect incoming messages for injection attempts.
+3. Set the **Scan model** that does the checking (for example, `claude-haiku-4-5`).
+
+## Control how personal data is handled
+1. On the Policy page, find the **PII protection** card.
+2. **Default action** — choose **log**, **mask**, or **hash** for personal data that passes through tools.
+3. Turn on **Scan memory writes** and **Scan audit logs** to apply the same check there.
+
+## Set the default memory backend
+1. Open Settings, then under Workspace pick **Memory**.
+2. Under **Backend**, choose **file** or **mem0**, and decide whether to **Use LLM for extraction**.
+3. The cards below (**File backend**, **Mem0**, **Session compaction**) hold the deeper settings for whichever backend you chose.
+
+## Tips
+- Per-agent tool permissions and approvals live on each agent, not here. Policy is workspace-wide only.
+- The Memory settings are defaults. Any agent can override them in its own editor.
+- Start strict on PII (mask or hash) and loosen only if you have a reason to keep raw values.
+
+## If something's off
+- Members don't see Policy or Memory — both are admin-only pages.
+- These pages save individual fields rather than a single form. Confirm each change took before moving on. Mark this surface as worth a careful live check; the save behavior wasn't fully traced from the code.
+- The scan model and embedding model fields expect exact provider model names. A typo here can silently disable the feature.
