@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import re
 import time
@@ -117,26 +118,45 @@ MAX_FORMS = 4
 FORM_SETTLE_MS = 2_500
 #: A form is not started with less than this left in the run budget.
 FORM_MIN_S = 8.0
-#: Obviously fake test data: example.com never delivers, 555-01xx rings nobody.
-TEST_DATA = {
+#: Test data that passes common format checks and reaches nobody: example.com never
+#: delivers; phones follow the site's region (``_FILL_FORM_JS`` picks it from the page)
+#: and use a fictional range (US 555-01xx, UK Ofcom 07700 900xxx) or, for India where no
+#: fictional range exists, a valid-format number. They never leave the draft: every
+#: off-site request is aborted while a form is tested.
+TEST_DATA: dict[str, Any] = {
     "name": "Paw Draft Test",
     "email": "paw.draft.test@example.com",
     "text": "Paw draft test, please ignore",
-    "phones": ["5550100123", "+15550100123", "07700900123", "+447700900123", "9000000000"],
+    "phones": {
+        "in": ["+919000000001", "9000000001", "09000000001"],
+        "gb": ["07700900123", "+447700900123"],
+        "us": ["5550100123", "+15550100123", "555-010-0123"],
+    },
 }
 #: The Paw integration gateway paw.js posts to (``/sites/<id>/x/<integration>/<action>``):
-#: a test submit is answered with a stub there, so no real subscriber or order is made.
-_GATEWAY_RE = re.compile(r"/sites/[^/]+/x/[^/]+/[^/]+$")
-#: Words a page shows once an entry went through. Counted before and after the submit.
+#: a test submit gets a stub answer there, so no real subscriber, lead or order is made.
+_GATEWAY_RE = re.compile(r"/sites/[^/]+/x/([^/]+)/([^/]+)/?$")
+#: Subresources an off-site host may still serve while a form is tested (a thank-you
+#: page's fonts and styles). Anything else off-site is aborted, whatever its method.
+_STATIC_TYPES = frozenset({"image", "font", "stylesheet", "script", "media", "manifest"})
+#: Captcha hosts: a challenge means the test could not tell, never that the form broke.
+_CAPTCHA_RE = re.compile(r"challenges\.cloudflare\.com|recaptcha|hcaptcha", re.IGNORECASE)
+#: Statuses that are certainly a broken form for a visitor. Other 4xx refuse the test
+#: entry (auth, validation, rate limits) and read as unchecked.
+_BROKEN = frozenset({404, 405})
+#: Words a page shows once an entry went through, counted before and after the submit.
+#: One signal among several (state, alerts, any visible change), so not English-only.
 _SUCCESS_RE = re.compile(
     r"thank|success|received|confirmed|you'?re (?:on|in|booked|all set)|booked|subscribed"
-    r"|\bsent\b|see you|be in touch|got it|on the list|added",
+    r"|\bsent\b|see you|be in touch|got it|on the list|added|gracias|merci|danke|grazie"
+    r"|obrigad|dhanyavad|shukriya|धन्यवाद",
     re.IGNORECASE,
 )
 
 #: Fill form ``i`` (document order, dialogs skipped) with the test data through the
-#: native value setters, so framework-controlled inputs see it, and mark it for the
-#: submit. Returns what the judge needs, or null when there is no form ``i``.
+#: native value setters, so framework-controlled inputs see it, remember what the page
+#: looked like near the form, and mark it for the submit. Returns what the judge needs,
+#: or null when there is no form ``i``.
 _FILL_FORM_JS = """
 (args) => {
   const [i, data] = args;
@@ -145,6 +165,11 @@ _FILL_FORM_JS = """
   const f = forms[i];
   if (!f) return null;
   const name = f.id || f.getAttribute('name') || f.getAttribute('aria-label') || `form ${i + 1}`;
+  const body = document.body ? document.body.innerText : '';
+  const lang = (document.documentElement.lang || '').toLowerCase();
+  const region = (/₹|\\+91/.test(body) || /-in$/.test(lang)) ? 'in'
+    : (/£|\\+44/.test(body) || /-gb$/.test(lang)) ? 'gb' : 'us';
+  const phones = [...data.phones[region], ...data.phones.us, ...data.phones.gb, ...data.phones.in];
   const set = (el, v) => {
     const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
     if (desc && desc.set) desc.set.call(el, v); else el.value = v;
@@ -172,7 +197,7 @@ _FILL_FORM_JS = """
     else if (t === 'tel' || /phone|mobile|whatsapp/.test(n)) {
       let re = null;
       try { re = el.pattern ? new RegExp(`^(?:${el.pattern})$`) : null; } catch (e) {}
-      set(el, fit(el, data.phones.find(p => !re || re.test(p)) || data.phones[0]));
+      set(el, fit(el, phones.find(p => !re || re.test(p)) || phones[0]));
     } else if (t === 'number') set(el, el.min || '1');
     else if (t === 'date') set(el, el.min && el.min > day ? el.min : day);
     else if (t === 'time') set(el, '12:00');
@@ -189,15 +214,20 @@ _FILL_FORM_JS = """
     const u = new URL(f.getAttribute('action') || location.href, location.href);
     if (u.origin !== location.origin) external = u.host;
   } catch (e) {}
+  const live = () => [...document.querySelectorAll('[role=status],[role=alert],[aria-live]')]
+    .map(e => (e.innerText || '').trim()).filter(Boolean).join('|');
+  window.__pawBefore = {
+    formText: (f.innerText || '').trim(),
+    live: live(),
+    visible: f.offsetParent !== null && !f.hidden,
+  };
   const invalid = f.checkValidity() ? [] : [...f.elements]
     .filter(e => e.willValidate && !e.validity.valid).slice(0, 3)
     .map(e => `${e.name || e.id || e.type}: ${e.validationMessage}`);
   const search = (f.getAttribute('role') || '').toLowerCase() === 'search'
     || [...f.elements].some(e => (e.type || '').toLowerCase() === 'search');
-  return {
-    name, count: forms.length, fields, invalid, external, search,
-    text: document.body ? document.body.innerText.slice(0, 20000) : '',
-  };
+  return { name, count: forms.length, fields, invalid, external, search, region,
+           text: body.slice(0, 20000) };
 }
 """
 _SUBMIT_FORM_JS = """
@@ -208,13 +238,30 @@ _SUBMIT_FORM_JS = """
   return true;
 }
 """
+#: The page after the submit: the form's paw state, whether anything visible changed
+#: near it (the form hidden or replaced, its text changed, a status / alert / live
+#: region updated), and whether a captcha appeared.
 _FORM_STATE_JS = """
 () => {
   const f = document.querySelector('form[data-paw-exercise]');
+  const b = window.__pawBefore || null;
+  const live = [...document.querySelectorAll('[role=status],[role=alert],[aria-live]')]
+    .map(e => (e.innerText || '').trim()).filter(Boolean).join('|');
+  const visible = !!(f && f.isConnected && f.offsetParent !== null && !f.hidden);
+  const formText = f ? (f.innerText || '').trim() : '';
+  let changed = false;
+  if (b) {
+    changed = (b.visible && !visible) || (live !== b.live && live.length > 0)
+      || (!!f && formText !== b.formText) || !f;
+  }
+  const captcha = !!document.querySelector(
+    'iframe[src*="challenges.cloudflare.com"],iframe[src*="recaptcha"],' +
+    'iframe[src*="hcaptcha"],[data-paw-turnstile]');
   return {
     state: f ? f.getAttribute('data-paw-state') : null,
     url: location.href,
     text: document.body ? document.body.innerText.slice(0, 20000) : '',
+    changed, captcha,
   };
 }
 """
@@ -253,9 +300,10 @@ class PlayResult:
 @dataclass
 class FormOutcome:
     """One form's test submit. ``status``: ``ok`` (sent and confirmed), ``failed`` (a
-    defect a visitor hits) or ``unchecked`` (the test could not tell: the browser's own
-    validation refused the test entry, or it posts to another service the test does not
-    contact). ``outcome`` is safe to show the owner; ``detail`` is for the agent."""
+    defect a visitor certainly hits: an echo into the address bar, a 404 / 405 / 5xx,
+    or nothing sent) or ``unchecked`` (the test could not tell: a refused test entry,
+    a captcha, a post to another service, a popup, no visible confirmation).
+    ``outcome`` is safe to show the owner; ``detail`` is for the agent."""
 
     name: str
     status: str
@@ -274,37 +322,43 @@ def judge_form(
     sent: list[dict[str, Any]],
     base_url: str,
     new_errors: list[str] | None = None,
+    dialogs: list[str] | None = None,
 ) -> FormOutcome:
     """Decide what one test submit showed. ``info`` is the fill result, ``state`` the
-    page after the submit (``None`` when it could not be read), ``sent`` every non-GET
-    request and navigation the submit caused (``{kind, method, url, status}``; ``kind``
-    is ``site``, ``gateway``, ``external`` or ``navigation``)."""
+    page after it (``None`` when unreadable), ``sent`` what the submit caused
+    (``{kind, method, url, status, resource_type?}``; ``kind`` is ``site``,
+    ``gateway``, ``external``, ``navigation`` or ``popup``), ``dialogs`` any alert text."""
     name = clean_text(info.get("name") or "form", 40)
     lines = [f"{s['kind']} {s.get('method', '')} {s['url']} -> {s.get('status')}" for s in sent]
-    if new_errors:
-        lines += [f"page error: {e}" for e in new_errors]
+    lines += [f"page error: {e}" for e in new_errors or ()]
+    lines += [f"alert: {d}" for d in dialogs or ()]
     detail = clean_text("; ".join(lines), MAX_EVENT_CHARS) if lines else "no request was sent"
+
+    def unchecked(outcome: str) -> FormOutcome:
+        return FormOutcome(name, "unchecked", outcome, detail)
+
+    if info.get("external"):
+        return unchecked(f"it sends to {info['external']}, which the test does not contact")
     if info.get("invalid"):
         why = clean_text(", ".join(info["invalid"]), 160)
         return FormOutcome(
             name, "unchecked", "the form's own checks refused the test entry", f"invalid: {why}"
         )
+    page = state or {}
     external = [s for s in sent if s["kind"] == "external"]
+    if page.get("captcha") or any(_CAPTCHA_RE.search(s["url"]) for s in external):
+        return unchecked("a captcha check stopped the test")
     posted = [s for s in sent if s["kind"] in ("site", "gateway")]
-    if info.get("external") or (external and not posted):
-        host = info.get("external") or urlsplit(external[0]["url"]).netloc
-        return FormOutcome(
-            name,
-            "unchecked",
-            f"it sends to {host}, which the test does not contact",
-            "submit blocked so no real email or record was made at the other service",
-        )
-    errors = [s for s in posted if (s.get("status") or 0) >= 400]
     navs = [s for s in sent if s["kind"] == "navigation"]
-    bad_nav = [s for s in navs if (s.get("status") or 0) >= 400]
-    if errors or bad_nav:
-        code = (errors or bad_nav)[0].get("status")
-        return FormOutcome(name, "failed", f"the site answered with an error (HTTP {code})", detail)
+    codes = [int(s["status"]) for s in posted + navs if s.get("status")]
+    broken = [c for c in codes if c in _BROKEN or c >= 500]
+    if broken:
+        return FormOutcome(
+            name, "failed", f"the site answered with an error (HTTP {broken[0]})", detail
+        )
+    refused = [c for c in codes if 400 <= c < 500]
+    if refused:
+        return unchecked(f"the site refused the test entry (HTTP {refused[0]})")
     fields = [f for f in info.get("fields") or () if f]
     for nav in navs:
         query = parse_qs(urlsplit(nav["url"]).query)
@@ -315,22 +369,22 @@ def judge_form(
                 "nothing was saved: what was typed ended up in the address bar",
                 detail,
             )
-    page = state or {}
-    before = len(_SUCCESS_RE.findall(info.get("text") or ""))
-    after = len(_SUCCESS_RE.findall(page.get("text") or ""))
-    confirmed = page.get("state") == "success" or after > before
-    moved = any(not _same_page(n["url"], base_url) for n in navs)
-    if page.get("state") == "error":
-        return FormOutcome(name, "failed", "the form showed an error", detail)
+    left = [s for s in external if s.get("resource_type") == "document" or not posted]
+    if left:
+        host = urlsplit(left[0]["url"]).netloc
+        return unchecked(f"it sends to {host}, which the test does not contact")
+    if any(s["kind"] == "popup" for s in sent):
+        return unchecked("it opens a new window, so the test could not see the result")
     if not posted and not navs:
         return FormOutcome(name, "failed", "nothing was sent and the page did not change", detail)
-    if confirmed or moved:
+    before = len(_SUCCESS_RE.findall(info.get("text") or ""))
+    after = len(_SUCCESS_RE.findall(page.get("text") or ""))
+    moved = any(not _same_page(n["url"], base_url) for n in navs)
+    if page.get("state") == "error":
+        return unchecked("the form showed an error for the test entry")
+    if page.get("state") == "success" or dialogs or page.get("changed") or moved or after > before:
         return FormOutcome(name, "ok", "sent and confirmed", detail)
-    if new_errors:
-        return FormOutcome(name, "failed", "the page hit a script error", detail)
-    return FormOutcome(
-        name, "failed", "it was sent, but the page showed no thank-you or confirmation", detail
-    )
+    return unchecked("it was sent, but nothing on the page changed to confirm it")
 
 
 # ── validation ──────────────────────────────────────────────────────────────
@@ -653,57 +707,108 @@ async def _do(page: Any, step: dict, mobile: bool, mouse: list[float], result: P
     return "skipped (unknown action)"
 
 
+def _gateway_stub(path: str) -> str:
+    """The answer paw.js expects from the gateway for a test submit: ``{ok, result}``,
+    with a checkout URL for Stripe (paw.js then navigates there, which is aborted)."""
+    m = _GATEWAY_RE.search(path)
+    action = m.group(2) if m else ""
+    if action == "create_checkout":
+        result: dict[str, Any] = {"url": "https://checkout.example.com/paw-draft-test"}
+    else:
+        result = {"ok": True}
+    return json.dumps({"ok": True, "result": result})
+
+
+def _origin(url: str) -> str:
+    return urlsplit(url)._replace(path="", query="", fragment="").geturl()
+
+
 async def exercise_page_forms(page: Any, url: str, result: PlayResult, deadline: float) -> None:
     """Submit each form on ``url`` (up to :data:`MAX_FORMS`, a fresh load each) with
     :data:`TEST_DATA` and judge what happened (:func:`judge_form`).
 
-    Where the entries go: a same-origin submit reaches the draft itself, whose server
-    (a project draft Worker) has draft-only D1 / KV / R2 that publish purges. A post to
-    the Paw integration gateway is answered with a stub, so no real subscriber, lead or
-    order is made. A non-GET to any other host is aborted, so no email is sent and no
-    record is made elsewhere. Search boxes are not submitted."""
-    origin = urlsplit(url)._replace(path="", query="", fragment="").geturl()
+    Where the entries go. A form whose action is another host is never submitted.
+    While a form is tested, every request of the browser CONTEXT (popups included) is
+    routed: same-origin requests the submit makes are fetched without following
+    redirects and answered as fetched, so a hop to another host comes back through the
+    router; the Paw gateway gets a stub; every other off-site request is aborted,
+    whatever its method, except static subresources (fonts, styles, images, scripts).
+    Popups are closed and alerts accepted. So the browser sends nothing off-site; the
+    draft's own server code still runs and may call outside services itself. Same-origin
+    entries land in the draft (a project draft Worker has draft-only D1 / KV / R2 that
+    publish purges). Search boxes are not submitted."""
+    origin = _origin(url)
     sent: list[dict[str, Any]] = []
+    dialogs: list[str] = []
+    pending: list[Any] = []
     armed = [False]
+    target = getattr(page, "context", None)
+    if target is None or not callable(getattr(target, "route", None)):
+        target = page
 
     async def route(r: Any) -> None:
         req = r.request
-        method = (getattr(req, "method", "GET") or "GET").upper()
-        if not armed[0] or method in ("GET", "HEAD", "OPTIONS"):
+        if not armed[0]:
             await r.continue_()
             return
-        target = req.url
-        if _GATEWAY_RE.search(urlsplit(target).path):
-            sent.append({"kind": "gateway", "method": method, "url": target, "status": 200})
-            await r.fulfill(status=200, content_type="application/json", body='{"ok":true}')
+        method = (getattr(req, "method", "GET") or "GET").upper()
+        kind = getattr(req, "resource_type", "") or ""
+        address = req.url
+        if _GATEWAY_RE.search(urlsplit(address).path):
+            sent.append({"kind": "gateway", "method": method, "url": address, "status": 200})
+            await r.fulfill(
+                status=200,
+                content_type="application/json",
+                body=_gateway_stub(urlsplit(address).path),
+            )
             return
-        if urlsplit(target)._replace(path="", query="", fragment="").geturl() != origin:
-            sent.append({"kind": "external", "method": method, "url": target, "status": None})
+        if _origin(address) != origin:
+            if method == "GET" and kind in _STATIC_TYPES:
+                await r.continue_()
+                return
+            sent.append(
+                {"kind": "external", "method": method, "url": address, "resource_type": kind}
+            )
             await r.abort()
             return
-        entry = {"kind": "site", "method": method, "url": target, "status": None}
+        if method in ("GET", "HEAD") and kind not in ("document", "xhr", "fetch"):
+            await r.continue_()
+            return
+        entry = {
+            "kind": "navigation" if method == "GET" and kind == "document" else "site",
+            "method": method,
+            "url": address,
+            "status": None,
+        }
         sent.append(entry)
-        await r.continue_()
+        try:
+            response = await r.fetch(max_redirects=0)
+        except Exception as exc:  # noqa: BLE001 — the draft did not answer
+            entry["status"] = 502
+            entry["error"] = clean_text(exc, 120)
+            await r.abort()
+            return
+        entry["status"] = response.status
+        await r.fulfill(response=response)
 
-    def on_response(resp: Any) -> None:
+    def on_page(popup: Any) -> None:
         if not armed[0]:
             return
-        req = resp.request
-        method = (getattr(req, "method", "GET") or "GET").upper()
-        for entry in sent:
-            if entry["kind"] == "site" and entry["url"] == resp.url and entry["status"] is None:
-                entry["status"] = resp.status
-                return
-        if method == "GET" and req.is_navigation_request():
-            sent.append({"kind": "navigation", "method": method, "url": resp.url})
-            sent[-1]["status"] = resp.status
+        sent.append({"kind": "popup", "url": getattr(popup, "url", "") or ""})
+        pending.append(asyncio.ensure_future(popup.close()))
+
+    def on_dialog(dialog: Any) -> None:
+        dialogs.append(clean_text(getattr(dialog, "message", ""), 160))
+        pending.append(asyncio.ensure_future(dialog.accept()))
 
     try:
-        await page.route("**/*", route)
+        await target.route("**/*", route)
     except Exception as exc:  # noqa: BLE001
         result.forms_note = f"forms were not exercised: {clean_text(exc, 120)}"
         return
-    page.on("response", on_response)
+    if target is not page and callable(getattr(target, "on", None)):
+        target.on("page", on_page)
+    page.on("dialog", on_dialog)
     for i in range(MAX_FORMS):
         if deadline - time.monotonic() < FORM_MIN_S:
             result.forms_note = "the run budget ran out before every form was tried"
@@ -711,6 +816,7 @@ async def exercise_page_forms(page: Any, url: str, result: PlayResult, deadline:
             break
         armed[0] = False
         sent.clear()
+        dialogs.clear()
         try:
             await page.goto(url, wait_until="load", timeout=NAV_TIMEOUT_MS)
             await page.wait_for_timeout(SETTLE_MS)
@@ -730,7 +836,7 @@ async def exercise_page_forms(page: Any, url: str, result: PlayResult, deadline:
             continue
         errors_before = len(result.page_errors)
         state = None
-        if not info.get("invalid"):
+        if not info.get("invalid") and not info.get("external"):
             armed[0] = True
             try:
                 await page.evaluate(_SUBMIT_FORM_JS)
@@ -741,13 +847,18 @@ async def exercise_page_forms(page: Any, url: str, result: PlayResult, deadline:
             except Exception:  # noqa: BLE001
                 pass
             await page.wait_for_timeout(FORM_SETTLE_MS)
-            armed[0] = False
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+                pending.clear()
             try:
                 state = await page.evaluate(_FORM_STATE_JS)
             except Exception:  # noqa: BLE001
                 state = None
+            armed[0] = False
         new_errors = result.page_errors[errors_before:]
-        result.forms.append(judge_form(info, state, list(sent), url, new_errors))
+        result.forms.append(
+            judge_form(info, state, list(sent), url, new_errors, dialogs=list(dialogs))
+        )
 
 
 def _describe(step: dict) -> str:

@@ -777,17 +777,21 @@ class TestExerciseForms:
             return False, None
 
         world.evaluate_hook = hook
-        out = await _play({"exercise_forms": True, "path": "/join"})
+        out = await _play({"exercise_forms": True, "path": "/join/index.html"})
         text = _text(out)
         assert "join: FAILED: nothing was sent and the page did not change" in text
         assert "blocks publishing" in text
+        # Honest about what the test can promise.
+        assert "server code may still call outside services" in text
+        assert "nothing reached the owner's real data" not in text
         ((pid, path, entries),) = recorded
+        # "/join/index.html" and "/join" are one page: one record key.
         assert (pid, path) == ("p1", "/join")
         assert entries[0]["id"] == "SC-FORM-01"
         assert entries[0]["page"] == "join/index.html"
         assert entries[0]["level"] == "error"
 
-    @pytest.mark.parametrize("mode", ["published", "static"])
+    @pytest.mark.parametrize("mode", ["published", "static", "server_only", None, "new-mode"])
     async def test_a_live_or_serverless_draft_is_never_exercised(
         self, ctx, world, monkeypatch, mode
     ) -> None:

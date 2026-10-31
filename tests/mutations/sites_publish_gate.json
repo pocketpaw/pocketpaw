@@ -146,17 +146,17 @@
   {
     "label": "no confirmation needed: a form that silently empties reads as working",
     "file": "ee/pocketpaw_ee/sites/play_test.py",
-    "find": "    if confirmed or moved:\n",
+    "find": "    if page.get(\"state\") == \"success\" or dialogs or page.get(\"changed\") or moved or after > before:\n",
     "replace": "    if True:\n",
     "tests": [
-      "tests/ee/sites/test_play_test_forms.py::TestJudge::test_a_send_without_a_confirmation_is_a_failure"
+      "tests/ee/sites/test_play_test_forms.py::TestJudge::test_a_send_with_no_visible_change_is_unchecked_not_failed"
     ]
   },
   {
     "label": "success words already on the page count: 'Thank you for visiting' confirms any send",
     "file": "ee/pocketpaw_ee/sites/play_test.py",
-    "find": "    confirmed = page.get(\"state\") == \"success\" or after > before\n",
-    "replace": "    confirmed = page.get(\"state\") == \"success\" or after > 0\n",
+    "find": "    after = len(_SUCCESS_RE.findall(page.get(\"text\") or \"\"))\n",
+    "replace": "    after = before + len(_SUCCESS_RE.findall(page.get(\"text\") or \"\"))\n",
     "tests": [
       "tests/ee/sites/test_play_test_forms.py::TestJudge::test_a_success_word_already_on_the_page_does_not_count"
     ]
@@ -164,8 +164,8 @@
   {
     "label": "gateway not stubbed: a form test adds a real newsletter subscriber",
     "file": "ee/pocketpaw_ee/sites/play_test.py",
-    "find": "            await r.fulfill(status=200, content_type=\"application/json\", body='{\"ok\":true}')\n",
-    "replace": "            await r.continue_()\n",
+    "find": "        if _GATEWAY_RE.search(urlsplit(address).path):\n",
+    "replace": "        if False:\n",
     "tests": [
       "tests/ee/sites/test_play_test_forms.py::TestExercise::test_test_entries_never_leave_the_draft"
     ]
@@ -173,8 +173,8 @@
   {
     "label": "other hosts not blocked: a form test emails the owner through Formspree",
     "file": "ee/pocketpaw_ee/sites/play_test.py",
-    "find": "            await r.abort()\n",
-    "replace": "            await r.continue_()\n",
+    "find": "                {\"kind\": \"external\", \"method\": method, \"url\": address, \"resource_type\": kind}\n            )\n            await r.abort()\n",
+    "replace": "                {\"kind\": \"external\", \"method\": method, \"url\": address, \"resource_type\": kind}\n            )\n            await r.continue_()\n",
     "tests": [
       "tests/ee/sites/test_play_test_forms.py::TestExercise::test_test_entries_never_leave_the_draft"
     ]
@@ -182,7 +182,7 @@
   {
     "label": "forms exercised on the live site: test entries land in the owner's real data",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_play_test.py",
-    "find": "        exercise_forms = not forms_refused\n",
+    "find": "        exercise_forms = mode == _FORMS_MODE\n",
     "replace": "        exercise_forms = True\n",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_play_test_site.py::TestExerciseForms::test_a_live_or_serverless_draft_is_never_exercised"
@@ -321,6 +321,96 @@
     "replace": "    r\"(?!johndoe@)[\\w.+\\-]+@example\\.(?:com|org|net)\\b\"\n",
     "tests": [
       "tests/ee/sites/test_verify_checks_blocking.py::TestBounded::test_adversarial_input_runs_in_bounded_time"
+    ]
+  },
+  {
+    "label": "external form submitted: a Google Forms action gets a real row",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "        if not info.get(\"invalid\") and not info.get(\"external\"):\n",
+    "replace": "        if not info.get(\"invalid\"):\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestExercise::test_an_external_form_is_never_submitted"
+    ]
+  },
+  {
+    "label": "off-site GETs allowed: an Apps Script or formResponse GET writes real data",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "            if method == \"GET\" and kind in _STATIC_TYPES:\n",
+    "replace": "            if method == \"GET\":\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestExercise::test_test_entries_never_leave_the_draft"
+    ]
+  },
+  {
+    "label": "redirects followed: a 307 to another host carries the test entry there",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "            response = await r.fetch(max_redirects=0)\n",
+    "replace": "            response = await r.fetch()\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestExercise::test_a_redirect_to_another_host_is_not_followed"
+    ]
+  },
+  {
+    "label": "popups left open: a target=_blank form keeps a window the router never judged",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "        pending.append(asyncio.ensure_future(popup.close()))\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestExercise::test_a_popup_is_closed_and_unchecked"
+    ]
+  },
+  {
+    "label": "refused entries fail: a 422 from validation or a 401 blocks publishing",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "    broken = [c for c in codes if c in _BROKEN or c >= 500]\n",
+    "replace": "    broken = [c for c in codes if c >= 400]\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestJudge::test_a_refused_test_entry_is_unchecked"
+    ]
+  },
+  {
+    "label": "alerts ignored: a form that confirms with alert() is reported unconfirmed",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "    if page.get(\"state\") == \"success\" or dialogs or page.get(\"changed\") or moved or after > before:\n",
+    "replace": "    if page.get(\"state\") == \"success\" or page.get(\"changed\") or moved or after > before:\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestJudge::test_a_confirmed_send_passes"
+    ]
+  },
+  {
+    "label": "visible change ignored: a non-English thank-you is reported unconfirmed",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "    if page.get(\"state\") == \"success\" or dialogs or page.get(\"changed\") or moved or after > before:\n",
+    "replace": "    if page.get(\"state\") == \"success\" or dialogs or moved or after > before:\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestJudge::test_a_confirmed_send_passes"
+    ]
+  },
+  {
+    "label": "no confirmation fails: a quiet but working form blocks publishing",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "    return unchecked(\"it was sent, but nothing on the page changed to confirm it\")\n",
+    "replace": "    return FormOutcome(name, \"failed\", \"no confirmation\", detail)\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestJudge::test_a_send_with_no_visible_change_is_unchecked_not_failed"
+    ]
+  },
+  {
+    "label": "checkout stub empty: paw.js finds no checkout URL in the gateway answer",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "        result: dict[str, Any] = {\"url\": \"https://checkout.example.com/paw-draft-test\"}\n",
+    "replace": "        result: dict[str, Any] = {}\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestExercise::test_the_gateway_stub_answers_in_the_shape_paw_js_expects"
+    ]
+  },
+  {
+    "label": "form records keyed raw: /join and /join/index.html never clear each other",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_play_test.py",
+    "find": "        pocket_id, verify.publish_content_hash(pocket), _norm_path(path), entries\n",
+    "replace": "        pocket_id, verify.publish_content_hash(pocket), path, entries\n",
+    "tests": [
+      "tests/ee/agent/test_sites_mcp_server/test_play_test_site.py::TestExerciseForms::test_failed_forms_are_recorded_for_verify_and_publish"
     ]
   }
 ]

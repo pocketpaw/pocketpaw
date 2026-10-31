@@ -66,6 +66,15 @@ _UNAVAILABLE = (
 )
 
 
+#: Forms are exercised ONLY on a draft of this ``preview_mode`` (the draft is the
+#: whole site, its own server included). Anything else, including a mode added later,
+#: is refused, with the reason below or :data:`_FORMS_REFUSED_DEFAULT`.
+_FORMS_MODE = "full"
+_FORMS_REFUSED_DEFAULT = (
+    "this draft cannot run the whole site here, so its forms were not tried end to end. "
+    "verify_site still checks every form for a real handler (SC-LINK-04); tell the owner "
+    "the forms were checked but not tried."
+)
 #: Why forms are not exercised on a draft of this ``preview_mode``.
 _FORMS_REFUSED = {
     "published": (
@@ -82,9 +91,18 @@ _FORMS_REFUSED = {
 }
 
 
+def _norm_path(path: str) -> str:
+    """One key per page: ``/``, ``/index.html`` and ``""`` are ``/``; ``/join/`` and
+    ``/join/index.html`` are ``/join``."""
+    clean = (path or "/").split("?", 1)[0].split("#", 1)[0].strip("/")
+    if clean == "index.html" or clean.endswith("/index.html"):
+        clean = clean[: -len("index.html")].rstrip("/")
+    return "/" + clean
+
+
 def _page_for(path: str) -> str:
     """The served page a draft path names (``/`` → ``index.html``)."""
-    clean = (path or "/").split("?", 1)[0].strip("/")
+    clean = _norm_path(path).strip("/")
     return f"{clean}/index.html" if clean else "index.html"
 
 
@@ -109,11 +127,13 @@ def _record_forms(pocket: dict, pocket_id: str, path: str, result: Any) -> None:
     ]
     if not entries and not result.forms:
         return
-    verify.record_form_results(pocket_id, verify.publish_content_hash(pocket), path, entries)
+    verify.record_form_results(
+        pocket_id, verify.publish_content_hash(pocket), _norm_path(path), entries
+    )
 
 
 def _forms_summary(result: Any) -> str:
-    out = ["Form test (each form submitted once with obviously fake data):"]
+    out = ["Form test (each form submitted once with test data):"]
     if result.forms_note:
         out.append(f"  note: {result.forms_note}")
     for f in result.forms:
@@ -128,9 +148,12 @@ def _forms_summary(result: Any) -> str:
     elif result.forms and all(f.status == "ok" for f in result.forms):
         out.append("Every form saved its test entry and showed a confirmation.")
     out.append(
-        "Test entries went to this draft only (its own database, cleared when the site is "
-        "published); posts to the Paw integration gateway were stubbed and posts to other "
-        "services were blocked, so nothing reached the owner's real data."
+        "Test entries went to this draft (its own database, cleared when the site is "
+        "published). During the test the browser blocked every off-site request and popup "
+        "and stubbed the Paw integration gateway, but the draft's server code may still "
+        "call outside services itself (an email provider, a webhook): check what it calls "
+        "before you say no one was contacted. UNCHECKED forms do not block publishing; say "
+        "plainly they were not confirmed."
     )
     return "\n".join(out)
 
@@ -303,8 +326,10 @@ async def _play_test_site_handler(args: dict) -> dict:
         return _error_response(reason)
     forms_refused = ""
     if exercise_forms:
-        forms_refused = _FORMS_REFUSED.get(artifact.get("preview_mode") or "", "")
-        exercise_forms = not forms_refused
+        mode = artifact.get("preview_mode")
+        if mode != _FORMS_MODE:
+            forms_refused = _FORMS_REFUSED.get(mode or "", _FORMS_REFUSED_DEFAULT)
+        exercise_forms = mode == _FORMS_MODE
 
     try:
         from pocketpaw_ee.sites.service import _cf_client
@@ -416,7 +441,7 @@ def make_play_test_site_tool(tool: Any) -> Any:
                         "obviously fake data and report whether each one saved and "
                         "showed a confirmation. Run it on every page with a form before "
                         "telling the owner the site is ready; a failed form blocks "
-                        "publishing. Entries stay in the draft."
+                        "publishing. Entries go to the draft; off-site requests are blocked."
                     ),
                 },
             },
