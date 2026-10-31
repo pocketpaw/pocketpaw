@@ -106,6 +106,7 @@ from pocketpaw_ee.sites.dto import (
     SlugAvailability,
     SlugRenameRequest,
     VersionHistoryResponse,
+    utc_iso,
 )
 from pocketpaw_ee.versions import service as versions_service
 
@@ -860,7 +861,7 @@ async def versions_by_pocket(
                 status=shown[str(r.id)],
                 label=r.label,
                 author=names.get(r.author, r.author) if r.author else None,
-                created_at=r.created_at.isoformat(),
+                created_at=utc_iso(r.created_at) or "",
             )
             for r in rows
         ],
@@ -1014,7 +1015,7 @@ async def revert_version_by_pocket(
         status=draft.status,
         label=draft.label,
         author=draft.author,
-        created_at=draft.created_at.isoformat(),
+        created_at=utc_iso(draft.created_at) or "",
     )
 
 

@@ -359,6 +359,7 @@ async def _persist(
     writes: dict[str, str] | None = None,
     deletes: list[str] | None = None,
     add_recipe: str | None = None,
+    admin_path: str | None = None,
     label: str | None = None,
 ) -> tuple[list[str], dict | None]:
     """``project_tools.save_changes`` as ``(lockfiles_dropped, error)``."""
@@ -372,6 +373,7 @@ async def _persist(
             writes=writes,
             deletes=deletes,
             add_recipe=add_recipe,
+            admin_path=admin_path,
             label=label,
         )
     except Exception as exc:  # noqa: BLE001
@@ -566,6 +568,26 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
     from pocketpaw_ee.sites import project_tools
     from pocketpaw_ee.sites import service as sites_service
 
+    # Where the owner page lives (``site_meta.admin_path``), for a recipe that makes
+    # one: the agent's own path, else the one already recorded, else the default.
+    admin_path: str | None = None
+    if args.get("admin_path") is not None:
+        try:
+            admin_path = project_tools.admin_path_or_error(args.get("admin_path"))
+        except ValueError as exc:
+            return _error_response(f"{tool}: {exc} Nothing was changed.")
+    if recipe_id in project_tools.OWNER_PAGE_RECIPES and admin_path is None:
+        meta = pocket.get("siteMeta") or pocket.get("site_meta") or {}
+        try:
+            admin_path = project_tools.admin_path_or_error(
+                meta.get("admin_path") if isinstance(meta, dict) else None
+            )
+        except ValueError:
+            # Nothing recorded, or a value that is not a plain site path.
+            admin_path = project_tools.DEFAULT_ADMIN_PATH
+    if recipe_id not in project_tools.OWNER_PAGE_RECIPES:
+        admin_path = None
+
     try:
         recipe = await project_tools.find_recipe(recipe_id)
     except Exception as exc:  # noqa: BLE001
@@ -660,12 +682,19 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
             }
         )
     if result.get("alreadyApplied") or not writes:
+        if admin_path:
+            _dropped, err = await _persist(
+                tool, workspace_id, user_id, pocket_id, source, admin_path=admin_path
+            )
+            if err:
+                return err
         return _success_response(
             {
                 "ok": True,
                 "status": "already_applied",
                 "recipe": recipe_id,
                 "written": [],
+                **({"admin_path": admin_path} if admin_path else {}),
                 **requests,
                 "next_steps": recipe_next_steps(recipe_id, template),
                 "message": f"{recipe_id} is already applied; nothing changed. {SECRETS_RULE}",
@@ -680,6 +709,7 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
         source,
         writes=writes,
         add_recipe=recipe_id,
+        admin_path=admin_path,
         label=f"Applied recipe {recipe_id}",
     )
     if err:
@@ -697,6 +727,7 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
             "packages_added": result.get("packagesAdded") or [],
             "migrations": result.get("migrations") or [],
             "lockfile_removed": dropped,
+            **({"admin_path": admin_path} if admin_path else {}),
             **requests,
             "verification": verification,
             "next_steps": recipe_next_steps(recipe_id, template),
@@ -1180,7 +1211,9 @@ def make_project_tools(tool: Any) -> list[Any]:
             "secrets or PAW_GATEWAY_TOKEN: Paw creates those); NEVER write a secret "
             "value into a file. On a conflict NOTHING is written and the conflicts are "
             "returned. Refused when the site's plan is below the recipe's plan. "
-            "`dry_run` shows what would change."
+            "`dry_run` shows what would change. For better-auth, `admin_path` is the "
+            "site path of the owner page you build (default /admin); Paw links the "
+            "owner there, so pass it again if you put the owner page elsewhere."
         ),
         {
             "type": "object",
@@ -1192,6 +1225,14 @@ def make_project_tools(tool: Any) -> list[Any]:
                     "description": "Recipe id from list_site_recipes.",
                 },
                 "dry_run": {"type": "boolean", "description": "Plan only; write nothing."},
+                "admin_path": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": (
+                        "better-auth only: the owner page's path on the site, e.g. "
+                        "/admin or /owner/orders. Default /admin."
+                    ),
+                },
             },
             "required": ["pocket_id", "recipe_id"],
             "additionalProperties": False,

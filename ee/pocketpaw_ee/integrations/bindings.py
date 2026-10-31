@@ -113,10 +113,18 @@ async def require_edit(workspace_id: str, user_id: str, pocket_id: str):
     return doc
 
 
-async def require_owner(workspace_id: str, user_id: str, pocket_id: str):
+async def require_owner(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    *,
+    action: str = "sites.integration.export",
+):
+    """The pocket, when ``user_id`` owns it; else a ``sites.not_owner`` 403, audited
+    under ``action`` (what the caller was trying to do)."""
     doc = await pocket_in_workspace(workspace_id, pocket_id)
     if doc.owner != user_id:
-        _deny(user_id, workspace_id, pocket_id, "sites.integration.export", "sites.not_owner")
+        _deny(user_id, workspace_id, pocket_id, action, "sites.not_owner")
         raise Forbidden("sites.not_owner", "Only the site owner can do that.")
     return doc
 

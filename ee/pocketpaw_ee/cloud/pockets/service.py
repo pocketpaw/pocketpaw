@@ -2308,7 +2308,8 @@ SITE_SNAPSHOT_FIELDS = (
 def site_meta_snapshot(site_meta: Any) -> dict[str, Any] | None:
     """The part of a pocket's ``site_meta`` a copy may carry: ``project.template``,
     ``project.framework`` and ``project.recipes`` (what the repo was started from and
-    which recipes are applied). Nothing else crosses, so a future site-specific id or
+    which recipes are applied), plus ``admin_path`` (the copy's code puts the owner
+    page at the same path). Nothing else crosses, so a future site-specific id or
     secret stored under ``site_meta`` never leaks into a duplicate or a template.
     ``None`` when there is no project part (every non-project pocket)."""
     project = site_meta.get("project") if isinstance(site_meta, dict) else None
@@ -2317,7 +2318,7 @@ def site_meta_snapshot(site_meta: Any) -> dict[str, Any] | None:
     template = project.get("template")
     framework = project.get("framework")
     recipes = project.get("recipes")
-    return {
+    snapshot: dict[str, Any] = {
         "project": {
             "template": template if isinstance(template, str) else None,
             "framework": framework if isinstance(framework, str) else None,
@@ -2326,6 +2327,13 @@ def site_meta_snapshot(site_meta: Any) -> dict[str, Any] | None:
             else [],
         }
     }
+    from pocketpaw_ee.sites.project_tools import admin_path_or_error
+
+    try:
+        snapshot["admin_path"] = admin_path_or_error(site_meta.get("admin_path"))
+    except ValueError:
+        pass  # absent or not a plain site path: the copy carries none
+    return snapshot
 
 
 async def copy_site_snapshot(
@@ -2878,6 +2886,7 @@ async def set_project_source(
     writes: dict[str, str] | None = None,
     deletes: list[str] | None = None,
     add_recipe: str | None = None,
+    admin_path: str | None = None,
     label: str | None = None,
     guard: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -2890,7 +2899,9 @@ async def set_project_source(
     the event and the draft version, mirroring ``set_html_source_file``.
 
     ``add_recipe`` appends a recipe id to ``site_meta.project.recipes`` in the same
-    save. A delete of a path that is not there is a ``NotFound`` (nothing saved).
+    save; ``admin_path`` (already validated by ``sites.project_tools``) records where
+    the site's owner page lives as ``site_meta.admin_path``. A delete of a path that
+    is not there is a ``NotFound`` (nothing saved).
     ``guard`` sees the source map just read, before anything changes, and refuses
     the save by raising (``sites.project_tools.check_bases``: a file that moved
     since the caller read it is a 409). Returns ``{files, bytes, changed}`` for the
@@ -2922,6 +2933,9 @@ async def set_project_source(
         project.setdefault("framework", None)
         project["recipes"] = [*recipes, add_recipe]
         meta["project"] = project
+        meta_changed = True
+    if admin_path and meta.get("admin_path") != admin_path:
+        meta["admin_path"] = admin_path
         meta_changed = True
     changed = updated != doc.source
     if changed or meta_changed:

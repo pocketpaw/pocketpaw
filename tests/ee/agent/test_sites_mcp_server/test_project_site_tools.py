@@ -1129,3 +1129,109 @@ def test_create_and_refine_preambles_route_project_sites() -> None:
     # Every new site is a project now, the html default included.
     html = handler._create_preamble(SurfaceMeta())
     assert 'engine="project"' in html and "start_site_from_template" in html
+
+
+class TestOwnerPagePath:
+    """The accounts recipe records where the site's owner page lives
+    (``site_meta.admin_path``), so Paw can link the owner straight to their bookings
+    and orders instead of leaving them to find a footer link."""
+
+    async def test_better_auth_records_the_default_owner_page(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        pocket_id = await _start(cli)
+        out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
+        assert not out.get("is_error"), out
+        assert _body(out)["admin_path"] == "/admin"
+        assert (await _doc(pocket_id)).site_meta["admin_path"] == "/admin"
+
+    async def test_the_agent_names_its_own_owner_page(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        pocket_id = await _start(cli)
+        out = await _call(
+            "apply_site_recipe",
+            {"pocket_id": pocket_id, "recipe_id": "better-auth", "admin_path": " /owner/orders "},
+        )
+        assert not out.get("is_error"), out
+        assert (await _doc(pocket_id)).site_meta["admin_path"] == "/owner/orders"
+
+    async def test_an_already_applied_recipe_still_moves_the_owner_page(
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.sites import project_tools
+
+        pocket_id = await _start(cli)
+        await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
+        monkeypatch.setattr(
+            project_tools, "apply_recipe", AsyncMock(return_value=({"alreadyApplied": True}, {}))
+        )
+        out = await _call(
+            "apply_site_recipe",
+            {"pocket_id": pocket_id, "recipe_id": "better-auth", "admin_path": "/dashboard"},
+        )
+        assert _body(out)["status"] == "already_applied"
+        assert (await _doc(pocket_id)).site_meta["admin_path"] == "/dashboard"
+
+    @pytest.mark.parametrize(
+        "bad", ["admin", "//evil.example", "https://evil.example/admin", "/a b", "/../x"]
+    )
+    async def test_an_unsafe_owner_page_path_writes_nothing(
+        self, cli, identity, builds, beanie_test_db, recording_bus, bad
+    ) -> None:
+        pocket_id = await _start(cli)
+        out = await _call(
+            "apply_site_recipe",
+            {"pocket_id": pocket_id, "recipe_id": "better-auth", "admin_path": bad},
+        )
+        assert out["is_error"]
+        doc = await _doc(pocket_id)
+        assert doc.source == TEMPLATE_FILES
+        assert "admin_path" not in (doc.site_meta or {})
+
+    async def test_other_recipes_record_no_owner_page(
+        self, cli, identity, builds, beanie_test_db, recording_bus
+    ) -> None:
+        pocket_id = await _start(cli)
+        out = await _call(
+            "apply_site_recipe",
+            {"pocket_id": pocket_id, "recipe_id": "d1-drizzle", "admin_path": "/admin"},
+        )
+        assert not out.get("is_error"), out
+        assert "admin_path" not in _body(out)
+        assert "admin_path" not in (await _doc(pocket_id)).site_meta
+
+
+def test_a_copy_keeps_the_owner_page_path_and_nothing_else_new() -> None:
+    """A duplicate or template carries the same code, so its owner page is at the same
+    path; any other site_meta key still stays behind."""
+    from pocketpaw_ee.cloud.pockets.service import site_meta_snapshot
+
+    meta = {
+        "project": {"template": "astro", "framework": "astro", "recipes": ["better-auth"]},
+        "admin_path": "/owner",
+        "secret_thing": "x",
+    }
+    assert site_meta_snapshot(meta) == {
+        "project": {"template": "astro", "framework": "astro", "recipes": ["better-auth"]},
+        "admin_path": "/owner",
+    }
+    assert "admin_path" not in site_meta_snapshot({"project": {}, "admin_path": 5})
+    # A stored value that is not a plain site path never crosses into a copy.
+    for bad in ["//evil.example", "https://evil.example/admin", "admin", "/../x"]:
+        assert "admin_path" not in site_meta_snapshot({"project": {}, "admin_path": bad})
+
+
+async def test_a_bad_recorded_owner_page_path_is_replaced_by_the_default(
+    cli, identity, builds, beanie_test_db, recording_bus
+) -> None:
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    pocket_id = await _start(cli)
+    doc = await Pocket.get(ObjectId(pocket_id))
+    doc.site_meta = {**(doc.site_meta or {}), "admin_path": "https://evil.example/admin"}
+    await doc.save()
+    out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
+    assert not out.get("is_error"), out
+    assert (await _doc(pocket_id)).site_meta["admin_path"] == "/admin"

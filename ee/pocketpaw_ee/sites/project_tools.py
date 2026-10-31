@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import tempfile
 from collections.abc import Mapping
@@ -636,6 +637,34 @@ def check_bases(source: Mapping[str, Any], bases: Mapping[str, str | None]) -> N
         )
 
 
+#: Recipes that give the site accounts and an owner page Paw can link to.
+OWNER_PAGE_RECIPES = frozenset({"better-auth"})
+#: Where the accounts recipe's owner sign-in lands (``next=/admin`` in its AGENTS.md).
+DEFAULT_ADMIN_PATH = "/admin"
+_ADMIN_PATH_MAX = 200
+_ADMIN_PATH_RE = re.compile(r"^/(?!/)[A-Za-z0-9._~\-/]*$")
+
+
+def admin_path_or_error(value: Any) -> str:
+    """A site-relative owner page path ("/admin", "/owner/orders"), trimmed.
+
+    Raises ``ValueError`` for anything Paw must not turn into a link: no leading
+    slash, a protocol-relative or absolute URL, whitespace, a query or fragment, or a
+    ``..`` segment."""
+    path = value.strip() if isinstance(value, str) else ""
+    if (
+        not path
+        or len(path) > _ADMIN_PATH_MAX
+        or not _ADMIN_PATH_RE.match(path)
+        or ".." in path.split("/")
+    ):
+        raise ValueError(
+            "admin_path must be a path on the site that starts with one '/', like "
+            "/admin or /owner/orders: letters, digits, '-', '_', '.', '~' and '/' only."
+        )
+    return path
+
+
 async def save_changes(
     *,
     user_id: str,
@@ -644,6 +673,7 @@ async def save_changes(
     writes: Mapping[str, str] | None = None,
     deletes: list[str] | None = None,
     add_recipe: str | None = None,
+    admin_path: str | None = None,
     label: str | None = None,
     bases: Mapping[str, str | None] | None = None,
 ) -> list[str]:
@@ -669,6 +699,7 @@ async def save_changes(
         writes=writes,
         deletes=[*deletes, *dropped],
         add_recipe=add_recipe,
+        admin_path=admin_path,
         label=label,
         guard=(lambda current: check_bases(current, bases)) if bases else None,
     )

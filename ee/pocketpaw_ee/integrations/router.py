@@ -12,6 +12,8 @@
 #   GET    /sites/by-pocket/{pocket_id}/integrations/{provider}/fields/{key}/options
 #          ?<depends_on key>=<draft>                     {options} (select choices; 409/422/502)
 #   GET    /sites/by-pocket/{pocket_id}/integrations/newsletter/export.csv  (owner)
+#   GET    /sites/by-pocket/{pocket_id}/integrations/newsletter/subscribers
+#          {count, latest[20]} newest first (owner)
 #   GET    /sites/by-pocket/{pocket_id}/orders?limit&cursor
 #   POST   /sites/by-pocket/{pocket_id}/orders/{order_id}/refunds
 #          {amount_minor?, idempotency_key} -> OrderView (pocket owner or admin)
@@ -68,6 +70,8 @@ from pocketpaw_ee.integrations.dto import (
     ConnectionView,
     ConnectResponse,
     FieldOptionsView,
+    NewsletterSubscribers,
+    NewsletterSubscriberView,
     OrdersPage,
     OrderView,
     ProviderView,
@@ -177,6 +181,36 @@ async def export_newsletter(
             "Content-Disposition": 'attachment; filename="newsletter-subscribers.csv"',
             "Cache-Control": "no-store",
         },
+    )
+
+
+@router.get(_SITE + "/integrations/newsletter/subscribers", response_model=NewsletterSubscribers)
+async def newsletter_subscribers(
+    pocket_id: str,
+    response: Response,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> NewsletterSubscribers:
+    """How many signed up and the newest 20, for the owner only (the export's rule:
+    the addresses are personal data)."""
+    from pocketpaw_ee.integrations.providers.newsletter import (
+        latest_subscribers,
+        subscriber_count,
+    )
+    from pocketpaw_ee.sites.dto import utc_iso
+
+    workspace_id = ctx.workspace_id or ""
+    await bindings.require_owner(
+        workspace_id, ctx.user_id, pocket_id, action="sites.integration.newsletter.list"
+    )
+    latest = await latest_subscribers(workspace_id, pocket_id)
+    response.headers["Cache-Control"] = "no-store"
+    return NewsletterSubscribers(
+        count=await subscriber_count(workspace_id, pocket_id),
+        latest=[
+            NewsletterSubscriberView(email=email, subscribed_at=utc_iso(stamp))
+            for email, stamp in latest
+        ],
     )
 
 

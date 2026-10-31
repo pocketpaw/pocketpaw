@@ -114,6 +114,7 @@ from pocketpaw_ee.sites.dto import (
     SiteResponse,
     SiteStatusResponse,
     SlugAvailability,
+    utc_iso,
 )
 from pocketpaw_ee.sites.engines import (
     content_key,
@@ -1621,14 +1622,14 @@ def _to_response(
         builder_origin=getattr(doc, "builder_origin", ""),
         # P2b: ISO string of the last successful live deploy, or None before the
         # first deploy (pre-P2b rows read null via the getattr default).
-        deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        deployed_at=utc_iso(deployed_at),
         # When the row was made. The gallery orders by "most recent", and
         # ``deployed_at`` above is None for every draft — so without this the whole
         # draft half of a workspace had no ordering key and sorted alphabetically,
         # which put a site created a minute ago below one created last month. Read
         # via getattr for the same reason deployed_at is: a doc that predates the
         # field reads None rather than raising.
-        created_at=created_at.isoformat() if created_at is not None else None,
+        created_at=utc_iso(created_at),
         # DS-1a: the source pocket's authoring pattern ("dynamic" | "landing" |
         # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
         # not the Site). "" when unset / unresolved so the gallery is empty-safe.
@@ -1660,11 +1661,7 @@ def _to_response(
         # is more useful to whoever gets the support ticket than a blank.
         plan_tier=_canonical_plan_tier(getattr(doc, "plan_tier", None)),
         subscription_status=getattr(doc, "subscription_status", None) or "none",
-        renewal_date=(
-            _renewal.isoformat()
-            if (_renewal := getattr(doc, "renewal_date", None)) is not None
-            else None
-        ),
+        renewal_date=utc_iso(getattr(doc, "renewal_date", None)),
         # What the current period has already been bought at, so the builder can
         # price a plan CHANGE correctly. Sent for every site, including free ones
         # (where it is 0), because the client subtracts against it unconditionally.
@@ -7635,9 +7632,7 @@ def _analytics_iso(moment: datetime) -> str:
     own local time — a silent several-hour lie about when counting started, which is
     the very value a chart's x-axis begins at.
     """
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    return moment.astimezone(UTC).isoformat()
+    return utc_iso(moment) or ""
 
 
 def _analytics_empty(
@@ -7690,7 +7685,7 @@ def _client_response(site: _SiteDoc) -> SiteClientResponse:
         invoices=[
             SiteInvoiceOut(
                 id=inv.id,
-                issued_at=inv.issued_at.isoformat(),
+                issued_at=utc_iso(inv.issued_at) or "",
                 amount_cents=inv.amount_cents,
                 currency=inv.currency,
                 paid=inv.paid,
@@ -12959,7 +12954,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # getattr — the same reason the paid-grant branch further up is written out
     # rather than short-circuited.
     _status_renewal = doc.renewal_date if doc is not None else None
-    _status_renewal_iso = _status_renewal.isoformat() if _status_renewal is not None else None
+    _status_renewal_iso = utc_iso(_status_renewal)
 
     # The plan's DISPLAY name for the same copy. Best-effort: a name that will not
     # resolve is a phrasing problem on one line, not a reason to fail a status read
@@ -13006,7 +13001,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         # the address the latest build actually serves at, not a stale ``url=None``
         # dupe. None when the pocket has no deployed site.
         url=(doc.url or None) if doc is not None else None,
-        deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        deployed_at=utc_iso(deployed_at),
         pattern=pattern,
         engine=engine,
         capabilities=capabilities,
@@ -13577,8 +13572,8 @@ def _export_response(doc: _SiteExportDoc) -> SiteExportResponse:
         # call — which meant ``POST /sites/{id}/export`` answered 500 after doing all
         # its work, and the delete lane's forced export could never satisfy its own
         # gate. Nothing caught it because no test had ever built an export response.
-        created_at=doc.createdAt.isoformat() if doc.createdAt else None,
-        expires_at=doc.expires_at.isoformat() if doc.expires_at else None,
+        created_at=utc_iso(doc.createdAt),
+        expires_at=utc_iso(doc.expires_at),
     )
 
 

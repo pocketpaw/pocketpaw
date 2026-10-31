@@ -59,6 +59,7 @@ class _NoCounter:
         self.counters: dict[str, int] = {}
         self.ttls: dict[str, int] = {}
         self.guards: dict[str, int | None] = {}
+        self.values: dict[str, Any] = {}
 
     async def enqueue_job(self, _fn: str, *_a: Any, _job_id: str, **_k: Any) -> Any:
         if _job_id in self.live or _job_id in self.results:
@@ -94,11 +95,19 @@ class _ArqLike(_NoCounter):
         self.counters.clear()
         self.ttls.clear()
 
-    async def set(self, key: str, _value: Any, *, nx: bool = False, ex: int | None = None) -> Any:
+    async def set(self, key: str, value: Any, *, nx: bool = False, ex: int | None = None) -> Any:
         if nx and key in self.guards:
             return None
         self.guards[key] = ex
+        self.values[key] = value
         return True
+
+    async def get(self, key: str) -> Any:
+        return self.values.get(key)
+
+    def record_supersede(self, job_id: str, pocket_id: str = "p1") -> None:
+        """What ``_supersede_previous_job`` leaves on the job it aborted."""
+        self.values[bj._SUPERSEDED_JOB_KEY.format(job_id=job_id)] = pocket_id
 
     def lapse_guards(self) -> None:
         self.guards.clear()
@@ -351,6 +360,7 @@ async def test_an_aborted_render_is_not_budgeted(arq_like: _ArqLike) -> None:
     import asyncio
 
     job_id = bj._preview_job_id("p1", "h1")
+    arq_like.record_supersede(job_id)
     answers = await _fail_every_run(
         arq_like, job_id, _raised(asyncio.CancelledError()), runs=bj.RETRY_LIMITS["raised"] + 3
     )
@@ -373,7 +383,9 @@ RAISED_READS = {
         lambda: bj.SandboxUnavailableError("RuntimeError: Daytona is not configured"),
         "sandbox_unavailable:no_sandbox",
     ),
-    "aborted": (lambda: asyncio.CancelledError(), bj.SUPERSEDED_REASON),
+    # A cancel nothing superseded (a shutdown, a stale abort mark) is a lost job, not a
+    # newer edit; the superseded read is pinned in test_cancel_is_not_superseded.py.
+    "cancelled": (lambda: asyncio.CancelledError(), bj.JOB_CANCELLED_REASON),
     "code_bug": (lambda: KeyError("layers"), "job_crashed:unhandled_exception"),
     "runtime_error": (lambda: RuntimeError("boom"), "job_crashed:unhandled_exception"),
     # arq's other JobExecutionFailed (an expired job, an unregistered function) is not a
@@ -414,7 +426,7 @@ async def test_a_crash_is_ours_and_never_reads_as_an_unreachable_service(
         ("no_sandbox", "raised"),
         ("max_tries_after_capacity", "sandbox_unavailable"),
         ("job_expired", "raised"),
-        ("aborted", "aborted"),
+        ("cancelled", "raised"),
     ],
 )
 def test_each_raise_spends_the_right_retry_budget(case: str, kind: str) -> None:

@@ -830,6 +830,48 @@ async def test_newsletter_dedupes_and_exports_csv_to_the_owner_only(beanie_test_
 
 
 @pytest.mark.asyncio
+async def test_newsletter_subscribers_lists_count_and_latest_to_the_owner_only(beanie_test_db):
+    """The owner sees how many people signed up and the newest few next to Export,
+    instead of having to download a CSV to find out whether anyone did."""
+    from pocketpaw_ee.cloud.models.integration import NewsletterSubscriber
+
+    pid = await _pocket()
+    site = await _site(pid)
+    other = await _pocket()
+    await _link(pid, "newsletter")
+    base = datetime(2026, 10, 1, tzinfo=UTC)
+    for i in range(23):
+        await NewsletterSubscriber(
+            workspace=WS,
+            pocket_id=pid,
+            site_id=str(site.id),
+            email=f"p{i:02d}@example.com",
+            createdAt=base + timedelta(minutes=i),
+        ).insert()
+    await NewsletterSubscriber(workspace=WS, pocket_id=other, email="else@example.com").insert()
+    url = f"/api/v1/sites/by-pocket/{pid}/integrations/newsletter/subscribers"
+
+    async with _client() as c:
+        resp = await c.get(url)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 23
+    assert len(body["latest"]) == 20
+    assert body["latest"][0]["email"] == "p22@example.com"
+    assert body["latest"][-1]["email"] == "p03@example.com"
+    assert body["latest"][0]["subscribed_at"].endswith("+00:00")
+    assert resp.headers["cache-control"] == "no-store"
+
+    from unittest.mock import patch
+
+    with patch("pocketpaw_ee.guards.audit.log_denial") as log_denial:
+        async with _client(WS, EDITOR) as c:
+            denied = await c.get(url)
+    assert denied.status_code == 403
+    assert log_denial.call_args.kwargs["action"] == "sites.integration.newsletter.list"
+
+
+@pytest.mark.asyncio
 async def test_gateway_cors_answers_preflight_for_the_gateway_path_only():
     from pocketpaw_ee.integrations.gateway import GatewayCors
 

@@ -369,7 +369,8 @@ async def _timeout_reason(pool: Any, job_id: str) -> str:
         if status is JobStatus.complete:
             info = await job.result_info()
             if info is not None and not info.success:
-                return build_job.raised_job_reason(info.result)
+                superseded = await build_job._result_superseded(pool, job_id, info)
+                return build_job.raised_job_reason(info.result, superseded=superseded)
     except Exception:  # noqa: BLE001
         return "timeout"
     return "timeout"
