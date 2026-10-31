@@ -119,7 +119,7 @@
   {
     "label": "a pending name that appeared in the account is deployed over, so wrangler replaces a Worker the site does not own",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "            await _refuse_taken_pending_name(rename.slug_pending)\n",
+    "find": "            await _refuse_taken_pending_name(rename.slug_pending, site_id=rename.id)\n",
     "replace": "",
     "tests": [
       "tests/ee/sites/test_sites_rename.py::test_a_pending_name_that_appeared_in_the_account_is_refused"
@@ -186,6 +186,141 @@
     "replace": "    site = await _load(workspace_id, site_id)",
     "tests": [
       "tests/ee/sites/test_sites_rename.py::test_delete_cancels_a_pending_rename"
+    ]
+  },
+  {
+    "label": "the redirect target may be plain http, so the old address can bounce visitors off TLS",
+    "file": "ee/pocketpaw_ee/sites/slug_redirect.py",
+    "find": "    if parts.scheme != \"https\":",
+    "replace": "    if parts.scheme not in (\"https\", \"http\"):",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_redirect_only_ever_targets_a_plain_https_host"
+    ]
+  },
+  {
+    "label": "the redirect target may carry userinfo or a port, so a crafted address points somewhere it does not name",
+    "file": "ee/pocketpaw_ee/sites/slug_redirect.py",
+    "find": "    if parts.username is not None or parts.password is not None or parts.port is not None:",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_redirect_only_ever_targets_a_plain_https_host"
+    ]
+  },
+  {
+    "label": "the redirect target host is not checked, so an empty or malformed host is baked into the Worker",
+    "file": "ee/pocketpaw_ee/sites/slug_redirect.py",
+    "find": "    if not _HOSTNAME.match(host):",
+    "replace": "    if False:",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_redirect_only_ever_targets_a_plain_https_host"
+    ]
+  },
+  {
+    "label": "the redirect Worker resolves the request path against the target, so //evil.example turns it into an open redirect",
+    "file": "ee/pocketpaw_ee/sites/slug_redirect.py",
+    "find": "        \"    const to = new URL(TARGET);\\n\"\n        \"    to.pathname = from.pathname;\\n\"\n        \"    to.search = from.search;\\n\"",
+    "replace": "        \"    const to = new URL(from.pathname + from.search, TARGET);\\n\"",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_the_redirect_worker_keeps_path_and_query_and_never_changes_host"
+    ]
+  },
+  {
+    "label": "the redirect Worker drops the query, so a shared link loses its parameters",
+    "file": "ee/pocketpaw_ee/sites/slug_redirect.py",
+    "find": "        \"    to.search = from.search;\\n\"",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_the_redirect_worker_keeps_path_and_query_and_never_changes_host"
+    ]
+  },
+  {
+    "label": "a rename deletes the old Worker instead of redirecting, so every shared link dies",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await _redirect_old_address(doc, old_name=old_name, new_name=new_name, url=url)\n",
+    "replace": "    await _discard_worker(old_name, reason=\"a rename\")\n",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_the_old_address_301s_to_the_new_one_for_the_hold"
+    ]
+  },
+  {
+    "label": "a later rename does not re-point the earlier redirects, so A -> B -> C sends A through B",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        await slug_redirect.retarget_site(client, site_id=site_id, url=url, skip=old_name)",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_chained_rename_sends_every_old_address_straight_to_the_newest"
+    ]
+  },
+  {
+    "label": "taking an old address back keeps its redirect row, so the sweep later treats the live site's name as a redirect",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await slug_redirect.forget(new_name)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_site_can_take_its_own_old_address_back"
+    ]
+  },
+  {
+    "label": "a site's own redirect counts as a foreign Worker, so it can never take its old address back",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if await _owns_redirect(name, site_id):\n        return\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_site_can_take_its_own_old_address_back"
+    ]
+  },
+  {
+    "label": "the redirect lookup ignores which site owns it, so another site may claim a live redirect",
+    "file": "ee/pocketpaw_ee/sites/slug_redirect.py",
+    "find": "        {\"name\": name, \"site_id\": site_id}, {\"_id\": 1}",
+    "replace": "        {\"name\": name}, {\"_id\": 1}",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_another_site_cannot_take_a_redirecting_address"
+    ]
+  },
+  {
+    "label": "the sweep deletes redirects that have not expired, so the old link dies early",
+    "file": "ee/pocketpaw_ee/sites/slug_redirect.py",
+    "find": "        .find({\"expires_at\": {\"$lte\": now}})",
+    "replace": "        .find({})",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_an_expired_redirect_is_removed_and_the_address_freed"
+    ]
+  },
+  {
+    "label": "the sweep drops the row when the Worker delete fails, so the redirect Worker is orphaned for good",
+    "file": "ee/pocketpaw_ee/sites/slug_redirect.py",
+    "find": "        if serving is None:\n            await cf.delete_account_script(name)",
+    "replace": "        if serving is None:\n            try:\n                await cf.delete_account_script(name)\n            except Exception:\n                pass",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_an_expired_redirect_that_cannot_be_deleted_waits_for_the_next_tick"
+    ]
+  },
+  {
+    "label": "the sweep is not on the heartbeat, so expired redirects are never removed",
+    "file": "ee/pocketpaw_ee/extensions.py",
+    "find": "        sweep_slug_redirects,\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_the_redirect_sweep_runs_on_the_shared_heartbeat"
+    ]
+  },
+  {
+    "label": "deleting a site leaves its redirect Workers, so its old addresses keep 301ing to a deleted site",
+    "file": "ee/pocketpaw_ee/sites/delete_cascade.py",
+    "find": "            await remove_redirects(site_id=str(site.id))",
+    "replace": "            pass",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_deleting_the_site_removes_its_redirects"
+    ]
+  },
+  {
+    "label": "a failed redirect deploy no longer falls back to deleting the old Worker, so it keeps serving a stale copy",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "            \"sites: could not redirect %s to %s; deleting it instead\", old_name, url, exc_info=True\n        )\n        await _discard_worker(old_name, reason=\"a rename\")",
+    "replace": "            \"sites: could not redirect %s to %s; deleting it instead\", old_name, url, exc_info=True\n        )",
+    "tests": [
+      "tests/ee/sites/test_sites_rename.py::test_a_failed_redirect_falls_back_to_deleting_the_old_worker"
     ]
   }
 ]

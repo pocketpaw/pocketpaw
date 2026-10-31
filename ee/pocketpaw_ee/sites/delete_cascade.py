@@ -13,7 +13,8 @@
 #                      anything irreversible, so lead ingest and the concierge stop
 #                      even if every later step fails;
 #   3. serving off   — routes, hostnames, the script's Durable Objects (tombstone,
-#                      forced delete, verify; best effort), then the Worker script;
+#                      forced delete, verify; best effort), then the Worker script
+#                      and the redirect Workers of its old addresses;
 #   4. reclaim       — D1, the bundle-deploy KV namespaces and R2 buckets, the
 #                      pocket's draft Worker and draft data, the public-asset R2
 #                      prefix, artifacts: the things that cost money once nothing
@@ -356,6 +357,11 @@ async def _delete_script(*, site: Any, deps: Any) -> str:
         from pocketpaw_ee.sites.workers_deploy import site_worker_name
 
         await deps.cloudflare.delete_account_script(site_worker_name(site), **force)
+        # The site's old addresses, still redirecting to it after a rename. Only a
+        # workers site can rename; ``deps`` without the hook (unit fakes) has none.
+        remove_redirects = getattr(deps, "remove_redirects", None)
+        if remove_redirects is not None:
+            await remove_redirects(site_id=str(site.id))
     return OUTCOME_DONE
 
 

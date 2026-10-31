@@ -2,10 +2,10 @@
 # Created: 2026-09-23 (VS-4, feat/sites-rename). Written and read ONLY through
 # ``pocketpaw_ee.sites.service`` (the rename apply step and the availability check).
 #
-# When a site renames (``acme-bakery`` -> ``acme-cakes``), its old address stops
-# serving on the next publish. Handing ``acme-bakery`` to a stranger the same minute
-# would let them publish at the URL the old owner's customers, links and QR codes
-# still point at. So the old name is HELD for 30 days:
+# When a site renames (``acme-bakery`` -> ``acme-cakes``), its old address redirects
+# to the new one for 30 days (``SiteRedirect``, ``sites.slug_redirect``). Handing
+# ``acme-bakery`` to a stranger would let them publish at the URL the old owner's
+# customers, links and QR codes still point at. So the old name is HELD for as long:
 #
 #   * unavailable to every OTHER workspace until ``hold_until``;
 #   * available to the workspace that released it, so an owner who regrets a rename
