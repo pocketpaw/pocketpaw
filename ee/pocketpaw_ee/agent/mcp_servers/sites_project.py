@@ -137,7 +137,7 @@ def _draft_worker_note(record: dict[str, Any] | None) -> str:
 
 SECRETS_RULE = (
     "Never write a secret value into any file. Signing secrets (BETTER_AUTH_SECRET, "
-    "SESSION_SECRET, AUTH_SECRET, JWT_SECRET) and PAW_GATEWAY_TOKEN are created by Paw: "
+    "SESSION_SECRET, AUTH_SECRET) and PAW_GATEWAY_TOKEN are created by Paw: "
     "never request them or mention them to the owner. For any other secret name, call "
     "`request_site_secret` (pocket_id, name, description) so the owner fills it in; "
     "`list_site_secrets` shows which are set. If those tools are not available, tell "

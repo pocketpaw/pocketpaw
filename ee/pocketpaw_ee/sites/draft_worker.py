@@ -171,16 +171,26 @@ def draft_resource_id(pocket_id: str) -> str:
     return f"draft{env_tag()}{_pid(pocket_id)}"
 
 
+def signing_value_for(signing_value: str, name: str) -> str:
+    """One draft signing secret per name: HMAC-SHA256(draft secret, name), so no two
+    names share a value and none of them is the stored secret itself."""
+    import hashlib
+    import hmac
+
+    return hmac.new(signing_value.encode(), name.encode(), hashlib.sha256).hexdigest()
+
+
 def draft_secrets(owner: Mapping[str, str], *, signing_value: str) -> dict[str, str]:
     """The secrets a draft binds: ONLY each owner ``NAME__DRAFT`` (bound as ``NAME``)
-    plus the draft's own session-signing value. A production value never reaches a
-    draft; a secret with no draft value is simply not bound."""
+    plus the draft's own session-signing value per name (``signing_value_for``). A
+    production value never reaches a draft; a secret with no draft value is simply
+    not bound."""
     out: dict[str, str] = {}
     for name, value in owner.items():
         if name.endswith(DRAFT_SUFFIX) and len(name) > len(DRAFT_SUFFIX):
             out[name[: -len(DRAFT_SUFFIX)]] = value
     for name in SIGNING_SECRETS:
-        out[name] = signing_value
+        out[name] = signing_value_for(signing_value, name)
     return out
 
 

@@ -71,16 +71,25 @@ def test_the_signing_list_is_shared_with_drafts():
         "BETTER_AUTH_SECRET",
         "AUTH_SECRET",
         "SESSION_SECRET",
-        "JWT_SECRET",
     }
     assert draft_worker.SIGNING_SECRETS == site_secrets.PLATFORM_SIGNING_SECRETS
+
+
+def test_drafts_get_a_distinct_signing_value_per_name():
+    out = draft_worker.draft_secrets({}, signing_value="draft-signing")
+    values = [out[n] for n in draft_worker.SIGNING_SECRETS]
+    assert len(set(values)) == len(values)
+    assert "draft-signing" not in values
+    # Stable for one draft secret, so draft sessions survive redeploys.
+    assert draft_worker.draft_secrets({}, signing_value="draft-signing") == out
+    assert draft_worker.draft_secrets({}, signing_value="other") != out
 
 
 @pytest.mark.parametrize(
     ("name", "managed"),
     [
         ("BETTER_AUTH_SECRET", True),
-        ("JWT_SECRET", True),
+        ("JWT_SECRET", False),  # app data, not only sessions: the owner's call
         ("SESSION_SECRET__DRAFT", True),
         ("PAW_GATEWAY_TOKEN", True),
         ("ADMIN_PASSWORD", False),
@@ -165,7 +174,7 @@ async def test_a_pending_signing_request_is_filled_even_when_the_build_does_not_
 
     pid = await _pocket()
     await site_secrets.request_secret(
-        workspace_id=WS, user_id=EDITOR, pocket_id=pid, name="JWT_SECRET", description="x"
+        workspace_id=WS, user_id=EDITOR, pocket_id=pid, name="AUTH_SECRET", description="x"
     )
     await site_secrets.request_secret(
         workspace_id=WS, user_id=EDITOR, pocket_id=pid, name="ADMIN_PASSWORD", description="x"
@@ -173,7 +182,7 @@ async def test_a_pending_signing_request_is_filled_even_when_the_build_does_not_
     site = SimpleNamespace(id="site_9", workspace=WS, pocket_id=pid, d1_database_id="")
     cf = _CF()
     await sites_service.deploy_bundle(site, _build(tmp_path, []), cloudflare=cf)
-    assert set(_secret_bindings(cf.puts[0])) == {"JWT_SECRET"}
+    assert set(_secret_bindings(cf.puts[0])) == {"AUTH_SECRET"}
     listed = await site_secrets.list_secrets(workspace_id=WS, user_id=OWNER, pocket_id=pid)
     assert [s.name for s in listed.pending] == ["ADMIN_PASSWORD"]
 
@@ -216,7 +225,7 @@ def _agent(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("name", ["BETTER_AUTH_SECRET", "JWT_SECRET", "AUTH_SECRET__DRAFT"])
+@pytest.mark.parametrize("name", ["BETTER_AUTH_SECRET", "SESSION_SECRET", "AUTH_SECRET__DRAFT"])
 async def test_the_agent_cannot_ask_the_owner_for_a_signing_secret(beanie_test_db, _agent, name):
     sites_create, pushed = _agent
     pid = await _pocket()

@@ -88,7 +88,7 @@ Server, framework templates: apply the `paw-integrations` recipe, then call
 ## Secrets
 
 Paw creates signing secrets (`BETTER_AUTH_SECRET`, `SESSION_SECRET`,
-`AUTH_SECRET`, `JWT_SECRET`); never request them. For other NAMEs, call
+`AUTH_SECRET`); never request them. For other NAMEs, call
 `request_site_secret(pocket_id, name, description)` in plain words;
 `list_site_secrets` shows which are set.
 Never write a secret value into any file: only names go in `.dev.vars.example`.

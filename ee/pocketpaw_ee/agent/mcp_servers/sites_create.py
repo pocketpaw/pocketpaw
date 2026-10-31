@@ -3924,8 +3924,8 @@ def make_request_site_secret_tool(tool: Any) -> Any:
             "env var the Worker reads (UPPER_SNAKE_CASE, max 64 chars, e.g. "
             "STRIPE_SECRET_KEY); `description` tells the owner, in plain words, what it is "
             "and where to get it. Publishing binds every set secret as env.<NAME>. Never "
-            "for signing secrets (BETTER_AUTH_SECRET, SESSION_SECRET, AUTH_SECRET, "
-            "JWT_SECRET) or PAW_GATEWAY_TOKEN: Paw creates those itself and refuses the "
+            "for signing secrets (BETTER_AUTH_SECRET, SESSION_SECRET, AUTH_SECRET) or "
+            "PAW_GATEWAY_TOKEN: Paw creates those itself and refuses the "
             "request. Only ask for what the owner really has to choose or bring."
         ),
         {
