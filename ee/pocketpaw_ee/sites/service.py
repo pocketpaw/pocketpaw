@@ -5850,6 +5850,9 @@ async def site_build_status(*, workspace_id: str, pocket_id: str) -> dict[str, A
         "site_id": str(doc.id) if doc is not None else None,
         "name": doc.name if doc is not None else "",
         "published": doc is not None,
+        # A saved rename waiting for the next publish: the live ``url`` changes to it
+        # then, and the old address stops working. The agent quotes ``url`` until then.
+        "slug_pending": getattr(doc, "slug_pending", None) if doc is not None else None,
         **state,
     }
 

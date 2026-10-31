@@ -1498,7 +1498,9 @@ _PROJECT_LOOP = (
 _SHARING_RULE = (
     "Sharing: the live address is the link and the Share button copies it. The owner "
     "renames it in Settings > General > Address > Change; the new name takes over at the "
-    "next publish and the old link stops working then. There is no QR maker for the site "
+    "next publish and the old link stops working then. Before you quote the address, "
+    "read it with `mcp__pocketpaw_sites_manager__get_site_build_status` (`url`; "
+    "`slug_pending` is a rename waiting for that publish). There is no QR maker for the site "
     "link; never point to one or to an outside link service. Status buttons in a "
     "generated admin move forward only: the primary action is the next state.\n"
 )

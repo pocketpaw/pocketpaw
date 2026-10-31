@@ -75,3 +75,27 @@ def test_the_app_plan_skill_says_what_ready_means() -> None:
         "There is no QR maker for the site link",
     ):
         assert phrase in section, phrase
+
+
+async def test_the_build_status_tool_reads_the_live_address_and_a_pending_rename(
+    monkeypatch,
+) -> None:
+    """After a rename the chat kept quoting the dead link. The status tool carries the
+    live ``url`` and the rename waiting for the next publish, and the sharing rule
+    tells the agent to read it before quoting an address."""
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.surface.handlers import sites as handler
+    from pocketpaw_ee.sites import service
+
+    doc = SimpleNamespace(id="s1", name="Asha's Pickles", slug_pending="ashas-pickles")
+
+    async def _doc(_ws: str, _pid: str) -> SimpleNamespace:
+        return doc
+
+    monkeypatch.setattr(service, "canonical_site_for_pocket", _doc)
+    monkeypatch.setattr(service, "build_wire_state", lambda _d: {"url": "https://old.example.dev/"})
+    state = await service.site_build_status(workspace_id="w", pocket_id="p")
+    assert state["url"] == "https://old.example.dev/"
+    assert state["slug_pending"] == "ashas-pickles"
+    assert "get_site_build_status" in handler._SHARING_RULE
