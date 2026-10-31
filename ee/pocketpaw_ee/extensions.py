@@ -113,6 +113,8 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
     - ``sweep_do_usage``: daily Durable Object usage per site from Cloudflare GraphQL
       analytics; flips ``do_throttled`` past the plan's ceiling. Fails open; at most
       once an interval; no-op unless PAW_SITES_DURABLE_OBJECTS is on.
+    - ``sweep_slug_redirects``: delete the redirect Worker of a renamed site's old
+      address once its 30-day hold ends, freeing the name.
     - ``sweep_do_teardowns``: retry DO teardowns a site delete could not finish, with
       backoff, then hand them to an operator (same flag).
     - ``backfill_tenant_keys`` (tick only): mint LiteLLM tenant keys for up to 50
@@ -132,6 +134,7 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
     from pocketpaw_ee.sites.draft_worker import sweep_draft_workers
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
     from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
+    from pocketpaw_ee.sites.slug_redirect import sweep_slug_redirects
 
     cluster = [
         sweep_stale_runs,
@@ -143,6 +146,7 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
         sweep_subscription_grace,
         sweep_draft_workers,
         sweep_do_usage,
+        sweep_slug_redirects,
         sweep_do_teardowns,
         backfill_tenant_keys,
     ]

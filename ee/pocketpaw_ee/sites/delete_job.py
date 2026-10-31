@@ -171,6 +171,11 @@ class _DeleteDeps:
     async def purge_records(self, *, workspace_id: str, site_id: str) -> None:
         await sites_service.purge_site_records(workspace_id=workspace_id, site_id=site_id)
 
+    async def remove_redirects(self, *, site_id: str) -> None:
+        from pocketpaw_ee.sites.slug_redirect import remove_site_redirects
+
+        await remove_site_redirects(self.cloudflare, site_id=site_id)
+
 
 def _build_deps() -> _DeleteDeps:
     from pocketpaw_ee.sites.public_assets import public_asset_store

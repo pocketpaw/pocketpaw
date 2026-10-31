@@ -3338,7 +3338,7 @@ async def _deploy_site_doc(
         # script that appeared under the pending name since is refused, not overwritten.
         rename = await _pending_rename(workspace_id=workspace_id, site_id=site_id)
         if rename is not None:
-            await _refuse_taken_pending_name(rename.slug_pending)
+            await _refuse_taken_pending_name(rename.slug_pending, site_id=rename.id)
             deploy_name = rename.slug_pending
         else:
             # VS-1: the Worker this site already lives under, read from its row, so a
@@ -4407,6 +4407,9 @@ async def _slug_unavailable_reason(slug: str, *, workspace_id: str, own: Any | N
     # global-read: see ``_address_claimed_by_other_site``.
     if await _SiteDoc.get_pymongo_collection().find_one(query, {"_id": 1}) is not None:
         return "taken"
+    if own is not None and await _owns_redirect(slug, own.id):
+        # One of this site's own old addresses, redirecting to it: it may take it back.
+        return None
     if slug in await account_script_names() and (own is None or site_worker_name(own) != slug):
         return "taken"
     if await _slug_held_from(slug, workspace_id):
@@ -4559,7 +4562,14 @@ async def _pending_rename(*, workspace_id: str, site_id: str) -> Any | None:
     return doc
 
 
-async def _refuse_taken_pending_name(name: str) -> None:
+async def _owns_redirect(name: str, site_id: Any) -> bool:
+    """Is ``name`` one of this site's old addresses, now redirecting to it?"""
+    from pocketpaw_ee.sites import slug_redirect
+
+    return await slug_redirect.owns_redirect(name, str(site_id))
+
+
+async def _refuse_taken_pending_name(name: str, *, site_id: Any) -> None:
     """Refuse to deploy a rename onto a Worker name that exists in the account now.
 
     Unlike VS-2's claimed-name exemption, a renaming site already has a live Worker
@@ -4568,7 +4578,15 @@ async def _refuse_taken_pending_name(name: str) -> None:
     ``wrangler deploy`` would silently replace, or what a failed rename left when
     even its cleanup failed. Overwriting the first is unrecoverable; the second costs
     the owner one cancel. So refuse, keep ``slug_pending``, and say how to get out.
-    Reads the account FRESH, and fails open like the listing."""
+    The one script it may replace is the site's OWN redirect (taking an old address
+    back). Reads the account FRESH, and fails open like the listing."""
+    if await _owns_redirect(name, site_id):
+        # Taking an old address back: drop the row BEFORE the deploy overwrites the
+        # redirect Worker, so nothing ever sweeps the site's own Worker.
+        from pocketpaw_ee.sites import slug_redirect
+
+        await slug_redirect.forget(name, site_id=str(site_id))
+        return
     if name in await account_script_names(refresh=True):
         raise ConflictError(
             "sites.slug_taken",
@@ -4578,14 +4596,15 @@ async def _refuse_taken_pending_name(name: str) -> None:
         )
 
 
-async def _discard_worker(name: str, *, reason: str) -> bool:
+async def _discard_worker(name: str, *, reason: str, force: bool = False) -> bool:
     """Delete an account-level Worker, best effort. Logs WARNING and returns False on
-    any failure: every caller is cleaning up after something that already happened."""
+    any failure: every caller is cleaning up after something that already happened.
+    ``force`` for a script that holds Durable Objects."""
     try:
         client = _cf_account_client()
         if client is None:
             raise RuntimeError("no Cloudflare account credentials")
-        await client.delete_account_script(name)
+        await client.delete_account_script(name, **({"force": True} if force else {}))
     except Exception:  # noqa: BLE001 - cleanup only; the caller's outcome stands
         logger.warning(
             "sites: could not delete the Worker %s after %s; it may need removing by hand",
@@ -4609,7 +4628,10 @@ async def _apply_rename(doc: Any, *, new_name: str, url: str) -> None:
          would take that domain down) and the failure is logged at ERROR.
       2. Record the new name on the row with a targeted write, BEFORE the post-deploy
          upsert re-reads it, so that full-document save carries it instead of undoing it.
-      3. Delete the old Worker. Nothing routes to it any more; a failure only logs.
+      3. Replace the old Worker with a redirect to the new address for the hold
+         period (``slug_redirect``), and point the site's earlier old addresses at the
+         new one too, so a chain of renames collapses. If the redirect cannot deploy,
+         delete the old Worker instead. Neither failure fails the publish.
       4. Hold a real old slug for 30 days. ``paw-site-<id>`` is never held.
     """
     from pocketpaw_ee.cloud.models.released_slug import HOLD_DAYS, ReleasedSlug
@@ -4664,7 +4686,7 @@ async def _apply_rename(doc: Any, *, new_name: str, url: str) -> None:
     await _release_hold(new_name)
     logger.info("sites: site %s moved from %s to %s", doc.id, old_name, new_name)
 
-    await _discard_worker(old_name, reason="a rename")
+    await _redirect_old_address(doc, old_name=old_name, new_name=new_name, url=url)
 
     if old_slug and not slug_mod.has_reserved_prefix(old_slug):
         now = datetime.now(UTC)
@@ -4678,6 +4700,59 @@ async def _apply_rename(doc: Any, *, new_name: str, url: str) -> None:
                 "hold_until": now + timedelta(days=HOLD_DAYS),
             },
             upsert=True,
+        )
+
+
+async def _redirect_old_address(doc: Any, *, old_name: str, new_name: str, url: str) -> None:
+    """Step 3 of ``_apply_rename``: the old address 301s to ``url`` for the hold period.
+
+    The site may have just taken one of its own old names back, in which case its
+    deploy replaced that redirect Worker and only the row goes. Every other redirect
+    the site owns is re-pointed at ``url``. A redirect that cannot deploy (bad target,
+    Cloudflare refusal, no credentials) falls back to deleting the old Worker, the
+    behaviour before redirects existed. A Durable Object site cannot redirect (its old
+    script's classes would be dropped), so its old Worker is force-deleted, logged at
+    ERROR. A name some site claims is never replaced (deploy_redirect says so)."""
+    from pocketpaw_ee.cloud.models.released_slug import HOLD_DAYS
+    from pocketpaw_ee.sites import slug_redirect
+
+    site_id = str(doc.id)
+    if getattr(doc, "do_classes", None):
+        # A replacement without the old script's Durable Object classes is refused,
+        # so a DO site's old address cannot redirect: it stops, said loudly.
+        logger.error(
+            "sites: site %s holds Durable Objects, so its old address %s cannot redirect "
+            "to %s; deleting the old Worker, the old link stops working",
+            site_id,
+            old_name,
+            url,
+        )
+        await _discard_worker(old_name, reason="a rename of a Durable Object site", force=True)
+        return
+    try:
+        await slug_redirect.forget(new_name, site_id=site_id)
+        client = _cf_account_client()
+        if client is None:
+            raise RuntimeError("no Cloudflare account credentials")
+        await slug_redirect.deploy_redirect(
+            client,
+            name=old_name,
+            site_id=site_id,
+            workspace_id=doc.workspace,
+            url=url,
+            days=HOLD_DAYS,
+        )
+    except Exception:  # noqa: BLE001 - the site already moved; the old address just stops
+        logger.warning(
+            "sites: could not redirect %s to %s; deleting it instead", old_name, url, exc_info=True
+        )
+        await _discard_worker(old_name, reason="a rename")
+        return
+    try:
+        await slug_redirect.retarget_site(client, site_id=site_id, url=url, skip=old_name)
+    except Exception:  # noqa: BLE001 - older redirects still answer, one hop longer
+        logger.warning(
+            "sites: could not re-point the older redirects of %s", site_id, exc_info=True
         )
 
 

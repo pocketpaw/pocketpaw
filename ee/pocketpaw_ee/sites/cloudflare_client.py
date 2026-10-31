@@ -749,6 +749,17 @@ class CloudflareClient:
             resp = await client.post(url, json={"enabled": True, "previews_enabled": False})
         self._unwrap(resp)
 
+    async def clear_schedules(self, script_name: str) -> None:
+        """Remove every cron trigger from an ACCOUNT-LEVEL script.
+
+        ``PUT /accounts/{id}/workers/scripts/{name}/schedules`` with ``[]``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/schedules/methods/update/).
+        A script replaced by a redirect must not keep firing the old site's crons."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}/schedules"
+        async with self._client() as client:
+            resp = await client.put(url, json=[])
+        self._unwrap(resp)
+
     async def workers_dev_subdomain(self) -> str:
         """The account's workers.dev subdomain (the ``<sub>`` in
         ``<script>.<sub>.workers.dev``), or ``""`` when the account has none.

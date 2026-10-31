@@ -324,6 +324,7 @@ from pocketpaw_ee.cloud.models.site_draft_worker import SiteDraftWorker
 from pocketpaw_ee.cloud.models.site_export import SiteExport
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.site_redirect import SiteRedirect
 from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea
@@ -714,6 +715,9 @@ def get_all_documents():
         # VS-4 — an address a renamed site gave up, held 30 days for its old
         # workspace. Only ``pocketpaw_ee.sites.service`` reads/writes it.
         ReleasedSlug,
+        # A renamed site's old address, 301ing to its current one until the hold
+        # ends. Only ``pocketpaw_ee.sites.slug_redirect`` reads/writes it.
+        SiteRedirect,
         # Early-access launch switches (singleton) and the paused-signup waitlist.
         # Only ``ee.cloud.launch_controls`` and ``ee.cloud.early_access`` touch them.
         LaunchControlsDoc,

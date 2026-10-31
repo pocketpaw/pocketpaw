@@ -5878,8 +5878,8 @@ Every site response now carries two fields:
 **A rename does not take effect when you make it.** A live build cannot be redeployed
 without rebuilding the draft, so the request reserves the name and the site's next
 publish moves it: it deploys under the new name, re-points every custom domain, then
-deletes the old Worker. Until then `slug` and `url` still show the current address.
-Show `slug_pending` as "goes live when you next publish".
+replaces the old Worker with a redirect (below). Until then `slug` and `url` still show
+the current address. Show `slug_pending` as "goes live when you next publish".
 
 ### `GET /sites/slug-available?slug=<raw>&site_id=<optional>`
 
@@ -5942,6 +5942,21 @@ Worker and `slug_pending` is kept, so publishing again retries the move.
 
 **The old name is held for 30 days** after the move. No other workspace can take it in
 that time; yours can take it back. `paw-site-<id>` names are never held.
+
+**The old address keeps working for those 30 days.** The old Worker is replaced by a
+small redirect Worker that answers every request with a `308` (the method is kept) to
+the same path and query on the site's current address (`Cache-Control: private,
+max-age=300`). The redirect Worker has no bindings, and the old Worker's cron triggers
+are cleared. It only ever points at the site's own current address: a later rename
+re-points every old address of the site, so A → B → C sends A straight to C. The site
+itself may take one of its old names back (the redirect is replaced by the site); no
+other site can while it redirects (`taken`). A name some site serves at or is moving
+to is never replaced or deleted by a redirect. When the 30 days end, a background
+sweep deletes the redirect Worker and the name is free. Deleting the site deletes its
+redirects too. If the redirect cannot be deployed, the old Worker is deleted instead,
+as before. **A site with Durable Objects cannot redirect**: its old Worker is deleted
+on the rename and the old link stops working. Source:
+`ee/pocketpaw_ee/sites/slug_redirect.py`.
 
 ### `DELETE /sites/{site_id}/slug/pending`
 
