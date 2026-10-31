@@ -590,8 +590,8 @@ async def apply_fix(workspace_id: str, user_id: str, site_id: str, body: ApplyFi
             workspace_id=workspace_id,
             user_id=user_id,
             pocket_id=site.pocket_id,
-            # A visibility fix on a live site, not the owner taking new content live.
-            confirm_placeholders=True,
+            # A visibility fix republishes content; exempt only if it was vetted.
+            machine_republish=True,
         )
     )
     _republishes.add(task)

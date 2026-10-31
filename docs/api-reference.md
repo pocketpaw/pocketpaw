@@ -1042,13 +1042,22 @@ Returns `403` (`plan.feature_denied`) when the workspace's plan does not include
 ### `POST /sites/publish`: `confirm_placeholders`
 
 A live publish is refused while the draft still shows something the owner never
-gave or that does not work. The check reads the draft's stored build (or its
-no-build files) and never rebuilds; when it cannot run (no build yet, a crash, over
-15 s) the publish goes ahead. Previews are never gated.
+gave or that does not work. The check reads what goes live: the html or no-build
+files, or the stored build of the current content (a project publish deploys exactly
+that build and returns `409 sites.project_build_required` without it). A svelte or
+react draft with no stored build is checked on the build the publish makes, before
+anything deploys. Only a checker crash lets a publish through (logged as
+`metric=sites_publish_gate_fail_open`). Previews are never gated.
 
-`confirm_placeholders: boolean` (default `false`) skips it: the owner saw the list
-and chose to go live anyway. Only the owner's publish dialog (or the agent, after the
-owner said so in chat) sends it.
+`confirm_placeholders: boolean` (default `false`) publishes past the findings: the
+owner saw the list and chose to go live anyway. The override is written to the
+workspace audit log (`sites.publish_gate_overridden`, target the pocket, metadata
+`{count, findings: [{rule, reason, page, text}]}`). Only the owner's publish dialog
+sends it; the agent's publish tool cannot (it files a Tray card instead, see below).
+
+Platform republishes (a plan sale, a payment restamp, an AI-visibility fix, an
+approved plan request) skip the check only when the content is exactly what last
+passed it or was confirmed; otherwise they are refused the same way.
 
 Refusal: `409`, code `sites.publish_blocked`.
 
@@ -1110,7 +1119,11 @@ with an `_artifact_change` blob). The same gate applies:
   409 (`findings`, `more`, `override`).
 - **Publish anyway:** `POST /instinct/actions/{id}/approve` with body
   `{"confirm_placeholders": true}` merges and deploys past the findings. Only the
-  single-Action approve accepts it; bulk approve never does.
+  single-Action approve accepts it; bulk approve never does. The override is audited
+  under the approver (`sites.publish_gate_overridden`).
+- When the owner tells the agent to publish anyway, the agent's publish tool files
+  this same card (`approval_required: true`, `action_id`, `publish_findings`) instead
+  of publishing; the owner's "Publish anyway" on it is the only override.
 - A failed Action cannot be approved again. After fixing, the agent files a new
   request; or the owner uses "Publish anyway" on a card that already shows the
   findings.

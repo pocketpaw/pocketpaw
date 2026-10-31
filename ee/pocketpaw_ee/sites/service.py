@@ -2616,6 +2616,8 @@ async def publish(
     preview: bool = False,
     confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
+    # The publish gate found no stored build to read: check the build made here.
+    gate_built_output: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -2855,6 +2857,7 @@ async def publish(
         workers_deploy=_workers_deploy,
         confirm_destructive_migrations=confirm_destructive_migrations,
         confirm_do_data_loss=confirm_do_data_loss,
+        gate_built_output=gate_built_output,
     )
 
 
@@ -3052,6 +3055,9 @@ async def _deploy_site_doc(
     # growing a second copy of the deploy tail. One deploy path, two places the build
     # can have happened.
     prebuilt_project_dir: str | None = None,
+    # ``publish_gate.check_built_output`` runs on the inline build before anything
+    # deploys (the gate had no stored build of this content to read).
+    gate_built_output: bool = False,
     # A project publish may run migrations that delete data the site holds only when
     # the owner confirmed it (``project_d1``). Ignored by every other engine.
     confirm_destructive_migrations: bool | list[str] = False,
@@ -3139,6 +3145,13 @@ async def _deploy_site_doc(
     # actually be deployed from it. A prebuilt dir means the worker already ran this
     # build and is calling back in to finish the publish, so it must NOT re-fork.
     if prebuilt_project_dir is None and build_runs_async(engine, source=source, pattern=pattern):
+        if gate_built_output:
+            logger.warning(
+                "sites.publish_gate: %s reason=async_build_lane pocket=%s engine=%s",
+                "metric=sites_publish_gate_fail_open",
+                pocket_id,
+                engine,
+            )
         return await _enqueue_static_build(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -3198,6 +3211,15 @@ async def _deploy_site_doc(
             # rollback in edit_svelte_component are unchanged — a broken edit never
             # reaches the live deploy.
             smoke=True,
+        )
+
+    # The publish gate had no stored build of this content: check the one just made,
+    # before anything below touches or deploys it.
+    if gate_built_output:
+        from pocketpaw_ee.sites import publish_gate
+
+        await asyncio.to_thread(
+            publish_gate.check_built_output, build.project_dir, engine, pocket_id=pocket_id
         )
 
     # Grow the concierge onto the built pages BEFORE they deploy, so the artifact
@@ -8058,8 +8080,11 @@ async def publish_pocket(
     confirm_destructive_migrations: bool | list[str] = False,
     confirm_do_data_loss: list[str] | None = None,
     # Owner chose to go live despite placeholders / made-up contacts / broken forms
-    # (``publish_gate``). Machine republishes of content already live pass True.
+    # (``publish_gate``); audited.
     confirm_placeholders: bool = False,
+    # A republish the platform makes (plan sale, payment restamp, AI-visibility fix, an
+    # approved plan request): exempt from the gate only for content that last passed it.
+    machine_republish: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -8068,11 +8093,14 @@ async def publish_pocket(
     """Publish a pocket as a site by id — the shared path for the REST router
     and the in-process MCP tool.
 
-    PUBLISH GATE: a LIVE publish first runs ``publish_gate.enforce`` over the draft's
-    stored build (never a rebuild) and raises ``PublishBlocked`` (409
-    ``sites.publish_blocked``, owner-worded findings in ``details``) while it still
-    shows placeholder copy, a made-up phone number, or a form that saves nothing or
-    failed its test submit. ``confirm_placeholders=True`` skips it. Previews skip it.
+    PUBLISH GATE: a LIVE publish first runs ``publish_gate.gate_publish`` over what goes
+    live (the stored build of the current content, or the build made here when there
+    is none) and raises ``PublishBlocked`` (409 ``sites.publish_blocked``, owner-worded
+    findings in ``details``) while it still shows placeholder copy, a made-up phone
+    number, or a form that saves nothing or failed its test submit.
+    ``confirm_placeholders=True`` (the owner) publishes anyway and is audited;
+    ``machine_republish=True`` is exempt only for content that last passed. Previews
+    skip it.
 
     BC-9 (per-site annual plan — the Webflow model): a published site carries its
     OWN recurring annual plan on a tier. ``site_plan_key`` selects the tier from
@@ -8138,10 +8166,18 @@ async def publish_pocket(
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     pocket = await pockets_service.get(pocket_id, user_id)
+    gate_built_output = False
     if not preview:
         from pocketpaw_ee.sites import publish_gate
 
-        await publish_gate.enforce(pocket, pocket_id=pocket_id, confirmed=confirm_placeholders)
+        gate_built_output = await publish_gate.gate_publish(
+            pocket,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            confirmed=confirm_placeholders,
+            machine_republish=machine_republish,
+        )
     ripple_spec = pocket.get("rippleSpec") or {}
     theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
     # Paw Sites "Svelte track" — the pocket carries which generation engine it
@@ -8684,6 +8720,7 @@ async def publish_pocket(
         preview=False,
         confirm_destructive_migrations=confirm_destructive_migrations,
         confirm_do_data_loss=confirm_do_data_loss,
+        gate_built_output=gate_built_output,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
@@ -8810,8 +8847,8 @@ async def sell_site_plan(
             pocket_id=doc.pocket_id,
             site_plan_key=tier_key,
             purchase_authorized=True,
-            # A plan sale republishes the site's content as it is; not a go-live.
-            confirm_placeholders=True,
+            # A plan sale republishes the site's content; exempt only if it was vetted.
+            machine_republish=True,
         )
         completed = True
     finally:
@@ -9247,8 +9284,8 @@ async def redeploy_site(site_id: str) -> None:
         workspace_id=doc.workspace,
         user_id=doc.owner,
         pocket_id=doc.pocket_id,
-        # Restamping a live site after a payment is not the owner taking it live.
-        confirm_placeholders=True,
+        # A restamp after a payment; exempt only for content that was vetted.
+        machine_republish=True,
     )
 
 

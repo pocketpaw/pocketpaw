@@ -286,7 +286,6 @@ class TestPublishHandler:
             user_id="u_1",
             pocket_id="pk_1",
             name="Bright Smile Dental",
-            confirm_placeholders=False,
         )
 
     @pytest.mark.asyncio
@@ -312,7 +311,6 @@ class TestPublishHandler:
             user_id="u_1",
             pocket_id="pk_1",
             name="",
-            confirm_placeholders=False,
         )
 
     @pytest.mark.asyncio

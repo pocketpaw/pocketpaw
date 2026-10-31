@@ -61,7 +61,13 @@ class TestFindings:
 class TestEnforce:
     async def test_refusal_carries_the_findings(self) -> None:
         with pytest.raises(publish_gate.PublishBlocked) as info:
-            await publish_gate.enforce(_html(_CAFE), pocket_id="p1", store=MemoryVerifyStore())
+            await publish_gate.gate_publish(
+                _html(_CAFE),
+                workspace_id="w",
+                user_id="u",
+                pocket_id="p1",
+                store=MemoryVerifyStore(),
+            )
         exc = info.value
         assert exc.status_code == 409
         assert exc.code == "sites.publish_blocked"
@@ -71,24 +77,40 @@ class TestEnforce:
         assert body["details"]["more"] == 0
         assert len(body["details"]["findings"]) == 4
 
-    async def test_owner_confirmation_skips_the_gate(self, monkeypatch) -> None:
-        async def _boom(*_a: Any, **_k: Any) -> list:
-            raise AssertionError("the gate ran despite the owner's confirmation")
-
-        monkeypatch.setattr(publish_gate, "blocking_findings", _boom)
-        await publish_gate.enforce(_html(_CAFE), pocket_id="p1", confirmed=True)
+    async def test_owner_confirmation_publishes_past_the_findings(self) -> None:
+        with patch("pocketpaw_ee.cloud.audit.service.record", new=AsyncMock()):
+            await publish_gate.gate_publish(
+                _html(_CAFE),
+                workspace_id="w",
+                user_id="u",
+                pocket_id="p1",
+                confirmed=True,
+                store=MemoryVerifyStore(),
+            )
 
     async def test_a_check_that_cannot_run_lets_the_publish_through(self, monkeypatch) -> None:
         def _crash(*_a: Any, **_k: Any) -> dict:
             raise RuntimeError("artifact store down")
 
         monkeypatch.setattr(verify, "publish_checks", _crash)
-        await publish_gate.enforce(_html(_CAFE), pocket_id="p1")
+        await publish_gate.gate_publish(
+            _html(_CAFE),
+            workspace_id="w",
+            user_id="u",
+            pocket_id="p1",
+            store=MemoryVerifyStore(),
+        )
 
     async def test_findings_past_the_cap_are_counted(self, monkeypatch) -> None:
         many = "".join(f"<p>[Phone] {'x' * i}</p><p>[NEED: item {i}]</p>" for i in range(30))
         with pytest.raises(publish_gate.PublishBlocked) as info:
-            await publish_gate.enforce(_html(_doc(many)), pocket_id="p1")
+            await publish_gate.gate_publish(
+                _html(_doc(many)),
+                workspace_id="w",
+                user_id="u",
+                pocket_id="p1",
+                store=MemoryVerifyStore(),
+            )
         details = info.value.details
         assert len(details["findings"]) == publish_gate.MAX_FINDINGS
         assert details["more"] == 31 - publish_gate.MAX_FINDINGS
@@ -108,7 +130,9 @@ class TestEnforce:
         }
         verify.record_form_results("p1", content_hash, "/", [entry], store=store)
         with pytest.raises(publish_gate.PublishBlocked) as info:
-            await publish_gate.enforce(pocket, pocket_id="p1", store=store)
+            await publish_gate.gate_publish(
+                pocket, workspace_id="w", user_id="u", pocket_id="p1", store=store
+            )
         (finding,) = info.value.details["findings"]
         assert finding["reason"] == "form_failed"
         assert finding["message"] == (
@@ -117,7 +141,9 @@ class TestEnforce:
         )
         # A later passing run on the same path clears it.
         verify.record_form_results("p1", content_hash, "/", [], store=store)
-        await publish_gate.enforce(pocket, pocket_id="p1", store=store)
+        await publish_gate.gate_publish(
+            pocket, workspace_id="w", user_id="u", pocket_id="p1", store=store
+        )
 
 
 class TestPublishPocket:
@@ -149,11 +175,11 @@ class TestPublishPocket:
         class Stop(Exception):
             pass
 
-        async def _enforce(_pocket: Any, *, pocket_id: str, confirmed: bool) -> None:
-            seen.append(confirmed)
+        async def _gate(_pocket: Any, **kw: Any) -> bool:
+            seen.append(kw["confirmed"])
             raise Stop
 
-        monkeypatch.setattr(publish_gate, "enforce", _enforce)
+        monkeypatch.setattr(publish_gate, "gate_publish", _gate)
         with pytest.raises(Stop):
             await sites_service.publish_pocket(
                 workspace_id="ws1", user_id="u1", pocket_id="p1", confirm_placeholders=True
@@ -167,7 +193,7 @@ class TestPublishPocket:
         async def _preview(**_kw: Any) -> str:
             return "preview-doc"
 
-        monkeypatch.setattr(publish_gate, "enforce", _enforce)
+        monkeypatch.setattr(publish_gate, "gate_publish", _enforce)
         monkeypatch.setattr(sites_service, "publish", _preview)
         out = await sites_service.publish_pocket(
             workspace_id="ws1", user_id="u1", pocket_id="p1", preview=True
@@ -200,10 +226,10 @@ class TestAgentTool:
         assert "sites.publish_blocked: NOT published." in text
         assert '- Your site still shows "[Address]" on the home page.' in text
         assert "never invent" in text and "play_test_site" in text
-        assert mock.await_args.kwargs["confirm_placeholders"] is False
+        assert "confirm_placeholders" not in mock.await_args.kwargs
 
-    async def test_the_override_is_only_a_literal_true(self) -> None:
+    async def test_a_truthy_non_true_override_is_a_plain_publish(self) -> None:
         _out, mock = await self._call(
             {"pocket_id": "p1", "confirm_placeholders": "yes"}, RuntimeError("stop")
         )
-        assert mock.await_args.kwargs["confirm_placeholders"] is False
+        assert "confirm_placeholders" not in mock.await_args.kwargs

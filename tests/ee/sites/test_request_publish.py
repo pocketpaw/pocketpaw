@@ -260,8 +260,8 @@ async def test_request_publish_approve_publishes_the_draft(
     # deploy so no Bun/workerd/CF is touched; the version publish below is REAL.
     deploy_calls: dict = {}
 
-    async def _fake_deploy(*, workspace_id, user_id, pocket_id, confirm_placeholders=False):
-        # The executor ran the publish gate before the merge, so the deploy skips it.
+    async def _fake_deploy(*, workspace_id, user_id, pocket_id, machine_republish=False):
+        # The executor ran the publish gate before the merge; the deploy is exempt.
         deploy_calls["pocket_id"] = pocket_id
 
     monkeypatch.setattr(sites_service, "publish_pocket", _fake_deploy)

@@ -442,9 +442,8 @@ async def _execute_locked(action: Any, *, human_event_id: Any | None = None) -> 
             pocket_id=pocket_id,
             site_plan_key=site_plan_key,
             purchase_authorized=True,
-            # The requester's own publish already passed the gate (it is what was
-            # refused for the plan); an approve must not fail on it in the background.
-            confirm_placeholders=True,
+            # Exempt from the publish gate only if this content already passed it.
+            machine_republish=True,
         )
     except Exception as exc:  # noqa: BLE001 — never let a publish failure break approve
         logger.warning(

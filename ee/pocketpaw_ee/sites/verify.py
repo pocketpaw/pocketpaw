@@ -618,8 +618,8 @@ def _page_checks(
 
 def publish_content_hash(pocket: dict[str, Any]) -> str:
     """The content hash the publish gate reads the draft's build and records under:
-    a project's current files, or the svelte / react armed hash at the default
-    builder origin (``""`` for html and anything else)."""
+    a project's current files, the svelte / react armed hash at the default builder
+    origin, a digest of an html source map (``""`` for anything else)."""
     from pocketpaw_ee.sites import project_build
     from pocketpaw_ee.sites.engines import normalize_engine
 
@@ -630,6 +630,12 @@ def publish_content_hash(pocket: dict[str, Any]) -> str:
     if engine in ("svelte", "react"):
         inputs = render_inputs(pocket)
         return inputs.content_hash if inputs is not None else ""
+    if engine == "html" and isinstance(source, dict):
+        import hashlib
+        import json
+
+        blob = json.dumps(source, sort_keys=True, default=str).encode("utf-8")
+        return "html-" + hashlib.sha256(blob).hexdigest()[:32]
     return ""
 
 

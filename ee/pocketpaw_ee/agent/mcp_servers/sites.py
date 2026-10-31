@@ -252,9 +252,42 @@ def _publish_blocked_text(exc: Any) -> str:
         + "\nFix each one: ask the owner for any real detail you do not have (address, "
         "phone, WhatsApp, email, hours) and never invent one; make every form POST to a "
         "real handler and exercise it with play_test_site (exercise_forms: true). Then "
-        "publish again. Tell the owner plainly what is missing. Pass "
-        "`confirm_placeholders: true` ONLY after you listed these to the owner and they "
-        "said, in their own words, to publish anyway."
+        "publish again. Tell the owner plainly what is missing. You cannot publish past "
+        "these yourself: if the owner wants it live as it is, call publish again with "
+        "`confirm_placeholders: true`, which sends a review card to the owner in the Tray "
+        "where only they can choose Publish anyway."
+    )
+
+
+async def _request_owner_override(workspace_id: str, user_id: str, pocket_id: str) -> dict:
+    """The agent asked to publish past the gate: file a Tray review card that lists the
+    findings instead. Only the owner's "Publish anyway" on that card takes it live."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        action = await sites_service.request_publish_pocket(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        )
+    except Exception:  # noqa: BLE001 - the agent still learns nothing was published
+        logger.warning("sites publish: could not file the publish-anyway card", exc_info=True)
+        return _error_response(
+            "Not published. Only the owner can publish past these findings: ask them to "
+            "use Publish anyway in the site's publish dialog."
+        )
+    blob = (getattr(action, "parameters", None) or {}).get("_artifact_change") or {}
+    return _success_response(
+        {
+            "ok": False,
+            "approval_required": True,
+            "action_id": str(action.id),
+            "publish_findings": blob.get("publish_findings") or [],
+            "message": (
+                "Not published. Only the owner can take the site live past these "
+                "findings, so a review card was sent to them in the Tray. Tell the owner "
+                "what `publish_findings` lists and that they can choose Publish anyway on "
+                "that card. Do not retry the publish."
+            ),
+        }
     )
 
 
@@ -290,7 +323,9 @@ async def _publish_handler(args: dict) -> dict:
         )
     name_raw = args.get("name")
     name = name_raw if isinstance(name_raw, str) else ""
-    confirm_placeholders = args.get("confirm_placeholders") is True
+    if args.get("confirm_placeholders") is True:
+        # The agent never grants the override: the owner does, on a Tray card.
+        return await _request_owner_override(workspace_id, user_id, pocket_id)
 
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites import service as sites_service
@@ -301,7 +336,6 @@ async def _publish_handler(args: dict) -> dict:
             user_id=user_id,
             pocket_id=pocket_id,
             name=name,
-            confirm_placeholders=confirm_placeholders,
         )
     except CloudError as exc:
         if exc.code == "sites.publish_blocked":
@@ -571,9 +605,10 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
                 "confirm_placeholders": {
                     "type": "boolean",
                     "description": (
-                        "Go live although the site still shows placeholders, a made-up "
-                        "number or a broken form. ONLY after the owner saw that list and "
-                        "told you to publish anyway. Never on your own."
+                        "The owner wants it live although publish was refused for "
+                        "placeholders, a made-up number or a broken form. This does NOT "
+                        "publish: it sends the owner a Tray card where only they can "
+                        "choose Publish anyway."
                     ),
                 },
             },

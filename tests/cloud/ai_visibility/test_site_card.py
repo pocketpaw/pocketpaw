@@ -302,9 +302,9 @@ async def test_apply_fix(client, monkeypatch) -> None:
     assert resp.status_code == 202 and resp.json() == {"republish": "started"}
     await asyncio.sleep(0)
     # The normal republish, with no plan key so the plan never changes.
-    # A fix on a live site is not the owner taking new content live: no publish gate.
+    # A machine republish: exempt from the publish gate only for vetted content.
     assert calls == [
-        {"workspace_id": WS, "user_id": "u1", "pocket_id": "p1", "confirm_placeholders": True}
+        {"workspace_id": WS, "user_id": "u1", "pocket_id": "p1", "machine_republish": True}
     ]
 
     refused = await client.post(_url(staff, "/apply-fix"), json={"fix_id": "gbp"})

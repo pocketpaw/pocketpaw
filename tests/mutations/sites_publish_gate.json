@@ -2,8 +2,8 @@
   {
     "label": "publish gate gone: a live publish of a page showing [Address] goes out",
     "file": "ee/pocketpaw_ee/sites/service.py",
-    "find": "        await publish_gate.enforce(pocket, pocket_id=pocket_id, confirmed=confirm_placeholders)\n",
-    "replace": "        pass\n",
+    "find": "        gate_built_output = await publish_gate.gate_publish(\n",
+    "replace": "        gate_built_output = False and await publish_gate.gate_publish(\n",
     "tests": [
       "tests/ee/sites/test_publish_gate.py::TestPublishPocket::test_live_publish_is_refused_before_any_build"
     ]
@@ -11,10 +11,10 @@
   {
     "label": "override ignored: an owner who confirmed is still refused",
     "file": "ee/pocketpaw_ee/sites/publish_gate.py",
-    "find": "    if confirmed:\n        return\n",
-    "replace": "",
+    "find": "    owner_confirmed = confirmed and not machine_republish\n",
+    "replace": "    owner_confirmed = False\n",
     "tests": [
-      "tests/ee/sites/test_publish_gate.py::TestEnforce::test_owner_confirmation_skips_the_gate"
+      "tests/ee/sites/test_publish_gate.py::TestEnforce::test_owner_confirmation_publishes_past_the_findings"
     ]
   },
   {
@@ -29,7 +29,7 @@
   {
     "label": "gate fails closed: an artifact store outage blocks every publish",
     "file": "ee/pocketpaw_ee/sites/publish_gate.py",
-    "find": "        logger.warning(\"sites.publish_gate: checks did not run for %s\", pocket_id, exc_info=True)\n        return []\n",
+    "find": "        return [], \"check_crashed\"\n",
     "replace": "        raise\n",
     "tests": [
       "tests/ee/sites/test_publish_gate.py::TestEnforce::test_a_check_that_cannot_run_lets_the_publish_through"
@@ -47,10 +47,10 @@
   {
     "label": "agent override loosened: any truthy value from the model skips the gate",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
-    "find": "    confirm_placeholders = args.get(\"confirm_placeholders\") is True\n",
-    "replace": "    confirm_placeholders = bool(args.get(\"confirm_placeholders\"))\n",
+    "find": "    if args.get(\"confirm_placeholders\") is True:\n",
+    "replace": "    if args.get(\"confirm_placeholders\") is True and False:\n",
     "tests": [
-      "tests/ee/sites/test_publish_gate.py::TestAgentTool::test_the_override_is_only_a_literal_true"
+      "tests/ee/sites/test_publish_gate_hardening.py::test_the_agent_cannot_publish_anyway_it_files_a_card"
     ]
   },
   {
@@ -209,8 +209,8 @@
   {
     "label": "publish anyway ignored on approve: the owner who chose it is still refused",
     "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
-    "find": "    if confirmed:\n        return False\n",
-    "replace": "",
+    "find": "    if not findings or confirmed:\n",
+    "replace": "    if not findings:\n",
     "tests": [
       "tests/ee/sites/test_publish_gate_approval.py::test_an_approve_with_publish_anyway_goes_live"
     ]
@@ -411,6 +411,69 @@
     "replace": "        pocket_id, verify.publish_content_hash(pocket), path, entries\n",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_play_test_site.py::TestExerciseForms::test_failed_forms_are_recorded_for_verify_and_publish"
+    ]
+  },
+  {
+    "label": "post-build gate skipped: a svelte draft with no stored build ships [Address]",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if gate_built_output:\n        from pocketpaw_ee.sites import publish_gate\n",
+    "replace": "    if False:\n        from pocketpaw_ee.sites import publish_gate\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_hardening.py::test_the_deploy_stops_before_anything_goes_live"
+    ]
+  },
+  {
+    "label": "no-build flag dropped: the publish build is never checked",
+    "file": "ee/pocketpaw_ee/sites/publish_gate.py",
+    "find": "    return skipped == \"no_built_output\" and engine in (\"svelte\", \"react\") and not owner_confirmed\n",
+    "replace": "    return False\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_hardening.py::test_a_draft_with_no_stored_build_is_checked_on_the_publish_build"
+    ]
+  },
+  {
+    "label": "machine republish always exempt: an unvetted draft edit rides out on a plan sale",
+    "file": "ee/pocketpaw_ee/sites/publish_gate.py",
+    "find": "    if machine_republish and content_hash and content_hash == last_gated(pocket_id, store=store):\n",
+    "replace": "    if machine_republish:\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_hardening.py::test_a_machine_republish_of_new_content_is_gated"
+    ]
+  },
+  {
+    "label": "machine republish confirms: a platform republish publishes past findings",
+    "file": "ee/pocketpaw_ee/sites/publish_gate.py",
+    "find": "    owner_confirmed = confirmed and not machine_republish\n",
+    "replace": "    owner_confirmed = confirmed or machine_republish\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_hardening.py::test_a_machine_republish_of_new_content_is_gated"
+    ]
+  },
+  {
+    "label": "gated content not remembered: every restamp re-runs the gate",
+    "file": "ee/pocketpaw_ee/sites/publish_gate.py",
+    "find": "    if not skipped or owner_confirmed:\n        remember_gated(pocket_id, content_hash, store=store)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_hardening.py::test_a_machine_republish_of_gated_content_skips_the_gate"
+    ]
+  },
+  {
+    "label": "override not audited: no record of who published past the findings",
+    "file": "ee/pocketpaw_ee/sites/publish_gate.py",
+    "find": "        await audit_override(\n            workspace_id=workspace_id, actor_id=user_id, pocket_id=pocket_id, findings=findings\n        )\n",
+    "replace": "        pass\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_hardening.py::test_an_owner_override_is_audited_with_the_findings"
+    ]
+  },
+  {
+    "label": "approve override not audited: a Tray publish anyway leaves no record",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "        await publish_gate.audit_override(\n",
+    "replace": "        None and await publish_gate.audit_override(\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_hardening.py::test_the_approval_executor_audits_a_publish_anyway"
     ]
   }
 ]

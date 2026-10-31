@@ -174,7 +174,7 @@ async def test_an_approve_with_publish_anyway_goes_live(recorder) -> None:
 
     assert len(recorder.merges) == 1
     (deploy,) = recorder.deploys
-    assert deploy["confirm_placeholders"] is True
+    assert deploy["machine_republish"] is True
     assert recorder.marks[0][0] == "executed"
 
 
@@ -186,7 +186,7 @@ async def test_a_clean_draft_approves_and_skips_the_second_check(recorder, pocke
     await instinct_executor.execute_approved_change(_Action())
 
     (deploy,) = recorder.deploys
-    assert deploy["confirm_placeholders"] is True
+    assert deploy["machine_republish"] is True
     assert recorder.marks[0][0] == "executed"
 
 

@@ -70,18 +70,35 @@ def _confirmed_migration_keys(blob: dict[str, Any]) -> list[str]:
 
 
 async def _publish_blocked(
-    store: Any, action: Any, blob: dict[str, Any], scope_id: str, author: str, confirmed: bool
+    store: Any,
+    action: Any,
+    blob: dict[str, Any],
+    *,
+    workspace_id: str,
+    scope_id: str,
+    author: str,
+    confirmed: bool,
 ) -> bool:
-    """Run the publish gate on the pocket about to go live. On blocking findings
-    (and no ``confirm_placeholders``) record them on the Action's blob as
+    """Run the publish gate on the pocket about to go live. On blocking findings and
+    no ``confirm_placeholders``: record them on the Action's blob as
     ``publish_blocked``, fail the Action with the owner-worded refusal, and return
-    True: nothing is merged and nothing deploys."""
-    from pocketpaw_ee.sites import publish_gate
+    True (nothing is merged, nothing deploys). With the approver's "publish anyway"
+    the override is audited under the approver. Content that goes ahead is remembered
+    as vetted, so the deploy's own gate (a machine republish) does not run twice."""
+    from pocketpaw_ee.sites import publish_gate, verify
 
-    if confirmed:
-        return False
-    findings = await publish_gate.pocket_findings(pocket_id=scope_id, user_id=author)
-    if not findings:
+    pocket, findings = await publish_gate.pocket_check(pocket_id=scope_id, user_id=author)
+    if findings and confirmed:
+        approver = str(getattr(action, "approved_by", None) or author)
+        await publish_gate.audit_override(
+            workspace_id=workspace_id, actor_id=approver, pocket_id=scope_id, findings=findings
+        )
+    if not findings or confirmed:
+        if pocket is not None:
+            try:
+                publish_gate.remember_gated(scope_id, verify.publish_content_hash(pocket))
+            except Exception:  # noqa: BLE001 — the deploy then gates again; harmless
+                logger.warning("artifact-change merge: could not remember %s", scope_id)
         return False
     refusal = publish_gate.refusal(findings)
     try:
@@ -143,7 +160,13 @@ async def execute_approved_change(
     # The publish gate BEFORE the merge: a refused publish promotes no version, so the
     # draft stays the draft and the owner can fix it and ask again.
     if scope_type in _DEPLOYABLE_SCOPES and await _publish_blocked(
-        store, action, blob, scope_id, str(author or "system"), confirm_placeholders
+        store,
+        action,
+        blob,
+        workspace_id=workspace_id,
+        scope_id=scope_id,
+        author=str(author or "system"),
+        confirmed=confirm_placeholders,
     ):
         return
 
@@ -198,8 +221,8 @@ async def execute_approved_change(
                 workspace_id=workspace_id,
                 user_id=str(author or "system"),
                 pocket_id=scope_id,
-                # Checked above, before the merge (or the owner chose publish anyway).
-                confirm_placeholders=True,
+                # Gated above, before the merge, and remembered: exempt as vetted.
+                machine_republish=True,
                 **confirm_kw,
             )
             deploy_note = " + deploy triggered"

@@ -25,7 +25,8 @@
 # viewed the draft with, read by ``service.resolve_armed_builder_origin``),
 # ``latest-build`` (a project pocket's newest build job, ``project_build``),
 # ``build-history`` (its recent builds without logs, the builds list route) and
-# ``edit-session`` (until when a project draft is being visually edited). The project
+# ``edit-session`` (until when a project draft is being visually edited) and
+# ``publish-gate`` (the content hash that last passed the publish gate). The project
 # lane's per-job build logs are ordinary ``build-<job id>`` records.
 #
 # THE BACKEND FOLLOWS THE ARTIFACT STORE'S. The worker writes and the web process reads,
@@ -76,10 +77,19 @@ BUILD_HISTORY_KEY = "build-history"
 
 #: Until when someone is visually editing a project pocket's draft (``project_build``).
 EDIT_SESSION_KEY = "edit-session"
+#: The content hash that last passed the publish gate or was confirmed (``publish_gate``).
+PUBLISH_GATE_KEY = "publish-gate"
 
 #: Pointer records: one per pocket, never evicted to make room for hash records.
 _POINTER_KEYS = frozenset(
-    {LATEST_KEY, VIEW_ORIGIN_KEY, LATEST_BUILD_KEY, BUILD_HISTORY_KEY, EDIT_SESSION_KEY}
+    {
+        LATEST_KEY,
+        VIEW_ORIGIN_KEY,
+        LATEST_BUILD_KEY,
+        BUILD_HISTORY_KEY,
+        EDIT_SESSION_KEY,
+        PUBLISH_GATE_KEY,
+    }
 )
 
 
