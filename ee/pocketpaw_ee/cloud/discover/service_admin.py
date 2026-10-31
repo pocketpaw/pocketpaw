@@ -8,9 +8,10 @@
 #   * The public wire is ``_cards`` -> ``PublicListingResponse`` (an allow-list).
 #     ``workspace``, ``owner``, ``reports``, ``hidden``, ``source_id`` and
 #     ``remixed_from_source_id`` stop here. ``_cards`` resolves a whole page in
-#     two batch reads, never one per card: the opt-in ``creator`` name through
-#     ``auth.service.resolve_public_names`` (``full_name`` only, never the email,
-#     read live so a rename shows at once) and ``remixed_from`` through one
+#     two batch reads, never one per card: the opt-in ``creator`` through
+#     ``auth.service.resolve_public_identities`` (``full_name`` and an absolute
+#     http(s) avatar only, never the email or the id, read live so a rename or a
+#     new picture shows at once) and ``remixed_from`` through one
 #     ``$in`` over the parent listings (``null`` when the parent is hidden,
 #     withdrawn or gone).
 #   * A hidden or withdrawn listing is NotFound to every public read and to use /
@@ -54,7 +55,7 @@ import asyncio
 import re
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from beanie import PydanticObjectId
 from bson.errors import InvalidId
@@ -81,6 +82,9 @@ from pocketpaw_ee.cloud.discover.dto import (
 from pocketpaw_ee.cloud.discover.sources import get_source, hide_at_source
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.sites.slug import normalize as slugify
+
+if TYPE_CHECKING:
+    from pocketpaw_ee.cloud.auth.domain import PublicIdentity
 
 SITE_TEMPLATE = "site_template"
 STUDIO_TEMPLATE = "studio_template"
@@ -173,18 +177,22 @@ _RESOLVED = ("creator", "remixed_from")
 def _public(
     doc: DiscoverListing,
     *,
-    creator: str | None = None,
+    creator: PublicIdentity | None = None,
     remixed_from: dict[str, str] | None = None,
 ) -> dict:
     """The allow-listed public wire dict: never workspace, owner, reports,
     hidden, source_id or remixed_from_source_id. ``creator`` and
-    ``remixed_from`` arrive resolved from ``_cards``; the creator name shows
-    only when the listing opted in."""
+    ``remixed_from`` arrive resolved from ``_cards``; the creator shows only
+    when the listing opted in."""
     view = asdict(_view(doc))
     wire: dict[str, Any] = {
         key: view[key] for key in PublicListingResponse.model_fields if key not in _RESOLVED
     }
-    wire["creator"] = {"name": creator} if creator and doc.show_creator else None
+    wire["creator"] = (
+        {"name": creator.name, "avatar_url": creator.avatar_url}
+        if creator and doc.show_creator
+        else None
+    )
     wire["remixed_from"] = remixed_from
     return PublicListingResponse.model_validate(wire).model_dump(mode="json")
 
@@ -195,11 +203,11 @@ async def _cards(docs: list[DiscoverListing]) -> list[dict]:
     # admin-cross-tenant: public cards; the parent listings are public too and
     # only their slug and title reach the wire.
     owners = {d.owner for d in docs if d.show_creator}
-    names: dict[str, str] = {}
+    names: dict[str, PublicIdentity] = {}
     if owners:
         from pocketpaw_ee.cloud.auth import service as auth_service
 
-        names = await auth_service.resolve_public_names(owners)
+        names = await auth_service.resolve_public_identities(owners)
     refs = {(d.source, d.remixed_from_source_id) for d in docs if d.remixed_from_source_id}
     parents: dict[tuple[str, str], dict[str, str]] = {}
     if refs:

@@ -11,11 +11,12 @@ Public API is module-level ``async def`` functions:
 - ``set_avatar_path(ctx, avatar_path)``
 - ``get_home_pocket_id(user_id)`` / ``claim_home_pocket_id(user_id, id, *, expected)``
 - ``resolve_display_names(user_ids)`` / ``resolve_identities(user_ids)`` /
-  ``resolve_public_names(user_ids)``: batch id -> name lookups, one query each.
-  ``resolve_identities`` adds the avatar (a separate function: a dozen callers
-  read ``resolve_display_names`` as a plain ``dict[str, str]``).
-  ``resolve_public_names`` never falls back to the email, for anonymous
-  surfaces (a Discover card's opt-in creator name).
+  ``resolve_public_identities(user_ids)``: batch id -> name lookups, one query
+  each. ``resolve_identities`` adds the avatar (a separate function: a dozen
+  callers read ``resolve_display_names`` as a plain ``dict[str, str]``).
+  ``resolve_public_identities`` is for anonymous surfaces (a Discover card's
+  opt-in creator): the full name only, never the email, and the avatar only
+  when it is an absolute http(s) URL.
 
 The pockets service owns home-pocket provisioning but stores the resolved id
 here, so ``models.user`` writes stay inside the auth entity;
@@ -26,12 +27,18 @@ resolves to a single home pocket.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.context import RequestContext
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
-from pocketpaw_ee.cloud.auth.domain import AuthUser, UserIdentity, WorkspaceMembershipRef
+from pocketpaw_ee.cloud.auth.domain import (
+    AuthUser,
+    PublicIdentity,
+    UserIdentity,
+    WorkspaceMembershipRef,
+)
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 
 # ---------------------------------------------------------------------------
@@ -233,11 +240,30 @@ async def resolve_display_names(user_ids: set[str]) -> dict[str, str]:
     }
 
 
-async def resolve_public_names(user_ids: set[str]) -> dict[str, str]:
-    """Batch-resolve user ids -> the name an ANONYMOUS viewer may see, in one
-    query: the trimmed ``full_name`` only. A user with no name, a non-ObjectId
-    id and an unknown id are all absent from the map; the email is never a
-    fallback, because the caller puts this on a public page."""
+#: Longest avatar URL an anonymous card carries; anything longer is dropped.
+_MAX_PUBLIC_AVATAR_URL = 2048
+
+
+def _public_avatar_url(raw: str | None) -> str | None:
+    """``raw`` when it is an absolute http(s) URL with a host, else ``None``."""
+    url = (raw or "").strip()
+    if not url or len(url) > _MAX_PUBLIC_AVATAR_URL or any(c.isspace() for c in url):
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        return None
+    return url
+
+
+async def resolve_public_identities(user_ids: set[str]) -> dict[str, PublicIdentity]:
+    """Batch-resolve user ids -> what an ANONYMOUS viewer may see, in one query:
+    the trimmed ``full_name`` and, when it is an absolute http(s) URL, the
+    avatar (see ``PublicIdentity``). A user with no name, a non-ObjectId id and
+    an unknown id are all absent from the map; the email is never a fallback,
+    because the caller puts this on a public page."""
     object_ids: list[PydanticObjectId] = []
     for uid in user_ids:
         try:
@@ -247,7 +273,11 @@ async def resolve_public_names(user_ids: set[str]) -> dict[str, str]:
     if not object_ids:
         return {}
     docs = await _UserDoc.find({"_id": {"$in": object_ids}}).to_list()
-    return {str(u.id): name for u in docs if (name := (u.full_name or "").strip())}
+    return {
+        str(u.id): PublicIdentity(name=name, avatar_url=_public_avatar_url(u.avatar))
+        for u in docs
+        if (name := (u.full_name or "").strip())
+    }
 
 
 async def resolve_identities(user_ids: set[str]) -> dict[str, UserIdentity]:
@@ -288,12 +318,13 @@ async def resolve_identities(user_ids: set[str]) -> dict[str, UserIdentity]:
 
 
 __all__ = [
+    "PublicIdentity",
     "UserIdentity",
     "claim_home_pocket_id",
     "get_home_pocket_id",
     "get_profile",
     "resolve_display_names",
-    "resolve_public_names",
+    "resolve_public_identities",
     "set_active_workspace",
     "set_avatar_path",
     "suggest_workspace_members",

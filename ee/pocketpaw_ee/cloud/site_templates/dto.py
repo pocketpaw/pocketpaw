@@ -9,8 +9,11 @@
 #
 # Save and PATCH take the Discover fields ``kind``, ``audiences``, ``tags``
 # (normalised by ``_core.tags.normalize_tags``: at most 8, each 1-32 of
-# ``[a-z0-9-]``) and ``show_creator`` (put the owner's display name on the
-# public Discover card); the response carries them plus ``live_url``.
+# ``[a-z0-9-]``) and ``show_creator`` (put the owner's display name and
+# picture on the public Discover card); the response carries them plus
+# ``live_url``. ``show_creator`` defaults to ``True`` on save only (a new
+# publish shows its maker unless they switch it off); PATCH leaves it alone
+# unless the body names it, and the stored default for older rows is ``False``.
 
 from __future__ import annotations
 
@@ -43,7 +46,8 @@ class SaveSiteTemplateRequest(BaseModel):
     kind: Kind = "site"
     audiences: list[Audience] = Field(default_factory=list, max_length=4)
     tags: list[str] = Field(default_factory=list)
-    show_creator: bool = False
+    #: On by default for a new template; the owner opts out.
+    show_creator: bool = True
 
     @field_validator("tags", mode="before")
     @classmethod

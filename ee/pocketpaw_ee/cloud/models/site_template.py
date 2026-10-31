@@ -24,8 +24,10 @@
 # ``kind`` and ``audiences`` are source-owned Discover fields the owner sets;
 # ``live_url`` is the source site's deployed URL, stamped by the service on save
 # and update (``None`` when the site is not deployed). ``tags`` (``_core.tags``
-# dialect) and ``show_creator`` (the owner opted in to their name on the public
-# Discover card) are owner-set Discover fields too. ``remixed_from_template_id``
+# dialect) and ``show_creator`` (the owner's name and picture on the public
+# Discover card) are owner-set Discover fields too; ``show_creator`` defaults
+# to ``False`` here so a row saved before the field existed stays anonymous
+# (the save request, not this model, turns it on for new templates). ``remixed_from_template_id``
 # is stamped at save from the source pocket's own ``template_id``: the template
 # the saved site was itself made from, or ``None``. Defaults keep old rows valid.
 #

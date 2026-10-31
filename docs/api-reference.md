@@ -1563,7 +1563,7 @@ the owner:
   "audiences": ["shop"],
   "live_url": "https://bakery.pawsites.workers.dev",
   "tags": ["bakery", "shop"],
-  "show_creator": false,
+  "show_creator": true,
   "created_at": "2026-10-01T09:00:00Z",
   "updated_at": "2026-10-01T09:00:00Z"
 }
@@ -1584,8 +1584,11 @@ Discover index, and so do `tags` and `show_creator`. `tags` holds at most 8
 tags, each 1 to 32 characters of `a-z`, `0-9` and `-`; they are normalised on
 save and PATCH (trimmed, lowercased, spaces and underscores become `-`,
 duplicates dropped), and anything still outside that set is a `422`.
-`show_creator` (default `false`) puts the owner's display name on the public
-Discover card; with it off the card names no one. A template saved from a site
+`show_creator` puts the owner's display name and profile picture on the public
+Discover card; with it off the card names no one. It defaults to `true` on
+`POST` (a new template shows its maker unless they switch it off). A `PATCH`
+that leaves the field out keeps the stored value, and a template saved before
+the field existed reads as `false` until its owner turns it on. A template saved from a site
 that was itself made with `use` remembers which template that was, and its
 Discover listing links back to it (`remixed_from`). `live_url` is the source site's live URL when that site is
 deployed, else `null`; it is re-read on save, on every `PATCH` and on every
@@ -1612,10 +1615,11 @@ workspace; `site_template.used` and `.reported` in the acting user's workspace
 Save a site pocket as a template the caller owns.
 
 ```json
-{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private", "kind": "site", "audiences": [], "tags": ["bakery"], "show_creator": false }
+{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private", "kind": "site", "audiences": [], "tags": ["bakery"], "show_creator": true }
 ```
 
-`name` is 1 to 100 characters; `visibility` defaults to `private`. The caller
+`name` is 1 to 100 characters; `visibility` defaults to `private`;
+`show_creator` defaults to `true`. The caller
 needs read access to the pocket, as for a duplicate. Response `200`: the
 template's metadata.
 
@@ -1647,8 +1651,8 @@ One template's metadata, if you can see it; otherwise `404`.
 ### `PATCH /site-templates/{template_id}`
 
 Change any of `name`, `description`, `visibility`, `kind`, `audiences`, `tags`,
-`show_creator`. Owner only (`404` for anyone
-else). Setting `visibility` to `public` runs the publish checks. `version` does
+`show_creator`. A field left out keeps its stored value. Owner only (`404` for
+anyone else). Setting `visibility` to `public` runs the publish checks. `version` does
 not change. Response `200`: the metadata.
 
 ### `DELETE /site-templates/{template_id}`
@@ -1716,6 +1720,10 @@ change it. Input images are never published: `recipe.params` drops
 Discover (`source: "studio_template"`), private or deleted takes the listing
 down. `kind` is `image`, `video` or `music` (an `audio` generation publishes as
 `music`). Cover URLs stay backend-relative (`/api/v1/media/...`) here.
+`show_creator` puts the owner's display name and profile picture on the
+Discover card, as for site templates: `true` by default on `POST`, kept by a
+`PATCH` that leaves it out, and `false` for a template published before the
+field existed.
 
 ```json
 {
@@ -1731,6 +1739,7 @@ down. `kind` is `image`, `video` or `music` (an `audio` generation publishes as
   "cover": {"url": "/api/v1/media/fox.png", "mime": "image/png", "width": 1024, "height": 1024, "poster_url": null},
   "recipe": {"kind": "image", "model": "flux", "prompt": "a red fox", "params": {"aspectRatio": "1:1", "count": 1}},
   "uses_input_images": false,
+  "show_creator": true,
   "hidden": false,
   "created_at": "2026-10-02T09:00:00Z",
   "updated_at": "2026-10-02T09:00:00Z"
@@ -1740,10 +1749,11 @@ down. `kind` is `image`, `video` or `music` (an `audio` generation publishes as
 ### `POST /studio-templates`
 
 ```json
-{ "generation_id": "gen_abc", "asset_id": "a2", "title": "Red fox", "description": "", "audiences": ["design"], "visibility": "public" }
+{ "generation_id": "gen_abc", "asset_id": "a2", "title": "Red fox", "description": "", "audiences": ["design"], "visibility": "public", "show_creator": true }
 ```
 
-`asset_id` is optional (default: the generation's first asset). Response `200`:
+`asset_id` is optional (default: the generation's first asset); `show_creator`
+defaults to `true`. Response `200`:
 the template. Errors: `404` for a generation that isn't in your workspace or an
 unknown `asset_id`; `409` (`studio_templates.not_ready`) unless the generation
 succeeded.
@@ -1756,8 +1766,8 @@ default 50), `cursor`. Response `200`:
 
 ### `PATCH /studio-templates/{template_id}`
 
-Any of `title`, `description`, `audiences`, `visibility`. Owner only; anyone
-else gets `404`. The cover and recipe never change. A template hidden by
+Any of `title`, `description`, `audiences`, `visibility`, `show_creator`; a
+field left out keeps its stored value. Owner only; anyone else gets `404`. The cover and recipe never change. A template hidden by
 Discover reports stays hidden after a private and public round trip.
 
 ### `DELETE /studio-templates/{template_id}`
@@ -1797,20 +1807,25 @@ the workspace, reports or the source item's id):
   "media_kind": null,
   "media_url": null,
   "tags": ["bakery", "shop"],
-  "creator": { "name": "Ada Baker" },
+  "creator": { "name": "Ada Baker", "avatar_url": "https://lh3.googleusercontent.com/a/ada" },
   "remixed_from": { "slug": "corner-bakery", "title": "Corner bakery" }
 }
 ```
 
 `updated_at` is when the listing's content last changed (a re-sync that
 changes nothing leaves it; featuring or hiding moves it). `tags` are the
-source's tags, lowercase `a-z0-9-`, at most 8. `creator` is `{"name": ...}`
-only when the owner opted in (`show_creator` on the site template) and has a
-display name; otherwise `null`. It is never an email or an id. `remixed_from`
+source's tags, lowercase `a-z0-9-`, at most 8. `creator` is
+`{"name": ..., "avatar_url": ...}` only when the owner opted in (`show_creator`
+on the site or studio template) and has a display name; otherwise `null`. Both
+fields are read live from the owner's profile, so a rename or a new picture
+shows at once. `avatar_url` is the profile picture when it is an absolute
+`http(s)` URL (an OAuth sign-in picture, say) and `null` otherwise: an uploaded
+picture is a signed-in `/uploads/...` path a logged-out page can't load, and a
+`data:` URL is never served. `creator` is never an email or an id. `remixed_from`
 is the listing this item was made from (a site created with `use`, then saved
 as a public template), or `null` for an original, or when that listing is
-hidden or no longer public. Studio template listings always have `tags: []`,
-`creator: null` and `remixed_from: null` for now.
+hidden or no longer public. Studio template listings always have `tags: []`
+and `remixed_from: null` for now.
 
 `slug` is the listing's URL handle: the title lowercased and folded to
 `a-z0-9` with `-` between words (`Café Crème & Co!` is `cafe-creme-co`), cut

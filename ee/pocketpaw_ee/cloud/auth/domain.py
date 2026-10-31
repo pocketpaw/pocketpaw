@@ -72,4 +72,19 @@ class UserIdentity:
     avatar: str
 
 
-__all__ = ["AuthUser", "UserIdentity", "WorkspaceMembershipRef"]
+@dataclass(frozen=True)
+class PublicIdentity:
+    """What an ANONYMOUS viewer may see of a user: a name and a picture.
+
+    No id, no email. ``name`` is the trimmed ``full_name`` (never empty; a user
+    without one resolves to nothing). ``avatar_url`` is the stored avatar only
+    when it is an absolute http(s) URL, else ``None``: an uploaded picture is a
+    backend-relative ``/uploads/...`` path a logged-out page can't load, and a
+    ``data:`` URL is never served.
+    """
+
+    name: str
+    avatar_url: str | None
+
+
+__all__ = ["AuthUser", "PublicIdentity", "UserIdentity", "WorkspaceMembershipRef"]

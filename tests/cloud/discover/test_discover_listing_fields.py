@@ -9,8 +9,12 @@
 # read; ``updated_at`` moves on a content change and not on a no-op re-sync;
 # tags are normalised on write (template save and upsert), capped at 8, refused
 # outside ``[a-z0-9-]``, and filter ``GET /discover?tag=`` case-insensitively; the
-# creator name shows only when opted in, never falls back to the email, and a
-# list page resolves names and parents in one batch read each; a site made with
+# creator (name + ``avatar_url``) shows only when opted in, never falls back to
+# the email, carries the avatar only when it is an absolute http(s) URL, and a
+# list page resolves creators and parents in one batch read each; a new site
+# template shows its creator by default, a PATCH without ``show_creator`` keeps
+# the stored value, and a row saved before the field existed stays anonymous
+# through a sync and a reindex; a site made with
 # "use" and saved as a public template points back at the listing it came from,
 # and that link goes null when the parent is hidden or withdrawn.
 from __future__ import annotations
@@ -18,12 +22,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from beanie import PydanticObjectId
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.discover import service, service_admin
 from pocketpaw_ee.cloud.discover.dto import ListPublicListingsRequest, UpsertListingRequest
 from pocketpaw_ee.cloud.models.discover_listing import DiscoverListing
 from pocketpaw_ee.cloud.models.pocket import Pocket as PocketDoc
+from pocketpaw_ee.cloud.models.site_template import SiteTemplate
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.site_templates import service as templates
 from pydantic import ValidationError
@@ -33,9 +39,10 @@ pytestmark = [pytest.mark.usefixtures("mongo_db"), pytest.mark.asyncio]
 WS, OTHER_WS = "w1", "w2"
 
 
-async def _user(full_name: str = "", email: str = "maker@example.com") -> str:
+async def _user(full_name: str = "", email: str = "maker@example.com", avatar: str = "") -> str:
     user = User(email=email, hashed_password="x", is_active=True, is_verified=True)
     user.full_name = full_name
+    user.avatar = avatar
     await user.insert()
     return str(user.id)
 
@@ -250,16 +257,63 @@ async def test_creator_is_opt_in_and_never_the_email() -> None:
     no_name = await _upsert("c", owner=unnamed, show_creator=True)
 
     assert (await service_admin.get_public(hidden_name))["creator"] is None
-    assert (await service_admin.get_public(shown))["creator"] == {"name": "Ada Baker"}
+    assert (await service_admin.get_public(shown))["creator"] == {
+        "name": "Ada Baker",
+        "avatar_url": None,
+    }
     assert (await service_admin.get_public(no_name))["creator"] is None
 
     page = await service_admin.list_public()
     blob = repr(page)
     for secret in ("ada@example.com", "nameless@example.com", named, unnamed):
         assert secret not in blob
-    assert await auth_service.resolve_public_names({named, unnamed, "not-an-id"}) == {
-        named: "Ada Baker"
+    assert await auth_service.resolve_public_identities({named, unnamed, "not-an-id"}) == {
+        named: auth_service.PublicIdentity(name="Ada Baker", avatar_url=None)
     }
+
+
+@pytest.mark.parametrize(
+    ("avatar", "expected"),
+    [
+        ("https://cdn.example/ada.png", "https://cdn.example/ada.png"),
+        ("http://cdn.example/ada.png", "http://cdn.example/ada.png"),
+        ("  https://cdn.example/ada.png  ", "https://cdn.example/ada.png"),
+        ("/uploads/avatars/ada.png", None),
+        ("/api/v1/uploads/ada.png", None),
+        ("data:image/png;base64,iVBORw0KGgo=", None),
+        ("javascript:alert(1)", None),
+        ("ftp://cdn.example/ada.png", None),
+        ("https://", None),
+        ("//cdn.example/ada.png", None),
+        ("https://cdn.example/a da.png", None),
+        ("https://cdn.example/" + "a" * 2100, None),
+        ("", None),
+    ],
+)
+async def test_creator_avatar_is_an_absolute_http_url_or_null(avatar: str, expected) -> None:
+    owner = await _user("Ada Baker", avatar=avatar)
+    listing_id = await _upsert("a", owner=owner, show_creator=True)
+    card = await service_admin.get_public(listing_id)
+    assert card["creator"] == {"name": "Ada Baker", "avatar_url": expected}
+
+
+async def test_creator_avatar_is_opt_in_like_the_name() -> None:
+    owner = await _user("Ada Baker", "ada@example.com", avatar="https://cdn.example/ada.png")
+    hidden = await _upsert("a", owner=owner, show_creator=False)
+    shown = await _upsert("b", owner=owner, show_creator=True)
+
+    hidden_card = await service_admin.get_public(hidden)
+    assert hidden_card["creator"] is None
+    assert "cdn.example" not in repr(hidden_card)
+    assert (await service_admin.get_public(shown))["creator"] == {
+        "name": "Ada Baker",
+        "avatar_url": "https://cdn.example/ada.png",
+    }
+    # The creator object carries the name and picture only: no id, no email.
+    page = await service_admin.list_public()
+    creators = [item["creator"] for item in page["items"] if item["creator"]]
+    assert [set(c) for c in creators] == [{"name", "avatar_url"}]
+    assert owner not in repr(page) and "ada@example.com" not in repr(page)
 
 
 async def test_template_show_creator_reaches_the_listing() -> None:
@@ -267,24 +321,27 @@ async def test_template_show_creator_reaches_the_listing() -> None:
     meta = await _publish(owner=owner, show_creator=True)
     assert meta["show_creator"] is True
     card = await service_admin.get_public(str((await _row(meta["id"])).id))
-    assert card["creator"] == {"name": "Ada Baker"}
+    assert card["creator"] == {"name": "Ada Baker", "avatar_url": None}
 
     await templates.update_template(WS, owner, meta["id"], {"show_creator": False})
     await service_admin.sync_source("site_template", meta["id"])
     assert (await service_admin.get_public(card["id"]))["creator"] is None
 
 
-async def test_a_list_page_resolves_names_and_parents_in_one_read_each(monkeypatch) -> None:
-    owners = [await _user(f"Maker {i}", f"m{i}@example.com") for i in range(3)]
+async def test_a_list_page_resolves_creators_and_parents_in_one_read_each(monkeypatch) -> None:
+    owners = [
+        await _user(f"Maker {i}", f"m{i}@example.com", avatar=f"https://cdn.example/{i}.png")
+        for i in range(3)
+    ]
     await _upsert("parent", title="Parent")
     for i, owner in enumerate(owners):
         await _upsert(f"kid{i}", owner=owner, show_creator=True, remixed_from_source_id="parent")
 
     calls = {"names": 0, "find": 0}
-    real_names = auth_service.resolve_public_names
+    real_names = auth_service.resolve_public_identities
     real_find = DiscoverListing.find
 
-    async def counting_names(ids: set[str]) -> dict[str, str]:
+    async def counting_names(ids: set[str]) -> dict[str, auth_service.PublicIdentity]:
         calls["names"] += 1
         return await real_names(ids)
 
@@ -292,7 +349,7 @@ async def test_a_list_page_resolves_names_and_parents_in_one_read_each(monkeypat
         calls["find"] += 1
         return real_find(*args, **kwargs)
 
-    monkeypatch.setattr(auth_service, "resolve_public_names", counting_names)
+    monkeypatch.setattr(auth_service, "resolve_public_identities", counting_names)
     monkeypatch.setattr(DiscoverListing, "find", counting_find)
     page = await service_admin.list_public()
 
@@ -300,7 +357,66 @@ async def test_a_list_page_resolves_names_and_parents_in_one_read_each(monkeypat
     assert calls == {"names": 1, "find": 2}  # the page itself + the parents
     kids = [item for item in page["items"] if item["title"] != "Parent"]
     assert {k["creator"]["name"] for k in kids} == {"Maker 0", "Maker 1", "Maker 2"}
+    assert {k["creator"]["avatar_url"] for k in kids} == {
+        f"https://cdn.example/{i}.png" for i in range(3)
+    }
     assert {k["remixed_from"]["slug"] for k in kids} == {"parent"}
+
+
+# ---------------------------------------------------------------------------
+# show_creator defaults
+# ---------------------------------------------------------------------------
+
+
+async def test_a_new_site_template_shows_its_creator_by_default() -> None:
+    owner = await _user("Ada Baker", avatar="https://cdn.example/ada.png")
+    meta = await _publish(owner=owner)
+    assert meta["show_creator"] is True
+    assert (await _row(meta["id"])).show_creator is True
+    card = await service_admin.get_public(str((await _row(meta["id"])).id))
+    assert card["creator"] == {"name": "Ada Baker", "avatar_url": "https://cdn.example/ada.png"}
+
+    # Opting out at save time still works.
+    quiet = await _publish(owner=owner, name="Quiet", show_creator=False)
+    assert quiet["show_creator"] is False
+    assert (await service_admin.get_public(str((await _row(quiet["id"])).id)))["creator"] is None
+
+
+@pytest.mark.parametrize("stored", [True, False])
+async def test_a_patch_without_show_creator_keeps_the_stored_value(stored: bool) -> None:
+    owner = await _user("Ada Baker")
+    meta = await _publish(owner=owner, show_creator=stored)
+    patched = await templates.update_template(
+        WS, owner, meta["id"], {"name": "Cake shop", "tags": ["cakes"]}
+    )
+    await service_admin.sync_source("site_template", meta["id"])
+    assert patched["show_creator"] is stored
+    assert (await _row(meta["id"])).show_creator is stored
+
+
+async def test_a_template_saved_before_show_creator_stays_anonymous() -> None:
+    owner = await _user("Ada Baker", avatar="https://cdn.example/ada.png")
+    meta = await _publish(owner=owner)
+    # Rewind both rows to before the field existed.
+    await SiteTemplate.get_pymongo_collection().update_one(
+        {"_id": PydanticObjectId(meta["id"])}, {"$unset": {"show_creator": ""}}
+    )
+    await DiscoverListing.get_pymongo_collection().update_one(
+        {"source": "site_template", "source_id": meta["id"]}, {"$unset": {"show_creator": ""}}
+    )
+    listing_id = str((await _row(meta["id"])).id)
+    assert (await service_admin.get_public(listing_id))["creator"] is None
+
+    counts = await service_admin.reindex("site_template")
+    assert (counts["created"], counts["updated"], counts["unchanged"]) == (0, 0, 1)
+    await service_admin.sync_source("site_template", meta["id"])
+    assert (await _row(meta["id"])).show_creator is False
+    assert (await service_admin.get_public(listing_id))["creator"] is None
+
+    # A PATCH that doesn't name the field leaves it off too.
+    await templates.update_template(WS, owner, meta["id"], {"description": "Fresh bread"})
+    await service_admin.sync_source("site_template", meta["id"])
+    assert (await service_admin.get_public(listing_id))["creator"] is None
 
 
 # ---------------------------------------------------------------------------
