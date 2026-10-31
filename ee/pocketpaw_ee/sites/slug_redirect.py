@@ -1,5 +1,5 @@
 # ee/pocketpaw_ee/sites/slug_redirect.py — a renamed site's old address keeps
-# working: it 301s to the same path and query on the site's current address until
+# working: it 308s to the same path and query on the site's current address until
 # the old name's 30-day hold ends.
 #
 # Rename only exists on the ``workers`` lane, where a site's address IS its
@@ -13,15 +13,23 @@
 #     origin, so no request can steer it to another host: no open redirect.
 #   * A later rename re-points every redirect the site owns (``retarget_site``), so
 #     A -> B -> C sends A straight to C, never through B.
-#   * A site taking one of its own old names back drops that row (``forget``): its
-#     deploy already replaced the redirect Worker.
+#   * NEVER OVER A NAME A SITE CLAIMS. Before any upload or delete, a name that is
+#     some site's ``worker_name``, ``slug`` or ``slug_pending`` is left alone (its
+#     row is dropped and logged): a redirect must not replace a live site's Worker.
+#   * A site taking one of its own old names back drops that row (``forget``)
+#     before its deploy overwrites the redirect Worker. Only unexpired rows count
+#     as the site's own (``owns_redirect``).
+#   * The upload is a bare module Worker with no bindings, its crons cleared and
+#     workers.dev on. The caller skips redirects for Durable Object sites (a
+#     replacement without their classes would be refused).
 #   * ``sweep_slug_redirects`` (the shared heartbeat) deletes expired redirect
 #     Workers and their rows; ``remove_site_redirects`` (the site delete cascade)
 #     deletes all of a site's at once.
 #
-# The 301 carries ``Cache-Control: max-age=3600`` so a browser forgets it within the
-# hour: an owner who renames back (A -> B -> A) would otherwise leave visitors with a
-# cached A -> B bouncing off B's redirect to A.
+# A 308 keeps the method (a form POST to the old address stays a POST). It carries
+# ``Cache-Control: private, max-age=300`` so a browser forgets it within minutes and
+# no shared cache keeps it: an owner who renames back (A -> B -> A) would otherwise
+# leave visitors with a cached A -> B bouncing off B's redirect to A.
 
 from __future__ import annotations
 
@@ -38,6 +46,8 @@ logger = logging.getLogger(__name__)
 
 # The workers.dev address of an account-level script.
 _ACCOUNT_TARGET = "account"
+_MODULE = "redirect.mjs"
+_COMPATIBILITY_DATE = "2024-09-23"
 # A DNS hostname: dot-separated labels of letters, digits and inner hyphens.
 _LABEL = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
 _HOSTNAME = re.compile(rf"^(?=.{{1,253}}$){_LABEL}(\.{_LABEL})+$")
@@ -64,7 +74,7 @@ def redirect_origin(url: str) -> str:
 
 
 def redirect_worker_source(origin: str) -> bytes:
-    """The redirect Worker: a 301 to ``origin`` with the request's path and query.
+    """The redirect Worker: a 308 to ``origin`` with the request's path and query.
 
     The target URL is built FROM ``origin`` and only its path and query are set, so a
     path like ``//evil.example`` stays a path on ``origin``."""
@@ -77,8 +87,8 @@ def redirect_worker_source(origin: str) -> bytes:
         "    to.pathname = from.pathname;\n"
         "    to.search = from.search;\n"
         "    return new Response(null, {\n"
-        "      status: 301,\n"
-        '      headers: { Location: to.toString(), "Cache-Control": "public, max-age=3600" },\n'
+        "      status: 308,\n"
+        '      headers: { Location: to.toString(), "Cache-Control": "private, max-age=300" },\n'
         "    });\n"
         "  },\n"
         "};\n"
@@ -86,21 +96,48 @@ def redirect_worker_source(origin: str) -> bytes:
 
 
 async def _upload(cf: Any, name: str, origin: str) -> None:
+    from pocketpaw_ee.sites.cloudflare_client import WorkerModule
+
     await cf.put_worker(
-        script_name=name, bundle=redirect_worker_source(origin), target=_ACCOUNT_TARGET
+        script_name=name,
+        target=_ACCOUNT_TARGET,
+        modules=[
+            WorkerModule(_MODULE, redirect_worker_source(origin), "application/javascript+module")
+        ],
+        main_module=_MODULE,
+        bindings=[],
+        compatibility_date=_COMPATIBILITY_DATE,
     )
+    await cf.clear_schedules(name)
     await cf.enable_workers_dev(name)
+
+
+async def _claimed_by_a_site(name: str) -> bool:
+    """Does any site serve at, or move to, ``name``? Such a name is never uploaded
+    over or deleted here."""
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    # global-read: workers.dev is one namespace for the whole account.
+    found = await _SiteDoc.get_pymongo_collection().find_one(
+        {"$or": [{"worker_name": name}, {"slug": name}, {"slug_pending": name}]}, {"_id": 1}
+    )
+    return found is not None
 
 
 async def deploy_redirect(
     cf: Any, *, name: str, site_id: str, workspace_id: str, url: str, days: int
-) -> None:
+) -> bool:
     """Replace the Worker ``name`` with a redirect to ``url`` for ``days`` days.
 
-    Raises when the target is invalid or the upload fails; the caller decides what
-    happens to the old Worker then. The row is written only after the upload, so a
-    row always means a redirect Worker is (or was) there to sweep."""
+    False, touching nothing, when a site claims ``name`` (the old Worker is not the
+    caller's to replace or delete then). Raises when the target is invalid or the
+    upload fails; the caller decides what happens to the old Worker. The row is
+    written only after the upload, so a row always means a redirect Worker is (or
+    was) there to sweep."""
     origin = redirect_origin(url)
+    if await _claimed_by_a_site(name):
+        logger.warning("sites: not redirecting %s, a site claims that name", name)
+        return False
     await _upload(cf, name, origin)
     now = datetime.now(UTC)
     await SiteRedirect.get_pymongo_collection().replace_one(
@@ -116,6 +153,7 @@ async def deploy_redirect(
         upsert=True,
     )
     logger.info("sites: %s now redirects to %s", name, origin)
+    return True
 
 
 async def retarget_site(cf: Any, *, site_id: str, url: str, skip: str = "") -> None:
@@ -127,6 +165,10 @@ async def retarget_site(cf: Any, *, site_id: str, url: str, skip: str = "") -> N
     )
     async for row in rows:
         if row["name"] == skip:
+            continue
+        if await _claimed_by_a_site(row["name"]):
+            logger.warning("sites: dropping redirect %s, a site claims that name", row["name"])
+            await SiteRedirect.get_pymongo_collection().delete_one({"_id": row["_id"]})
             continue
         try:
             await _upload(cf, row["name"], origin)
@@ -141,30 +183,27 @@ async def retarget_site(cf: Any, *, site_id: str, url: str, skip: str = "") -> N
 
 
 async def owns_redirect(name: str, site_id: str) -> bool:
-    """Is ``name`` one of ``site_id``'s own redirects (so the site may take it back)?"""
+    """Is ``name`` one of ``site_id``'s own, unexpired redirects (so the site may take
+    it back)? An expired row is a name on its way out, not the site's."""
     found = await SiteRedirect.get_pymongo_collection().find_one(
-        {"name": name, "site_id": site_id}, {"_id": 1}
+        {"name": name, "site_id": site_id, "expires_at": {"$gt": datetime.now(UTC)}},
+        {"_id": 1},
     )
     return found is not None
 
 
-async def forget(name: str) -> None:
-    """Drop the row for ``name`` without touching the Worker: a site deployed over it."""
-    await SiteRedirect.get_pymongo_collection().delete_many({"name": name})
+async def forget(name: str, *, site_id: str) -> None:
+    """Drop ``site_id``'s row for ``name`` without touching the Worker: the site is
+    deploying over it."""
+    await SiteRedirect.get_pymongo_collection().delete_many({"name": name, "site_id": site_id})
 
 
 async def _delete_rows(cf: Any, rows: list[dict]) -> int:
-    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
-
     removed = 0
     for row in rows:
         name = row["name"]
-        # Belt and braces: never delete a Worker a site now serves from.
-        # global-read: workers.dev is one namespace for the whole account.
-        serving = await _SiteDoc.get_pymongo_collection().find_one(
-            {"worker_name": name}, {"_id": 1}
-        )
-        if serving is None:
+        # Never delete a Worker a site serves from, or a name one is moving to.
+        if not await _claimed_by_a_site(name):
             await cf.delete_account_script(name)
         await SiteRedirect.get_pymongo_collection().delete_one({"_id": row["_id"]})
         removed += 1

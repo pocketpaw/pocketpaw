@@ -4399,9 +4399,6 @@ async def _slug_unavailable_reason(slug: str, *, workspace_id: str, own: Any | N
         return error.reason
     if own is not None and slug in (own.slug, own.slug_pending):
         return None
-    if own is not None and await _owns_redirect(slug, own.id):
-        # One of this site's own old addresses, redirecting to it: it may take it back.
-        return None
     query: dict[str, Any] = {
         "$or": [{"slug": slug}, {"slug_pending": slug}, {"worker_name": slug}],
     }
@@ -4410,6 +4407,9 @@ async def _slug_unavailable_reason(slug: str, *, workspace_id: str, own: Any | N
     # global-read: see ``_address_claimed_by_other_site``.
     if await _SiteDoc.get_pymongo_collection().find_one(query, {"_id": 1}) is not None:
         return "taken"
+    if own is not None and await _owns_redirect(slug, own.id):
+        # One of this site's own old addresses, redirecting to it: it may take it back.
+        return None
     if slug in await account_script_names() and (own is None or site_worker_name(own) != slug):
         return "taken"
     if await _slug_held_from(slug, workspace_id):
@@ -4581,6 +4581,11 @@ async def _refuse_taken_pending_name(name: str, *, site_id: Any) -> None:
     The one script it may replace is the site's OWN redirect (taking an old address
     back). Reads the account FRESH, and fails open like the listing."""
     if await _owns_redirect(name, site_id):
+        # Taking an old address back: drop the row BEFORE the deploy overwrites the
+        # redirect Worker, so nothing ever sweeps the site's own Worker.
+        from pocketpaw_ee.sites import slug_redirect
+
+        await slug_redirect.forget(name, site_id=str(site_id))
         return
     if name in await account_script_names(refresh=True):
         raise ConflictError(
@@ -4591,14 +4596,15 @@ async def _refuse_taken_pending_name(name: str, *, site_id: Any) -> None:
         )
 
 
-async def _discard_worker(name: str, *, reason: str) -> bool:
+async def _discard_worker(name: str, *, reason: str, force: bool = False) -> bool:
     """Delete an account-level Worker, best effort. Logs WARNING and returns False on
-    any failure: every caller is cleaning up after something that already happened."""
+    any failure: every caller is cleaning up after something that already happened.
+    ``force`` for a script that holds Durable Objects."""
     try:
         client = _cf_account_client()
         if client is None:
             raise RuntimeError("no Cloudflare account credentials")
-        await client.delete_account_script(name)
+        await client.delete_account_script(name, **({"force": True} if force else {}))
     except Exception:  # noqa: BLE001 - cleanup only; the caller's outcome stands
         logger.warning(
             "sites: could not delete the Worker %s after %s; it may need removing by hand",
@@ -4704,13 +4710,27 @@ async def _redirect_old_address(doc: Any, *, old_name: str, new_name: str, url: 
     deploy replaced that redirect Worker and only the row goes. Every other redirect
     the site owns is re-pointed at ``url``. A redirect that cannot deploy (bad target,
     Cloudflare refusal, no credentials) falls back to deleting the old Worker, the
-    behaviour before redirects existed."""
+    behaviour before redirects existed. A Durable Object site cannot redirect (its old
+    script's classes would be dropped), so its old Worker is force-deleted, logged at
+    ERROR. A name some site claims is never replaced (deploy_redirect says so)."""
     from pocketpaw_ee.cloud.models.released_slug import HOLD_DAYS
     from pocketpaw_ee.sites import slug_redirect
 
     site_id = str(doc.id)
-    await slug_redirect.forget(new_name)
+    if getattr(doc, "do_classes", None):
+        # A replacement without the old script's Durable Object classes is refused,
+        # so a DO site's old address cannot redirect: it stops, said loudly.
+        logger.error(
+            "sites: site %s holds Durable Objects, so its old address %s cannot redirect "
+            "to %s; deleting the old Worker, the old link stops working",
+            site_id,
+            old_name,
+            url,
+        )
+        await _discard_worker(old_name, reason="a rename of a Durable Object site", force=True)
+        return
     try:
+        await slug_redirect.forget(new_name, site_id=site_id)
         client = _cf_account_client()
         if client is None:
             raise RuntimeError("no Cloudflare account credentials")
