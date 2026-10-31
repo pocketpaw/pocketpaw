@@ -1828,6 +1828,15 @@ async def _supersede_previous_job(pool: Any, pocket_id: str, job_id: str) -> str
         previous = previous.decode("utf-8", "replace")
     if not previous or previous == job_id:
         return None
+    # The record goes in BEFORE the abort: the worker can cancel the job inside the
+    # abort's wait, and a reader then must already find it. It is only read for a
+    # stored CancelledError, so a record for an abort that never lands is harmless.
+    try:
+        await pool.set(
+            _SUPERSEDED_JOB_KEY.format(job_id=previous), pocket_id, ex=_CURRENT_JOB_TTL_SECONDS
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("sites.preview: no supersede record for %s", previous, exc_info=True)
     try:
         await Job(previous, pool, _queue_name=SITE_BUILD_QUEUE_NAME).abort(timeout=0.01)
     except TimeoutError:
@@ -1835,12 +1844,6 @@ async def _supersede_previous_job(pool: Any, pocket_id: str, job_id: str) -> str
     except Exception:  # noqa: BLE001
         logger.warning("sites.preview: could not abort superseded job %s", previous)
         return None
-    try:
-        await pool.set(
-            _SUPERSEDED_JOB_KEY.format(job_id=previous), pocket_id, ex=_CURRENT_JOB_TTL_SECONDS
-        )
-    except Exception:  # noqa: BLE001
-        logger.debug("sites.preview: no supersede record for %s", previous, exc_info=True)
     logger.info(
         "sites.preview: pocket %s superseded job %s with %s (aborted)",
         pocket_id,

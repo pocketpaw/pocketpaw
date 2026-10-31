@@ -169,3 +169,24 @@ async def test_a_waiter_reads_superseded_only_for_a_real_supersede(redis: _Redis
 
 async def test_an_unreadable_record_reads_as_not_superseded() -> None:
     assert await bj.was_superseded(object(), OLD) is False
+
+
+async def test_the_record_is_written_before_the_abort_is_requested(
+    redis: _Redis, monkeypatch
+) -> None:
+    """The worker can cancel the old job inside the abort's wait, and a reader that
+    looks then must already find the record."""
+    seen: list[bool] = []
+
+    original = bj.Job
+
+    class _Watching(original):  # type: ignore[misc, valid-type]
+        async def abort(self, *, timeout: float | None = None) -> bool:
+            seen.append(await bj.was_superseded(redis, self.job_id))
+            raise TimeoutError
+
+    monkeypatch.setattr(bj, "Job", _Watching)
+    await bj._supersede_previous_job(redis, "p1", OLD)
+    await bj._supersede_previous_job(redis, "p1", NEW)
+
+    assert seen == [True]
