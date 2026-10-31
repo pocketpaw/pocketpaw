@@ -42,6 +42,7 @@ from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
 from pocketpaw_ee.sites.capacity import reason_message
+from pocketpaw_ee.sites.site_secrets import is_platform_managed
 
 from ._audit import record_tool_call
 from .sites_create import (
@@ -135,7 +136,9 @@ def _draft_worker_note(record: dict[str, Any] | None) -> str:
 
 
 SECRETS_RULE = (
-    "Never write a secret value into any file. For each secret name, call "
+    "Never write a secret value into any file. Signing secrets (BETTER_AUTH_SECRET, "
+    "SESSION_SECRET, AUTH_SECRET) and PAW_GATEWAY_TOKEN are created by Paw: "
+    "never request them or mention them to the owner. For any other secret name, call "
     "`request_site_secret` (pocket_id, name, description) so the owner fills it in; "
     "`list_site_secrets` shows which are set. If those tools are not available, tell "
     "the user which secrets the site needs and that they set them in the site's "
@@ -481,7 +484,8 @@ async def _start_site_from_template_handler(args: dict) -> dict:
             "canonical snippets). Follow it over your own framework defaults.",
             "Need a database, accounts or storage? list_site_recipes, then "
             "apply_site_recipe for each, before writing the features that use them.",
-            "Request each secret a recipe returns with request_site_secret.",
+            "Request each owner secret a recipe returns with request_site_secret; skip "
+            "signing secrets and PAW_GATEWAY_TOKEN, which Paw creates itself.",
             "Design before the first UI file: research real sites (the gate in your "
             "instructions), state the locked palette, type pairing and layout idea in "
             "one line, load pocketpaw-design-taste, then retheme the tokens file "
@@ -525,6 +529,23 @@ async def _list_site_recipes_handler(args: dict) -> dict:
         for r in refused:
             message += f" {r['id']} is not available on {slug}: {r['unsupported'][slug]}"
     return _success_response({"ok": True, "recipes": recipes, "message": message})
+
+
+async def _mint_platform_secrets(workspace_id: str, pocket_id: str, names: list[str]) -> None:
+    """A recipe's platform secrets exist from the moment it is applied, so the Worker
+    reads them whether or not the build lists them. Never fails the apply: publish
+    mints them again."""
+    from pocketpaw_ee.integrations import bindings as integration_bindings
+    from pocketpaw_ee.sites import site_secrets
+
+    try:
+        await site_secrets.ensure_signing_secrets(
+            workspace_id=workspace_id, pocket_id=pocket_id, names=names
+        )
+        if integration_bindings.GATEWAY_TOKEN_NAME in names:
+            await integration_bindings.ensure_gateway_token(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("apply_site_recipe: platform secrets not minted yet", exc_info=True)
 
 
 async def _apply_site_recipe_handler(args: dict) -> dict:
@@ -594,7 +615,14 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
         "glue_tasks": result.get("agentTasks") or [],
         "verify": result.get("verify") or [],
     }
-    requests["secret_names"] = [s["name"] for s in requests["secrets"]]
+    # Signing secrets and the gateway token are Paw's to create (publish mints them),
+    # so only the rest are names the agent requests from the owner.
+    for s in requests["secrets"]:
+        s["set_by"] = "paw" if is_platform_managed(str(s["name"])) else "owner"
+    requests["secret_names"] = [s["name"] for s in requests["secrets"] if s["set_by"] == "owner"]
+    requests["platform_secret_names"] = [
+        s["name"] for s in requests["secrets"] if s["set_by"] == "paw"
+    ]
     if result.get("errors"):
         return _structured_error(
             {
@@ -656,6 +684,7 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
     )
     if err:
         return err
+    await _mint_platform_secrets(workspace_id, pocket_id, requests["platform_secret_names"])
     verification = await _queue_build(workspace_id, user_id, pocket_id)
     return _success_response(
         {
@@ -1147,7 +1176,8 @@ def make_project_tools(tool: Any) -> list[Any]:
             "Add one backend recipe to a project site: writes its files, packages, "
             "wrangler binding requests (names only), migrations and AGENTS.md section "
             "into the draft. Returns glue_tasks (do them, in order), secret names and "
-            "env names. For each secret call request_site_secret; NEVER write a secret "
+            "env names. For each owner secret call request_site_secret (never for signing "
+            "secrets or PAW_GATEWAY_TOKEN: Paw creates those); NEVER write a secret "
             "value into a file. On a conflict NOTHING is written and the conflicts are "
             "returned. Refused when the site's plan is below the recipe's plan. "
             "`dry_run` shows what would change."

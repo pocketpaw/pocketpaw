@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -536,13 +537,26 @@ class TestRecipes:
         assert _body(await _call("list_site_recipes", {"template": "rails"}))["recipes"] == []
 
     async def test_apply_writes_back_records_and_returns_secret_names(
-        self, cli, identity, builds, beanie_test_db, recording_bus
+        self, cli, identity, builds, beanie_test_db, recording_bus, monkeypatch
     ) -> None:
+        from cryptography.fernet import Fernet
+
+        monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
         pocket_id = await _start(cli)
         out = await _call("apply_site_recipe", {"pocket_id": pocket_id, "recipe_id": "better-auth"})
         assert not out.get("is_error"), out
         body = _body(out)
-        assert body["secret_names"] == ["BETTER_AUTH_SECRET"]
+        # A signing secret is Paw's to create: it is never among the names to request.
+        assert body["secret_names"] == []
+        assert body["platform_secret_names"] == ["BETTER_AUTH_SECRET"]
+        assert body["secrets"][0]["set_by"] == "paw"
+        # ...and it exists from the apply on, so the Worker reads it without a request.
+        from pocketpaw_ee.sites import site_secrets
+
+        minted = await site_secrets.secrets_for_deploy(
+            SimpleNamespace(workspace=(await _doc(pocket_id)).workspace, pocket_id=pocket_id)
+        )
+        assert set(minted) == {"BETTER_AUTH_SECRET"}
         assert body["glue_tasks"] == [{"task": "Wire getUser.", "file": "src/server/auth/index.ts"}]
         assert "request_site_secret" in body["message"]
         assert "never write" in body["message"].lower()

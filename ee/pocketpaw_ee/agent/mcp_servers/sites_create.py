@@ -3794,6 +3794,9 @@ async def _request_site_secret_handler(args: dict) -> dict:
     ) is not None:
         return gate
     pocket_id = pocket_id.strip()
+    name = str(args.get("name") or "").strip()
+    if site_secrets.is_platform_managed(name):
+        return await _refuse_platform_secret(workspace_id, user_id, pocket_id, name)
     try:
         view = await site_secrets.request_secret(
             workspace_id=workspace_id,
@@ -3826,6 +3829,40 @@ async def _request_site_secret_handler(args: dict) -> dict:
             "secret": view.model_dump(mode="json"),
             "message": message,
         }
+    )
+
+
+async def _refuse_platform_secret(
+    workspace_id: str, user_id: str, pocket_id: str, name: str
+) -> dict:
+    """``request_site_secret`` for a name the platform sets itself: no card, no
+    pending row. A signing secret is minted on the spot (publish would mint it
+    anyway), so the agent can go on as if it were set."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import site_secrets
+
+    base = name.removesuffix(site_secrets.DRAFT_SUFFIX)
+    if base == site_secrets.GATEWAY_TOKEN_SECRET:
+        return _error_response(
+            f"{name} is set automatically by Paw when the owner links an integration. "
+            "Do not ask the owner for it. If the site needs a provider, call "
+            "connect_site_integration instead."
+        )
+    try:
+        # The same access rule as a request: edit access to a pocket in this workspace.
+        await site_secrets._require_edit(workspace_id, user_id, pocket_id)
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    try:
+        await site_secrets.ensure_signing_secrets(
+            workspace_id=workspace_id, pocket_id=pocket_id, names=[base]
+        )
+    except Exception:  # noqa: BLE001 - publish mints it again; the answer is the same
+        logger.warning("request_site_secret: could not mint %s now", base, exc_info=True)
+    return _error_response(
+        f"{name} is a signing secret that Paw creates automatically for every site "
+        f"(drafts get their own). Do not ask the owner for it and never mention it to "
+        f"them. Read it in the Worker as env.{base}; publishing binds it."
     )
 
 
@@ -3885,8 +3922,11 @@ def make_request_site_secret_tool(tool: Any) -> Any:
             "in the builder's secure input; you NEVER receive, write or ask for the "
             "value, and must not put one in source, .dev.vars or chat. `name` is the "
             "env var the Worker reads (UPPER_SNAKE_CASE, max 64 chars, e.g. "
-            "STRIPE_SECRET_KEY); `description` tells the owner what it is and where to "
-            "get it. Publishing binds every set secret as env.<NAME>."
+            "STRIPE_SECRET_KEY); `description` tells the owner, in plain words, what it is "
+            "and where to get it. Publishing binds every set secret as env.<NAME>. Never "
+            "for signing secrets (BETTER_AUTH_SECRET, SESSION_SECRET, AUTH_SECRET) or "
+            "PAW_GATEWAY_TOKEN: Paw creates those itself and refuses the "
+            "request. Only ask for what the owner really has to choose or bring."
         ),
         {
             "type": "object",

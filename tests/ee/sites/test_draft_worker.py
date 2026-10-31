@@ -298,9 +298,9 @@ def test_drafts_bind_only_draft_values_never_production_secrets():
     assert "STRIPE_KEY__DRAFT" not in out
     assert "RESEND_KEY" not in out  # a production value never reaches a draft
     assert "sk_live_x" not in out.values() and "re_x" not in out.values()
-    assert out["BETTER_AUTH_SECRET"] == "draft-signing"
     for name in draft_worker.SIGNING_SECRETS:
-        assert out[name] == "draft-signing"
+        assert out[name] == draft_worker.signing_value_for("draft-signing", name)
+        assert out[name] != "draft-signing"
 
 
 def test_flag_is_off_by_default(monkeypatch):

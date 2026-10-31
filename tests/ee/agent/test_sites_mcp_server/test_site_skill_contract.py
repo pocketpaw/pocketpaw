@@ -81,6 +81,8 @@ def test_the_site_skill_carries_the_platform_contract() -> None:
         assert phrase in text, phrase
     # Secrets, plans, and where framework knowledge comes from.
     assert "Never write a secret value into any file" in text
+    # Signing secrets are Paw's: the agent never asks a non-technical owner for one.
+    assert "BETTER_AUTH_SECRET" in text and "never request them" in text
     assert "plan refusal" in text
     assert "search the web" in text
     # No old per-engine create tool is named.
