@@ -7,8 +7,9 @@
 # events on navigation. These tests pin step validation, that the page is always
 # the pocket's preview_url (plus a validated path), the bearer header, the capture
 # lists (deduped, capped), the blank-canvas flag, fps, that the session is closed
-# even when a step raises, the honest "unavailable" errors, the rate limit and
-# the allow-list registration.
+# even when a step raises, the honest "unavailable" errors, the rate limit,
+# the allow-list registration, and ``exercise_forms`` (failures recorded for verify and
+# the publish gate; never run on the live site or a draft without server routes).
 from __future__ import annotations
 
 import io
@@ -136,7 +137,11 @@ class _FakePage:
         self.calls.append(("screenshot", (), kwargs))
         return self.world.image
 
-    async def evaluate(self, js: str) -> Any:
+    async def evaluate(self, js: str, arg: Any = None) -> Any:
+        if self.world.evaluate_hook is not None:
+            handled, value = self.world.evaluate_hook(js, arg)
+            if handled:
+                return value
         if "__pawFrames" in js:
             return {"frames": 120, "ms": 2000.0}
         if "canvas" in js:
@@ -145,6 +150,12 @@ class _FakePage:
 
     def is_closed(self) -> bool:
         return self.closed
+
+    async def route(self, pattern: str, handler: Any) -> None:
+        self.calls.append(("route", (pattern,), {}))
+
+    async def wait_for_load_state(self, state: str, **kwargs: Any) -> None:
+        self.calls.append(("wait_for_load_state", (state,), kwargs))
 
 
 class _FakeContext:
@@ -206,6 +217,8 @@ class _World:
         self.context: _FakeContext | None = None
         self.cdp_sent: list[str] = []
         self.browser_closed = False
+        #: ``(js, arg) -> (handled, value)`` for the form-exercise scripts.
+        self.evaluate_hook: Any = None
 
     def async_playwright(self):
         world = self
@@ -712,7 +725,7 @@ def test_the_tool_schema_offers_steps() -> None:
     make_play_test_site_tool(fake_tool)
     assert captured["name"] == "play_test_site"
     props = captured["schema"]["properties"]
-    assert set(props) == {"pocket_id", "path", "device", "steps"}
+    assert set(props) == {"pocket_id", "path", "device", "steps", "exercise_forms"}
     assert props["steps"]["maxItems"] == 25
     assert "never claim gameplay works" in captured["description"]
 
@@ -736,3 +749,53 @@ def test_the_app_plan_skill_plays_every_milestone() -> None:
     assert "play_test_site" in text
     assert "lose or win" in text and "play again" in text
     assert "Never claim gameplay works without a passing play-test" in text
+
+
+_FORM_INFO = {"name": "join", "fields": ["email"], "invalid": [], "external": "", "count": 1}
+
+
+class TestExerciseForms:
+    async def test_failed_forms_are_recorded_for_verify_and_publish(
+        self, ctx, world, monkeypatch
+    ) -> None:
+        from pocketpaw_ee.sites import play_test, verify
+
+        recorded: list[tuple] = []
+        monkeypatch.setattr(
+            verify,
+            "record_form_results",
+            lambda pid, h, path, entries, **_k: recorded.append((pid, path, entries)),
+        )
+
+        def hook(js: str, arg: Any) -> tuple[bool, Any]:
+            if js is play_test._FILL_FORM_JS:
+                return True, (_FORM_INFO if arg[0] == 0 else None)
+            if js is play_test._SUBMIT_FORM_JS:
+                return True, True
+            if js is play_test._FORM_STATE_JS:
+                return True, {"text": "", "state": None}
+            return False, None
+
+        world.evaluate_hook = hook
+        out = await _play({"exercise_forms": True, "path": "/join"})
+        text = _text(out)
+        assert "join: FAILED: nothing was sent and the page did not change" in text
+        assert "blocks publishing" in text
+        ((pid, path, entries),) = recorded
+        assert (pid, path) == ("p1", "/join")
+        assert entries[0]["id"] == "SC-FORM-01"
+        assert entries[0]["page"] == "join/index.html"
+        assert entries[0]["level"] == "error"
+
+    @pytest.mark.parametrize("mode", ["published", "static"])
+    async def test_a_live_or_serverless_draft_is_never_exercised(
+        self, ctx, world, monkeypatch, mode
+    ) -> None:
+        artifact = {"build_status": "built", "preview_url": _PREVIEW, "preview_mode": mode}
+        with patch(
+            "pocketpaw_ee.sites.service.get_native_artifact",
+            new=AsyncMock(return_value=artifact),
+        ):
+            out = await _play({"exercise_forms": True})
+        assert "Forms were NOT exercised" in _text(out)
+        assert not any(c[0] == "route" for c in world.page.calls)
