@@ -63,10 +63,12 @@ MAX_SECRETS_PER_SITE = 50
 Requester = Literal["agent", "user"]
 Status = Literal["set", "pending"]
 
-#: Session / token signing secrets the platform mints per site. An owner never types
-#: one: publish mints the ones a build requests (``ensure_signing_secrets``) and a
-#: draft binds its own value for each (``draft_worker.draft_secrets``).
-PLATFORM_SIGNING_SECRETS = ("BETTER_AUTH_SECRET", "AUTH_SECRET", "SESSION_SECRET", "JWT_SECRET")
+#: Session-signing secrets the platform mints per site. An owner never types one:
+#: publish mints the ones a build requests (``ensure_signing_secrets``) and a draft
+#: binds its own value for each (``draft_worker.draft_secrets``). Only names that
+#: clearly sign the app's own sessions: a JWT_SECRET may verify tokens from another
+#: system, so it stays the owner's to set.
+PLATFORM_SIGNING_SECRETS = ("BETTER_AUTH_SECRET", "AUTH_SECRET", "SESSION_SECRET")
 #: The integrations gateway token (``integrations.bindings.GATEWAY_TOKEN_NAME``),
 #: minted when the owner links an integration.
 GATEWAY_TOKEN_SECRET = "PAW_GATEWAY_TOKEN"
@@ -388,20 +390,37 @@ async def ensure_generated_secret(
 
     For secrets the platform owns (a per-site gateway token), so it skips the owner
     gate and the per-site cap: the caller has already authorized the action that
-    needs it. A pending row of the same name is filled in."""
+    needs it. A pending row of the same name is filled in.
+
+    Insert-if-absent, so two callers racing (or a stale read) can never replace a
+    value: a new row relies on the unique (workspace, pocket_id, name) index, and a
+    pending row is filled only by an update that still sees it empty."""
     import secrets as _secrets
+
+    from pymongo.errors import DuplicateKeyError
 
     name = validate_name(name)
     row = await _row(workspace_id, pocket_id, name)
     if row is not None and row.encrypted_value:
         return False
+    fields = {
+        "encrypted_value": crypto.encrypt(_secrets.token_urlsafe(32)),
+        "description": description[:MAX_DESCRIPTION_CHARS],
+        "value_set_by": "system",
+        "value_set_at": datetime.now(UTC),
+    }
     if row is None:
-        row = _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name)
-    row.encrypted_value = crypto.encrypt(_secrets.token_urlsafe(32))
-    row.description = description[:MAX_DESCRIPTION_CHARS]
-    row.value_set_by = "system"
-    row.value_set_at = datetime.now(UTC)
-    await row.save()
+        try:
+            await _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name, **fields).insert()
+        except DuplicateKeyError:
+            return False
+    else:
+        coll = _doc().get_pymongo_collection()
+        done = await coll.update_one(
+            {"_id": row.id, "encrypted_value": {"$in": [None, ""]}}, {"$set": fields}
+        )
+        if done.modified_count != 1:
+            return False
     logger.info("site_secrets: generated %s on pocket %s", name, pocket_id)
     return True
 

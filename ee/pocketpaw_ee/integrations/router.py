@@ -33,7 +33,8 @@
 #   POST /integrations/social/redeem          PAW_GATEWAY_TOKEN + ticket + nonce
 #                                            (all three: social_broker.py)
 #   POST /integrations/owner-sign-in/redeem   PAW_GATEWAY_TOKEN + ticket
-#                                            (owner_sign_in.py)
+#   POST /integrations/owner-sign-in/check    PAW_GATEWAY_TOKEN + account id -> role
+#                                            (both: owner_sign_in.py)
 #
 # Wire shapes are pinned by the Wave 0 contract and its Wave 1 / Wave 2 addenda;
 # see dto.py. Mounted in ``cloud.mount_cloud``; both routers are in
@@ -416,3 +417,9 @@ async def owner_sign_in_link(
 async def owner_sign_in_redeem(request: Request) -> JSONResponse:
     """The site Worker trades an owner-page ticket for the owner identity, once."""
     return await owner_sign_in.redeem(request)
+
+
+@public_router.post("/integrations/owner-sign-in/check")
+async def owner_sign_in_check(request: Request) -> JSONResponse:
+    """The site Worker re-checks a site account's role (owner, staff or none)."""
+    return await owner_sign_in.check(request)

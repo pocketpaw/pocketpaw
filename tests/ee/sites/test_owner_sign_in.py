@@ -1,14 +1,16 @@
 # tests/ee/sites/test_owner_sign_in.py: "Open owner page" (integrations/owner_sign_in.py).
 #
-# A Paw user with edit access to a published site gets a one-time link that signs them
-# in to the site's own better-auth as its owner (the pocket owner) or staff (anyone
-# else with edit access). The site's Worker trades the ticket for the identity with its
-# PAW_GATEWAY_TOKEN. Negative paths: replay, another site's ticket, a wrong or missing
-# token, an expired or tampered ticket, an open redirect, no access, unpublished.
-# Plus the deploy side: a Worker holding the gateway token gets PAW_API_BASE and
-# PAW_SITE_ID, and a build that requests the token gets one minted.
+# A VERIFIED Paw user who owns a published site, or is one of its explicit collaborators
+# (pocket.team / shared_with), gets a one-time link that signs them in to the site's own
+# better-auth as "owner" or "staff". Plain workspace members get nothing. The ticket rides
+# in the URL fragment, so no server or request log ever sees it. The site's Worker
+# trades it for the identity with its PAW_GATEWAY_TOKEN, and re-checks the role with
+# /check. Negative paths: unverified email, not a collaborator, replay, another site's
+# ticket, a wrong or missing token (answered exactly like a missing site), expiry,
+# tampering, open redirects, unpublished, no token deployed yet. Plus the deploy side.
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -32,17 +34,43 @@ from tests.ee.sites.test_integrations import (  # noqa: F401 - _env is an autous
 
 HOST = "pickles.pawsites.example"
 CALLBACK = "/api/paw-owner/callback"
+TEAMMATE = "user-teammate"
 
 
-async def _site(pocket_id: str, *, url: str = f"https://{HOST}", script: str = "pickles-1"):
+async def _site(
+    pocket_id: str,
+    *,
+    url: str = f"https://{HOST}",
+    script: str = "pickles-1",
+    token: bool = True,
+):
+    """A site doc; ``token`` = it was published with its gateway token."""
     from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.integrations import bindings
 
     site = Site(workspace=WS, pocket_id=pocket_id, owner=OWNER, script_name=script, url=url)
     await site.insert()
+    if token:
+        await bindings.ensure_gateway_token(WS, pocket_id)
     return site
 
 
-def _app(user_id: str, *, workspace_id: str = WS, email: str = "asha@example.com") -> FastAPI:
+async def _with_team(pocket_id: str, *, team=(), shared_with=()) -> None:
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    doc = await Pocket.get(pocket_id)
+    doc.team = list(team)
+    doc.shared_with = list(shared_with)
+    await doc.save()
+
+
+def _app(
+    user_id: str,
+    *,
+    workspace_id: str = WS,
+    email: str = "asha@example.com",
+    verified: bool = True,
+) -> FastAPI:
     from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
     from pocketpaw_ee.cloud._core.deps import current_workspace_id
     from pocketpaw_ee.cloud._core.http import add_error_handler
@@ -54,6 +82,7 @@ def _app(user_id: str, *, workspace_id: str = WS, email: str = "asha@example.com
         id=user_id,
         email=email,
         full_name="Asha Rao",
+        is_verified=verified,
         active_workspace=workspace_id,
         workspaces=[_Membership(workspace_id)],
     )
@@ -86,9 +115,13 @@ async def _link(c: AsyncClient, pocket_id: str, **body):
     return await c.post(f"/api/v1/sites/by-pocket/{pocket_id}/owner-sign-in", json=body)
 
 
-def _ticket(resp) -> str:
+def _fragment(resp) -> dict[str, str]:
     assert resp.status_code == 200, resp.text
-    return parse_qs(urlsplit(resp.json()["url"]).query)["ticket"][0]
+    return {k: v[0] for k, v in parse_qs(urlsplit(resp.json()["url"]).fragment).items()}
+
+
+def _ticket(resp) -> str:
+    return _fragment(resp)["ticket"]
 
 
 async def _token(site) -> str:
@@ -102,31 +135,66 @@ async def _redeem(c: AsyncClient, token: str | None, **body):
     return await c.post("/api/v1/integrations/owner-sign-in/redeem", json=body, headers=headers)
 
 
+async def _check(c: AsyncClient, token: str | None, **body):
+    headers = {"authorization": f"Bearer {token}"} if token is not None else {}
+    return await c.post("/api/v1/integrations/owner-sign-in/check", json=body, headers=headers)
+
+
 def _err(resp) -> str:
     body = resp.json()
     assert body["ok"] is False, body
     return body["error"]["code"]
 
 
+async def _site_doc(pid: str):
+    from pocketpaw_ee.cloud.models.site import Site
+
+    return await Site.find_one(Site.pocket_id == pid)
+
+
 # --------------------------------------------------------------------- issue
 
 
 @pytest.mark.asyncio
-async def test_the_owner_gets_a_one_time_link_to_the_sites_own_callback(beanie_test_db):
+async def test_the_owner_gets_a_one_time_link_with_the_ticket_in_the_fragment(beanie_test_db):
     pid = await _pocket()
-    site = await _site(pid)
+    await _site(pid)
     async with _client() as c:
         resp = await _link(c, pid, next="/admin")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     url = urlsplit(body["url"])
-    assert (url.scheme, url.netloc, url.path) == ("https", HOST, CALLBACK)
-    q = parse_qs(url.query)
-    assert q["next"] == ["/admin"] and len(q["ticket"][0]) >= 32
+    assert (url.scheme, url.netloc, url.path, url.query) == ("https", HOST, CALLBACK, "")
+    frag = _fragment(resp)
+    assert frag["next"] == "/admin" and len(frag["ticket"]) >= 32
     assert body["role"] == "owner" and body["expires_in"] == 60
     assert resp.headers["cache-control"] == "no-store"
-    # The site needs its gateway token to redeem: minted with the first link.
+
+
+@pytest.mark.asyncio
+async def test_an_unverified_paw_email_gets_no_link(beanie_test_db):
+    pid = await _pocket()
+    await _site(pid)
+    async with _client(verified=False) as c:
+        resp = await _link(c, pid)
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "sites.owner_page_unverified"
+    assert "Verify your email" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_the_first_link_on_a_site_without_its_token_asks_for_a_publish(beanie_test_db):
+    pid = await _pocket()
+    site = await _site(pid, token=False)
+    async with _client() as c:
+        first = await _link(c, pid)
+        second = await _link(c, pid)
+    assert first.status_code == 409
+    assert first.json()["error"]["code"] == "sites.owner_page_publish_needed"
+    assert "Publish" in first.json()["error"]["message"]
+    # The token now exists for the next publish to bind; once it does, links work.
     assert await _token(site)
+    assert second.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -143,27 +211,34 @@ async def test_a_live_custom_domain_is_preferred(beanie_test_db):
     async with _client() as c:
         resp = await _link(c, pid)
     assert urlsplit(resp.json()["url"]).netloc == "shop.asha.test"
-    assert parse_qs(urlsplit(resp.json()["url"]).query)["next"] == ["/"]
+    assert _fragment(resp)["next"] == "/"
 
 
 @pytest.mark.asyncio
-async def test_an_editor_gets_a_staff_link(beanie_test_db):
+@pytest.mark.parametrize("field", ["team", "shared_with"])
+async def test_an_explicit_collaborator_gets_a_staff_link(beanie_test_db, field):
     pid = await _pocket()
     await _site(pid)
-    async with _client(EDITOR, email="ravi@example.com") as c:
-        ticket = _ticket(await _link(c, pid))
-        assert (await _link(c, pid)).json()["role"] == "staff"
+    await _with_team(pid, **{field: [TEAMMATE]})
+    async with _client(TEAMMATE, email="ravi@example.com") as c:
+        resp = await _link(c, pid)
+        ticket = _ticket(resp)
+    assert resp.json()["role"] == "staff"
     site = await _site_doc(pid)
     async with _client() as c:
-        resp = await _redeem(c, await _token(site), site_id=str(site.id), ticket=ticket)
-    assert resp.json()["result"]["role"] == "staff"
-    assert resp.json()["result"]["email"] == "ravi@example.com"
+        redeemed = await _redeem(c, await _token(site), site_id=str(site.id), ticket=ticket)
+    assert redeemed.json()["result"]["role"] == "staff"
+    assert redeemed.json()["result"]["email"] == "ravi@example.com"
 
 
-async def _site_doc(pid: str):
-    from pocketpaw_ee.cloud.models.site import Site
-
-    return await Site.find_one(Site.pocket_id == pid)
+@pytest.mark.asyncio
+async def test_a_plain_workspace_member_gets_nothing(beanie_test_db):
+    pid = await _pocket()  # workspace-visible: EDITOR can edit it, but is no collaborator
+    await _site(pid)
+    async with _client(EDITOR) as c:
+        resp = await _link(c, pid)
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "sites.owner_page_not_collaborator"
 
 
 @pytest.mark.asyncio
@@ -182,6 +257,7 @@ async def test_no_link_without_access_or_for_another_workspace(beanie_test_db):
         missing = await _link(c, foreign)
         malformed = await _link(c, "not-an-id")
     assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "pocket.access_denied"
     assert missing.status_code == 404 and malformed.status_code == 404
 
 
@@ -216,11 +292,26 @@ async def test_an_account_without_an_email_cannot_open_the_owner_page(beanie_tes
     assert resp.status_code == 422
 
 
+@pytest.mark.asyncio
+async def test_each_link_is_audited_with_its_role(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.guards import audit
+
+    seen: list[dict] = []
+    monkeypatch.setattr(audit, "log_privileged_action", lambda **kw: seen.append(kw))
+    pid = await _pocket()
+    await _site(pid)
+    async with _client() as c:
+        ticket = _ticket(await _link(c, pid))
+    assert seen and seen[-1]["action"] == "sites.owner_sign_in.issue"
+    assert seen[-1]["actor"] == OWNER and seen[-1]["role"] == "owner"
+    assert ticket not in json.dumps(seen, default=str)
+
+
 # -------------------------------------------------------------------- redeem
 
 
 @pytest.mark.asyncio
-async def test_redeem_returns_the_owner_once(beanie_test_db, caplog):
+async def test_redeem_returns_the_verified_owner_once(beanie_test_db, caplog):
     caplog.set_level(logging.DEBUG)
     pid = await _pocket()
     site = await _site(pid)
@@ -231,12 +322,11 @@ async def test_redeem_returns_the_owner_once(beanie_test_db, caplog):
         replay = await _redeem(c, token, site_id=str(site.id), ticket=ticket)
     assert first.status_code == 200, first.text
     result = first.json()["result"]
-    assert result["role"] == "owner"
+    assert result["role"] == "owner" and result["email_verified"] is True
     assert result["email"] == "asha@example.com" and result["name"] == "Asha Rao"
     assert len(result["account_id"]) == 64 and OWNER not in result["account_id"]
     assert first.headers["cache-control"] == "no-store"
     assert (replay.status_code, _err(replay)) == (400, "invalid_ticket")
-    # Neither the ticket nor the token is ever logged.
     assert ticket not in caplog.text and token not in caplog.text
 
 
@@ -251,10 +341,11 @@ async def test_the_account_id_is_stable_per_site_and_person(beanie_test_db):
     pid_a, pid_b = await _pocket(), await _pocket()
     site_a = await _site(pid_a)
     site_b = await _site(pid_b, url="https://other.pawsites.example", script="other-1")
+    await _with_team(pid_a, team=[TEAMMATE])
     a1 = await _account(OWNER, pid_a, site_a)
     assert a1 == await _account(OWNER, pid_a, site_a)
     assert a1 != await _account(OWNER, pid_b, site_b)
-    assert a1 != await _account(EDITOR, pid_a, site_a)
+    assert a1 != await _account(TEAMMATE, pid_a, site_a)
 
 
 @pytest.mark.asyncio
@@ -264,7 +355,6 @@ async def test_another_sites_ticket_is_refused_and_burned(beanie_test_db):
     site_b = await _site(pid_b, url="https://other.pawsites.example", script="other-1")
     async with _client() as c:
         ticket = _ticket(await _link(c, pid_a))
-        await _link(c, pid_b)  # site B has its own gateway token
         cross = await _redeem(c, await _token(site_b), site_id=str(site_b.id), ticket=ticket)
         after = await _redeem(c, await _token(site_a), site_id=str(site_a.id), ticket=ticket)
     assert (cross.status_code, _err(cross)) == (400, "invalid_ticket")
@@ -272,22 +362,62 @@ async def test_another_sites_ticket_is_refused_and_burned(beanie_test_db):
 
 
 @pytest.mark.asyncio
-async def test_redeem_needs_the_sites_own_gateway_token(beanie_test_db):
+async def test_a_bad_token_and_a_missing_site_answer_identically(beanie_test_db):
     pid_a, pid_b = await _pocket(), await _pocket()
     site_a = await _site(pid_a)
     site_b = await _site(pid_b, url="https://other.pawsites.example", script="other-1")
     async with _client() as c:
         ticket = _ticket(await _link(c, pid_a))
-        await _link(c, pid_b)
         sid = str(site_a.id)
         none = await _redeem(c, None, site_id=sid, ticket=ticket)
         wrong = await _redeem(c, "x" * 43, site_id=sid, ticket=ticket)
         other = await _redeem(c, await _token(site_b), site_id=sid, ticket=ticket)
+        missing = await _redeem(c, "x" * 43, site_id="0" * 24, ticket=ticket)
         # A refused token never spends the ticket: the real site still can.
         ok = await _redeem(c, await _token(site_a), site_id=sid, ticket=ticket)
-    for resp in (none, wrong, other):
+    bodies = {json.dumps(r.json(), sort_keys=True) for r in (none, wrong, other, missing)}
+    assert len(bodies) == 1
+    for resp in (none, wrong, other, missing):
         assert (resp.status_code, _err(resp)) == (401, "unauthorized")
     assert ok.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_failed_auth_is_capped_per_ip_and_site_without_spending_the_sites_bucket(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.integrations import owner_sign_in
+
+    monkeypatch.setattr(owner_sign_in, "AUTH_FAIL_PER_MIN", 2)
+    monkeypatch.setattr(owner_sign_in, "REDEEM_SITE_PER_MIN", 2)
+    pid = await _pocket()
+    site = await _site(pid)
+    async with _client() as c:
+        ticket = _ticket(await _link(c, pid))
+        bad = [
+            (await _redeem(c, "x" * 43, site_id=str(site.id), ticket="t" * 43)).status_code
+            for _ in range(3)
+        ]
+        # Bad tokens never touched the site's redeem bucket: the real Worker still gets in.
+        ok = await _redeem(c, await _token(site), site_id=str(site.id), ticket=ticket)
+    assert bad == [401, 401, 429]
+    assert ok.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_redeem_is_capped_per_site(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.integrations import owner_sign_in
+
+    monkeypatch.setattr(owner_sign_in, "REDEEM_SITE_PER_MIN", 2)
+    pid = await _pocket()
+    site = await _site(pid)
+    async with _client() as c:
+        token = await _token(site)
+        codes = [
+            (await _redeem(c, token, site_id=str(site.id), ticket="t" * 43)).status_code
+            for _ in range(3)
+        ]
+    assert codes == [400, 400, 429]
 
 
 @pytest.mark.asyncio
@@ -298,7 +428,7 @@ async def test_an_expired_or_tampered_ticket_is_refused(beanie_test_db):
     site = await _site(pid)
     async with _client() as c:
         expired = _ticket(await _link(c, pid))
-        await redis_client.get_redis().delete(f"site_owner_ticket_state:{expired}")  # TTL elapsed
+        await redis_client.get_redis().delete(f"site_owner_ticket_state:{expired}")
         live = _ticket(await _link(c, pid))
         token = await _token(site)
         sid = str(site.id)
@@ -335,21 +465,55 @@ async def test_a_revoked_site_cannot_redeem(beanie_test_db):
     assert (resp.status_code, _err(resp)) == (401, "unauthorized")
 
 
-@pytest.mark.asyncio
-async def test_redeem_is_capped_per_site(beanie_test_db, monkeypatch):
-    from pocketpaw_ee.integrations import owner_sign_in
+# --------------------------------------------------------------------- check
 
-    monkeypatch.setattr(owner_sign_in, "REDEEM_SITE_PER_MIN", 2)
+
+async def _account_for(user: str, pid: str, site) -> str:
+    async with _client(user) as c:
+        ticket = _ticket(await _link(c, pid))
+        resp = await _redeem(c, await _token(site), site_id=str(site.id), ticket=ticket)
+    return resp.json()["result"]["account_id"]
+
+
+@pytest.mark.asyncio
+async def test_check_answers_the_current_role_and_drops_removed_people(beanie_test_db):
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
     pid = await _pocket()
     site = await _site(pid)
+    await _with_team(pid, team=[TEAMMATE])
+    owner_acct = await _account_for(OWNER, pid, site)
+    mate_acct = await _account_for(TEAMMATE, pid, site)
+    token, sid = await _token(site), str(site.id)
     async with _client() as c:
-        await _link(c, pid)
-        token = await _token(site)
-        codes = [
-            (await _redeem(c, token, site_id=str(site.id), ticket="t" * 43)).status_code
-            for _ in range(3)
-        ]
-    assert codes == [400, 400, 429]
+        owner_now = await _check(c, token, site_id=sid, account_id=owner_acct)
+        mate_now = await _check(c, token, site_id=sid, account_id=mate_acct)
+        await _with_team(pid)  # the teammate is removed
+        gone = await _check(c, token, site_id=sid, account_id=mate_acct)
+        doc = await Pocket.get(pid)
+        doc.owner = "user-new-owner"  # the pocket is transferred
+        await doc.save()
+        moved = await _check(c, token, site_id=sid, account_id=owner_acct)
+        unknown = await _check(c, token, site_id=sid, account_id="f" * 64)
+    assert owner_now.json()["result"] == {"role": "owner"}
+    assert mate_now.json()["result"] == {"role": "staff"}
+    assert gone.json()["result"] == {"role": None}
+    assert moved.json()["result"] == {"role": None}
+    assert unknown.json()["result"] == {"role": None}
+
+
+@pytest.mark.asyncio
+async def test_check_needs_the_sites_own_token(beanie_test_db):
+    pid = await _pocket()
+    site = await _site(pid)
+    acct = await _account_for(OWNER, pid, site)
+    async with _client() as c:
+        wrong = await _check(c, "x" * 43, site_id=str(site.id), account_id=acct)
+        none = await _check(c, None, site_id=str(site.id), account_id=acct)
+        bad = await _check(c, await _token(site), site_id=str(site.id))
+    assert (wrong.status_code, _err(wrong)) == (401, "unauthorized")
+    assert (none.status_code, _err(none)) == (401, "unauthorized")
+    assert (bad.status_code, _err(bad)) == (400, "invalid_request")
 
 
 # -------------------------------------------------------------------- deploy
@@ -385,7 +549,7 @@ async def test_a_build_asking_for_the_gateway_token_gets_it_and_the_paw_vars(
     from pocketpaw_ee.sites import service as sites_service
 
     pid = await _pocket()
-    site = await _site(pid)
+    site = await _site(pid, token=False)
     cf = _CF()
     await sites_service.deploy_bundle(
         site,
@@ -408,7 +572,7 @@ async def test_a_worker_without_the_gateway_token_gets_no_paw_vars(beanie_test_d
     from pocketpaw_ee.sites import service as sites_service
 
     pid = await _pocket()
-    site = await _site(pid)
+    site = await _site(pid, token=False)
     cf = _CF()
     await sites_service.deploy_bundle(site, _build(tmp_path, []), cloudflare=cf)
     assert cf.puts[0]["bindings"] == []
@@ -433,3 +597,53 @@ def test_an_assets_only_worker_gets_neither_the_token_nor_its_vars():
     )
     bundle_deploy._map_into(bundle, {}, provisioned)
     assert [b["name"] for b in bundle.bindings] == ["OTHER"]
+
+
+# ------------------------------------------------- the platform-minted secret
+
+
+@pytest.mark.asyncio
+async def test_a_pending_row_filled_meanwhile_is_never_overwritten(beanie_test_db, monkeypatch):
+    """ensure_generated_secret is insert-if-absent: a stale read of a pending row
+    cannot replace a value someone set in between."""
+    from pocketpaw_ee.sites import site_secrets
+
+    pid = await _pocket()
+    await site_secrets.request_secret(
+        workspace_id=WS, user_id=OWNER, pocket_id=pid, name="SESSION_SECRET", description="x"
+    )
+    stale = await site_secrets._row(WS, pid, "SESSION_SECRET")
+    await site_secrets.set_secret(
+        workspace_id=WS, user_id=OWNER, pocket_id=pid, name="SESSION_SECRET", value="owner-value"
+    )
+
+    async def _stale_row(*_a):
+        return stale
+
+    real_row = site_secrets._row
+    monkeypatch.setattr(site_secrets, "_row", _stale_row)
+    minted = await site_secrets.ensure_generated_secret(
+        workspace_id=WS, pocket_id=pid, name="SESSION_SECRET", description="d"
+    )
+    monkeypatch.setattr(site_secrets, "_row", real_row)
+    assert minted is False
+    deployed = await site_secrets.secrets_for_deploy(SimpleNamespace(workspace=WS, pocket_id=pid))
+    assert deployed["SESSION_SECRET"] == "owner-value"
+
+
+@pytest.mark.asyncio
+async def test_two_mints_at_once_make_one_value(beanie_test_db):
+    from pocketpaw_ee.sites import site_secrets
+
+    pid = await _pocket()
+    results = await asyncio.gather(
+        *(
+            site_secrets.ensure_generated_secret(
+                workspace_id=WS, pocket_id=pid, name="BETTER_AUTH_SECRET", description="d"
+            )
+            for _ in range(2)
+        )
+    )
+    assert sorted(results) == [False, True]
+    listed = await site_secrets.list_secrets(workspace_id=WS, user_id=OWNER, pocket_id=pid)
+    assert [s.name for s in listed.secrets] == ["BETTER_AUTH_SECRET"]

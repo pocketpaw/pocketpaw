@@ -9,16 +9,16 @@
   {
     "label": "owner ticket: skip the gateway token check",
     "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
-    "find": "    if not await site_secrets.secret_matches(\n        workspace_id=site.workspace,",
-    "replace": "    if False and await site_secrets.secret_matches(\n        workspace_id=site.workspace,",
-    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_redeem_needs_the_sites_own_gateway_token"]
+    "find": "    if ok:\n        return site, None",
+    "replace": "    if site is not None:\n        return site, None",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_a_bad_token_and_a_missing_site_answer_identically"]
   },
   {
     "label": "owner ticket: peek instead of consume (replayable)",
     "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
-    "find": "payload = await _oauth_state.consume(TICKET_NAMESPACE, ticket)",
-    "replace": "payload = await _oauth_state.peek(TICKET_NAMESPACE, ticket) or {}",
-    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_redeem_returns_the_owner_once"]
+    "find": "payload = await _oauth_state.consume(TICKET_NAMESPACE, body[\"ticket\"])",
+    "replace": "payload = await _oauth_state.peek(TICKET_NAMESPACE, body[\"ticket\"]) or {}",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_redeem_returns_the_verified_owner_once"]
   },
   {
     "label": "owner ticket: live for an hour",
@@ -28,14 +28,35 @@
     "tests": ["tests/ee/sites/test_owner_sign_in.py::test_the_ticket_lives_sixty_seconds"]
   },
   {
-    "label": "owner ticket: every editor becomes the owner",
+    "label": "owner ticket: an unverified Paw email gets a link",
     "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
-    "find": "role = ROLE_OWNER if pocket.owner == user_id else ROLE_STAFF",
-    "replace": "role = ROLE_OWNER",
-    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_an_editor_gets_a_staff_link"]
+    "find": "    if getattr(user, \"is_verified\", False) is not True:",
+    "replace": "    if False:",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_an_unverified_paw_email_gets_no_link"]
   },
   {
-    "label": "owner ticket: no edit-access check",
+    "label": "owner ticket: the ticket stops saying the email is verified",
+    "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
+    "find": "            \"email_verified\": True,",
+    "replace": "            \"email_verified\": False,",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_redeem_returns_the_verified_owner_once"]
+  },
+  {
+    "label": "owner ticket: every workspace member becomes staff",
+    "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
+    "find": "    if user_id in _member_ids(pocket.team) or user_id in _member_ids(pocket.shared_with):\n        return ROLE_STAFF\n    return None",
+    "replace": "    return ROLE_STAFF",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_a_plain_workspace_member_gets_nothing"]
+  },
+  {
+    "label": "owner ticket: every collaborator becomes the owner",
+    "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
+    "find": "    if pocket.owner == user_id:\n        return ROLE_OWNER",
+    "replace": "    if True:\n        return ROLE_OWNER",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_an_explicit_collaborator_gets_a_staff_link"]
+  },
+  {
+    "label": "owner ticket: no access check",
     "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
     "find": "pocket = await site_secrets._require_edit(workspace_id, user_id, pocket_id)",
     "replace": "pocket = await site_secrets._pocket_in_workspace(workspace_id, pocket_id)",
@@ -49,14 +70,42 @@
     "tests": ["tests/ee/sites/test_owner_sign_in.py::test_next_must_be_a_path_on_the_site"]
   },
   {
+    "label": "owner ticket: the ticket rides in the query string",
+    "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
+    "find": "url=f\"https://{host}{CALLBACK_PATH}#{fragment}\"",
+    "replace": "url=f\"https://{host}{CALLBACK_PATH}?{fragment}\"",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_the_owner_gets_a_one_time_link_with_the_ticket_in_the_fragment"]
+  },
+  {
+    "label": "owner ticket: a link before the token is deployed",
+    "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
+    "find": "        raise ConflictError(\n            \"sites.owner_page_publish_needed\",",
+    "replace": "        pass\n    if False:\n        raise ConflictError(\n            \"sites.owner_page_publish_needed\",",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_the_first_link_on_a_site_without_its_token_asks_for_a_publish"]
+  },
+  {
     "label": "owner ticket: raw Paw user id reaches the site",
     "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
     "find": "    return hmac.new(key, f\"{site_id}:{user_id}\".encode(), hashlib.sha256).hexdigest()",
     "replace": "    return user_id",
     "tests": [
-      "tests/ee/sites/test_owner_sign_in.py::test_redeem_returns_the_owner_once",
+      "tests/ee/sites/test_owner_sign_in.py::test_redeem_returns_the_verified_owner_once",
       "tests/ee/sites/test_owner_sign_in.py::test_the_account_id_is_stable_per_site_and_person"
     ]
+  },
+  {
+    "label": "owner auth: failed auth never capped",
+    "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
+    "find": "    if not await _within(\"owner_auth_fail\", key, AUTH_FAIL_PER_MIN):",
+    "replace": "    if False:",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_failed_auth_is_capped_per_ip_and_site_without_spending_the_sites_bucket"]
+  },
+  {
+    "label": "owner check: removed people keep their role",
+    "file": "ee/pocketpaw_ee/integrations/owner_sign_in.py",
+    "find": "                role = role_of(pocket, user_id)\n                break",
+    "replace": "                role = ROLE_STAFF\n                break",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_check_answers_the_current_role_and_drops_removed_people"]
   },
   {
     "label": "signing secrets: publish stops minting",
@@ -66,11 +115,11 @@
     "tests": ["tests/ee/sites/test_platform_signing_secrets.py::test_publish_mints_a_requested_signing_secret_instead_of_refusing"]
   },
   {
-    "label": "signing secrets: mint over an owner-set value",
+    "label": "signing secrets: a stale pending read overwrites a value",
     "file": "ee/pocketpaw_ee/sites/site_secrets.py",
-    "find": "    if row is not None and row.encrypted_value:\n        return False\n    if row is None:\n        row = _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name)\n    row.encrypted_value = crypto.encrypt(_secrets.token_urlsafe(32))",
-    "replace": "    if row is None:\n        row = _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name)\n    row.encrypted_value = crypto.encrypt(_secrets.token_urlsafe(32))",
-    "tests": ["tests/ee/sites/test_platform_signing_secrets.py::test_publish_keeps_an_owner_set_signing_secret"]
+    "find": "            {\"_id\": row.id, \"encrypted_value\": {\"$in\": [None, \"\"]}}, {\"$set\": fields}",
+    "replace": "            {\"_id\": row.id}, {\"$set\": fields}",
+    "tests": ["tests/ee/sites/test_owner_sign_in.py::test_a_pending_row_filled_meanwhile_is_never_overwritten"]
   },
   {
     "label": "signing secrets: the agent may ask the owner again",
@@ -78,6 +127,13 @@
     "find": "    if site_secrets.is_platform_managed(name):\n        return await _refuse_platform_secret(",
     "replace": "    if False:\n        return await _refuse_platform_secret(",
     "tests": ["tests/ee/sites/test_platform_signing_secrets.py::test_the_agent_cannot_ask_the_owner_for_a_signing_secret"]
+  },
+  {
+    "label": "drafts: every name shares one signing value",
+    "file": "ee/pocketpaw_ee/sites/draft_worker.py",
+    "find": "        out[name] = signing_value_for(signing_value, name)",
+    "replace": "        out[name] = signing_value",
+    "tests": ["tests/ee/sites/test_platform_signing_secrets.py::test_drafts_get_a_distinct_signing_value_per_name"]
   },
   {
     "label": "gateway vars: sent to every worker",
