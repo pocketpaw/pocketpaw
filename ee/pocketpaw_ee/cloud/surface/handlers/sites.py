@@ -1487,7 +1487,20 @@ _PROJECT_LOOP = (
     "implying it was. When `preview_mode` is `static`, tell the user the "
     "preview shows the static pages only and server routes (API, actions, server "
     "pages) run after publish. Publish deploys the finished build of the current "
-    "files, so build before you publish.\n"
+    "files, so build before you publish. Ready means `play_test_site` with "
+    "`exercise_forms: true` passed on each form page. Never invent contact details; "
+    "ask. Speak in outcomes, never tool names.\n"
+)
+
+#: Refine turns only (sharing questions come after publish; the create preamble has a
+#: size budget). What the product really offers, so the agent never sends the owner
+#: to a feature that does not exist or to an outside service.
+_SHARING_RULE = (
+    "Sharing: the live address is the link and the Share button copies it. The owner "
+    "renames it in Settings > General > Address > Change; the new name takes over at the "
+    "next publish and the old link stops working then. There is no QR maker for the site "
+    "link; never point to one or to an outside link service. Status buttons in a "
+    "generated admin move forward only: the primary action is the next state.\n"
 )
 
 
@@ -1832,6 +1845,7 @@ def _refine_preamble(meta: SurfaceMeta, engine: str | None = None) -> str:
             "`start_site_from_template` again: that mints a SECOND site.\n"
             + _APP_PLAN_REFINE_RULE
             + _PROJECT_LOOP
+            + _SHARING_RULE
         )
         rules = _REFINE_SHARED_RULES
     else:
