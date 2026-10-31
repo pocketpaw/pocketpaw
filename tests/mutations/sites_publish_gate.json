@@ -475,5 +475,59 @@
     "tests": [
       "tests/ee/sites/test_publish_gate_hardening.py::test_the_approval_executor_audits_a_publish_anyway"
     ]
+  },
+  {
+    "label": "images and scripts allowed off-site: a pixel or JSONP GET carries the entry out",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "_STATIC_TYPES = frozenset({\"font\", \"stylesheet\"})\n",
+    "replace": "_STATIC_TYPES = frozenset({\"font\", \"stylesheet\", \"image\", \"script\"})\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestReReview::test_off_site_images_and_scripts_are_aborted"
+    ]
+  },
+  {
+    "label": "off-site redirect followed: a 307 re-POSTs the entry to another host",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "        if location and _origin(location) != origin:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestExercise::test_a_redirect_to_another_host_is_not_followed"
+    ]
+  },
+  {
+    "label": "off-site websocket connected: the entry leaves over a socket",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "        if armed[0] and socket_origin != urlsplit(url).netloc:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestReReview::test_an_off_site_websocket_is_closed_and_a_same_origin_one_connects"
+    ]
+  },
+  {
+    "label": "service workers allowed: a worker answers requests the router never sees",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "CONTEXT_OPTIONS: dict[str, Any] = {\"service_workers\": \"block\"}\n",
+    "replace": "CONTEXT_OPTIONS: dict[str, Any] = {\"service_workers\": \"allow\"}\n",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms_browser.py::test_the_test_context_blocks_service_workers"
+    ]
+  },
+  {
+    "label": "multi-step form fails: a form that moves to step 2 blocks publishing",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "        if page.get(\"changed\"):\n            return unchecked(\"the form moved to another step, which the test does not fill in\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestReReview::test_a_multi_step_form_that_moves_on_is_unchecked"
+    ]
+  },
+  {
+    "label": "fetch error fails the form: a flaky draft blocks publishing",
+    "file": "ee/pocketpaw_ee/sites/play_test.py",
+    "find": "    if any(s.get(\"error\") for s in sent):\n        return unchecked(\"the draft did not answer the test submit\")\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_play_test_forms.py::TestReReview::test_a_draft_that_does_not_answer_is_unchecked"
+    ]
   }
 ]

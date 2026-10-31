@@ -278,8 +278,10 @@ class TestExercise:
         result = await _run(_Page([first, hop]))
         assert first.fetch_kw == {"max_redirects": 0} and first.done == "fulfill"
         assert hop.done == "abort"
+        # Answered with a stub, never followed: the browser gets no Location to obey.
+        assert first.body == play_test._REDIRECT_STUB
         assert result.forms[0].status == "unchecked"
-        assert "hooks.zapier.com" in result.forms[0].outcome
+        assert "redirects off-site to hooks.zapier.com" in result.forms[0].outcome
 
     async def test_an_alert_counts_as_the_confirmation(self) -> None:
         page = _Page([_Route(_BASE + "api/join", "POST")], dialog="Danke!")
@@ -329,3 +331,71 @@ class TestTestData:
         assert phones["in"][0].startswith("+91")
         assert phones["gb"][0].startswith("07700900")
         assert "555" in phones["us"][0]
+
+
+class TestReReview:
+    def test_a_multi_step_form_that_moves_on_is_unchecked(self) -> None:
+        out = play_test.judge_form(_info(), {"text": "Step 2 of 3", "changed": True}, [], _BASE)
+        assert out.status == "unchecked" and "another step" in out.outcome
+
+    def test_a_mailto_form_is_unchecked(self) -> None:
+        out = play_test.judge_form(_info(external="an email app (mailto:)"), None, [], _BASE)
+        assert out.status == "unchecked" and "mailto" in out.outcome
+
+    def test_a_draft_that_does_not_answer_is_unchecked(self) -> None:
+        sent = [{"kind": "site", "method": "POST", "url": _BASE + "x", "error": "reset"}]
+        out = play_test.judge_form(_info(), None, sent, _BASE)
+        assert out.status == "unchecked" and "did not answer" in out.outcome
+
+    async def test_off_site_images_and_scripts_are_aborted(self) -> None:
+        routes = [
+            _Route("https://tracker.example.net/p.gif?e=x", "GET", "image"),
+            _Route("https://list.example.net/sub.js?e=x", "GET", "script"),
+            _Route("https://fonts.gstatic.com/s/a.woff2", "GET", "font"),
+            _Route("https://fonts.googleapis.com/css2?family=Inter", "GET", "stylesheet"),
+        ]
+        await _run(_Page(routes))
+        assert [r.done for r in routes] == ["abort", "abort", "continue", "continue"]
+
+    async def test_a_fetch_error_aborts_without_failing_the_form(self) -> None:
+        class _Down(_Route):
+            async def fetch(self, **_kw: Any) -> _Response:
+                raise ConnectionError("reset")
+
+        route = _Down(_BASE + "api/join", "POST")
+        result = await _run(_Page([route]))
+        assert route.done == "abort"
+        assert result.forms[0].status == "unchecked"
+
+    async def test_an_off_site_websocket_is_closed_and_a_same_origin_one_connects(self) -> None:
+        class _Socket:
+            def __init__(self, url: str) -> None:
+                self.url = url
+                self.done = ""
+
+            async def close(self) -> None:
+                self.done = "close"
+
+            async def connect(self) -> None:
+                self.done = "connect"
+
+        sockets = [
+            _Socket("wss://chat.example.net/ws?e=x"),
+            _Socket("wss://abc.preview.example.com/ws"),
+        ]
+
+        class _WsContext(_Context):
+            async def route_web_socket(self, _match: Any, handler: Any) -> None:
+                self.ws_handler = handler
+
+        class _WsPage(_Page):
+            async def evaluate(self, js: str, arg: Any = None) -> Any:
+                if js is play_test._SUBMIT_FORM_JS:
+                    for sock in sockets:
+                        await self.context.ws_handler(sock)
+                return await super().evaluate(js, arg)
+
+        page = _WsPage([])
+        page.context = _WsContext()
+        await _run(page)
+        assert [s.done for s in sockets] == ["close", "connect"]

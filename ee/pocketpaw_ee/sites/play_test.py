@@ -38,7 +38,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -136,9 +136,17 @@ TEST_DATA: dict[str, Any] = {
 #: The Paw integration gateway paw.js posts to (``/sites/<id>/x/<integration>/<action>``):
 #: a test submit gets a stub answer there, so no real subscriber, lead or order is made.
 _GATEWAY_RE = re.compile(r"/sites/[^/]+/x/([^/]+)/([^/]+)/?$")
-#: Subresources an off-site host may still serve while a form is tested (a thank-you
-#: page's fonts and styles). Anything else off-site is aborted, whatever its method.
-_STATIC_TYPES = frozenset({"image", "font", "stylesheet", "script", "media", "manifest"})
+#: The only off-site requests allowed while a form is tested: fonts and stylesheets
+#: (a thank-you page's look). Images, scripts and media are blocked too, because a
+#: tracking pixel or a JSONP endpoint carries the entry in its query string. Requests
+#: made by the page load BEFORE a form is armed are not affected.
+_STATIC_TYPES = frozenset({"font", "stylesheet"})
+#: Options for every browser context that plays a draft: no service worker may sit
+#: between the page and the router.
+CONTEXT_OPTIONS: dict[str, Any] = {"service_workers": "block"}
+#: What a same-origin redirect to another host is answered with instead of following
+#: it (Playwright does not route redirect hops, so a 307 would re-POST the entry).
+_REDIRECT_STUB = "<!doctype html><title>Stopped</title><p>Stopped before leaving the draft.</p>"
 #: Captcha hosts: a challenge means the test could not tell, never that the form broke.
 _CAPTCHA_RE = re.compile(r"challenges\.cloudflare\.com|recaptcha|hcaptcha", re.IGNORECASE)
 #: Statuses that are certainly a broken form for a visitor. Other 4xx refuse the test
@@ -212,7 +220,10 @@ _FILL_FORM_JS = """
   let external = '';
   try {
     const u = new URL(f.getAttribute('action') || location.href, location.href);
-    if (u.origin !== location.origin) external = u.host;
+    if (u.protocol === 'mailto:') external = 'an email app (mailto:)';
+    else if (u.protocol === 'tel:' || u.protocol === 'sms:') external = `a phone (${u.protocol})`;
+    else if (u.protocol !== 'http:' && u.protocol !== 'https:') external = `a ${u.protocol} link`;
+    else if (u.origin !== location.origin) external = u.host;
   } catch (e) {}
   const live = () => [...document.querySelectorAll('[role=status],[role=alert],[aria-live]')]
     .map(e => (e.innerText || '').trim()).filter(Boolean).join('|');
@@ -348,6 +359,13 @@ def judge_form(
     external = [s for s in sent if s["kind"] == "external"]
     if page.get("captcha") or any(_CAPTCHA_RE.search(s["url"]) for s in external):
         return unchecked("a captcha check stopped the test")
+    offsite = [s for s in sent if s.get("offsite_redirect")]
+    if offsite:
+        return unchecked(
+            f"it redirects off-site to {offsite[0]['offsite_redirect']}, so the test stopped there"
+        )
+    if any(s.get("error") for s in sent):
+        return unchecked("the draft did not answer the test submit")
     posted = [s for s in sent if s["kind"] in ("site", "gateway")]
     navs = [s for s in sent if s["kind"] == "navigation"]
     codes = [int(s["status"]) for s in posted + navs if s.get("status")]
@@ -376,6 +394,8 @@ def judge_form(
     if any(s["kind"] == "popup" for s in sent):
         return unchecked("it opens a new window, so the test could not see the result")
     if not posted and not navs:
+        if page.get("changed"):
+            return unchecked("the form moved to another step, which the test does not fill in")
         return FormOutcome(name, "failed", "nothing was sent and the page did not change", detail)
     before = len(_SUCCESS_RE.findall(info.get("text") or ""))
     after = len(_SUCCESS_RE.findall(page.get("text") or ""))
@@ -783,13 +803,31 @@ async def exercise_page_forms(page: Any, url: str, result: PlayResult, deadline:
         sent.append(entry)
         try:
             response = await r.fetch(max_redirects=0)
-        except Exception as exc:  # noqa: BLE001 — the draft did not answer
-            entry["status"] = 502
+        except Exception as exc:  # noqa: BLE001 — the draft did not answer the test
             entry["error"] = clean_text(exc, 120)
             await r.abort()
             return
         entry["status"] = response.status
+        location = ""
+        if 300 <= response.status < 400:
+            location = urljoin(address, (response.headers or {}).get("location", ""))
+        if location and _origin(location) != origin:
+            # Never follow it: the browser would re-send the entry to that host.
+            entry["offsite_redirect"] = urlsplit(location).netloc
+            await r.fulfill(status=200, content_type="text/html", body=_REDIRECT_STUB)
+            return
         await r.fulfill(response=response)
+
+    async def route_socket(ws: Any) -> None:
+        address = getattr(ws, "url", "") or ""
+        socket_origin = urlsplit(address).netloc
+        if armed[0] and socket_origin != urlsplit(url).netloc:
+            sent.append(
+                {"kind": "external", "method": "WS", "url": address, "resource_type": "websocket"}
+            )
+            await ws.close()
+            return
+        await ws.connect()
 
     def on_page(popup: Any) -> None:
         if not armed[0]:
@@ -803,6 +841,8 @@ async def exercise_page_forms(page: Any, url: str, result: PlayResult, deadline:
 
     try:
         await target.route("**/*", route)
+        if callable(getattr(target, "route_web_socket", None)):
+            await target.route_web_socket(lambda _url: True, route_socket)
     except Exception as exc:  # noqa: BLE001
         result.forms_note = f"forms were not exercised: {clean_text(exc, 120)}"
         return
@@ -875,7 +915,9 @@ async def _play(
     deadline: float,
     exercise_forms: bool = False,
 ) -> None:
-    context = await browser.new_context(viewport=dict(viewport), has_touch=mobile, is_mobile=mobile)
+    context = await browser.new_context(
+        viewport=dict(viewport), has_touch=mobile, is_mobile=mobile, **CONTEXT_OPTIONS
+    )
     try:
         await context.add_init_script(RAF_COUNTER_JS)
         page = await context.new_page()

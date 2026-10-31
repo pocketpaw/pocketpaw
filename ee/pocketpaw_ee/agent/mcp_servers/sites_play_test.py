@@ -149,11 +149,10 @@ def _forms_summary(result: Any) -> str:
         out.append("Every form saved its test entry and showed a confirmation.")
     out.append(
         "Test entries went to this draft (its own database, cleared when the site is "
-        "published). During the test the browser blocked every off-site request and popup "
-        "and stubbed the Paw integration gateway, but the draft's server code may still "
-        "call outside services itself (an email provider, a webhook): check what it calls "
-        "before you say no one was contacted. UNCHECKED forms do not block publishing; say "
-        "plainly they were not confirmed."
+        "published). The browser blocked off-site requests while testing; the draft's own "
+        "server code may still call outside services (an email provider, a webhook), so "
+        "check what it calls before you say no one was contacted. UNCHECKED forms do not "
+        "block publishing; say plainly they were not confirmed."
     )
     return "\n".join(out)
 
