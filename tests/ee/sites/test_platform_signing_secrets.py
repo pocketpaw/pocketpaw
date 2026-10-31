@@ -158,6 +158,27 @@ async def test_a_pending_signing_request_is_filled_on_publish(beanie_test_db, tm
 
 
 @pytest.mark.asyncio
+async def test_a_pending_signing_request_is_filled_even_when_the_build_does_not_list_it(
+    beanie_test_db, tmp_path
+):
+    from pocketpaw_ee.sites import service as sites_service
+
+    pid = await _pocket()
+    await site_secrets.request_secret(
+        workspace_id=WS, user_id=EDITOR, pocket_id=pid, name="JWT_SECRET", description="x"
+    )
+    await site_secrets.request_secret(
+        workspace_id=WS, user_id=EDITOR, pocket_id=pid, name="ADMIN_PASSWORD", description="x"
+    )
+    site = SimpleNamespace(id="site_9", workspace=WS, pocket_id=pid, d1_database_id="")
+    cf = _CF()
+    await sites_service.deploy_bundle(site, _build(tmp_path, []), cloudflare=cf)
+    assert set(_secret_bindings(cf.puts[0])) == {"JWT_SECRET"}
+    listed = await site_secrets.list_secrets(workspace_id=WS, user_id=OWNER, pocket_id=pid)
+    assert [s.name for s in listed.pending] == ["ADMIN_PASSWORD"]
+
+
+@pytest.mark.asyncio
 async def test_an_owner_secret_is_still_required(beanie_test_db, tmp_path):
     from pocketpaw_ee.cloud._core.errors import ValidationError
     from pocketpaw_ee.sites import service as sites_service

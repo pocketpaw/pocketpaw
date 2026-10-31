@@ -21,12 +21,12 @@
 #   * The site delete cascade calls ``purge_for_pocket``; it is best effort there.
 #     A site transfer calls ``move_for_pocket`` to re-key the rows to the new
 #     workspace (the Fernet key is deployment-wide, so tokens move as they are).
-#   * ``ensure_generated_secret`` / ``secret_matches`` serve platform-minted secrets
-#     (the integrations gateway's ``PAW_GATEWAY_TOKEN``; the session-signing secrets
-#     in ``PLATFORM_SIGNING_SECRETS``, minted at publish by ``ensure_signing_secrets``
-#     so no owner is ever asked for one). The first skips the owner
-#     gate, so its callers authorize first; the second compares in constant time
-#     here, so the value still never leaves this module.
+#   * ``ensure_generated_secret`` / ``secret_matches`` serve platform-minted secrets:
+#     the integrations gateway's ``PAW_GATEWAY_TOKEN`` and the session-signing secrets
+#     in ``PLATFORM_SIGNING_SECRETS`` (``ensure_signing_secrets``, at recipe apply and
+#     publish, so no owner is ever asked for one). The first skips the owner gate, so
+#     its callers authorize first; the second compares in constant time here, so the
+#     value still never leaves this module.
 #   * ``set_managed_secret`` / ``delete_managed_secrets`` serve integration-written
 #     secrets (Supabase's project keys), tagged ``managed_by``. They skip the owner
 #     gate too (the caller is an integration hook the owner set up) but are audited
@@ -409,13 +409,15 @@ async def ensure_generated_secret(
 async def ensure_signing_secrets(
     *, workspace_id: str, pocket_id: str, names: Iterable[object]
 ) -> list[str]:
-    """Mint each platform signing secret in ``names`` that has no value yet (a
-    pending request is filled; an owner-set value is kept). Other names are
-    ignored. Returns the minted names. Needs CLOUD_ENCRYPTION_KEY like every
-    secret write; the caller authorized the deploy that needs them."""
+    """Mint each platform signing secret in ``names``, or with a pending request
+    (a site built when the agent still asked the owner), that has no value yet.
+    An owner-set value is kept; other names are ignored. Returns the minted names.
+    Needs CLOUD_ENCRYPTION_KEY like every secret write; the caller authorized the
+    action that needs them."""
     if not workspace_id or not pocket_id:
         return []
     asked = {str(n) for n in names}
+    asked |= {r.name for r in await _rows(workspace_id, pocket_id) if not r.encrypted_value}
     return [
         name
         for name in PLATFORM_SIGNING_SECRETS

@@ -531,6 +531,23 @@ async def _list_site_recipes_handler(args: dict) -> dict:
     return _success_response({"ok": True, "recipes": recipes, "message": message})
 
 
+async def _mint_platform_secrets(workspace_id: str, pocket_id: str, names: list[str]) -> None:
+    """A recipe's platform secrets exist from the moment it is applied, so the Worker
+    reads them whether or not the build lists them. Never fails the apply: publish
+    mints them again."""
+    from pocketpaw_ee.integrations import bindings as integration_bindings
+    from pocketpaw_ee.sites import site_secrets
+
+    try:
+        await site_secrets.ensure_signing_secrets(
+            workspace_id=workspace_id, pocket_id=pocket_id, names=names
+        )
+        if integration_bindings.GATEWAY_TOKEN_NAME in names:
+            await integration_bindings.ensure_gateway_token(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("apply_site_recipe: platform secrets not minted yet", exc_info=True)
+
+
 async def _apply_site_recipe_handler(args: dict) -> dict:
     tool = "apply_site_recipe"
     workspace_id, user_id, err = await _begin(tool)
@@ -667,6 +684,7 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
     )
     if err:
         return err
+    await _mint_platform_secrets(workspace_id, pocket_id, requests["platform_secret_names"])
     verification = await _queue_build(workspace_id, user_id, pocket_id)
     return _success_response(
         {
