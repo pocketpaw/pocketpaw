@@ -38,9 +38,13 @@
     "",
     "v6 (2026-10-05): set_effects. Light and colour effects on a video or image",
     "clip (grade, glow, vignette, spotlight, light rays, sweep, leak, grain,",
-    "aberration, flicker), rendered by the browser's WebGL compositor."
+    "aberration, flicker), rendered by the browser's WebGL compositor.",
+    "",
+    "v7 (2026-11-03): set_shake. Handheld camera shake on a visual clip",
+    "(intensity, speed, rotation), added on top of its transform and keyframes",
+    "so it survives a zoom. set_effects gained fields but not a verb."
   ],
-  "version": 6,
+  "version": 7,
   "maxOpsPerBatch": 50,
   "ops": [
     "add_caption",
@@ -55,6 +59,7 @@
     "set_chroma",
     "set_effects",
     "set_project",
+    "set_shake",
     "set_transform",
     "set_transition",
     "set_volume",

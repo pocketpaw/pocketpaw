@@ -19,6 +19,9 @@
 # Ranges are checked here; the browser renders it in WebGL. `fx` keyframes its
 # overall strength.
 #
+# `set_shake` adds handheld camera shake to a visual clip: intensity, speed and
+# rotation are 0-1 fractions; the browser turns them into motion.
+#
 # 2026-09-11 (feat/agent-lane-ops): `add_lane`, and `track` resolving by lane
 # NAME as well as id. The name path is load-bearing — track ids are minted when
 # the batch applies in the browser, so a lane this batch creates has no id to
@@ -56,6 +59,7 @@ OP_KINDS: frozenset[str] = frozenset(
         "remove_clip",
         "set_chroma",
         "set_effects",
+        "set_shake",
         "set_project",
         "set_transition",
         "set_transform",
@@ -83,6 +87,7 @@ _CLIP_OPS: frozenset[str] = frozenset(
         "add_keyframe",
         "clear_keyframes",
         "set_effects",
+        "set_shake",
         "zoom_clip",
         "set_chroma",
     }
@@ -121,6 +126,31 @@ _FX_SCALARS: dict[str, tuple[float, float]] = {
     "pixelate": _UNIT,
     "scanlines": _UNIT,
     "curvature": _UNIT,
+    "glitch": _UNIT,
+    "vhs": _UNIT,
+    "jpeg": _UNIT,
+    "dither": _UNIT,
+    "halftone": _UNIT,
+    "halftoneSize": _UNIT,
+    "riso": _UNIT,
+    "hatch": _UNIT,
+    "sketch": _UNIT,
+    "ascii": _UNIT,
+    "asciiSize": _UNIT,
+    "paper": _UNIT,
+    "ripple": _UNIT,
+    "swirl": _SIGNED,
+    "bulge": _SIGNED,
+    "heat": _UNIT,
+    "reeded": _UNIT,
+    "zoomBlur": _UNIT,
+    "spinBlur": _UNIT,
+    "motionBlur": _UNIT,
+    "motionAngle": (-180.0, 180.0),
+    "tiltShift": _UNIT,
+    "tiltFocus": _SIGNED,
+    "streaks": _UNIT,
+    "starburst": _UNIT,
 }
 _FX_GROUPS: dict[str, dict[str, tuple[float, float]]] = {
     "spotlight": {"x": _UNIT, "y": _UNIT, "radius": _UNIT, "intensity": _UNIT},
@@ -787,6 +817,14 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
                 return err
             if raw.get(key) is not None and raw[key] > 1:
                 return f"ops[{i}].{key} must be between 0 and 1."
+        if raw.get("off") is not None and not isinstance(raw["off"], bool):
+            return f"ops[{i}].off must be true or false."
+
+    elif kind == "set_shake":
+        for key in ("intensity", "speed", "rotation"):
+            err = _check_range(raw.get(key), 0.0, 1.0, f"ops[{i}].{key}")
+            if err:
+                return err
         if raw.get("off") is not None and not isinstance(raw["off"], bool):
             return f"ops[{i}].off must be true or false."
 

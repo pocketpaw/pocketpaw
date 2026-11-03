@@ -128,6 +128,7 @@ def test_every_contract_op_is_reachable(summary: TimelineSummary) -> None:
         "zoom_clip": {"clipId": "clip_aaa", "focusX": 0.3, "focusY": 0.4, "scale": 1.5},
         "set_chroma": {"clipId": "clip_aaa"},
         "set_effects": {"clipId": "clip_aaa", "preset": "moody"},
+        "set_shake": {"clipId": "clip_aaa", "intensity": 0.5},
     }
     assert set(minimal) == set(OP_KINDS), "a verb was added without a case here"
     for kind, args in minimal.items():
@@ -691,6 +692,10 @@ def test_set_chroma_checks_colour_and_ranges(summary, fields, error) -> None:
         ({"hsl": {"green": {"saturation": 0.5}, "blue": {"hue": -0.2}}}, None),
         ({"hsl": {"teal": {"hue": 0.1}}}, "hsl must be null or an object keyed by hue band"),
         ({"hsl": {"red": {"hue": 2}}}, "hsl.red.hue must be between -1 and 1"),
+        ({"vhs": 1, "glitch": 0.4, "ascii": 1, "swirl": -0.5, "motionAngle": -90}, None),
+        ({"bulge": -1, "tiltFocus": 0.5, "halftoneSize": 0}, None),
+        ({"swirl": 1.5}, "swirl must be between -1 and 1"),
+        ({"motionAngle": 200}, "motionAngle must be between -180 and 180"),
     ],
 )
 def test_set_effects_checks_presets_ranges_and_groups(summary, fields, error) -> None:
@@ -699,6 +704,29 @@ def test_set_effects_checks_presets_ranges_and_groups(summary, fields, error) ->
         assert err is None and ops[0]["op"] == "set_effects"
     else:
         assert ops is None and error in err
+
+
+@pytest.mark.parametrize(
+    ("fields", "error"),
+    [
+        ({"intensity": 0.6, "speed": 0.2, "rotation": 1}, None),
+        ({"off": True}, None),
+        ({"intensity": 2}, "intensity must be between 0 and 1"),
+        ({"speed": "fast"}, "speed must be a number"),
+        ({"off": 1}, "off must be true or false"),
+    ],
+)
+def test_set_shake_checks_ranges(summary, fields, error) -> None:
+    ops, err = validate_ops([{"op": "set_shake", "clipId": "clip_aaa", **fields}], summary)
+    if error is None:
+        assert err is None and ops[0]["op"] == "set_shake"
+    else:
+        assert ops is None and error in err
+
+
+def test_set_shake_needs_a_clip_on_the_timeline(summary) -> None:
+    ops, err = validate_ops([{"op": "set_shake", "clipId": "clip_zzz"}], summary)
+    assert ops is None and "clip_zzz" in err
 
 
 @pytest.mark.parametrize(("value", "ok"), [(0.0, True), (1.0, True), (1.5, False)])
