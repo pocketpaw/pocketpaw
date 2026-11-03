@@ -6,7 +6,8 @@
 # was mid-build, so the builder showed the bare template. These tests pin the contract:
 # only the create tools stamp ``generating`` (with the chat session), the read paths
 # self-heal it to ``waiting`` / ``ready`` once the creating run is over, run
-# finalization settles it too, a published site never reports it, and the list read
+# finalization settles it too, a superseded run (follow-up mid-build) or a freshly
+# answered ask keeps it live, a published site never reports it, and the list read
 # costs nothing extra unless a row is actually generating.
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ async def _run(
     run_id: str = "run-1",
     assistant_message_id: str | None = None,
     age_s: int = 0,
+    ended_ago_s: int | None = None,
 ):
     doc = ChatRunDoc(
         run_id=run_id,
@@ -70,6 +72,9 @@ async def _run(
         status=status,
         assistant_message_id=assistant_message_id,
         createdAt=datetime.now(UTC) - timedelta(seconds=age_s),
+        ended_at=None
+        if ended_ago_s is None
+        else datetime.now(UTC) - timedelta(seconds=ended_ago_s),
     )
     await doc.insert()
     return doc
@@ -203,15 +208,46 @@ class TestTheStatusRead:
         got = await _status()
         assert got.generation == "waiting"
 
-    async def test_an_answered_ask_is_ready(self, beanie_test_db) -> None:
-        await _site(generation="generating", generation_session_id=SESSION)
+    async def test_an_answered_ask_before_the_next_run_exists_keeps_the_stored_value(
+        self, beanie_test_db
+    ) -> None:
+        """The plan-chip gap: the answer is persisted before ``create_run`` inserts
+        the next run. A read in that gap must not write a sticky ``ready``."""
+        await _site(generation="waiting", generation_session_id=SESSION)
         await _run("completed", assistant_message_id=await _reply(ask=True, answered=True))
 
-        assert (await _status()).generation == "ready"
+        assert (await _status()).generation == "waiting"
+        stored = await Site.find_one({"pocket_id": "pk1"})
+        assert stored is not None and stored.generation == "waiting"
+
+    async def test_an_answered_ask_then_a_new_run_reads_generating(self, beanie_test_db) -> None:
+        await _site(generation="waiting", generation_session_id=SESSION)
+        await _run(
+            "completed",
+            assistant_message_id=await _reply(ask=True, answered=True),
+            age_s=30,
+        )
+        await _run("queued", run_id="run-2")
+
+        assert (await _status()).generation == "generating"
 
     async def test_a_swept_run_never_leaves_it_stuck(self, beanie_test_db) -> None:
         await _site(generation="generating", generation_session_id=SESSION)
-        await _run("interrupted")
+        await _run("interrupted", ended_ago_s=site_generation.SUPERSEDE_GRACE_S + 5)
+
+        assert (await _status()).generation == "ready"
+
+    async def test_a_just_interrupted_run_is_not_yet_proof_the_build_is_over(
+        self, beanie_test_db
+    ) -> None:
+        await _site(generation="generating", generation_session_id=SESSION)
+        await _run("interrupted", ended_ago_s=1)
+
+        assert (await _status()).generation == "generating"
+
+    async def test_a_plain_stop_settles_after_the_grace_window(self, beanie_test_db) -> None:
+        await _site(generation="generating", generation_session_id=SESSION)
+        await _run("cancelled", ended_ago_s=site_generation.SUPERSEDE_GRACE_S + 5)
 
         assert (await _status()).generation == "ready"
 
@@ -237,6 +273,22 @@ class TestTheStatusRead:
 
         got = await _status()
         assert got.generation is None
+
+    async def test_a_site_published_mid_generation_settles_in_storage(self, beanie_test_db) -> None:
+        """The wire hides it either way, but the stored value must not stay stale,
+        or every later run in the session re-fetches the row."""
+        await _site(
+            generation="generating",
+            generation_session_id=SESSION,
+            deployed=True,
+            url="https://x.test",
+        )
+        await _run("completed", assistant_message_id=await _reply(ask=False))
+
+        await site_generation.settle_for_session(WS, SESSION)
+        stored = await Site.find_one({"pocket_id": "pk1"})
+        assert stored is not None and stored.generation == "ready"
+        assert (await _status()).generation is None
 
     async def test_a_site_without_the_field_reads_none(self, beanie_test_db) -> None:
         await _site()
@@ -299,6 +351,7 @@ class TestRunFinalizationSettlesIt:
         msg_id = await _reply(ask=True)
 
         await runs_service.mark_completed("run-1", assistant_message_id=msg_id, partial_text="hi")
+        await runs_service.wait_for_site_generation_settles()
 
         stored = await Site.find_one({"pocket_id": "pk1"})
         assert stored is not None and stored.generation == "waiting"
@@ -310,6 +363,7 @@ class TestRunFinalizationSettlesIt:
         await _run("running")
 
         await runs_service.mark_terminal("run-1", status="failed", error="x")
+        await runs_service.wait_for_site_generation_settles()
 
         stored = await Site.find_one({"pocket_id": "pk1"})
         assert stored is not None and stored.generation == "ready"
@@ -325,17 +379,55 @@ class TestRunFinalizationSettlesIt:
         monkeypatch.setattr(site_generation, "settle_for_session", _boom)
         await _run("running")
         await runs_service.mark_completed("run-1", assistant_message_id=None, partial_text="")
+        await runs_service.wait_for_site_generation_settles()
         doc = await ChatRunDoc.find_one({"run_id": "run-1"})
         assert doc is not None and doc.status == "completed"
 
 
-class TestTheSweeperSettlesIt:
-    async def test_a_swept_run_settles_the_site(self, beanie_test_db) -> None:
+class TestASupersededRunKeepsItLive:
+    """A follow-up mid-build cancels R1 before R2 exists. R1's ``cancelled`` must
+    not settle the flag, or the rest of the build reads ``ready``."""
+
+    async def test_cancel_then_follow_up_still_reads_generating(self, beanie_test_db) -> None:
+        from pocketpaw_ee.cloud.chat.runs import service as runs_service
+
+        await _site(generation="generating", generation_session_id=SESSION)
+        await _run("running", age_s=30)
+
+        await runs_service.mark_terminal("run-1", status="cancelled")
+        await runs_service.wait_for_site_generation_settles()
+        stored = await Site.find_one({"pocket_id": "pk1"})
+        assert stored is not None and stored.generation == "generating"
+
+        assert (await _status()).generation == "generating"  # the gap before R2
+        await _run("queued", run_id="run-2")
+        assert (await _status()).generation == "generating"
+
+    async def test_a_swept_run_waits_out_the_grace_then_settles(self, beanie_test_db) -> None:
         from pocketpaw_ee.cloud.chat.runs import sweeper
 
         await _site(generation="generating", generation_session_id=SESSION)
         await _run("running", age_s=3600)
 
         assert await sweeper.sweep_stale_runs(older_than_minutes=10) == 1
-        stored = await Site.find_one({"pocket_id": "pk1"})
-        assert stored is not None and stored.generation == "ready"
+        assert (await _status()).generation == "generating"
+
+        long_ago = datetime.now(UTC) - timedelta(seconds=site_generation.SUPERSEDE_GRACE_S + 5)
+        await ChatRunDoc.get_pymongo_collection().update_one(
+            {"run_id": "run-1"}, {"$set": {"ended_at": long_ago}}
+        )
+        assert (await _status()).generation == "ready"
+
+
+def test_the_run_lookup_sorts_on_the_index_keys() -> None:
+    """``$group``/``$first`` can use the scope index only when the sort matches it."""
+    from pocketpaw_ee.cloud.chat.runs import service as runs_service
+
+    pipeline = runs_service._latest_session_runs_pipeline(WS, [SESSION])
+    sort = next(stage["$sort"] for stage in pipeline if "$sort" in stage)
+    assert list(sort.items()) == [
+        ("workspace", 1),
+        ("context_type", 1),
+        ("scope_id", 1),
+        ("createdAt", -1),
+    ]

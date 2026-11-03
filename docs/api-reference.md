@@ -7897,7 +7897,10 @@ mid-build can show the build instead of the bare template. Only the agent create
 tools stamp it (`generating`, with the chat session the run lives in); edits,
 imports, remixes, upgrades and publish never do. `waiting` means that session's
 newest run ended on an unanswered `ask_user`; `ready` means it ended otherwise.
-Both reads re-check rows that are `generating` or `waiting` against the session's
+Two endings keep the current value instead of settling: a run cancelled or
+interrupted less than 60 s ago (a follow-up message cancels the run in flight
+before the next one exists), and a reply whose question was just answered (the
+next run is about to start). Both reads re-check rows that are `generating` or `waiting` against the session's
 runs and write the settled value back, so the flag cannot stick; a new run in the
 same session reads `generating` again. `null` means never tracked (behave as
 before), and a deployed site always reads `null` for both fields. Independent of
