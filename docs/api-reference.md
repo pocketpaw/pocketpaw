@@ -7885,6 +7885,28 @@ sandbox image carrying bun, node and Playwright 1.62.1's Chromium; without it th
 sandbox tries `playwright-core install chromium` and, if the browser still cannot
 launch, the browser layer is `unverified` / `browser_unavailable`.
 
+#### `GET /sites` and `GET /sites/by-pocket/{pocket_id}/status` — `generation`
+
+```json
+"generation": "generating | waiting | ready | null",
+"generation_session_id": "<chat session id> | null"
+```
+
+Whether the agent run that CREATED the site is still working on it, so a reload
+mid-build can show the build instead of the bare template. Only the agent create
+tools stamp it (`generating`, with the chat session the run lives in); edits,
+imports, remixes, upgrades and publish never do. `waiting` means that session's
+newest run ended on an unanswered `ask_user`; `ready` means it ended otherwise.
+Two endings keep the current value instead of settling: a run cancelled or
+interrupted less than 60 s ago (a follow-up message cancels the run in flight
+before the next one exists), and a reply whose question was just answered (the
+next run is about to start). Both reads re-check rows that are `generating` or `waiting` against the session's
+runs and write the settled value back, so the flag cannot stick; a new run in the
+same session reads `generating` again. `null` means never tracked (behave as
+before), and a deployed site always reads `null` for both fields. Independent of
+`status`, `is_live` and the `build_*` fields; publish, previews and billing never
+read it.
+
 ### Build state on the `publish` response
 
 `publish` returns `{ok, message, site: {...}}`. The `site` object carries the five

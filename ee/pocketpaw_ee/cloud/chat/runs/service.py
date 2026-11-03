@@ -27,6 +27,12 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
   failed / cancelled / interrupted run's partial text (runs with an
   ``assistant_message_id`` are skipped, their text is already a Message), and
   ``(usage, createdAt)`` pairs for the concierge spend cap.
+- A ``completed`` or ``failed`` ``session`` run settles the ``generation`` flag
+  of a site it was creating (``sites.generation.settle_for_session``) in a
+  tracked background task, best-effort. ``cancelled`` / ``interrupted`` do not:
+  a follow-up cancels the run in flight before its successor exists, so the
+  sites read path settles those after a grace window. ``latest_session_runs``
+  (``SessionRunState`` per session) is the batched read that path uses.
 - ``record_card_audit`` stores one chat card's browser audit counts on a
   concierge run, matched on the visitor, workspace and pocket so a caller can only
   write to its own runs.
@@ -35,6 +41,7 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 from collections.abc import Iterable
@@ -46,7 +53,12 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.errors import NotFound
-from pocketpaw_ee.cloud.chat.runs.domain import RunActivityRow, RunSpec, StrandedReply
+from pocketpaw_ee.cloud.chat.runs.domain import (
+    RunActivityRow,
+    RunSpec,
+    SessionRunState,
+    StrandedReply,
+)
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
 logger = logging.getLogger(__name__)
@@ -168,6 +180,50 @@ def _trigger_spend_ingest(doc: ChatRunDoc) -> None:
         logger.debug("run spend-ingest trigger failed for %s", doc.run_id, exc_info=True)
 
 
+# Settles in flight, held so the loop does not garbage-collect them mid-write.
+_SITE_GENERATION_SETTLES: set[asyncio.Task[None]] = set()
+
+# A cancelled or interrupted run is not proof a site build is over: a follow-up
+# message cancels the run in flight BEFORE its successor exists. Those are left to
+# the sites read path, which waits out a grace window first.
+_NO_SETTLE_STATUSES = ("cancelled", "interrupted")
+
+
+async def _settle_site_generation(workspace: str, session_id: str, run_id: str) -> None:
+    try:
+        from pocketpaw_ee.sites import generation as site_generation
+
+        await site_generation.settle_for_session(workspace, session_id)
+    except Exception:  # noqa: BLE001 — the read path self-heals; never fail the run
+        logger.warning("site generation settle failed for run %s", run_id, exc_info=True)
+
+
+def schedule_site_generation_settle(doc: ChatRunDoc) -> None:
+    """Settle the ``generation`` flag of any site this session's run was creating.
+
+    Fired after a ``completed`` or ``failed`` transition of a ``session`` run as a
+    tracked background task, so finalization never waits on a Mongo round trip and
+    a sites failure can never fail it. One indexed Site read when the session
+    created no site (the common case); the read path self-heals the flag anyway.
+    """
+    if doc.context_type != "session" or not doc.scope_id or doc.status in _NO_SETTLE_STATUSES:
+        return
+    try:
+        task = asyncio.get_running_loop().create_task(
+            _settle_site_generation(doc.workspace, doc.scope_id, doc.run_id)
+        )
+    except RuntimeError:  # no running loop: nothing to schedule on
+        return
+    _SITE_GENERATION_SETTLES.add(task)
+    task.add_done_callback(_SITE_GENERATION_SETTLES.discard)
+
+
+async def wait_for_site_generation_settles() -> None:
+    """Await every settle in flight (tests, and a graceful shutdown)."""
+    while _SITE_GENERATION_SETTLES:
+        await asyncio.gather(*list(_SITE_GENERATION_SETTLES), return_exceptions=True)
+
+
 async def mark_running(run_id: str) -> bool:
     """Atomically move a run from ``queued`` to ``running``. True when it moved.
 
@@ -257,6 +313,7 @@ async def mark_completed(
     doc.ended_at = _utcnow()
     await doc.save()
     _trigger_spend_ingest(doc)
+    schedule_site_generation_settle(doc)
 
 
 async def mark_terminal(
@@ -284,6 +341,7 @@ async def mark_terminal(
     # priced them. Billing only completed runs would serve every interrupted one
     # free — which is why the metering sweeper bills all four terminal states too.
     _trigger_spend_ingest(doc)
+    schedule_site_generation_settle(doc)
 
 
 # A concierge stream's card ids ("c1", "c2", ...). Also a Mongo field-path guard.
@@ -395,6 +453,65 @@ async def find_active_run_for_scope(
         .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .first_or_none()
     )
+
+
+def _latest_session_runs_pipeline(workspace_id: str, ids: list[str]) -> list[dict[str, Any]]:
+    # The sort spells out the ``(workspace, context_type, scope_id, createdAt)``
+    # index exactly, so ``$group`` / ``$first`` can walk it instead of fetching
+    # and sorting every run of every session.
+    return [
+        {
+            "$match": {
+                "workspace": workspace_id,
+                "context_type": "session",
+                "scope_id": {"$in": ids},
+            }
+        },
+        {"$sort": {"workspace": 1, "context_type": 1, "scope_id": 1, "createdAt": -1}},
+        {
+            "$group": {
+                "_id": "$scope_id",
+                "run_id": {"$first": "$run_id"},
+                "status": {"$first": "$status"},
+                "assistant_message_id": {"$first": "$assistant_message_id"},
+                "ended_at": {"$first": "$ended_at"},
+            }
+        },
+    ]
+
+
+async def latest_session_runs(
+    workspace_id: str, session_ids: Iterable[str]
+) -> dict[str, SessionRunState]:
+    """``{session_id: SessionRunState}`` of each session's NEWEST run.
+
+    For the sites ``generation`` flag: one aggregation for a whole batch of
+    sessions, served by the ``(workspace, context_type, scope_id, createdAt)``
+    index and reduced to a few short fields (never the answer text). A session
+    with no run is absent.
+    """
+    ids = sorted({sid for sid in session_ids if sid})
+    if not ids:
+        return {}
+    # A coroutine under the prod pymongo-async client, a plain cursor under
+    # mongomock-motor; await only when awaitable (same idiom as credits.service).
+    cursor = ChatRunDoc.get_pymongo_collection().aggregate(
+        _latest_session_runs_pipeline(workspace_id, ids)
+    )
+    if inspect.isawaitable(cursor):
+        cursor = await cursor
+    out: dict[str, SessionRunState] = {}
+    async for row in cursor:
+        ended_at = row.get("ended_at")
+        if isinstance(ended_at, datetime) and ended_at.tzinfo is None:
+            ended_at = ended_at.replace(tzinfo=UTC)  # Mongo reads back naive UTC
+        out[str(row["_id"])] = SessionRunState(
+            run_id=str(row.get("run_id") or ""),
+            status=str(row.get("status") or ""),
+            assistant_message_id=row.get("assistant_message_id"),
+            ended_at=ended_at if isinstance(ended_at, datetime) else None,
+        )
+    return out
 
 
 async def wait_until_terminal(run_id: str, *, timeout: float, interval: float = 0.1) -> bool:

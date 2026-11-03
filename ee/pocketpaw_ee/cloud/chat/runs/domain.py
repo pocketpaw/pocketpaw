@@ -7,8 +7,8 @@ resolved (``surface``/``surface_meta``, ``model_override``, ``tools_enabled``,
 ``flow_context``, ``persist_user_text``) ride on it: a field left off is silently
 dropped at the submit boundary.
 
-``RunActivityRow`` and ``StrandedReply`` are Beanie-free read projections, so
-consumers outside this entity never import ``ChatRunDoc`` (EE Rule 2).
+``RunActivityRow``, ``StrandedReply`` and ``SessionRunState`` are Beanie-free read
+projections, so consumers outside this entity never import ``ChatRunDoc`` (EE Rule 2).
 
 The timing resolvers live here rather than in ``worker.py`` so the web process
 (the SSE reader, the sweeper, the arq executor) can read them without importing
@@ -216,3 +216,15 @@ class StrandedReply(BaseModel):
     status: str
     text: str
     created_at: datetime
+
+
+class SessionRunState(BaseModel):
+    """A chat session's NEWEST run, reduced to what the sites ``generation`` flag
+    needs: is it still going, how did it end, and which reply did it leave."""
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    status: str
+    assistant_message_id: str | None = None
+    ended_at: datetime | None = None

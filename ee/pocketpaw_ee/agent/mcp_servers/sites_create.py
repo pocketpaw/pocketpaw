@@ -25,8 +25,10 @@
 #     publish path and the REST router use) before it writes; the refusal says what
 #     the call did not do (create / edit / read) in plain words a user can read;
 #   * creates persist a DRAFT and mint a draft Site doc (``_mint_draft_site``); they
-#     never publish. Edits stage a draft too, and report ``verification`` per the
-#     verify contract (static check now, build and browser verdict on the next call);
+#     never publish. That mint is the only place a site is stamped
+#     ``generation="generating"`` (with the run's chat session). Edits stage a
+#     draft too, and report ``verification`` per the verify contract (static check
+#     now, build and browser verdict on the next call);
 #   * ``_INTEGRATION_NEXT_STEPS`` has one wiring line per registered provider, in
 #     client (paw.js / ``Paw.call``) and server (``pawCall`` with
 #     ``env.PAW_GATEWAY_TOKEN``) form where both exist. A provider added to the
@@ -774,12 +776,29 @@ async def _mint_draft_site(workspace_id: str, user_id: str, pocket_id: str, name
     (one doc per pocket). Best-effort: the pocket already exists in Mongo (the primary
     contract), so a mint failure logs and returns rather than undoing a successful
     create — the site is simply not yet listable (the prior behaviour), never a hard
-    error. The plan gate already ran before ``agent_create``, so this adds no gate."""
+    error. The plan gate already ran before ``agent_create``, so this adds no gate.
+
+    Only the create tools call this, so it is the one place that marks a site as
+    being generated: the chat session of the current run rides along and the fresh
+    draft starts as ``generation="generating"`` (``sites.generation``), which lets a
+    reload mid-build show the build. No session (or a failure reading it) just
+    leaves the flag unset; it never fails the create."""
+    generation_session_id: str | None = None
+    try:
+        from pocketpaw_ee.cloud.chat import agent_service
+
+        generation_session_id = agent_service.current_session_mongo_id() or None
+    except Exception:  # noqa: BLE001 — the generation flag is best-effort
+        logger.debug("create-site: no chat session for the generation flag", exc_info=True)
     try:
         from pocketpaw_ee.sites.service import create_draft_site
 
         await create_draft_site(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, name=name
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            name=name,
+            generation_session_id=generation_session_id,
         )
     except Exception:  # noqa: BLE001 — draft-doc mint is best-effort, never fails a create
         logger.warning(

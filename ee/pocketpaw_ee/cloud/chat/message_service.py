@@ -19,6 +19,7 @@ Invariants a reader must not break:
 - ``ask_user`` holds the question an agent reply asked through the ``ask_user``
   tool; ``persist_user_message_for_scope`` marks it answered on the user's next
   message in that scope. The ``askUser`` wire key appears only when set.
+  ``ask_states_for_messages`` is the batched read of which replies asked, and answered.
 - Per-member fan-out on send is batched or bounded: notifications (message and
   mention kinds) go through ``notifications_service.create_many`` (one
   ``insert_many``, external webhook delivery in a background task), and the
@@ -1468,6 +1469,31 @@ async def _answer_pending_ask(kind: str, scope_id: str, session_key: str, conten
         )
     except Exception:
         logger.warning("marking the pending ask answered failed for %s", scope_id, exc_info=True)
+
+
+async def ask_states_for_messages(message_ids: list[str]) -> dict[str, bool]:
+    """``{message_id: answered}`` for each of ``message_ids`` that carries an ``ask_user``.
+
+    One ``_id $in`` read projected to the answered flag, for the sites
+    ``generation`` flag: absent = the reply asked nothing, False = the question is
+    still open, True = the user answered (their next run may not exist yet). Ids
+    that are not valid ObjectIds are skipped.
+    """
+    oids: list[PydanticObjectId] = []
+    for mid in message_ids:
+        try:
+            oids.append(PydanticObjectId(mid))
+        except Exception:  # noqa: BLE001 — a malformed id simply has no ask
+            continue
+    if not oids:
+        return {}
+    cursor = _MessageDoc.get_pymongo_collection().find(
+        {"_id": {"$in": oids}, "ask_user": {"$ne": None}},
+        {"_id": 1, "ask_user.answered": 1},
+    )
+    return {
+        str(row["_id"]): bool((row.get("ask_user") or {}).get("answered")) async for row in cursor
+    }
 
 
 async def persist_assistant_message_for_scope(

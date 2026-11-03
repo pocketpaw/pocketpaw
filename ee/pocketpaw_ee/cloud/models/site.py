@@ -22,6 +22,10 @@
 # (runtime, guided fields, FAQs, sources, doc code, transcript retention, lead
 # capture); owner text is only ever rendered as quoted data, never into the frame.
 #
+# Generation: ``generation`` / ``generation_session_id`` say whether the agent run
+# that created the site is still working on it. Independent of ``deployed`` and the
+# build lane, and never read by publish, serving, previews or billing.
+#
 # Billing: ``plan_tier`` / ``subscription_*`` / ``billing_rail`` /
 # ``period_paid_usd`` are what the owner pays US; ``client_*`` are what the owner's
 # own client owes THEM (an address and receipt book nothing bills from). A paid site
@@ -396,6 +400,16 @@ class Site(TimestampedDocument):
     # into a config. The stderr tail stays in logs. Same reasoning as
     # ``jobs/worker.py``'s ``_safe_failure_message``.
     build_reason: str | None = None
+    # Is the agent still GENERATING this site in the chat run that created it?
+    # ``generating`` | ``waiting`` (the run ended on an unanswered ``ask_user``) |
+    # ``ready``; None = never tracked (every site not made by an agent create tool).
+    # Separate from ``status`` / ``deployed`` / ``build_*`` on purpose: nothing in
+    # publish, serving, previews, billing or the build lane reads it. Stamped only
+    # by the create tools' shared mint (``create_draft_site``), settled by run
+    # finalization and self-healed on read (``sites.generation``).
+    # ``generation_session_id`` is the chat session the creating run lives in.
+    generation: Literal["generating", "waiting", "ready"] | None = None
+    generation_session_id: str | None = None
     # BC-9: per-site annual plan (the Webflow model — each published site has its
     # OWN recurring annual plan on a tier, distinct from the workspace plan).
     # ``plan_tier`` is the site-plan catalog key — one of the SITE-SCOPED rungs
@@ -955,5 +969,12 @@ class Site(TimestampedDocument):
                 [("slug_pending", 1)],
                 unique=True,
                 partialFilterExpression={"slug_pending": {"$type": "string"}},
+            ),
+            # Run finalization settles a session's generating sites by
+            # ``generation_session_id``. PARTIAL, so the index holds only the
+            # agent-created rows, never the null majority.
+            IndexModel(
+                [("generation_session_id", 1)],
+                partialFilterExpression={"generation_session_id": {"$type": "string"}},
             ),
         ]
