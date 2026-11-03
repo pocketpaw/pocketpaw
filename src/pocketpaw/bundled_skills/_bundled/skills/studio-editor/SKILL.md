@@ -133,10 +133,30 @@ property moves between them.
 is refused rather than snapped to an edge, because a keyframe pinned
 somewhere nobody asked for is worse than none.
 
-Animatable: `x`, `y`, `scale`, `rotation`, `opacity`, `volume`, and `fx` (the
-overall strength of a clip's light effects, 0 to 1). Font size,
-colour and the preset are not — say so rather than reaching for a keyframe
-that would silently do nothing.
+Animatable: `x`, `y`, `scale`, `rotation`, `opacity`, `volume`, `fx` (the
+overall strength of a clip's effects, 0 to 1), and `fx.<effect>` for any
+single `set_effects` scalar within its own range (`fx.glitch` 0 to 1,
+`fx.swirl` -1 to 1). Font size, colour and the preset are not — say so rather
+than reaching for a keyframe that would silently do nothing.
+
+`ease` is `linear`, `easeIn`, `easeOut`, `easeInOut`, `hold`, or one that
+overshoots and settles: `back`, `elastic`, `bounce`.
+
+## Looks, lanes and shake
+
+`set_effects` styles one clip; `set_track_effects` takes the same fields plus a
+`track` (lane id or name) and styles every video and image clip on that lane,
+under each clip's own effects. "Make the whole video look like super 8" is one
+`set_track_effects`, not a `set_effects` per clip.
+
+```json
+[{"op":"set_track_effects","track":"Video","preset":"super-8"},
+ {"op":"add_keyframe","clipId":"…a1","prop":"fx.glitch","atMs":4000,"value":0},
+ {"op":"add_keyframe","clipId":"…a1","prop":"fx.glitch","atMs":4200,"value":0.8,"ease":"easeOut"}]
+```
+
+`set_shake {clipId, intensity?, speed?, rotation?, off?}` adds handheld camera
+shake. It stacks on top of a zoom and any keyframes instead of replacing them.
 
 ## Zooming in on something
 
