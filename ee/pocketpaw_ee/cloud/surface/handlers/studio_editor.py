@@ -321,6 +321,7 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
                     kind=c.get("kind"),
                     chroma=c.get("chroma"),
                     effects=c.get("effects"),
+                    shake=c.get("shake"),
                 ),
             )
         )
@@ -371,7 +372,12 @@ Operations (this list is closed — an invented verb is rejected):
                  hsl, mono, sepia, colorMap, posterize, threshold, glow, halation,
                  spotlight, rays, sweep, leak, sharpen, vignette, aberration,
                  rgbShift, grain, grainSize, grainColor, flicker, scanlines,
-                 curvature, pixelate}
+                 curvature, pixelate, glitch, vhs, jpeg, dither, halftone,
+                 halftoneSize, riso, hatch, sketch, ascii, asciiSize, paper,
+                 ripple, swirl, bulge, heat, reeded, zoomBlur, spinBlur,
+                 motionBlur, motionAngle, tiltShift, tiltFocus, streaks,
+                 starburst}
+- set_shake     {clipId, intensity?, speed?, rotation?, off?}   handheld camera shake
 - set_project   {name?, aspectRatio?, fps?, fit?, background?}
 
 Style fields (add_text and style_text both take these):
@@ -489,7 +495,12 @@ Rules that matter:
   them all. "Black and white" is mono, "duotone" / "gradient map" is colorMap
   (darkest colour first), "crush the blacks" is levels or shadows, "make the
   greens pop" is hsl on that band, "retro TV" is scanlines + curvature,
-  "8-bit" is pixelate + posterize. To ramp the strength, add_keyframe prop fx
+  "8-bit" is pixelate + posterize, "VHS" is vhs, "glitch" is glitch, "comic /
+  newspaper print" is halftone, "pencil sketch" is sketch, "risograph" is riso,
+  "matrix / terminal" is ascii, "dreamy blur" is zoomBlur or tiltShift, "lens
+  flare streaks" is streaks. swirl and bulge are signed (negative bulge
+  pinches). "Shaky cam" / "handheld" is set_shake, which stacks on top of a
+  zoom. To ramp the strength, add_keyframe prop fx
   (0-1). These change brightness and colour on the frame; they cannot move the real light on a
   subject, so say so if that is what they want.
 - A MARKED AREA IS A BOX THE USER DREW ON THE FRAME at that time: "At 00:08,
