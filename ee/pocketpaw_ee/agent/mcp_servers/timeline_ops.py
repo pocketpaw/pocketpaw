@@ -12,9 +12,12 @@
 # is "#rrggbb" or "auto" and the tuning knobs are 0-1 fractions; defaults and the
 # per-pixel work live in the browser.
 #
-# `set_effects` grades and lights a video or image clip (presets, scalar knobs,
-# and spotlight / rays / sweep / leak groups, where null removes one). Ranges are
-# checked here; the browser renders it in WebGL. `fx` keyframes its strength.
+# `set_effects` grades, lights and stylises a video or image clip: presets,
+# scalar knobs (_FX_SCALARS, mirroring FX_SCALARS in schema.ts), numeric groups
+# (spotlight / rays / sweep / leak / levels), a colour map of 2-4 hex stops,
+# tone curves per channel, and per-hue-band HSL shifts; null removes any one.
+# Ranges are checked here; the browser renders it in WebGL. `fx` keyframes its
+# overall strength.
 #
 # 2026-09-11 (feat/agent-lane-ops): `add_lane`, and `track` resolving by lane
 # NAME as well as id. The name path is load-bearing — track ids are minted when
@@ -99,18 +102,38 @@ _FX_SCALARS: dict[str, tuple[float, float]] = {
     "temperature": _SIGNED,
     "tint": _SIGNED,
     "saturation": _SIGNED,
+    "highlights": _SIGNED,
+    "shadows": _SIGNED,
     "glow": _UNIT,
+    "halation": _UNIT,
     "vignette": _UNIT,
     "grain": _UNIT,
+    "grainSize": _UNIT,
+    "grainColor": _UNIT,
     "aberration": _UNIT,
+    "rgbShift": _UNIT,
     "flicker": _UNIT,
+    "sharpen": _UNIT,
+    "mono": _UNIT,
+    "sepia": _UNIT,
+    "posterize": _UNIT,
+    "threshold": _UNIT,
+    "pixelate": _UNIT,
+    "scanlines": _UNIT,
+    "curvature": _UNIT,
 }
 _FX_GROUPS: dict[str, dict[str, tuple[float, float]]] = {
     "spotlight": {"x": _UNIT, "y": _UNIT, "radius": _UNIT, "intensity": _UNIT},
     "rays": {"x": _UNIT, "y": _UNIT, "intensity": _UNIT, "length": _UNIT},
     "sweep": {"angle": (-180.0, 180.0), "width": _UNIT, "intensity": _UNIT},
     "leak": {"intensity": _UNIT, "hue": (0.0, 360.0)},
+    "levels": {"black": _UNIT, "white": _UNIT, "gamma": (0.1, 10.0)},
 }
+_HUE_BANDS: frozenset[str] = frozenset(
+    {"red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta"}
+)
+_CURVE_CHANNELS: frozenset[str] = frozenset({"master", "r", "g", "b"})
+_MAX_CURVE_POINTS = 16
 
 # Ops that bring an asset onto the timeline.
 _ASSET_OPS: frozenset[str] = frozenset({"place_clip", "place_audio"})
@@ -336,6 +359,63 @@ def _check_range(value: Any, lo: float, hi: float, field: str) -> str | None:
         return f"{field} must be a number."
     if not lo <= value <= hi:
         return f"{field} must be between {lo:g} and {hi:g}."
+    return None
+
+
+def _check_fx_extras(raw: dict[str, Any], i: int) -> str | None:
+    """set_effects' non-numeric groups: colorMap, curves, hsl."""
+    color_map = raw.get("colorMap")
+    if color_map is not None:
+        if not isinstance(color_map, dict) or set(color_map) - {"colors", "intensity"}:
+            return f"ops[{i}].colorMap must be null or an object with colors, intensity."
+        colors = color_map.get("colors")
+        if colors is not None and (
+            not isinstance(colors, list)
+            or not 2 <= len(colors) <= 4
+            or not all(isinstance(c, str) and _HEX_COLOR.fullmatch(c) for c in colors)
+        ):
+            return f'ops[{i}].colorMap.colors must be 2 to 4 "#rrggbb" colours, darkest first.'
+        err = _check_range(color_map.get("intensity"), 0.0, 1.0, f"ops[{i}].colorMap.intensity")
+        if err:
+            return err
+
+    curves = raw.get("curves")
+    if curves is not None:
+        if not isinstance(curves, dict) or set(curves) - _CURVE_CHANNELS:
+            return (
+                f"ops[{i}].curves must be null or an object keyed by "
+                f"{', '.join(sorted(_CURVE_CHANNELS))}."
+            )
+        for channel, points in curves.items():
+            if (
+                not isinstance(points, list)
+                or not 2 <= len(points) <= _MAX_CURVE_POINTS
+                or not all(
+                    isinstance(p, list)
+                    and len(p) == 2
+                    and all(type(v) in (int, float) and 0 <= v <= 1 for v in p)
+                    for p in points
+                )
+            ):
+                return (
+                    f"ops[{i}].curves.{channel} must be 2 to {_MAX_CURVE_POINTS} "
+                    "[x, y] points with both values between 0 and 1."
+                )
+
+    hsl = raw.get("hsl")
+    if hsl is not None:
+        if not isinstance(hsl, dict) or set(hsl) - _HUE_BANDS:
+            return (
+                f"ops[{i}].hsl must be null or an object keyed by hue band "
+                f"({', '.join(sorted(_HUE_BANDS))})."
+            )
+        for band, shift in hsl.items():
+            if not isinstance(shift, dict) or set(shift) - {"hue", "saturation", "lightness"}:
+                return f"ops[{i}].hsl.{band} must be an object with hue, saturation, lightness."
+            for key, value in shift.items():
+                err = _check_range(value, -1.0, 1.0, f"ops[{i}].hsl.{band}.{key}")
+                if err:
+                    return err
     return None
 
 
@@ -735,6 +815,9 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
                 err = _check_range(value.get(key), lo, hi, f"ops[{i}].{group}.{key}")
                 if err:
                     return err
+        err = _check_fx_extras(raw, i)
+        if err:
+            return err
         if raw.get("off") is not None and not isinstance(raw["off"], bool):
             return f"ops[{i}].off must be true or false."
 
