@@ -17,8 +17,10 @@
 # built in a sibling staging dir and renamed into place, and reference-counted:
 # ``materialize_run_skills`` takes a reference, ``cleanup_run_skills`` drops
 # one, and the dir is removed only when the last reference goes. A warm Claude
-# CLI is bound to the path it connected with, so a holder (the SDK backend's
-# per-digest cache) keeps its reference for as long as such a client may live.
+# CLI is bound to the path it connected with, so every in-flight run holds a
+# reference and the SDK backend's warm-client cache holds one more
+# (``retain_run_skills``). The first use in a process sweeps stores left by
+# dead processes and stale staging dirs.
 #
 # Name resolution: an installed skill (``SkillLoader.SKILL_PATHS``) wins; the
 # packaged ``_bundled/skills/`` dir is a last-resort fallback so a surface can
@@ -63,6 +65,11 @@ _RUN_ID_MAX_LEN = 48
 # a dir to zero can never race an acquire that is about to reuse it.
 _REFS: dict[Path, int] = {}
 _REFS_LOCK = threading.Lock()
+
+# Store dirs are ``paw-run-skills-p<pid>``; anything else is not ours to sweep.
+_STORE_RE = re.compile(r"^paw-run-skills-p(\d+)$")
+# Set once the first-use sweep of stale stores has run in this process.
+_SWEPT = False
 
 _UNSAFE_FS_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _DASH_RUN_RE = re.compile(r"-{2,}")
@@ -214,9 +221,10 @@ def materialize_run_skills(
         logger.info("materialize_run_skills: no requested skill matched an installed skill")
         return None
 
-    store = _store_root()
-    root = store / f"{_TMP_PREFIX}{_fingerprint(matched)}"
+    fingerprint = _fingerprint(matched)
     with _REFS_LOCK:
+        store = _store_root()
+        root = store / f"{_TMP_PREFIX}{fingerprint}"
         if not _is_plugin_dir(root):
             if root.exists():
                 # Half-built or partly reaped by a tmp cleaner: rebuild it. Any
@@ -244,9 +252,47 @@ def materialize_run_skills(
     return root
 
 
+def retain_run_skills(root: Path) -> None:
+    """Take one more reference to a dir ``materialize_run_skills`` returned, for
+    a holder that outlives the caller's own reference (the SDK backend's warm
+    client cache). Release it with :func:`cleanup_run_skills`."""
+    with _REFS_LOCK:
+        root = Path(root)
+        _REFS[root] = _REFS.get(root, 0) + 1
+
+
 def _store_root() -> Path:
-    """Per-process parent of every materialized plugin dir."""
-    return Path(tempfile.gettempdir()) / f"{_TMP_PREFIX}p{os.getpid()}"
+    """Per-process parent of every materialized plugin dir. Call under
+    ``_REFS_LOCK``: the first call sweeps stale stores."""
+    global _SWEPT
+    store = Path(tempfile.gettempdir()) / f"{_TMP_PREFIX}p{os.getpid()}"
+    if not _SWEPT:
+        _SWEPT = True
+        _sweep_stale_stores(store)
+    return store
+
+
+def _sweep_stale_stores(store: Path) -> None:
+    """Best effort: remove stores of processes that no longer exist, and staging
+    dirs a crashed build left in this process's own store. A store whose pid is
+    alive (or cannot be checked) is left alone."""
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - psutil is a core dependency
+        psutil = None
+    try:
+        if psutil is not None:
+            for d in store.parent.iterdir():
+                m = _STORE_RE.match(d.name)
+                if not m or d == store or not d.is_dir():
+                    continue
+                if not psutil.pid_exists(int(m.group(1))):
+                    shutil.rmtree(d, ignore_errors=True)
+        if store.is_dir():
+            for staged in store.glob(".staging-*"):
+                shutil.rmtree(staged, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001 - a sweep must never fail a run
+        logger.debug("materialize_run_skills: stale store sweep failed: %s", exc)
 
 
 def _fingerprint(matched: list[tuple[str, Path]]) -> str:
@@ -350,4 +396,9 @@ def cleanup_run_skills(root: Path | None) -> None:
         logger.debug("cleanup_run_skills: failed to remove %s: %s", root, exc)
 
 
-__all__ = ["cleanup_run_skills", "fs_safe_component", "materialize_run_skills"]
+__all__ = [
+    "cleanup_run_skills",
+    "fs_safe_component",
+    "materialize_run_skills",
+    "retain_run_skills",
+]

@@ -309,3 +309,42 @@ def test_fs_safe_component_caps_with_stable_hash():
     assert out_a == fs_safe_component(long_a, max_len=48)  # stable
     assert out_a != fs_safe_component(long_b, max_len=48)  # distinguishable
     assert fs_safe_component("short", max_len=48) == "short"
+
+
+def test_first_use_sweeps_dead_process_stores_and_own_staging(
+    installed_skills, tmp_path, monkeypatch
+):
+    """Stores left by dead processes and stale staging dirs in our own store are
+    removed at first use; a live process's store is left alone."""
+    import os
+
+    import psutil
+
+    from pocketpaw.skills import materialize as materialize_mod
+
+    tmp_root = tmp_path / "tmp"
+    tmp_root.mkdir()
+    monkeypatch.setattr(materialize_mod.tempfile, "gettempdir", lambda: str(tmp_root))
+    monkeypatch.setattr(materialize_mod, "_SWEPT", False, raising=False)
+
+    dead_pid = 999_999
+    while psutil.pid_exists(dead_pid):
+        dead_pid += 4
+    dead = tmp_root / f"paw-run-skills-p{dead_pid}"
+    (dead / "paw-run-skills-abc").mkdir(parents=True)
+    live = tmp_root / f"paw-run-skills-p{os.getppid()}"
+    live.mkdir()
+    unrelated = tmp_root / "paw-run-skills-legacy-name"
+    unrelated.mkdir()
+    own_staging = tmp_root / f"paw-run-skills-p{os.getpid()}" / ".staging-old"
+    own_staging.mkdir(parents=True)
+
+    root = materialize_run_skills(["github"])
+    try:
+        assert root is not None and root.is_dir()
+        assert not dead.exists(), "a dead process's store must be swept"
+        assert live.exists(), "a live process's store must be left alone"
+        assert unrelated.exists(), "names that are not a pid store must be left alone"
+        assert not own_staging.exists(), "stale staging dirs in our store must be swept"
+    finally:
+        cleanup_run_skills(root)

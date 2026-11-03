@@ -3,10 +3,10 @@
 # that lets a skill/tool-bearing run REUSE the warm persistent CLI subprocess
 # instead of re-spawning a fresh stateless query every turn (~6s/turn floor).
 #
-# Five groups:
+# Six groups:
 #   1. KEY-LEVEL (pure)   — ``_plugin_digest`` / ``_client_cache_key`` fold in
-#      the skill IDENTITY (sorted names + bundled flag), never the materialized
-#      PATH (which is a fresh ``mkdtemp`` per run and would defeat reuse).
+#      the skill IDENTITY (sorted names + bundled flag + content fingerprint),
+#      never a per-run path, so unchanged skills keep the key stable.
 #   2. BEHAVIORAL         — the latency invariant: two identical-skill turns on
 #      one session ``connect()`` the subprocess ONCE (re-spawn → count==2 today,
 #      reuse → count==1 after the fix).
@@ -17,6 +17,9 @@
 #   5. LIVE PATH          — with the real materializer: no query ever reaches a
 #      client whose connected plugin dir is gone (same-digest rebuild, prewarm
 #      eviction, prewarm losing the lease, stateless sibling, reaped dir).
+#   6. OWNERSHIP          — an in-flight run keeps its dir through a concurrent
+#      cleanup(), an edited skill rebuilds the warm client, prewarm leaks no
+#      reference, and a leased client with no plugin dir is never driven.
 
 from __future__ import annotations
 
@@ -326,43 +329,30 @@ async def test_skill_then_non_skill_turn_rebuilds_without_plugin(tmp_path):
 # ===========================================================================
 
 
-async def test_warm_client_dir_survives_finally_and_cleaned_on_cleanup(tmp_path):
+async def test_warm_client_dir_survives_finally_and_cleaned_on_cleanup(real_skills):
     """Two same-skill turns reuse the client; the materialized dir the live
     subprocess references must still EXIST after turn 1's per-run finally (the
     subprocess holds that path from its first connect), and must be removed on
-    ``backend.cleanup()``."""
+    ``backend.cleanup()``. Uses the real reference-counted materializer: a fake
+    cleanup that rmtrees on every call would ignore the other holders."""
     counter = [0]
     sdk = _make_sdk(counter)
 
-    stable = tmp_path / "skills_plugin"
+    await _drive(sdk, "turn one", skill_names=_SKILLS)
+    (stable,) = (Path(p["path"]) for p in sdk._client.options.plugins)
+    # Turn 1's finally has run. The warm client is still live and references
+    # ``stable`` — the per-run release must NOT have removed it.
+    assert stable.exists(), (
+        "the per-run finally removed the materialized dir that the live warm "
+        "subprocess still references — turn 2 would point at a deleted path"
+    )
 
-    def _materialize(skill_names, run_id=None):
-        # Re-create the stable dir on disk if a prior cleanup removed it; return
-        # the SAME path every call (what an identity-keyed reuse depends on).
-        stable.mkdir(exist_ok=True)
-        return stable
+    await _drive(sdk, "turn two", skill_names=_SKILLS)
+    assert counter[0] == 1, "turn two must reuse the warm client (connect_count == 1)"
+    assert stable.exists(), "the reused dir must still exist after turn two"
 
-    import shutil
-
-    def _cleanup(root):
-        if root is not None:
-            shutil.rmtree(root, ignore_errors=True)
-
-    with patch(_MATERIALIZE, side_effect=_materialize), patch(_CLEANUP, side_effect=_cleanup):
-        await _drive(sdk, "turn one", skill_names=frozenset({"skillA"}))
-        # Turn 1's finally has run. The warm client is still live and references
-        # ``stable`` — it must NOT have been rmtree'd by the per-run cleanup.
-        assert stable.exists(), (
-            "the per-run finally removed the materialized dir that the live warm "
-            "subprocess still references — turn 2 would point at a deleted path"
-        )
-
-        await _drive(sdk, "turn two", skill_names=frozenset({"skillA"}))
-        assert counter[0] == 1, "turn two must reuse the warm client (connect_count == 1)"
-        assert stable.exists(), "the reused dir must still exist after turn two"
-
-        # cleanup() tears down the warm client AND sweeps its materialized dir.
-        await sdk.cleanup()
+    # cleanup() tears down the warm client AND releases its materialized dir.
+    await sdk.cleanup()
 
     assert sdk._client is None
     assert not stable.exists(), (
@@ -631,3 +621,142 @@ async def test_cleanup_releases_materialized_dir(real_skills):
     assert paths and all(p.exists() for p in paths)
     await sdk.cleanup()
     assert not any(p.exists() for p in paths), "cleanup() must release the skills dir"
+
+
+# ===========================================================================
+# 6. OWNERSHIP — every in-flight run holds its own reference, skill edits
+#    rebuild the warm client, and no reference leaks.
+# ===========================================================================
+
+
+class _HookedClient(_PathCheckingClient):
+    """Runs ``before_query`` (if set on the class instance) before checking the
+    plugin paths, to act out something another session does mid-turn."""
+
+    before_query = None
+
+    async def query(self, prompt, session_id="default"):
+        hook = type(self).before_query
+        if hook is not None:
+            await hook(self, prompt)
+        await super().query(prompt, session_id)
+
+
+def _make_hooked_sdk(counter, log, clients):
+    sdk = _make_sdk(counter)
+
+    def _factory(**kwargs):
+        c = _HookedClient(counter, log, **kwargs)
+        clients.append(c)
+        return c
+
+    sdk._ClaudeSDKClient = _factory
+    return sdk
+
+
+async def test_cleanup_mid_turn_keeps_in_flight_leased_runs_dir(real_skills, monkeypatch):
+    """``stop()`` for another session reaches ``cleanup()``, which releases the
+    cache's references. A run streaming on a supervisor-leased client holds its
+    own reference, so its dir must still exist when its query lands."""
+    from pocketpaw.agents.backend import LeasedClient
+
+    counter, log, clients = [0], [], []
+    sdk = _make_hooked_sdk(counter, log, clients)
+    captured: dict = {}
+
+    def _on_built(client, key, teardown):
+        captured.update(client=client, key=key)
+
+    try:
+        await _turn(sdk, "turn one", on_client_built=_on_built)
+        lease = LeasedClient(client=captured["client"], options_key=captured["key"])
+
+        async def _stop_other_session(client, prompt):
+            if prompt == "turn two":
+                await sdk.cleanup()  # what stop(session_key=<other>) ends in
+
+        monkeypatch.setattr(_HookedClient, "before_query", _stop_other_session)
+        await _turn(sdk, "turn two", warm_client=lease)
+        assert captured["client"].queries[-1] == "turn two", "turn two must reuse the lease"
+        _assert_no_query_saw_missing_dir(log)
+    finally:
+        await sdk.cleanup()
+
+
+async def test_skill_edit_rebuilds_warm_client_on_new_dir(real_skills):
+    """An edited skill must reach the warm client: the content change alters
+    the key, the client is rebuilt on the new dir, and the old dir is released."""
+    counter, log, clients = [0], [], []
+    sdk = _make_hooked_sdk(counter, log, clients)
+    try:
+        await _turn(sdk, "turn one")
+        (old_dir,) = sdk._client.plugin_paths()
+        md = real_skills["site-skill"].path
+        md.write_text(md.read_text(encoding="utf-8") + "\nedited\n", encoding="utf-8")
+        await _turn(sdk, "turn two")
+        assert counter[0] == 2, "an edited skill must rebuild the warm client"
+        (new_dir,) = sdk._client.plugin_paths()
+        assert new_dir != old_dir
+        body = (new_dir / "skills" / "site-skill" / "SKILL.md").read_text(encoding="utf-8")
+        assert "edited" in body
+        assert not old_dir.exists(), "the superseded dir must be released"
+        await _turn(sdk, "turn three")
+        assert counter[0] == 2, "unchanged skills must still reuse the warm client"
+        _assert_no_query_saw_missing_dir(log)
+    finally:
+        await sdk.cleanup()
+
+
+async def test_prewarm_built_during_a_run_leaks_no_reference(real_skills):
+    """Prewarm whose options were built while a run held the lease, then
+    connected after it finished, must leave nothing behind after cleanup()."""
+    counter, log, clients = [0], [], []
+    sdk = _make_hooked_sdk(counter, log, clients)
+    orig_build = sdk._build_options
+
+    async def _build_while_leased(*args, **kwargs):
+        sdk._client_in_use = True
+        try:
+            return await orig_build(*args, **kwargs)
+        finally:
+            sdk._client_in_use = False
+
+    sdk._build_options = _build_while_leased
+    with _run_patches():
+        await sdk.prewarm(session_key="s1", system_prompt="identity", skill_names=_SKILLS)
+    assert counter[0] == 1
+    paths = sdk._client.plugin_paths()
+    assert paths and all(p.exists() for p in paths)
+    await sdk.cleanup()
+    assert not any(p.exists() for p in paths), "prewarm leaked a reference to the skills dir"
+
+
+async def test_leased_client_with_vanished_dir_is_not_reused(real_skills):
+    """The leased-dispatch guard: a key-matching leased client whose plugin dir
+    is gone at dispatch time is rebuilt, never driven."""
+    from pocketpaw.agents.backend import LeasedClient
+
+    counter, log, clients = [0], [], []
+    sdk = _make_hooked_sdk(counter, log, clients)
+    captured: dict = {}
+
+    def _on_built(client, key, teardown):
+        captured.update(client=client, key=key)
+
+    try:
+        await _turn(sdk, "turn one", on_client_built=_on_built)
+        leased = captured["client"]
+        lease = LeasedClient(client=leased, options_key=captured["key"])
+        orig_dispatch = sdk._leased_dispatch
+
+        async def _reap_then_dispatch(**kwargs):
+            for p in leased.plugin_paths():
+                shutil.rmtree(p, ignore_errors=True)
+            return await orig_dispatch(**kwargs)
+
+        sdk._leased_dispatch = _reap_then_dispatch
+        await _turn(sdk, "turn two", warm_client=lease, on_client_built=_on_built)
+        assert leased.queries == ["turn one"], "a leased client with no plugin dir was driven"
+        assert captured["client"] is not leased, "the turn must build a fresh client"
+    finally:
+        await sdk.cleanup()
