@@ -1782,6 +1782,7 @@ async def create_draft_site(
     user_id: str,
     pocket_id: str,
     name: str = "",
+    generation_session_id: str | None = None,
 ) -> _SiteDoc:
     """Mint the DRAFT Site doc for a freshly created site pocket so it lists in the
     /sites gallery BEFORE it is ever published (fix/sites-draft-visible).
@@ -1822,6 +1823,12 @@ async def create_draft_site(
     invisible until someone pressed Refresh. The emit sits AFTER the idempotent early
     return above, so it fires once per real insert — a repeat create, or one against
     an already-live doc, stays silent.
+
+    ``generation_session_id``: passed ONLY by the agent create tools' shared mint,
+    with the chat session the creating run lives in. A fresh mint then starts as
+    ``generation="generating"`` (see ``sites.generation``); every other caller
+    (import, remix, the pockets path) leaves it None, and a repeat create never
+    restamps an existing doc.
     """
     # Resolved, not derived: a TRANSFERRED site keeps the id it was minted with,
     # so a create against a moved pocket finds the real row instead of minting a
@@ -1853,6 +1860,10 @@ async def create_draft_site(
         signed_key=f"site_key_{secrets.token_urlsafe(24)}",
         allowed_origins=_default_allowed_origins(),
         event_mapping=_DEFAULT_EVENT_MAPPING,
+        # Only the agent create tools pass a session: the run in it is still
+        # building this site. Read by the list / status reads alone.
+        generation="generating" if generation_session_id else None,
+        generation_session_id=generation_session_id or None,
     )
     await doc.insert()
     # The gallery IS a downstream listener, and a draft is the moment its card
@@ -13064,6 +13075,14 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         **(await _verify.status_summary(workspace_id=workspace_id, pocket_id=pocket_id))
     )
 
+    # Is the agent run that created this site still building it? Self-healed here
+    # (lookups only when the row is generating/waiting); None for a live site.
+    from pocketpaw_ee.sites import generation as _generation
+
+    if doc is not None:
+        await _generation.resolve(workspace_id, [doc])
+    _gen, _gen_session = _generation.wire_fields(doc) if not is_live else (None, None)
+
     return SiteStatusResponse(
         pocket_id=pocket_id,
         status=status,
@@ -13099,6 +13118,8 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         build_status=getattr(doc, "build_status", "none") if doc is not None else "none",
         build_reason=getattr(doc, "build_reason", None) if doc is not None else None,
         build_job_id=getattr(doc, "build_job_id", None) if doc is not None else None,
+        generation=_gen,
+        generation_session_id=_gen_session,
         # The billing state the Billing tab has always asked this read for and
         # never received. Read off the same ``doc``, so it costs no extra query.
         #
@@ -13364,15 +13385,22 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
         engines,
         {doc.pocket_id: getattr(doc, "d1_database_id", "") or "" for doc in docs},
     )
-    return [
-        _to_response(
+    # Self-heal the ``generation`` flag of rows still generating/waiting: one batched
+    # lookup for all of them, nothing at all when no row is.
+    from pocketpaw_ee.sites import generation as _generation
+
+    await _generation.resolve(workspace_id, docs)
+    responses: list[SiteResponse] = []
+    for doc in docs:
+        resp = _to_response(
             doc,
             patterns.get(doc.pocket_id) or "",
             engines.get(doc.pocket_id) or "",
             capabilities.get(doc.pocket_id),
         )
-        for doc in docs
-    ]
+        resp.generation, resp.generation_session_id = _generation.wire_fields(doc)
+        responses.append(resp)
+    return responses
 
 
 async def _capabilities_for_pockets(

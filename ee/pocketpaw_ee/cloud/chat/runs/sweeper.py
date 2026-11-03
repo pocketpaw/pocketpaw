@@ -22,6 +22,9 @@ stream frame:
   "system was busy" message, which is also stored on the doc's ``error``. When
   arq later dequeues it, ``mark_running`` refuses and the worker drops it.
 
+A swept ``session`` run also settles the ``generation`` flag of a site it was
+creating, the same best-effort hook ``mark_terminal`` runs.
+
 Two cadences share this: the web process's periodic sweep (default cutoffs) and
 the Tier 2 worker's boot sweep (a short explicit cutoff applied to both arms).
 """
@@ -32,6 +35,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from pocketpaw_ee.cloud.chat.runs.domain import queued_timeout_minutes
+from pocketpaw_ee.cloud.chat.runs.service import settle_site_generation
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 
@@ -101,6 +105,8 @@ async def sweep_stale_runs(
         if result.modified_count != 1:
             continue
         swept += 1
+        # Settle a site this run was generating (best-effort, never raises).
+        await settle_site_generation(doc)
         if transport is not None:
             try:
                 if was_queued:

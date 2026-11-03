@@ -27,6 +27,10 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
   failed / cancelled / interrupted run's partial text (runs with an
   ``assistant_message_id`` are skipped, their text is already a Message), and
   ``(usage, createdAt)`` pairs for the concierge spend cap.
+- Every terminal transition of a ``session`` run settles the ``generation`` flag
+  of a site that run was creating (``sites.generation.settle_for_session``),
+  best-effort and last. ``latest_session_runs`` is the batched read the sites
+  read path uses to self-heal that flag.
 - ``record_card_audit`` stores one chat card's browser audit counts on a
   concierge run, matched on the visitor, workspace and pocket so a caller can only
   write to its own runs.
@@ -35,6 +39,7 @@ Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 from collections.abc import Iterable
@@ -168,6 +173,24 @@ def _trigger_spend_ingest(doc: ChatRunDoc) -> None:
         logger.debug("run spend-ingest trigger failed for %s", doc.run_id, exc_info=True)
 
 
+async def settle_site_generation(doc: ChatRunDoc) -> None:
+    """Settle the ``generation`` flag of any site this session's run was creating.
+
+    Called after every terminal transition of a ``session`` run. One indexed Site
+    read when the session created no site (the common case). Best-effort and last:
+    a sites failure must never fail or delay a finalization that already happened,
+    and the sites read path self-heals the flag anyway.
+    """
+    if doc.context_type != "session" or not doc.scope_id:
+        return
+    try:
+        from pocketpaw_ee.sites import generation as site_generation
+
+        await site_generation.settle_for_session(doc.workspace, doc.scope_id)
+    except Exception:  # noqa: BLE001 — the read path self-heals; never fail the run
+        logger.warning("site generation settle failed for run %s", doc.run_id, exc_info=True)
+
+
 async def mark_running(run_id: str) -> bool:
     """Atomically move a run from ``queued`` to ``running``. True when it moved.
 
@@ -257,6 +280,7 @@ async def mark_completed(
     doc.ended_at = _utcnow()
     await doc.save()
     _trigger_spend_ingest(doc)
+    await settle_site_generation(doc)
 
 
 async def mark_terminal(
@@ -284,6 +308,7 @@ async def mark_terminal(
     # priced them. Billing only completed runs would serve every interrupted one
     # free — which is why the metering sweeper bills all four terminal states too.
     _trigger_spend_ingest(doc)
+    await settle_site_generation(doc)
 
 
 # A concierge stream's card ids ("c1", "c2", ...). Also a Mongo field-path guard.
@@ -395,6 +420,47 @@ async def find_active_run_for_scope(
         .sort(-ChatRunDoc.createdAt)  # type: ignore[operator]
         .first_or_none()
     )
+
+
+async def latest_session_runs(
+    workspace_id: str, session_ids: Iterable[str]
+) -> dict[str, tuple[str, str | None]]:
+    """``{session_id: (status, assistant_message_id)}`` of each session's NEWEST run.
+
+    For the sites ``generation`` flag: one aggregation for a whole batch of
+    sessions, served by the ``(workspace, context_type, scope_id, createdAt)``
+    index and projected to three short fields (never the answer text). A session
+    with no run is absent.
+    """
+    ids = sorted({sid for sid in session_ids if sid})
+    if not ids:
+        return {}
+    pipeline: list[dict[str, Any]] = [
+        {
+            "$match": {
+                "workspace": workspace_id,
+                "context_type": "session",
+                "scope_id": {"$in": ids},
+            }
+        },
+        {"$sort": {"createdAt": -1}},
+        {
+            "$group": {
+                "_id": "$scope_id",
+                "status": {"$first": "$status"},
+                "assistant_message_id": {"$first": "$assistant_message_id"},
+            }
+        },
+    ]
+    # A coroutine under the prod pymongo-async client, a plain cursor under
+    # mongomock-motor; await only when awaitable (same idiom as credits.service).
+    cursor = ChatRunDoc.get_pymongo_collection().aggregate(pipeline)
+    if inspect.isawaitable(cursor):
+        cursor = await cursor
+    out: dict[str, tuple[str, str | None]] = {}
+    async for row in cursor:
+        out[str(row["_id"])] = (str(row.get("status") or ""), row.get("assistant_message_id"))
+    return out
 
 
 async def wait_until_terminal(run_id: str, *, timeout: float, interval: float = 0.1) -> bool:

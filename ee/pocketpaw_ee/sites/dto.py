@@ -5,7 +5,9 @@
 # ``SiteResponse`` is the one wire shape for a site, mapped from the document in
 # ``service._to_response``; every field defaults so rows written before it existed
 # still serialize. Owner switches (``badge_hidden``, ``ai_training_allowed``) are the
-# stored PREFERENCE and reach the live page on the next publish. Status and
+# stored PREFERENCE and reach the live page on the next publish. ``generation`` /
+# ``generation_session_id`` (list row and by-pocket status) say whether the agent
+# run that created the site is still building it; None on deployed sites. Status and
 # analytics responses carry counts and states only, never diagnostics text.
 # Length caps on owner-typed text live here, so an over-long value is a 422 at the
 # edge rather than a silently truncated record.
@@ -283,6 +285,13 @@ class SiteResponse(BaseModel):
     # set of rungs is closed forever, for the same reason it must not error on an
     # unrecognised ``build_status``.
     build_reason: str | None = None
+    # Is the agent run that CREATED this site still working on it? ``generating`` |
+    # ``waiting`` (that run ended on an unanswered ``ask_user``) | ``ready``; None =
+    # never tracked (behave as before). Resolved on read (``sites.generation``), and
+    # always None for a deployed site. Independent of ``build_status`` and publish.
+    generation: Literal["generating", "waiting", "ready"] | None = None
+    # The chat session the creating run lives in, so a reload can reattach to it.
+    generation_session_id: str | None = None
     # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,
     # title}], asset_count, asset_bytes, forms: [{page, original_action, rewired}],
     # scripts, warnings} (from-url adds status/source_url). None for every
@@ -631,6 +640,10 @@ class SiteStatusResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+    # The same ``generation`` pair ``SiteResponse`` carries (see there): the by-pocket
+    # read is what the builder polls after a reload. None with no Site doc.
+    generation: Literal["generating", "waiting", "ready"] | None = None
+    generation_session_id: str | None = None
     # ── The site's BILLING state on the by-pocket read ──────────────────────────
     #
     # The frontend has declared these on its own ``SiteStatusResponse`` since BC-11
