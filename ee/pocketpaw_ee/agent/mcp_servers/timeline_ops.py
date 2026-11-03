@@ -19,6 +19,9 @@
 # Ranges are checked here; the browser renders it in WebGL. `fx` keyframes its
 # overall strength.
 #
+# `set_track_effects` takes the same fields on a whole lane (`track` is a lane
+# id or name); every video and image clip on it renders them under its own.
+#
 # `set_shake` adds handheld camera shake to a visual clip: intensity, speed and
 # rotation are 0-1 fractions; the browser turns them into motion.
 #
@@ -60,6 +63,7 @@ OP_KINDS: frozenset[str] = frozenset(
         "set_chroma",
         "set_effects",
         "set_shake",
+        "set_track_effects",
         "set_project",
         "set_transition",
         "set_transform",
@@ -97,7 +101,30 @@ _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 
 # set_effects: preset ids, scalar ranges, and the nested groups' field ranges.
 _FX_PRESETS: frozenset[str] = frozenset(
-    {"golden-hour", "moody", "neon-glow", "spotlight", "dreamy", "none"}
+    {
+        "none",
+        "golden-hour",
+        "moody",
+        "neon-glow",
+        "spotlight",
+        "dreamy",
+        "noir",
+        "faded-film",
+        "super-8",
+        "teal-orange",
+        "sunset-duotone",
+        "camcorder",
+        "arcade-crt",
+        "glitch-pop",
+        "handheld-8bit",
+        "comic-print",
+        "riso-zine",
+        "pencil",
+        "blueprint",
+        "terminal",
+        "miniature",
+        "dream-haze",
+    }
 )
 _UNIT = (0.0, 1.0)
 _SIGNED = (-1.0, 1.0)
@@ -163,6 +190,10 @@ _HUE_BANDS: frozenset[str] = frozenset(
     {"red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta"}
 )
 _CURVE_CHANNELS: frozenset[str] = frozenset({"master", "r", "g", "b"})
+# AnimatableProp in schema.ts: the transform props, the overall effects
+# strength `fx`, and `fx.<scalar>` for each effect scalar.
+_BASE_ANIM_PROPS: tuple[str, ...] = ("x", "y", "scale", "rotation", "opacity", "volume", "fx")
+_ANIM_PROPS: frozenset[str] = frozenset(_BASE_ANIM_PROPS) | {f"fx.{k}" for k in _FX_SCALARS}
 _MAX_CURVE_POINTS = 16
 
 # Ops that bring an asset onto the timeline.
@@ -218,9 +249,6 @@ _ANIM_KINDS: frozenset[str] = frozenset({"none", "fade", "pop", "slide", "typewr
 # CaptionStyleId — the CUE BOX model, a different axis from _TEXT_PRESETS.
 _CAPTION_STYLES: frozenset[str] = frozenset({"plain", "boxed", "outlined"})
 
-# AnimatableProp in schema.ts.
-_ANIM_PROPS: frozenset[str] = frozenset({"x", "y", "scale", "rotation", "opacity", "volume", "fx"})
-
 # TrackKind in schema.ts. 'overlay' is in the enum and nothing authors one yet;
 # it stays accepted because the document already allows it and refusing here
 # would be this file inventing a narrower contract than the one it validates.
@@ -236,7 +264,9 @@ _MAX_LANE_NAME = 40
 
 # Named easings. The tuple form (cubic bezier) is deliberately not offered: it
 # is four numbers with a throwing domain and nothing an agent can reason about.
-_EASINGS: frozenset[str] = frozenset({"linear", "easeIn", "easeOut", "easeInOut", "hold"})
+_EASINGS: frozenset[str] = frozenset(
+    {"linear", "easeIn", "easeOut", "easeInOut", "hold", "back", "elastic", "bounce"}
+)
 
 
 class TimelineSummary:
@@ -389,6 +419,40 @@ def _check_range(value: Any, lo: float, hi: float, field: str) -> str | None:
         return f"{field} must be a number."
     if not lo <= value <= hi:
         return f"{field} must be between {lo:g} and {hi:g}."
+    return None
+
+
+def _check_effect_fields(raw: dict[str, Any], i: int) -> str | None:
+    """The field set shared by set_effects and set_track_effects."""
+    preset = raw.get("preset")
+    if preset is not None and preset not in _FX_PRESETS:
+        hint = _suggest(str(preset), set(_FX_PRESETS))
+        return (
+            f"ops[{i}].preset {preset!r} is not an effects preset.{hint} "
+            f"Valid presets: {', '.join(sorted(_FX_PRESETS))}."
+        )
+    for key, (lo, hi) in _FX_SCALARS.items():
+        err = _check_range(raw.get(key), lo, hi, f"ops[{i}].{key}")
+        if err:
+            return err
+    for group, fields in _FX_GROUPS.items():
+        value = raw.get(group)
+        if value is None:
+            continue
+        if not isinstance(value, dict) or set(value) - set(fields):
+            return (
+                f"ops[{i}].{group} must be null or an object with "
+                f"{', '.join(fields)}; got {value!r}."
+            )
+        for key, (lo, hi) in fields.items():
+            err = _check_range(value.get(key), lo, hi, f"ops[{i}].{group}.{key}")
+            if err:
+                return err
+    err = _check_fx_extras(raw, i)
+    if err:
+        return err
+    if raw.get("off") is not None and not isinstance(raw["off"], bool):
+        return f"ops[{i}].off must be true or false."
     return None
 
 
@@ -828,36 +892,12 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
         if raw.get("off") is not None and not isinstance(raw["off"], bool):
             return f"ops[{i}].off must be true or false."
 
-    elif kind == "set_effects":
-        preset = raw.get("preset")
-        if preset is not None and preset not in _FX_PRESETS:
-            hint = _suggest(str(preset), set(_FX_PRESETS))
-            return (
-                f"ops[{i}].preset {preset!r} is not an effects preset.{hint} "
-                f"Valid presets: {', '.join(sorted(_FX_PRESETS))}."
-            )
-        for key, (lo, hi) in _FX_SCALARS.items():
-            err = _check_range(raw.get(key), lo, hi, f"ops[{i}].{key}")
-            if err:
-                return err
-        for group, fields in _FX_GROUPS.items():
-            value = raw.get(group)
-            if value is None:
-                continue
-            if not isinstance(value, dict) or set(value) - set(fields):
-                return (
-                    f"ops[{i}].{group} must be null or an object with "
-                    f"{', '.join(fields)}; got {value!r}."
-                )
-            for key, (lo, hi) in fields.items():
-                err = _check_range(value.get(key), lo, hi, f"ops[{i}].{group}.{key}")
-                if err:
-                    return err
-        err = _check_fx_extras(raw, i)
+    elif kind in ("set_effects", "set_track_effects"):
+        if kind == "set_track_effects" and not raw.get("track"):
+            return f"ops[{i}].track is required: the lane id or name to treat."
+        err = _check_effect_fields(raw, i)
         if err:
             return err
-        if raw.get("off") is not None and not isinstance(raw["off"], bool):
-            return f"ops[{i}].off must be true or false."
 
     elif kind in ("add_keyframe", "clear_keyframes"):
         prop = raw.get("prop")
@@ -865,7 +905,8 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
             hint = _suggest(str(prop), set(_ANIM_PROPS))
             return (
                 f"ops[{i}].prop {prop!r} cannot be animated.{hint} "
-                f"Animatable: {', '.join(sorted(_ANIM_PROPS))}."
+                f"Animatable: {', '.join(_BASE_ANIM_PROPS)}, or fx.<effect> for any "
+                "set_effects scalar (fx.glitch, fx.vignette, ...)."
             )
         if kind == "add_keyframe":
             if "atMs" not in raw or raw["atMs"] is None:
@@ -877,6 +918,11 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
                 err = _check_range(raw.get("value"), 0.0, 1.0, f"ops[{i}].value")
                 if err:
                     return f"{err} fx is the overall effects strength."
+            elif prop.startswith("fx."):
+                lo, hi = _FX_SCALARS[prop[3:]]
+                err = _check_range(raw.get("value"), lo, hi, f"ops[{i}].value")
+                if err:
+                    return f"{err} That is the range of {prop[3:]}."
             ease = raw.get("ease")
             if ease is not None and ease not in _EASINGS:
                 hint = _suggest(str(ease), set(_EASINGS))

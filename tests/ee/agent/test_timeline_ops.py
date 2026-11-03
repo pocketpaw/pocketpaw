@@ -129,6 +129,7 @@ def test_every_contract_op_is_reachable(summary: TimelineSummary) -> None:
         "set_chroma": {"clipId": "clip_aaa"},
         "set_effects": {"clipId": "clip_aaa", "preset": "moody"},
         "set_shake": {"clipId": "clip_aaa", "intensity": 0.5},
+        "set_track_effects": {"track": "Video", "preset": "noir"},
     }
     assert set(minimal) == set(OP_KINDS), "a verb was added without a case here"
     for kind, args in minimal.items():
@@ -720,6 +721,46 @@ def test_set_shake_checks_ranges(summary, fields, error) -> None:
     ops, err = validate_ops([{"op": "set_shake", "clipId": "clip_aaa", **fields}], summary)
     if error is None:
         assert err is None and ops[0]["op"] == "set_shake"
+    else:
+        assert ops is None and error in err
+
+
+@pytest.mark.parametrize(
+    ("op", "error"),
+    [
+        ({"track": "Video", "preset": "super-8", "grain": 0.5}, None),
+        ({"track": "Video", "off": True}, None),
+        ({"preset": "noir"}, "track is required"),
+        ({"track": "Video", "vignette": 3}, "vignette must be between 0 and 1"),
+        ({"track": "Video", "preset": "polaroid"}, "is not an effects preset"),
+    ],
+)
+def test_set_track_effects_takes_the_set_effects_fields(summary, op, error) -> None:
+    ops, err = validate_ops([{"op": "set_track_effects", **op}], summary)
+    if error is None:
+        assert err is None and ops[0]["op"] == "set_track_effects"
+    else:
+        assert ops is None and error in err
+
+
+@pytest.mark.parametrize(
+    ("prop", "value", "ease", "error"),
+    [
+        ("fx.glitch", 0.8, "elastic", None),
+        ("fx.swirl", -0.5, "bounce", None),
+        ("fx.motionAngle", 120, "back", None),
+        ("fx.glitch", 1.5, None, "That is the range of glitch"),
+        ("fx.sparkle", 0.5, None, "cannot be animated"),
+        ("opacity", 0.5, "springy", "is not an easing"),
+    ],
+)
+def test_effect_props_animate_within_their_range(summary, prop, value, ease, error) -> None:
+    op = {"op": "add_keyframe", "clipId": "clip_aaa", "prop": prop, "atMs": 500, "value": value}
+    if ease:
+        op["ease"] = ease
+    ops, err = validate_ops([op], summary)
+    if error is None:
+        assert err is None, err
     else:
         assert ops is None and error in err
 
