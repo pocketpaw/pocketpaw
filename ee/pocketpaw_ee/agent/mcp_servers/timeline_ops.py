@@ -12,9 +12,18 @@
 # is "#rrggbb" or "auto" and the tuning knobs are 0-1 fractions; defaults and the
 # per-pixel work live in the browser.
 #
-# `set_effects` grades and lights a video or image clip (presets, scalar knobs,
-# and spotlight / rays / sweep / leak groups, where null removes one). Ranges are
-# checked here; the browser renders it in WebGL. `fx` keyframes its strength.
+# `set_effects` grades, lights and stylises a video or image clip: presets,
+# scalar knobs (_FX_SCALARS, mirroring FX_SCALARS in schema.ts), numeric groups
+# (spotlight / rays / sweep / leak / levels), a colour map of 2-4 hex stops,
+# tone curves per channel, and per-hue-band HSL shifts; null removes any one.
+# Ranges are checked here; the browser renders it in WebGL. `fx` keyframes its
+# overall strength.
+#
+# `set_track_effects` takes the same fields on a whole lane (`track` is a lane
+# id or name); every video and image clip on it renders them under its own.
+#
+# `set_shake` adds handheld camera shake to a visual clip: intensity, speed and
+# rotation are 0-1 fractions; the browser turns them into motion.
 #
 # 2026-09-11 (feat/agent-lane-ops): `add_lane`, and `track` resolving by lane
 # NAME as well as id. The name path is load-bearing — track ids are minted when
@@ -53,6 +62,8 @@ OP_KINDS: frozenset[str] = frozenset(
         "remove_clip",
         "set_chroma",
         "set_effects",
+        "set_shake",
+        "set_track_effects",
         "set_project",
         "set_transition",
         "set_transform",
@@ -80,6 +91,7 @@ _CLIP_OPS: frozenset[str] = frozenset(
         "add_keyframe",
         "clear_keyframes",
         "set_effects",
+        "set_shake",
         "zoom_clip",
         "set_chroma",
     }
@@ -89,7 +101,30 @@ _HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}")
 
 # set_effects: preset ids, scalar ranges, and the nested groups' field ranges.
 _FX_PRESETS: frozenset[str] = frozenset(
-    {"golden-hour", "moody", "neon-glow", "spotlight", "dreamy", "none"}
+    {
+        "none",
+        "golden-hour",
+        "moody",
+        "neon-glow",
+        "spotlight",
+        "dreamy",
+        "noir",
+        "faded-film",
+        "super-8",
+        "teal-orange",
+        "sunset-duotone",
+        "camcorder",
+        "arcade-crt",
+        "glitch-pop",
+        "handheld-8bit",
+        "comic-print",
+        "riso-zine",
+        "pencil",
+        "blueprint",
+        "terminal",
+        "miniature",
+        "dream-haze",
+    }
 )
 _UNIT = (0.0, 1.0)
 _SIGNED = (-1.0, 1.0)
@@ -99,18 +134,67 @@ _FX_SCALARS: dict[str, tuple[float, float]] = {
     "temperature": _SIGNED,
     "tint": _SIGNED,
     "saturation": _SIGNED,
+    "highlights": _SIGNED,
+    "shadows": _SIGNED,
     "glow": _UNIT,
+    "halation": _UNIT,
     "vignette": _UNIT,
     "grain": _UNIT,
+    "grainSize": _UNIT,
+    "grainColor": _UNIT,
     "aberration": _UNIT,
+    "rgbShift": _UNIT,
     "flicker": _UNIT,
+    "sharpen": _UNIT,
+    "mono": _UNIT,
+    "sepia": _UNIT,
+    "posterize": _UNIT,
+    "threshold": _UNIT,
+    "pixelate": _UNIT,
+    "scanlines": _UNIT,
+    "curvature": _UNIT,
+    "glitch": _UNIT,
+    "vhs": _UNIT,
+    "jpeg": _UNIT,
+    "dither": _UNIT,
+    "halftone": _UNIT,
+    "halftoneSize": _UNIT,
+    "riso": _UNIT,
+    "hatch": _UNIT,
+    "sketch": _UNIT,
+    "ascii": _UNIT,
+    "asciiSize": _UNIT,
+    "paper": _UNIT,
+    "ripple": _UNIT,
+    "swirl": _SIGNED,
+    "bulge": _SIGNED,
+    "heat": _UNIT,
+    "reeded": _UNIT,
+    "zoomBlur": _UNIT,
+    "spinBlur": _UNIT,
+    "motionBlur": _UNIT,
+    "motionAngle": (-180.0, 180.0),
+    "tiltShift": _UNIT,
+    "tiltFocus": _SIGNED,
+    "streaks": _UNIT,
+    "starburst": _UNIT,
 }
 _FX_GROUPS: dict[str, dict[str, tuple[float, float]]] = {
     "spotlight": {"x": _UNIT, "y": _UNIT, "radius": _UNIT, "intensity": _UNIT},
     "rays": {"x": _UNIT, "y": _UNIT, "intensity": _UNIT, "length": _UNIT},
     "sweep": {"angle": (-180.0, 180.0), "width": _UNIT, "intensity": _UNIT},
     "leak": {"intensity": _UNIT, "hue": (0.0, 360.0)},
+    "levels": {"black": _UNIT, "white": _UNIT, "gamma": (0.1, 10.0)},
 }
+_HUE_BANDS: frozenset[str] = frozenset(
+    {"red", "orange", "yellow", "green", "aqua", "blue", "purple", "magenta"}
+)
+_CURVE_CHANNELS: frozenset[str] = frozenset({"master", "r", "g", "b"})
+# AnimatableProp in schema.ts: the transform props, the overall effects
+# strength `fx`, and `fx.<scalar>` for each effect scalar.
+_BASE_ANIM_PROPS: tuple[str, ...] = ("x", "y", "scale", "rotation", "opacity", "volume", "fx")
+_ANIM_PROPS: frozenset[str] = frozenset(_BASE_ANIM_PROPS) | {f"fx.{k}" for k in _FX_SCALARS}
+_MAX_CURVE_POINTS = 16
 
 # Ops that bring an asset onto the timeline.
 _ASSET_OPS: frozenset[str] = frozenset({"place_clip", "place_audio"})
@@ -165,9 +249,6 @@ _ANIM_KINDS: frozenset[str] = frozenset({"none", "fade", "pop", "slide", "typewr
 # CaptionStyleId — the CUE BOX model, a different axis from _TEXT_PRESETS.
 _CAPTION_STYLES: frozenset[str] = frozenset({"plain", "boxed", "outlined"})
 
-# AnimatableProp in schema.ts.
-_ANIM_PROPS: frozenset[str] = frozenset({"x", "y", "scale", "rotation", "opacity", "volume", "fx"})
-
 # TrackKind in schema.ts. 'overlay' is in the enum and nothing authors one yet;
 # it stays accepted because the document already allows it and refusing here
 # would be this file inventing a narrower contract than the one it validates.
@@ -183,7 +264,9 @@ _MAX_LANE_NAME = 40
 
 # Named easings. The tuple form (cubic bezier) is deliberately not offered: it
 # is four numbers with a throwing domain and nothing an agent can reason about.
-_EASINGS: frozenset[str] = frozenset({"linear", "easeIn", "easeOut", "easeInOut", "hold"})
+_EASINGS: frozenset[str] = frozenset(
+    {"linear", "easeIn", "easeOut", "easeInOut", "hold", "back", "elastic", "bounce"}
+)
 
 
 class TimelineSummary:
@@ -336,6 +419,97 @@ def _check_range(value: Any, lo: float, hi: float, field: str) -> str | None:
         return f"{field} must be a number."
     if not lo <= value <= hi:
         return f"{field} must be between {lo:g} and {hi:g}."
+    return None
+
+
+def _check_effect_fields(raw: dict[str, Any], i: int) -> str | None:
+    """The field set shared by set_effects and set_track_effects."""
+    preset = raw.get("preset")
+    if preset is not None and preset not in _FX_PRESETS:
+        hint = _suggest(str(preset), set(_FX_PRESETS))
+        return (
+            f"ops[{i}].preset {preset!r} is not an effects preset.{hint} "
+            f"Valid presets: {', '.join(sorted(_FX_PRESETS))}."
+        )
+    for key, (lo, hi) in _FX_SCALARS.items():
+        err = _check_range(raw.get(key), lo, hi, f"ops[{i}].{key}")
+        if err:
+            return err
+    for group, fields in _FX_GROUPS.items():
+        value = raw.get(group)
+        if value is None:
+            continue
+        if not isinstance(value, dict) or set(value) - set(fields):
+            return (
+                f"ops[{i}].{group} must be null or an object with "
+                f"{', '.join(fields)}; got {value!r}."
+            )
+        for key, (lo, hi) in fields.items():
+            err = _check_range(value.get(key), lo, hi, f"ops[{i}].{group}.{key}")
+            if err:
+                return err
+    err = _check_fx_extras(raw, i)
+    if err:
+        return err
+    if raw.get("off") is not None and not isinstance(raw["off"], bool):
+        return f"ops[{i}].off must be true or false."
+    return None
+
+
+def _check_fx_extras(raw: dict[str, Any], i: int) -> str | None:
+    """set_effects' non-numeric groups: colorMap, curves, hsl."""
+    color_map = raw.get("colorMap")
+    if color_map is not None:
+        if not isinstance(color_map, dict) or set(color_map) - {"colors", "intensity"}:
+            return f"ops[{i}].colorMap must be null or an object with colors, intensity."
+        colors = color_map.get("colors")
+        if colors is not None and (
+            not isinstance(colors, list)
+            or not 2 <= len(colors) <= 4
+            or not all(isinstance(c, str) and _HEX_COLOR.fullmatch(c) for c in colors)
+        ):
+            return f'ops[{i}].colorMap.colors must be 2 to 4 "#rrggbb" colours, darkest first.'
+        err = _check_range(color_map.get("intensity"), 0.0, 1.0, f"ops[{i}].colorMap.intensity")
+        if err:
+            return err
+
+    curves = raw.get("curves")
+    if curves is not None:
+        if not isinstance(curves, dict) or set(curves) - _CURVE_CHANNELS:
+            return (
+                f"ops[{i}].curves must be null or an object keyed by "
+                f"{', '.join(sorted(_CURVE_CHANNELS))}."
+            )
+        for channel, points in curves.items():
+            if (
+                not isinstance(points, list)
+                or not 2 <= len(points) <= _MAX_CURVE_POINTS
+                or not all(
+                    isinstance(p, list)
+                    and len(p) == 2
+                    and all(type(v) in (int, float) and 0 <= v <= 1 for v in p)
+                    for p in points
+                )
+            ):
+                return (
+                    f"ops[{i}].curves.{channel} must be 2 to {_MAX_CURVE_POINTS} "
+                    "[x, y] points with both values between 0 and 1."
+                )
+
+    hsl = raw.get("hsl")
+    if hsl is not None:
+        if not isinstance(hsl, dict) or set(hsl) - _HUE_BANDS:
+            return (
+                f"ops[{i}].hsl must be null or an object keyed by hue band "
+                f"({', '.join(sorted(_HUE_BANDS))})."
+            )
+        for band, shift in hsl.items():
+            if not isinstance(shift, dict) or set(shift) - {"hue", "saturation", "lightness"}:
+                return f"ops[{i}].hsl.{band} must be an object with hue, saturation, lightness."
+            for key, value in shift.items():
+                err = _check_range(value, -1.0, 1.0, f"ops[{i}].hsl.{band}.{key}")
+                if err:
+                    return err
     return None
 
 
@@ -710,33 +884,20 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
         if raw.get("off") is not None and not isinstance(raw["off"], bool):
             return f"ops[{i}].off must be true or false."
 
-    elif kind == "set_effects":
-        preset = raw.get("preset")
-        if preset is not None and preset not in _FX_PRESETS:
-            hint = _suggest(str(preset), set(_FX_PRESETS))
-            return (
-                f"ops[{i}].preset {preset!r} is not an effects preset.{hint} "
-                f"Valid presets: {', '.join(sorted(_FX_PRESETS))}."
-            )
-        for key, (lo, hi) in _FX_SCALARS.items():
-            err = _check_range(raw.get(key), lo, hi, f"ops[{i}].{key}")
+    elif kind == "set_shake":
+        for key in ("intensity", "speed", "rotation"):
+            err = _check_range(raw.get(key), 0.0, 1.0, f"ops[{i}].{key}")
             if err:
                 return err
-        for group, fields in _FX_GROUPS.items():
-            value = raw.get(group)
-            if value is None:
-                continue
-            if not isinstance(value, dict) or set(value) - set(fields):
-                return (
-                    f"ops[{i}].{group} must be null or an object with "
-                    f"{', '.join(fields)}; got {value!r}."
-                )
-            for key, (lo, hi) in fields.items():
-                err = _check_range(value.get(key), lo, hi, f"ops[{i}].{group}.{key}")
-                if err:
-                    return err
         if raw.get("off") is not None and not isinstance(raw["off"], bool):
             return f"ops[{i}].off must be true or false."
+
+    elif kind in ("set_effects", "set_track_effects"):
+        if kind == "set_track_effects" and not raw.get("track"):
+            return f"ops[{i}].track is required: the lane id or name to treat."
+        err = _check_effect_fields(raw, i)
+        if err:
+            return err
 
     elif kind in ("add_keyframe", "clear_keyframes"):
         prop = raw.get("prop")
@@ -744,7 +905,8 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
             hint = _suggest(str(prop), set(_ANIM_PROPS))
             return (
                 f"ops[{i}].prop {prop!r} cannot be animated.{hint} "
-                f"Animatable: {', '.join(sorted(_ANIM_PROPS))}."
+                f"Animatable: {', '.join(_BASE_ANIM_PROPS)}, or fx.<effect> for any "
+                "set_effects scalar (fx.glitch, fx.vignette, ...)."
             )
         if kind == "add_keyframe":
             if "atMs" not in raw or raw["atMs"] is None:
@@ -756,6 +918,11 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
                 err = _check_range(raw.get("value"), 0.0, 1.0, f"ops[{i}].value")
                 if err:
                     return f"{err} fx is the overall effects strength."
+            elif prop.startswith("fx."):
+                lo, hi = _FX_SCALARS[prop[3:]]
+                err = _check_range(raw.get("value"), lo, hi, f"ops[{i}].value")
+                if err:
+                    return f"{err} That is the range of {prop[3:]}."
             ease = raw.get("ease")
             if ease is not None and ease not in _EASINGS:
                 hint = _suggest(str(ease), set(_EASINGS))

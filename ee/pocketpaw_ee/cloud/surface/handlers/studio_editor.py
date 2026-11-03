@@ -285,6 +285,7 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
                     kind=t.get("kind"),
                     role=t.get("role") or "-",
                     clips=t.get("clip_count"),
+                    effects=t.get("effects"),
                 ),
             )
         )
@@ -321,6 +322,7 @@ def _timeline_block(timeline: dict[str, Any]) -> str:
                     kind=c.get("kind"),
                     chroma=c.get("chroma"),
                     effects=c.get("effects"),
+                    shake=c.get("shake"),
                 ),
             )
         )
@@ -366,9 +368,18 @@ Operations (this list is closed — an invented verb is rejected):
 - clear_keyframes {clipId, prop, atMs?}
 - zoom_clip     {clipId, focusX, focusY, scale, atMs?, inMs?, holdMs?, outMs?}
 - set_chroma    {clipId, color?: '#rrggbb'|'auto', similarity?, smoothness?, spill?, off?}
-- set_effects   {clipId, preset?, exposure?, contrast?, temperature?, tint?, saturation?,
-                 glow?, vignette?, spotlight?, rays?, sweep?, leak?, grain?, aberration?,
-                 flicker?, off?}
+- set_effects   {clipId, preset?, off?, + any effect field: exposure, contrast,
+                 highlights, shadows, temperature, tint, saturation, levels, curves,
+                 hsl, mono, sepia, colorMap, posterize, threshold, glow, halation,
+                 spotlight, rays, sweep, leak, sharpen, vignette, aberration,
+                 rgbShift, grain, grainSize, grainColor, flicker, scanlines,
+                 curvature, pixelate, glitch, vhs, jpeg, dither, halftone,
+                 halftoneSize, riso, hatch, sketch, ascii, asciiSize, paper,
+                 ripple, swirl, bulge, heat, reeded, zoomBlur, spinBlur,
+                 motionBlur, motionAngle, tiltShift, tiltFocus, streaks,
+                 starburst}
+- set_shake     {clipId, intensity?, speed?, rotation?, off?}   handheld camera shake
+- set_track_effects {track, preset?, off?, + any set_effects field}   a whole lane
 - set_project   {name?, aspectRatio?, fps?, fit?, background?}
 
 Style fields (add_text and style_text both take these):
@@ -473,8 +484,9 @@ Rules that matter:
   CENTRE, so negative is left and up; scale 1 is original size; opacity 0-1.
 - TO ANIMATE, PIN TWO VALUES. add_keyframe at the start time and again at the
   end time, and the property moves between them. atMs is TIMELINE time and must
-  fall inside the clip. Animatable: x, y, scale, rotation, opacity, volume, fx —
-  nothing else (font size and colour cannot be animated).
+  fall inside the clip. Animatable: x, y, scale, rotation, opacity, volume, fx,
+  and fx.<effect> for any set_effects scalar — nothing else (font size and
+  colour cannot be animated).
 - GREEN SCREEN IS set_chroma. "Remove / key out the green (or blue) background"
   is set_chroma on that video or image clip, color 'auto' unless they name one;
   off: true removes it. Whatever sits on a LOWER lane shows through the keyed
@@ -483,8 +495,24 @@ Rules that matter:
   "spotlight on her", "light rays" are set_effects on that clip, with a preset
   (golden-hour | moody | neon-glow | spotlight | dreamy) when one fits; fields
   passed with it override the preset, null removes one effect, off: true clears
-  them all. To ramp the strength, add_keyframe prop fx (0-1). These change
-  brightness and colour on the frame; they cannot move the real light on a
+  them all. "Black and white" is mono, "duotone" / "gradient map" is colorMap
+  (darkest colour first), "crush the blacks" is levels or shadows, "make the
+  greens pop" is hsl on that band, "retro TV" is scanlines + curvature,
+  "8-bit" is pixelate + posterize, "VHS" is vhs, "glitch" is glitch, "comic /
+  newspaper print" is halftone, "pencil sketch" is sketch, "risograph" is riso,
+  "matrix / terminal" is ascii, "dreamy blur" is zoomBlur or tiltShift, "lens
+  flare streaks" is streaks. swirl and bulge are signed (negative bulge
+  pinches). "Shaky cam" / "handheld" is set_shake, which stacks on top of a
+  zoom. Named looks: golden-hour, moody, neon-glow, spotlight, dreamy, noir,
+  faded-film, super-8, teal-orange, sunset-duotone, camcorder, arcade-crt,
+  glitch-pop, handheld-8bit, comic-print, riso-zine, pencil, blueprint,
+  terminal, miniature, dream-haze. "Make the whole video / every clip / this
+  lane look like X" is ONE set_track_effects on that lane, not one set_effects
+  per clip; a clip's own effects still win where both set one. To make one
+  effect move over time ("glitch on the beat", "fade the grain in"), add_keyframe
+  prop fx.<effect> with that effect's range. Easing back / elastic / bounce
+  overshoot and settle. To ramp the strength, add_keyframe prop fx
+  (0-1). These change brightness and colour on the frame; they cannot move the real light on a
   subject, so say so if that is what they want.
 - A MARKED AREA IS A BOX THE USER DREW ON THE FRAME at that time: "At 00:08,
   marked area x 40-60%, y 20-50% (centre 0.50, 0.35): ...". It targets the video
