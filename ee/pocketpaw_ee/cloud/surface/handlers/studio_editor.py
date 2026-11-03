@@ -366,9 +366,12 @@ Operations (this list is closed — an invented verb is rejected):
 - clear_keyframes {clipId, prop, atMs?}
 - zoom_clip     {clipId, focusX, focusY, scale, atMs?, inMs?, holdMs?, outMs?}
 - set_chroma    {clipId, color?: '#rrggbb'|'auto', similarity?, smoothness?, spill?, off?}
-- set_effects   {clipId, preset?, exposure?, contrast?, temperature?, tint?, saturation?,
-                 glow?, vignette?, spotlight?, rays?, sweep?, leak?, grain?, aberration?,
-                 flicker?, off?}
+- set_effects   {clipId, preset?, off?, + any effect field: exposure, contrast,
+                 highlights, shadows, temperature, tint, saturation, levels, curves,
+                 hsl, mono, sepia, colorMap, posterize, threshold, glow, halation,
+                 spotlight, rays, sweep, leak, sharpen, vignette, aberration,
+                 rgbShift, grain, grainSize, grainColor, flicker, scanlines,
+                 curvature, pixelate}
 - set_project   {name?, aspectRatio?, fps?, fit?, background?}
 
 Style fields (add_text and style_text both take these):
@@ -483,8 +486,11 @@ Rules that matter:
   "spotlight on her", "light rays" are set_effects on that clip, with a preset
   (golden-hour | moody | neon-glow | spotlight | dreamy) when one fits; fields
   passed with it override the preset, null removes one effect, off: true clears
-  them all. To ramp the strength, add_keyframe prop fx (0-1). These change
-  brightness and colour on the frame; they cannot move the real light on a
+  them all. "Black and white" is mono, "duotone" / "gradient map" is colorMap
+  (darkest colour first), "crush the blacks" is levels or shadows, "make the
+  greens pop" is hsl on that band, "retro TV" is scanlines + curvature,
+  "8-bit" is pixelate + posterize. To ramp the strength, add_keyframe prop fx
+  (0-1). These change brightness and colour on the frame; they cannot move the real light on a
   subject, so say so if that is what they want.
 - A MARKED AREA IS A BOX THE USER DREW ON THE FRAME at that time: "At 00:08,
   marked area x 40-60%, y 20-50% (centre 0.50, 0.35): ...". It targets the video
