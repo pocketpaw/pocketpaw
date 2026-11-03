@@ -3,7 +3,7 @@
 # that lets a skill/tool-bearing run REUSE the warm persistent CLI subprocess
 # instead of re-spawning a fresh stateless query every turn (~6s/turn floor).
 #
-# Four groups:
+# Five groups:
 #   1. KEY-LEVEL (pure)   — ``_plugin_digest`` / ``_client_cache_key`` fold in
 #      the skill IDENTITY (sorted names + bundled flag), never the materialized
 #      PATH (which is a fresh ``mkdtemp`` per run and would defeat reuse).
@@ -14,11 +14,19 @@
 #      connect and the non-skill turn's options carry NO per-run skills plugin.
 #   4. LIFECYCLE          — the materialized dir a live warm client references
 #      SURVIVES turn 1's finally and is removed on ``cleanup()``.
+#   5. LIVE PATH          — with the real materializer: no query ever reaches a
+#      client whose connected plugin dir is gone (same-digest rebuild, prewarm
+#      eviction, prewarm losing the lease, stateless sibling, reaped dir).
 
 from __future__ import annotations
 
+import contextlib
+import shutil
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from pocketpaw.agents.claude_sdk import ClaudeAgentSDK, ClaudeSDKBackend
 from pocketpaw.agents.model_router import ModelSelection, TaskComplexity
@@ -371,3 +379,255 @@ def test_run_still_accepts_skill_names_kwarg() -> None:
     params = inspect.signature(ClaudeSDKBackend.run).parameters
     assert "skill_names" in params
     assert params["skill_names"].default == frozenset()
+
+
+# ===========================================================================
+# 5. LIVE PATH — a client is never sent a query while its plugin dir is gone
+#
+# Driven with the REAL ``materialize_run_skills`` / ``cleanup_run_skills`` over
+# a throwaway installed-skill set, so the assertions are about the filesystem:
+# at every ``query()`` the ``plugins=`` paths the client was CONNECTED with must
+# exist. In production the CLI resolves the Skill tool against that path, and a
+# deleted dir surfaced as "Unknown skill: pocketpaw-site ... (path not found)".
+# ===========================================================================
+
+_SKILLS = frozenset({"site-skill", "craft-skill"})
+
+
+@pytest.fixture
+def real_skills(tmp_path, monkeypatch):
+    """A SkillLoader with two on-disk skills and no packaged bundle, so the real
+    materializer copies them into a plugin dir."""
+    from pocketpaw.skills import loader as loader_mod
+    from pocketpaw.skills import materialize as materialize_mod
+    from pocketpaw.skills.loader import Skill, SkillLoader
+
+    src = tmp_path / "installed"
+    skills = {}
+    for name in _SKILLS:
+        d = src / name
+        d.mkdir(parents=True)
+        md = d / "SKILL.md"
+        md.write_text(f"---\nname: {name}\ndescription: d\n---\nbody\n", encoding="utf-8")
+        skills[name] = Skill(name=name, description="d", content="body", path=md)
+    fake_loader = SkillLoader()
+    fake_loader._skills = skills
+    fake_loader._loaded = True
+    monkeypatch.setattr(loader_mod, "_skill_loader", fake_loader)
+    monkeypatch.setattr(materialize_mod, "_bundled_plugin_root", lambda: None)
+    return skills
+
+
+class _PathCheckingClient(_FakeClient):
+    """Records, at every ``query()``, which local plugin paths it was connected
+    with no longer exist on disk."""
+
+    def __init__(self, counter, log, options=None, **kw):
+        super().__init__(counter, options=options, **kw)
+        self._log = log
+
+    def plugin_paths(self) -> list[Path]:
+        plugins = getattr(self.options, "plugins", None) or []
+        return [Path(p["path"]) for p in plugins if isinstance(p, dict) and p.get("path")]
+
+    async def query(self, prompt, session_id="default"):
+        missing = [str(p) for p in self.plugin_paths() if not p.exists()]
+        self._log.append((prompt, missing))
+        await super().query(prompt, session_id)
+
+
+def _make_checking_sdk(counter, log):
+    sdk = _make_sdk(counter)
+    sdk._ClaudeSDKClient = lambda **kwargs: _PathCheckingClient(counter, log, **kwargs)
+    return sdk
+
+
+@contextlib.contextmanager
+def _run_patches():
+    selection = ModelSelection(
+        complexity=TaskComplexity.MODERATE, model="claude-sonnet-4-5-20250929", reason="test"
+    )
+    with patch(_LLM_CLIENT) as mock_resolve:
+        mock_llm = MagicMock()
+        mock_llm.is_ollama = False
+        mock_llm.is_openai_compatible = False
+        mock_llm.is_gemini = False
+        mock_llm.is_litellm = False
+        mock_llm.is_openrouter = False
+        mock_llm.to_sdk_env.return_value = {"ANTHROPIC_API_KEY": "sk-test"}
+        mock_resolve.return_value = mock_llm
+        with patch(_MODEL_ROUTER) as MockRouter:
+            MockRouter.return_value.classify.return_value = selection
+            with patch.object(ClaudeSDKBackend, "_get_mcp_servers", return_value={}):
+                yield
+
+
+async def _turn(sdk, message, **kwargs):
+    with _run_patches():
+        return [
+            ev
+            async for ev in sdk.run(
+                message, system_prompt="identity", session_key="s1", skill_names=_SKILLS, **kwargs
+            )
+        ]
+
+
+def _assert_no_query_saw_missing_dir(log):
+    assert log, "no query reached a persistent client"
+    bad = [(prompt[:40], missing) for prompt, missing in log if missing]
+    assert not bad, (
+        "a warm client was sent a query after the skills plugin dir it was "
+        f"connected with had been deleted (the CLI answers 'Unknown skill'): {bad}"
+    )
+
+
+async def test_rebuild_with_same_skill_set_keeps_new_clients_dir(real_skills):
+    """A rebuild that keeps the SAME skill set (here a per-send model pick; in
+    production also a prompt-digest or history mismatch) must not delete the
+    dir the replacement client is being connected with, and later turns that
+    reuse that client must still find it."""
+    counter, log = [0], []
+    sdk = _make_checking_sdk(counter, log)
+    try:
+        await _turn(sdk, "turn one")
+        await _turn(sdk, "turn two", model_override="claude-opus-4-1")
+        await _turn(sdk, "turn three", model_override="claude-opus-4-1")
+        assert counter[0] == 2, "turn three must reuse the client turn two rebuilt"
+        for p in sdk._client.plugin_paths():
+            assert p.exists(), f"the live warm client's plugin dir {p} was deleted"
+        _assert_no_query_saw_missing_dir(log)
+    finally:
+        await sdk.cleanup()
+
+
+async def test_prewarm_then_turns_keep_the_warm_clients_dir(real_skills):
+    """The production sequence: prewarm, turn one evicts the prewarmed client
+    (its key differs, same skills), turn two reuses turn one's client. Every
+    query must find the plugin dir its client was connected with."""
+    counter, log = [0], []
+    sdk = _make_checking_sdk(counter, log)
+    try:
+        with _run_patches():
+            await sdk.prewarm(
+                session_key="s1",
+                system_prompt="identity",
+                skill_names=_SKILLS,
+                system_prompt_digest="prewarm-digest",
+            )
+        assert counter[0] == 1
+        await _turn(sdk, "turn one")
+        await _turn(sdk, "turn two")
+        assert counter[0] == 2, "turn two must reuse turn one's client"
+        _assert_no_query_saw_missing_dir(log)
+    finally:
+        await sdk.cleanup()
+
+
+async def test_prewarm_losing_the_lease_keeps_the_runs_dir(real_skills):
+    """A prewarm that finds a run already holding the lease returns without a
+    client. The run built its options from the same cached dir, so prewarm must
+    not delete it out from under the run."""
+    counter, log = [0], []
+    sdk = _make_checking_sdk(counter, log)
+    run_paths: list[Path] = []
+    orig = sdk._get_or_create_client
+
+    async def _racing(options, **kwargs):
+        if kwargs.get("prewarm"):
+            # The first run builds its options now (reusing the dir prewarm
+            # cached) and takes the lease before prewarm reaches the lock.
+            built = await sdk._build_options(
+                "turn one",
+                system_prompt="identity",
+                session_key="s1",
+                deny_mcp_tool_ids=frozenset(),
+                allow_sdk_tools=frozenset(),
+                allow_mcp_tool_ids=None,
+                skill_names=_SKILLS,
+                stderr_sink=[],
+            )
+            run_paths.extend(Path(p["path"]) for p in built.options.plugins if isinstance(p, dict))
+            sdk._client_in_use = True
+            try:
+                return await orig(options, **kwargs)
+            finally:
+                sdk._client_in_use = False
+        return await orig(options, **kwargs)
+
+    sdk._get_or_create_client = _racing
+    try:
+        with _run_patches():
+            await sdk.prewarm(session_key="s1", system_prompt="identity", skill_names=_SKILLS)
+        assert run_paths, "the racing run must have been given a plugin dir"
+        for p in run_paths:
+            assert p.exists(), f"prewarm deleted the dir {p} the racing run connects with"
+    finally:
+        await sdk.cleanup()
+
+
+async def test_stateless_sibling_run_does_not_delete_warm_dir(real_skills):
+    """A run that falls back to stateless because a sibling holds the lease owns
+    its own plugin reference; releasing it must never remove the dir the warm
+    client is connected with."""
+    counter, log = [0], []
+    sdk = _make_checking_sdk(counter, log)
+    try:
+        await _turn(sdk, "turn one")
+        warm_paths = sdk._client.plugin_paths()
+        sdk._client_in_use = True  # a sibling run holds the lease
+        sdk._query = MagicMock(side_effect=RuntimeError("no stateless CLI in tests"))
+        await _turn(sdk, "sibling turn")
+        sdk._client_in_use = False
+        for p in warm_paths:
+            assert p.exists(), f"the stateless sibling removed the warm client's dir {p}"
+        await _turn(sdk, "turn two")
+        _assert_no_query_saw_missing_dir(log)
+    finally:
+        await sdk.cleanup()
+
+
+async def test_reuse_rebuilds_when_plugin_dir_vanished(real_skills):
+    """Defence in depth: if the dir a warm client was connected with disappears
+    anyway (an external tmp reaper) and the skills changed meanwhile, so the
+    fresh dir lands at a new path, the next turn must rebuild the client
+    instead of reusing one that cannot load skills."""
+    counter, log = [0], []
+    sdk = _make_checking_sdk(counter, log)
+    try:
+        await _turn(sdk, "turn one")
+        for p in sdk._client.plugin_paths():
+            shutil.rmtree(p)
+        md = real_skills["site-skill"].path
+        md.write_text(md.read_text(encoding="utf-8") + "\nupdated\n", encoding="utf-8")
+        await _turn(sdk, "turn two")
+        assert counter[0] == 2, "a client whose plugin dir vanished must be rebuilt"
+        _assert_no_query_saw_missing_dir(log)
+    finally:
+        await sdk.cleanup()
+
+
+async def test_vanished_dir_with_same_skills_is_rematerialized_in_place(real_skills):
+    """A reaped dir with unchanged skills is rebuilt at the SAME content path,
+    so the warm client is reused and finds its plugin again."""
+    counter, log = [0], []
+    sdk = _make_checking_sdk(counter, log)
+    try:
+        await _turn(sdk, "turn one")
+        for p in sdk._client.plugin_paths():
+            shutil.rmtree(p)
+        await _turn(sdk, "turn two")
+        assert counter[0] == 1
+        _assert_no_query_saw_missing_dir(log)
+    finally:
+        await sdk.cleanup()
+
+
+async def test_cleanup_releases_materialized_dir(real_skills):
+    """``cleanup()`` releases the dir once no live client in the process uses it."""
+    counter, log = [0], []
+    sdk = _make_checking_sdk(counter, log)
+    await _turn(sdk, "turn one")
+    paths = sdk._client.plugin_paths()
+    assert paths and all(p.exists() for p in paths)
+    await sdk.cleanup()
+    assert not any(p.exists() for p in paths), "cleanup() must release the skills dir"

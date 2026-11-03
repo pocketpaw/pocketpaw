@@ -4,8 +4,7 @@
 # LIVE for the claude_agent_sdk backend. Covers: filters to the named subset,
 # rejects unsafe slugs, produces a plugin-shaped dir (.claude-plugin/plugin.json
 # + skills/<slug>/SKILL.md), returns None on no match, cleans up, resolves
-# bundled skills, and turns a session-key run id into a legal, capped temp-dir
-# name via ``fs_safe_component``.
+# bundled skills, and the shared content-addressed, reference-counted dir.
 
 from __future__ import annotations
 
@@ -196,52 +195,90 @@ def test_bundled_fallback_is_inert_when_no_bundle_present(installed_skills, monk
     assert materialize_run_skills(["code-react"]) is None
 
 
-# --- run_id is a session key: it must become a legal directory name -------
-# A cloud session key looks like ``cloud:session:<ws>:<pocket>:u:<user>``. Fed
-# raw into ``tempfile.mkdtemp(prefix=...)`` its colons raise WinError 123 on
-# Windows and fail every chat run. The run id is only folded in for legibility,
-# so it is reduced to ``[A-Za-z0-9._-]`` and length-capped.
+# --- shared, content-addressed dirs ---------------------------------------
+# A warm Claude CLI is bound to the plugin path it connected with, so the dir
+# must not depend on the run: the same skills give the same path, references
+# are counted, and the dir goes only when the last holder releases it. A run id
+# (a session key full of ``:``) never reaches the path.
 
-_RUN_DIR_RE = r"^paw-run-skills-[A-Za-z0-9._-]+$"
+_RUN_DIR_RE = r"^paw-run-skills-[0-9a-f]+$"
 
 _CLOUD_SESSION_KEY = (
     "cloud:session:6ad37f5d6c7b32c8c231987c:69f88339dc8997d1f758cb60:u:69f88339dc8997d1f758cb5d"
 )
 
 
-def test_session_key_run_id_yields_legal_dir_name(installed_skills):
-    """A colon-bearing session key produces an existing dir with a safe name."""
+def test_session_key_run_id_yields_legal_shared_dir(installed_skills):
+    """A colon-bearing session key still produces a legal dir, and the run id
+    does not change which dir the same skills land in."""
     import re
 
-    root = materialize_run_skills(["github"], run_id="cloud:session:6ad37f5d:u:69f8")
+    root_a = materialize_run_skills(["github"], run_id="cloud:session:6ad37f5d:u:69f8")
+    root_b = materialize_run_skills(["github"], run_id=_CLOUD_SESSION_KEY)
     try:
-        assert root is not None and root.is_dir()
-        assert ":" not in root.name
-        assert re.match(_RUN_DIR_RE, root.name), root.name
-        assert root.name.startswith("paw-run-skills-cloud-session-6ad37f5d-u-69f8-")
-    finally:
-        cleanup_run_skills(root)
-    assert not root.exists()
-
-
-def test_long_run_id_is_capped_and_cleaned_up(installed_skills):
-    """A long session key is capped; distinct long keys stay distinguishable."""
-    import re
-
-    root_a = materialize_run_skills(["github"], run_id=_CLOUD_SESSION_KEY)
-    root_b = materialize_run_skills(["github"], run_id=_CLOUD_SESSION_KEY[:-1] + "e")
-    try:
-        assert root_a is not None and root_b is not None
-        for root in (root_a, root_b):
-            assert re.match(_RUN_DIR_RE, root.name), root.name
-            # prefix + capped id + "-" + mkdtemp's random suffix (8 chars)
-            assert len(root.name) <= len("paw-run-skills-") + 48 + 1 + 8
-        # Same leading 40 chars, different tail: the hash keeps them apart.
-        assert root_a.name[:-9] != root_b.name[:-9]
+        assert root_a is not None and root_a.is_dir()
+        assert ":" not in str(root_a.relative_to(root_a.parent.parent))
+        assert re.match(_RUN_DIR_RE, root_a.name), root_a.name
+        assert root_a == root_b
     finally:
         cleanup_run_skills(root_a)
         cleanup_run_skills(root_b)
-    assert not root_a.exists() and not root_b.exists()
+    assert not root_a.exists()
+
+
+def test_dir_survives_until_last_reference_released(installed_skills):
+    """Two holders of the same skills share one dir; releasing one keeps it."""
+    first = materialize_run_skills(["github", "calendar-sync"])
+    second = materialize_run_skills(["calendar-sync", "github"])
+    assert first is not None and first == second
+    cleanup_run_skills(first)
+    assert (first / "skills" / "github" / "SKILL.md").is_file(), (
+        "releasing one reference removed a dir another holder still uses"
+    )
+    cleanup_run_skills(second)
+    assert not first.exists()
+
+
+def test_different_skill_sets_get_different_dirs(installed_skills):
+    a = materialize_run_skills(["github"])
+    b = materialize_run_skills(["github", "calendar-sync"])
+    try:
+        assert a is not None and b is not None and a != b
+    finally:
+        cleanup_run_skills(a)
+        cleanup_run_skills(b)
+
+
+def test_changed_skill_files_get_a_new_dir(installed_skills):
+    """Editing a skill yields a fresh dir; the old holder's dir is untouched."""
+    old = materialize_run_skills(["github"])
+    md = installed_skills.get_all()["github"].path
+    md.write_text(md.read_text(encoding="utf-8") + "\nmore\n", encoding="utf-8")
+    new = materialize_run_skills(["github"])
+    try:
+        assert old is not None and new is not None and old != new
+        assert old.exists() and "more" in (new / "skills" / "github" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+    finally:
+        cleanup_run_skills(old)
+        cleanup_run_skills(new)
+
+
+def test_damaged_dir_is_rebuilt_in_place(installed_skills):
+    """A dir whose manifest vanished (partial tmp reaping) is rebuilt at the
+    same path, so clients bound to that path see their skills again."""
+    root = materialize_run_skills(["github"])
+    try:
+        assert root is not None
+        (root / ".claude-plugin" / "plugin.json").unlink()
+        again = materialize_run_skills(["github"])
+        assert again == root
+        assert (root / ".claude-plugin" / "plugin.json").is_file()
+        cleanup_run_skills(again)
+    finally:
+        cleanup_run_skills(root)
+    assert not list(root.parent.glob(".staging-*")), "a staging dir leaked"
 
 
 @pytest.mark.parametrize(
