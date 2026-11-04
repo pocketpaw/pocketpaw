@@ -374,7 +374,7 @@ def test_the_reference_build_skill_names_both_tools() -> None:
 
     plugin_dir = bundled_skills_plugin_dir()
     assert plugin_dir is not None
-    text = (plugin_dir / "skills" / "sites-reference-build" / "SKILL.md").read_text(
+    text = (plugin_dir / "skills" / "sites-reference-match" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     assert "`save_site_reference`" in text

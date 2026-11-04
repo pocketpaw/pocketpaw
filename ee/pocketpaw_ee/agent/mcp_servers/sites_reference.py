@@ -3,7 +3,7 @@
 # (a screenshot or mockup attached in chat); the agent stores it on the pocket, then
 # compares its draft against it at the same width and reads back side-by-side tiles,
 # a diff heatmap, the top mismatch regions and a score per tile. The
-# ``sites-reference-build`` skill drives the loop; the image work lives in
+# ``sites-reference-match`` skill drives the loop; the image work lives in
 # ``sites/site_references.py``.
 #
 # Invariants a reader must not break:
