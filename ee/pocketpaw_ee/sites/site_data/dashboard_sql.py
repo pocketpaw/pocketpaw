@@ -6,8 +6,9 @@
 # ``check`` (pure): the console's ``classify`` (one statement, <= 10 KB here, no control
 # characters, no parameters, no DDL / transaction / ATTACH / PRAGMA keyword anywhere,
 # no internal table name anywhere), then a read whose verb is SELECT or VALUES (a WITH
-# prefix allowed). EXPLAIN, PRAGMA reads, ``WITH RECURSIVE``, every ``pragma_*``
-# function and a few memory / extension functions are refused too.
+# prefix allowed). EXPLAIN, PRAGMA reads, recursion (``RECURSIVE``, or any CTE whose body
+# reaches itself: SQLite recurses without the keyword), every ``pragma_*`` function and a
+# few memory / extension functions (under any quoting) are refused too.
 # ``gate``: ``check``, then the console's ``plan`` against the live schema: every source
 # is a user table or a CTE, any table holding masked columns is rewritten into a
 # subquery reading ``MASK`` (so no expression, filter, join, CTE or compound sees a
@@ -17,7 +18,6 @@
 # Every refusal is 422 ``sql_rejected`` with ``details.reason`` (the console's code
 # without its ``sites.data_`` prefix, or ``not_a_select`` / ``recursive`` / ``pragma`` /
 # ``function`` / ``bad_viz``).
-#
 # ``heavy`` runs ``EXPLAIN QUERY PLAN`` on the planned SQL (save / test time only) and
 # reports a full ``SCAN`` of a table over 10k rows; a failed explain is "not heavy".
 # ``run_batch`` sends a dashboard's widgets as one D1 batch; a failing batch is re-run
@@ -108,13 +108,66 @@ def check(sql: Any) -> console.Statement:
     toks = stmt.tokens
     for j, t in enumerate(toks):
         nxt = toks[j + 1] if j + 1 < len(toks) else None
-        if t.type == "word" and t.name in _FUNCTIONS and nxt is not None and nxt.type == "lparen":
+        if t.name_like and t.name in _FUNCTIONS and nxt is not None and nxt.type == "lparen":
             raise SqlRejected("function", f"Widgets can't call {t.text}().")
         if t.type == "word" and t.value == "RECURSIVE":
             raise SqlRejected("recursive", "Widgets can't use recursive queries.")
         if t.name_like and t.name.startswith("pragma_"):
             raise SqlRejected("pragma", "Widgets can't read pragma functions.")
+    if _cte_cycle(stmt):
+        raise SqlRejected("recursive", "Widgets can't use recursive queries.")
     return stmt
+
+
+def _cte_bodies(stmt: console.Statement) -> dict[str, list[tuple[int, int]]]:
+    """Each CTE's body token spans ``[start, end)``, by its folded name."""
+    toks = list(stmt.tokens)
+    out: dict[str, list[tuple[int, int]]] = {}
+    for j in sorted(stmt.exempt):
+        t = toks[j]
+        if t.name not in stmt.ctes or not console._cte_def(toks, j):
+            continue
+        k = j + 1
+        if k < len(toks) and toks[k].type == "lparen":  # the column list
+            k = console._skip_group(toks, k)
+        if not (k < len(toks) and toks[k].type == "word" and toks[k].value == "AS"):
+            continue
+        k += 1
+        while k < len(toks) and toks[k].type == "word" and toks[k].value in ("NOT", "MATERIALIZED"):
+            k += 1
+        if k < len(toks) and toks[k].type == "lparen":
+            out.setdefault(t.name, []).append((k, console._skip_group(toks, k)))
+    return out
+
+
+def _cte_cycle(stmt: console.Statement) -> bool:
+    """Whether a CTE reaches itself through the CTEs its body reads. SQLite recurses
+    on any self-referencing CTE, with or without the RECURSIVE keyword."""
+    if not stmt.ctes:
+        return False
+    bodies = _cte_bodies(stmt)
+    edges: dict[str, set[str]] = {name: set() for name in bodies}
+    for ref in stmt.refs:
+        if ref.name not in stmt.ctes:
+            continue
+        for name, spans in bodies.items():
+            if any(a <= ref.start < b for a, b in spans):
+                edges[name].add(ref.name)
+    seen: set[str] = set()
+    path: set[str] = set()
+
+    def loops(name: str) -> bool:
+        if name in path:
+            return True
+        if name in seen:
+            return False
+        seen.add(name)
+        path.add(name)
+        found = any(loops(n) for n in edges.get(name, ()))
+        path.discard(name)
+        return found
+
+    return any(loops(name) for name in edges)
 
 
 def _deps(stmt: console.Statement, schema: d1.Schema) -> tuple[str, ...]:

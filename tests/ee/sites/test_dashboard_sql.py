@@ -166,6 +166,29 @@ REFUSED = [
     ("SELECT length(randomblob(1000000000))", "function"),
     ("SELECT zeroblob(1000000000)", "function"),
     ("SELECT readfile('/etc/passwd')", "function"),
+    ('SELECT "zeroblob"(500000000)', "function"),
+    ("SELECT length([randomblob](100))", "function"),
+    ("SELECT `load_extension`('x')", "function"),
+    # recursion without the RECURSIVE keyword: SQLite recurses on any self-reference
+    (
+        "WITH c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) AS n FROM c",
+        "recursive",
+    ),
+    (
+        "WITH c(x) AS (SELECT 1 UNION ALL SELECT t.x + 1 FROM c AS t) SELECT count(*) FROM c",
+        "recursive",
+    ),
+    ('WITH "C"(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM "C"', "recursive"),
+    ("WITH c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x IN c) SELECT 1", "recursive"),
+    (
+        "WITH a(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM b), b(x) AS (SELECT x FROM a) "
+        "SELECT count(*) FROM a",
+        "recursive",
+    ),
+    (
+        "WITH a AS (SELECT 1 AS x), b AS (SELECT x FROM c), c AS (SELECT x FROM b) SELECT * FROM a",
+        "recursive",
+    ),
 ]
 
 
@@ -179,6 +202,7 @@ ALLOWED = [
     "select count(*) as n from orders;",
     "VALUES (1, 2)",
     "WITH paid AS (SELECT * FROM orders WHERE status = 'paid') SELECT count(*) FROM paid",
+    "WITH a AS (SELECT 1 AS x), b AS (SELECT x FROM a) SELECT * FROM b JOIN a USING (x)",
     "SELECT date(created_at) AS d, sum(total) AS t FROM orders GROUP BY 1 ORDER BY 1",
     "SELECT json_extract('{\"a\":1}', '$.a') AS a",
     "SELECT key, value FROM json_each('[1,2,3]')",
@@ -206,7 +230,7 @@ def test_unknown_viz_is_refused(db):
     [
         ("SELECT * FROM nope", "sql_unknown_table"),
         ("SELECT * FROM notes JOIN nope ON 1", "sql_unknown_table"),
-        ("WITH account AS (SELECT * FROM account) SELECT * FROM account", "sql_ambiguous"),
+        ("WITH account AS (SELECT * FROM account) SELECT * FROM account", "recursive"),
         ("WITH session AS (SELECT 1 AS token) SELECT * FROM session", "sql_ambiguous"),
         ("SELECT account FROM customers", "sql_ambiguous"),
     ],
