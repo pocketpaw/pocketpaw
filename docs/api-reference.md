@@ -7835,13 +7835,13 @@ for svelte and react. Errors, none of which mean the site is broken:
 | Arg | Type | Notes |
 |-----|------|-------|
 | `pocket_id` | string | Required. The pocket must be readable by the caller and in the chat's workspace. |
-| `image_url` | string | Required. The public URL of an image the owner attached in chat or uploaded to this site (read back from storage, never fetched), or a Refero / Inspo screenshot (fetched from those hosts only). Every other host is refused before any request. |
+| `image_url` | string | Required. The public URL of an image the owner attached in chat or uploaded to this site (read back from storage, never fetched), or a Refero screenshot (streamed from `images.refero.design` only, exact host, size-capped, one 20 s deadline). Every other host is refused before any request. |
 
 Stores a design the owner supplied on the pocket. The image must be PNG, JPEG,
-WebP or GIF, at most 10 MB, 40 megapixels and 20,000px a side, and at least 200px
-wide. It is re-encoded to a fresh PNG (first frame, RGB, no metadata) and kept on
+WebP or GIF, at most 10 MB, 40 megapixels, 20,000px a side and 30:1 tall, and at
+least 200px wide. It is re-encoded to a fresh PNG (first frame, RGB, no metadata) and kept on
 the private upload adapter at `sites-references/{workspace}/{pocket}/{reference_id}.png`,
-at most 20 per pocket. Returns JSON `{ok, reference_id, width, height, looks_like}`;
+at most 20 per pocket; a site delete removes them. Returns JSON `{ok, reference_id, width, height, looks_like}`;
 the id is `ref_` plus a content hash, so saving the same image twice returns the
 same id. `looks_like` is the guessed width class (`desktop` or `mobile`).
 
