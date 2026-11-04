@@ -164,6 +164,9 @@ ROUTER_MODULES = [
     # Sites integrations. Owner routes take request_context; the three public ones
     # are on the allowlist below. Authz is asserted in tests/ee/sites/test_integrations_*.
     ("integrations", "pocketpaw_ee.integrations.router"),
+    # Site AI apps. Owner routes take request_context (sites.ai_manage to write);
+    # authz is asserted in tests/ee/sites/test_site_ai_*.
+    ("site_ai", "pocketpaw_ee.site_ai.router"),
     # Early access (EA-7): one public route, on the allowlist below.
     ("early_access", "pocketpaw_ee.cloud.early_access.router"),
 ]

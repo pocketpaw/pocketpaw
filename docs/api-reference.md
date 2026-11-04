@@ -6294,6 +6294,32 @@ leave it out to refund everything left. Returns the `OrderView`.
 - Razorpay refunds go to the order's captured payment (stored from the paid
   webhook, or looked up for an order recorded before that) at normal speed.
 
+## Sites — AI apps
+
+A published site can call an OpenAI-shaped LLM API through us (our provider keys,
+via LiteLLM), billed to the owner's workspace wallet and bounded by the site's hard
+caps. Callers name a model alias (`fast`, `smart`, `vision`, `embed`); a provider
+model id never appears in a request, response, error or log. Money is integer
+micro-credits (1 credit = 1,000,000 micro = $0.01).
+
+### Owner routes
+
+Session auth. Reads need `fabric.read`; every write needs `sites.ai_manage`
+(workspace ADMIN) and writes an audit row. A pocket in another workspace is a 404.
+
+| Route | Body / result |
+|---|---|
+| `GET/PUT /sites/by-pocket/{pocket_id}/ai/settings` | `SiteAiSettings`: `enabled`, `browser_access`, `require_preset_for_browser`, `allowed_models`, `keep_transcripts`; `plan_models` is read-only. `allowed_models` outside the plan is a 422 `site_ai.model_not_in_plan`. |
+| `GET/POST /sites/by-pocket/{pocket_id}/ai/presets` | `SiteAiPreset[]` / create `{name, system_prompt, model, max_output_tokens, temperature}` (201, at most 50 per site) |
+| `GET/PUT/DELETE /sites/by-pocket/{pocket_id}/ai/presets/{id}` | a PUT bumps `version`; calls pin the version they ran with |
+| `GET/PUT /sites/by-pocket/{pocket_id}/ai/budget` | `SiteAiBudget`: `monthly_cap_micro`, `daily_cap_micro`, `per_visitor_daily_micro`, `preview_daily_cap_micro`, `alert_thresholds` (1-100, up to 5), `paused`; read-only `spent_today_micro`, `spent_month_micro`, `allowance_month_micro` |
+| `GET /sites/by-pocket/{pocket_id}/ai/usage?from&to` | `SiteAiUsage`: settled spend by day, model alias and caller (`worker`, `browser`, `preview`); up to 92 days, default the last 30 |
+
+Plans (`cloud/billing/site_plans.py`): `free` gets `fast` in its own draft
+preview only; `site` adds `vision` and `embed`; `staff` adds `smart`. The monthly
+allowance (`site` 500 credits, `staff` 2,000) is the plan's hard ceiling on a
+site's AI spend; the owner's monthly cap can only lower it.
+
 ## Deleting a site
 
 Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and

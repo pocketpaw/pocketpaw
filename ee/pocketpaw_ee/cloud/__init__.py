@@ -559,6 +559,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.instinct.router import router as instinct_router
     from pocketpaw_ee.integrations.router import public_router as integrations_public_router
     from pocketpaw_ee.integrations.router import router as integrations_router
+    from pocketpaw_ee.site_ai.router import router as site_ai_router
     from pocketpaw_ee.paw_bar.catalog_routes import router as paw_bar_catalog_router
     from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
@@ -641,6 +642,8 @@ def mount_cloud(app: FastAPI) -> None:
     # its own credential. See ``pocketpaw_ee.integrations.router``.
     app.include_router(integrations_router, prefix="/api/v1")
     app.include_router(integrations_public_router, prefix="/api/v1")
+    # Site AI apps: owner settings/presets/budget/usage (session + sites.ai_manage).
+    app.include_router(site_ai_router, prefix="/api/v1")
     # A project site's files (list / read / write / patch / delete) for the builder's
     # Code view; the same service functions the agent's project file tools call.
     app.include_router(site_files_router, prefix="/api/v1")

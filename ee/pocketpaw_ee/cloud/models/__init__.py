@@ -328,6 +328,13 @@ from pocketpaw_ee.cloud.models.site_do_teardown import SiteDoTeardown
 from pocketpaw_ee.cloud.models.site_draft_worker import SiteDraftWorker
 from pocketpaw_ee.cloud.models.site_export import SiteExport
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
+from pocketpaw_ee.cloud.models.site_ai import (
+    SiteAiBudgetDoc,
+    SiteAiCallDoc,
+    SiteAiCounterDoc,
+    SiteAiPresetDoc,
+    SiteAiSettingsDoc,
+)
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.site_redirect import SiteRedirect
 from pocketpaw_ee.cloud.models.site_secret import SiteSecret
@@ -523,6 +530,11 @@ __all__ = [
     "SiteExport",
     "SiteDomain",
     "SiteOriginClaim",
+    "SiteAiBudgetDoc",
+    "SiteAiCallDoc",
+    "SiteAiCounterDoc",
+    "SiteAiPresetDoc",
+    "SiteAiSettingsDoc",
     "SiteRateCounter",
     "SiteSecret",
     "IntegrationConnection",
@@ -702,6 +714,13 @@ def get_all_documents():
         # concierge crawl reads it before fetching anyone's pages.
         SiteOriginClaim,
         SiteRateCounter,
+        # Site AI apps (settings, presets, budget, per-call reservations, spend
+        # counters). Only ``pocketpaw_ee.site_ai`` touches them.
+        SiteAiSettingsDoc,
+        SiteAiPresetDoc,
+        SiteAiBudgetDoc,
+        SiteAiCallDoc,
+        SiteAiCounterDoc,
         # Per-site secrets (encrypted at rest). Only ``sites.site_secrets`` touches it.
         SiteSecret,
         # Sites integrations (vault, bindings, orders, webhook dedupe, newsletter).
