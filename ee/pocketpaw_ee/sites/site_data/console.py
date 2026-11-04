@@ -27,7 +27,8 @@
 #   * a write may not reference a login table at all (403 ``sites.data_read_only``),
 #     may not name a masked column of its target, and must list its columns when it
 #     inserts into a table that has masked ones;
-#   * reads of SELECT / VALUES are wrapped ``SELECT * FROM (...) LIMIT 501``; a string
+#   * reads of SELECT / VALUES are wrapped ``SELECT * FROM (...) LIMIT 501`` (a caller's
+#     ``row_cap`` + 1, for the dashboards' smaller caps); a string
 #     literal holding ``;`` is sent as a bound parameter, so the text D1 gets never
 #     contains a semicolon at all.
 # ``shape`` turns D1's raw columns / rows into the response, masking every column
@@ -609,8 +610,9 @@ def _masked_source(table: d1.Table) -> str:
     return f"(SELECT {', '.join(cols)} FROM {d1.quote_ident(table.name)})"  # noqa: S608
 
 
-def plan(stmt: Statement, schema: d1.Schema) -> Plan:
-    """The SQL D1 runs for ``stmt`` against this database, or the refusal."""
+def plan(stmt: Statement, schema: d1.Schema, *, row_cap: int = ROW_CAP) -> Plan:
+    """The SQL D1 runs for ``stmt`` against this database, or the refusal. A wrapped
+    read fetches ``row_cap + 1`` rows, so the caller can tell it was cut."""
     by_name = {fold(name): t for name, t in schema.tables.items()}
     toks = list(stmt.tokens)
     for ref in stmt.refs:
@@ -733,7 +735,7 @@ def plan(stmt: Statement, schema: d1.Schema) -> Plan:
             out.append(t.text)
         j += 1
     body = " ".join(out)
-    sql = f"SELECT * FROM ({body}) LIMIT {ROW_CAP + 1}" if stmt.wrap else body  # noqa: S608
+    sql = f"SELECT * FROM ({body}) LIMIT {int(row_cap) + 1}" if stmt.wrap else body  # noqa: S608
     if len(params) > d1.MAX_PARAMS:
         raise _refuse("sql_error", "That statement has too many texts holding ';'.")
     return Plan(sql=sql, params=params, mask=frozenset(mask), login=login, tables=stmt.tables)
