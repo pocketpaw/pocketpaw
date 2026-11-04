@@ -50,7 +50,7 @@ _CREATE_METAS = (
     SurfaceMeta(engine="project"),
 )
 
-# The six design skills every /sites mode names (create, refine, import-create).
+# The seven design skills every /sites mode names (create, refine, import-create).
 _DESIGN_SKILLS = frozenset(
     {
         "pocketpaw-design-taste",
@@ -58,6 +58,7 @@ _DESIGN_SKILLS = frozenset(
         "sites-conversion-structure",
         "sites-check",
         "sites-references",
+        "sites-reference-build",
         "sites-restraint",
     }
 )
@@ -752,6 +753,29 @@ def test_sites_references_is_one_entry_advertised_in_both_modes() -> None:
     assert plugin_dir is not None
     for name in names:
         assert (plugin_dir / "skills" / name / "SKILL.md").is_file(), name
+
+
+def test_sites_reference_build_loads_only_on_a_supplied_design() -> None:
+    """The build-to-a-reference skill is advertised in both modes with an INPUT
+    trigger: a screenshot, mockup or Figma frame the user supplied. Its row must
+    say ONLY and rule out the open brief, or a create turn with nothing to match
+    pays for 10 KB of reconstruction method. The row stays short because the
+    create preamble sits close to its 25,000-char ceiling.
+
+    Mutation that must fail this: scope the entry to ``"create"``, or drop
+    "Never for an open brief" from its trigger.
+    """
+    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
+
+    rows = {n: (scope, why) for n, scope, why in sites_handler._SITES_DESIGN_SKILLS}
+    scope, why = rows[sites_handler.REFERENCE_BUILD_SKILL]
+    assert sites_handler.REFERENCE_BUILD_SKILL == "sites-reference-build"
+    assert scope == "both"
+    assert why.startswith("ONLY when the user supplies a design")
+    assert "screenshot" in why and "Figma" in why
+    assert "Never for an open brief" in why
+    for mode in ("create", "refine"):
+        assert "`sites-reference-build`" in sites_handler._design_skills_note(mode), mode
 
 
 def test_sites_conversion_structure_is_advertised_in_both_modes() -> None:

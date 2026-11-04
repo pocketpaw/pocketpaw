@@ -29,7 +29,7 @@ stop. Implement only if the user also asks for the fixes, then re-check what
 you changed.
 
 Every rule has an id: `SC-<GROUP>-<NN>`. Groups: BUILD, HONEST, LINK, COPY,
-LAYOUT, A11Y, MOBILE, SCORE. Cite the id in a finding, so a tool, a review and
+LAYOUT, A11Y, MOBILE, REF, SCORE. Cite the id in a finding, so a tool, a review and
 a later fix all point at the same rule. Ids are stable: a retired rule keeps
 its number and is never reused.
 
@@ -359,6 +359,22 @@ The rules are `sites-craft` section 5. These are the checks.
   value, and in a media and copy block the picture comes first.
 - **SC-MOBILE-09 Text off the edge** (MEDIUM). At least 16px side padding at
   every width, set once on the page wrapper.
+
+## REF: built to a supplied design
+
+Only when the user supplied a screenshot, mockup or frame (`sites-reference-build`).
+
+- **SC-REF-01 Correction order** (HIGH). Compare beside the reference at its
+  width and fix the biggest mismatch first: content and state, page shell and
+  section heights, grid and alignment, fonts and line breaks, images and crop,
+  spacing, colour and surface, small details, states and motion. A global cause
+  (font, container width) before its symptoms.
+- **SC-REF-02 Two passes** (HIGH). At least two compare-and-fix passes, each on
+  a fresh capture. One look is not a check.
+- **SC-REF-03 One verdict** (HIGH). The reply ends on exactly one: READY,
+  READY WITH SUBSTITUTIONS (a commercial font or missing asset was swapped;
+  list each), NOT READY (name what remains), or UNVERIFIED (no comparison
+  ran). Never "pixel-perfect".
 
 ## SCORE: the judgement pass
 
