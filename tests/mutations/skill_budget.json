@@ -133,5 +133,41 @@
     "tests": [
       "tests/test_sites_craft_skill_budget.py"
     ]
+  },
+  {
+    "label": "reference-build budget: the skill grows past its ceiling and nothing notices",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/sites-reference-build/SKILL.md",
+    "find": "# Sites: build to a reference\n",
+    "replace": "# Sites: build to a reference\n\n## Extra step 1 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 2 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 3 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 4 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 5 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 6 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 7 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 8 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 9 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 10 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 11 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n\n## Extra step 12 (added without measuring the budget)\nA plausible paragraph written to look like method, long enough to cost real bytes, and repeated so the file crosses its ceiling without anyone noticing it grew.\n",
+    "tests": [
+      "tests/test_sites_reference_build_skill_budget.py"
+    ]
+  },
+  {
+    "label": "reference-build budget: the ceiling is measured in decoded chars, not wc -c bytes",
+    "file": "tests/test_sites_reference_build_skill_budget.py",
+    "find": "    return path.stat().st_size",
+    "replace": "    return len(path.read_text(encoding=\"utf-8\"))",
+    "tests": [
+      "tests/test_sites_reference_build_skill_budget.py"
+    ]
+  },
+  {
+    "label": "reference-build budget: the fixture reads a path that does not exist",
+    "file": "tests/test_sites_reference_build_skill_budget.py",
+    "find": "    return _skills_dir() / \"sites-reference-build\" / \"SKILL.md\"",
+    "replace": "    return _skills_dir() / \"sites-reference-build\" / \"SKILL.markdown\"",
+    "tests": [
+      "tests/test_sites_reference_build_skill_budget.py"
+    ]
+  },
+  {
+    "label": "reference-build: a verdict drops out of the skill",
+    "file": "src/pocketpaw/bundled_skills/_bundled/skills/sites-reference-build/SKILL.md",
+    "find": "- **UNVERIFIED:** the build exists",
+    "replace": "- **UNCHECKED:** the build exists",
+    "tests": [
+      "tests/test_sites_reference_build_skill_budget.py"
+    ]
   }
 ]

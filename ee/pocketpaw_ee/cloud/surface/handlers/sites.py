@@ -458,6 +458,14 @@ def _craft_system(scope: str = "full") -> str:
 # a review. Review is advertised on create too, so its trigger text must keep
 # saying "read-only" and "only when the user asks" or a create turn reads it as a
 # licence to critique instead of build.
+#
+# `sites-reference-build` is the one entry whose trigger is an INPUT, not a phase:
+# it fires only when the user hands over a design to match (a screenshot or mockup
+# today, a Figma frame later). Its trigger text must keep saying "ONLY" and "Never
+# for an open brief", or a create turn loads 10 KB of reconstruction method for a
+# brief that has nothing to reconstruct.
+REFERENCE_BUILD_SKILL = "sites-reference-build"
+
 _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
     (
         "sites-conversion-structure",
@@ -501,12 +509,16 @@ _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
     (
         "sites-references",
         "both",
-        "When the look is open and you want the full research method behind the "
-        "RESEARCH step (how to search, open and lock references), or when you are "
-        "about to hand-write a background, texture, canvas shader, CSS animation, "
-        "text effect or type pairing and want a real technique, not a reflex. "
-        "Everything there is CSS, inline SVG or GLSL you retype; nothing is "
-        "downloaded. Skip it for a copy edit or when the user supplied a design.",
+        "When the look is open: the full method behind the RESEARCH step, and real "
+        "techniques before you hand-write a background, texture, shader, CSS "
+        "animation, text effect or type pairing (CSS, SVG or GLSL you retype, "
+        "nothing downloaded). Skip it for a copy edit or a supplied design.",
+    ),
+    (
+        REFERENCE_BUILD_SKILL,
+        "both",
+        "ONLY when the user supplies a design to match (screenshot, mockup, Figma "
+        "frame). Never for an open brief.",
     ),
 )
 
