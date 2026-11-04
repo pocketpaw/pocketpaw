@@ -271,6 +271,10 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
         "PAW_GATEWAY_TOKEN (constant-time), Turnstile on writes, SiteRateCounter"
     ),
     "POST /integrations/webhooks/{provider}": "provider webhook; provider signature verified",
+    "POST /sites/{site_id}/ai/ticket": (
+        "site AI visitor ticket; per-IP bucket, site key + origin gate, Turnstile "
+        "(fail closed), per-IP mint rate limit"
+    ),
     "POST /sites/{site_id}/ai/chat": (
         "site AI API; per-IP bucket, then PAW_GATEWAY_TOKEN (constant-time) or the "
         "site key + origin gate + visitor ticket, per-site/visitor rate and spend caps"

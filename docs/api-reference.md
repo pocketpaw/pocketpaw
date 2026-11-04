@@ -6320,10 +6320,32 @@ preview only; `site` adds `vision` and `embed`; `staff` adds `smart`. The monthl
 allowance (`site` 500 credits, `staff` 2,000) is the plan's hard ceiling on a
 site's AI spend; the owner's monthly cap can only lower it.
 
+### `POST /sites/{site_id}/ai/ticket`
+
+Browser callers only: `X-Paw-Site-Key` from one of the site's own hosts (or its
+own draft preview). Body `{turnstile_token}` → `{ticket, expires_at}`. The ticket
+is an HMAC over the site, the caller's IP hash, the caller kind and an expiry about
+20 minutes out, signed with `POCKETPAW_SITE_AI_TICKET_SECRET` (else derived from
+`AUTH_SECRET`; with neither, tickets are refused with 503). Refused with 403
+`browser_disabled` unless the owner turned on browser access. Turnstile fails
+closed: the site's own Turnstile widget when it has one, else the platform secret;
+with neither configured, production refuses (403 `turnstile_required`), so browser
+AI needs Turnstile on the site. A draft preview gets a `preview` ticket without
+Turnstile (its origin is the draft's unguessable host). 10 tickets a minute per
+visitor address.
+
 ### `POST /sites/{site_id}/ai/chat`
 
 No session. Auth is `Authorization: Bearer <PAW_GATEWAY_TOKEN>` (the site's
-Worker). Body: `{model, messages, preset?, tools?, tool_choice?, response_format?,
+Worker), or for browser callers `X-Paw-Site-Key` + the origin gate +
+`X-Paw-Ai-Ticket`. Browser calls need browser access (else `unavailable {reason:
+"browser_disabled"}`, 403 for JSON), a live ticket from the same address (else 401
+`unauthorized`; re-mint and retry), and a preset when the owner requires one (403
+`preset_required`). With a preset, any `system` message a browser sends is dropped.
+Browser calls are held against the per-visitor daily cap (keyed on the hashed
+address) and limited to 20 a minute per address and 300 a minute per site. A call
+from the site's own draft preview needs a `preview` ticket, works on the free
+plan, and is held only against the preview daily cap. Body: `{model, messages, preset?, tools?, tool_choice?, response_format?,
 max_output_tokens?, temperature?, stream?, user?}`; only these fields are read,
 and nothing else from the body is forwarded. `user` is hashed and only feeds a
 per-user rate limit; LiteLLM's `user` is always the paying workspace.
