@@ -42,6 +42,7 @@ def _env(monkeypatch):
 
     monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("POCKETPAW_SITE_AI_TICKET_SECRET", "t" * 40)
+    monkeypatch.setenv("PAW_SITE_AI_ALLOW_NO_TURNSTILE", "1")
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(redis_client, "get_redis", lambda: fake)
     monkeypatch.setattr(chat, "_ip_limiter", RateLimiter(rate=1000.0, capacity=1000))
@@ -136,7 +137,9 @@ async def test_embed_budget_and_provider_failure(beanie_test_db, monkeypatch):
     async with client() as c:
         down = await _embed(c, site, token, {"input": "x"})
     assert (down.status_code, down.json()["detail"]) == (503, "provider_unavailable")
-    assert await SiteAiCallDoc.find(SiteAiCallDoc.state == "released").count() == 1
+    # The request left, so its input is billed even though it failed.
+    failed = await SiteAiCallDoc.find(SiteAiCallDoc.state == "settled").to_list()
+    assert len(failed) == 1 and failed[0].input_tokens == 1
 
     await SiteAiBudgetDoc(workspace=WS, pocket_id=site.pocket_id, daily_cap_micro=0).insert()
     async with client() as c:
@@ -316,7 +319,9 @@ async def test_transfer_moves_config_releases_holds_and_drops_transcripts(beanie
     assert calls[f"done-{pid}"].state == "settled"
     assert calls[f"held-{pid}"].state == "released"
     counter = await SiteAiCounterDoc.find_one()
-    assert counter.workspace == WS and counter.held_micro == 0 and counter.spent_micro == 20
+    # Keyed by the pocket: the spend (and so the caps) carries over to the new owner.
+    assert counter.workspace == OTHER_WS and counter.held_micro == 0
+    assert counter.spent_micro == 20
     # A resume is a no-op.
     assert await _TransferDeps.move_secrets(pocket_id=pid, destination_workspace_id=OTHER_WS) == 0
 
@@ -349,3 +354,114 @@ async def test_delete_cascade_removes_every_site_ai_row(beanie_test_db):
     ):
         assert await doc.find(doc.pocket_id == pid).count() == 0, doc.__name__
         assert await doc.find(doc.pocket_id == keep).count() > 0, doc.__name__
+
+
+# ---------------------------------------------------------------- hardening review
+
+
+@pytest.mark.asyncio
+async def test_a_transfer_keeps_the_day_cap(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.cloud.models.site_ai import SiteAiBudgetDoc
+    from pocketpaw_ee.site_ai import budget
+    from pocketpaw_ee.site_ai.service import load_budget
+    from pocketpaw_ee.sites.service import _TransferDeps
+
+    site, token = await _setup()
+    await SiteAiBudgetDoc(workspace=WS, pocket_id=site.pocket_id, daily_cap_micro=500).insert()
+    hold = await budget.reserve(
+        run_id="pre",
+        workspace_id=WS,
+        pocket_id=site.pocket_id,
+        site_id=str(site.id),
+        caller="worker",
+        model="fast",
+        amount=450,
+        caps=budget.caps_for(
+            caller="worker", budget=await load_budget(WS, site.pocket_id), allowance=10**12
+        ),
+    )
+    await budget.settle(hold, 450, 1, 1)
+    await _TransferDeps.move_secrets(pocket_id=site.pocket_id, destination_workspace_id=OTHER_WS)
+    await Site.get_pymongo_collection().update_one(
+        {"_id": site.id}, {"$set": {"workspace": OTHER_WS}}
+    )
+    moved = await load_budget(OTHER_WS, site.pocket_id)
+    with pytest.raises(budget.BudgetRefused):
+        await budget.reserve(
+            run_id="post",
+            workspace_id=OTHER_WS,
+            pocket_id=site.pocket_id,
+            site_id=str(site.id),
+            caller="worker",
+            model="fast",
+            amount=100,
+            caps=budget.caps_for(caller="worker", budget=moved, allowance=10**12),
+        )
+
+
+@pytest.mark.asyncio
+async def test_transcripts_rechecked_at_write_time(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.models.site import Site
+    from pocketpaw_ee.cloud.models.site_ai import SiteAiSettingsDoc, SiteAiTranscriptDoc
+    from pocketpaw_ee.site_ai.llm import LlmEvent
+
+    site, token = await _setup(keep_transcripts=True)
+    flipped = {"done": False}
+
+    async def _flip_then_answer(payload):
+        # The owner turns transcripts off while the call is in flight.
+        if not flipped["done"]:
+            await SiteAiSettingsDoc.get_pymongo_collection().update_one(
+                {"pocket_id": site.pocket_id}, {"$set": {"keep_transcripts": False}}
+            )
+            flipped["done"] = True
+        yield LlmEvent("text", text="hi")
+        yield LlmEvent("usage", input_tokens=3, output_tokens=1)
+
+    from pocketpaw_ee.site_ai import llm
+
+    monkeypatch.setattr(llm, "stream", _flip_then_answer)
+    body = {"model": "fast", "messages": [{"role": "user", "content": "x"}]}
+    hdr = {"authorization": f"Bearer {token}"}
+    async with client() as c:
+        await c.post(f"/api/v1/sites/{site.id}/ai/chat", json=body, headers=hdr)
+    assert await SiteAiTranscriptDoc.find_all().count() == 0
+
+    # Back on, but the site moves to another workspace mid-call: not written either.
+    await SiteAiSettingsDoc.get_pymongo_collection().update_one(
+        {"pocket_id": site.pocket_id}, {"$set": {"keep_transcripts": True}}
+    )
+
+    async def _move_then_answer(payload):
+        await Site.get_pymongo_collection().update_one(
+            {"_id": site.id}, {"$set": {"workspace": OTHER_WS}}
+        )
+        yield LlmEvent("text", text="hi")
+        yield LlmEvent("usage", input_tokens=3, output_tokens=1)
+
+    monkeypatch.setattr(llm, "stream", _move_then_answer)
+    async with client() as c:
+        await c.post(f"/api/v1/sites/{site.id}/ai/chat", json=body, headers=hdr)
+    assert await SiteAiTranscriptDoc.find_all().count() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_site_delete_leaves_the_workspace_wallet_counter(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.models.site_ai import SiteAiCounterDoc
+    from pocketpaw_ee.site_ai import budget
+    from pocketpaw_ee.site_ai.service import purge_for_pocket
+
+    pid = await make_pocket()
+    await budget.reserve(
+        run_id="w",
+        workspace_id=WS,
+        pocket_id=pid,
+        site_id="s",
+        caller="worker",
+        model="fast",
+        amount=10,
+        caps=[budget.Cap("wallet", "inflight", 10**9, budget.wallet_key(WS))],
+    )
+    await purge_for_pocket(workspace_id=WS, pocket_id=pid)
+    assert await SiteAiCounterDoc.find_one(SiteAiCounterDoc.key == budget.wallet_key(WS))

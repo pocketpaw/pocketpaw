@@ -6407,7 +6407,8 @@ site, an empty wallet or a spent budget is a 402.
 
 **Transfer and delete.** A site transfer moves its AI settings, presets and budget
 to the new workspace (new calls bill the new owner), releases holds in flight and
-deletes transcripts; usage rows stay with the workspace that paid for them. A site
+deletes transcripts; usage rows stay with the workspace that paid for them, and the
+spend counters are keyed by the site, so a transfer never resets its caps. A site
 delete removes every site AI row; the credit ledger keeps its debits.
 
 ## Deleting a site

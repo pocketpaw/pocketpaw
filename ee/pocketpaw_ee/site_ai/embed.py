@@ -5,8 +5,9 @@
 # and gates as ``/ai/chat`` (chat.py): the Worker token, or a browser / own-draft
 # caller with browser access and a live ticket. ``model`` defaults to ``embed`` and
 # may only be ``embed``; the plan must sell it (``_SITE_PLAN_AI_MODELS``).
-# Limits: 64 inputs, 8,000 chars each, 1 MB body. The worst case (pessimistic token
-# estimate) is reserved against the same caps, settled to the provider's count.
+# Limits: 64 inputs, 8,000 chars each, 1 MB body. The worst case (UTF-8 bytes, an
+# upper bound on tokens) is reserved against the same caps and settled to the
+# provider's count; a request that left but failed bills its input estimate.
 # JSON only: a paused site, an empty wallet or a spent budget is a 402.
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ async def _admit(request: Request, site_id: str) -> tuple[chat.Admitted, list[st
     provider_model = aliases.provider_model("embed")
     if not provider_model:
         raise AiError("provider_unavailable")
-    estimate = sum((len(t.encode("utf-8")) + 1) // 2 for t in inputs)
+    estimate = sum(len(t.encode("utf-8")) for t in inputs)  # bytes >= tokens
     call = chat.Admitted(
         site=site,
         workspace_id=site.workspace,
@@ -96,6 +97,7 @@ async def handle(request: Request, site_id: str) -> Response:
     except AiError as exc:
         return error_response(exc)
     try:
+        await chat._send(call)
         vectors, tokens = await llm.embed(
             provider_model=call.provider_model,
             inputs=inputs,
@@ -105,7 +107,10 @@ async def handle(request: Request, site_id: str) -> Response:
     except Exception as exc:  # noqa: BLE001 - classified, never echoed
         kind = exc.kind if isinstance(exc, llm.LlmError) else type(exc).__name__
         logger.warning("site_ai: embed run %s failed (%s)", call.run_id, kind)
-        await chat.record(call, "failed", 0, 0)
+        if chat._unsent(exc):
+            call.sent -= 1
+        # A request that left costs its input, answered or not.
+        await chat.record(call, "failed", chat._floor_in(call), 0)
         return error_response(AiError("provider_unavailable"))
     tokens = tokens or call.input_estimate
     micro = await chat.record(call, "completed", tokens, 0)

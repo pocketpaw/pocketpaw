@@ -383,16 +383,17 @@ async def record(
         await alerts.check(call.site, call.workspace_id, call.pocket_id)
     if call.keep_transcript and (input_tokens or output_tokens) and call.kind == "chat":
         try:
-            await service.write_transcript(
-                workspace_id=call.workspace_id,
-                pocket_id=call.pocket_id,
-                run_id=call.run_id,
-                caller=call.caller,
-                model=call.alias,
-                messages=call.messages,
-                output=output,
-                tool_calls=tool_calls or [],
-            )
+            if await _still_keeps_transcripts(call):
+                await service.write_transcript(
+                    workspace_id=call.workspace_id,
+                    pocket_id=call.pocket_id,
+                    run_id=call.run_id,
+                    caller=call.caller,
+                    model=call.alias,
+                    messages=call.messages,
+                    output=output,
+                    tool_calls=tool_calls or [],
+                )
         except Exception:  # noqa: BLE001 - a transcript never breaks the answer
             logger.warning("site_ai: transcript failed for run %s", call.run_id, exc_info=True)
     logger.info(
@@ -407,6 +408,17 @@ async def record(
         micro,
     )
     return micro
+
+
+async def _still_keeps_transcripts(call: Admitted) -> bool:
+    """Re-read at write time: the owner may have turned transcripts off, or the site
+    may have moved to another workspace, while the call ran."""
+    from pocketpaw_ee.cloud.models.site import Site
+
+    site = await Site.get(call.site.id)
+    if site is None or site.workspace != call.workspace_id:
+        return False
+    return (await service.load_settings(call.workspace_id, call.pocket_id)).keep_transcripts
 
 
 async def _debit_direct(call: Admitted, micro: int) -> None:
