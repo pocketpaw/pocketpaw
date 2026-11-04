@@ -157,10 +157,11 @@
   {
     "label": "reads are not capped",
     "file": "ee/pocketpaw_ee/sites/site_data/console.py",
-    "find": "    sql = f\"SELECT * FROM ({body}) LIMIT {ROW_CAP + 1}\" if stmt.wrap else body",
+    "find": "    sql = f\"SELECT * FROM ({body}) LIMIT {int(row_cap) + 1}\" if stmt.wrap else body",
     "replace": "    sql = body",
     "tests": [
-      "tests/ee/sites/test_site_data_console.py::test_read_caps_at_500_and_flags_truncation"
+      "tests/ee/sites/test_site_data_console.py::test_read_caps_at_500_and_flags_truncation",
+      "tests/ee/sites/test_dashboard_sql.py::test_row_caps"
     ]
   },
   {
