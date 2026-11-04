@@ -45,7 +45,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.integrations import site_gate
-from pocketpaw_ee.site_ai import alerts, aliases, llm, service, tickets, validate
+from pocketpaw_ee.site_ai import alerts, aliases, llm, service, tickets, validate, visitor
 from pocketpaw_ee.site_ai import budget as budget_mod
 from pocketpaw_ee.site_ai.errors import AiError, error_response, invalid
 
@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 WORKER_SITE_PER_MIN = 600
 USER_PER_MIN = 60
 BROWSER_IP_PER_MIN = 20
+MAX_BROWSER_ASSISTANT_TURNS = 20
 BROWSER_SITE_PER_MIN = 300
 TICKET_IP_PER_MIN = 10
 
@@ -129,9 +130,7 @@ def sse(event: str, data: dict[str, Any]) -> bytes:
 
 
 async def authenticate(request: Request, site_id: str) -> tuple[Any, str]:
-    from pocketpaw_ee.cloud._core.rate_limit import client_ip
-
-    ip = client_ip(request)
+    ip = visitor.bucket(visitor.client_address(request))
     if not _ip_limiter.check(f"site-ai:{ip}").allowed:
         raise AiError("rate_limited", retry_after=_retry_after())
     try:
@@ -153,9 +152,7 @@ def admit_browser(
     need ``browser_access`` (-> unavailable ``browser_disabled``), every non-Worker
     call needs a live ticket of its own kind from this address (-> 401), and a
     site that requires presets refuses a call without one (-> 403)."""
-    from pocketpaw_ee.cloud._core.rate_limit import client_ip
-
-    ip_hash = site_gate.rate_key(client_ip(request))
+    ip_hash = visitor.visitor_key(request)
     if caller == "worker":
         return ip_hash
     if caller == "browser" and not settings.browser_access:
@@ -167,10 +164,18 @@ def admit_browser(
 
 
 def _apply_preset(parsed: validate.ParsedChat, preset: Any, caller: str) -> list[dict]:
+    """The preset's system prompt first. For a browser (or preview) caller the preset
+    is the owner's lock, so the browser's own system messages, tools, tool choice
+    and response format are dropped (presets declare none), and its history may
+    carry at most ``MAX_BROWSER_ASSISTANT_TURNS`` assistant turns: a fabricated
+    history can still argue with the prompt, which is why the lock is soft and
+    Worker-side calls stay the default for anything secret."""
     messages = parsed.messages
     if caller != "worker":
-        # A browser caller never overrides the preset's system prompt.
         messages = [m for m in messages if m["role"] != "system"]
+        if sum(m["role"] == "assistant" for m in messages) > MAX_BROWSER_ASSISTANT_TURNS:
+            raise invalid("messages", "Too many assistant turns for a browser call.")
+        parsed.tools, parsed.tool_choice, parsed.response_format = [], None, None
     if preset.system_prompt:
         messages = [{"role": "system", "content": preset.system_prompt}, *messages]
     return messages
@@ -644,8 +649,6 @@ async def handle(request: Request, site_id: str) -> Response:
 
 async def handle_ticket(request: Request, site_id: str) -> Response:
     """POST /sites/{site_id}/ai/ticket: Turnstile in, visitor ticket out."""
-    from pocketpaw_ee.cloud._core.rate_limit import client_ip
-
     try:
         site, caller = await authenticate(request, site_id)
         if caller == "worker":
@@ -654,8 +657,8 @@ async def handle_ticket(request: Request, site_id: str) -> Response:
         if caller == "browser" and not settings.browser_access:
             raise AiError("browser_disabled")
         body = validate.load_json(await validate.read_body(request, limit=8 * 1024))
-        ip = client_ip(request)
-        ip_hash = site_gate.rate_key(ip)
+        ip = visitor.client_address(request)
+        ip_hash = visitor.visitor_key(request)
         key = f"{site.workspace}:{site.pocket_id}:{ip_hash}"
         if await site_gate.bump("ai_ticket", key) > TICKET_IP_PER_MIN:
             raise AiError("rate_limited", retry_after=_retry_after())

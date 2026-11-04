@@ -9,10 +9,11 @@
 # site) and an expiry ~20 minutes out. The IP hash is never in the ticket: it is
 # recomputed from the request, so a ticket used from another address fails.
 #
-# Turnstile (browser tickets), fail closed: the site's own widget when it has one
-# (its secret, and the answer's hostname must be one of the site's hosts), else the
-# platform secret. With neither configured the ticket is refused in production;
-# only a non-production deployment with no Turnstile anywhere mints without it.
+# Turnstile (browser tickets), fail closed: the site's own widget when it has one,
+# else the platform secret; either way the answer's hostname must be one of the
+# site's own hosts. With neither configured the ticket is refused, unless the
+# dev-only ``PAW_SITE_AI_ALLOW_NO_TURNSTILE=1`` is set on a non-production box
+# (the flag is ignored, and logged, in production).
 # Preview tickets (the site's own unguessable draft origin) skip Turnstile.
 #
 # Secret: ``POCKETPAW_SITE_AI_TICKET_SECRET``, else derived from ``AUTH_SECRET``.
@@ -23,6 +24,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 import time
@@ -30,6 +32,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pocketpaw_ee.site_ai.errors import AiError
+
+logger = logging.getLogger(__name__)
 
 TICKET_TTL_S = 20 * 60
 _SKEW_S = 60
@@ -91,12 +95,24 @@ async def check_turnstile(site: Any, token: Any, ip: str) -> None:
             await site_gate.verify_turnstile(token, ip, widget)
             return
         if site_gate.turnstile_configured():
-            await site_gate.verify_turnstile(token, ip)
+            from pocketpaw_ee.cloud.leads.intake import derived_origins
+
+            secret = str(_platform_secret() or "")
+            await site_gate.verify_turnstile(token, ip, (secret, derived_origins(site)))
             return
     except site_gate.SiteGateError:
         raise AiError("turnstile_required") from None
-    if _is_production():
-        raise AiError("turnstile_required", "Browser AI needs Turnstile set up for this site.")
+    if os.environ.get("PAW_SITE_AI_ALLOW_NO_TURNSTILE", "").strip() == "1":
+        if not _is_production():
+            return
+        logger.error("site_ai: PAW_SITE_AI_ALLOW_NO_TURNSTILE is set in production; ignored")
+    raise AiError("turnstile_required", "Browser AI needs Turnstile set up for this site.")
+
+
+def _platform_secret() -> str | None:
+    from pocketpaw.config import get_settings
+
+    return get_settings().turnstile_secret
 
 
 __all__ = ["TICKET_TTL_S", "check_turnstile", "mint", "verify"]
