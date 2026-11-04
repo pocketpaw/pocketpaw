@@ -318,7 +318,11 @@ from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
 from pocketpaw_ee.cloud.models.ship import ShipApp, ShipBox, ShipDeploy
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
-from pocketpaw_ee.cloud.models.site_dashboard import SiteDashboard, SiteDashboardRevision
+from pocketpaw_ee.cloud.models.site_dashboard import (
+    SiteDashboard,
+    SiteDashboardJob,
+    SiteDashboardRevision,
+)
 from pocketpaw_ee.cloud.models.site_design_brief import SiteDesignBrief
 from pocketpaw_ee.cloud.models.site_do_teardown import SiteDoTeardown
 from pocketpaw_ee.cloud.models.site_draft_worker import SiteDraftWorker
@@ -719,10 +723,11 @@ def get_all_documents():
         # A renamed site's old address, 301ing to its current one until the hold
         # ends. Only ``pocketpaw_ee.sites.slug_redirect`` reads/writes it.
         SiteRedirect,
-        # A site's AI dashboards and their revisions. Only
+        # A site's AI dashboards, their revisions and generation jobs. Only
         # ``pocketpaw_ee.sites.dashboard_service`` touches them.
         SiteDashboard,
         SiteDashboardRevision,
+        SiteDashboardJob,
         # Early-access launch switches (singleton) and the paused-signup waitlist.
         # Only ``ee.cloud.launch_controls`` and ``ee.cloud.early_access`` touch them.
         LaunchControlsDoc,

@@ -209,3 +209,36 @@ class RevisionOut(BaseModel):
 
 class RevisionsOut(BaseModel):
     revisions: list[RevisionOut]
+
+
+# --------------------------------------------------------------------------- generation
+
+GenerateMode = Literal["new", "suggest", "regenerate"]
+JobStatus = Literal["queued", "running", "done", "failed"]
+
+
+class GenerateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: GenerateMode = "new"
+    dashboard_id: str | None = Field(default=None, max_length=64)
+    include_stats: bool = False
+    focus: str | None = Field(default=None, max_length=500)
+
+
+class GenerateOut(BaseModel):
+    job_id: str
+
+
+class DroppedWidget(BaseModel):
+    title: str
+    reason: str
+
+
+class JobOut(BaseModel):
+    status: JobStatus
+    stage: str | None
+    dashboard_id: str | None
+    proposal: list[dict[str, Any]] | None  # WidgetOp[] for suggest / regenerate
+    dropped: list[DroppedWidget]
+    error: str | None

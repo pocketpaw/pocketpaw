@@ -13,6 +13,8 @@
 #     which the health check compares against to report drift and new tables.
 #   * ``SiteDashboardRevision`` holds the state BEFORE each save (the last 20 per
 #     dashboard), so any save can be undone by restoring the version before it.
+#   * ``SiteDashboardJob`` is one generation run's status and result, readable from any
+#     worker; Mongo drops it a day after it was created.
 from __future__ import annotations
 
 from datetime import datetime
@@ -68,4 +70,28 @@ class SiteDashboardRevision(Document):
         ]
 
 
-__all__ = ["SiteDashboard", "SiteDashboardRevision"]
+class SiteDashboardJob(Document):
+    """One generation (or suggestion) run. Expires a day after it was created."""
+
+    workspace_id: str
+    site_pocket_id: str
+    mode: str  # new | suggest | regenerate
+    dashboard_id: str | None = None
+    status: str = "queued"  # queued | running | done | failed
+    stage: str | None = None
+    proposal: list[dict[str, Any]] | None = None
+    dropped: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime
+
+    class Settings:
+        name = "site_dashboard_jobs"
+        indexes = [
+            IndexModel([("expires_at", 1)], expireAfterSeconds=0, name="dashboard_job_expiry"),
+        ]
+
+
+__all__ = ["SiteDashboard", "SiteDashboardJob", "SiteDashboardRevision"]
