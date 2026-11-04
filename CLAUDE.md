@@ -771,11 +771,6 @@ uv run python scripts/mutate.py --plan tests/mutations/<area>.json
 A plan is a JSON list of `{label, file, find, replace, tests}`. The script applies
 each mutation, runs the tests, restores the file, and exits non-zero if any
 mutation **escaped** (tests still passed).
-`tests` must be a non-empty list of non-blank target strings, even for one test.
-Before mutating, the script requires a passing baseline for each distinct target
-list. Only pytest exit code 1 counts as caught; other non-zero exits abort with
-the mutation label and pytest output. `--validate` checks target-list shape and
-anchors without collecting or running tests.
 
 **Why:** a passing test means the code and the test agree, which is also true when
 both are wrong. That is not hypothetical here — `updatedAt` never updated and
