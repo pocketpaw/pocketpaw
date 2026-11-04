@@ -36,7 +36,9 @@ _PII = re.compile(
     r"|ip_?addr|^ip$|_ip$|user_?agent|device_?id"
     r"|latitude|longitude|^lat$|^lng$|^lon$|geo_?loc|coordinates"
     r"|first_?name|last_?name|full_?name|given_?name|family_?name|sur_?name|middle_?name"
-    r"|maiden_?name|legal_?name|contact_?name|customer_?name|billing_?name|shipping_?name"
+    r"|(?:maiden|legal|contact|customer|billing|shipping|author|owner|guest|sender|recipient"
+    r"|buyer|seller|client|patient|member|parent|student|employee|staff|attendee|visitor|lead"
+    r"|reviewer|commenter|submitter|requester|applicant|candidate|user|nick|real|person)_?name"
     r"|gender|ethnicity|religion|health|diagnos|medical|salary"
 )
 _PERSON_NAMES = frozenset({"name", "display_name", "username", "user_name", "nickname", "handle"})

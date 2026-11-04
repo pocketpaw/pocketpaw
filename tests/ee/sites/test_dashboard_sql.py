@@ -640,6 +640,8 @@ async def test_adversarial_statements_never_run(db, sql):
         ("bookings", "name"),
         ("contact_submissions", "name"),
         ("auth_user", "display_name"),
+        ("comments", "author_name"),
+        ("messages", "senderName"),
     ],
 )
 def test_pii_names(table, column):

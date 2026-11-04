@@ -455,22 +455,8 @@ async def list_dashboards(
     )
 
 
-@busy_as_rate_limited
-async def create_dashboard(
-    *,
-    workspace_id: str,
-    user_id: str,
-    pocket_id: str,
-    name: str,
-    widgets: list[dict[str, Any]] | None = None,
-    generated: dict[str, Any] | None = None,
-    schema: d1.Schema | None = None,
-    _cloudflare: Any | None = None,
-) -> SiteDashboard:
-    """A new dashboard (blank unless the generator hands it ``widgets``)."""
-    target = await manage_target(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
-    )
+async def check_room(workspace_id: str, pocket_id: str) -> None:
+    """409 ``sites.dashboard_limit`` when the site already has the most dashboards."""
     count = await SiteDashboard.find(
         {"workspace_id": workspace_id, "site_pocket_id": pocket_id}
     ).count()
@@ -478,17 +464,28 @@ async def create_dashboard(
         raise ConflictError(
             "sites.dashboard_limit", f"A site can have up to {MAX_DASHBOARDS} dashboards."
         )
-    if schema is None and not target.reason:
-        schema = await d1.introspect(client(target, _cloudflare), target.d1_id)
+
+
+async def insert_dashboard(
+    target: data_service.DataTarget,
+    user_id: str,
+    name: str,
+    *,
+    widgets: list[dict[str, Any]] | None = None,
+    generated: dict[str, Any] | None = None,
+    schema: d1.Schema | None = None,
+) -> SiteDashboard:
+    """Store a new dashboard (the caller checked access and room) and audit it."""
     now = _now()
     doc = SiteDashboard(
-        workspace_id=workspace_id,
-        site_pocket_id=pocket_id,
+        workspace_id=target.workspace_id,
+        site_pocket_id=target.pocket_id,
         name=name.strip() or "Dashboard",
         widgets=widgets or [],
         schema_fingerprint=schema.fingerprint if schema else "",
         known_tables=sorted(schema.tables) if schema else [],
         generated=generated,
+        reason="generate" if generated else "create",
         created_by=user_id,
         updated_by=user_id,
         created_at=now,
@@ -522,6 +519,27 @@ async def keep_within_cap(doc: SiteDashboard) -> None:
         raise ConflictError(
             "sites.dashboard_limit", f"A site can have up to {MAX_DASHBOARDS} dashboards."
         )
+
+
+@busy_as_rate_limited
+async def create_dashboard(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    name: str,
+    widgets: list[dict[str, Any]] | None = None,
+    _cloudflare: Any | None = None,
+) -> SiteDashboard:
+    """A new dashboard (blank unless given ``widgets``)."""
+    target = await manage_target(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
+    )
+    await check_room(workspace_id, pocket_id)
+    schema = None
+    if not target.reason:
+        schema = await d1.introspect(client(target, _cloudflare), target.d1_id)
+    return await insert_dashboard(target, user_id, name, widgets=widgets, schema=schema)
 
 
 async def get_dashboard(
