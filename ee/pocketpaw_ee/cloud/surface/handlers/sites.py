@@ -459,12 +459,12 @@ def _craft_system(scope: str = "full") -> str:
 # saying "read-only" and "only when the user asks" or a create turn reads it as a
 # licence to critique instead of build.
 #
-# `sites-reference-build` is the one entry whose trigger is an INPUT, not a phase:
+# `sites-reference-match` is the one entry whose trigger is an INPUT, not a phase:
 # it fires only when the user hands over a design to match (a screenshot or mockup
 # today, a Figma frame later). Its trigger text must keep saying "ONLY" and "Never
 # for an open brief", or a create turn loads 10 KB of reconstruction method for a
 # brief that has nothing to reconstruct.
-REFERENCE_BUILD_SKILL = "sites-reference-build"
+REFERENCE_BUILD_SKILL = "sites-reference-match"
 
 _SITES_DESIGN_SKILLS: tuple[tuple[str, str, str], ...] = (
     (

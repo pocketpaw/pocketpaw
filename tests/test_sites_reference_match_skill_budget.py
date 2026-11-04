@@ -1,9 +1,9 @@
-# tests/test_sites_reference_build_skill_budget.py — bounds the byte size of the
-# sites-reference-build skill (build a site TO a supplied design) and pins the
+# tests/test_sites_reference_match_skill_budget.py — bounds the byte size of the
+# sites-reference-match skill (build a site TO a supplied design) and pins the
 # contract it shares with design-taste, sites-check and sites-craft: the four
 # verdicts, the seven responsive transforms, the precedence sentence and the
 # SC-REF ids. Mutations live in tests/mutations/skill_budget.json.
-"""``sites-reference-build/SKILL.md`` stays under a stated byte ceiling.
+"""``sites-reference-match/SKILL.md`` stays under a stated byte ceiling.
 
 WHY IT IS MEASURED. The /sites preamble names this skill in ``<design-skills>``
 on create and refine with an input trigger: it loads only when the user hands
@@ -29,7 +29,7 @@ import pytest
 
 from pocketpaw.bundled_skills.installer import bundled_skills_plugin_dir
 
-# The ceiling, in bytes, for the sites-reference-build skill.
+# The ceiling, in bytes, for the sites-reference-match skill.
 SITES_REFERENCE_BUILD_MAX_BYTES = 10_240
 
 # A read that returns far less than this is a broken path, not a lean skill.
@@ -52,7 +52,7 @@ def _skills_dir() -> Path:
 def _reference_build_skill() -> Path:
     """Resolve the skill file through the accessor the SHIPPING code uses."""
 
-    return _skills_dir() / "sites-reference-build" / "SKILL.md"
+    return _skills_dir() / "sites-reference-match" / "SKILL.md"
 
 
 def _skill_bytes(path: Path) -> int:
@@ -65,14 +65,14 @@ def test_the_fixture_reads_the_real_shipped_skill() -> None:
     """MUTATION: point ``_reference_build_skill`` at a name that does not exist."""
 
     path = _reference_build_skill()
-    assert path.is_file(), f"sites-reference-build SKILL.md not found at {path}"
+    assert path.is_file(), f"sites-reference-match SKILL.md not found at {path}"
     size = path.stat().st_size
     assert size > _IMPLAUSIBLY_SMALL, (
         f"{path} is only {size} bytes. That is a broken read, not a lean skill."
     )
 
 
-def test_sites_reference_build_skill_stays_under_its_ceiling() -> None:
+def test_sites_reference_match_skill_stays_under_its_ceiling() -> None:
     """MUTATION: append ~2,000 bytes of plausible guidance to SKILL.md."""
 
     path = _reference_build_skill()
@@ -130,7 +130,7 @@ def test_the_sibling_skills_carry_their_share() -> None:
     skills = _skills_dir()
     taste = (skills / "pocketpaw-design-taste" / "SKILL.md").read_text(encoding="utf-8")
     assert "A supplied design" in taste and "outranks taste" in taste
-    assert "`sites-reference-build`" in taste
+    assert "`sites-reference-match`" in taste
 
     check = (skills / "sites-check" / "SKILL.md").read_text(encoding="utf-8")
     for rule in ("SC-REF-01", "SC-REF-02", "SC-REF-03"):

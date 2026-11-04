@@ -43,7 +43,7 @@ verified external catalog in the workspace design doc
 | github.com/JCarterJohnson/vibecoded-design-tells | MIT | The "cleared by the data" list (Severity and strength) |
 | github.com/MengTo/Skills, web-design | MIT | Logo-row rules (SC-LAYOUT-14) |
 | FTC rule on fake reviews and testimonials (2024), ftc.gov | public domain | Why an invented testimonial is a legal problem (SC-HONEST-01) |
-| github.com/Atharvsinh-codez/skills (Atharv Jadav), `design-to-code` | MIT | The correction order, the two-pass minimum and the four verdicts for builds against a supplied design (SC-REF-01 to 03); the full method is `sites-reference-build` |
+| github.com/Atharvsinh-codez/skills (Atharv Jadav), `design-to-code` | MIT | The correction order, the two-pass minimum and the four verdicts for builds against a supplied design (SC-REF-01 to 03); the full method is `sites-reference-match` |
 | Blogs (scanaislop, Admin Bar, ContentBeta, Superdesign) | unlicensed, paraphrase only | Local-business brochure words, builder provenance (SC-COPY-14, SC-BUILD-12) |
 
 Catalog gaps placed here without a single external source: performative section
