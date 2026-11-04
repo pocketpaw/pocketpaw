@@ -11,7 +11,8 @@
 #
 # ``stats`` (opt-in) adds aggregates over a 10k-row sample per table: null share and
 # distinct count for every summarized column, min / max for number and time columns
-# only. Text values are never sent, so visitor-written rows can't reach the prompt.
+# only (a time column's string only when it parses as an ISO date). Repair prompts get
+# D1 errors with quoted spans removed (``scrub_error``). No visitor text is sent.
 #
 # The model call goes through our own LiteLLM gateway (OpenAI-compatible
 # ``/v1/chat/completions``) with one forced tool: ``propose_widgets`` (widget JSON,
@@ -26,6 +27,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -47,6 +49,30 @@ STATS_SAMPLE = 10_000
 TIMEOUT_S = 60.0
 _UNSAFE = re.compile(r"[\x00-\x1f\x7f<>`]")
 _NUMERIC = frozenset({"integer", "real", "datetime", "date"})
+
+
+_ISO_TIME = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$"
+)
+
+
+def is_iso_time(text: str) -> bool:
+    """Whether ``text`` is an ISO date / datetime and nothing else."""
+    if not _ISO_TIME.match(text):
+        return False
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00").replace(" ", "T"))
+    except ValueError:
+        return False
+    return True
+
+
+def scrub_error(text: str) -> str:
+    """A D1 error with every quoted span removed, so a value it echoes (``bad JSON
+    path: 'alice@x.com'``) never reaches the model."""
+    out = re.sub(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"", "\x00", str(text or ""))
+    out = re.sub(r"['\"].*$", "\x00", out)  # a quote never closed: drop the rest
+    return out.replace("\x00", "'…'")[:300]
 
 
 def safe_name(name: str) -> bool:
@@ -171,8 +197,8 @@ def read_stats(
                 v = row.get(f"c{i}_{k}")
                 if isinstance(v, int | float) and not isinstance(v, bool):
                     entry[k] = d1.json_safe(v)
-                elif isinstance(v, str) and len(v) <= 40 and _kind(c) in ("datetime", "date"):
-                    entry[k] = v
+                elif isinstance(v, str) and _kind(c) in ("datetime", "date") and is_iso_time(v):
+                    entry[k] = v  # a date, never free text a visitor typed
             per[c.name] = entry
         out[t.name] = per
     return out
