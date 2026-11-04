@@ -464,11 +464,10 @@ def test_chart_series():
         "chart", WidgetMapping(label_col="day", series_cols=["paid", "refunded"]), _COLS, _ROWS
     )
     assert not lossy
-    assert data[:2] == [
-        {"label": "2026-10-01", "value": 3, "series": "paid"},
-        {"label": "2026-10-01", "value": 1, "series": "refunded"},
+    assert data == [
+        {"label": "2026-10-01", "series": {"paid": 3, "refunded": 1}},
+        {"label": "2026-10-02", "series": {"paid": 5, "refunded": 0}},
     ]
-    assert len(data) == 4
 
 
 def test_chart_defaults_to_first_two_columns():
