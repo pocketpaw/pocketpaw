@@ -6338,8 +6338,7 @@ per-user rate limit; LiteLLM's `user` is always the paying workspace.
 - A preset's system prompt, model, output cap and temperature win over the request.
 - Limits: 400 KB body, 200 messages, 64 tools, 8 images (vision alias only, user
   messages only; `data:` URLs must be png/jpeg/gif/webp and match their magic
-  bytes, up to 5 MB; remote URLs must be https and not name a private or loopback
-  host), input within the alias context, output clamped to the alias/preset cap.
+  bytes, up to 5 MB; remote image URLs are refused, since the provider would fetch them), input within the alias context, output clamped to the alias/preset cap.
 - A transient provider failure before the first token is retried once. Before any
   output a failure streams `unavailable {reason: "temporary"}` (or `error
   {code: "invalid_request"}` when the provider refused the request); mid-stream it

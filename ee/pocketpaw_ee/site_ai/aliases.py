@@ -31,12 +31,12 @@ class AliasSpec:
 
 
 ALIASES: dict[str, AliasSpec] = {
-    "fast": AliasSpec("fast", "site_ai_model_fast", 4_096, 32_000, False, Decimal(1), Decimal(5)),
+    "fast": AliasSpec("fast", "site_ai_model_fast", 4_096, 150_000, False, Decimal(1), Decimal(5)),
     "smart": AliasSpec(
-        "smart", "site_ai_model_smart", 8_192, 64_000, False, Decimal(3), Decimal(15)
+        "smart", "site_ai_model_smart", 8_192, 150_000, False, Decimal(3), Decimal(15)
     ),
     "vision": AliasSpec(
-        "vision", "site_ai_model_vision", 4_096, 32_000, True, Decimal(1), Decimal(5)
+        "vision", "site_ai_model_vision", 4_096, 150_000, True, Decimal(1), Decimal(5)
     ),
     "embed": AliasSpec("embed", "site_ai_model_embed", 0, 8_192, False, Decimal("0.2"), Decimal(0)),
 }

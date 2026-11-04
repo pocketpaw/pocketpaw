@@ -8,22 +8,23 @@
 #   * <= 200 messages, <= 64 tools, <= 8 images, input tokens <= the alias context
 #   * images only on vision aliases, in user messages. ``data:`` URLs must be
 #     png/jpeg/gif/webp, are decoded strictly, re-checked by magic bytes against
-#     the declared type, capped at 5 MB and re-encoded. Remote URLs must be https,
-#     carry no credentials and not name localhost or a private/loopback/link-local
-#     IP literal; we never fetch them (the provider does).
-# ``estimate_tokens`` is deliberately pessimistic (UTF-8 bytes / 2 for text, a flat
-# figure per image): it sizes the budget hold and the context check.
+#     the declared type, capped at 5 MB and re-encoded. Remote image URLs are
+#     refused: LiteLLM would fetch them itself (following redirects), which is an
+#     SSRF path from a visitor's request into our network. Callers inline images.
+# ``estimate_tokens`` is an upper bound on input tokens: UTF-8 bytes of the text
+# (no tokenizer yields more tokens than bytes), plus fixed overheads per message,
+# per tool and for a response schema, and ``IMAGE_TOKENS`` per image (above any
+# supported provider's per-image maximum). It sizes both the budget hold and the
+# context check.
 
 from __future__ import annotations
 
 import base64
 import binascii
-import ipaddress
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
 
 from fastapi import Request
 
@@ -35,18 +36,15 @@ MAX_MESSAGES = 200
 MAX_TOOLS = 64
 MAX_IMAGES = 8
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
-MAX_URL_CHARS = 2048
 MAX_USER_CHARS = 256
-IMAGE_TOKENS = 2_000
-MESSAGE_OVERHEAD_TOKENS = 8
+IMAGE_TOKENS = 6_000
+MESSAGE_OVERHEAD_TOKENS = 16
+TOOL_OVERHEAD_TOKENS = 64
+SCHEMA_OVERHEAD_TOKENS = 64
 
 ROLES = ("system", "user", "assistant", "tool")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _DATA_URL_RE = re.compile(r"^data:(image/(?:png|jpeg|gif|webp));base64,(.*)$", re.DOTALL)
-_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".lan", ".home.arpa")
-# A host made only of numeric or hex labels (``0x7f.1``, ``127.1``) is an IP in a
-# form ``ipaddress`` won't parse but HTTP clients will.
-_NUMERIC_LABEL_RE = re.compile(r"^(0x[0-9a-f]*|[0-9]+)$")
 
 
 async def read_body(request: Request, limit: int = MAX_BODY_BYTES) -> bytes:
@@ -103,29 +101,6 @@ def _sniff(raw: bytes) -> str | None:
     return None
 
 
-def _host_blocked(host: str) -> bool:
-    host = host.strip("[]").rstrip(".").lower()
-    if not host or host == "localhost" or host.endswith(_BLOCKED_HOST_SUFFIXES):
-        return True
-    if all(_NUMERIC_LABEL_RE.match(label) for label in host.split(".")):
-        return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return "." not in host  # a bare intranet name
-    mapped = getattr(ip, "ipv4_mapped", None)
-    if mapped is not None:
-        ip = mapped
-    return (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
-
-
 def check_image_url(url: Any, where: str) -> str:
     if not isinstance(url, str) or not url:
         raise invalid(where, "An image needs a URL.")
@@ -145,21 +120,7 @@ def check_image_url(url: Any, where: str) -> str:
         return f"data:{declared};base64,{base64.b64encode(raw).decode('ascii')}"
     if url.startswith("data:"):
         raise invalid(where, "Only png, jpeg, gif or webp images are accepted.")
-    if len(url) > MAX_URL_CHARS:
-        raise invalid(where, "An image URL is too long.")
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname or ""
-        _ = parts.port  # raises on a malformed port
-    except ValueError:
-        raise invalid(where, "An image URL isn't valid.") from None
-    if parts.scheme != "https" or not host:
-        raise invalid(where, "Image URLs must use https.")
-    if parts.username or parts.password:
-        raise invalid(where, "Image URLs can't carry credentials.")
-    if _host_blocked(host):
-        raise invalid(where, "That image host isn't allowed.")
-    return url
+    raise invalid(where, "Send images inline as data: URLs; remote image URLs aren't fetched.")
 
 
 # ------------------------------------------------------------------ messages
@@ -382,7 +343,7 @@ def parse_chat(body: dict[str, Any]) -> ParsedChat:
 
 
 def _text_tokens(text: str) -> int:
-    return (len(text.encode("utf-8")) + 1) // 2
+    return len(text.encode("utf-8"))
 
 
 def estimate_tokens(
@@ -404,10 +365,12 @@ def estimate_tokens(
                     total += IMAGE_TOKENS
         for call in msg.get("tool_calls") or ():
             total += _text_tokens(json.dumps(call, separators=(",", ":")))
-    if tools:
-        total += _text_tokens(json.dumps(tools, separators=(",", ":")))
+    for tool in tools or ():
+        total += TOOL_OVERHEAD_TOKENS + _text_tokens(json.dumps(tool, separators=(",", ":")))
     if response_format:
-        total += _text_tokens(json.dumps(response_format, separators=(",", ":")))
+        total += SCHEMA_OVERHEAD_TOKENS + _text_tokens(
+            json.dumps(response_format, separators=(",", ":"))
+        )
     return total
 
 
