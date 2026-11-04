@@ -87,8 +87,8 @@
   {
     "label": "the project tools drop off the /sites allow-list",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites.py",
-    "find": "    *SITES_PROJECT_TOOL_IDS,\n)",
-    "replace": ")",
+    "find": "    *SITES_PROJECT_TOOL_IDS,\n    # Site AI apps",
+    "replace": "    # Site AI apps",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_project_site_tools.py::TestRegistration"
     ]
