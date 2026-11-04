@@ -14,8 +14,16 @@
 #            spend is added on its own so nothing is lost.
 #   release  held -> released, counters give the whole hold back (an error before
 #            any output costs nothing).
-#   sweep    ``sweep_expired_holds`` releases holds whose call died (crash, kill)
-#            after ``HOLD_TTL``; registered in ``extensions._sweeps``.
+#   sweep    ``sweep_expired_holds`` ends holds whose call died (crash, kill) after
+#            ``HOLD_TTL``: a call that was SENT (``mark_sent``) settles to its full
+#            hold and is debited (the provider charged us); an unsent one releases.
+#            Registered in ``extensions._sweeps``.
+# Settle is unconditional (real spend can pass a cap); a counter past its cap then
+# refuses every new hold until the period rolls over.
+# The wallet hold: ``wallet_cap`` holds every call against the workspace balance
+# (plus ``WALLET_OVERDRAFT_MICRO``) on one workspace-wide in-flight counter, so
+# concurrent calls across sites can't push the wallet far below zero. That counter
+# is held only: settle and release both give the hold back, the debit is the spend.
 #
 # Counters (``SiteAiCounterDoc``) are keyed "{ws}:{pocket}:{scope}:{period}"; caps
 # per caller come from ``caps_for``. Wallet debits are separate (``bill_run``,
@@ -39,6 +47,8 @@ logger = logging.getLogger(__name__)
 # Long enough for the longest stream (8k tokens at a slow rate); a call that
 # outlives it still settles (see ``settle``), it just stops holding headroom.
 HOLD_TTL = timedelta(minutes=15)
+WALLET_OVERDRAFT_MICRO = 10 * 1_000_000
+_WALLET_SUFFIX = ":wallet:inflight"
 
 
 class BudgetRefused(Exception):
@@ -49,9 +59,10 @@ class BudgetRefused(Exception):
 
 @dataclass(frozen=True)
 class Cap:
-    scope: str  # day | month | preview | visitor:<hash> | user:<hash>
+    scope: str  # day | month | preview | visitor:<hash> | wallet
     period: str
     limit: int
+    key: str | None = None  # overrides the per-site key (the wallet counter)
 
 
 @dataclass
@@ -90,6 +101,30 @@ def caps_for(
 
 def _coll():
     return SiteAiCounterDoc.get_pymongo_collection()
+
+
+def wallet_key(workspace_id: str) -> str:
+    return f"{workspace_id}:*{_WALLET_SUFFIX}"
+
+
+async def wallet_cap(workspace_id: str) -> Cap | None:
+    """The workspace in-flight cap, when credits are enforced: holds may not exceed
+    the balance plus a small overdraft."""
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    if not (settings.billing_enforced or settings.credits_enforced):
+        return None
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    balance = await credits_service.balance_micro(workspace_id)
+    return Cap("wallet", "inflight", balance + WALLET_OVERDRAFT_MICRO, wallet_key(workspace_id))
+
+
+async def mark_sent(run_id: str) -> None:
+    await SiteAiCallDoc.get_pymongo_collection().update_one(
+        {"run_id": run_id, "sent_at": None}, {"$set": {"sent_at": datetime.now(UTC)}}
+    )
 
 
 async def _ensure_counter(key: str, workspace_id: str, pocket_id: str) -> None:
@@ -148,7 +183,7 @@ async def reserve(
     taken: list[str] = []
     calls = SiteAiCallDoc.get_pymongo_collection()
     for cap in caps:
-        key = service.counter_key(workspace_id, pocket_id, cap.scope, cap.period)
+        key = cap.key or service.counter_key(workspace_id, pocket_id, cap.scope, cap.period)
         await _ensure_counter(key, workspace_id, pocket_id)
         doc = await _coll().find_one_and_update(
             {"key": key, "committed_micro": {"$lte": cap.limit - amount}},
@@ -187,6 +222,12 @@ async def settle(hold: Hold, actual: int, input_tokens: int, output_tokens: int)
     )
     if moved is not None:
         for key in moved.get("counters") or []:
+            if key.endswith(_WALLET_SUFFIX):
+                await _coll().update_one(
+                    {"key": key},
+                    {"$inc": {"committed_micro": -hold.reserved, "held_micro": -hold.reserved}},
+                )
+                continue
             await _coll().update_one(
                 {"key": key},
                 {
@@ -215,6 +256,8 @@ async def settle(hold: Hold, actual: int, input_tokens: int, output_tokens: int)
     )
     if released is not None:
         for key in hold.counters:
+            if key.endswith(_WALLET_SUFFIX):
+                continue
             await _coll().update_one(
                 {"key": key},
                 {"$inc": {"committed_micro": actual, "spent_micro": actual, "calls": 1}},
@@ -240,21 +283,56 @@ async def release(hold: Hold) -> None:
     await _release_doc({"run_id": hold.run_id})
 
 
+async def _debit_dead_call(row: SiteAiCallDoc) -> None:
+    """Bill a sent call whose process died before it could: its full hold, keyed
+    ``run:{run_id}`` like every site AI debit. Skipped in LiteLLM ``live`` mode,
+    where the proxy's own spend ingest bills the call."""
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.llm_provisioning import service as provisioning_service
+
+    if provisioning_service.spend_mode() == "live" or row.reserved_micro <= 0:
+        return
+    await credits_service.debit(
+        workspace=row.workspace,
+        amount_micro=row.reserved_micro,
+        cause="compute_spend",
+        idempotency_key=f"run:{row.run_id}",
+        ref={
+            "run_id": row.run_id,
+            "kind": "site_ai",
+            "pocket_id": row.pocket_id,
+            "site_id": row.site_id,
+            "model": f"site-ai/{row.model}",
+            "cost_source": "site_ai_hold",
+        },
+        allow_negative=True,
+    )
+
+
 async def sweep_expired_holds(now: datetime | None = None, limit: int = 500) -> int:
-    """Release holds past their expiry (the call's process died). Returns how many."""
+    """End holds past their expiry (the call's process died). A sent call settles to
+    its full hold and is debited; an unsent one is released. Returns how many."""
     now = now or datetime.now(UTC)
     rows = (
         await SiteAiCallDoc.find({"state": "held", "expires_at": {"$lt": now}})
         .limit(limit)
         .to_list()
     )
-    released = 0
+    ended = 0
     for row in rows:
-        if await _release_doc({"run_id": row.run_id}):
-            released += 1
-    if released:
-        logger.info("site_ai: released %d expired hold(s)", released)
-    return released
+        if row.sent_at is None:
+            ended += int(await _release_doc({"run_id": row.run_id}))
+            continue
+        hold = Hold(row.run_id, row.workspace, row.pocket_id, row.reserved_micro, row.counters)
+        await settle(hold, row.reserved_micro, 0, 0)
+        try:
+            await _debit_dead_call(row)
+        except Exception:  # noqa: BLE001 - the next pass retries the same key
+            logger.warning("site_ai: dead-call debit failed for %s", row.run_id, exc_info=True)
+        ended += 1
+    if ended:
+        logger.info("site_ai: ended %d expired hold(s)", ended)
+    return ended
 
 
 __all__ = [
@@ -263,6 +341,9 @@ __all__ = [
     "Cap",
     "Hold",
     "caps_for",
+    "mark_sent",
+    "wallet_cap",
+    "wallet_key",
     "release",
     "reserve",
     "settle",

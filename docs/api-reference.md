@@ -6363,7 +6363,7 @@ per-visitor daily cap for a Worker call that sends `user`. Preview calls use onl
 the preview daily cap. A refused hold is `budget_exhausted`; both stream
 `unavailable {reason: "limit"}` (402 for JSON callers). After the call the hold
 settles to the provider-reported usage and the surplus is released; an error
-before any output releases it all. A sweeper releases holds whose call died.
+before any output releases it all only when the connection was refused; once a request has left it bills at least its input estimate (every attempt). A sweeper settles a dead call that was sent to its full hold and debits it, and releases one that was never sent. Settles are unconditional; a counter past its cap refuses new holds. With credits enforced, every call is also held on a workspace-wide in-flight counter against the wallet balance plus a 10-credit overdraft (`wallet_empty`). These counters are ours, so the caps hold in LiteLLM `live` spend mode too, where the proxy does the wallet billing.
 Crossing an alert threshold of the monthly cap notifies the workspace owner once
 per threshold per month (kind `site_ai_budget`) and emits `site.ai_budget` to the
 site owner.

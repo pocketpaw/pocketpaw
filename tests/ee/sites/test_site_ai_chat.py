@@ -400,8 +400,11 @@ async def test_retry_once_before_first_token_then_unavailable(beanie_test_db, mo
     assert parse_sse(refused.text) == [("unavailable", {"reason": "temporary"})]
     assert len(fake.payloads) == 2  # one each, no retry on a non-transient failure
     assert (plain.status_code, plain.json()["detail"]) == (503, "provider_unavailable")
-    # Failures before any output cost nothing and leave no billable run.
-    assert await ChatRunDoc.find(ChatRunDoc.status == "failed").count() == 0
+    # A request that left costs its input even with no output: every failed run
+    # bills at least the input estimate of each attempt that was sent.
+    failed = await ChatRunDoc.find(ChatRunDoc.status == "failed").to_list()
+    assert failed and all(r.usage["input_tokens"] > 0 for r in failed)
+    assert all(r.usage["output_tokens"] == 0 for r in failed)
 
 
 @pytest.mark.asyncio

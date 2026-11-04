@@ -107,6 +107,9 @@ class SiteAiCallDoc(Document):
     day: str = ""  # UTC "YYYY-MM-DD" the call is counted on
     created_at: datetime = Field(default_factory=_utcnow)
     expires_at: datetime = Field(default_factory=_utcnow)
+    # Set when the request was handed to the provider: from then on the call
+    # costs at least its input, so a dead hold settles instead of releasing.
+    sent_at: datetime | None = None
     settled_at: datetime | None = None
 
     class Settings:
@@ -122,7 +125,8 @@ class SiteAiCallDoc(Document):
 
 class SiteAiCounterDoc(Document):
     # ``key`` is "{workspace}:{pocket_id}:{scope}:{period}", scope one of day,
-    # month, visitor:<hash>, user:<hash>, preview.
+    # month, visitor:<hash>, preview; or "{workspace}:*:wallet:inflight", the
+    # workspace's in-flight holds (held only, never spent: the wallet is the spend).
     key: str
     workspace: str
     pocket_id: str

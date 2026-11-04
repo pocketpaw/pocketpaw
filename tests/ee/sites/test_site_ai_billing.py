@@ -241,8 +241,9 @@ async def test_worker_user_gets_the_per_visitor_cap(beanie_test_db, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_error_before_output_releases_the_hold(beanie_test_db, monkeypatch):
+async def test_an_error_after_the_request_left_bills_its_input(beanie_test_db, monkeypatch):
     from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc
+    from pocketpaw_ee.site_ai import aliases, validate
     from pocketpaw_ee.site_ai.llm import LlmError
 
     site, token = await _setup()
@@ -250,7 +251,37 @@ async def test_error_before_output_releases_the_hold(beanie_test_db, monkeypatch
     async with client() as c:
         await _post(c, site, token, _body())
         await _post(c, site, token, _body(stream=False))
-    assert await SiteAiCallDoc.find(SiteAiCallDoc.state == "released").count() == 2
+    est = validate.estimate_tokens([{"role": "user", "content": "hi"}])
+    rows = await SiteAiCallDoc.find(SiteAiCallDoc.state == "settled").to_list()
+    assert len(rows) == 2 and all(r.input_tokens == est for r in rows)
+    doc = await _counter(site, "day")
+    assert doc.spent_micro == 2 * aliases.actual_micro("fast", est, 0) and doc.held_micro == 0
+
+
+@pytest.mark.asyncio
+async def test_a_transient_retry_bills_both_attempts_inputs(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.site_ai import validate
+    from pocketpaw_ee.site_ai.llm import LlmError
+
+    site, token = await _setup()
+    FakeLlm(monkeypatch, script=[[LlmError(True)], text_events("ok", 9, 5)])
+    async with client() as c:
+        resp = await _post(c, site, token, _body())
+    usage = parse_sse(resp.text)[-2][1]
+    est = validate.estimate_tokens([{"role": "user", "content": "hi"}])
+    assert usage["input_tokens"] == 9 + est
+
+
+@pytest.mark.asyncio
+async def test_a_refused_connection_was_never_sent_and_costs_nothing(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc
+    from pocketpaw_ee.site_ai.llm import LlmError
+
+    site, token = await _setup()
+    FakeLlm(monkeypatch, script=[[LlmError(True, "connect")]])
+    async with client() as c:
+        await _post(c, site, token, _body())
+    assert await SiteAiCallDoc.find(SiteAiCallDoc.state == "released").count() == 1
     doc = await _counter(site, "day")
     assert (doc.committed_micro, doc.held_micro, doc.spent_micro) == (0, 0, 0)
 
@@ -337,7 +368,7 @@ async def test_disconnect_mid_stream_settles_what_streamed(beanie_test_db, monke
     assert first.startswith(b"event: chunk")
     await gen.aclose()
     doc = await SiteAiCallDoc.find_one(SiteAiCallDoc.run_id == call.run_id)
-    assert doc.state == "settled" and doc.output_tokens == 20 and doc.input_tokens == 10
+    assert doc.state == "settled" and doc.output_tokens == 40 and doc.input_tokens == 10
 
 
 @pytest.mark.asyncio
@@ -454,7 +485,7 @@ async def test_a_broken_wallet_or_hold_read_refuses_without_a_500(beanie_test_db
 
 
 @pytest.mark.asyncio
-async def test_an_unexpected_json_mode_crash_releases_the_hold(beanie_test_db, monkeypatch):
+async def test_an_unexpected_json_mode_crash_settles_the_hold(beanie_test_db, monkeypatch):
     from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc
 
     site, token = await _setup()
@@ -462,4 +493,208 @@ async def test_an_unexpected_json_mode_crash_releases_the_hold(beanie_test_db, m
     async with client() as c:
         resp = await _post(c, site, token, _body(stream=False))
     assert (resp.status_code, resp.json()["detail"]) == (503, "provider_unavailable")
-    assert await SiteAiCallDoc.find(SiteAiCallDoc.state == "released").count() == 1
+    # The request had left (it may have reached the provider): its input is billed.
+    assert await SiteAiCallDoc.find(SiteAiCallDoc.state == "settled").count() == 1
+
+
+# ---------------------------------------------------------------- hardening review
+
+
+@pytest.mark.asyncio
+async def test_a_counter_past_its_cap_refuses_new_holds(beanie_test_db):
+    from pocketpaw_ee.site_ai import budget
+    from pocketpaw_ee.site_ai.service import day_period
+
+    pid = await make_pocket()
+    caps = [budget.Cap("day", day_period(), 1_000)]
+    kw = dict(workspace_id=WS, pocket_id=pid, site_id="s", caller="worker", model="fast")
+    hold = await budget.reserve(run_id="a", amount=600, caps=caps, **kw)
+    await budget.settle(hold, 1_500, 1, 1)  # real spend passed the cap: kept
+    with pytest.raises(budget.BudgetRefused):
+        await budget.reserve(run_id="b", amount=1, caps=caps, **kw)
+
+
+@pytest.mark.asyncio
+async def test_sweeper_settles_a_sent_dead_hold_and_debits_it(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc
+    from pocketpaw_ee.site_ai import budget
+    from pocketpaw_ee.site_ai.service import day_period
+
+    debits = []
+
+    async def _debit(**kw):
+        debits.append(kw)
+        return 0
+
+    monkeypatch.setattr(credits_service, "debit", _debit)
+    pid = await make_pocket()
+    caps = [budget.Cap("day", day_period(), 10_000)]
+    kw = dict(workspace_id=WS, pocket_id=pid, site_id="s", caller="worker", model="fast")
+    await budget.reserve(run_id="sent", amount=400, caps=caps, **kw)
+    await budget.mark_sent("sent")
+    await budget.reserve(run_id="unsent", amount=300, caps=caps, **kw)
+    await SiteAiCallDoc.get_pymongo_collection().update_many(
+        {}, {"$set": {"expires_at": datetime.now(UTC) - timedelta(minutes=1)}}
+    )
+    assert await budget.sweep_expired_holds() == 2
+    rows = {r.run_id: r for r in await SiteAiCallDoc.find_all().to_list()}
+    assert rows["sent"].state == "settled" and rows["sent"].actual_micro == 400
+    assert rows["unsent"].state == "released"
+    site = type("S", (), {"pocket_id": pid})()
+    doc = await _counter(site, "day")
+    assert (doc.committed_micro, doc.held_micro, doc.spent_micro) == (400, 0, 400)
+    assert [(d["idempotency_key"], d["amount_micro"]) for d in debits] == [("run:sent", 400)]
+
+
+def _enforce_credits(monkeypatch, balance: int) -> None:
+    from pocketpaw_ee.cloud.credits import guards
+    from pocketpaw_ee.cloud.credits import service as credits_service
+
+    from pocketpaw.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "credits_enforced", True, raising=False)
+
+    async def _balance(ws):
+        return balance
+
+    async def _ok(*a, **kw):
+        return None
+
+    monkeypatch.setattr(credits_service, "balance_micro", _balance)
+    monkeypatch.setattr(guards, "over_billing_limit", _ok)
+
+
+@pytest.mark.asyncio
+async def test_wallet_inflight_holds_bound_concurrent_calls_across_sites(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.cloud.models.site_ai import SiteAiCounterDoc
+    from pocketpaw_ee.site_ai import budget
+
+    _enforce_credits(monkeypatch, 1_000)
+    cap = await budget.wallet_cap(WS)
+    assert cap.limit == 1_000 + budget.WALLET_OVERDRAFT_MICRO
+    p1, p2 = await make_pocket(), await make_pocket()
+    amount = budget.WALLET_OVERDRAFT_MICRO // 2
+    held = []
+    for i, pid in enumerate([p1, p2, p1, p2]):
+        try:
+            held.append(
+                await budget.reserve(
+                    run_id=f"w{i}",
+                    workspace_id=WS,
+                    pocket_id=pid,
+                    site_id="s",
+                    caller="worker",
+                    model="fast",
+                    amount=amount,
+                    caps=[cap],
+                )
+            )
+        except budget.BudgetRefused as exc:
+            assert exc.scope == "wallet"
+    assert len(held) == 2  # balance + overdraft fits two in-flight holds, not four
+    for h in held:
+        await budget.settle(h, 5, 1, 1)
+    wallet = await SiteAiCounterDoc.find_one(SiteAiCounterDoc.key == budget.wallet_key(WS))
+    assert (wallet.committed_micro, wallet.held_micro, wallet.spent_micro) == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_wallet_hold_refusal_is_wallet_empty(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.site_ai import budget
+
+    _enforce_credits(monkeypatch, -budget.WALLET_OVERDRAFT_MICRO)
+    site, token = await _setup()
+    FakeLlm(monkeypatch, script=[text_events()])
+    async with client() as c:
+        plain = await _post(c, site, token, _body(stream=False))
+    assert (plain.status_code, plain.json()["detail"]) == (402, "wallet_empty")
+
+
+@pytest.mark.asyncio
+async def test_missing_usage_bills_the_estimate(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.site_ai import validate
+    from pocketpaw_ee.site_ai.llm import LlmEvent, LlmResult
+
+    site, token = await _setup()
+    est = validate.estimate_tokens([{"role": "user", "content": "hi"}])
+    FakeLlm(monkeypatch, script=[[LlmEvent("text", text="abcd"), LlmEvent("usage")]])
+    async with client() as c:
+        streamed = await _post(c, site, token, _body())
+    FakeLlm(monkeypatch, result=LlmResult("abcdef", [], "stop", 0, 0))
+    async with client() as c:
+        plain = await _post(c, site, token, _body(stream=False))
+    usage = parse_sse(streamed.text)[-2][1]
+    assert (usage["input_tokens"], usage["output_tokens"]) == (est, 4)
+    assert plain.json()["usage"]["input_tokens"] == est
+    assert plain.json()["usage"]["output_tokens"] == 6
+    assert plain.json()["usage"]["credits_micro"] > 0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_run_write_still_debits(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.site_ai import chat
+
+    debits = []
+
+    async def _debit(**kw):
+        debits.append(kw)
+        return 0
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("mongo")
+
+    monkeypatch.setattr(credits_service, "debit", _debit)
+    monkeypatch.setattr(chat, "_write_run", _boom)
+    site, token = await _setup()
+    FakeLlm(monkeypatch, script=[text_events("ok", 9, 5)])
+    async with client() as c:
+        resp = await _post(c, site, token, _body())
+    micro = parse_sse(resp.text)[-2][1]["credits_micro"]
+    assert len(debits) == 1 and debits[0]["amount_micro"] == micro
+    assert debits[0]["idempotency_key"].startswith("run:")
+    assert debits[0]["ref"]["model"] == "site-ai/fast"
+
+
+@pytest.mark.asyncio
+async def test_the_provider_model_never_reaches_owner_spend_views(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.metering import service as metering
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    site, token = await _setup()
+    FakeLlm(monkeypatch, script=[text_events("ok", 9, 5)])
+    async with client() as c:
+        await _post(c, site, token, _body())
+    run = await ChatRunDoc.find_one(ChatRunDoc.context_type == "site_ai")
+    assert run.usage["model"] == "site-ai/fast" and run.usage["total_cost_usd"] > 0
+    debits = []
+
+    async def _debit(**kw):
+        debits.append(kw)
+        return 0
+
+    async def _noop(*a, **kw):
+        return None
+
+    monkeypatch.setattr(metering.credits_service, "debit", _debit)
+    monkeypatch.setattr(metering.chat_runs_service, "mark_billed", _noop)
+    monkeypatch.setattr(metering, "_reconcile_early_access", _noop)
+    await metering.bill_run(run)
+    assert debits[0]["ref"]["model"] == "site-ai/fast"
+    assert "claude" not in str(debits[0]["ref"])
+
+
+@pytest.mark.asyncio
+async def test_live_spend_mode_still_enforces_the_site_caps(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.llm_provisioning import service as provisioning_service
+
+    monkeypatch.setattr(provisioning_service, "spend_mode", lambda: "live")
+    site, token = await _setup(daily_cap_micro=10)
+    fake = FakeLlm(monkeypatch, script=[text_events()])
+    async with client() as c:
+        resp = await _post(c, site, token, _body())
+    assert parse_sse(resp.text) == [("unavailable", {"reason": "limit"})]
+    assert fake.payloads == []
