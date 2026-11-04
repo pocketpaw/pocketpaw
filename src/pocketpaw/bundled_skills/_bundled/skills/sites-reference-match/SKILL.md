@@ -156,10 +156,10 @@ One DOM; change layout with CSS. Break where the content fails, not at a fixed
 
 ## 7. Compare and correct
 
-Look at the build with `preview_site` at the reference's width class (desktop
-1280, `device: mobile` 390) and put it beside the reference. Compare the full
-page first, then the hero and every section that looks off. Ignore lone
-anti-aliasing noise; chase shapes and repeated offsets.
+Store each reference once with `save_site_reference` (its public URL), then run
+`compare_site_to_reference` at its width: side-by-side tiles, a heatmap, the
+worst regions and a score per tile. If it errors, use `preview_site` beside the
+reference. Ignore lone anti-aliasing noise; chase shapes and repeated offsets.
 
 Fix the largest mismatch first, in this order, then capture again:
 

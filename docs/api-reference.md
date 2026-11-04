@@ -7830,6 +7830,44 @@ for svelte and react. Errors, none of which mean the site is broken:
   `PAW_CF_API_TOKEN` / `PAW_CF_ZONE_ID`): screenshots are unavailable on this
   deployment.
 
+#### `save_site_reference`
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. The pocket must be readable by the caller and in the chat's workspace. |
+| `image_url` | string | Required. The public URL of an image the owner attached in chat or uploaded to this site (read back from storage, never fetched), or a Refero / Inspo screenshot (fetched from those hosts only). Every other host is refused before any request. |
+
+Stores a design the owner supplied on the pocket. The image must be PNG, JPEG,
+WebP or GIF, at most 10 MB, 40 megapixels and 20,000px a side, and at least 200px
+wide. It is re-encoded to a fresh PNG (first frame, RGB, no metadata) and kept on
+the private upload adapter at `sites-references/{workspace}/{pocket}/{reference_id}.png`,
+at most 20 per pocket. Returns JSON `{ok, reference_id, width, height, looks_like}`;
+the id is `ref_` plus a content hash, so saving the same image twice returns the
+same id. `looks_like` is the guessed width class (`desktop` or `mobile`).
+
+#### `compare_site_to_reference`
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. |
+| `reference_id` | string | Required. A `ref_...` id from `save_site_reference`. |
+| `viewport` | `desktop` \| `mobile` \| integer | Optional. `desktop` is 1280px, `mobile` 390px, or an exact CSS width (320-1920). Default: guessed from the reference. |
+| `path` | string | Optional route on a template-built draft, validated like `preview_site`'s. |
+| `wait_ms` | integer | Optional settle wait, clamped to 0-8000, as in `preview_site`. |
+
+Photographs the draft through the same capture path as `preview_site`, at the
+chosen width, scales the reference to that width and compares the top of both
+(the shorter page, capped at three tiles). The difference is taken on lightly
+blurred copies, so anti-aliasing does not count, and averaged over a grid of
+square cells. Returns MCP `image` blocks (one REFERENCE | BUILD side-by-side per
+tile, then a heatmap with the top regions boxed and numbered) and one text block:
+the match (share of grid cells under the threshold), a score per tile, up to five
+mismatch regions in CSS px with a 0-100 score, and both page heights. The whole
+result stays under 700 KB of base64; lower tile pairs are dropped first, and the
+heatmap is always kept. A score measures pixels, not fidelity, so a substituted
+font or a placeholder image lowers it. Errors mean no comparison ran, never that
+the site is broken.
+
 #### `play_test_site`
 
 | Arg | Type | Notes |
