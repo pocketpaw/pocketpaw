@@ -339,7 +339,7 @@
   {
     "label": "every refusal claims to be the workspace bucket",
     "file": "ee/pocketpaw_ee/sites/site_data/budget.py",
-    "find": "    if key.startswith(\"cf:data:ws:\"):",
+    "find": "    if key.startswith((\"cf:data:ws:\", \"cf:data:dash:ws:\")):",
     "replace": "    if True:",
     "tests": [
       "tests/ee/sites/test_site_data_budget.py::test_a_refusal_names_the_bucket_that_was_full"
