@@ -1,8 +1,8 @@
-<!-- Provenance for sites-reference-build: where the method came from, what was
+<!-- Provenance for sites-reference-match: where the method came from, what was
      left out, and how to refresh it. Not served to the /sites agent. -->
-# Vendored: sites-reference-build
+# Vendored: sites-reference-match
 
-`sites-reference-build` is the on-demand skill the /sites agent loads when the
+`sites-reference-match` is the on-demand skill the /sites agent loads when the
 user supplies a design to build to (a screenshot or mockup today, a Figma frame
 once the Figma tools land). The method is adapted from an upstream skill; every
 body line is a rewrite in our voice against the /sites toolset. Nothing is
@@ -51,4 +51,4 @@ have not been re-derived against live Paw Site builds.
 Re-fetch the upstream files at a newer commit and diff the sections named
 above. Keep the file single and self-contained: /sites denies `Read`, so only
 `SKILL.md` reaches the agent. Budget: 10,240 bytes
-(`tests/test_sites_reference_build_skill_budget.py`).
+(`tests/test_sites_reference_match_skill_budget.py`).

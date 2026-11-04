@@ -213,4 +213,4 @@ matrix, the stale-response guard), the seven named responsive transforms, and
 the font ledger. All of it sits above `## 5. The floor`, so refine turns do not
 pay for it. Bytes came from the frontmatter description, the intro, the
 visual-mass paragraph, and a few sentences that restated their own rule. Full provenance:
-`sites-reference-build/VENDORED.md`.
+`sites-reference-match/VENDORED.md`.

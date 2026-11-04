@@ -1,5 +1,5 @@
 ---
-name: sites-reference-build
+name: sites-reference-match
 description: |
   Build a Paw Site TO a design the user supplied: a screenshot, a mockup image,
   or (later) a Figma frame. Invoke it ONLY when the user hands you such a

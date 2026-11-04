@@ -362,7 +362,7 @@ The rules are `sites-craft` section 5. These are the checks.
 
 ## REF: built to a supplied design
 
-Only when the user supplied a screenshot, mockup or frame (`sites-reference-build`).
+Only when the user supplied a screenshot, mockup or frame (`sites-reference-match`).
 
 - **SC-REF-01 Correction order** (HIGH). Compare beside the reference at its
   width and fix the biggest mismatch first: content and state, page shell and

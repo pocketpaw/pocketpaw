@@ -58,7 +58,7 @@ _DESIGN_SKILLS = frozenset(
         "sites-conversion-structure",
         "sites-check",
         "sites-references",
-        "sites-reference-build",
+        "sites-reference-match",
         "sites-restraint",
     }
 )
@@ -755,7 +755,7 @@ def test_sites_references_is_one_entry_advertised_in_both_modes() -> None:
         assert (plugin_dir / "skills" / name / "SKILL.md").is_file(), name
 
 
-def test_sites_reference_build_loads_only_on_a_supplied_design() -> None:
+def test_sites_reference_match_loads_only_on_a_supplied_design() -> None:
     """The build-to-a-reference skill is advertised in both modes with an INPUT
     trigger: a screenshot, mockup or Figma frame the user supplied. Its row must
     say ONLY and rule out the open brief, or a create turn with nothing to match
@@ -769,13 +769,13 @@ def test_sites_reference_build_loads_only_on_a_supplied_design() -> None:
 
     rows = {n: (scope, why) for n, scope, why in sites_handler._SITES_DESIGN_SKILLS}
     scope, why = rows[sites_handler.REFERENCE_BUILD_SKILL]
-    assert sites_handler.REFERENCE_BUILD_SKILL == "sites-reference-build"
+    assert sites_handler.REFERENCE_BUILD_SKILL == "sites-reference-match"
     assert scope == "both"
     assert why.startswith("ONLY when the user supplies a design")
     assert "screenshot" in why and "Figma" in why
     assert "Never for an open brief" in why
     for mode in ("create", "refine"):
-        assert "`sites-reference-build`" in sites_handler._design_skills_note(mode), mode
+        assert "`sites-reference-match`" in sites_handler._design_skills_note(mode), mode
 
 
 def test_sites_conversion_structure_is_advertised_in_both_modes() -> None:
