@@ -15,6 +15,10 @@
 #                      aggregate. Token counts and hashes only, never content.
 #   SiteAiCounterDoc   atomic spend counters per (site, scope, period): ``committed``
 #                      is held + spent and is the figure every cap is tested on.
+#   SiteAiTranscriptDoc  one per call, ONLY when the owner turned transcripts on:
+#                      capped messages and output, images dropped. PERSONAL DATA:
+#                      a 30-day TTL, deleted when the owner turns transcripts off,
+#                      on a transfer and on site delete.
 #
 # Money is integer micro-credits throughout (1 credit = 1,000,000 micro = $0.01).
 
@@ -147,10 +151,30 @@ class SiteAiCounterDoc(Document):
         ]
 
 
+class SiteAiTranscriptDoc(Document):
+    workspace: str
+    pocket_id: str
+    run_id: str
+    caller: str
+    model: str
+    messages: list[dict] = Field(default_factory=list)
+    output: str = ""
+    tool_calls: list[dict] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=_utcnow)
+
+    class Settings:
+        name = "site_ai_transcripts"
+        indexes = [
+            IndexModel([("workspace", 1), ("pocket_id", 1), ("created_at", -1)]),
+            IndexModel([("created_at", 1)], expireAfterSeconds=30 * 24 * 3600),
+        ]
+
+
 __all__ = [
     "SiteAiBudgetDoc",
     "SiteAiCallDoc",
     "SiteAiCounterDoc",
     "SiteAiPresetDoc",
     "SiteAiSettingsDoc",
+    "SiteAiTranscriptDoc",
 ]

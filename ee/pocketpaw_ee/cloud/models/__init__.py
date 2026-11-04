@@ -324,6 +324,7 @@ from pocketpaw_ee.cloud.models.site_ai import (
     SiteAiCounterDoc,
     SiteAiPresetDoc,
     SiteAiSettingsDoc,
+    SiteAiTranscriptDoc,
 )
 from pocketpaw_ee.cloud.models.site_dashboard import (
     SiteDashboard,
@@ -535,6 +536,7 @@ __all__ = [
     "SiteAiCounterDoc",
     "SiteAiPresetDoc",
     "SiteAiSettingsDoc",
+    "SiteAiTranscriptDoc",
     "SiteRateCounter",
     "SiteSecret",
     "IntegrationConnection",
@@ -721,6 +723,7 @@ def get_all_documents():
         SiteAiBudgetDoc,
         SiteAiCallDoc,
         SiteAiCounterDoc,
+        SiteAiTranscriptDoc,
         # Per-site secrets (encrypted at rest). Only ``sites.site_secrets`` touches it.
         SiteSecret,
         # Sites integrations (vault, bindings, orders, webhook dedupe, newsletter).

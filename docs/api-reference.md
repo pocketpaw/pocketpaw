@@ -6314,6 +6314,7 @@ Session auth. Reads need `fabric.read`; every write needs `sites.ai_manage`
 | `GET/PUT/DELETE /sites/by-pocket/{pocket_id}/ai/presets/{id}` | a PUT bumps `version`; calls pin the version they ran with |
 | `GET/PUT /sites/by-pocket/{pocket_id}/ai/budget` | `SiteAiBudget`: `monthly_cap_micro`, `daily_cap_micro`, `per_visitor_daily_micro`, `preview_daily_cap_micro`, `alert_thresholds` (1-100, up to 5), `paused`; read-only `spent_today_micro`, `spent_month_micro`, `allowance_month_micro` |
 | `GET /sites/by-pocket/{pocket_id}/ai/usage?from&to` | `SiteAiUsage`: settled spend by day, model alias and caller (`worker`, `browser`, `preview`); up to 92 days, default the last 30 |
+| `GET /sites/by-pocket/{pocket_id}/ai/transcripts?limit&before` | opt-in transcripts, newest first (`sites.ai_manage`: they are visitors' words). Written only while `keep_transcripts` is on, kept 30 days, deleted when it is turned off |
 
 Plans (`cloud/billing/site_plans.py`): `free` gets `fast` in its own draft
 preview only; `site` adds `vision` and `embed`; `staff` adds `smart`. The monthly
@@ -6395,6 +6396,19 @@ before any output releases it all only when the connection was refused; once a r
 Crossing an alert threshold of the monthly cap notifies the workspace owner once
 per threshold per month (kind `site_ai_budget`) and emits `site.ai_budget` to the
 site owner.
+
+### `POST /sites/{site_id}/ai/embed`
+
+Same callers and gates as `/ai/chat`. Body `{input: string | string[], model?:
+"embed"}` (up to 64 inputs, 8,000 chars each; `model` defaults to `embed`) →
+`{vectors: number[][], usage: {input_tokens, credits_micro}}`. Needs a plan that
+sells `embed` (`site` and up). Held against the same caps; JSON only, so a paused
+site, an empty wallet or a spent budget is a 402.
+
+**Transfer and delete.** A site transfer moves its AI settings, presets and budget
+to the new workspace (new calls bill the new owner), releases holds in flight and
+deletes transcripts; usage rows stay with the workspace that paid for them. A site
+delete removes every site AI row; the credit ledger keeps its debits.
 
 ## Deleting a site
 

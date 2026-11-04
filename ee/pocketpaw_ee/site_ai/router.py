@@ -8,11 +8,14 @@
 #   GET/PUT/DELETE /sites/by-pocket/{pocket_id}/ai/presets/{preset_id}
 #   GET/PUT     /sites/by-pocket/{pocket_id}/ai/budget
 #   GET         /sites/by-pocket/{pocket_id}/ai/usage?from&to
+#   GET         /sites/by-pocket/{pocket_id}/ai/transcripts?limit&before  (sites.ai_manage:
+#               opt-in transcripts are visitors' words, so reading them is ADMIN too)
 #
 # ``public_router`` (no session by design; the site gates in chat.py are the auth):
 #   POST /sites/{site_id}/ai/ticket  site key + origin gate + Turnstile -> visitor ticket
 #   POST /sites/{site_id}/ai/chat    PAW_GATEWAY_TOKEN (the site's Worker), or the site
 #                                    key + origin gate + ticket (browser / own preview)
+#   POST /sites/{site_id}/ai/embed   the same callers as chat
 #
 # Wire shapes are pinned by the Sites AI apps contract; see dto.py. Mounted in
 # ``cloud.mount_cloud``; listed in tests/cloud/auth/test_route_auth_audit.py.
@@ -23,7 +26,7 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
-from pocketpaw_ee.site_ai import chat, service
+from pocketpaw_ee.site_ai import chat, embed, service
 from pocketpaw_ee.site_ai.dto import (
     SiteAiBudget,
     SiteAiBudgetPut,
@@ -31,6 +34,7 @@ from pocketpaw_ee.site_ai.dto import (
     SiteAiPresetBody,
     SiteAiSettings,
     SiteAiSettingsPut,
+    SiteAiTranscript,
     SiteAiUsage,
 )
 
@@ -138,6 +142,17 @@ async def get_usage(
     return await service.usage(ctx.workspace_id or "", pocket_id, from_, to)
 
 
+@router.get(_SITE + "/transcripts", response_model=list[SiteAiTranscript])
+async def list_transcripts(
+    pocket_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    before: str | None = Query(None, max_length=40),
+    ctx: RequestContext = Depends(request_context),
+    _: object = _MANAGE,
+) -> list[SiteAiTranscript]:
+    return await service.list_transcripts(ctx.workspace_id or "", pocket_id, limit, before)
+
+
 @public_router.post("/sites/{site_id}/ai/chat")
 async def ai_chat(site_id: str, request: Request) -> Response:
     """OpenAI-shaped chat for a site. See chat.py for the gate order."""
@@ -148,3 +163,9 @@ async def ai_chat(site_id: str, request: Request) -> Response:
 async def ai_ticket(site_id: str, request: Request) -> Response:
     """A ~20 minute visitor ticket for browser AI calls. See tickets.py."""
     return await chat.handle_ticket(request, site_id)
+
+
+@public_router.post("/sites/{site_id}/ai/embed")
+async def ai_embed(site_id: str, request: Request) -> Response:
+    """Embeddings for a site (``input`` up to 64 strings). See embed.py."""
+    return await embed.handle(request, site_id)

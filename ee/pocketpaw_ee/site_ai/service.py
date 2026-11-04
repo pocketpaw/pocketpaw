@@ -13,6 +13,12 @@
 #
 # Spend figures read the atomic counters ``budget.py`` maintains: ``spent`` is
 # settled spend only (holds in flight are not spend yet).
+#
+# Transcripts (opt-in, ``keep_transcripts``) are written by ``write_transcript``
+# capped and image-free, readable by ``sites.ai_manage`` only, and deleted when the
+# owner turns them off. ``move_for_pocket`` (site transfer) re-keys settings,
+# presets and budget to the new workspace and deletes transcripts; usage rows stay
+# with the old workspace. ``purge_for_pocket`` (site delete) removes every row.
 
 from __future__ import annotations
 
@@ -30,6 +36,7 @@ from pocketpaw_ee.cloud.models.site_ai import (
     SiteAiCounterDoc,
     SiteAiPresetDoc,
     SiteAiSettingsDoc,
+    SiteAiTranscriptDoc,
 )
 from pocketpaw_ee.site_ai.dto import (
     SiteAiBudget,
@@ -38,6 +45,7 @@ from pocketpaw_ee.site_ai.dto import (
     SiteAiPresetBody,
     SiteAiSettings,
     SiteAiSettingsPut,
+    SiteAiTranscript,
     SiteAiUsage,
     UsageCaller,
     UsageDay,
@@ -143,10 +151,16 @@ async def put_settings(
                 f"This site's plan doesn't include: {', '.join(outside)}.",
             )
         changes["allowed_models"] = list(dict.fromkeys(changes["allowed_models"]))
+    turning_off_transcripts = doc.keep_transcripts and changes.get("keep_transcripts") is False
     for key, value in changes.items():
         setattr(doc, key, value)
     doc.updated_at = datetime.now(UTC)
     await doc.save()
+    if turning_off_transcripts:
+        await SiteAiTranscriptDoc.find(
+            SiteAiTranscriptDoc.workspace == workspace_id,
+            SiteAiTranscriptDoc.pocket_id == pocket_id,
+        ).delete()
     _audit(user_id, workspace_id, pocket_id, "sites.ai.settings.update", fields=sorted(changes))
     return _settings_view(doc, site)
 
@@ -378,3 +392,151 @@ async def usage(
             for k, v in sorted(by_caller.items())
         ],
     )
+
+
+# ------------------------------------------------------------------ transcripts
+
+TRANSCRIPT_MESSAGES = 20
+TRANSCRIPT_TEXT_CHARS = 4_000
+TRANSCRIPT_OUTPUT_CHARS = 16_000
+
+
+def _clip(text: Any, limit: int) -> str:
+    text = text if isinstance(text, str) else ""
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _transcript_message(msg: dict[str, Any]) -> dict[str, Any]:
+    content = msg.get("content")
+    if isinstance(content, list):
+        parts = [
+            _clip(p.get("text"), TRANSCRIPT_TEXT_CHARS) if p.get("type") == "text" else "[image]"
+            for p in content
+        ]
+        text = "\n".join(parts)  # each part is clipped already
+    else:
+        text = _clip(content, TRANSCRIPT_TEXT_CHARS)
+    out: dict[str, Any] = {"role": msg.get("role", ""), "content": text}
+    if msg.get("tool_calls"):
+        out["tool_calls"] = [
+            {
+                "name": c["function"]["name"],
+                "arguments": _clip(c["function"]["arguments"], 2_000),
+            }
+            for c in msg["tool_calls"]
+        ]
+    return out
+
+
+async def write_transcript(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    run_id: str,
+    caller: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    output: str,
+    tool_calls: list[dict[str, Any]],
+) -> None:
+    """Keep one call's conversation for the owner (only when they opted in).
+    System messages are skipped: a preset's prompt is already the owner's."""
+    kept = [m for m in messages if m.get("role") != "system"][-TRANSCRIPT_MESSAGES:]
+    await SiteAiTranscriptDoc(
+        workspace=workspace_id,
+        pocket_id=pocket_id,
+        run_id=run_id,
+        caller=caller,
+        model=model,
+        messages=[_transcript_message(m) for m in kept],
+        output=_clip(output, TRANSCRIPT_OUTPUT_CHARS),
+        tool_calls=[
+            {"name": c.get("name", ""), "arguments": _clip(c.get("arguments", ""), 2_000)}
+            for c in tool_calls[:16]
+        ],
+    ).insert()
+
+
+async def list_transcripts(
+    workspace_id: str, pocket_id: str, limit: int = 20, before: str | None = None
+) -> list[SiteAiTranscript]:
+    await _pocket(workspace_id, pocket_id)
+    query: dict[str, Any] = {"workspace": workspace_id, "pocket_id": pocket_id}
+    if before:
+        try:
+            query["created_at"] = {"$lt": datetime.fromisoformat(before)}
+        except ValueError:
+            raise ValidationError(
+                "site_ai.invalid_cursor", "`before` must be a timestamp."
+            ) from None
+    rows = await SiteAiTranscriptDoc.find(query).sort("-created_at").limit(limit).to_list()
+    return [
+        SiteAiTranscript(
+            run_id=r.run_id,
+            caller=r.caller,
+            model=r.model,
+            created_at=r.created_at.astimezone(UTC).isoformat(),
+            messages=r.messages,
+            output=r.output,
+            tool_calls=r.tool_calls,
+        )
+        for r in rows
+    ]
+
+
+# ------------------------------------------------------------------ lifecycle
+
+
+async def move_for_pocket(*, pocket_id: str, destination_workspace_id: str) -> int:
+    """A site transfer: settings, presets and budget follow the pocket to the new
+    workspace (new calls bill the new owner). Held calls are released, transcripts
+    (the old owner's visitors) are deleted, settled usage rows stay where they were
+    billed. Matched by pocket in any other workspace, so a resume is idempotent."""
+    destination = (destination_workspace_id or "").strip()
+    if not pocket_id or not destination:
+        return 0
+    from pocketpaw_ee.site_ai import budget
+
+    moved = 0
+    for doc in (SiteAiSettingsDoc, SiteAiPresetDoc, SiteAiBudgetDoc):
+        stale = {"pocket_id": pocket_id, "workspace": {"$ne": destination}}
+        if doc is not SiteAiPresetDoc and await doc.find_one(
+            {"pocket_id": pocket_id, "workspace": destination}
+        ):
+            # The destination already configured this site: its row wins.
+            await doc.find(stale).delete()
+            continue
+        result = await doc.get_pymongo_collection().update_many(
+            stale, {"$set": {"workspace": destination}}
+        )
+        moved += int(getattr(result, "modified_count", 0) or 0)
+    held = await SiteAiCallDoc.find(
+        {"pocket_id": pocket_id, "workspace": {"$ne": destination}, "state": "held"}
+    ).to_list()
+    for row in held:
+        await budget.release(
+            budget.Hold(row.run_id, row.workspace, row.pocket_id, row.reserved_micro, row.counters)
+        )
+    await SiteAiTranscriptDoc.find(
+        {"pocket_id": pocket_id, "workspace": {"$ne": destination}}
+    ).delete()
+    return moved
+
+
+async def purge_for_pocket(*, workspace_id: str, pocket_id: str) -> int:
+    """A site delete: every site AI row of the pocket. The credit ledger keeps its
+    debits (they are the bill), nothing else about the site's AI survives."""
+    if not pocket_id:
+        return 0
+    removed = 0
+    for doc in (
+        SiteAiSettingsDoc,
+        SiteAiPresetDoc,
+        SiteAiBudgetDoc,
+        SiteAiCallDoc,
+        SiteAiCounterDoc,
+        SiteAiTranscriptDoc,
+    ):
+        result = await doc.find({"workspace": workspace_id, "pocket_id": pocket_id}).delete()
+        removed += int(getattr(result, "deleted_count", 0) or 0)
+    return removed

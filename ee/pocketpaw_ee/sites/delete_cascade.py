@@ -482,7 +482,27 @@ async def _purge_records(*, site: Any, deps: Any) -> str:
     await deps.purge_records(workspace_id=site.workspace, site_id=lead_site_id(site))
     await _purge_secrets(site)
     await _purge_integrations(site)
+    await _purge_site_ai(site)
     return OUTCOME_DONE
+
+
+async def _purge_site_ai(site: Any) -> None:
+    """The site's AI settings, presets, budget, holds, usage rows and transcripts.
+    The credit ledger keeps its debits. Best effort, like secrets."""
+    try:
+        from pocketpaw_ee.site_ai import service as site_ai_service
+
+        removed = await site_ai_service.purge_for_pocket(
+            workspace_id=site.workspace, pocket_id=site.pocket_id
+        )
+        if removed:
+            logger.info("sites.delete: site %s removed %d site AI row(s)", site.id, removed)
+    except Exception:  # noqa: BLE001 - best effort, logged
+        logger.warning(
+            "sites.delete: site %s could not remove its site AI rows",
+            getattr(site, "id", "?"),
+            exc_info=True,
+        )
 
 
 async def _purge_integrations(site: Any) -> None:

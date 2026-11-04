@@ -275,6 +275,10 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
         "site AI visitor ticket; per-IP bucket, site key + origin gate, Turnstile "
         "(fail closed), per-IP mint rate limit"
     ),
+    "POST /sites/{site_id}/ai/embed": (
+        "site AI embeddings; same gates as /ai/chat (token, or site key + origin + "
+        "ticket), plan allowlist, rate and spend caps"
+    ),
     "POST /sites/{site_id}/ai/chat": (
         "site AI API; per-IP bucket, then PAW_GATEWAY_TOKEN (constant-time) or the "
         "site key + origin gate + visitor ticket, per-site/visitor rate and spend caps"
