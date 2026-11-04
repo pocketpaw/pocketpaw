@@ -900,6 +900,33 @@ async def test_gateway_cors_answers_preflight_for_the_gateway_path_only():
     ]
 
 
+@pytest.mark.asyncio
+async def test_site_cors_covers_the_ai_paths_and_lets_the_ticket_header_through():
+    from pocketpaw_ee.integrations.site_gate import GatewayCors
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    app = GatewayCors(inner)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        pre = await c.options(
+            "/api/v1/sites/s1/ai/chat",
+            headers={"origin": ORIGIN, "access-control-request-method": "POST"},
+        )
+        post = await c.post("/api/v1/sites/s1/ai/ticket", headers={"origin": ORIGIN})
+        owner = await c.post("/api/v1/sites/by-pocket/p1/ai/settings", headers={"origin": ORIGIN})
+        deep = await c.post("/api/v1/sites/s1/ai/chat/extra", headers={"origin": ORIGIN})
+    assert pre.status_code == 204 and pre.headers["access-control-allow-origin"] == ORIGIN
+    assert "x-paw-ai-ticket" in pre.headers["access-control-allow-headers"]
+    assert "authorization" not in pre.headers["access-control-allow-headers"]
+    assert post.headers["access-control-allow-origin"] == ORIGIN
+    assert "access-control-allow-origin" not in deep.headers
+    # The owner routes sit at /sites/by-pocket/{id}/ai/{name}: that shape is two
+    # segments deeper than the site path, so it never gets the open CORS answer.
+    assert "access-control-allow-origin" not in owner.headers
+
+
 # ---------------------------------------------------------- webhooks + orders
 
 
