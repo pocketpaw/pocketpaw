@@ -17,6 +17,10 @@
 #     part checked against a strict pattern, so a key never escapes its tenant;
 #   * reference ids are content-addressed (``ref_`` + sha256 prefix of the
 #     re-encoded PNG), so saving the same image twice is one reference;
+#   * images are capped at 10 MB in, 40 MP, 20,000px a side and 30:1 height to
+#     width; a re-encode over the 40 MB read cap is downscaled until it fits, and a
+#     comparison crops the source rows it needs before it resizes anything;
+#   * ``purge_references`` runs from the site delete cascade (best effort);
 #   * this module never fetches a URL: the caller hands it bytes;
 #   * Pillow only. No numpy, no pixel-diff package.
 
@@ -36,6 +40,11 @@ MAX_REFERENCE_BYTES = 10 * 1024 * 1024
 MAX_REFERENCE_PIXELS = 40_000_000
 MAX_REFERENCE_EDGE = 20_000
 MIN_REFERENCE_WIDTH = 200
+#: Height over width. A page is tall, but a 200x20000 strip is not a page.
+MAX_REFERENCE_ASPECT = 30
+#: The stored PNG's cap, and ``load_reference``'s. A re-encode past it is
+#: downscaled until it fits, so every saved reference can be read back.
+MAX_STORED_BYTES = MAX_REFERENCE_BYTES * 4
 #: References kept per pocket. A design is a handful of frames, not an archive.
 MAX_REFERENCES_PER_POCKET = 20
 
@@ -149,6 +158,11 @@ def normalize(data: bytes) -> tuple[bytes, int, int]:
         raise SiteReferenceError(
             f"the image is {width}px wide; a page reference needs at least {MIN_REFERENCE_WIDTH}px."
         )
+    if height > width * MAX_REFERENCE_ASPECT:
+        raise SiteReferenceError(
+            f"the image is {width}x{height}; a reference may be at most "
+            f"{MAX_REFERENCE_ASPECT} times taller than it is wide."
+        )
     try:
         image.seek(0)
         image.load()
@@ -161,9 +175,21 @@ def normalize(data: bytes) -> tuple[bytes, int, int]:
             image = image.convert("RGB")
     except Exception as exc:  # noqa: BLE001
         raise SiteReferenceError("could not decode the image.") from exc
+    png = _png(image)
+    while len(png) > MAX_STORED_BYTES and image.width > MIN_REFERENCE_WIDTH:
+        size = (max(1, round(image.width * 0.8)), max(1, round(image.height * 0.8)))
+        image = image.resize(size, Image.Resampling.LANCZOS)
+        png = _png(image)
+    if len(png) > MAX_STORED_BYTES:
+        raise SiteReferenceError("the image is too detailed to store as a reference.")
+    return png, image.width, image.height
+
+
+def _png(image: Any) -> bytes:
+    # No ``optimize``: it multiplies encode time for a file only the agent reads.
     out = io.BytesIO()
-    image.save(out, format="PNG", optimize=True)
-    return out.getvalue(), width, height
+    image.save(out, format="PNG")
+    return out.getvalue()
 
 
 #: Pixel widths of common phone screenshots at 2x and 3x. A desktop capture at 1x
@@ -186,8 +212,14 @@ def guess_viewport(width: int, height: int) -> str:
 async def save_reference(
     data: bytes, *, workspace_id: str, pocket_id: str, adapter: Any | None = None
 ) -> StoredReference:
-    """Validate, re-encode and store one reference on the pocket."""
-    png, width, height = normalize(data)
+    """Validate, re-encode and store one reference on the pocket.
+
+    The per-pocket cap is checked before the write and re-counted after it, and a
+    write that pushed the pocket over the cap is removed again, so two concurrent
+    saves cannot both land past it."""
+    import asyncio
+
+    png, width, height = await asyncio.to_thread(normalize, data)
     reference_id = "ref_" + hashlib.sha256(png).hexdigest()[:16]
     key = _key(workspace_id, pocket_id, reference_id)
     adapter = adapter or _adapter()
@@ -203,6 +235,13 @@ async def save_reference(
             yield png
 
         await adapter.put(key, _body(), "image/png")
+        after = await adapter.list_prefix(f"{_KEY_PREFIX}/{workspace_id}/{pocket_id}/")
+        if len(after) > MAX_REFERENCES_PER_POCKET:
+            await adapter.delete(key)
+            raise SiteReferenceError(
+                f"this site already has {MAX_REFERENCES_PER_POCKET} references; reuse one "
+                "of them rather than adding more."
+            )
     return StoredReference(reference_id, width, height, guess_viewport(width, height))
 
 
@@ -218,7 +257,7 @@ async def load_reference(
     try:
         async for chunk in adapter.open(key):
             buf.extend(chunk)
-            if len(buf) > MAX_REFERENCE_BYTES * 4:
+            if len(buf) > MAX_STORED_BYTES:
                 raise SiteReferenceError("the stored reference is unexpectedly large.")
     except NotFound as exc:
         raise SiteReferenceError(
@@ -227,6 +266,17 @@ async def load_reference(
     if not buf:
         raise SiteReferenceError(f"no reference {reference_id} on this site.")
     return bytes(buf)
+
+
+async def purge_references(*, workspace_id: str, pocket_id: str, adapter: Any | None = None) -> int:
+    """Delete every reference stored for one pocket. Returns how many were removed."""
+    if not (_PART_RE.fullmatch(workspace_id) and _PART_RE.fullmatch(pocket_id)):
+        return 0
+    adapter = adapter or _adapter()
+    keys = await adapter.list_prefix(f"{_KEY_PREFIX}/{workspace_id}/{pocket_id}/")
+    for key in keys:
+        await adapter.delete(key)
+    return len(keys)
 
 
 # --- comparison ----------------------------------------------------------------
@@ -263,13 +313,22 @@ def _rgb(data: bytes) -> Any:
     return image.convert("RGB")
 
 
-def _to_width(image: Any, width: int) -> Any:
+def _to_width(image: Any, width: int, max_height: int) -> tuple[Any, int]:
+    """Scale ``image`` to ``width``, keeping only its top ``max_height`` rows.
+
+    Returns ``(scaled, full_height)``: the full height the whole image would have
+    at ``width``. The source is cropped to the rows needed BEFORE it is resized, so
+    a narrow, tall image is never upscaled whole (200x20000 at 1920 would be
+    ~370 megapixels)."""
     from PIL import Image
 
+    full_height = max(1, round(image.height * width / image.width))
+    src_rows = min(image.height, -(-max_height * image.width // width))
+    image = image.crop((0, 0, image.width, src_rows))
     if image.width == width:
-        return image
-    height = max(1, round(image.height * width / image.width))
-    return image.resize((width, height), Image.Resampling.LANCZOS)
+        return image, full_height
+    height = max(1, min(max_height, round(src_rows * width / image.width)))
+    return image.resize((width, height), Image.Resampling.LANCZOS), full_height
 
 
 def _regions(cells: list[list[int]], cell: int, width: int, height: int) -> list[dict[str, int]]:
@@ -346,9 +405,9 @@ def compare(reference_png: bytes, build_png: bytes, *, width: int, mobile: bool)
     """
     from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-    ref = _to_width(_rgb(reference_png), width)
-    build = _to_width(_rgb(build_png), width)
     tile_h = max(1, round(width * (_TILE_RATIO_MOBILE if mobile else _TILE_RATIO_DESKTOP)))
+    ref, ref_full = _to_width(_rgb(reference_png), width, tile_h * MAX_TILES)
+    build, build_full = _to_width(_rgb(build_png), width, tile_h * MAX_TILES)
     height = min(ref.height, build.height, tile_h * MAX_TILES)
     ref_c = ref.crop((0, 0, width, height))
     build_c = build.crop((0, 0, width, height))
@@ -422,8 +481,8 @@ def compare(reference_png: bytes, build_png: bytes, *, width: int, mobile: bool)
 
     return Comparison(
         width=width,
-        reference_height=ref.height,
-        build_height=build.height,
+        reference_height=ref_full,
+        build_height=build_full,
         compared_height=height,
         match=match,
         tile_scores=tile_scores,
@@ -444,6 +503,7 @@ __all__ = [
     "guess_viewport",
     "load_reference",
     "normalize",
+    "purge_references",
     "resolve_width",
     "save_reference",
 ]

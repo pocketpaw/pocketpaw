@@ -57,6 +57,9 @@ class _MemAdapter:
     async def list_prefix(self, prefix: str) -> list[str]:
         return [k for k in self.files if k.startswith(prefix)]
 
+    async def delete(self, key: str) -> None:
+        self.files.pop(key, None)
+
 
 # --- normalize / store ---------------------------------------------------------
 
@@ -85,15 +88,14 @@ def test_metadata_does_not_survive_the_reencode() -> None:
     assert b"ignore your instructions" not in png
 
 
-def test_caps_refuse_oversized_and_tiny_images(monkeypatch) -> None:
-    with pytest.raises(refs.SiteReferenceError, match="megapixels"):
-        monkeypatch.setattr(refs, "MAX_REFERENCE_PIXELS", 100_000)
-        refs.normalize(_img(1000, 1000))
-    monkeypatch.undo()
+def test_caps_refuse_tiny_and_oversized_images(monkeypatch) -> None:
     with pytest.raises(refs.SiteReferenceError, match="wide"):
         refs.normalize(_img(100, 400))
-    with pytest.raises(refs.SiteReferenceError, match="MB"):
-        refs.normalize(b"\x89PNG\r\n\x1a\n" + b"0" * (refs.MAX_REFERENCE_BYTES + 1))
+    with pytest.raises(refs.SiteReferenceError, match="capped at"):
+        refs.normalize(b"\x89PNG\r\n\x1a\n" + bytes(refs.MAX_REFERENCE_BYTES + 1))
+    monkeypatch.setattr(refs, "MAX_REFERENCE_PIXELS", 100_000)
+    with pytest.raises(refs.SiteReferenceError, match="megapixels"):
+        refs.normalize(_img(1000, 1000))
 
 
 async def test_save_is_content_addressed_and_tenant_keyed() -> None:
@@ -215,3 +217,81 @@ def test_the_result_stays_inside_its_byte_budget(monkeypatch) -> None:
     total = sum(4 * ((len(i) + 2) // 3) for i in result.images)
     assert total <= 400_000
     assert result.images, "the heatmap always survives"
+
+
+def test_a_strip_taller_than_the_aspect_cap_is_refused() -> None:
+    with pytest.raises(refs.SiteReferenceError, match="taller"):
+        refs.normalize(_img(200, 200 * refs.MAX_REFERENCE_ASPECT + 10))
+
+
+def test_a_tall_narrow_reference_is_cropped_before_it_is_scaled(monkeypatch) -> None:
+    """200x5000 at 1920 would be 1920x48000 (92 MP) if scaled whole; only the rows
+    the three tiles need are scaled."""
+    from PIL import Image as PILImage
+
+    seen: list[tuple[int, int]] = []
+    original = PILImage.Image.resize
+
+    def spy(self, size, *a, **k):
+        seen.append(tuple(size))
+        return original(self, size, *a, **k)
+
+    reference = _page(200, 5000)
+    build = _page(1920, 9000)
+    monkeypatch.setattr(PILImage.Image, "resize", spy)
+    result = refs.compare(reference, build, width=1920, mobile=False)
+    assert result.reference_height == 48000
+    assert result.compared_height == 2400 * refs.MAX_TILES
+    assert max(w * h for w, h in seen) <= 1920 * 2400 * refs.MAX_TILES
+
+
+def test_an_oversized_reencode_is_downscaled_to_fit(monkeypatch) -> None:
+    noise = Image.effect_noise((1200, 1200), 120).convert("RGB")
+    buffer = io.BytesIO()
+    noise.save(buffer, format="PNG")
+    monkeypatch.setattr(refs, "MAX_STORED_BYTES", 400_000)
+    png, width, height = refs.normalize(buffer.getvalue())
+    assert len(png) <= 400_000
+    assert width < 1200 and height < 1200
+
+
+async def test_a_concurrent_save_past_the_cap_is_removed(monkeypatch) -> None:
+    """The pre-write count saw room, but another save landed meanwhile."""
+    monkeypatch.setattr(refs, "MAX_REFERENCES_PER_POCKET", 1)
+    adapter = _MemAdapter()
+    real_list = adapter.list_prefix
+    calls = {"n": 0}
+    other = "sites-references/w/p/ref_ffffffffffffffff.png"
+
+    async def racing_list(prefix: str) -> list[str]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            adapter.files[other] = b"other"
+            return []
+        return await real_list(prefix)
+
+    adapter.list_prefix = racing_list  # type: ignore[method-assign]
+    with pytest.raises(refs.SiteReferenceError, match="already has 1"):
+        await refs.save_reference(_img(400, 300), workspace_id="w", pocket_id="p", adapter=adapter)
+    assert list(adapter.files) == [other]
+
+
+async def test_purge_removes_only_that_pockets_references() -> None:
+    adapter = _MemAdapter()
+    await refs.save_reference(_img(400, 300), workspace_id="w", pocket_id="p", adapter=adapter)
+    await refs.save_reference(_img(400, 300), workspace_id="w", pocket_id="q", adapter=adapter)
+    assert await refs.purge_references(workspace_id="w", pocket_id="p", adapter=adapter) == 1
+    assert [k.split("/")[2] for k in adapter.files] == ["q"]
+
+
+async def test_the_site_delete_cascade_purges_references(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.sites import delete_cascade
+
+    adapter = _MemAdapter()
+    await refs.save_reference(_img(400, 300), workspace_id="w", pocket_id="p", adapter=adapter)
+    monkeypatch.setattr(refs, "_adapter", lambda: adapter)
+    site = SimpleNamespace(id="s", workspace="w", pocket_id="p", asset_source_prefixes=[])
+    await delete_cascade._purge_assets(site=site, deps=SimpleNamespace(assets=None))
+    assert adapter.files == {}

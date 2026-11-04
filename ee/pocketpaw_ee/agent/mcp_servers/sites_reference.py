@@ -9,8 +9,9 @@
 # Invariants a reader must not break:
 #   * ``save_site_reference`` never fetches an arbitrary URL. It reads this
 #     workspace's own public site assets back from storage (where a chat
-#     attachment on /sites lands), or fetches from the fixed research image hosts
-#     (Refero, Inspo). Every other host is refused before any request is made;
+#     attachment on /sites lands), or streams from Refero's image host, matched
+#     exactly, under a size cap and a total deadline. Every other host is refused
+#     before any request is made;
 #   * the stored file is a re-encoded PNG on the PRIVATE adapter, keyed by
 #     workspace and pocket, and the pocket is opened as the caller first, so a
 #     reference can only be saved to or read from a pocket the user can see;
@@ -42,26 +43,75 @@ from .sites_create import (
 logger = logging.getLogger(__name__)
 
 
-def _research_hosts() -> tuple[str, ...]:
-    """The research image hosts a reference may be fetched from: the same hosts the
-    Refero and Inspo tools already open screenshots from."""
-    from pocketpaw.tools.builtin.inspo import IMAGE_HOSTS as INSPO_HOSTS
-    from pocketpaw.tools.builtin.refero import IMAGE_HOSTS as REFERO_HOSTS
-
-    return (*REFERO_HOSTS, *INSPO_HOSTS)
-
+#: Hosts a reference may be FETCHED from, matched EXACTLY (no subdomains). Refero's
+#: image CDN only. Inspo's captures live on a shared Vercel Blob domain where any
+#: customer can mint a ``<store>.public.blob.vercel-storage.com`` host, so it is not
+#: here: an owner's design arrives as a chat attachment, not a research capture.
+_FETCH_HOSTS = frozenset({"images.refero.design"})
+#: Fetch limits: a total deadline for the whole request, not a per-read timeout.
+_FETCH_DEADLINE_S = 20.0
+#: Tests inject an ``httpx.MockTransport`` here.
+_TRANSPORT: Any = None
 
 _REFUSED_SOURCE = (
     "`image_url` must be the PUBLIC URL of an image the owner attached in this chat or "
-    "uploaded to this site, or a Refero or Inspo screenshot. Other hosts are refused. "
+    "uploaded to this site, or a Refero screenshot. Other hosts are refused. "
     "If the owner's image has no public URL here, say the comparison is unavailable "
     "and compare by eye with preview_site."
 )
 
 
+def _fetch_allowed(url: str) -> bool:
+    """HTTPS and a host EXACTLY in ``_FETCH_HOSTS``."""
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() in _FETCH_HOSTS
+
+
+async def _fetch(url: str) -> bytes:
+    """Stream an image from an exact-match host, refusing past the size cap.
+
+    A declared ``Content-Length`` over the cap is refused before the body is read,
+    and the body is abandoned as soon as it passes the cap, so a hostile or broken
+    host can never make this buffer more than the cap. The whole request runs under
+    one deadline. Redirects are not followed."""
+    import httpx
+
+    cap = refs.MAX_REFERENCE_BYTES
+    kwargs: dict[str, Any] = {"timeout": _FETCH_DEADLINE_S, "follow_redirects": False}
+    if _TRANSPORT is not None:
+        kwargs["transport"] = _TRANSPORT
+    buf = bytearray()
+    try:
+        async with asyncio.timeout(_FETCH_DEADLINE_S):
+            async with httpx.AsyncClient(**kwargs) as client:
+                async with client.stream("GET", url) as response:
+                    if response.status_code != 200:
+                        raise refs.SiteReferenceError(
+                            f"the image fetch returned HTTP {response.status_code}."
+                        )
+                    if not response.headers.get("content-type", "").startswith("image/"):
+                        raise refs.SiteReferenceError("the URL did not return an image.")
+                    declared = response.headers.get("content-length", "")
+                    if declared.isdigit() and int(declared) > cap:
+                        raise refs.SiteReferenceError("the image is too large to read.")
+                    async for chunk in response.aiter_bytes():
+                        buf.extend(chunk)
+                        if len(buf) > cap:
+                            raise refs.SiteReferenceError("the image is too large to read.")
+    except TimeoutError as exc:
+        raise refs.SiteReferenceError("the image fetch took too long.") from exc
+    except httpx.HTTPError as exc:
+        raise refs.SiteReferenceError(f"the image fetch failed: {exc}") from exc
+    return bytes(buf)
+
+
 async def _read_source(image_url: str, *, workspace_id: str) -> bytes:
-    """The bytes behind ``image_url``, from storage or an allow-listed host."""
-    from pocketpaw.tools.builtin import reference_images
+    """The bytes behind ``image_url``, from storage or an exact-match host."""
     from pocketpaw_ee.sites.public_assets import PublicAssetError, public_asset_store
 
     store = public_asset_store()
@@ -72,13 +122,9 @@ async def _read_source(image_url: str, *, workspace_id: str) -> bytes:
                 return await store.read(key, max_bytes=refs.MAX_REFERENCE_BYTES)
             except PublicAssetError as exc:
                 raise refs.SiteReferenceError(str(exc)) from exc
-    hosts = _research_hosts()
-    if not reference_images.host_allowed(image_url, hosts):
+    if not _fetch_allowed(image_url):
         raise refs.SiteReferenceError(_REFUSED_SOURCE)
-    try:
-        return await reference_images.fetch_image(image_url, hosts)
-    except reference_images.ReferenceImageError as exc:
-        raise refs.SiteReferenceError(str(exc)) from exc
+    return await _fetch(image_url)
 
 
 async def _open_pocket(pocket_id: str, user_id: str, workspace_id: str) -> dict[str, Any] | None:
@@ -301,7 +347,7 @@ def make_save_site_reference_tool(tool: Any) -> Any:
             "want) on the site, so compare_site_to_reference can measure the draft "
             "against it. Args: `pocket_id` (required); `image_url` (required): the "
             "PUBLIC URL of an image the owner attached in this chat or uploaded to this "
-            "site, or a Refero or Inspo screenshot. Other hosts are refused. Returns a "
+            "site, or a Refero screenshot. Other hosts are refused. Returns a "
             "`reference_id`, the image size and the width class it looks like. Saving "
             "the same image twice returns the same id."
         ),
