@@ -184,7 +184,10 @@ async def reserve(
     calls = SiteAiCallDoc.get_pymongo_collection()
     for cap in caps:
         key = cap.key or service.counter_key(workspace_id, pocket_id, cap.scope, cap.period)
-        await _ensure_counter(key, workspace_id, pocket_id)
+        # The wallet counter is the workspace's, not this pocket's: a site delete
+        # (which purges by pocket) must never drop other sites' in-flight holds.
+        owner = "*" if key.endswith(_WALLET_SUFFIX) else pocket_id
+        await _ensure_counter(key, workspace_id, owner)
         doc = await _coll().find_one_and_update(
             {"key": key, "committed_micro": {"$lte": cap.limit - amount}},
             {"$inc": {"committed_micro": amount, "held_micro": amount}},

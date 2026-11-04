@@ -18,7 +18,9 @@
 # capped and image-free, readable by ``sites.ai_manage`` only, and deleted when the
 # owner turns them off. ``move_for_pocket`` (site transfer) re-keys settings,
 # presets and budget to the new workspace and deletes transcripts; usage rows stay
-# with the old workspace. ``purge_for_pocket`` (site delete) removes every row.
+# with the old workspace, and spend counters (keyed by pocket) keep counting, so a
+# transfer never resets the caps. ``purge_for_pocket`` (site delete) removes every
+# row of the pocket in any workspace.
 
 from __future__ import annotations
 
@@ -70,7 +72,11 @@ def month_period(now: datetime | None = None) -> str:
 
 
 def counter_key(workspace_id: str, pocket_id: str, scope: str, period: str) -> str:
-    return f"{workspace_id}:{pocket_id}:{scope}:{period}"
+    """A site's spend counter id. Keyed by the pocket only (pocket ids are unique),
+    so a transfer to another workspace keeps the site's spend and its caps;
+    ``workspace_id`` is accepted for call-site symmetry and not part of the key."""
+    del workspace_id
+    return f"site:{pocket_id}:{scope}:{period}"
 
 
 # ------------------------------------------------------------------ access
@@ -520,6 +526,12 @@ async def move_for_pocket(*, pocket_id: str, destination_workspace_id: str) -> i
     await SiteAiTranscriptDoc.find(
         {"pocket_id": pocket_id, "workspace": {"$ne": destination}}
     ).delete()
+    # Counters are keyed by the pocket, so today's and this month's spend (and
+    # therefore the caps) carry over; only their owner label moves.
+    await SiteAiCounterDoc.get_pymongo_collection().update_many(
+        {"pocket_id": pocket_id, "workspace": {"$ne": destination}},
+        {"$set": {"workspace": destination}},
+    )
     return moved
 
 
@@ -537,6 +549,8 @@ async def purge_for_pocket(*, workspace_id: str, pocket_id: str) -> int:
         SiteAiCounterDoc,
         SiteAiTranscriptDoc,
     ):
-        result = await doc.find({"workspace": workspace_id, "pocket_id": pocket_id}).delete()
+        # By pocket in any workspace: a transferred site's history rows stay keyed
+        # to the workspace that paid, and they go with the site too.
+        result = await doc.find({"pocket_id": pocket_id}).delete()
         removed += int(getattr(result, "deleted_count", 0) or 0)
     return removed
