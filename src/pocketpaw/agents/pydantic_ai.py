@@ -1196,7 +1196,7 @@ class PydanticAIBackend:
                 "pip_spec": "pocketpaw[pydantic-ai]",
                 "verify_import": "pydantic_ai",
             },
-            beta=True,
+            # Not beta: this is the cloud chat default path.
         )
 
     def __init__(self, settings: Settings, policy: ToolPolicy | None = None) -> None:

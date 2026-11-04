@@ -1,8 +1,10 @@
 # Shared FastAPI dependencies for the API layer.
-# Created: 2026-02-20
-# 2026-04-16: require_scope now fails closed. Master/session/cookie/localhost
-# auth must set request.state.full_access = True explicitly — no implicit
-# bypass. Closes #888.
+#
+# require_scope(...) fails closed: master/session/cookie/localhost auth must set
+# request.state.full_access = True explicitly, there is no implicit bypass.
+# require_signed_in accepts an active cloud user or a chat-scoped caller; it is
+# the guard for read-only /api/v1 routes, where the global AuthMiddleware
+# deliberately skips the 401 and leaves the decision to the route.
 
 from __future__ import annotations
 
@@ -78,3 +80,21 @@ def require_scope(*scopes: str):
         )
 
     return _check
+
+
+_chat_scope = require_scope("chat")
+
+
+async def require_signed_in(request: Request) -> None:
+    """An active verified cloud user, or a caller holding the chat scope.
+
+    The guard for read-only ``/api/v1`` routes any signed-in caller may use.
+    The cloud EE auth bridge sets ``user_id`` and ``ee_user_authenticated``
+    (active users only) after the JWT verifies; everyone else falls through to
+    ``require_scope("chat")``: master token, dashboard session cookie, genuine
+    localhost, or a chat-scoped API key / OAuth token. Anyone else gets 403.
+    """
+    state = request.state
+    if getattr(state, "user_id", None) and getattr(state, "ee_user_authenticated", False):
+        return
+    await _chat_scope(request)

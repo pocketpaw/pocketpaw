@@ -3587,6 +3587,36 @@ every role-gated entry stays hidden.
   "download") lifts that. Exact ties are deterministic: verbs last, then the
   entry whose name the query covers more, then kind, then id.
 
+## Feature Stages
+
+Which app surfaces are alpha, hidden or preview in this release. The list is
+code-reviewed constants in `src/pocketpaw/feature_stages.py`; the route is
+`src/pocketpaw/api/v1/health.py`. It needs a signed-in caller (an active cloud
+user, or a caller holding the `chat` scope: dashboard session, master token,
+genuine localhost, chat-scoped API key). Anyone else gets 403, which a client
+should treat as "no stage data".
+
+### `GET /api/v1/config/features`
+
+```json
+{ "alpha": ["/agent-health", "/calendar", "backend:codex_cli", "channel:gchat", "..."],
+  "hidden": ["/automations", "/belt", "/code", "..."],
+  "preview": { "/belt-next": "in-the-works", "/foresight": "in-the-works" } }
+```
+
+- Ids are paw-enterprise route paths, matched by path segment (`p === id ||
+  p.startsWith(id + "/")`, so `/belt` never matches `/belt-next`), or runtime
+  ids `channel:<adapter>` / `backend:<name>`.
+- `hidden`: off every nav surface, and the route redirects to `/`. This is a UI
+  rule, not access control: the APIs behind a hidden route stay up.
+- `alpha`: keeps its nav entry and shows the Alpha pill. `backend:*` ids come
+  from each backend's `BackendInfo.beta` (the same flag `GET /api/v1/backends`
+  returns as `beta`).
+- `preview`: keeps its nav entry; opening it shows an "in the works" modal once
+  per device. The value names the modal variant.
+- The three stages are disjoint, and no route id in one stage segment-matches a
+  route id in another.
+
 ## Belt — Architecture Read
 
 ### `GET /api/v1/belt/architecture?repo=<path>`

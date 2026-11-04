@@ -1,15 +1,19 @@
-# Health router — health summary, errors, check, security audit, self-audit.
-# Created: 2026-02-20
+# Health router — version, feature stages, health summary, errors, check,
+# security audit, self-audit.
 #
-# Extracted from dashboard.py health + audit endpoints.
+# Auth: the global AuthMiddleware does not 401 under /api/v1/, so a route here
+# is open unless it declares a guard. /version and /health are open on purpose
+# (uptime probes poll them). /config/features requires a signed-in caller
+# (pocketpaw.api.deps.require_signed_in).
 
 from __future__ import annotations
 
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from pocketpaw.api.deps import require_signed_in
 from pocketpaw.api.v1.schemas.common import OkResponse
 from pocketpaw.api.v1.schemas.health import (
     HealthSummary,
@@ -36,6 +40,17 @@ async def get_version():
         "python": sys.version,
         "agent_backend": settings.agent_backend,
     }
+
+
+@router.get("/config/features", dependencies=[Depends(require_signed_in)])
+async def get_feature_stages():
+    """Which surfaces are alpha, hidden or preview (``pocketpaw.feature_stages``).
+
+    Hidden is a UI rule, not access control: the APIs behind it stay up.
+    """
+    from pocketpaw.feature_stages import stages
+
+    return stages()
 
 
 @router.get("/health", response_model=HealthSummary)

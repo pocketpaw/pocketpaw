@@ -7,7 +7,8 @@
 # Read-only. Callers: an ACTIVE signed-in cloud user (the EE auth bridge sets
 #   request.state.user_id after the JWT verifies and ee_user_authenticated only
 #   for active users), or a caller holding the "chat" scope (API key, OAuth
-#   token, local dashboard session). Anyone else gets 403.
+#   token, local dashboard session). Anyone else gets 403. The guard is
+#   pocketpaw.api.deps.require_signed_in.
 #
 # Workspace overlay: answers go through the atlas EntitlementProvider for the
 #   caller's workspace (ws:<id>, "default" outside the cloud). With a signed-in
@@ -30,7 +31,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from pocketpaw.api.deps import require_scope
+from pocketpaw.api.deps import require_signed_in
 from pocketpaw.api.v1.schemas.atlas import (
     AtlasSearchResponse,
     AtlasSearchResult,
@@ -56,18 +57,7 @@ MAX_QUERY_CHARS = 200
 MAX_KINDS_CHARS = 64
 SEARCH_KINDS = ("surface", "verb", "capability", "primitive")
 
-_chat_scope = require_scope("chat")
-
-
-async def _require_signed_in(request: Request) -> None:
-    """An active verified cloud user, or a caller holding the chat scope."""
-    state = request.state
-    if getattr(state, "user_id", None) and getattr(state, "ee_user_authenticated", False):
-        return
-    await _chat_scope(request)
-
-
-router = APIRouter(prefix="/atlas", tags=["Atlas"], dependencies=[Depends(_require_signed_in)])
+router = APIRouter(prefix="/atlas", tags=["Atlas"], dependencies=[Depends(require_signed_in)])
 
 
 async def _provider(request: Request) -> EntitlementProvider:
