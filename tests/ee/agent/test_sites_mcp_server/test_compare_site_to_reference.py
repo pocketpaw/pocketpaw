@@ -54,6 +54,9 @@ class _MemAdapter:
     async def list_prefix(self, prefix: str) -> list[str]:
         return [k for k in self.files if k.startswith(prefix)]
 
+    async def delete(self, key: str) -> None:
+        self.files.pop(key, None)
+
 
 class _FakeCF:
     def __init__(self, image: bytes) -> None:
@@ -129,32 +132,102 @@ async def test_save_reads_the_owners_attachment_from_storage(ctx, adapter) -> No
     assert list(adapter.files) == [f"sites-references/w/p1/{body['reference_id']}.png"]
 
 
-async def test_save_refuses_other_hosts_before_any_request(ctx, adapter) -> None:
-    from pocketpaw.tools.builtin import reference_images
+class _Transport:
+    """An ``httpx.MockTransport`` that records every request it sees."""
 
-    fetch = AsyncMock()
-    with patch.object(reference_images, "fetch_image", fetch):
-        for url in (
-            "https://evil.example.com/a.png",
-            "http://images.refero.design/a.png",
-            "https://169.254.169.254/latest/meta-data",
-            "https://assets.example.test/sites-assets/other-ws/p1/a.png",
-        ):
-            out = await _save(_page(), url)
-            assert out.get("is_error") is True, url
-            assert "Nothing was saved" in out["content"][0]["text"]
-    fetch.assert_not_called()
+    def __init__(self, handler) -> None:
+        import httpx
+
+        self.urls: list[str] = []
+
+        def record(request):
+            self.urls.append(str(request.url))
+            return handler(request)
+
+        self.transport = httpx.MockTransport(record)
+
+
+@pytest.fixture
+def transport(monkeypatch):
+    import httpx
+    from pocketpaw_ee.agent.mcp_servers import sites_reference as mcp
+
+    def install(handler=None):
+        t = _Transport(
+            handler
+            or (
+                lambda request: httpx.Response(
+                    200, headers={"content-type": "image/png"}, content=_page()
+                )
+            )
+        )
+        monkeypatch.setattr(mcp, "_TRANSPORT", t.transport)
+        return t
+
+    return install
+
+
+async def test_save_refuses_other_hosts_before_any_request(ctx, adapter, transport) -> None:
+    t = transport()
+    for url in (
+        "https://evil.example.com/a.png",
+        "http://images.refero.design/a.png",
+        "https://169.254.169.254/latest/meta-data",
+        "https://assets.example.test/sites-assets/other-ws/p1/a.png",
+        # Any Vercel Blob customer can mint a store subdomain; Inspo's shared
+        # blob domain is not an allowed fetch host, nor is a refero subdomain.
+        "https://attacker.public.blob.vercel-storage.com/x.png",
+        "https://public.blob.vercel-storage.com/x.png",
+        "https://evil.images.refero.design/x.png",
+    ):
+        out = await _save(_page(), url)
+        assert out.get("is_error") is True, url
+        assert "Nothing was saved" in out["content"][0]["text"]
+    assert t.urls == []
     assert adapter.files == {}
 
 
-async def test_save_fetches_from_a_research_host(ctx, adapter) -> None:
-    from pocketpaw.tools.builtin import reference_images
-
-    fetch = AsyncMock(return_value=_page())
-    with patch.object(reference_images, "fetch_image", fetch):
-        out = await _save(_page(), "https://images.refero.design/screens/1.png")
+async def test_save_fetches_from_refero_exactly(ctx, adapter, transport) -> None:
+    t = transport()
+    out = await _save(_page(), "https://images.refero.design/screens/1.png")
     assert out.get("is_error") is not True, out
-    fetch.assert_awaited_once()
+    assert t.urls == ["https://images.refero.design/screens/1.png"]
+
+
+async def test_an_oversized_stream_is_aborted(ctx, adapter, transport, monkeypatch) -> None:
+    import httpx
+    from pocketpaw_ee.sites import site_references as refs
+
+    monkeypatch.setattr(refs, "MAX_REFERENCE_BYTES", 64 * 1024)
+    pulled: list[int] = []
+
+    class _Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for _ in range(1000):  # 16 MB if read to the end
+                pulled.append(1)
+                yield bytes(16 * 1024)
+
+    transport(lambda r: httpx.Response(200, headers={"content-type": "image/png"}, stream=_Body()))
+    out = await _save(_page(), "https://images.refero.design/big.png")
+    assert out.get("is_error") is True
+    assert "too large" in out["content"][0]["text"]
+    assert len(pulled) <= 6, "the body was read past the cap"
+    assert adapter.files == {}
+
+
+async def test_a_declared_oversized_body_is_refused_unread(ctx, adapter, transport) -> None:
+    import httpx
+
+    transport(
+        lambda r: httpx.Response(
+            200,
+            headers={"content-type": "image/png", "content-length": str(50 * 1024 * 1024)},
+            content=b"x",
+        )
+    )
+    out = await _save(_page(), "https://images.refero.design/big.png")
+    assert out.get("is_error") is True
+    assert "too large" in out["content"][0]["text"]
 
 
 async def test_save_refuses_a_non_image(ctx, adapter) -> None:

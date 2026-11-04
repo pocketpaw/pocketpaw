@@ -425,6 +425,7 @@ async def _delete_drafts(*, site: Any, deps: Any) -> str:
 
 
 async def _purge_assets(*, site: Any, deps: Any) -> str:
+    await _purge_references(site)
     if deps.assets is None:
         # No public rail configured on this deployment, so there is nothing on a
         # bucket to remove. Distinct from an adapter that cannot list, which
@@ -451,6 +452,23 @@ async def _purge_assets(*, site: Any, deps: Any) -> str:
     for prefix in getattr(site, "asset_source_prefixes", None) or []:
         await deps.assets.purge_prefix(prefix)
     return OUTCOME_DONE
+
+
+async def _purge_references(site: Any) -> None:
+    """The design references stored for the pocket (``site_references``), on the
+    PRIVATE adapter. Best effort and never raises: they are agent input nobody can
+    reach without the pocket, so a leftover is clutter, not exposure."""
+    from pocketpaw_ee.sites import site_references
+
+    try:
+        await site_references.purge_references(
+            workspace_id=str(getattr(site, "workspace", "") or ""),
+            pocket_id=str(getattr(site, "pocket_id", "") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - best effort, logged
+        logger.warning(
+            "sites.delete: site %s reference cleanup failed: %s", getattr(site, "id", "?"), exc
+        )
 
 
 async def _purge_records(*, site: Any, deps: Any) -> str:
