@@ -167,7 +167,22 @@ class TestSitesMcpServerRegistration:
 
         assert PLAY_TEST_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__play_test_site"
         assert PLAY_TEST_SITE_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 34
+        # Site AI apps: read the AI settings, change them (with the budget card),
+        # save a preset. The /sites agent builds AI features, so it needs all three.
+        from pocketpaw_ee.agent.mcp_servers.sites_ai import (
+            GET_SITE_AI_SETTINGS_TOOL_ID,
+            SET_SITE_AI_SETTINGS_TOOL_ID,
+            UPSERT_SITE_AI_PRESET_TOOL_ID,
+        )
+
+        assert GET_SITE_AI_SETTINGS_TOOL_ID == "mcp__pocketpaw_sites_manager__get_site_ai_settings"
+        for tool_id in (
+            GET_SITE_AI_SETTINGS_TOOL_ID,
+            SET_SITE_AI_SETTINGS_TOOL_ID,
+            UPSERT_SITE_AI_PRESET_TOOL_ID,
+        ):
+            assert tool_id in SITES_TOOL_IDS
+        assert len(SITES_TOOL_IDS) == 37
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

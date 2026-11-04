@@ -59,6 +59,7 @@ import logging
 from typing import Any
 
 from ._audit import record_tool_call
+from .sites_ai import SITE_AI_TOOL_IDS
 from .sites_project import SITES_PROJECT_TOOL_IDS, agent_error_text
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,8 @@ SITES_TOOL_IDS = (
     # The project engine's tools (sites_project.py): base templates, backend
     # recipes, the generic file tools and the sandbox build. Must ride here too.
     *SITES_PROJECT_TOOL_IDS,
+    # Site AI apps (sites_ai.py): read settings, change them, save a preset.
+    *SITE_AI_TOOL_IDS,
 )
 
 
@@ -788,6 +791,10 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     from pocketpaw_ee.agent.mcp_servers.sites_project import make_project_tools
 
     project_tools = make_project_tools(tool)
+    # Site AI apps: settings, the budget card, presets. Same server.
+    from pocketpaw_ee.agent.mcp_servers.sites_ai import make_site_ai_tools
+
+    site_ai_tools = make_site_ai_tools(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -816,6 +823,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             list_site_integrations,
             connect_site_integration,
             *project_tools,
+            *site_ai_tools,
         ],
     )
     return SERVER_NAME, server

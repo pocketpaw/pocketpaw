@@ -6405,6 +6405,15 @@ Same callers and gates as `/ai/chat`. Body `{input: string | string[], model?:
 sells `embed` (`site` and up). Held against the same caps; JSON only, so a paused
 site, an empty wallet or a spent budget is a 402.
 
+**Builder agent.** The /sites agent has `get_site_ai_settings` (settings, budget,
+presets and `how_to`, the build guidance: call AI from server code with the
+`paw-ai` recipe's `pawAi(env)`, browser calls only when needed and behind a
+preset, always render a resting state for `budget_exhausted` / `unavailable`),
+`set_site_ai_settings` (needs `sites.ai_manage`; pushes the SSE card
+`site_ai_budget_requested {pocket_id, purpose, budget}` so the owner confirms the
+caps) and `upsert_site_ai_preset` (needs `sites.ai_manage`). The agent never sets
+caps or transcripts.
+
 **Transfer and delete.** A site transfer moves its AI settings, presets and budget
 to the new workspace (new calls bill the new owner), releases holds in flight and
 deletes transcripts; usage rows stay with the workspace that paid for them, and the
