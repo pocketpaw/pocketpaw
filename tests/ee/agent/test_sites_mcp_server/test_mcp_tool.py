@@ -167,7 +167,7 @@ class TestSitesMcpServerRegistration:
 
         assert PLAY_TEST_SITE_TOOL_ID == "mcp__pocketpaw_sites_manager__play_test_site"
         assert PLAY_TEST_SITE_TOOL_ID in SITES_TOOL_IDS
-        assert len(SITES_TOOL_IDS) == 32
+        assert len(SITES_TOOL_IDS) == 34
 
     def test_extension_provider_advertises_tool_id(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk

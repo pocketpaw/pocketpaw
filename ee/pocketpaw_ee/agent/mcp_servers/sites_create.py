@@ -13,7 +13,8 @@
 #
 # Shared by every engine: ``verify_site`` / ``preview_site`` (the three-layer
 # verdict and a screenshot of the draft; ``play_test_site`` in sites_play_test.py
-# reuses the preview target helpers), ``set_site_dependencies`` (the only writer
+# reuses the preview target helpers and ``compare_site_to_reference`` in
+# sites_reference.py reuses ``_capture_draft``), ``set_site_dependencies`` (the only writer
 # of ``paw.dependencies.json``), ``list_site_assets``, ``request_site_secret`` /
 # ``list_site_secrets`` (names and status only, never values), and
 # ``list_site_integrations`` / ``connect_site_integration`` (one-click Connect: the
@@ -127,6 +128,10 @@ VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
 PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
 # Play the draft in a remote browser (sites_play_test.py). Same server.
 PLAY_TEST_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__play_test_site"
+# Store a design the owner supplied on the pocket, and compare the draft against it
+# (sites_reference.py). Same server.
+SAVE_SITE_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__save_site_reference"
+COMPARE_SITE_TO_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__compare_site_to_reference"
 
 # Site secrets: ask the owner for one by name, list names + status. No values.
 REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
@@ -150,6 +155,8 @@ SITES_CREATE_TOOL_IDS = (
     VERIFY_SITE_TOOL_ID,
     PREVIEW_SITE_TOOL_ID,
     PLAY_TEST_SITE_TOOL_ID,
+    SAVE_SITE_REFERENCE_TOOL_ID,
+    COMPARE_SITE_TO_REFERENCE_TOOL_ID,
     REQUEST_SITE_SECRET_TOOL_ID,
     LIST_SITE_SECRETS_TOOL_ID,
     LIST_SITE_INTEGRATIONS_TOOL_ID,
@@ -3365,6 +3372,76 @@ async def _draft_document(
     )
 
 
+async def _capture_draft(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    viewport: dict[str, int],
+    path: str = "",
+    wait_ms: int | None = None,
+    log_tag: str = "preview_site",
+) -> tuple[bytes, str, dict[str, Any] | None]:
+    """Photograph a pocket's current draft with Browser Rendering at ``viewport``.
+
+    Returns ``(png, url, None)`` (``url`` is the draft address for a template-built
+    site, ``""`` for one rendered from markup), or ``(b"", "", error_response)``
+    saying why there is no picture. Shared by ``preview_site`` and
+    ``compare_site_to_reference`` so both photograph the same draft the same way.
+    """
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except CloudError as exc:
+        return b"", "", _error_response(f"{exc.code}: {exc.message}")
+
+    try:
+        document, url, reason = await _draft_document(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, pocket=pocket
+        )
+    except Exception as exc:  # noqa: BLE001 — a preview is never a gate on the build
+        logger.warning("sites.%s: draft assembly failed", log_tag, exc_info=True)
+        return b"", "", _error_response(f"could not assemble the draft: {exc}")
+    if not document and not url:
+        return b"", "", _error_response(reason)
+
+    # A url capture runs the page's own scripts, so it waits for them to settle; an
+    # html capture keeps the plain ``load`` unless the agent asked for a pause.
+    if url:
+        target: dict[str, Any] = {"url": _join_preview_url(url, path)}
+        settle = _PREVIEW_URL_SETTLE_MS if wait_ms is None else wait_ms
+    else:
+        target = {"html": document}
+        settle = wait_ms or 0
+    try:
+        from pocketpaw_ee.sites.service import _cf_client
+
+        image = await _cf_client().capture_screenshot(
+            **target,
+            viewport=viewport,
+            goto_options={"waitUntil": _PREVIEW_WAIT_UNTIL, "timeout": 20_000},
+            screenshot_options={"fullPage": True},
+            wait_for_timeout=settle,
+        )
+    except CloudError as exc:
+        return (
+            b"",
+            "",
+            _error_response(
+                f"screenshots are unavailable on this deployment ({exc.message}). Rely on "
+                "verify_site and re-read your source against the design instead."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sites.%s: capture failed", log_tag, exc_info=True)
+        return b"", "", _error_response(f"the screenshot failed: {exc}")
+    if not image:
+        return b"", "", _error_response("the screenshot came back empty.")
+    return image, url, None
+
+
 @_with_previous_verification("preview_site", timed=False)
 async def _preview_site_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__preview_site``.
@@ -3405,52 +3482,18 @@ async def _preview_site_handler(args: dict) -> dict:
         return gate
 
     from pocketpaw.tools.builtin import reference_images
-    from pocketpaw_ee.cloud._core.errors import CloudError
-    from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    try:
-        pocket = await pockets_service.get(pocket_id, user_id)
-    except CloudError as exc:
-        return _error_response(f"{exc.code}: {exc.message}")
-
-    try:
-        document, url, reason = await _draft_document(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, pocket=pocket
-        )
-    except Exception as exc:  # noqa: BLE001 — a preview is never a gate on the build
-        logger.warning("sites.preview_site: draft assembly failed", exc_info=True)
-        return _error_response(f"could not assemble the draft: {exc}")
-    if not document and not url:
-        return _error_response(reason)
-
-    # A url capture runs the page's own scripts, so it waits for them to settle; an
-    # html capture keeps the plain ``load`` unless the agent asked for a pause.
-    if url:
-        target: dict[str, Any] = {"url": _join_preview_url(url, path)}
-        settle = _PREVIEW_URL_SETTLE_MS if wait_ms is None else wait_ms
-    else:
-        target = {"html": document}
-        settle = wait_ms or 0
-    try:
-        from pocketpaw_ee.sites.service import _cf_client
-
-        image = await _cf_client().capture_screenshot(
-            **target,
-            viewport=dict(_PREVIEW_VIEWPORTS[device]),
-            goto_options={"waitUntil": _PREVIEW_WAIT_UNTIL, "timeout": 20_000},
-            screenshot_options={"fullPage": True},
-            wait_for_timeout=settle,
-        )
-    except CloudError as exc:
-        return _error_response(
-            f"screenshots are unavailable on this deployment ({exc.message}). Rely on "
-            "verify_site and re-read your source against the design instead."
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("sites.preview_site: capture failed", exc_info=True)
-        return _error_response(f"the screenshot failed: {exc}")
-    if not image:
-        return _error_response("the screenshot came back empty.")
+    image, url, failure = await _capture_draft(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        viewport=dict(_PREVIEW_VIEWPORTS[device]),
+        path=path,
+        wait_ms=wait_ms,
+        log_tag="preview_site",
+    )
+    if failure is not None:
+        return failure
 
     try:
         tiles = reference_images.to_tiles(
@@ -4317,6 +4360,8 @@ __all__ = [
     "LIST_SITE_INTEGRATIONS_TOOL_ID",
     "LIST_SITE_SECRETS_TOOL_ID",
     "PLAY_TEST_SITE_TOOL_ID",
+    "SAVE_SITE_REFERENCE_TOOL_ID",
+    "COMPARE_SITE_TO_REFERENCE_TOOL_ID",
     "REACT_REQUIRED_KEYS",
     "REACT_RESERVED_FILES",
     "REACT_RESERVED_PREFIX",

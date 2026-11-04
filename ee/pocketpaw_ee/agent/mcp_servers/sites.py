@@ -136,6 +136,10 @@ PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
 # Play the draft (keys, clicks, console errors) in a remote browser. Must ride
 # SITES_TOOL_IDS like every other tool on this server.
 PLAY_TEST_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__play_test_site"
+# Store an owner-supplied design on the pocket and compare the draft against it
+# (sites_reference.py). Must ride SITES_TOOL_IDS like every other tool here.
+SAVE_SITE_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__save_site_reference"
+COMPARE_SITE_TO_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__compare_site_to_reference"
 # Per-site secrets: request one from the owner by name, list names + status. Must
 # ride SITES_TOOL_IDS like every other tool on this server.
 REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
@@ -162,6 +166,8 @@ SITES_TOOL_IDS = (
     VERIFY_SITE_TOOL_ID,
     PREVIEW_SITE_TOOL_ID,
     PLAY_TEST_SITE_TOOL_ID,
+    SAVE_SITE_REFERENCE_TOOL_ID,
+    COMPARE_SITE_TO_REFERENCE_TOOL_ID,
     REQUEST_SITE_SECRET_TOOL_ID,
     LIST_SITE_SECRETS_TOOL_ID,
     LIST_SITE_INTEGRATIONS_TOOL_ID,
@@ -763,6 +769,14 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     from pocketpaw_ee.agent.mcp_servers.sites_play_test import make_play_test_site_tool
 
     play_test_site = make_play_test_site_tool(tool)
+    # Store an owner-supplied design and compare the draft against it. Same server.
+    from pocketpaw_ee.agent.mcp_servers.sites_reference import (
+        make_compare_site_to_reference_tool,
+        make_save_site_reference_tool,
+    )
+
+    save_site_reference = make_save_site_reference_tool(tool)
+    compare_site_to_reference = make_compare_site_to_reference_tool(tool)
     # Site secrets: ask the owner for one by name; list names + status. Same server.
     request_site_secret = make_request_site_secret_tool(tool)
     list_site_secrets = make_list_site_secrets_tool(tool)
@@ -795,6 +809,8 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             verify_site,
             preview_site,
             play_test_site,
+            save_site_reference,
+            compare_site_to_reference,
             request_site_secret,
             list_site_secrets,
             list_site_integrations,
@@ -819,11 +835,13 @@ __all__ = [
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "GET_SITE_BUILD_STATUS_TOOL_ID",
+    "COMPARE_SITE_TO_REFERENCE_TOOL_ID",
     "PLAY_TEST_SITE_TOOL_ID",
     "PREVIEW_SITE_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "READ_SITE_SOURCE_TOOL_ID",
     "REQUEST_SITE_SECRET_TOOL_ID",
+    "SAVE_SITE_REFERENCE_TOOL_ID",
     "SERVER_NAME",
     "SET_SITE_DEPENDENCIES_TOOL_ID",
     "SITES_TOOL_IDS",
