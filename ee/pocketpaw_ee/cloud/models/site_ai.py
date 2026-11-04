@@ -71,8 +71,8 @@ class SiteAiBudgetDoc(Document):
     pocket_id: str
     monthly_cap_micro: int = 1_000 * 1_000_000
     daily_cap_micro: int = 100 * 1_000_000
-    per_visitor_daily_micro: int = 5 * 1_000_000
-    preview_daily_cap_micro: int = 20 * 1_000_000
+    per_visitor_daily_micro: int = 20 * 1_000_000
+    preview_daily_cap_micro: int = 50 * 1_000_000
     alert_thresholds: list[int] = Field(default_factory=lambda: [50, 80, 100])
     # period ("2026-11") -> the highest threshold already alerted in it.
     alerted: dict[str, int] = Field(default_factory=dict)

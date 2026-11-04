@@ -457,6 +457,10 @@ class AudienceResolver:
         if t in {"site.secret_requested", "site.secret_updated", "site.integration_changed"}:
             return list(dict.fromkeys(u for u in (d.get("owner"), d.get("user_id")) if u))
 
+        # --- Site AI budget threshold crossed: the site owner only ---------------
+        if t == "site.ai_budget":
+            return [d["owner"]] if d.get("owner") else []
+
         # --- Site templates (user-saved; private, workspace or public) ----------
         # One recipient, named by the service in ``user_id`` (the owner, or the
         # caller for ``used``). Never fans out on ``workspace_id``: a public
