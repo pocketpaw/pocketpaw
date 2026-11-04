@@ -6329,8 +6329,14 @@ is an HMAC over the site, the caller's IP hash, the caller kind and an expiry ab
 `AUTH_SECRET`; with neither, tickets are refused with 503). Refused with 403
 `browser_disabled` unless the owner turned on browser access. Turnstile fails
 closed: the site's own Turnstile widget when it has one, else the platform secret;
-with neither configured, production refuses (403 `turnstile_required`), so browser
-AI needs Turnstile on the site. A draft preview gets a `preview` ticket without
+with neither configured the ticket is refused (403 `turnstile_required`) unless the
+dev-only `PAW_SITE_AI_ALLOW_NO_TURNSTILE=1` is set on a non-production box. The
+answer's hostname must be one of the site's own hosts. The visitor address is the
+`CF-Connecting-IP` when the hop our proxy saw is a Cloudflare edge, else that hop
+(`POCKETPAW_SITE_AI_TRUSTED_HOPS`, default 1); IPv6 is bucketed by /64 and the
+bucket is HMAC'd with the ticket secret. A browser call naming a preset loses its
+own system messages, tools, tool choice and response format, and may carry at most
+20 assistant turns. A draft preview gets a `preview` ticket without
 Turnstile (its origin is the draft's unguessable host). 10 tickets a minute per
 visitor address.
 
