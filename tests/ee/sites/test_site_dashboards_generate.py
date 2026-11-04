@@ -9,7 +9,8 @@
 # summary that holds no sign-in table, masked or PII column, or row value. Also covered:
 # repair then drop, refused writes, the two-stage pick over 25 tables, opt-in stats,
 # prompt-injection names, empty databases (no model call), the daily allowance and its
-# refund, one job per site, job polling and the routes. A real-model eval runs only with
+# refund, one job per site, job polling and the routes (suggest / regenerate live in
+# test_site_dashboards_ai_edit.py). A real-model eval runs only with
 # PAW_DASHBOARD_EVAL=1.
 from __future__ import annotations
 
@@ -467,14 +468,6 @@ async def test_one_job_per_site(beanie_test_db, monkeypatch, audit):
         await _generate()
     assert exc.value.code == "rate_limited"
     assert sum(gen._daily_local.values()) == 0  # a refused start spends nothing
-
-
-@pytest.mark.asyncio
-async def test_only_new_mode_for_now(beanie_test_db, monkeypatch, audit):
-    _site(monkeypatch, _ddl("shop"))
-    with pytest.raises(CloudError) as exc:
-        await _generate(mode="suggest")
-    assert exc.value.status_code == 422
 
 
 @pytest.mark.asyncio

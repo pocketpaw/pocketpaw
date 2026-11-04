@@ -21,8 +21,12 @@
 # ``ai``). Nothing is saved when no widget works or the model doesn't answer; a model
 # that never answered refunds the day's allowance.
 #
-# Model usage is not billed to the workspace wallet (like the Enhance button's side
-# completion); the daily allowance is the bound.
+# ``suggest`` / ``regenerate`` run the same design against an existing dashboard and end
+# with a PROPOSAL (``WidgetOp[]``), never a save. Suggest only adds (designed over the
+# tables added since the dashboard last saw the schema when there are any, never
+# repeating a query it runs); regenerate removes the untouched ``ai`` widgets and adds
+# replacements, never touching ``user`` / ``ai_edited`` ones. Model usage is not billed
+# to the wallet; the daily allowance is the bound.
 from __future__ import annotations
 
 import asyncio
@@ -143,6 +147,51 @@ def lay_out(widgets: list[WidgetIn]) -> list[WidgetIn]:
     return [WidgetIn.model_validate(w.model_dump()) for w in out]
 
 
+def place_below(existing: list[dict[str, Any]], widgets: list[WidgetIn]) -> list[WidgetIn]:
+    """``widgets`` laid out in rows under the ``existing`` ones."""
+    base = max((int(w["layout"]["y"]) + int(w["layout"]["h"]) for w in existing), default=0)
+    out: list[WidgetIn] = []
+    for w in lay_out(widgets):
+        layout = {**w.layout.model_dump(), "y": min(w.layout.y + base, 1000)}
+        out.append(WidgetIn.model_validate({**w.model_dump(), "layout": layout}))
+    return out
+
+
+def op_widget(w: WidgetIn) -> dict[str, Any]:
+    """A widget as an ``add`` op carries it."""
+    return {
+        "title": w.title,
+        "viz": w.viz,
+        "chart_type": (w.chart_type or "bar") if w.viz == "chart" else None,
+        "sql": w.sql,
+        "mapping": w.mapping.model_dump(exclude_none=True),
+        "layout": w.layout.model_dump(),
+        "refresh": w.refresh,
+        "interval_s": w.interval_s,
+    }
+
+
+def _norm_sql(sql: str) -> str:
+    return " ".join(str(sql or "").lower().split()).rstrip(";")
+
+
+def suggest_ops(existing: list[dict[str, Any]], widgets: list[WidgetIn]) -> list[dict[str, Any]]:
+    """Additions only, none repeating a query the dashboard already runs."""
+    have = {_norm_sql(w.get("sql", "")) for w in existing}
+    fresh = [w for w in widgets if _norm_sql(w.sql) not in have]
+    return [{"op": "add", "widget": op_widget(w)} for w in place_below(existing, fresh)]
+
+
+def regenerate_ops(existing: list[dict[str, Any]], widgets: list[WidgetIn]) -> list[dict[str, Any]]:
+    """Replace the untouched ``ai`` widgets; ``user`` and ``ai_edited`` ones stay."""
+    kept = [w for w in existing if w.get("origin") != "ai"]
+    ops: list[dict[str, Any]] = [
+        {"op": "remove", "widget_id": w["id"]} for w in existing if w.get("origin") == "ai"
+    ]
+    ops += [{"op": "add", "widget": op_widget(w)} for w in place_below(kept, widgets)]
+    return ops
+
+
 # --------------------------------------------------------------------------- design
 
 
@@ -259,6 +308,7 @@ async def design(
     focus: str | None = None,
     stage: Callable[[str], Awaitable[None]] | None = None,
     extra_user: str = "",
+    summary_schema: d1.Schema | None = None,
 ) -> tuple[list[WidgetIn], list[DroppedWidget], bool]:
     """``(working widgets, dropped, answered)``: the model's design, tested, with one
     repair round. ``answered`` is False when the model never replied."""
@@ -270,7 +320,12 @@ async def design(
     model = prompt.model_name()
     await _stage("schema")
     summary = await summary_for(
-        cf, database_id, schema, include_stats=include_stats, focus=focus, model=model
+        cf,
+        database_id,
+        summary_schema or schema,
+        include_stats=include_stats,
+        focus=focus,
+        model=model,
     )
     if summary is None:
         return [], [], False
@@ -434,17 +489,24 @@ async def start_generation(
     focus: str | None = None,
     _cloudflare: Any | None = None,
 ) -> GenerateOut:
-    """Queue a generation job; ``{job_id}``."""
-    if mode != "new":
-        raise ValidationError(
-            "sites.dashboard_mode_unsupported", "Only new dashboards can be generated yet."
-        )
+    """Queue a generation job; ``{job_id}``. ``new`` saves a new dashboard; ``suggest``
+    and ``regenerate`` only ever return a proposal for ``dashboard_id``."""
+    if mode not in ("new", "suggest", "regenerate"):
+        raise ValidationError("sites.dashboard_bad_mode", "Unknown generation mode.")
     target = await svc.manage_target(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
     )
     if target.reason:
         raise svc.unavailable(target.reason)
-    await svc.check_room(workspace_id, pocket_id)
+    existing = None
+    if mode == "new":
+        await svc.check_room(workspace_id, pocket_id)
+    else:
+        if not dashboard_id:
+            raise ValidationError(
+                "sites.dashboard_id_required", "Name the dashboard to suggest widgets for."
+            )
+        existing = await svc.find(target, dashboard_id)
     cf = svc.client(target, _cloudflare)
     schema = await d1.introspect(cf, target.d1_id)
     if not any(prompt.usable_columns(t) for t in prompt.usable_tables(schema)):
@@ -455,7 +517,7 @@ async def start_generation(
     except RateLimited:
         await budget.release(slot)
         raise
-    job = await new_job(target, user_id, mode)
+    job = await new_job(target, user_id, mode, str(existing.id) if existing else None)
     await svc._audit(
         target,
         user_id,
@@ -470,13 +532,45 @@ async def start_generation(
         async def _stage(name: str) -> None:
             await _update(job, stage=name)
 
+        extra, narrowed = "", None
+        if existing is not None:
+            kept = (
+                existing.widgets
+                if mode == "suggest"
+                else [w for w in existing.widgets if w.get("origin") != "ai"]
+            )
+            extra = prompt.existing_block(kept) if kept else ""
+            fresh = svc.new_tables(existing, schema) if mode == "suggest" else []
+            if fresh:  # suggest over the tables added since the dashboard last saw the schema
+                narrowed = d1.Schema(
+                    fingerprint=schema.fingerprint,
+                    tables={n: schema.tables[n] for n in fresh},
+                )
         widgets, dropped, answered = await design(
-            cf, target.d1_id, schema, include_stats=include_stats, focus=focus, stage=_stage
+            cf,
+            target.d1_id,
+            schema,
+            include_stats=include_stats,
+            focus=focus,
+            stage=_stage,
+            extra_user=extra,
+            summary_schema=narrowed,
         )
         dropped_out = [d.model_dump() for d in dropped]
         if not answered:
             await refund_daily(workspace_id, "generate")
             await _update(job, status="failed", error=NO_ANSWER, dropped=dropped_out)
+            return
+        if existing is not None:
+            if mode == "regenerate" and not widgets:
+                await _update(job, status="failed", error=NOTHING_WORKED, dropped=dropped_out)
+                return
+            ops = (
+                suggest_ops(existing.widgets, widgets)
+                if mode == "suggest"
+                else regenerate_ops(existing.widgets, widgets)
+            )
+            await _update(job, status="done", stage=None, proposal=ops, dropped=dropped_out)
             return
         if not widgets:
             await _update(job, status="failed", error=NOTHING_WORKED, dropped=dropped_out)
