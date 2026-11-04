@@ -11,15 +11,19 @@
 #      images only on a vision alias, input within the alias context -> 403 / 400
 #   7. site AI off or paused                            -> Unavailable("paused")
 #   8. SiteRateCounter per site, and per hashed ``user`` when sent -> 429
-# ``Unavailable`` (paused, later budget) answers a streaming request with one
+#   9. ``over_billing_limit`` on the workspace wallet -> Unavailable("limit",
+#      wallet_empty), then the worst case is reserved against every cap
+#      (budget.py) -> Unavailable("limit", budget_exhausted)
+# ``Unavailable`` answers a streaming request with one
 # ``unavailable`` SSE event and a JSON request with its 402.
 #
 # Then one LiteLLM call (llm.py) with the validated fields only, retried once when
 # a transient failure happens before the first token. Tool calls are relayed to
 # the caller and never executed. Every stream ends with ``done``, ``unavailable``
 # or ``error``. ``record`` prices the tokens (provider usage; an estimate for a cut
-# stream), writes the ``ChatRunDoc`` (context ``site_ai``, no content) and the
-# ``SiteAiCallDoc``, and asks for the wallet debit (``bill_run`` keyed ``run:{id}``).
+# stream), writes the ``ChatRunDoc`` (context ``site_ai``, no content), settles the
+# hold to that figure (or releases it when nothing was produced), checks the
+# owner's alert thresholds and asks for the wallet debit (``bill_run``, ``run:{id}``).
 
 from __future__ import annotations
 
@@ -31,7 +35,6 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import Request
@@ -39,7 +42,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.integrations import site_gate
-from pocketpaw_ee.site_ai import aliases, llm, service, validate
+from pocketpaw_ee.site_ai import alerts, aliases, llm, service, validate
+from pocketpaw_ee.site_ai import budget as budget_mod
 from pocketpaw_ee.site_ai.errors import AiError, error_response, invalid
 
 logger = logging.getLogger(__name__)
@@ -85,6 +89,8 @@ class Admitted:
     preset_version: int | None = None
     ip_hash: str = ""
     user_hash: str | None = None
+    visitor: str | None = None  # the per-visitor cap's key (hashed)
+    hold: budget_mod.Hold | None = None
 
     def payload(self) -> dict[str, Any]:
         return llm.build_payload(
@@ -219,7 +225,55 @@ async def admit(request: Request, site_id: str) -> Admitted:
             "paused", "budget_exhausted", "AI is paused for this site.", stream=call.stream
         )
     await _rate_limit(call)
+    if call.caller == "worker":
+        call.visitor = call.user_hash
+    await _wallet_gate(call)
+    await _reserve(call, budget, site_plans.site_ai_allowance_micro(plan))
     return call
+
+
+async def _wallet_gate(call: Admitted) -> None:
+    """The workspace wallet first: kill switch, empty wallet, monthly ceiling."""
+    from pocketpaw_ee.cloud.credits.guards import over_billing_limit
+
+    try:
+        refusal = await over_billing_limit(call.workspace_id)
+    except Exception as exc:  # noqa: BLE001 - an unreadable wallet refuses, never 500s
+        logger.warning(
+            "site_ai: wallet check failed for run %s (%s)", call.run_id, type(exc).__name__
+        )
+        raise Unavailable("temporary", "provider_unavailable", stream=call.stream) from None
+    if refusal is not None:
+        logger.info("site_ai: run %s refused by the wallet (%s)", call.run_id, refusal.code)
+        raise Unavailable("limit", "wallet_empty", stream=call.stream)
+
+
+async def _reserve(call: Admitted, budget: Any, allowance: int) -> None:
+    """Hold the call's worst case (input estimate + full output cap) against every
+    cap that applies, atomically, before the provider is called."""
+    amount = aliases.reserve_micro(call.alias, call.input_estimate, call.max_tokens)
+    caps = budget_mod.caps_for(
+        caller=call.caller, budget=budget, allowance=allowance, visitor=call.visitor
+    )
+    try:
+        call.hold = await budget_mod.reserve(
+            run_id=call.run_id,
+            workspace_id=call.workspace_id,
+            pocket_id=call.pocket_id,
+            site_id=call.site_id,
+            caller=call.caller,
+            model=call.alias,
+            amount=amount,
+            caps=caps,
+            preset_id=call.preset_id,
+            preset_version=call.preset_version,
+        )
+    except budget_mod.BudgetRefused as exc:
+        logger.info("site_ai: run %s over the %s cap", call.run_id, exc.scope)
+        raise Unavailable("limit", "budget_exhausted", stream=call.stream) from None
+    except Exception as exc:  # noqa: BLE001 - a failed hold refuses, never 500s
+        logger.warning("site_ai: hold failed for run %s (%s)", call.run_id, type(exc).__name__)
+        raise Unavailable("temporary", "provider_unavailable", stream=call.stream) from None
 
 
 async def _rate_limit(call: Admitted) -> None:
@@ -244,9 +298,18 @@ async def record(call: Admitted, status: str, input_tokens: int, output_tokens: 
     micro = aliases.actual_micro(call.alias, input_tokens, output_tokens)
     try:
         await _write_run(call, status, input_tokens, output_tokens)
-        await _settle(call, micro, input_tokens, output_tokens)
     except Exception:  # noqa: BLE001 - bookkeeping must not break the answer
-        logger.warning("site_ai: bookkeeping failed for run %s", call.run_id, exc_info=True)
+        logger.warning("site_ai: run doc failed for run %s", call.run_id, exc_info=True)
+    try:
+        if call.hold is not None:
+            if input_tokens or output_tokens:
+                await budget_mod.settle(call.hold, micro, input_tokens, output_tokens)
+            else:
+                await budget_mod.release(call.hold)
+    except Exception:  # noqa: BLE001 - the sweeper releases a hold we couldn't
+        logger.warning("site_ai: settle failed for run %s", call.run_id, exc_info=True)
+    if micro:
+        await alerts.check(call.site, call.workspace_id, call.pocket_id)
     logger.info(
         "site_ai.call run=%s site=%s alias=%s caller=%s status=%s in=%d out=%d micro=%d",
         call.run_id,
@@ -315,43 +378,6 @@ def _schedule_bill(run_id: str) -> None:
         return
     _BACKGROUND.add(task)
     task.add_done_callback(_BACKGROUND.discard)
-
-
-async def _settle(call: Admitted, micro: int, input_tokens: int, output_tokens: int) -> None:
-    from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc, SiteAiCounterDoc
-
-    now = datetime.now(UTC)
-    await SiteAiCallDoc(
-        run_id=call.run_id,
-        workspace=call.workspace_id,
-        pocket_id=call.pocket_id,
-        site_id=call.site_id,
-        caller=call.caller,  # type: ignore[arg-type]
-        model=call.alias,
-        preset_id=call.preset_id,
-        preset_version=call.preset_version,
-        actual_micro=micro,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        state="settled",
-        day=service.day_period(now),
-        settled_at=now,
-    ).insert()
-    coll = SiteAiCounterDoc.get_pymongo_collection()
-    for scope, period in (("day", service.day_period(now)), ("month", service.month_period(now))):
-        await coll.update_one(
-            {"key": service.counter_key(call.workspace_id, call.pocket_id, scope, period)},
-            {
-                "$inc": {"committed_micro": micro, "spent_micro": micro, "calls": 1},
-                "$setOnInsert": {
-                    "workspace": call.workspace_id,
-                    "pocket_id": call.pocket_id,
-                    "held_micro": 0,
-                    "created_at": now,
-                },
-            },
-            upsert=True,
-        )
 
 
 # ------------------------------------------------------------------ run
@@ -450,7 +476,9 @@ async def _json(call: Admitted) -> Response:
         try:
             result = await llm.complete(call.payload())
             break
-        except llm.LlmError as exc:
+        except Exception as exc:  # noqa: BLE001 - classified, never echoed
+            if not isinstance(exc, llm.LlmError):
+                exc = llm.LlmError(False, type(exc).__name__)
             logger.warning("site_ai: run %s failed (%s)", call.run_id, exc.kind)
             if not exc.transient or attempt == 1:
                 await record(call, "failed", 0, 0)

@@ -367,13 +367,7 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
             amount_micro=micro,
             cause=_COMPUTE_SPEND_CAUSE,
             idempotency_key=f"run:{run_id}",
-            ref={
-                "run_id": run_id,
-                "cost_usd": cost.cost_usd,
-                "cost_source": cost.source,
-                "model": cost.model,
-                "total_tokens": tokens,
-            },
+            ref=_debit_ref(run_doc, cost, tokens),
             allow_negative=True,
         )
         debited = True
@@ -421,6 +415,24 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
         cost_source=cost.source,
         model=cost.model,
     )
+
+
+def _debit_ref(run_doc: ChatRunDoc, cost: ComputeCost, tokens: int) -> dict[str, Any]:
+    """The ledger ``ref`` for one run's debit. A site AI run also names its site
+    (``kind: site_ai``, the pocket and the site), so spend is attributed per site
+    in the owner's one wallet."""
+    ref: dict[str, Any] = {
+        "run_id": run_doc.run_id,
+        "cost_usd": cost.cost_usd,
+        "cost_source": cost.source,
+        "model": cost.model,
+        "total_tokens": tokens,
+    }
+    if run_doc.context_type == "site_ai":
+        ref["kind"] = "site_ai"
+        ref["pocket_id"] = run_doc.scope_id
+        ref["site_id"] = str((run_doc.usage or {}).get("site_id") or "")
+    return ref
 
 
 # The states a finished run can be in. Mirrors the sweeper's ``_TERMINAL_STATES``

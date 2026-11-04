@@ -588,6 +588,14 @@ class SiteIntegrationChanged(Event):
     EVENT_TYPE: ClassVar[str] = "site.integration_changed"
 
 
+# A site's AI spend crossed one of its alert thresholds this month. Data:
+# {workspace_id, pocket_id, site_id, owner, period, threshold, spent_month_micro,
+# monthly_cap_micro}. Routed to the site owner only.
+@dataclass
+class SiteAiBudget(Event):
+    EVENT_TYPE: ClassVar[str] = "site.ai_budget"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):

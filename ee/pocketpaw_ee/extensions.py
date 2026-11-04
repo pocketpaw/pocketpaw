@@ -117,6 +117,7 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
       address once its 30-day hold ends, freeing the name.
     - ``sweep_do_teardowns``: retry DO teardowns a site delete could not finish, with
       backoff, then hand them to an operator (same flag).
+    - ``sweep_expired_holds``: release site AI budget holds whose call died.
     - ``backfill_tenant_keys`` (tick only): mint LiteLLM tenant keys for up to 50
       live workspaces with none, since workspace create never retries a failed
       mint. Skipped on the boot pass, where a down proxy would hold startup.
@@ -130,6 +131,7 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
     from pocketpaw_ee.cloud.llm_provisioning.service import backfill_tenant_keys
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.cloud.partners.service import sweep_partner_tiers
+    from pocketpaw_ee.site_ai.budget import sweep_expired_holds
     from pocketpaw_ee.sites.do_metering import sweep_do_teardowns, sweep_do_usage
     from pocketpaw_ee.sites.draft_worker import sweep_draft_workers
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
@@ -148,6 +150,7 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
         sweep_do_usage,
         sweep_slug_redirects,
         sweep_do_teardowns,
+        sweep_expired_holds,
         backfill_tenant_keys,
     ]
     return cluster, [sweep_agent_jails]

@@ -6351,7 +6351,22 @@ per-user rate limit; LiteLLM's `user` is always the paying workspace.
   (JSON callers get 402 `budget_exhausted`).
 
 Each call writes a `ChatRunDoc` (`context_type: "site_ai"`, token counts only, no
-content) and is debited through `bill_run` keyed `run:{run_id}`.
+content) and is debited through `bill_run` keyed `run:{run_id}`; the ledger `ref`
+carries `kind: "site_ai"`, `pocket_id` and `site_id`.
+
+**Hard caps.** Before the provider is called, the workspace wallet is checked
+(`over_billing_limit`: empty wallet, monthly ceiling, kill switch → `wallet_empty`)
+and the call's worst case (pessimistic input estimate + the full output cap, priced
+with the RateCard markup) is reserved atomically against every cap that applies:
+the site's daily cap and monthly cap (bounded by the plan allowance), plus the
+per-visitor daily cap for a Worker call that sends `user`. Preview calls use only
+the preview daily cap. A refused hold is `budget_exhausted`; both stream
+`unavailable {reason: "limit"}` (402 for JSON callers). After the call the hold
+settles to the provider-reported usage and the surplus is released; an error
+before any output releases it all. A sweeper releases holds whose call died.
+Crossing an alert threshold of the monthly cap notifies the workspace owner once
+per threshold per month (kind `site_ai_budget`) and emits `site.ai_budget` to the
+site owner.
 
 ## Deleting a site
 
