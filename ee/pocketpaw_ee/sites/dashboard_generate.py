@@ -32,7 +32,7 @@ from datetime import UTC, datetime, timedelta
 from datetime import time as dtime
 from typing import Any
 
-from pocketpaw_ee.cloud._core.errors import NotFound, RateLimited, ValidationError
+from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, RateLimited, ValidationError
 from pocketpaw_ee.cloud.models.site_dashboard import SiteDashboardJob
 from pocketpaw_ee.sites import dashboard_service as svc
 from pocketpaw_ee.sites import data_service
@@ -200,7 +200,9 @@ async def validate(
         if result.ok:
             working.append((index, w))
         else:
-            failed.append({"index": index, "widget": _brief(w), "error": result.error or ""})
+            # D1's own text can echo a row value; our mapping messages can't.
+            error = prompt.scrub_error(raw) if isinstance(raw, str) else result.error or ""
+            failed.append({"index": index, "widget": _brief(w), "error": error})
     return working, failed, dropped
 
 
@@ -387,6 +389,8 @@ async def _launch(
             await asyncio.wait_for(runner(job), timeout=JOB_TTL_S)
         except budget.DataBusy:
             await _update(job, status="failed", error="Your site's data is busy. Try again soon.")
+        except CloudError as exc:  # e.g. the dashboard cap, re-checked at insert
+            await _update(job, status="failed", error=exc.message)
         except TimeoutError:
             await _update(job, status="failed", error="The job took too long. Try again.")
         except Exception:  # noqa: BLE001 — a job must always end with a status
