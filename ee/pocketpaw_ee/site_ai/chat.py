@@ -26,7 +26,8 @@
 # or ``error``. ``record`` prices the tokens (provider usage; an estimate for a cut
 # stream), writes the ``ChatRunDoc`` (context ``site_ai``, no content), settles the
 # hold to that figure (or releases it when nothing was produced), checks the
-# owner's alert thresholds and asks for the wallet debit (``bill_run``, ``run:{id}``).
+# owner's alert thresholds, writes an opted-in transcript and asks for the wallet
+# debit (``bill_run``, ``run:{id}``).
 
 from __future__ import annotations
 
@@ -99,6 +100,8 @@ class Admitted:
     visitor: str | None = None  # the per-visitor cap's key (hashed)
     hold: budget_mod.Hold | None = None
     sent: int = 0  # provider requests that left this process (each costs its input)
+    kind: str = "chat"  # chat | embed
+    keep_transcript: bool = False
 
     def payload(self) -> dict[str, Any]:
         return llm.build_payload(
@@ -241,6 +244,7 @@ async def admit(request: Request, site_id: str) -> Admitted:
         preset_id=preset_id,
         preset_version=preset_version,
         ip_hash=ip_hash,
+        keep_transcript=settings.keep_transcripts,
         user_hash=_hash(f"{workspace_id}:{parsed.user}") if parsed.user else None,
     )
 
@@ -292,6 +296,7 @@ async def _reserve(call: Admitted, budget: Any, allowance: int) -> None:
             model=call.alias,
             amount=amount,
             caps=caps,
+            kind=call.kind,
             preset_id=call.preset_id,
             preset_version=call.preset_version,
         )
@@ -346,8 +351,16 @@ def _floor_in(call: Admitted, extra_attempts: int = 0) -> int:
     return call.input_estimate * max(0, call.sent - extra_attempts)
 
 
-async def record(call: Admitted, status: str, input_tokens: int, output_tokens: int) -> int:
-    """Price and persist one finished call; returns its micro-credits. Never raises."""
+async def record(
+    call: Admitted,
+    status: str,
+    input_tokens: int,
+    output_tokens: int,
+    output: str = "",
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> int:
+    """Price and persist one finished call; returns its micro-credits. Never raises.
+    ``output`` / ``tool_calls`` only feed an opted-in transcript."""
     input_tokens, output_tokens = max(0, int(input_tokens)), max(0, int(output_tokens))
     micro = aliases.actual_micro(call.alias, input_tokens, output_tokens)
     try:
@@ -368,6 +381,20 @@ async def record(call: Admitted, status: str, input_tokens: int, output_tokens: 
         logger.warning("site_ai: settle failed for run %s", call.run_id, exc_info=True)
     if micro:
         await alerts.check(call.site, call.workspace_id, call.pocket_id)
+    if call.keep_transcript and (input_tokens or output_tokens) and call.kind == "chat":
+        try:
+            await service.write_transcript(
+                workspace_id=call.workspace_id,
+                pocket_id=call.pocket_id,
+                run_id=call.run_id,
+                caller=call.caller,
+                model=call.alias,
+                messages=call.messages,
+                output=output,
+                tool_calls=tool_calls or [],
+            )
+        except Exception:  # noqa: BLE001 - a transcript never breaks the answer
+            logger.warning("site_ai: transcript failed for run %s", call.run_id, exc_info=True)
     logger.info(
         "site_ai.call run=%s site=%s alias=%s caller=%s status=%s in=%d out=%d micro=%d",
         call.run_id,
@@ -477,6 +504,8 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
     finish = "stop"
     usage: tuple[int, int] | None = None
     streamed = ""
+    text = ""
+    calls: dict[int, dict[str, str]] = {}
     recorded = False
     try:
         try:
@@ -487,17 +516,21 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
                         if ev.kind == "text":
                             started = True
                             streamed += ev.text
+                            text += ev.text
                             yield sse("chunk", {"delta": ev.text})
                         elif ev.kind == "tool":
                             started = True
                             frame: dict[str, Any] = {"index": ev.index}
+                            acc = calls.setdefault(ev.index, {"name": "", "arguments": ""})
                             if ev.id:
                                 frame["id"] = ev.id
                             if ev.name:
                                 frame["name"] = ev.name
+                                acc["name"] += ev.name
                                 streamed += ev.name
                             if ev.arguments:
                                 frame["arguments_delta"] = ev.arguments
+                                acc["arguments"] += ev.arguments
                                 streamed += ev.arguments
                             yield sse("tool_call", frame)
                         elif ev.kind == "finish":
@@ -524,7 +557,7 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
                     yield sse("unavailable", {"reason": "temporary"})
                 return
             tokens_in, tokens_out = _billed(call, usage, streamed)
-            micro = await record(call, "failed", tokens_in, tokens_out)
+            micro = await record(call, "failed", tokens_in, tokens_out, text, list(calls.values()))
             yield sse(
                 "usage",
                 {"input_tokens": tokens_in, "output_tokens": tokens_out, "credits_micro": micro},
@@ -533,7 +566,7 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
             return
         tokens_in, tokens_out = _billed(call, usage, streamed)
         recorded = True
-        micro = await record(call, "completed", tokens_in, tokens_out)
+        micro = await record(call, "completed", tokens_in, tokens_out, text, list(calls.values()))
         yield sse(
             "usage",
             {"input_tokens": tokens_in, "output_tokens": tokens_out, "credits_micro": micro},
@@ -545,7 +578,9 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
             # the input of every request that left, output or not.
             tokens_in = _floor_in(call)
             tokens_out = _text_tokens(streamed)
-            await asyncio.shield(record(call, "cancelled", tokens_in, tokens_out))
+            await asyncio.shield(
+                record(call, "cancelled", tokens_in, tokens_out, text, list(calls.values()))
+            )
 
 
 def _billed(call: Admitted, usage: tuple[int, int] | None, streamed: str) -> tuple[int, int]:
@@ -600,7 +635,14 @@ async def _json(call: Admitted) -> Response:
         tokens_in, tokens_out = _floor_in(call), _text_tokens(produced)
     else:
         tokens_in += _floor_in(call, extra_attempts=1)
-    micro = await record(call, "completed", tokens_in, tokens_out)
+    micro = await record(
+        call,
+        "completed",
+        tokens_in,
+        tokens_out,
+        result.content or "",
+        [c["function"] for c in result.tool_calls],
+    )
     message: dict[str, Any] = {"role": "assistant", "content": result.content}
     if result.tool_calls:
         message["tool_calls"] = result.tool_calls

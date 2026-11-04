@@ -111,6 +111,16 @@ class SiteAiUsage(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SiteAiTranscript(BaseModel):
+    run_id: str
+    caller: str
+    model: str
+    created_at: str
+    messages: list[dict]
+    output: str
+    tool_calls: list[dict]
+
+
 __all__ = [
     "MAX_CAP_MICRO",
     "MAX_PRESET_NAME_CHARS",
@@ -122,6 +132,7 @@ __all__ = [
     "SiteAiPresetBody",
     "SiteAiSettings",
     "SiteAiSettingsPut",
+    "SiteAiTranscript",
     "SiteAiUsage",
     "UsageCaller",
     "UsageDay",

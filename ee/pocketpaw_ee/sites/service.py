@@ -14358,9 +14358,15 @@ class _TransferDeps:
     async def move_secrets(*, pocket_id: str, destination_workspace_id: str) -> int:
         """Re-key the site's per-site secrets (``site_secrets.move_for_pocket``).
         Values are never read or decrypted here; the tokens move as stored."""
+        from pocketpaw_ee.site_ai import service as site_ai_service
         from pocketpaw_ee.sites import site_secrets
 
-        return await site_secrets.move_for_pocket(
+        moved = await site_secrets.move_for_pocket(
+            pocket_id=pocket_id, destination_workspace_id=destination_workspace_id
+        )
+        # The site's AI settings, presets and budget move with it (its AI usage
+        # history and transcripts do not; see ``site_ai.service.move_for_pocket``).
+        return moved + await site_ai_service.move_for_pocket(
             pocket_id=pocket_id, destination_workspace_id=destination_workspace_id
         )
 
