@@ -146,6 +146,7 @@ class DashboardSummary(BaseModel):
 class DashboardList(BaseModel):
     dashboards: list[DashboardSummary]
     unavailable_reason: UnavailableReason | None = None
+    can_manage: bool = False  # caller has sites.dashboard_manage (create / generate)
 
 
 class CreateDashboardBody(BaseModel):

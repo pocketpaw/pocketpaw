@@ -194,7 +194,7 @@ async def test_create_get_list(beanie_test_db, db, audit):
     got = (await _call(app, "GET", f"/{dash['id']}")).json()
     assert got["id"] == dash["id"] and got["name"] == "Sales"
     listed = (await _call(app, "GET")).json()
-    assert listed["unavailable_reason"] is None
+    assert listed["unavailable_reason"] is None and listed["can_manage"] is True
     assert listed["dashboards"] == [
         {
             "id": dash["id"],
@@ -214,6 +214,8 @@ async def test_member_views_but_cannot_manage(beanie_test_db, db, audit):
     member = _app("member")
     got = await _call(member, "GET", f"/{dash['id']}")
     assert got.status_code == 200 and got.json()["can_manage"] is False
+    listed = (await _call(member, "GET")).json()
+    assert listed["can_manage"] is False and len(listed["dashboards"]) == 1
     assert (await _call(member, "POST", f"/{dash['id']}/run", {})).status_code == 200
     for method, path, body in [
         ("POST", "", {"name": "x"}),
@@ -632,7 +634,7 @@ async def test_an_empty_database_lists_no_tables(beanie_test_db, monkeypatch, au
     monkeypatch.setattr(sites_service, "_canonical_site_doc", _doc)
     monkeypatch.setattr(sites_service, "_data_cf_client", lambda: cf)
     listed = (await _call(_app(), "GET")).json()
-    assert listed == {"dashboards": [], "unavailable_reason": "no_tables"}
+    assert listed == {"dashboards": [], "unavailable_reason": "no_tables", "can_manage": True}
 
 
 # --------------------------------------------------------------------------- test widget
