@@ -413,6 +413,27 @@ async def test_a_heavy_widget_gets_a_long_interval(beanie_test_db, db, audit):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_creates_never_pass_the_cap(beanie_test_db, db, audit, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(svc, "MAX_DASHBOARDS", 3)
+    with _pocket():
+        await svc.create_dashboard(workspace_id="ws1", user_id="u1", pocket_id="pk1", name="a")
+        results = await asyncio.gather(
+            *[
+                svc.create_dashboard(workspace_id="ws1", user_id="u1", pocket_id="pk1", name=n)
+                for n in "bcde"
+            ],
+            return_exceptions=True,
+        )
+    from pocketpaw_ee.cloud.models.site_dashboard import SiteDashboard
+
+    assert await SiteDashboard.find({"site_pocket_id": "pk1"}).count() == 3
+    refused = [r for r in results if isinstance(r, Exception)]
+    assert refused and all(getattr(r, "code", "") == "sites.dashboard_limit" for r in refused)
+
+
+@pytest.mark.asyncio
 async def test_widget_count_is_capped(beanie_test_db, db, audit):
     app = _app()
     dash = await _new(app)
@@ -476,15 +497,74 @@ async def test_runs_share_the_cache_until_the_owner_writes(beanie_test_db, db, a
 
 
 @pytest.mark.asyncio
-async def test_force_skips_the_cache(beanie_test_db, db, audit):
+async def test_force_is_for_managers_and_has_a_floor(beanie_test_db, db, audit, monkeypatch):
     app = _app()
     dash = await _dash_with(app, [_w("SELECT count(*) AS n FROM orders")])
+    wid = dash["widgets"][0]["id"]
     await _call(app, "POST", f"/{dash['id']}/run", {})
     db.execute("INSERT INTO orders (total) VALUES (1)")  # behind Paw's back
-    wid = dash["widgets"][0]["id"]
     cached = (await _call(app, "POST", f"/{dash['id']}/run", {})).json()["results"][wid]
+    assert cached["data"] == {"value": 3}
+    # A forced refresh right after a read still gets the shared result (15 s floor).
+    soon = (await _call(app, "POST", f"/{dash['id']}/run", {"force": True})).json()
+    assert soon["results"][wid]["data"] == {"value": 3}
+    monkeypatch.setattr(svc, "FORCE_FLOOR_S", 0)
+    member = (await _call(_app("member"), "POST", f"/{dash['id']}/run", {"force": True})).json()
+    assert member["results"][wid]["data"] == {"value": 3}  # a viewer's force is ignored
     forced = (await _call(app, "POST", f"/{dash['id']}/run", {"force": True})).json()
-    assert cached["data"] == {"value": 3} and forced["results"][wid]["data"] == {"value": 4}
+    assert forced["results"][wid]["data"] == {"value": 4}
+
+
+def test_results_are_shared_for_the_widget_interval():
+    assert svc.refresh_floor({"interval_s": 60}) == 60
+    assert svc.refresh_floor({"interval_s": 3600}) == 3600
+    assert svc.refresh_floor({"interval_s": 60, "status": "heavy"}) == 900
+    assert svc.refresh_floor({}) == 300
+
+
+@pytest.mark.asyncio
+async def test_a_cached_result_outlives_a_minute(beanie_test_db, db, audit, monkeypatch):
+    """The TTL is the widget's interval, not min(interval, 60 s)."""
+    from pocketpaw_ee.sites.site_data import dashboard_cache
+
+    app = _app()
+    dash = await _dash_with(app, [_w("SELECT count(*) AS n FROM orders", interval_s=1800)])
+    await _call(app, "POST", f"/{dash['id']}/run", {})
+    import time as _time
+
+    (expires, _value) = next(
+        v for k, v in dashboard_cache._local.items() if k.startswith("dash:res:")
+    )
+    assert expires - _time.monotonic() > 1700
+
+
+@pytest.mark.asyncio
+async def test_a_widget_batch_costs_one_token_per_statement(beanie_test_db, db, audit):
+    app = _app()
+    dash = await _dash_with(app, [_w(f"SELECT {i} AS n") for i in range(3)])
+    budget.reset()
+    svc.reset()
+    d1.clear_caches()
+    await _call(app, "POST", f"/{dash['id']}/run", {})
+    # introspection: 2 calls; the widget batch: 3 statements.
+    assert budget._local["cf:data:dash:ws:ws1"][0] == 5
+    assert budget._local["cf:data:global"][0] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_redis", [False, True])
+async def test_statement_costs_are_atomic(use_redis, monkeypatch):
+    from fakeredis import FakeAsyncRedis
+
+    if use_redis:
+        budget.use_redis(FakeAsyncRedis(decode_responses=True))
+    monkeypatch.setattr(budget, "DASHBOARD_LIMIT", (4, 60))
+    await budget.acquire("d1", "ws9", dashboard=True, statements=3)
+    with pytest.raises(budget.DataBusy):
+        await budget.acquire("d1", "ws9", dashboard=True, statements=2)  # 3 + 2 > 4
+    await budget.acquire("d1", "ws9", dashboard=True)  # nothing was charged by the refusal
+    with pytest.raises(budget.DataBusy):
+        await budget.acquire("d1", "ws9", dashboard=True)
 
 
 @pytest.mark.asyncio
@@ -585,6 +665,10 @@ async def test_widget_test_runs_fresh(beanie_test_db, db, audit):
         )
     ).json()
     assert miss["status"] == "needs_fix" and "'b'" in miss["status_detail"]
+    runs = [e for e in audit if e["action"] == "site_data.sql"]
+    assert len(runs) == 2 and runs[0]["target_type"] == "site_query"
+    assert runs[0]["metadata"]["source"] == "dashboard_test"
+    assert runs[0]["metadata"]["sql"] == "SELECT status, total FROM orders"
 
 
 # --------------------------------------------------------------------------- health

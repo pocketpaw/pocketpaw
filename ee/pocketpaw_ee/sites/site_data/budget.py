@@ -7,8 +7,8 @@
 #   * ``cf:data:global``     every call, 900 / 5 min (headroom under the 1,200 cap)
 #   * ``cf:data:r2``         R2 calls on top of global, 900 / 5 min
 #   * ``cf:data:ws:<id>``    every call from one workspace, 120 / min
-#   * ``cf:data:dash:ws:<id>`` AI dashboard calls (``Budgeted(dashboard=True)``), 30 / min,
-#     INSTEAD of the workspace bucket so dashboards can't starve the Data page
+#   * ``cf:data:dash:ws:<id>`` AI dashboard calls (``Budgeted(dashboard=True)``), 240 / min,
+#     INSTEAD of the workspace bucket; a widget batch costs one per statement
 # A call is granted only when every bucket it touches has room, and then all of them
 # are charged; a refused call charges nothing. Refusal raises ``DataBusy`` (429
 # ``sites.data_busy`` with ``details.retry_after`` in seconds).
@@ -44,29 +44,29 @@ logger = logging.getLogger(__name__)
 GLOBAL_LIMIT: tuple[int, int] = (900, 300)
 R2_LIMIT: tuple[int, int] = (900, 300)
 WORKSPACE_LIMIT: tuple[int, int] = (120, 60)
-DASHBOARD_LIMIT: tuple[int, int] = (30, 60)
+DASHBOARD_LIMIT: tuple[int, int] = (240, 60)  # calls, and statements in widget batches
 RESTORE_LIMIT: tuple[int, int] = (3, 600)
 UPLOAD_SLOTS = 2
 UPLOAD_SLOT_TTL = 900  # seconds
 
 KINDS = frozenset({"d1", "kv", "r2"})
 
-# KEYS: the bucket keys. ARGV: limit, window_ms per key, in KEYS order. Returns {0, 0}
+# KEYS: the bucket keys. ARGV: limit, window_ms, cost per key, in KEYS order. Returns {0, 0}
 # when granted (every key charged), else {milliseconds until the full bucket resets,
 # its 1-based position in KEYS}.
 _ACQUIRE_LUA = """
 for i = 1, #KEYS do
   local used = tonumber(redis.call('GET', KEYS[i]) or '0')
-  if used >= tonumber(ARGV[2 * i - 1]) then
+  if used + tonumber(ARGV[3 * i]) > tonumber(ARGV[3 * i - 2]) then
     local ttl = redis.call('PTTL', KEYS[i])
-    if ttl < 1 then ttl = tonumber(ARGV[2 * i]) end
+    if ttl < 1 then ttl = tonumber(ARGV[3 * i - 1]) end
     return {ttl, i}
   end
 end
 for i = 1, #KEYS do
-  local n = redis.call('INCR', KEYS[i])
-  if n == 1 or redis.call('PTTL', KEYS[i]) < 0 then
-    redis.call('PEXPIRE', KEYS[i], ARGV[2 * i])
+  local n = redis.call('INCRBY', KEYS[i], ARGV[3 * i])
+  if n == tonumber(ARGV[3 * i]) or redis.call('PTTL', KEYS[i]) < 0 then
+    redis.call('PEXPIRE', KEYS[i], ARGV[3 * i - 1])
   end
 end
 return {0, 0}
@@ -132,26 +132,31 @@ def redis_client() -> Any | None:
         return None
 
 
-def _acquire_local(buckets: list[tuple[str, int, int]]) -> tuple[float, str]:
+def _acquire_local(
+    buckets: list[tuple[str, int, int]], costs: list[int] | None = None
+) -> tuple[float, str]:
     """``(0, "")`` when granted, else (seconds until the full bucket resets, its key)."""
     now = time.monotonic()
-    for key, limit, window in buckets:
+    costs = costs or [1] * len(buckets)
+    for (key, limit, window), cost in zip(buckets, costs, strict=True):
         slot = _local.get(key)
         if slot is not None and slot[1] <= now:
             slot = None
             _local.pop(key, None)
-        if slot is not None and slot[0] >= limit:
-            return max(slot[1] - now, 0.001), key
-    for key, _limit, window in buckets:
+        if (slot[0] if slot is not None else 0) + cost > limit:
+            return (max(slot[1] - now, 0.001) if slot is not None else float(window)), key
+    for (key, _limit, window), cost in zip(buckets, costs, strict=True):
         slot = _local.setdefault(key, [0, now + window])
-        slot[0] += 1
+        slot[0] += cost
     return 0.0, ""
 
 
-async def _acquire_redis(client: Any, buckets: list[tuple[str, int, int]]) -> tuple[float, str]:
+async def _acquire_redis(
+    client: Any, buckets: list[tuple[str, int, int]], costs: list[int] | None = None
+) -> tuple[float, str]:
     args: list[Any] = []
-    for _key, limit, window in buckets:
-        args += [limit, window * 1000]
+    for (_key, limit, window), cost in zip(buckets, costs or [1] * len(buckets), strict=True):
+        args += [limit, window * 1000, cost]
     out = await client.eval(_ACQUIRE_LUA, len(buckets), *[b[0] for b in buckets], *args)
     wait_ms, index = (list(out) + [0, 0])[:2] if isinstance(out, list | tuple) else (out, 0)
     index = int(index or 0)
@@ -176,27 +181,37 @@ class RestoreBusy(RateLimited):
         self.details = {"retry_after": retry_after}
 
 
-async def _wait(buckets: list[tuple[str, int, int]]) -> tuple[float, str]:
+async def _wait(
+    buckets: list[tuple[str, int, int]], costs: list[int] | None = None
+) -> tuple[float, str]:
     """Charge every bucket and answer ``(0, "")``, or answer the seconds until the
     full one resets and its key (charging nothing)."""
     wait: tuple[float, str] = (0.0, "")
     client = redis_client()
     if client is not None:
         try:
-            wait = await _acquire_redis(client, buckets)
+            wait = await _acquire_redis(client, buckets, costs)
         except Exception:  # noqa: BLE001 — a Redis outage must not fail every read
             logger.warning("site_data.budget: Redis unavailable, using in-process buckets")
-            wait = _acquire_local(buckets)
+            wait = _acquire_local(buckets, costs)
     else:
-        wait = _acquire_local(buckets)
+        wait = _acquire_local(buckets, costs)
     return wait
 
 
-async def acquire(kind: str, workspace_id: str, *, dashboard: bool = False) -> None:
+async def acquire(
+    kind: str, workspace_id: str, *, dashboard: bool = False, statements: int = 1
+) -> None:
     """Spend one Cloudflare call of ``kind`` (``d1`` / ``kv`` / ``r2``) for
-    ``workspace_id`` (from its dashboards' bucket when ``dashboard``), or raise
-    ``DataBusy`` when any bucket it needs is spent."""
-    wait, key = await _wait(_buckets(kind, workspace_id, dashboard))
+    ``workspace_id`` (from its dashboards' bucket when ``dashboard``, which a widget
+    batch charges once per statement), or raise ``DataBusy`` when any bucket it needs
+    is spent."""
+    buckets = _buckets(kind, workspace_id, dashboard)
+    costs = [
+        max(1, statements) if dashboard and k.startswith("cf:data:dash:") else 1
+        for k, *_ in buckets
+    ]
+    wait, key = await _wait(buckets, costs)
     if wait > 0:
         raise DataBusy(max(1, math.ceil(wait)), _scope(key))
 
@@ -228,6 +243,15 @@ class Budgeted:
     async def query_d1_raw(self, *, database_id: str, sql: str, params: list | None = None) -> Any:
         await self._acquire("d1")
         return await self._cf.query_d1_raw(database_id=database_id, sql=sql, params=params)
+
+    async def query_widget_batch(self, *, database_id: str, statements: Any) -> Any:
+        """A batch of dashboard widget reads: one global token, one dashboard token
+        per statement."""
+        statements = list(statements)
+        await acquire(
+            "d1", self._workspace_id, dashboard=self._dashboard, statements=len(statements)
+        )
+        return await self._cf.query_d1_batch(database_id=database_id, statements=statements)
 
     async def query_d1_batch(self, *, database_id: str, statements: Any) -> Any:
         await self._acquire("d1")

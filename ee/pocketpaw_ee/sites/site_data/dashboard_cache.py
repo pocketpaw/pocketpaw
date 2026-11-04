@@ -2,7 +2,7 @@
 # AI dashboard widgets, so many viewers of one dashboard cost one D1 read.
 #
 # A widget query's raw D1 result is cached under ``dash:res:<d1>:<sha(sql, params)>:
-# <schema fingerprint>:<epoch>`` for ``min(widget interval, 60 s)``. The schema
+# <schema fingerprint>:<epoch>`` for the widget's interval (``refresh_floor``). The schema
 # fingerprint changes on any migration, and ``epoch`` is a per-database counter the Data
 # page bumps on every write it makes (rows, imports, console writes, restores), so a
 # cached result never outlives a change the owner made through Paw. Errors are never
@@ -25,7 +25,7 @@ from pocketpaw_ee.sites.site_data.dashboard_sql import CELL_MAX, GatedQuery
 
 logger = logging.getLogger(__name__)
 
-MAX_TTL_S = 60
+MAX_TTL_S = 86_400
 EPOCH_TTL_S = 7 * 24 * 3600
 _LOCAL_MAX = 512
 
@@ -86,6 +86,17 @@ def key(database_id: str, q: GatedQuery, schema_fp: str, epoch_n: int) -> str:
     body = json.dumps([q.sql, q.params], default=str).encode()
     digest = hashlib.sha256(body).hexdigest()[:32]
     return f"dash:res:{database_id or '-'}:{digest}:{schema_fp[:16]}:{epoch_n}"
+
+
+def age_s(at: str) -> float:
+    """Seconds since an ISO ``cached_at`` (infinite when it can't be read)."""
+    from datetime import UTC, datetime
+
+    try:
+        then = datetime.fromisoformat(at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return float("inf")
+    return (datetime.now(UTC) - then).total_seconds()
 
 
 def _clip(raw: dict[str, Any]) -> dict[str, Any]:

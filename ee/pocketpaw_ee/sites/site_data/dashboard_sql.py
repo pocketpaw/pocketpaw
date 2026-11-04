@@ -279,9 +279,9 @@ async def run_batch(
     if len(queries) == 1:
         return [await run_one(cf, database_id, queries[0])]
     try:
-        results = await cf.query_d1_batch(
-            database_id=database_id, statements=[(q.sql, q.params) for q in queries]
-        )
+        statements = [(q.sql, q.params) for q in queries]
+        send = getattr(cf, "query_widget_batch", None) or cf.query_d1_batch
+        results = await send(database_id=database_id, statements=statements)
     except budget.DataBusy:
         raise
     except ValidationError as exc:

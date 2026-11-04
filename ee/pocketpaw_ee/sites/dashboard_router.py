@@ -144,13 +144,16 @@ async def run_site_dashboard(
     body: RunBody,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(_READ),
+    can_manage: bool = Depends(_CAN_MANAGE),
 ) -> RunOut:
-    """Every (or the named) widget's result, from the shared cache unless ``force``."""
+    """Every (or the named) widget's result, from the shared cache; ``force`` counts
+    only for a manager."""
     return await svc.run_dashboard(
         **_ids(ctx, pocket_id),
         dashboard_id=dashboard_id,
         widget_ids=body.widget_ids,
         force=body.force,
+        can_manage=can_manage,
     )
 
 
