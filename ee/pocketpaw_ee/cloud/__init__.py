@@ -559,10 +559,10 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.instinct.router import router as instinct_router
     from pocketpaw_ee.integrations.router import public_router as integrations_public_router
     from pocketpaw_ee.integrations.router import router as integrations_router
-    from pocketpaw_ee.site_ai.router import router as site_ai_router
     from pocketpaw_ee.paw_bar.catalog_routes import router as paw_bar_catalog_router
     from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
+    from pocketpaw_ee.site_ai.router import router as site_ai_router
     from pocketpaw_ee.sites.files_router import router as site_files_router
     from pocketpaw_ee.sites.router import router as sites_router
     from pocketpaw_ee.sites.secrets_router import router as site_secrets_router
