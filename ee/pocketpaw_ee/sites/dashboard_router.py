@@ -14,6 +14,7 @@
 #   POST   /{id}/revisions/{v}:restore      SiteDashboardOut                (manage)
 #   POST   :generate   {mode, dashboard_id?, include_stats?, focus?}  {job_id}  (manage)
 #   GET    /jobs/{job_id}                   JobOut
+#   POST   /{id}:ai-edit    {instruction, widget_id?}  {ops, dropped}       (manage)
 #
 # Thin handlers over ``sites.dashboard_service``. Every route takes ``request_context`` +
 # ``fabric.read``; "manage" routes also require ``sites.dashboard_manage`` (ADMIN), and
@@ -32,10 +33,13 @@ from fastapi import APIRouter, Depends, Header, Response
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import action_allowed_any_workspace, require_action_any_workspace
 from pocketpaw_ee.cloud._core.errors import CloudError
+from pocketpaw_ee.sites import dashboard_ai_edit as ai
 from pocketpaw_ee.sites import dashboard_generate as gen
 from pocketpaw_ee.sites import dashboard_service as svc
 from pocketpaw_ee.sites.data_router import _write_body_limit
 from pocketpaw_ee.sites.site_data.dashboard_dto import (
+    AiEditBody,
+    AiEditOut,
     CreateDashboardBody,
     DashboardList,
     GenerateBody,
@@ -213,6 +217,25 @@ async def test_site_dashboard_widget(
         viz=body.viz,
         chart_type=body.chart_type,
         mapping=body.mapping,
+    )
+
+
+@router.post(BASE + "/{dashboard_id}:ai-edit", response_model=AiEditOut)
+async def ai_edit_site_dashboard(
+    pocket_id: str,
+    dashboard_id: str,
+    body: AiEditBody,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(_READ),
+    __: object = Depends(_MANAGE),
+    ___: None = Depends(_write_body_limit),
+) -> AiEditOut:
+    """Proposed ops for the owner's request (never applied here)."""
+    return await ai.ai_edit(
+        **_ids(ctx, pocket_id),
+        dashboard_id=dashboard_id,
+        instruction=body.instruction,
+        widget_id=body.widget_id,
     )
 
 

@@ -242,3 +242,18 @@ class JobOut(BaseModel):
     proposal: list[dict[str, Any]] | None  # WidgetOp[] for suggest / regenerate
     dropped: list[DroppedWidget]
     error: str | None
+
+
+# --------------------------------------------------------------------------- AI edit
+
+
+class AiEditBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    instruction: str = Field(min_length=1, max_length=2_000)
+    widget_id: str | None = Field(default=None, max_length=64)
+
+
+class AiEditOut(BaseModel):
+    ops: list[dict[str, Any]]  # WidgetOp[]: preview, then apply through PATCH
+    dropped: list[DroppedWidget] = Field(default_factory=list)
