@@ -13,8 +13,7 @@
 # subquery reading ``MASK`` (so no expression, filter, join, CTE or compound sees a
 # credential), and the read is wrapped ``SELECT * FROM (...) LIMIT cap + 1`` with the
 # viz's row cap (metric / stat / gauge 1, funnel 50, table 100, chart / sparkline 366).
-# It also records ``deps``: the tables and ``table.column`` names the SQL mentions,
-# which drift checks compare against a later schema.
+# ``deps`` lists the tables and ``table.column`` names it mentions, for drift checks.
 # Every refusal is 422 ``sql_rejected`` with ``details.reason`` (the console's code
 # without its ``sites.data_`` prefix, or ``not_a_select`` / ``recursive`` / ``pragma`` /
 # ``function`` / ``bad_viz``).
@@ -26,7 +25,9 @@
 # raises ``budget.DataBusy``; every other failure becomes that widget's error text
 # (``console.clean_error``: ids and anything after the SQLite code removed).
 # ``to_result`` re-masks (``console.shape``), cuts to the cap, clips long cells and
-# shapes ``data`` for the viz; a mapping column missing from the result is an error.
+# shapes ``data`` for the viz (a chart point is ``{label, value}``, or ``{label, series:
+# {column: value}}`` with ``series_cols``); a mapping column missing from the result is
+# an error.
 from __future__ import annotations
 
 import logging
@@ -314,13 +315,17 @@ def shape_data(
     points: list[dict[str, Any]] = []
     lossy = False
     for r in rows:
+        nums: dict[str, Any] = {}
         for col in values:
             v, lost = _number(r.get(col))
             lossy |= lost
-            p: dict[str, Any] = {"label": _label(r.get(label)), "value": v}
-            if m.series_cols:
-                p["series"] = col
-            points.append(p)
+            nums[col] = v
+        p: dict[str, Any] = {"label": _label(r.get(label))}
+        if m.series_cols:  # Ripple's chart: one point per label, a value per series
+            p["series"] = nums
+        else:
+            p["value"] = nums[values[0]]
+        points.append(p)
     return points, lossy
 
 
