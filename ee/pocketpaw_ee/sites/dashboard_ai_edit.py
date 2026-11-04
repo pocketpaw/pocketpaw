@@ -3,7 +3,8 @@
 # previews the ops and applies them through PATCH (with If-Match), which re-gates them.
 #
 # ``ai_edit`` (manage only, one of the workspace's 50 AI edits a day, refunded when the
-# model doesn't answer; 503 ``unavailable`` with ``reason: model_unavailable`` then)
+# model doesn't answer, 503 ``unavailable`` / ``model_unavailable``, or the site's data
+# is too busy to summarize, 429)
 # shows the model the schema summary (same rules as generation: no sign-in tables,
 # masked / PII columns or values), the dashboard's widgets and the request (neutralised,
 # 2,000 chars), and takes ONE forced ``propose_ops`` call. With ``widget_id`` it may only
@@ -23,7 +24,7 @@ from typing import Any
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound
 from pocketpaw_ee.sites import dashboard_generate as gen
 from pocketpaw_ee.sites import dashboard_service as svc
-from pocketpaw_ee.sites.site_data import d1
+from pocketpaw_ee.sites.site_data import budget, d1
 from pocketpaw_ee.sites.site_data import dashboard_prompt as prompt
 from pocketpaw_ee.sites.site_data.dashboard_dto import (
     AiEditOut,
@@ -94,9 +95,13 @@ async def ai_edit(
     schema = await d1.introspect(cf, target.d1_id)
     await gen.take_daily(workspace_id, "ai_edit")
     model = prompt.model_name()
-    summary = await gen.summary_for(
-        cf, target.d1_id, schema, include_stats=False, focus=instruction, model=model
-    )
+    try:
+        summary = await gen.summary_for(
+            cf, target.d1_id, schema, include_stats=False, focus=instruction, model=model
+        )
+    except budget.DataBusy:  # nothing was asked of the model: give the edit back
+        await gen.refund_daily(workspace_id, "ai_edit")
+        raise
     problem = None
     if focus_widget is not None:
         broken = {b.widget_id: b.reason for b in svc.broken_widgets(doc, schema)}

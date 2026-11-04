@@ -310,6 +310,25 @@ async def test_no_answer_is_503_and_refunds(beanie_test_db, monkeypatch, audit):
 
 
 @pytest.mark.asyncio
+async def test_a_busy_summary_refunds_the_edit(beanie_test_db, monkeypatch, audit):
+    from pocketpaw_ee.sites.site_data import budget
+
+    _site(monkeypatch, _ddl("shop"))
+    dash = await _dash()
+
+    async def _busy(*_a, **_k):
+        raise budget.DataBusy(30)
+
+    monkeypatch.setattr(gen, "summary_for", _busy)
+    fake = FakeModel()
+    monkeypatch.setattr(prompt, "call_tool", fake)
+    with pytest.raises(CloudError) as exc:
+        await _edit(dash, "anything")
+    assert exc.value.code == "rate_limited" and fake.calls == []
+    assert sum(gen._daily_local.values()) == 0
+
+
+@pytest.mark.asyncio
 async def test_ai_edit_daily_allowance(beanie_test_db, monkeypatch, audit):
     _site(monkeypatch, _ddl("shop"))
     dash = await _dash()
