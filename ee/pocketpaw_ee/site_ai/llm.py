@@ -13,7 +13,9 @@
 #
 # Failures become ``LlmError(transient)`` carrying no provider text: an SDK error
 # message can quote the provider model or request, and none of that may reach a
-# response or a log line. Embeddings go through ``embed`` on the same client.
+# response or a log line. ``kind == "connect"`` means the connection was refused
+# before the request left: the only failure the caller may treat as unsent.
+# Embeddings go through ``embed`` on the same client.
 
 from __future__ import annotations
 
@@ -105,9 +107,14 @@ def build_payload(
 
 
 def _classify(exc: BaseException) -> LlmError:
+    import httpx
     import openai
 
     status = getattr(exc, "status_code", None)
+    if isinstance(exc, openai.APIConnectionError) and not isinstance(exc, openai.APITimeoutError):
+        # Refused before any byte left: nothing was sent, so nothing is billed.
+        if isinstance(exc.__cause__, httpx.ConnectError):
+            return LlmError(True, "connect")
     if isinstance(exc, openai.APITimeoutError | openai.APIConnectionError):
         return LlmError(True, "connection")
     if isinstance(status, int):

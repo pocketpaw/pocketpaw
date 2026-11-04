@@ -87,21 +87,26 @@ def reserve_micro(alias: str, input_tokens: int, output_tokens: int) -> int:
     return _rate_card().to_micro_credits(usd) + 1
 
 
-def actual_micro(alias: str, input_tokens: int, output_tokens: int) -> int:
+def actual_cost_usd(alias: str, input_tokens: int, output_tokens: int) -> Decimal:
+    """Provider cost (before markup) of the tokens a call used: the dated price,
+    else the alias fallback price."""
     if input_tokens <= 0 and output_tokens <= 0:
-        return 0
-    spec = ALIASES[alias]
+        return Decimal(0)
     priced = _priced_usd(alias, input_tokens, output_tokens)
-    usd = priced if priced is not None and priced > 0 else None
-    if usd is None:
-        usd = _fallback_usd(spec, input_tokens, output_tokens)
-    return _rate_card().to_micro_credits(usd)
+    if priced is not None and priced > 0:
+        return priced
+    return _fallback_usd(ALIASES[alias], input_tokens, output_tokens)
+
+
+def actual_micro(alias: str, input_tokens: int, output_tokens: int) -> int:
+    return _rate_card().to_micro_credits(actual_cost_usd(alias, input_tokens, output_tokens))
 
 
 __all__ = [
     "ALIASES",
     "CHAT_ALIASES",
     "AliasSpec",
+    "actual_cost_usd",
     "actual_micro",
     "provider_model",
     "reserve_micro",

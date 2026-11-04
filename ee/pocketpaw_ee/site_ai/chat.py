@@ -91,6 +91,7 @@ class Admitted:
     user_hash: str | None = None
     visitor: str | None = None  # the per-visitor cap's key (hashed)
     hold: budget_mod.Hold | None = None
+    sent: int = 0  # provider requests that left this process (each costs its input)
 
     def payload(self) -> dict[str, Any]:
         return llm.build_payload(
@@ -256,6 +257,9 @@ async def _reserve(call: Admitted, budget: Any, allowance: int) -> None:
         caller=call.caller, budget=budget, allowance=allowance, visitor=call.visitor
     )
     try:
+        wallet = await budget_mod.wallet_cap(call.workspace_id)
+        if wallet is not None:
+            caps.append(wallet)
         call.hold = await budget_mod.reserve(
             run_id=call.run_id,
             workspace_id=call.workspace_id,
@@ -270,7 +274,8 @@ async def _reserve(call: Admitted, budget: Any, allowance: int) -> None:
         )
     except budget_mod.BudgetRefused as exc:
         logger.info("site_ai: run %s over the %s cap", call.run_id, exc.scope)
-        raise Unavailable("limit", "budget_exhausted", stream=call.stream) from None
+        code = "wallet_empty" if exc.scope == "wallet" else "budget_exhausted"
+        raise Unavailable("limit", code, stream=call.stream) from None
     except Exception as exc:  # noqa: BLE001 - a failed hold refuses, never 500s
         logger.warning("site_ai: hold failed for run %s (%s)", call.run_id, type(exc).__name__)
         raise Unavailable("temporary", "provider_unavailable", stream=call.stream) from None
@@ -292,6 +297,26 @@ def _text_tokens(chars: str) -> int:
     return len(chars.encode("utf-8"))
 
 
+async def _send(call: Admitted) -> None:
+    """Count a provider request as sent BEFORE it is made: from here on the call
+    costs at least its input, whatever happens to the stream or the process."""
+    call.sent += 1
+    try:
+        await budget_mod.mark_sent(call.run_id)
+    except Exception:  # noqa: BLE001 - the in-memory count still bills it
+        logger.warning("site_ai: could not mark run %s sent", call.run_id, exc_info=True)
+
+
+def _unsent(exc: BaseException) -> bool:
+    return isinstance(exc, llm.LlmError) and exc.kind == "connect"
+
+
+def _floor_in(call: Admitted, extra_attempts: int = 0) -> int:
+    """Input tokens to bill when the provider's own count is missing: the estimate
+    for every request that left, ``extra_attempts`` beyond the counted one."""
+    return call.input_estimate * max(0, call.sent - extra_attempts)
+
+
 async def record(call: Admitted, status: str, input_tokens: int, output_tokens: int) -> int:
     """Price and persist one finished call; returns its micro-credits. Never raises."""
     input_tokens, output_tokens = max(0, int(input_tokens)), max(0, int(output_tokens))
@@ -300,6 +325,10 @@ async def record(call: Admitted, status: str, input_tokens: int, output_tokens: 
         await _write_run(call, status, input_tokens, output_tokens)
     except Exception:  # noqa: BLE001 - bookkeeping must not break the answer
         logger.warning("site_ai: run doc failed for run %s", call.run_id, exc_info=True)
+        try:
+            await _debit_direct(call, micro)
+        except Exception:  # noqa: BLE001 - logged; the hold row still records the spend
+            logger.error("site_ai: run %s is unbilled", call.run_id, exc_info=True)
     try:
         if call.hold is not None:
             if input_tokens or output_tokens:
@@ -322,6 +351,31 @@ async def record(call: Admitted, status: str, input_tokens: int, output_tokens: 
         micro,
     )
     return micro
+
+
+async def _debit_direct(call: Admitted, micro: int) -> None:
+    """The run doc couldn't be written, so ``bill_run`` will never see this call:
+    debit it here under the same ``run:{run_id}`` key (live mode bills at the proxy)."""
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.llm_provisioning import service as provisioning_service
+
+    if micro <= 0 or provisioning_service.spend_mode() == "live":
+        return
+    await credits_service.debit(
+        workspace=call.workspace_id,
+        amount_micro=micro,
+        cause="compute_spend",
+        idempotency_key=f"run:{call.run_id}",
+        ref={
+            "run_id": call.run_id,
+            "kind": "site_ai",
+            "pocket_id": call.pocket_id,
+            "site_id": call.site_id,
+            "model": f"site-ai/{call.alias}",
+            "cost_source": "site_ai_direct",
+        },
+        allow_negative=True,
+    )
 
 
 async def _write_run(call: Admitted, status: str, input_tokens: int, output_tokens: int) -> None:
@@ -348,8 +402,14 @@ async def _write_run(call: Admitted, status: str, input_tokens: int, output_toke
         surface_meta={"site_id": call.site_id, "caller": call.caller, "alias": call.alias},
     )
     await run_service.create_run(spec)
+    # ``model`` is the alias label the owner's spend views show; the provider id is
+    # kept in ``provider_model`` for operators only. ``total_cost_usd`` carries the
+    # provider cost, so the meter prices this run without needing the provider id.
+    cost = aliases.actual_cost_usd(call.alias, input_tokens, output_tokens)
     usage = {
-        "model": call.provider_model,
+        "model": f"site-ai/{call.alias}",
+        "provider_model": call.provider_model,
+        "total_cost_usd": float(cost),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "backend": "site_ai",
@@ -393,6 +453,7 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
         try:
             for attempt in (0, 1):
                 try:
+                    await _send(call)
                     async for ev in llm.stream(call.payload()):
                         if ev.kind == "text":
                             started = True
@@ -416,6 +477,8 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
                             usage = (ev.input_tokens, ev.output_tokens)
                     break
                 except llm.LlmError as exc:
+                    if _unsent(exc):
+                        call.sent -= 1
                     if started or not exc.transient or attempt == 1:
                         raise
                     logger.info("site_ai: retrying run %s after %s", call.run_id, exc.kind)
@@ -424,13 +487,14 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
             logger.warning("site_ai: run %s failed (%s)", call.run_id, kind)
             recorded = True
             if not started:
-                await record(call, "failed", 0, 0)
+                # A request that left costs its input even with no output.
+                await record(call, "failed", _floor_in(call), 0)
                 if _rejected(exc):
                     yield sse("error", {"code": "invalid_request", "message": _REJECTED_MESSAGE})
                 else:
                     yield sse("unavailable", {"reason": "temporary"})
                 return
-            tokens_in, tokens_out = usage or (call.input_estimate, _text_tokens(streamed))
+            tokens_in, tokens_out = _billed(call, usage, streamed)
             micro = await record(call, "failed", tokens_in, tokens_out)
             yield sse(
                 "usage",
@@ -438,7 +502,7 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
             )
             yield sse("error", {"code": "provider_unavailable", "message": _UPSTREAM_MESSAGE})
             return
-        tokens_in, tokens_out = usage or (call.input_estimate, _text_tokens(streamed))
+        tokens_in, tokens_out = _billed(call, usage, streamed)
         recorded = True
         micro = await record(call, "completed", tokens_in, tokens_out)
         yield sse(
@@ -448,10 +512,20 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
         yield sse("done", {"id": f"aic_{call.run_id}", "finish_reason": finish})
     finally:
         if not recorded:
-            # The caller went away mid-stream: bill what the provider already did.
-            tokens_in = call.input_estimate if started else 0
+            # The caller went away: bill what the provider already did, at least
+            # the input of every request that left, output or not.
+            tokens_in = _floor_in(call)
             tokens_out = _text_tokens(streamed)
             await asyncio.shield(record(call, "cancelled", tokens_in, tokens_out))
+
+
+def _billed(call: Admitted, usage: tuple[int, int] | None, streamed: str) -> tuple[int, int]:
+    """Tokens to bill for a stream: the provider's count for the last attempt plus
+    the input estimate of any earlier attempt that left; the estimate when the
+    provider reported nothing (or zeros)."""
+    if usage is None or (usage[0] <= 0 and usage[1] <= 0):
+        return _floor_in(call), _text_tokens(streamed)
+    return usage[0] + _floor_in(call, extra_attempts=1), usage[1]
 
 
 _UPSTREAM_MESSAGE = "The AI service stopped mid-answer. Try again."
@@ -474,19 +548,30 @@ async def _json(call: Admitted) -> Response:
     result = None
     for attempt in (0, 1):
         try:
+            await _send(call)
             result = await llm.complete(call.payload())
             break
         except Exception as exc:  # noqa: BLE001 - classified, never echoed
             if not isinstance(exc, llm.LlmError):
                 exc = llm.LlmError(False, type(exc).__name__)
+            if _unsent(exc):
+                call.sent -= 1
             logger.warning("site_ai: run %s failed (%s)", call.run_id, exc.kind)
             if not exc.transient or attempt == 1:
-                await record(call, "failed", 0, 0)
+                await record(call, "failed", _floor_in(call), 0)
                 if _rejected(exc):
                     return error_response(AiError("invalid_request", _REJECTED_MESSAGE))
                 return error_response(AiError("provider_unavailable"))
     assert result is not None
-    micro = await record(call, "completed", result.input_tokens, result.output_tokens)
+    tokens_in, tokens_out = result.input_tokens, result.output_tokens
+    if tokens_in <= 0 and tokens_out <= 0:  # the provider reported no usage
+        produced = (result.content or "") + "".join(
+            c["function"]["name"] + c["function"]["arguments"] for c in result.tool_calls
+        )
+        tokens_in, tokens_out = _floor_in(call), _text_tokens(produced)
+    else:
+        tokens_in += _floor_in(call, extra_attempts=1)
+    micro = await record(call, "completed", tokens_in, tokens_out)
     message: dict[str, Any] = {"role": "assistant", "content": result.content}
     if result.tool_calls:
         message["tool_calls"] = result.tool_calls
@@ -497,8 +582,8 @@ async def _json(call: Admitted) -> Response:
             "message": message,
             "finish_reason": result.finish_reason,
             "usage": {
-                "input_tokens": result.input_tokens,
-                "output_tokens": result.output_tokens,
+                "input_tokens": tokens_in,
+                "output_tokens": tokens_out,
                 "credits_micro": micro,
             },
         },
