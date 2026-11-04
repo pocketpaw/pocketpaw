@@ -4,13 +4,16 @@
 #   1. per-IP bucket (in-process)                       -> 429 rate_limited
 #   2. site_gate.authenticate: PAW_GATEWAY_TOKEN = worker; a site key from the
 #      site's own hosts = browser, from its own draft = preview -> 401 / 403
-#   3. browser and preview callers are refused here     -> 403 browser_disabled
-#   4. body (<= 400 KB) parsed from an allowlist (validate.py)  -> 400 / 413
+#   3. body (<= 400 KB) parsed from an allowlist (validate.py)  -> 400 / 413
+#   4. browser: ``browser_access`` on (-> unavailable browser_disabled); browser and
+#      preview: a live ``X-Paw-Ai-Ticket`` of their kind from this IP (-> 401), a
+#      preset when the site requires one (-> 403 preset_required)
 #   5. preset: its system prompt, model, output cap and temperature win
 #   6. alias allowed by the plan AND the owner, live site on a plan that sells it,
 #      images only on a vision alias, input within the alias context -> 403 / 400
 #   7. site AI off or paused                            -> Unavailable("paused")
-#   8. SiteRateCounter per site, and per hashed ``user`` when sent -> 429
+#   8. SiteRateCounter: Worker per site and per hashed ``user``; browser/preview
+#      per (site, IP hash) and per site                  -> 429
 #   9. ``over_billing_limit`` on the workspace wallet -> Unavailable("limit",
 #      wallet_empty), then the worst case is reserved against every cap
 #      (budget.py) -> Unavailable("limit", budget_exhausted)
@@ -42,7 +45,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from pocketpaw.security.rate_limiter import RateLimiter
 from pocketpaw_ee.integrations import site_gate
-from pocketpaw_ee.site_ai import alerts, aliases, llm, service, validate
+from pocketpaw_ee.site_ai import alerts, aliases, llm, service, tickets, validate
 from pocketpaw_ee.site_ai import budget as budget_mod
 from pocketpaw_ee.site_ai.errors import AiError, error_response, invalid
 
@@ -50,6 +53,9 @@ logger = logging.getLogger(__name__)
 
 WORKER_SITE_PER_MIN = 600
 USER_PER_MIN = 60
+BROWSER_IP_PER_MIN = 20
+BROWSER_SITE_PER_MIN = 300
+TICKET_IP_PER_MIN = 10
 
 # 240 AI calls a minute per address across every site.
 _ip_limiter = RateLimiter(rate=240.0 / 60.0, capacity=240)
@@ -140,10 +146,24 @@ async def authenticate(request: Request, site_id: str) -> tuple[Any, str]:
     return site, "preview" if preview else "browser"
 
 
-async def _admit_caller(request: Request, site: Any, caller: str) -> None:
-    """Browser and preview callers: not on this path yet."""
-    if caller != "worker":
-        raise AiError("browser_disabled")
+def admit_browser(
+    request: Request, site: Any, caller: str, settings: Any, preset: str | None, stream: bool
+) -> str:
+    """The browser and preview rules; returns the caller's IP hash. Browser calls
+    need ``browser_access`` (-> unavailable ``browser_disabled``), every non-Worker
+    call needs a live ticket of its own kind from this address (-> 401), and a
+    site that requires presets refuses a call without one (-> 403)."""
+    from pocketpaw_ee.cloud._core.rate_limit import client_ip
+
+    ip_hash = site_gate.rate_key(client_ip(request))
+    if caller == "worker":
+        return ip_hash
+    if caller == "browser" and not settings.browser_access:
+        raise Unavailable("browser_disabled", "browser_disabled", stream=stream)
+    tickets.verify(request.headers.get("x-paw-ai-ticket"), caller, str(site.id), ip_hash)
+    if settings.require_preset_for_browser and preset is None:
+        raise AiError("preset_required")
+    return ip_hash
 
 
 def _apply_preset(parsed: validate.ParsedChat, preset: Any, caller: str) -> list[dict]:
@@ -157,14 +177,13 @@ def _apply_preset(parsed: validate.ParsedChat, preset: Any, caller: str) -> list
 
 
 async def admit(request: Request, site_id: str) -> Admitted:
-    from pocketpaw_ee.cloud._core.rate_limit import client_ip
     from pocketpaw_ee.cloud.billing import site_plans
 
     site, caller = await authenticate(request, site_id)
-    await _admit_caller(request, site, caller)
     workspace_id, pocket_id = site.workspace, site.pocket_id
     parsed = validate.parse_chat(validate.load_json(await validate.read_body(request)))
     settings = await service.load_settings(workspace_id, pocket_id)
+    ip_hash = admit_browser(request, site, caller, settings, parsed.preset, parsed.stream)
 
     alias = parsed.model
     messages = parsed.messages
@@ -216,7 +235,7 @@ async def admit(request: Request, site_id: str) -> Admitted:
         temperature=temperature,
         preset_id=preset_id,
         preset_version=preset_version,
-        ip_hash=site_gate.rate_key(client_ip(request)),
+        ip_hash=ip_hash,
         user_hash=_hash(f"{workspace_id}:{parsed.user}") if parsed.user else None,
     )
 
@@ -226,8 +245,7 @@ async def admit(request: Request, site_id: str) -> Admitted:
             "paused", "budget_exhausted", "AI is paused for this site.", stream=call.stream
         )
     await _rate_limit(call)
-    if call.caller == "worker":
-        call.visitor = call.user_hash
+    call.visitor = call.user_hash if call.caller == "worker" else call.ip_hash
     await _wallet_gate(call)
     await _reserve(call, budget, site_plans.site_ai_allowance_micro(plan))
     return call
@@ -283,6 +301,12 @@ async def _reserve(call: Admitted, budget: Any, allowance: int) -> None:
 
 async def _rate_limit(call: Admitted) -> None:
     base = f"{call.workspace_id}:{call.pocket_id}"
+    if call.caller != "worker":
+        if await site_gate.bump("ai_ip", f"{base}:{call.ip_hash}") > BROWSER_IP_PER_MIN:
+            raise AiError("rate_limited", retry_after=_retry_after())
+        if await site_gate.bump("ai_browser", base) > BROWSER_SITE_PER_MIN:
+            raise AiError("rate_limited", retry_after=_retry_after())
+        return
     if await site_gate.bump("ai_site", base) > WORKER_SITE_PER_MIN:
         raise AiError("rate_limited", retry_after=_retry_after())
     user_key = f"{base}:{call.user_hash}"
@@ -616,3 +640,30 @@ async def handle(request: Request, site_id: str) -> Response:
             _events(call), media_type="text/event-stream", headers=_SSE_HEADERS
         )
     return await _json(call)
+
+
+async def handle_ticket(request: Request, site_id: str) -> Response:
+    """POST /sites/{site_id}/ai/ticket: Turnstile in, visitor ticket out."""
+    from pocketpaw_ee.cloud._core.rate_limit import client_ip
+
+    try:
+        site, caller = await authenticate(request, site_id)
+        if caller == "worker":
+            raise invalid("caller", "Tickets are for browser calls; a Worker uses its token.")
+        settings = await service.load_settings(site.workspace, site.pocket_id)
+        if caller == "browser" and not settings.browser_access:
+            raise AiError("browser_disabled")
+        body = validate.load_json(await validate.read_body(request, limit=8 * 1024))
+        ip = client_ip(request)
+        ip_hash = site_gate.rate_key(ip)
+        key = f"{site.workspace}:{site.pocket_id}:{ip_hash}"
+        if await site_gate.bump("ai_ticket", key) > TICKET_IP_PER_MIN:
+            raise AiError("rate_limited", retry_after=_retry_after())
+        if caller == "browser":
+            await tickets.check_turnstile(site, body.get("turnstile_token"), ip)
+        ticket, expires_at = tickets.mint(caller, str(site.id), ip_hash)
+    except AiError as exc:
+        return error_response(exc)
+    return JSONResponse(
+        {"ticket": ticket, "expires_at": expires_at}, headers={"Cache-Control": "no-store"}
+    )

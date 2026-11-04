@@ -171,7 +171,8 @@ async def test_auth_gates_and_flat_error_bodies(beanie_test_db, monkeypatch):
     assert none.status_code == 401
     assert none.json() == {"detail": "unauthorized", "message": none.json()["message"]}
     assert bad.status_code == 401
-    assert (browser.status_code, browser.json()["detail"]) == (403, "browser_disabled")
+    # Browser access is off by default: a streaming call is told so in-band.
+    assert parse_sse(browser.text) == [("unavailable", {"reason": "browser_disabled"})]
     assert (evil.status_code, evil.json()["detail"]) == (403, "origin_not_allowed")
 
 

@@ -10,7 +10,9 @@
 #   GET         /sites/by-pocket/{pocket_id}/ai/usage?from&to
 #
 # ``public_router`` (no session by design; the site gates in chat.py are the auth):
-#   POST /sites/{site_id}/ai/chat   PAW_GATEWAY_TOKEN (the site's Worker)
+#   POST /sites/{site_id}/ai/ticket  site key + origin gate + Turnstile -> visitor ticket
+#   POST /sites/{site_id}/ai/chat    PAW_GATEWAY_TOKEN (the site's Worker), or the site
+#                                    key + origin gate + ticket (browser / own preview)
 #
 # Wire shapes are pinned by the Sites AI apps contract; see dto.py. Mounted in
 # ``cloud.mount_cloud``; listed in tests/cloud/auth/test_route_auth_audit.py.
@@ -140,3 +142,9 @@ async def get_usage(
 async def ai_chat(site_id: str, request: Request) -> Response:
     """OpenAI-shaped chat for a site. See chat.py for the gate order."""
     return await chat.handle(request, site_id)
+
+
+@public_router.post("/sites/{site_id}/ai/ticket")
+async def ai_ticket(site_id: str, request: Request) -> Response:
+    """A ~20 minute visitor ticket for browser AI calls. See tickets.py."""
+    return await chat.handle_ticket(request, site_id)

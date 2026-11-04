@@ -62,9 +62,11 @@ def build_app(workspace_id: str = WS, user_id: str = OWNER, role: str = "admin")
     return app
 
 
-def client(workspace_id: str = WS, user_id: str = OWNER, role: str = "admin") -> AsyncClient:
+def client(
+    workspace_id: str = WS, user_id: str = OWNER, role: str = "admin", ip: str = "203.0.113.7"
+) -> AsyncClient:
     return AsyncClient(
-        transport=ASGITransport(app=build_app(workspace_id, user_id, role)),
+        transport=ASGITransport(app=build_app(workspace_id, user_id, role), client=(ip, 4000)),
         base_url="https://api.test",
     )
 
