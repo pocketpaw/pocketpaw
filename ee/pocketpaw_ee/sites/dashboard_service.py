@@ -21,7 +21,7 @@
 # ``version_conflict`` carrying the current dashboard. The state before each save is
 # kept as a revision (the last 20). Runs batch every widget into one D1 call, share
 # results through ``dashboard_cache`` and spend the dashboards' own Cloudflare bucket
-# (``cf:data:dash:ws:<id>``, 30 / min); a spent bucket is 429 ``rate_limited`` with
+# (``cf:data:dash:ws:<id>``, per statement); a spent bucket is 429 ``rate_limited`` with
 # ``retry_after``. An unpublished or local site is 503 ``unavailable`` with ``reason``.
 # Creates, saves, deletes and restores are audited (``site_dashboard.*``).
 from __future__ import annotations
@@ -47,6 +47,7 @@ from pocketpaw_ee.sites.site_data import dashboard_cache as cache
 from pocketpaw_ee.sites.site_data import dashboard_sql as ds
 from pocketpaw_ee.sites.site_data.dashboard_dto import (
     HEAVY_INTERVAL_S,
+    MIN_INTERVAL_S,
     BrokenWidget,
     DashboardList,
     DashboardSummary,
@@ -67,6 +68,7 @@ from pocketpaw_ee.sites.site_data.dashboard_spec import compile_widget
 logger = logging.getLogger(__name__)
 
 MAX_DASHBOARDS = 20
+FORCE_FLOOR_S = 15  # a forced refresh never re-reads a result younger than this
 MAX_REVISIONS = 20
 SCHEMA_TTL_S = 30.0
 _AUDIT_TARGET = "site_dashboard"
@@ -257,6 +259,15 @@ def dashboard_out(doc: SiteDashboard, can_manage: bool) -> SiteDashboardOut:
         updated_at=iso(doc.updated_at),
         can_manage=can_manage,
     )
+
+
+def refresh_floor(w: dict[str, Any]) -> int:
+    """How long a widget's result is shared: its interval (at least 60 s, at least
+    15 minutes when heavy), whatever the client asks for."""
+    ttl = max(MIN_INTERVAL_S, int(w.get("interval_s") or 300))
+    if w.get("status") == "heavy":
+        ttl = max(ttl, HEAVY_INTERVAL_S)
+    return ttl
 
 
 def _content(w: dict[str, Any]) -> tuple:
@@ -484,6 +495,7 @@ async def create_dashboard(
         updated_at=now,
     )
     await doc.insert()
+    await keep_within_cap(doc)
     await _audit(
         target,
         user_id,
@@ -493,6 +505,23 @@ async def create_dashboard(
         generated=bool(generated),
     )
     return doc
+
+
+async def keep_within_cap(doc: SiteDashboard) -> None:
+    """After an insert: if concurrent creates pushed the site past the cap, the newest
+    ones (this among them) are removed again and refused with 409."""
+    docs = (
+        await SiteDashboard.find(
+            {"workspace_id": doc.workspace_id, "site_pocket_id": doc.site_pocket_id}
+        )
+        .sort("+_id")
+        .to_list()
+    )
+    if [d.id for d in docs].index(doc.id) >= MAX_DASHBOARDS:
+        await doc.delete()
+        raise ConflictError(
+            "sites.dashboard_limit", f"A site can have up to {MAX_DASHBOARDS} dashboards."
+        )
 
 
 async def get_dashboard(
@@ -584,10 +613,13 @@ async def run_dashboard(
     dashboard_id: str,
     widget_ids: list[str] | None = None,
     force: bool = False,
+    can_manage: bool = False,
     _cloudflare: Any | None = None,
 ) -> RunOut:
-    """Each widget's result: cached ones from the shared cache (unless ``force``), the
-    rest in ONE D1 batch (re-run one by one if the batch fails)."""
+    """Each widget's result: from the shared cache while it is younger than the widget's
+    interval, the rest in ONE D1 batch (re-run one by one if the batch fails). ``force``
+    counts only for a manager, and never re-reads a result younger than 15 s."""
+    force = force and can_manage
     target = await view_target(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, _cloudflare=_cloudflare
     )
@@ -613,10 +645,10 @@ async def run_dashboard(
             results[w["id"]] = ds.error_result(exc.message)
             continue
         key = cache.key(target.d1_id, q, schema.fingerprint, epoch)
-        ttl = min(int(w.get("interval_s") or 60), cache.MAX_TTL_S)
-        if not force and key not in pending:
+        ttl = refresh_floor(w)
+        if key not in pending:
             hit = await cache.get(key)
-            if hit is not None:
+            if hit is not None and (not force or cache.age_s(hit[1]) < FORCE_FLOOR_S):
                 raw, at = hit
                 results[w["id"]] = ds.to_result(q, w["viz"], mapping, raw, cached_at=at)
                 continue
@@ -672,6 +704,24 @@ async def test_widget(
         )
     raw = await ds.run_one(cf, target.d1_id, q)
     result = ds.to_result(q, viz, mapping, raw, cached_at=iso(_now()))
+    # Recorded like a console read: it ran owner-typed SQL against the live database.
+    await data_service._audit_event(
+        target,
+        user_id,
+        "site_data.sql",
+        target.pocket_id,
+        {
+            "kind": "read",
+            "verb": "SELECT",
+            "sql": sql[:2_048],
+            "database_id": target.d1_id,
+            "source": "dashboard_test",
+            "dashboard_id": dashboard_id,
+            "rows": len(result.rows),
+            "error": None if result.ok else result.error,
+        },
+        target_type=data_service._SQL_QUERY_TARGET,
+    )
     spec = compile_widget(viz, chart, "", mapping, result.columns)
     if not result.ok:
         return TestWidgetOut(
