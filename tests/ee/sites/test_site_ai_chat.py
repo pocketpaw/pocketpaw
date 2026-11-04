@@ -231,7 +231,7 @@ async def test_request_clamps(beanie_test_db, monkeypatch):
             None,
         ),
         "temperature": ({"model": "fast", "messages": _msgs(), "temperature": 3}, 400, None),
-        "context": ({"model": "fast", "messages": _msgs("x" * 70_000)}, 400, None),
+        "context": ({"model": "fast", "messages": _msgs("x" * 160_000)}, 400, None),
         "system_image": (
             {
                 "model": "vision",
@@ -495,15 +495,33 @@ async def test_deeply_nested_json_is_a_400_not_a_crash(beanie_test_db, monkeypat
         "https://intranet/x.png",
         "https://printer.local/x.png",
         "https://a.test:99999/x.png",
+        # Even a public https URL: LiteLLM would fetch it and follow redirects.
+        "https://cdn.example.com/a.png",
+        "https://cdn.example.com/redirect?to=http://169.254.169.254/",
     ],
 )
-def test_image_hosts_that_point_inward_are_refused(url):
+def test_remote_image_urls_are_refused(url):
     from pocketpaw_ee.site_ai.errors import AiError
     from pocketpaw_ee.site_ai.validate import check_image_url
 
     with pytest.raises(AiError):
         check_image_url(url, "x")
-    assert check_image_url("https://cdn.example.com/a.png", "x").startswith("https://cdn.")
+
+
+def test_the_estimate_never_undercounts():
+    from pocketpaw_ee.site_ai import validate
+
+    emoji = "😀" * 100  # 4 bytes each, often 2-3 tokens each
+    cjk = "漢" * 100  # 3 bytes each
+    text = [{"role": "user", "content": emoji + cjk + "plain"}]
+    base = validate.estimate_tokens(text)
+    assert base >= len((emoji + cjk + "plain").encode("utf-8"))
+    tool = {"type": "function", "function": {"name": "t", "parameters": {}}}
+    assert validate.estimate_tokens(text, [tool]) >= base + validate.TOOL_OVERHEAD_TOKENS
+    schema = {"type": "json_object"}
+    assert validate.estimate_tokens(text, None, schema) >= base + validate.SCHEMA_OVERHEAD_TOKENS
+    image = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:x"}}]}]
+    assert validate.estimate_tokens(image) >= validate.IMAGE_TOKENS
 
 
 @pytest.mark.asyncio

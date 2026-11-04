@@ -235,7 +235,7 @@ async def _rate_limit(call: Admitted) -> None:
 
 
 def _text_tokens(chars: str) -> int:
-    return (len(chars.encode("utf-8")) + 1) // 2
+    return len(chars.encode("utf-8"))
 
 
 async def record(call: Admitted, status: str, input_tokens: int, output_tokens: int) -> int:
