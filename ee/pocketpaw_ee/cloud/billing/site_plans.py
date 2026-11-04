@@ -1,140 +1,27 @@
 # ee/pocketpaw_ee/cloud/billing/site_plans.py — the SITE-PLAN CATALOG: the
-# declarative view of the PER-SITE annual plan tiers (BC-9, the per-site plan
-# layer). The Webflow model — each PUBLISHED site carries its OWN recurring
-# ANNUAL plan on a tier, distinct from the workspace plan (``billing.plans``).
+# read-only view of the per-site plan tiers, distinct from the workspace plan
+# (``billing.plans``). Each published site carries its own plan; its key lives in
+# ``Site.plan_tier``.
 #
-# This is the read-only catalog the publish flow (publish_pocket) builds on. For
-# each site tier it pairs:
-#   * ``monthly_price_usd`` — the recurring MONTHLY price for the tier (USD,
-#     whole dollars). It is BOTH the sticker and the charge: the publish debits
-#     exactly this many dollars, as credits, from the workspace balance.
-#   * ``cloudflare_features`` — the set of Cloudflare features a higher tier
-#     resells (BC-10 provisions these on publish). The base tier resells none.
-#   * ``badge_removal`` — whether a site on this tier may ship WITHOUT the
-#     free-tier attribution badge. This is the per-site paid tier's headline
-#     feature, so it lives on the tier rather than on the workspace plan.
+# The public ladder is ``free`` ($0) / ``site`` ($7) / ``staff`` ($19) a month,
+# plus two partner-only yearly rungs (``site_year``, ``staff_year``) priced per
+# billing country by ``partner_price_usd`` / ``partner_client_price`` and not in
+# the storefront order. A plan is paid from the workspace credit balance (a credit
+# is a cent); no site plan touches a payment gateway.
 #
-# Read-only by design (mirrors ``billing.plans``): no DB, no writes, no emit.
-# ``list_site_plans`` / ``get_site_plan`` return frozen ``SitePlanTier`` value
-# objects built fresh from the catalog constants + config, so the catalog can
-# never drift.
+# Per tier the catalog pairs the price with: resold Cloudflare features, whether
+# the concierge is sold, badge removal, the custom-domain grant, the (catalog-only)
+# conversation allowance, display copy, and the site AI tables:
+# ``_SITE_PLAN_AI_MODELS`` (the model aliases a site's AI API may use),
+# ``_SITE_PLAN_AI_PUBLISHED`` (whether the live site may call it; free is draft
+# preview only) and ``_SITE_PLAN_AI_ALLOWANCE_MICRO`` (the monthly AI spend
+# ceiling per site, in micro-credits; owner caps can only lower it).
 #
-# Created 2026-06-24 (integration/billing-credits, BC-9): new module.
-# Updated 2026-10-02 (feat/partners-sell, PH-2): ``SitePlanTier`` gains
-#   ``period_months`` (default 1) and ``partner_only`` (default False). Two
-#   partner-only YEARLY rungs, ``site_year`` and ``staff_year``, priced per billing
-#   country in ONE table read by ``partner_price_usd``. They resolve everywhere a
-#   tier key does (entitlements, sweeper) but are NOT in ``_SITE_TIER_ORDER``, so
-#   the public storefront is unchanged; ``list_partner_plans`` lists them. Their
-#   ``monthly_price_usd`` is derived and display-only. Existing rungs unchanged.
-# Updated 2026-10-02 (feat/partners-commissions, PH-13): ``partner_client_price``
-#   — the LIST yearly price a partner's client (the shop) pays us through a
-#   one-time pay link, per billing country, in that country's currency and minor
-#   units (IN: Rs.3,588 / Rs.11,988; default: $84 / $228). One table beside the
-#   wholesale one; the pay link charges it and the webhook checks the payment
-#   against the figure stored when the link was made.
-# Updated 2026-10-02 (feat/partners-tiers, PH-15): ``partner_price_usd`` takes the
-#   partner's volume ``tier`` and charges floor(price x (1 - discount)) through
-#   ``partners._calc.discounted_usd`` (the one table of tier numbers), so the
-#   sale, a tier change, the renewal and the offers all read the discounted
-#   figure. ``partner_prices_usd`` now lists every country x tier price, so a
-#   removed partner's site still renews at the discounted figure it last paid.
-# Updated 2026-08-19 (feat/site-plan-catalog-inclusions): added the
-#   ``sells_concierge`` property — the catalog-level "does this tier sell the
-#   concierge", lifted out of ``resolve_site_entitlements`` where it lived as an
-#   inline ``tier.key != BASE_SITE_PLAN_KEY``. Two callers now need the same
-#   answer (the resolver, and the plan-catalog DTO the buyer-facing plan cards
-#   read), and one rule expressed twice is one rule that drifts.
-# Updated 2026-08-13 (feat/sites-free-badge): added ``badge_removal`` — the gate
-#   ``sites.badge`` reads to decide whether a publish must stamp the attribution
-#   badge. The base tier does NOT carry it (that is what free means); the paid
-#   tiers do. Sourced from its own constant rather than folded into
-#   ``cloudflare_features``, which is specifically about RESOLD Cloudflare
-#   capability and would be the wrong home for a billing-policy flag.
-#   NOTE for the pricing-spec migration (step 3 of the build order in
-#   docs/design/drafts/2026-08-13-paw-sites-pricing-spec.md): when basic/pro/
-#   business are rekeyed to free/site/staff, this mapping moves with them and is
-#   the ONLY place the badge's plan gate is expressed.
-# ``max_domained_sites`` is the per-site custom-domain grant (None = uncapped).
-#   Free carries 1: every free site may carry its own custom domain, apex +
-#   ``www``, enforced as ``_FREE_MAX_HOSTNAMES_PER_SITE`` hostnames on that site.
-#   It is per site, never a workspace-wide count. Custom-domain entitlement reads
-#   this field rather than ``"custom_domain" in cloudflare_features``, so
-#   ``cloudflare_features`` means only RESOLD Cloudflare capability that BC-10
-#   provisions.
-
-# Updated 2026-08-21 (feat/site-plan-purchasable): added the ``purchasable``
-# property — "can a customer actually buy this tier right now". It then meant
-# "is a Dodo product configured for it"; see the 2026-09-05 note for what it
-# means now that no site plan touches a gateway.
-#
-# Updated 2026-08-22 (feat/site-pricing-ladder): the catalog now IS the pricing
-# spec — five tiers on the captain's approved ladder (free / site / staff /
-# studio / agency), rekeyed off the placeholder basic/pro/business names, at
-# $0 / $7 / $19 / $39 / $149 a month. (The last two were retired on 2026-09-06;
-# the ladder is the three per-site rungs. See the 2026-09-06 note below.)
-#
-# THE REKEY IS THE RISKY HALF, and it is handled by aliasing rather than by a
-# flag day. ``Site.plan_tier`` holds the OLD strings in production, and an
-# unrecognised key resolves to None — which drops the site to the free floor,
-# returning its badge and revoking its custom domain. So ``basic``/``pro``/
-# ``business`` remain resolvable FOREVER through ``_LEGACY_SITE_TIER_ALIASES``,
-# and resolve to the tier that carries the same capabilities they always did
-# (pro sold badge-removal and domains = ``site``; business added the concierge =
-# ``staff``). ``scripts/migrate_site_plan_keys.py`` rewrites the stored values so
-# the aliases go quiet; nothing breaks if it is never run.
-#
-# TWO SCOPES ONCE LIVED IN ONE CATALOG — worth reading because the machinery is
-# still here. ``free``/``site``/``staff`` are PER-SITE: they are bought one site at
-# a time and their key lands in ``Site.plan_tier``. ``studio``/``agency`` were
-# PER-ORG flats — one subscription covering many sites — and their key must NEVER
-# reach ``Site.plan_tier``, because a per-site publish cannot buy an org plan.
-# Both flats were retired on 2026-09-06, so the catalog ships one scope today; the
-# paragraph stays in the present tense because the SHAPE does, and the next
-# org-scoped tier inherits it rather than re-deriving it.
-# ``scope`` names the difference and ``site_scoped_tier`` enforces it: every
-# entitlement seam resolves through that function, so an org key stored on a site
-# (by a bug, a hand-edit, or a replayed webhook) fails closed to the floor instead
-# of handing one site the whole org's white-label allowance.
-#
-# Updated 2026-09-06 (feat/plan-included-sites): THE ORG FLATS ARE RETIRED.
-#
-# ``studio`` ($39, 5 sites) and ``agency`` ($149, 25) are gone, along with the
-# ``white_label`` and ``included_sites`` fields that existed only to describe
-# them. The WORKSPACE plan carries sites now — Paw Go 1, Pro 3, Pro Max 10, at
-# ``staff`` quality — so a second ladder selling sites by the flat fee both
-# contradicted it in the storefront and priced worse than Pro Max ($49 for 10) at
-# every rung. Neither was purchasable, so nothing was sold on either and no
-# customer migration is needed.
-#
-# ``scope`` / ``is_org_scoped`` / ``site_scoped_tier`` STAY, and are still the
-# guard every entitlement seam reads through. Nothing in the catalog is org-scoped
-# any more, so the guard now protects against a key that is merely GONE: a Site
-# doc that still stores "studio" from before today resolves to None and lands on
-# the free floor, exactly as it did when the key resolved to an org flat. The
-# unsafe reading — a plain ``get_site_plan`` handing one site an org allowance —
-# is unreachable either way, and keeping the seam means re-introducing an org tier
-# does not have to re-derive which lookups were safe.
-
-# Updated 2026-09-05 (fix/sites-plan-credits): DODO IS GONE FROM THIS CATALOG.
-#
-# A per-site plan is paid from the WORKSPACE CREDIT BALANCE — the publish debits
-# ``monthly_price_usd * 100`` credits (a credit is a cent) and a monthly sweep
-# debits it again each period. So the two gateway id fields (``dodo_product_id``,
-# ``dodo_addon_id``), their resolvers and the two settings maps that fed them
-# (``POCKETPAW_DODO_SITE_PRODUCTS``, ``POCKETPAW_DODO_SITE_ADDONS``) are all
-# removed rather than left unread. A field nothing consumes is a field someone
-# reintroduces a dependency on.
-#
-# ``purchasable`` therefore changed meaning rather than value: it asks "does the
-# ladder sell this tier ONE SITE AT A TIME", which is True for every rung the
-# catalog now ships — the org flats it answered False for are gone. Whether a
-# given workspace can afford a rung today is a question about its balance,
-# answered at purchase time with a 402 —
-# not a property of the catalog.
-#
-# The workspace-plan catalog (``billing.plans``) still bills through Dodo and is
-# untouched. Only the per-site ladder left the gateway.
+# Invariants: legacy keys (basic/pro/business) resolve forever through
+# ``_LEGACY_SITE_TIER_ALIASES``; an unknown key builds an ORG-scoped tier so it
+# fails closed out of the per-site path; ``site_scoped_tier`` is the seam every
+# ``Site.plan_tier`` read goes through. No DB, no writes: ``SitePlanTier`` values
+# are built fresh from these constants, so the catalog cannot drift.
 
 from __future__ import annotations
 
@@ -319,6 +206,42 @@ _SITE_PLAN_CONVERSATION_RATE_CENTS: dict[str, int] = {
     "staff": _LIST_CONVERSATION_RATE_CENTS,
     "site_year": _LIST_CONVERSATION_RATE_CENTS,
     "staff_year": _LIST_CONVERSATION_RATE_CENTS,
+}
+
+# Site AI (``pocketpaw_ee.site_ai``): the model aliases each tier's sites may
+# call. ``embed`` is the embeddings alias; the rest are chat aliases. The server
+# maps an alias to a LiteLLM model; callers never name a provider model.
+SITE_AI_CHAT_ALIASES: tuple[str, ...] = ("fast", "smart", "vision")
+_SITE_PLAN_AI_MODELS: dict[str, tuple[str, ...]] = {
+    "free": ("fast",),
+    "site": ("fast", "vision", "embed"),
+    "staff": ("fast", "smart", "vision", "embed"),
+    "site_year": ("fast", "vision", "embed"),
+    "staff_year": ("fast", "smart", "vision", "embed"),
+}
+
+# Whether the LIVE site may call its AI API. Free sites get AI in their own draft
+# preview only (against the small preview cap), so an owner can try it before
+# paying. Unknown keys resolve False: fail closed.
+_SITE_PLAN_AI_PUBLISHED: dict[str, bool] = {
+    "free": False,
+    "site": True,
+    "staff": True,
+    "site_year": True,
+    "staff_year": True,
+}
+
+# The monthly AI spend ceiling per site, in micro-credits (1 credit = 1,000,000
+# micro = $0.01). A hard cap with no overage: the owner's own monthly cap can only
+# lower it. Spend is still debited from the workspace wallet as it happens; this
+# bounds it. Yearly rungs carry the same figure per calendar month.
+_MICRO = 1_000_000
+_SITE_PLAN_AI_ALLOWANCE_MICRO: dict[str, int] = {
+    "free": 0,
+    "site": 500 * _MICRO,
+    "staff": 2_000 * _MICRO,
+    "site_year": 500 * _MICRO,
+    "staff_year": 2_000 * _MICRO,
 }
 
 # Buyer-facing name + the one line a plan card leads with. The catalog owns these
@@ -717,10 +640,33 @@ def site_scoped_tier(key: str | None) -> SitePlanTier | None:
     return tier
 
 
+def _ai_key(key: str | None) -> str:
+    tier = site_scoped_tier(key)
+    return tier.key if tier is not None else BASE_SITE_PLAN_KEY
+
+
+def site_ai_models(key: str | None) -> tuple[str, ...]:
+    """The AI model aliases a site on tier ``key`` may use (free floor when the
+    key is missing or unknown)."""
+    return _SITE_PLAN_AI_MODELS.get(_ai_key(key), ())
+
+
+def site_ai_published(key: str | None) -> bool:
+    """Whether a live site on tier ``key`` may call its AI API (not only its
+    draft preview)."""
+    return _SITE_PLAN_AI_PUBLISHED.get(_ai_key(key), False)
+
+
+def site_ai_allowance_micro(key: str | None) -> int:
+    """The monthly AI spend ceiling, in micro-credits, for a site on tier ``key``."""
+    return _SITE_PLAN_AI_ALLOWANCE_MICRO.get(_ai_key(key), 0)
+
+
 __all__ = [
     "ANALYTICS_FEATURE",
     "BASE_SITE_PLAN_KEY",
     "ORG_SCOPE",
+    "SITE_AI_CHAT_ALIASES",
     "SITE_SCOPE",
     "SitePlanTier",
     "canonical_site_tier_key",
@@ -732,5 +678,8 @@ __all__ = [
     "list_partner_plans",
     "list_site_plans",
     "list_site_scoped_plans",
+    "site_ai_allowance_micro",
+    "site_ai_models",
+    "site_ai_published",
     "site_scoped_tier",
 ]
