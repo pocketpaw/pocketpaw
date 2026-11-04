@@ -9,16 +9,19 @@
 #   GET/PUT     /sites/by-pocket/{pocket_id}/ai/budget
 #   GET         /sites/by-pocket/{pocket_id}/ai/usage?from&to
 #
+# ``public_router`` (no session by design; the site gates in chat.py are the auth):
+#   POST /sites/{site_id}/ai/chat   PAW_GATEWAY_TOKEN (the site's Worker)
+#
 # Wire shapes are pinned by the Sites AI apps contract; see dto.py. Mounted in
 # ``cloud.mount_cloud``; listed in tests/cloud/auth/test_route_auth_audit.py.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
-from pocketpaw_ee.site_ai import service
+from pocketpaw_ee.site_ai import chat, service
 from pocketpaw_ee.site_ai.dto import (
     SiteAiBudget,
     SiteAiBudgetPut,
@@ -30,6 +33,7 @@ from pocketpaw_ee.site_ai.dto import (
 )
 
 router = APIRouter(tags=["Site AI"], dependencies=[Depends(require_plan_feature("sites"))])
+public_router = APIRouter(tags=["Site AI"])
 
 _SITE = "/sites/by-pocket/{pocket_id}/ai"
 _READ = Depends(require_action_any_workspace("fabric.read"))
@@ -130,3 +134,9 @@ async def get_usage(
     _: object = _READ,
 ) -> SiteAiUsage:
     return await service.usage(ctx.workspace_id or "", pocket_id, from_, to)
+
+
+@public_router.post("/sites/{site_id}/ai/chat")
+async def ai_chat(site_id: str, request: Request) -> Response:
+    """OpenAI-shaped chat for a site. See chat.py for the gate order."""
+    return await chat.handle(request, site_id)

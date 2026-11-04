@@ -177,6 +177,7 @@ ROUTER_ATTRS: dict[str, tuple[str, ...]] = {
     "pocketpaw_ee.cloud.ai_visibility.router": ("router", "site_router"),
     "pocketpaw_ee.cloud.partners.router": ("router", "pros_router"),
     "pocketpaw_ee.integrations.router": ("router", "public_router"),
+    "pocketpaw_ee.site_ai.router": ("router", "public_router"),
 }
 
 #: Routes that are public BY DESIGN, each with the reason it has to be.
@@ -270,6 +271,10 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
         "PAW_GATEWAY_TOKEN (constant-time), Turnstile on writes, SiteRateCounter"
     ),
     "POST /integrations/webhooks/{provider}": "provider webhook; provider signature verified",
+    "POST /sites/{site_id}/ai/chat": (
+        "site AI API; per-IP bucket, then PAW_GATEWAY_TOKEN (constant-time) or the "
+        "site key + origin gate + visitor ticket, per-site/visitor rate and spend caps"
+    ),
     "GET /integrations/social/{provider}/authorize": (
         "visitor sign-in consent page; the site must bind social_login with that "
         "provider on, return_to must be the site's own host, per-IP counter"
