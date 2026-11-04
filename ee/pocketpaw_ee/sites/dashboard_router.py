@@ -71,9 +71,12 @@ async def list_site_dashboards(
     pocket_id: str,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(_READ),
+    can_manage: bool = Depends(_CAN_MANAGE),
 ) -> DashboardList:
-    """The site's dashboards, and why none can run yet (``unavailable_reason``)."""
-    return await svc.list_dashboards(**_ids(ctx, pocket_id))
+    """The site's dashboards, why none can run yet (``unavailable_reason``) and whether
+    the caller may create or generate one (``can_manage``)."""
+    out = await svc.list_dashboards(**_ids(ctx, pocket_id))
+    return out.model_copy(update={"can_manage": can_manage})
 
 
 @router.post(BASE, response_model=SiteDashboardOut)
