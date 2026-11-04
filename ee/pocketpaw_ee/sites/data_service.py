@@ -25,7 +25,8 @@
 # import take a Time Travel bookmark first and return it as ``restore_point``
 # (null when the database has none). An import claims its upload (imports once) and
 # reports what landed if it stops; export pages by key, credentials left out. One
-# import or export runs per workspace at a time (429 ``sites.data_job_busy``).
+# import or export runs per workspace at a time (429 ``sites.data_job_busy``). Every write
+# (and restore) bumps the AI dashboards' cache epoch for the database (``_data_changed``).
 #
 # Restore (``restore_status`` / ``restore`` / ``restore_undo``) needs edit access
 # here and ``sites.data_restore`` in the router; a ``production`` D1, a moment inside
@@ -35,8 +36,7 @@
 # import / bulk delete / console write events recorded. Undo takes only the newest
 # restore's bookmark, within 24 h and once. A restore drops every cache of the database.
 #
-# SQL console (``run_sql``, ``get_schema``): ``site_data.console`` decides what one
-# statement may do and builds what D1 runs; the section header below has the rules.
+# SQL console (``run_sql``, ``get_schema``): rules in the section header below.
 #
 # Files (R2) and key-values (KV): see the section header below. A store is named by a
 # binding the Site doc records (else 404), files are typed so they can't run as a page
@@ -175,6 +175,18 @@ async def resolve_target(
         reason=reason,
         site_name=(getattr(doc, "name", "") or "").strip() or str(pocket.get("name") or "").strip(),
     )
+
+
+async def _data_changed(database_id: str, *, restored: bool = False) -> None:
+    """Drop what is cached about the database after a write (everything after a
+    restore) and invalidate the AI dashboards' shared results."""
+    from pocketpaw_ee.sites.site_data import dashboard_cache
+
+    if restored:
+        d1.forget_database(database_id)
+    else:
+        d1.forget_counts(database_id)
+    await dashboard_cache.bump(database_id)
 
 
 def _client(target: DataTarget, injected: Any | None) -> budget.Budgeted:
@@ -573,7 +585,7 @@ async def insert_row(
         raise writes.read_only("login_table")
     _refuse_exposure(w, inserts=True)
     row = await writes.insert(w.cf, w.target.d1_id, w.table, w.kinds, values)
-    d1.forget_counts(w.target.d1_id)
+    await _data_changed(w.target.d1_id)
     await _audit(w, user_id, "site_data.row_insert", row.get("__key"), before=None, after=row)
     return RowOut(row=_masked(w.table, row))
 
@@ -636,7 +648,7 @@ async def delete_rows(
     # One row is undone by re-inserting it; a bulk delete gets a restore point.
     restore_point = await _restore_point(w) if len(row_keys) > 1 else None
     deleted, cascade = await writes.delete(w.cf, w.target.d1_id, w.schema, w.table, row_keys)
-    d1.forget_counts(w.target.d1_id)
+    await _data_changed(w.target.d1_id)
     gone = {r.get("__key") for r in deleted}
     slots = asyncio.Semaphore(_AUDIT_CONCURRENCY)
 
@@ -682,7 +694,7 @@ async def duplicate_row(
     _refuse_exposure(w, inserts=True)
     source = writes.key_value(w.table, w.kinds, key)
     row = await writes.duplicate(w.cf, w.target.d1_id, w.table, w.kinds, source, values or {})
-    d1.forget_counts(w.target.d1_id)
+    await _data_changed(w.target.d1_id)
     await _audit(
         w,
         user_id,
@@ -999,7 +1011,7 @@ async def import_commit(
     for e in errors:
         failed.setdefault(e.row, f"{e.column}: {e.error}" if e.column else e.error)
     failed_count = bad + written.failed_count
-    d1.forget_counts(w.target.d1_id)
+    await _data_changed(w.target.d1_id)
     await _audit_event(
         w.target,
         user_id,
@@ -1338,7 +1350,7 @@ async def _do_restore(
 ) -> RestoreOut:
     await budget.acquire_restore(target.d1_id)
     result = await cf.d1_restore(target.d1_id, bookmark=bookmark, timestamp=timestamp)
-    d1.forget_database(target.d1_id)
+    await _data_changed(target.d1_id, restored=True)
     out = RestoreOut(
         bookmark=str(result.get("bookmark") or ""),
         previous_bookmark=str(result["previous_bookmark"]),
@@ -2137,7 +2149,7 @@ async def run_sql(
     )
     changes = int(raw.get("changes") or 0) if stmt.kind == "write" else None
     if stmt.kind == "write":
-        d1.forget_counts(target.d1_id)
+        await _data_changed(target.d1_id)
     await _sql_audit(
         target,
         user_id,
