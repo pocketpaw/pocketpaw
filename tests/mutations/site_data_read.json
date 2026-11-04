@@ -75,8 +75,8 @@
   {
     "label": "a refused call charges the buckets anyway",
     "file": "ee/pocketpaw_ee/sites/site_data/budget.py",
-    "find": "        if slot is not None and slot[0] >= limit:\n            return max(slot[1] - now, 0.001)",
-    "replace": "        if slot is not None and slot[0] >= limit:\n            for k, _l, w in buckets:\n                _local.setdefault(k, [0, now + w])[0] += 1\n            return max(slot[1] - now, 0.001)",
+    "find": "        if (slot[0] if slot is not None else 0) + cost > limit:\n            return (max(slot[1] - now, 0.001) if slot is not None else float(window)), key",
+    "replace": "        if (slot[0] if slot is not None else 0) + cost > limit:\n            for k, _l, w in buckets:\n                _local.setdefault(k, [0, now + w])[0] += 1\n            return (max(slot[1] - now, 0.001) if slot is not None else float(window)), key",
     "tests": [
       "tests/ee/sites/test_site_data_budget.py::test_a_refused_call_spends_nothing"
     ]
