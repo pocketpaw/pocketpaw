@@ -99,3 +99,72 @@ async def make_site(pocket_id: str, workspace: str = WS, plan_tier: str | None =
     )
     await site.insert()
     return site
+
+
+async def gateway_token(site) -> str:
+    from pocketpaw_ee.integrations import bindings
+    from pocketpaw_ee.sites import site_secrets
+
+    await bindings.ensure_gateway_token(site.workspace, site.pocket_id)
+    return (await site_secrets.secrets_for_deploy(site))["PAW_GATEWAY_TOKEN"]
+
+
+class FakeLlm:
+    """Stands in for ``site_ai.llm.stream`` / ``complete``. ``script`` is a list of
+    attempts; each attempt is a list of ``LlmEvent``s and/or an exception to raise
+    at that point. Payloads sent are kept in ``payloads``."""
+
+    def __init__(self, monkeypatch, script=None, result=None) -> None:
+        from pocketpaw_ee.site_ai import llm
+
+        self.payloads: list[dict] = []
+        self.script = list(script or [])
+        self.result = result
+        self.gate = None  # an asyncio.Event a stream waits on, for burst tests
+        monkeypatch.setattr(llm, "stream", self._stream)
+        monkeypatch.setattr(llm, "complete", self._complete)
+
+    def _next(self):
+        return self.script.pop(0) if len(self.script) > 1 else self.script[0]
+
+    async def _stream(self, payload):
+        self.payloads.append(payload)
+        if self.gate is not None:
+            await self.gate.wait()
+        for item in self._next():
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+
+    async def _complete(self, payload):
+        self.payloads.append(payload)
+        if self.gate is not None:
+            await self.gate.wait()
+        item = self._next() if self.script else self.result
+        if isinstance(item, list):
+            item = item[0]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+def text_events(text: str = "Hello there", tokens_in: int = 10, tokens_out: int = 5):
+    from pocketpaw_ee.site_ai.llm import LlmEvent
+
+    return [
+        LlmEvent("text", text=text),
+        LlmEvent("finish", reason="stop"),
+        LlmEvent("usage", input_tokens=tokens_in, output_tokens=tokens_out),
+    ]
+
+
+def parse_sse(body: str) -> list[tuple[str, dict]]:
+    import json
+
+    events = []
+    for block in body.strip().split("\n\n"):
+        if not block.strip():
+            continue
+        lines = dict(line.split(": ", 1) for line in block.splitlines() if ": " in line)
+        events.append((lines.get("event", ""), json.loads(lines.get("data", "{}"))))
+    return events

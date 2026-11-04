@@ -6320,6 +6320,40 @@ preview only; `site` adds `vision` and `embed`; `staff` adds `smart`. The monthl
 allowance (`site` 500 credits, `staff` 2,000) is the plan's hard ceiling on a
 site's AI spend; the owner's monthly cap can only lower it.
 
+### `POST /sites/{site_id}/ai/chat`
+
+No session. Auth is `Authorization: Bearer <PAW_GATEWAY_TOKEN>` (the site's
+Worker). Body: `{model, messages, preset?, tools?, tool_choice?, response_format?,
+max_output_tokens?, temperature?, stream?, user?}`; only these fields are read,
+and nothing else from the body is forwarded. `user` is hashed and only feeds a
+per-user rate limit; LiteLLM's `user` is always the paying workspace.
+
+- `stream: true` (default) answers `text/event-stream` with `chunk {delta}`,
+  `tool_call {index, id?, name?, arguments_delta?}`, `usage {input_tokens,
+  output_tokens, credits_micro}`, and ends with exactly one of `done {id,
+  finish_reason}`, `unavailable {reason}` or `error {code, message}`.
+- `stream: false` answers `ChatResponse` JSON: `{id, model (the alias), message,
+  finish_reason, usage}`.
+- Tool calls are returned to the caller; the server never runs a tool.
+- A preset's system prompt, model, output cap and temperature win over the request.
+- Limits: 400 KB body, 200 messages, 64 tools, 8 images (vision alias only, user
+  messages only; `data:` URLs must be png/jpeg/gif/webp and match their magic
+  bytes, up to 5 MB; remote URLs must be https and not name a private or loopback
+  host), input within the alias context, output clamped to the alias/preset cap.
+- A transient provider failure before the first token is retried once. Before any
+  output a failure streams `unavailable {reason: "temporary"}` (or `error
+  {code: "invalid_request"}` when the provider refused the request); mid-stream it
+  streams `usage` for what was produced, then `error`.
+- Errors are JSON `{detail: code, message, field?, retry_after?}`: 400
+  `invalid_request`, 401 `unauthorized`, 402 `budget_exhausted` / `wallet_empty`,
+  403 `browser_disabled` / `preset_required` / `model_not_allowed` /
+  `origin_not_allowed`, 413 `request_too_large`, 429 `rate_limited`, 503
+  `provider_unavailable`. A paused site streams `unavailable {reason: "paused"}`
+  (JSON callers get 402 `budget_exhausted`).
+
+Each call writes a `ChatRunDoc` (`context_type: "site_ai"`, token counts only, no
+content) and is debited through `bill_run` keyed `run:{run_id}`.
+
 ## Deleting a site
 
 Wave 1 of the sites lifecycle. Deleting a site is **irreversible**, **owner-only**, and
