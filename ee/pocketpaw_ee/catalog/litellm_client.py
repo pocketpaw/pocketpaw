@@ -17,10 +17,12 @@
 # not expose per-model routability/readiness, so catalog ⊇ routable degrades to
 # "all listed entries are available" (noted in the entity README + MCG-1 report).
 #
-# One write-shaped call lives here too: ``chat_completion`` POSTs a single
-# OpenAI-compatible /v1/chat/completions request to the same proxy. It is the
-# canonical completion helper (scripts/dup-ratchet counts hand-rolled copies
-# elsewhere); callers pick the key, so a tenant's virtual key can bill the call.
+# One write-shaped call lives here too: ``chat_completion_message`` POSTs a single
+# OpenAI-compatible /v1/chat/completions request to the same proxy and returns the
+# first choice's whole message (``tool_calls`` included, for forced tool use);
+# ``chat_completion`` is its text-only form. They are the canonical completion
+# helpers (scripts/dup-ratchet counts hand-rolled copies elsewhere); callers pick the
+# key, so a tenant's virtual key can bill the call.
 #
 # httpx-based with an injectable ``_transport`` so tests stand in an
 # httpx.MockTransport (no live proxy). Fail-closed: a non-2xx raises
@@ -271,7 +273,7 @@ class LiteLLMClient:
         return list(entries.values())
 
 
-async def chat_completion(
+async def chat_completion_message(
     *,
     model: str,
     messages: list[dict[str, Any]],
@@ -280,14 +282,16 @@ async def chat_completion(
     timeout: float = 60.0,
     transport: httpx.BaseTransport | None = None,
     **params: Any,
-) -> str | None:
-    """One chat completion through the LiteLLM proxy; returns the first
-    choice's message content, or None when the reply carries no text.
+) -> dict[str, Any] | None:
+    """One chat completion through the LiteLLM proxy; returns the first choice's
+    message (``content``, ``tool_calls`` …), or None when the reply has none.
 
     ``api_key`` defaults to the deployment master key (pass a tenant's virtual
     key to bill it). ``params`` go into the body as-is (``temperature``,
-    ``max_tokens``, ``user``, ...). Transport and HTTP status failures raise
-    ``httpx.HTTPError``, so the caller decides whether to degrade or surface them.
+    ``max_tokens``, ``tools``, ``tool_choice``, ``user``, ...); message content
+    blocks pass through untouched, so ``cache_control`` reaches the provider.
+    Transport and HTTP status failures raise ``httpx.HTTPError``, so the caller
+    decides whether to degrade or surface them.
     """
     base = (base_url or config.litellm_proxy_url()).rstrip("/")
     key = api_key if api_key is not None else config.litellm_proxy_api_key()
@@ -300,15 +304,41 @@ async def chat_completion(
         resp.raise_for_status()
         body = resp.json()
     try:
-        content = body["choices"][0]["message"]["content"]
+        message = body["choices"][0]["message"]
     except (KeyError, IndexError, TypeError):
         return None
+    return message if isinstance(message, dict) else None
+
+
+async def chat_completion(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout: float = 60.0,
+    transport: httpx.BaseTransport | None = None,
+    **params: Any,
+) -> str | None:
+    """``chat_completion_message``'s text: the first choice's content, or None when
+    the reply carries no text. Same arguments and failure behaviour."""
+    message = await chat_completion_message(
+        model=model,
+        messages=messages,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout,
+        transport=transport,
+        **params,
+    )
+    content = (message or {}).get("content")
     return content if isinstance(content, str) else None
 
 
 __all__ = [
     "LiteLLMClient",
     "chat_completion",
+    "chat_completion_message",
     "CatalogUpstreamError",
     "MODE_TO_MODALITY",
     "SUPPORTS_TO_CAPABILITY",

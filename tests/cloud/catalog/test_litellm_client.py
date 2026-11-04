@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 from pocketpaw_ee.catalog.litellm_client import (
@@ -185,3 +187,53 @@ async def test_api_key_sent_as_bearer():
     )
     await client.model_info()
     assert seen["auth"] == "Bearer sk-proxy-123"
+
+
+# --------------------------------------------------------------------------- completions
+
+
+def _completion_handler(seen: dict, message: dict):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": message}]})
+
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_message_returns_tool_calls_and_passes_params():
+    from pocketpaw_ee.catalog.litellm_client import chat_completion_message
+
+    seen: dict = {}
+    call = {"function": {"name": "f", "arguments": '{"a": 1}'}}
+    system = [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}]
+    message = await chat_completion_message(
+        model="m",
+        messages=[{"role": "system", "content": system}],
+        base_url="http://proxy.test:4000",
+        api_key="",
+        transport=httpx.MockTransport(_completion_handler(seen, {"tool_calls": [call]})),
+        tools=[{"type": "function", "function": {"name": "f"}}],
+        tool_choice={"type": "function", "function": {"name": "f"}},
+    )
+    assert message == {"tool_calls": [call]}
+    assert seen["path"] == "/v1/chat/completions"
+    assert seen["body"]["tool_choice"]["function"]["name"] == "f"
+    assert seen["body"]["messages"][0]["content"] == system  # cache_control untouched
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_is_the_text_of_the_message():
+    from pocketpaw_ee.catalog.litellm_client import chat_completion
+
+    seen: dict = {}
+    for message, text in [({"content": "hi"}, "hi"), ({"tool_calls": []}, None)]:
+        out = await chat_completion(
+            model="m",
+            messages=[],
+            base_url="http://proxy.test:4000",
+            api_key="",
+            transport=httpx.MockTransport(_completion_handler(seen, message)),
+        )
+        assert out == text

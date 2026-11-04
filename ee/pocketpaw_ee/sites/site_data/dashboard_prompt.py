@@ -14,8 +14,8 @@
 # only (a time column's string only when it parses as an ISO date). Repair prompts get
 # D1 errors with quoted spans removed (``scrub_error``). No visitor text is sent.
 #
-# The model call goes through our own LiteLLM gateway (OpenAI-compatible
-# ``/v1/chat/completions``) with one forced tool: ``propose_widgets`` (widget JSON,
+# The model call goes through our own LiteLLM gateway (``catalog.litellm_client.
+# chat_completion_message``) with one forced tool: ``propose_widgets`` (widget JSON,
 # never Ripple) or, for a schema of more than 25 tables, first ``pick_tables``. The
 # system prompt is a fixed, cacheable block; customer text (the owner's focus) is
 # wrapped in a neutralised ``<owner_focus>`` tag and capped. ``call_tool`` never raises:
@@ -47,6 +47,7 @@ MAX_WIDGETS = 12
 MAX_FOCUS = 500
 STATS_SAMPLE = 10_000
 TIMEOUT_S = 60.0
+_TRANSPORT: httpx.BaseTransport | None = None  # tests stand in a MockTransport
 _UNSAFE = re.compile(r"[\x00-\x1f\x7f<>`]")
 _NUMERIC = frozenset({"integer", "real", "datetime", "date"})
 
@@ -357,36 +358,29 @@ async def call_tool(
 ) -> dict[str, Any] | None:
     """The forced tool call's arguments, or None (gateway down, no tool call, bad
     JSON). Never raises."""
-    from pocketpaw_ee.catalog import config as catalog_config
+    from pocketpaw_ee.catalog.litellm_client import chat_completion_message
 
     name = tool["function"]["name"]
-    payload: dict[str, Any] = {
-        "model": model or model_name(),
-        "messages": [
-            {
-                "role": "system",
-                "content": [
-                    {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
-                ],
-            },
-            {"role": "user", "content": user},
-        ],
-        "tools": [tool],
-        "tool_choice": {"type": "function", "function": {"name": name}},
-        "temperature": 0.2,
-        "max_tokens": 6000,
-    }
-    headers = {"Content-Type": "application/json"}
-    key = catalog_config.litellm_proxy_api_key()
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    url = catalog_config.litellm_proxy_url().rstrip("/") + "/v1/chat/completions"
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            resp.raise_for_status()
-            body = resp.json()
-        calls = body["choices"][0]["message"].get("tool_calls") or []
+        message = await chat_completion_message(
+            model=model or model_name(),
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+                    ],
+                },
+                {"role": "user", "content": user},
+            ],
+            timeout=TIMEOUT_S,
+            transport=_TRANSPORT,
+            tools=[tool],
+            tool_choice={"type": "function", "function": {"name": name}},
+            temperature=0.2,
+            max_tokens=6000,
+        )
+        calls = (message or {}).get("tool_calls") or []
         for call in calls:
             fn = call.get("function") or {}
             if fn.get("name") == name:

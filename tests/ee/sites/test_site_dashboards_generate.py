@@ -575,3 +575,40 @@ async def test_real_model_eval(beanie_test_db, monkeypatch, audit, name):
     job = await _job(await _generate())
     assert job.status == "done", (job.error, job.dropped)
     assert len((await _dashboard(job.dashboard_id)).widgets) >= 3
+
+
+# --------------------------------------------------------------------------- the call itself
+
+
+@pytest.mark.asyncio
+async def test_call_tool_forces_the_tool_through_the_shared_helper(monkeypatch):
+    import httpx
+
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = json.loads(request.content)
+        call = {"function": {"name": "propose_widgets", "arguments": '{"widgets": []}'}}
+        return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [call]}}]})
+
+    monkeypatch.setattr(prompt, "_TRANSPORT", httpx.MockTransport(handler))
+    out = await prompt.call_tool(system="S", user="U", tool=prompt.WIDGETS_TOOL, model="m")
+    assert out == {"widgets": []}
+    body = seen["body"]
+    assert seen["path"].endswith("/v1/chat/completions") and body["model"] == "m"
+    assert body["tool_choice"] == {"type": "function", "function": {"name": "propose_widgets"}}
+    assert body["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+@pytest.mark.asyncio
+async def test_call_tool_never_raises(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(prompt, "_TRANSPORT", httpx.MockTransport(lambda r: httpx.Response(502)))
+    assert await prompt.call_tool(system="S", user="U", tool=prompt.PICK_TOOL, model="m") is None
+    reply = {"choices": [{"message": {"content": "no tool"}}]}
+    monkeypatch.setattr(
+        prompt, "_TRANSPORT", httpx.MockTransport(lambda r: httpx.Response(200, json=reply))
+    )
+    assert await prompt.call_tool(system="S", user="U", tool=prompt.PICK_TOOL, model="m") is None
