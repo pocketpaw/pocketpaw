@@ -81,6 +81,7 @@ import aiosqlite
 from fastapi import FastAPI
 from soul_protocol.spec.journal import Actor
 
+from pocketpaw.instinct.models import ActionStatus
 from pocketpaw_ee.cloud._core.periodic import sweep_tick
 
 logger = logging.getLogger(__name__)
@@ -217,19 +218,16 @@ async def _list_abandoned_actions(
 
 
 async def _mark_action_expired(store: Any, action_id: str) -> None:
-    """Flip ``instinct_actions.status`` from ``pending`` to ``expired``.
+    """Flip ``instinct_actions.status`` from ``pending`` to ``ActionStatus.EXPIRED``.
 
-    The Slice 4 brief introduces ``expired`` as a new informal state —
-    ``ActionStatus`` does NOT carry it (the enum is closed at
-    pending/approved/rejected/executed/failed). Writing the string
-    directly avoids a coordinated enum bump; readers that fetch by enum
-    will see the row drop out of every named bucket and that's exactly
-    what we want — the row is no longer in any actionable state.
+    ``EXPIRED`` is a terminal state: the row drops out of every actionable
+    bucket, so the UI stops offering Approve / Reject. Written with raw SQL
+    because the store has no expire helper.
     """
     async with aiosqlite.connect(store._db_path) as db:  # noqa: SLF001
         await db.execute(
             "UPDATE instinct_actions SET status = ? WHERE id = ?",
-            ("expired", action_id),
+            (ActionStatus.EXPIRED.value, action_id),
         )
         await db.commit()
 
