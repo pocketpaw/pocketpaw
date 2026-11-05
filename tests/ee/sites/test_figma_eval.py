@@ -44,6 +44,8 @@ def _api(fx: dict):
             return httpx.Response(200, json={"file": {"name": "x", "last_touched_at": "t1"}})
         if path == f"/v1/files/{key}":
             return httpx.Response(200, json=fx["index"])
+        if path == f"/v1/files/{key}/variables/local" and "variables" in fx:
+            return httpx.Response(200, json=fx["variables"])
         if path == f"/v1/files/{key}/nodes":
             return httpx.Response(200, json=fx["nodes"])
         if path == f"/v1/images/{key}":
@@ -85,14 +87,14 @@ def run(monkeypatch):
     session_keys.clear_memory()
     monkeypatch.setattr(sites_reference, "_TRANSPORT", httpx.MockTransport(_images))
 
-    def install(fx: dict) -> SimpleNamespace:
+    def install(fx: dict, scopes: tuple[str, ...] = ("file_content:read",)) -> SimpleNamespace:
         monkeypatch.setattr(oauth_http, "_transport", httpx.MockTransport(_api(fx)))
 
         async def token(rejected: str = "") -> str:
             return "tok"
 
         source = RestFigmaSource(token, scope="conn-eval")
-        conn = SimpleNamespace(meta={}, scopes=["file_content:read"])
+        conn = SimpleNamespace(meta={"handle": "owner"}, scopes=list(scopes))
         monkeypatch.setattr(mcp, "source_for", AsyncMock(return_value=(source, conn)))
         return SimpleNamespace(mcp=mcp, fx=fx)
 
@@ -257,6 +259,24 @@ async def test_injected_layer_text_stays_content(run):
     for text in texts:
         for phrase in fx["must_not_appear_outside_envelope"]:
             assert phrase not in text, phrase
+
+
+async def test_injected_font_and_variable_names_never_become_tokens(run):
+    fx = _fixture("redteam_injection.json")
+    tools = run(fx, ("file_content:read", "file_variables:read"))
+    await _paste(fx["pasted"])
+    out = await tools.mcp._tokens_handler({"url": fx["pasted"] + "?node-id=1-2"})
+    text = out["content"][0]["text"]
+    body = json.loads(text)
+    assert body["source"] == "variables+derived"
+    for phrase in fx["must_not_appear_outside_envelope"]:
+        assert phrase not in text, phrase
+    tokens = body["tokens"]
+    assert tokens["color.accent"]["value"] == "#cc331a"  # the colour still counts
+    for role in ("font.display", "font.body"):
+        value = tokens[role]["value"]
+        assert value is None or all(c.isalnum() or c in " -" for c in value), value
+    assert "url(" not in body["css"]["root"] and "{" not in body["css"]["root"][7:]
 
 
 async def test_a_file_key_named_in_the_design_is_never_read(run):
