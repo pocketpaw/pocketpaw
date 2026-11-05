@@ -34,14 +34,21 @@ SYSTEM = "You sharpen website ideas."
 
 class _ToolsBackend:
     async def run(
-        self, message, *, system_prompt=None, tools_enabled=True, **_kw
+        self, message, *, system_prompt=None, tools_enabled=True, isolated=False, **_kw
     ):  # pragma: no cover
         yield None
 
 
 class _ImageBackend:
     async def run(
-        self, message, *, system_prompt=None, tools_enabled=True, image_attachments=(), **_kw
+        self,
+        message,
+        *,
+        system_prompt=None,
+        tools_enabled=True,
+        image_attachments=(),
+        isolated=False,
+        **_kw,
     ):  # pragma: no cover
         yield None
 
@@ -620,3 +627,31 @@ async def test_the_gateway_fallback_sends_only_the_callers_system_and_prompt(
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": "<original_prompt>a bakery</original_prompt>"},
     ]
+
+
+class _NotIsolatedBackend:
+    async def run(self, message, *, system_prompt=None, tools_enabled=True):  # pragma: no cover
+        yield None
+
+
+async def test_an_isolated_call_never_runs_a_backend_that_cant_promise_it(seams, use_pool):
+    pool = use_pool(_Pool("deep_agents"))
+    pool.instance.backend = _NotIsolatedBackend()
+
+    platform = await _complete(isolated=True)
+    seams.creds = TurnCredentials(source="byok", api_key="sk-x", provider="openai_compatible")
+    seams.source = "byok"
+    byok = await _complete(isolated=True)
+
+    assert pool.calls == []
+    assert platform.ok and platform.fallback  # the gateway answers instead
+    assert (byok.failure, byok.code) == ("error", "side.backend_unsupported")
+
+
+async def test_a_backend_without_isolated_still_serves_an_ordinary_call(seams, use_pool):
+    pool = use_pool(_Pool("deep_agents"))
+    pool.instance.backend = _NotIsolatedBackend()
+
+    result = await _complete()
+
+    assert result.ok and len(pool.calls) == 1

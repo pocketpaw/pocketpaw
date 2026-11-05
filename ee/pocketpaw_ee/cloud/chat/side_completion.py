@@ -21,7 +21,9 @@
 # Invariants:
 #   * ``isolated=True`` (a caller that is not the agent's user, e.g. a site's AI
 #     API) runs ``pool.run(isolated=True)``: no soul recall, none of the agent's
-#     skills, no backend extras, so the system prompt is exactly ``system``.
+#     skills, no backend extras, so the system prompt is exactly ``system``. A
+#     backend that doesn't declare ``isolated`` is handled like one without the
+#     tool switch (the gateway fallback, or refused on BYOK).
 #     Enhance and the other in-app callers keep the agent's full context.
 #   * ``images`` ride the chat turn's ``image_attachments`` channel to the
 #     backend; a backend that doesn't declare it (or the gateway fallback) is a
@@ -58,6 +60,7 @@ from pocketpaw.agents import pool as agent_pool  # type: ignore[import-untyped]
 from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
     ImageAttachment,
     _accepts_image_attachments_kwarg,
+    _accepts_isolated_kwarg,
     _accepts_tools_enabled_kwarg,
 )
 from pocketpaw.config import get_settings  # type: ignore[import-untyped]
@@ -301,10 +304,12 @@ async def _prepare(
         if limit is not None:
             run_kwargs["total_tokens_limit"] = limit
         meta.update(backend=PYDANTIC_AI, model=forced_model)
-    elif not _accepts_tools_enabled_kwarg(instance.backend.run):
-        # This backend would keep its tools. Only a platform-billed call may
-        # fall back to our gateway; a call gated as the workspace's own key
-        # must not quietly spend ours.
+    elif not _accepts_tools_enabled_kwarg(instance.backend.run) or (
+        isolated and not _accepts_isolated_kwarg(instance.backend.run)
+    ):
+        # This backend would keep its tools, or can't promise an isolated
+        # prompt. Only a platform-billed call may fall back to our gateway; a
+        # call gated as the workspace's own key must not quietly spend ours.
         if source == "byok":
             return _fail("error", "side.backend_unsupported", **meta)
         gateway = True
