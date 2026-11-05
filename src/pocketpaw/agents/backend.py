@@ -198,6 +198,17 @@ def _accepts_image_attachments_kwarg(func: Any) -> bool:
         return False
 
 
+def _accepts_isolated_kwarg(func: Any) -> bool:
+    """Does ``func`` name ``isolated`` in its signature? The Claude SDK backend
+    does: an isolated run adds nothing of the deployment's to the system prompt
+    (no connectors block, no bundled skills). Withheld from every other backend,
+    whose prompt is already exactly what ``AgentPool`` assembled."""
+    try:
+        return "isolated" in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _accepts_tools_enabled_kwarg(func: Any) -> bool:
     """Does ``func`` name ``tools_enabled`` in its signature?
 

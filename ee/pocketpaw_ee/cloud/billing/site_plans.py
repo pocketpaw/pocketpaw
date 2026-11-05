@@ -208,16 +208,16 @@ _SITE_PLAN_CONVERSATION_RATE_CENTS: dict[str, int] = {
     "staff_year": _LIST_CONVERSATION_RATE_CENTS,
 }
 
-# Site AI (``pocketpaw_ee.site_ai``): the model aliases each tier's sites may
-# call. ``embed`` is the embeddings alias; the rest are chat aliases. The server
-# maps an alias to a LiteLLM model; callers never name a provider model.
+# Site AI (``pocketpaw_ee.site_ai``): the chat model aliases each tier's sites may
+# call. The owner maps an alias to one of the workspace's agents (and optionally a
+# catalog model); callers never name a model. There is no embeddings alias.
 SITE_AI_CHAT_ALIASES: tuple[str, ...] = ("fast", "smart", "vision")
 _SITE_PLAN_AI_MODELS: dict[str, tuple[str, ...]] = {
     "free": ("fast",),
-    "site": ("fast", "vision", "embed"),
-    "staff": ("fast", "smart", "vision", "embed"),
-    "site_year": ("fast", "vision", "embed"),
-    "staff_year": ("fast", "smart", "vision", "embed"),
+    "site": ("fast", "vision"),
+    "staff": ("fast", "smart", "vision"),
+    "site_year": ("fast", "vision"),
+    "staff_year": ("fast", "smart", "vision"),
 }
 
 # Whether the LIVE site may call its AI API. Free sites get AI in their own draft

@@ -24,6 +24,8 @@ from pocketpaw.agents import pool as agent_pool
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import get_settings
 
+_REAL_CHAT_COMPLETION = prompt_soften._chat_completion
+
 WS = "ws-side"
 USER = "user-side"
 DEFAULT_AGENT = "agent-default"
@@ -32,7 +34,21 @@ SYSTEM = "You sharpen website ideas."
 
 class _ToolsBackend:
     async def run(
-        self, message, *, system_prompt=None, tools_enabled=True, **_kw
+        self, message, *, system_prompt=None, tools_enabled=True, isolated=False, **_kw
+    ):  # pragma: no cover
+        yield None
+
+
+class _ImageBackend:
+    async def run(
+        self,
+        message,
+        *,
+        system_prompt=None,
+        tools_enabled=True,
+        image_attachments=(),
+        isolated=False,
+        **_kw,
     ):  # pragma: no cover
         yield None
 
@@ -50,11 +66,17 @@ DONE = AgentEvent(type="done", content="")
 
 
 class _Pool:
-    def __init__(self, backend: str, model: str = "", *, tools: bool = True, delay: float = 0.0):
-        self.instance = SimpleNamespace(
-            config={"backend": backend, "model": model},
-            backend=_ToolsBackend() if tools else _NoToolsBackend(),
-        )
+    def __init__(
+        self,
+        backend: str,
+        model: str = "",
+        *,
+        tools: bool = True,
+        delay: float = 0.0,
+        images: bool = False,
+    ):
+        impl = _ImageBackend() if images else _ToolsBackend() if tools else _NoToolsBackend()
+        self.instance = SimpleNamespace(config={"backend": backend, "model": model}, backend=impl)
         self.events = [_msg("A brief "), _msg("for Crumb & Co."), DONE]
         self.delay = delay
         self.got: list[str] = []
@@ -416,3 +438,220 @@ async def test_never_raises(seams, use_pool, monkeypatch):
     result = await _complete()
 
     assert result.failure == "error"
+
+
+# ---------------------------------------------------------------- agent_stream
+
+
+async def _stream(**kw):
+    args = {
+        "workspace_id": WS,
+        "user_id": USER,
+        "system": SYSTEM,
+        "prompt": "<conversation>hi</conversation>",
+        "timeout_s": 5.0,
+    }
+    args.update(kw)
+    return [item async for item in side_completion.agent_stream(**args)]
+
+
+async def test_stream_yields_deltas_then_the_same_result(seams, use_pool):
+    pool = use_pool(_Pool("claude_agent_sdk", "claude-sonnet-5-5"))
+
+    items = await _stream(agent_id="agent-mine", model="claude-haiku-5-5")
+
+    started, *deltas, result = items
+    assert started is side_completion.STARTED
+    assert deltas == ["A brief ", "for Crumb & Co."]
+    assert result.ok and result.text == "A brief for Crumb & Co."
+    assert (result.payer, result.sent, result.agent_id) == ("platform", True, "agent-mine")
+    (call,) = pool.calls
+    assert call["tools_enabled"] is False and call["system_message_override"] == SYSTEM
+    assert call["model_override"] == "claude-haiku-5-5"
+    assert pool.closed
+
+
+async def test_a_gate_refusal_streams_only_the_result_and_was_never_sent(
+    seams, use_pool, monkeypatch
+):
+    async def _unknown(_model):
+        return True
+
+    monkeypatch.setattr(run_core, "_model_is_unknown_to_gateway", _unknown)
+    pool = use_pool(_Pool("claude_agent_sdk"))
+
+    (result,) = await _stream(model="claude-haiku-4-5")
+
+    assert (result.failure, result.code, result.sent) == ("model", "model.not_available", False)
+    assert pool.calls == []
+
+
+async def test_stream_timeout_is_typed_and_closes_the_generator(seams, use_pool):
+    pool = use_pool(_Pool("claude_agent_sdk", delay=1.0))
+
+    started, result = await _stream(timeout_s=0.05)
+
+    assert started is side_completion.STARTED
+    assert (result.failure, result.sent) == ("timeout", True)
+    assert pool.closed
+
+
+async def test_stream_reports_byok_as_the_payer(seams, use_pool):
+    seams.creds = TurnCredentials(source="byok", api_key="sk-ant", provider="anthropic")
+    seams.source = "byok"
+    pool = use_pool(_Pool("claude_agent_sdk"))
+
+    *_deltas, result = await _stream()
+
+    assert result.ok and result.payer == "byok"
+    assert pool.calls[0]["byok_api_key"] == "sk-ant"
+
+
+async def test_stream_through_the_gateway_fallback_is_one_delta(seams, use_pool):
+    use_pool(_Pool("codex_cli", tools=False))
+
+    items = await _stream()
+
+    assert items[0] is side_completion.STARTED and items[1] == "fallback brief"
+    assert items[-1].ok and items[-1].fallback and items[-1].sent
+
+
+async def test_resolve_target_names_the_agent_and_who_pays(seams, use_pool):
+    target = await side_completion.resolve_target(WS, USER, None)
+    hidden = await side_completion.resolve_target(WS, USER, "agent-elsewhere")
+
+    assert target is not None and (target.agent_id, target.payer) == (DEFAULT_AGENT, "platform")
+    assert hidden is None
+
+
+# ---------------------------------------------------------------- images
+
+
+def _png():
+    from pocketpaw.agents.backend import ImageAttachment
+
+    return ImageAttachment(data=b"\x89PNG\r\n\x1a\n" + b"\x00" * 8, media_type="image/png")
+
+
+async def test_an_image_rides_the_chat_turns_attachment_channel(seams, use_pool):
+    pool = use_pool(_Pool("claude_agent_sdk", images=True))
+    image = _png()
+
+    result = await _complete(images=[image])
+    *_deltas, streamed = await _stream(images=[image])
+
+    assert result.ok and streamed.ok
+    assert [c["image_attachments"] for c in pool.calls] == [(image,), (image,)]
+
+
+async def test_images_on_a_backend_that_cant_take_them_are_a_typed_failure(seams, use_pool):
+    pool = use_pool(_Pool("claude_agent_sdk"))  # no ``image_attachments`` parameter
+
+    result = await _complete(images=[_png()])
+    (streamed,) = await _stream(images=[_png()])
+
+    assert (result.failure, result.code, result.sent) == (
+        "unsupported",
+        "side.images_unsupported",
+        False,
+    )
+    assert streamed.failure == "unsupported" and pool.calls == []
+
+
+async def test_images_never_take_the_text_only_gateway_fallback(seams, use_pool):
+    pool = use_pool(_Pool("codex_cli", tools=False))
+
+    result = await _complete(images=[_png()])
+
+    assert result.failure == "unsupported"
+    assert pool.calls == [] and seams.gateway_calls == []
+
+
+async def test_a_call_without_images_sends_exactly_what_it_did_before(seams, use_pool):
+    """Enhance, motion video and the dashboard prompt pass no images: their run
+    kwargs carry no image key at all, on a backend that could take one too."""
+    pool = use_pool(_Pool("claude_agent_sdk", "claude-sonnet-4-6", images=True))
+
+    await _complete()
+    await _stream()
+
+    for call in pool.calls:
+        assert "image_attachments" not in call and "images" not in call
+        assert set(call) == {
+            "agent_id",
+            "message",
+            "session_key",
+            "system_message_override",
+            "tools_enabled",
+        }
+
+
+async def test_isolated_rides_to_the_pool_and_only_when_asked(seams, use_pool):
+    pool = use_pool(_Pool("claude_agent_sdk"))
+
+    await _complete(isolated=True)
+    await _stream(isolated=True)
+    await _complete()
+
+    assert [c.get("isolated") for c in pool.calls] == [True, True, None]
+
+
+def test_an_agent_with_no_model_is_priced_at_its_backends_default(seams):
+    assert side_completion.default_model_for("pydantic_ai") == "claude-sonnet-4-6"
+
+
+async def test_the_gateway_fallback_sends_only_the_callers_system_and_prompt(
+    seams, use_pool, monkeypatch
+):
+    """A backend that can't run tool-less falls back to the gateway: the request it
+    sends is the caller's system prompt and prompt, nothing of the agent's."""
+    import json
+
+    import httpx
+
+    bodies = []
+
+    def _handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "fallback"}}]})
+
+    monkeypatch.setattr(prompt_soften, "_chat_completion", _REAL_CHAT_COMPLETION)
+    monkeypatch.setattr(prompt_soften, "_TRANSPORT", httpx.MockTransport(_handler))
+    use_pool(_Pool("codex_cli", "gpt-5.6", tools=False))
+
+    result = await _complete(isolated=True)
+
+    assert result.ok and result.fallback
+    ((body),) = bodies
+    assert body["messages"] == [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": "<original_prompt>a bakery</original_prompt>"},
+    ]
+
+
+class _NotIsolatedBackend:
+    async def run(self, message, *, system_prompt=None, tools_enabled=True):  # pragma: no cover
+        yield None
+
+
+async def test_an_isolated_call_never_runs_a_backend_that_cant_promise_it(seams, use_pool):
+    pool = use_pool(_Pool("deep_agents"))
+    pool.instance.backend = _NotIsolatedBackend()
+
+    platform = await _complete(isolated=True)
+    seams.creds = TurnCredentials(source="byok", api_key="sk-x", provider="openai_compatible")
+    seams.source = "byok"
+    byok = await _complete(isolated=True)
+
+    assert pool.calls == []
+    assert platform.ok and platform.fallback  # the gateway answers instead
+    assert (byok.failure, byok.code) == ("error", "side.backend_unsupported")
+
+
+async def test_a_backend_without_isolated_still_serves_an_ordinary_call(seams, use_pool):
+    pool = use_pool(_Pool("deep_agents"))
+    pool.instance.backend = _NotIsolatedBackend()
+
+    result = await _complete()
+
+    assert result.ok and len(pool.calls) == 1

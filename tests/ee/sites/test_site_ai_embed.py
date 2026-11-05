@@ -1,15 +1,14 @@
 # tests/ee/sites/test_site_ai_embed.py: /ai/embed, opt-in transcripts, and the site
 # transfer / delete cascade for site AI rows.
 #
-# Embed: Worker and browser callers, ``model`` defaulting to ``embed``, input
-# limits, the plan allowlist, budget refusal as a 402. Transcripts: off by default,
-# capped and image-free when on, never the system prompt, deleted when turned off,
-# readable with ``sites.ai_manage`` only. Lifecycle: a transfer re-keys settings,
-# presets and budget, releases holds, drops transcripts and leaves usage rows; a
-# delete removes every row. The LLM is faked.
+# Embed: not offered (site AI runs on the workspace's agents, which can't embed), so
+# an authenticated caller gets a clear 503 and nothing is held or billed; an
+# unauthenticated one is still refused first. Transcripts: off by default, capped
+# when on, never the system prompt, deleted when turned off, readable with
+# ``sites.ai_manage`` only. Lifecycle: a transfer re-keys settings, presets and
+# budget, releases holds, drops transcripts and leaves usage rows; a delete removes
+# every row. The model is faked.
 from __future__ import annotations
-
-import base64
 
 import fakeredis.aioredis
 import pytest
@@ -25,6 +24,7 @@ from tests.ee.sites.site_ai_harness import (
     gateway_token,
     make_pocket,
     make_site,
+    ok,
     parse_sse,
     text_events,
 )
@@ -55,21 +55,6 @@ def _env(monkeypatch):
     monkeypatch.setattr(site_gate, "site_widget", _no_widget)
 
 
-class _Embedder:
-    def __init__(self, monkeypatch, tokens=7, fail=None):
-        from pocketpaw_ee.site_ai import llm
-
-        self.calls = []
-        self.tokens, self.fail = tokens, fail
-        monkeypatch.setattr(llm, "embed", self._embed)
-
-    async def _embed(self, *, provider_model, inputs, workspace_id, tags):
-        self.calls.append({"model": provider_model, "inputs": inputs, "user": workspace_id})
-        if self.fail:
-            raise self.fail
-        return [[0.1, 0.2] for _ in inputs], self.tokens
-
-
 async def _setup(plan="staff", **settings):
     from pocketpaw_ee.cloud.models.site_ai import SiteAiSettingsDoc
 
@@ -81,91 +66,29 @@ async def _setup(plan="staff", **settings):
 
 
 async def _embed(c, site, token, body):
-    return await c.post(
-        f"/api/v1/sites/{site.id}/ai/embed",
-        json=body,
-        headers={"authorization": f"Bearer {token}"},
-    )
+    headers = {"authorization": f"Bearer {token}"} if token else {}
+    return await c.post(f"/api/v1/sites/{site.id}/ai/embed", json=body, headers=headers)
 
 
 @pytest.mark.asyncio
-async def test_worker_embed(beanie_test_db, monkeypatch):
+async def test_embed_is_not_offered_and_costs_nothing(beanie_test_db, monkeypatch):
     from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc
 
-    site, token = await _setup()
-    fake = _Embedder(monkeypatch)
-    async with client() as c:
-        one = await _embed(c, site, token, {"input": "hello"})
-        many = await _embed(c, site, token, {"input": ["a", "b"], "model": "embed"})
-    assert one.status_code == 200, one.text
-    assert one.json()["vectors"] == [[0.1, 0.2]]
-    assert one.json()["usage"]["input_tokens"] == 7 and one.json()["usage"]["credits_micro"] > 0
-    assert len(many.json()["vectors"]) == 2
-    assert fake.calls[0]["model"] == "text-embedding-3-small"
-    assert fake.calls[0]["user"] == WS
-    assert "text-embedding" not in one.text
-    rows = await SiteAiCallDoc.find(SiteAiCallDoc.state == "settled").to_list()
-    assert {r.kind for r in rows} == {"embed"} and {r.model for r in rows} == {"embed"}
-
-
-@pytest.mark.asyncio
-async def test_embed_limits_and_plan(beanie_test_db, monkeypatch):
-    _Embedder(monkeypatch)
-    site, token = await _setup()
-    free, free_token = await _setup(plan="free")
-    async with client() as c:
-        cases = {
-            "fast": (await _embed(c, site, token, {"input": "x", "model": "fast"}), 400),
-            "none": (await _embed(c, site, token, {}), 400),
-            "empty": (await _embed(c, site, token, {"input": [""]}), 400),
-            "many": (await _embed(c, site, token, {"input": ["x"] * 65}), 400),
-            "long": (await _embed(c, site, token, {"input": "x" * 8001}), 400),
-            "number": (await _embed(c, site, token, {"input": [1]}), 400),
-            "free": (await _embed(c, free, free_token, {"input": "x"}), 403),
-        }
-    for name, (resp, status) in cases.items():
-        assert resp.status_code == status, (name, resp.text)
-
-
-@pytest.mark.asyncio
-async def test_embed_budget_and_provider_failure(beanie_test_db, monkeypatch):
-    from pocketpaw_ee.cloud.models.site_ai import SiteAiBudgetDoc, SiteAiCallDoc
-    from pocketpaw_ee.site_ai.llm import LlmError
-
-    site, token = await _setup()
-    _Embedder(monkeypatch, fail=LlmError(True))
-    async with client() as c:
-        down = await _embed(c, site, token, {"input": "x"})
-    assert (down.status_code, down.json()["detail"]) == (503, "provider_unavailable")
-    # The request left, so its input is billed even though it failed.
-    failed = await SiteAiCallDoc.find(SiteAiCallDoc.state == "settled").to_list()
-    assert len(failed) == 1 and failed[0].input_tokens == 1
-
-    await SiteAiBudgetDoc(workspace=WS, pocket_id=site.pocket_id, daily_cap_micro=0).insert()
-    async with client() as c:
-        capped = await _embed(c, site, token, {"input": "x"})
-    assert (capped.status_code, capped.json()["detail"]) == (402, "budget_exhausted")
-
-
-@pytest.mark.asyncio
-async def test_browser_embed_defaults_the_model(beanie_test_db, monkeypatch):
-    site, _token = await _setup(browser_access=True)
-    _Embedder(monkeypatch)
+    site, token = await _setup(browser_access=True)
+    fake = FakeLlm(monkeypatch)
     hdrs = {"x-paw-site-key": SITE_KEY, "origin": ORIGIN}
     async with client() as c:
-        ticket = (await c.post(f"/api/v1/sites/{site.id}/ai/ticket", json={}, headers=hdrs)).json()[
-            "ticket"
-        ]
-        no_ticket = await c.post(
+        worker = await _embed(c, site, token, {"input": "hello"})
+        anonymous = await _embed(c, site, None, {"input": "hello"})
+        browser = await c.post(
             f"/api/v1/sites/{site.id}/ai/embed", json={"input": "x"}, headers=hdrs
         )
-        ok = await c.post(
-            f"/api/v1/sites/{site.id}/ai/embed",
-            json={"input": "x"},
-            headers={**hdrs, "x-paw-ai-ticket": ticket},
-        )
-    assert no_ticket.status_code == 401
-    assert ok.status_code == 200, ok.text
+    assert (worker.status_code, worker.json()["detail"]) == (503, "provider_unavailable")
+    assert "Embeddings aren't available" in worker.json()["message"]
+    assert anonymous.status_code == 401
+    assert browser.status_code == 503
+    assert fake.calls == []
+    assert await SiteAiCallDoc.find_all().count() == 0
 
 
 # ---------------------------------------------------------------- transcripts
@@ -187,34 +110,16 @@ async def test_transcripts_are_off_by_default(beanie_test_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_opted_in_transcript_is_capped_image_free_and_admin_only(beanie_test_db, monkeypatch):
+async def test_opted_in_transcript_is_capped_and_admin_only(beanie_test_db, monkeypatch):
     from pocketpaw_ee.cloud.models.site_ai import SiteAiTranscriptDoc
-    from pocketpaw_ee.site_ai.llm import LlmEvent
 
     site, token = await _setup(keep_transcripts=True, allowed_models=["fast", "vision"])
-    FakeLlm(
-        monkeypatch,
-        script=[
-            [
-                LlmEvent("text", text="It is a cat."),
-                LlmEvent("tool", index=0, id="c1", name="save", arguments='{"a":'),
-                LlmEvent("tool", index=0, arguments="1}"),
-                LlmEvent("usage", input_tokens=5, output_tokens=5),
-            ]
-        ],
-    )
-    img = "data:image/png;base64," + base64.b64encode(PNG).decode()
+    FakeLlm(monkeypatch, script=text_events("It is a cat.", 5, 5))
     body = {
         "model": "vision",
         "messages": [
             {"role": "system", "content": "SECRET SYSTEM PROMPT"},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "what is " + "x" * 5000},
-                    {"type": "image_url", "image_url": {"url": img}},
-                ],
-            },
+            {"role": "user", "content": [{"type": "text", "text": "what is " + "x" * 5000}]},
         ],
     }
     async with client() as c:
@@ -231,9 +136,8 @@ async def test_opted_in_transcript_is_capped_image_free_and_admin_only(beanie_te
         other = await c.get(f"/api/v1/sites/by-pocket/{site.pocket_id}/ai/transcripts")
     doc = await SiteAiTranscriptDoc.find_one()
     assert doc is not None and doc.output == "It is a cat."
-    assert doc.tool_calls == [{"name": "save", "arguments": '{"a":1}'}]
+    assert doc.tool_calls == []
     assert [m["role"] for m in doc.messages] == ["user"]
-    assert "[image]" in doc.messages[0]["content"] and "base64" not in str(doc.messages)
     assert len(doc.messages[0]["content"]) < 4_100
     assert "SECRET SYSTEM PROMPT" not in str(doc.model_dump())
     assert listed.status_code == 200 and listed.json()[0]["run_id"] == doc.run_id
@@ -404,20 +308,20 @@ async def test_a_transfer_keeps_the_day_cap(beanie_test_db, monkeypatch):
 async def test_transcripts_rechecked_at_write_time(beanie_test_db, monkeypatch):
     from pocketpaw_ee.cloud.models.site import Site
     from pocketpaw_ee.cloud.models.site_ai import SiteAiSettingsDoc, SiteAiTranscriptDoc
-    from pocketpaw_ee.site_ai.llm import LlmEvent
 
     site, token = await _setup(keep_transcripts=True)
+    FakeLlm(monkeypatch)
     flipped = {"done": False}
 
-    async def _flip_then_answer(payload):
+    async def _flip_then_answer(call):
         # The owner turns transcripts off while the call is in flight.
         if not flipped["done"]:
             await SiteAiSettingsDoc.get_pymongo_collection().update_one(
                 {"pocket_id": site.pocket_id}, {"$set": {"keep_transcripts": False}}
             )
             flipped["done"] = True
-        yield LlmEvent("text", text="hi")
-        yield LlmEvent("usage", input_tokens=3, output_tokens=1)
+        yield "hi"
+        yield ok("hi", 3, 1)
 
     from pocketpaw_ee.site_ai import llm
 
@@ -433,12 +337,12 @@ async def test_transcripts_rechecked_at_write_time(beanie_test_db, monkeypatch):
         {"pocket_id": site.pocket_id}, {"$set": {"keep_transcripts": True}}
     )
 
-    async def _move_then_answer(payload):
+    async def _move_then_answer(call):
         await Site.get_pymongo_collection().update_one(
             {"_id": site.id}, {"$set": {"workspace": OTHER_WS}}
         )
-        yield LlmEvent("text", text="hi")
-        yield LlmEvent("usage", input_tokens=3, output_tokens=1)
+        yield "hi"
+        yield ok("hi", 3, 1)
 
     monkeypatch.setattr(llm, "stream", _move_then_answer)
     async with client() as c:

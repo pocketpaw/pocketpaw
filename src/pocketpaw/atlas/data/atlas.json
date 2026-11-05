@@ -519,7 +519,7 @@
       ],
       "kind": "capability",
       "name": "AI features on a Paw Site",
-      "narrative": "A site's AI features call Paw's AI API under the site's own budget. The builder agent reads the site's AI settings, budget and presets first, then follows the returned how_to: apply the paw-ai recipe and call AI from the site's server code by default; browser calls only when the app truly needs them, with browser access turned on and a preset so visitors cannot change the system prompt. The owner sets the daily and monthly caps (the agent never sets money); calls stop at the cap and every AI screen shows a friendly resting state instead of an error. Free sites get AI in the draft preview only.",
+      "narrative": "A site's AI features call Paw's AI API under the site's own budget; each model alias (fast, smart, vision) runs on the workspace agent and model the owner picked, with no tool calling or embeddings and images on vision only. The builder agent reads the site's AI settings, budget and presets first, then follows the returned how_to: apply the paw-ai recipe and call AI from the site's server code by default; browser calls only when the app truly needs them, with browser access turned on and a preset so visitors cannot change the system prompt. The owner sets the daily and monthly caps (the agent never sets money); calls stop at the cap and every AI screen shows a friendly resting state instead of an error. Free sites get AI in the draft preview only.",
       "requires": [
         "role:member"
       ],

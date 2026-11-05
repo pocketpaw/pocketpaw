@@ -10,6 +10,10 @@
 # ``plan_models`` and ``allowance_month_micro``. Stored ``allowed_models`` are kept
 # as the owner set them; the call path intersects them with the plan at call time,
 # so a downgrade narrows access without rewriting the owner's choice.
+# ``alias_models`` (which agent and model serve each alias) is checked on write: the
+# agent must be one the owner may use in this workspace, a model one the gateway
+# serves on a platform-paid agent. ``list_models`` is the picker's source: the
+# workspace's agents plus the chat catalog the per-send picker reads.
 #
 # Spend figures read the atomic counters ``budget.py`` maintains: ``spent`` is
 # settled spend only (holds in flight are not spend yet).
@@ -41,8 +45,11 @@ from pocketpaw_ee.cloud.models.site_ai import (
     SiteAiTranscriptDoc,
 )
 from pocketpaw_ee.site_ai.dto import (
+    AliasModel,
+    SiteAiAgentOption,
     SiteAiBudget,
     SiteAiBudgetPut,
+    SiteAiModels,
     SiteAiPreset,
     SiteAiPresetBody,
     SiteAiSettings,
@@ -124,13 +131,23 @@ async def load_settings(workspace_id: str, pocket_id: str) -> SiteAiSettingsDoc:
 
 
 def _settings_view(doc: SiteAiSettingsDoc, site: Any | None) -> SiteAiSettings:
+    from pocketpaw_ee.site_ai import aliases
+
     allowed = [m for m in doc.allowed_models if m in site_plans.SITE_AI_CHAT_ALIASES]
+    plan = [m for m in site_plans.site_ai_models(plan_key(site)) if m in aliases.CHAT_ALIASES]
+    mapping = {
+        alias: AliasModel.model_validate(value)
+        for alias, value in (doc.alias_models or {}).items()
+        if alias in aliases.CHAT_ALIASES and isinstance(value, dict)
+    }
     return SiteAiSettings(
         enabled=doc.enabled,
         browser_access=doc.browser_access,
         require_preset_for_browser=doc.require_preset_for_browser,
         allowed_models=allowed,  # type: ignore[arg-type]
-        plan_models=list(site_plans.site_ai_models(plan_key(site))),
+        plan_models=plan,
+        online_models=[m for m in plan if not aliases.is_offline(doc.workspace, doc.pocket_id, m)],
+        alias_models=mapping,  # type: ignore[arg-type]
         keep_transcripts=doc.keep_transcripts,
     )
 
@@ -141,9 +158,39 @@ async def get_settings(workspace_id: str, pocket_id: str) -> SiteAiSettings:
     return _settings_view(doc, await site_for_pocket(workspace_id, pocket_id))
 
 
+async def _check_alias_models(
+    workspace_id: str, user_id: str, mapping: dict[str, Any]
+) -> dict[str, dict[str, str | None]]:
+    """Each entry's agent must be one the owner may use in this workspace, and a
+    model must be one the gateway serves (on a platform-paid agent; a BYOK agent's
+    own provider judges its model at call time). An empty entry is dropped."""
+    from pocketpaw_ee.cloud.chat import side_completion
+    from pocketpaw_ee.cloud.chat.runs import run_core
+
+    out: dict[str, dict[str, str | None]] = {}
+    for alias, entry in mapping.items():
+        agent_id = (entry.get("agent_id") or "").strip() or None
+        model = (entry.get("model") or "").strip() or None
+        if agent_id is None and model is None:
+            continue
+        target = await side_completion.resolve_target(workspace_id, user_id, agent_id)
+        if target is None:
+            raise ValidationError(
+                "site_ai.agent_not_found", f"The agent for {alias} isn't in this workspace."
+            )
+        if model and target.payer != "byok" and await run_core._model_is_unknown_to_gateway(model):
+            raise ValidationError(
+                "site_ai.model_not_available", f"The model for {alias} isn't available."
+            )
+        out[alias] = {"agent_id": agent_id, "model": model}
+    return out
+
+
 async def put_settings(
     workspace_id: str, user_id: str, pocket_id: str, body: SiteAiSettingsPut
 ) -> SiteAiSettings:
+    from pocketpaw_ee.site_ai import aliases
+
     await _pocket(workspace_id, pocket_id)
     site = await site_for_pocket(workspace_id, pocket_id)
     doc = await load_settings(workspace_id, pocket_id)
@@ -157,6 +204,11 @@ async def put_settings(
                 f"This site's plan doesn't include: {', '.join(outside)}.",
             )
         changes["allowed_models"] = list(dict.fromkeys(changes["allowed_models"]))
+    if "alias_models" in changes:
+        changes["alias_models"] = await _check_alias_models(
+            workspace_id, user_id, changes["alias_models"]
+        )
+        aliases.clear_offline(workspace_id, pocket_id)
     turning_off_transcripts = doc.keep_transcripts and changes.get("keep_transcripts") is False
     for key, value in changes.items():
         setattr(doc, key, value)
@@ -169,6 +221,42 @@ async def put_settings(
         ).delete()
     _audit(user_id, workspace_id, pocket_id, "sites.ai.settings.update", fields=sorted(changes))
     return _settings_view(doc, site)
+
+
+async def list_models(workspace_id: str, user_id: str, pocket_id: str) -> SiteAiModels:
+    """What the owner can map an alias to: the workspace agents they may use (from
+    the agents service, concierges left out) and the chat catalog the per-send
+    picker reads, with this workspace's availability."""
+    from pocketpaw_ee.catalog import availability
+    from pocketpaw_ee.catalog import service as catalog_service
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.cloud.chat import agent_service
+
+    await _pocket(workspace_id, pocket_id)
+    default_id = await agent_service._get_default_workspace_agent_id(workspace_id)
+    agents = [
+        SiteAiAgentOption(
+            id=a.id,
+            name=a.name,
+            backend=a.config.backend,
+            model=a.config.model or "",
+            default=a.id == default_id,
+        )
+        for a in await agents_service.list_agents(workspace_id, viewer_user_id=user_id)
+        if not a.disabled
+    ]
+    models: list[dict[str, Any]] = []
+    catalog_error = False
+    try:
+        entries = await catalog_service.list_models(modality="chat")
+        entries = await availability.overlay(workspace_id, entries)
+        models = [e.model_dump(mode="json") for e in entries]
+    except Exception:  # noqa: BLE001 - the agents still answer without the catalog
+        logger.warning("site_ai: model catalog unavailable for the models list", exc_info=True)
+        catalog_error = True
+    return SiteAiModels(
+        agents=agents, models=models, default_agent_id=default_id, catalog_error=catalog_error
+    )
 
 
 # ------------------------------------------------------------------ presets

@@ -6343,7 +6343,8 @@ Session auth. Reads need `fabric.read`; every write needs `sites.ai_manage`
 
 | Route | Body / result |
 |---|---|
-| `GET/PUT /sites/by-pocket/{pocket_id}/ai/settings` | `SiteAiSettings`: `enabled`, `browser_access`, `require_preset_for_browser`, `allowed_models`, `keep_transcripts`; `plan_models` is read-only. `allowed_models` outside the plan is a 422 `site_ai.model_not_in_plan`. |
+| `GET/PUT /sites/by-pocket/{pocket_id}/ai/settings` | `SiteAiSettings`: `enabled`, `browser_access`, `require_preset_for_browser`, `allowed_models`, `alias_models`, `keep_transcripts`; `plan_models` and `online_models` (the plan's aliases not offline right now) are read-only. `allowed_models` outside the plan is a 422 `site_ai.model_not_in_plan`. `alias_models` is `{fast?, smart?, vision?}`, each `{agent_id?, model?}`: the workspace agent the alias runs on (none = the workspace default agent) and an optional catalog model (none = the agent's own). A PUT replaces the whole map; an agent the owner can't use is a 422 `site_ai.agent_not_found`, a model the gateway doesn't serve (on a platform-paid agent) a 422 `site_ai.model_not_available`. Only the agent's backend and model are used, never its prompt, tools or soul. |
+| `GET /sites/by-pocket/{pocket_id}/ai/models` | `SiteAiModels`: `agents` (`{id, name, backend, model, default}`, the workspace agents the caller may use, concierges left out), `models` (the chat entries of `GET /catalog/models`, with this workspace's `availability`), `default_agent_id`, and `catalog_error` (true when the catalog was unreachable; agents still listed). Feeds the per-alias pickers. |
 | `GET/POST /sites/by-pocket/{pocket_id}/ai/presets` | `SiteAiPreset[]` / create `{name, system_prompt, model, max_output_tokens, temperature}` (201, at most 50 per site) |
 | `GET/PUT/DELETE /sites/by-pocket/{pocket_id}/ai/presets/{id}` | a PUT bumps `version`; calls pin the version they ran with |
 | `GET/PUT /sites/by-pocket/{pocket_id}/ai/budget` | `SiteAiBudget`: `monthly_cap_micro`, `daily_cap_micro`, `per_visitor_daily_micro`, `preview_daily_cap_micro`, `alert_thresholds` (1-100, up to 5), `paused`; read-only `spent_today_micro`, `spent_month_micro`, `allowance_month_micro` |
@@ -6351,7 +6352,7 @@ Session auth. Reads need `fabric.read`; every write needs `sites.ai_manage`
 | `GET /sites/by-pocket/{pocket_id}/ai/transcripts?limit&before` | opt-in transcripts, newest first (`sites.ai_manage`: they are visitors' words). Written only while `keep_transcripts` is on, kept 30 days, deleted when it is turned off |
 
 Plans (`cloud/billing/site_plans.py`): `free` gets `fast` in its own draft
-preview only; `site` adds `vision` and `embed`; `staff` adds `smart`. The monthly
+preview only; `site` adds `vision`; `staff` adds `smart`. The monthly
 allowance (`site` 500 credits, `staff` 2,000) is the plan's hard ceiling on a
 site's AI spend; the owner's monthly cap can only lower it.
 
@@ -6370,8 +6371,8 @@ answer's hostname must be one of the site's own hosts. The visitor address is th
 `CF-Connecting-IP` when the hop our proxy saw is a Cloudflare edge, else that hop
 (`POCKETPAW_SITE_AI_TRUSTED_HOPS`, default 1); IPv6 is bucketed by /64 and the
 bucket is HMAC'd with the ticket secret. A browser call naming a preset loses its
-own system messages, tools, tool choice and response format, and may carry at most
-20 assistant turns. A draft preview gets a `preview` ticket without
+own system messages and response format, and may carry at most 20 assistant
+turns. A draft preview gets a `preview` ticket without
 Turnstile (its origin is the draft's unguessable host). 10 tickets a minute per
 visitor address.
 
@@ -6386,63 +6387,102 @@ Worker), or for browser callers `X-Paw-Site-Key` + the origin gate +
 Browser calls are held against the per-visitor daily cap (keyed on the hashed
 address) and limited to 20 a minute per address and 300 a minute per site. A call
 from the site's own draft preview needs a `preview` ticket, works on the free
-plan, and is held only against the preview daily cap. Body: `{model, messages, preset?, tools?, tool_choice?, response_format?,
+plan, and is held only against the preview daily cap. Body: `{model, messages, preset?, response_format?,
 max_output_tokens?, temperature?, stream?, user?}`; only these fields are read,
 and nothing else from the body is forwarded. `user` is hashed and only feeds a
-per-user rate limit; LiteLLM's `user` is always the paying workspace.
+per-user rate limit.
+
+The call runs as ONE tool-less side completion
+(`cloud/chat/side_completion.agent_complete` / `agent_stream`) on the agent and
+model the owner mapped to the alias, as the site owner: the agent's own backend
+(Claude Agent SDK, pydantic_ai, ...), the catalog check of a picked model, the
+workspace's BYOK key when it has one, and the chat turn's credit gates. The call
+is isolated: no soul recall, none of the agent's skills, no connectors block, so the
+system prompt is exactly the site's (or its preset's) system messages; the rest of
+the history is one delimited transcript. The site owner must still be a member of
+the site's workspace. `max_output_tokens` and the alias cap ride as an instruction,
+and a stream is cut once its text passes the cap (`finish_reason: "length"`).
+`temperature` is accepted and ignored.
 
 - `stream: true` (default) answers `text/event-stream` with `chunk {delta}`,
-  `tool_call {index, id?, name?, arguments_delta?}`, `usage {input_tokens,
-  output_tokens, credits_micro}`, and ends with exactly one of `done {id,
-  finish_reason}`, `unavailable {reason}` or `error {code, message}`.
+  `usage {input_tokens, output_tokens, credits_micro}`, and ends with exactly one
+  of `done {id, finish_reason}`, `unavailable {reason}` or `error {code,
+  message}`.
 - `stream: false` answers `ChatResponse` JSON: `{id, model (the alias), message,
   finish_reason, usage}`.
-- Tool calls are returned to the caller; the server never runs a tool.
-- A preset's system prompt, model, output cap and temperature win over the request.
-- Limits: 400 KB body, 200 messages, 64 tools, 8 images (vision alias only, user
-  messages only; `data:` URLs must be png/jpeg/gif/webp and match their magic
-  bytes, up to 5 MB; remote image URLs are refused, since the provider would fetch them), input within the alias context, output clamped to the alias/preset cap.
-- A transient provider failure before the first token is retried once. Before any
-  output a failure streams `unavailable {reason: "temporary"}` (or `error
-  {code: "invalid_request"}` when the provider refused the request); mid-stream it
-  streams `usage` for what was produced, then `error`.
+- No tool calling: `tools`, `tool_choice`, `tool` messages and assistant
+  `tool_calls` are a 400 `unsupported` (with `field`: `tools` or `messages[i]`),
+  never silently dropped.
+- Images (vision alias only, user messages only; `data:` URLs must be
+  png/jpeg/gif/webp and match their magic bytes, up to 5 MB and 8 per request;
+  remote image URLs are refused) reach the model on the chat turn's
+  `image_attachments` channel. An agent whose backend can't take images answers
+  `error {code: "unsupported", field: "messages[i].content"}` (400 for JSON
+  callers), unbilled.
+- `response_format` `json_object` / `json_schema` adds a reply-with-JSON
+  instruction (and the schema) to the system prompt; the reply's JSON value is
+  returned re-serialised (a stream sends it as one `chunk`). A reply with no JSON
+  is `error {code: "provider_unavailable"}` (503 for JSON callers), billed.
+- A preset's system prompt, model and output cap win over the request.
+- Limits: 400 KB body, 200 messages, input within the alias context (an image
+  counts as 6,000 tokens in the hold).
+- Failures: a credit or billing refusal streams `unavailable {reason: "limit"}`
+  (402 `wallet_empty`). A misconfigured alias (an unknown model, an agent that is
+  gone, a backend that can't run tool-less) streams `unavailable {reason:
+  "temporary"}` (503 `provider_unavailable`), logs one ERROR line marked
+  `alias_misconfigured` and takes the alias offline for 5 minutes (the owner
+  saving a new mapping clears it). A timeout or backend error streams
+  `unavailable {reason: "temporary"}` before any output; mid-stream it streams
+  `usage` for what was produced, then `error`.
 - Errors are JSON `{detail: code, message, field?, retry_after?}`: 400
-  `invalid_request`, 401 `unauthorized`, 402 `budget_exhausted` / `wallet_empty`,
+  `invalid_request` / `unsupported`, 401 `unauthorized`, 402 `budget_exhausted` / `wallet_empty`,
   403 `browser_disabled` / `preset_required` / `model_not_allowed` /
   `origin_not_allowed`, 413 `request_too_large`, 429 `rate_limited`, 503
   `provider_unavailable`. A paused site streams `unavailable {reason: "paused"}`
   (JSON callers get 402 `budget_exhausted`).
 
 Each call writes a `ChatRunDoc` (`context_type: "site_ai"`, token counts only, no
-content) and is debited through `bill_run` keyed `run:{run_id}`; the ledger `ref`
-carries `kind: "site_ai"`, `pocket_id` and `site_id`.
+content, `credential_source` = who paid) and a platform-paid one is debited
+through `bill_run` keyed `run:{run_id}`; the ledger `ref` carries `kind:
+"site_ai"`, `pocket_id` and `site_id`. A BYOK call (the workspace's own key paid)
+is recorded and counted against the owner's own caps, never debited. Cost comes
+from `resolve_cost` (the backend's reported cost, else the dated price of the
+model that ran), else the alias's fallback rate.
 
-**Hard caps.** Before the provider is called, the workspace wallet is checked
+**Hard caps.** Before the model is called, a platform-paid call's workspace wallet is checked
 (`over_billing_limit`: empty wallet, monthly ceiling, kill switch → `wallet_empty`)
 and the call's worst case (pessimistic input estimate + the full output cap, priced
 with the RateCard markup) is reserved atomically against every cap that applies:
 the site's daily cap and monthly cap (bounded by the plan allowance), plus the
 per-visitor daily cap for a Worker call that sends `user`. Preview calls use only
-the preview daily cap. A refused hold is `budget_exhausted`; both stream
+the preview daily cap. A BYOK call is held only against the owner's own caps (no
+plan allowance, no wallet). A refused hold is `budget_exhausted`; both stream
 `unavailable {reason: "limit"}` (402 for JSON callers). After the call the hold
-settles to the provider-reported usage and the surplus is released; an error
-before any output releases it all only when the connection was refused; once a request has left it bills at least its input estimate (every attempt). A sweeper settles a dead call that was sent to its full hold and debits it, and releases one that was never sent. Settles are unconditional; a counter past its cap refuses new holds. With credits enforced, every call is also held on a workspace-wide in-flight counter against the wallet balance plus a 10-credit overdraft (`wallet_empty`). These counters are ours, so the caps hold in LiteLLM `live` spend mode too, where the proxy does the wallet billing.
+settles to the reported usage and the surplus is released, and never above the
+hold (the platform absorbs an overrun). A call the model never started on (a gate
+or credit refusal, a misconfigured alias, a timeout before the run began) or a
+backend error with no usage and no output costs nothing and releases it all; one
+that started and then failed or was disconnected bills its usage, else its input
+estimate plus what streamed. Holds are priced at the higher of the answering
+model's dated price (the agent's model, else its backend's default) and the
+alias's fallback rate. A sweeper settles a dead call that was sent to its full hold and debits it, and releases one that was never sent. Settles are unconditional; a counter past its cap refuses new holds. With credits enforced, every call is also held on a workspace-wide in-flight counter against the wallet balance plus a 10-credit overdraft (`wallet_empty`). These counters are ours, so the caps hold in LiteLLM `live` spend mode too, where the proxy does the wallet billing.
 Crossing an alert threshold of the monthly cap notifies the workspace owner once
 per threshold per month (kind `site_ai_budget`) and emits `site.ai_budget` to the
 site owner.
 
 ### `POST /sites/{site_id}/ai/embed`
 
-Same callers and gates as `/ai/chat`. Body `{input: string | string[], model?:
-"embed"}` (up to 64 inputs, 8,000 chars each; `model` defaults to `embed`) →
-`{vectors: number[][], usage: {input_tokens, credits_micro}}`. Needs a plan that
-sells `embed` (`site` and up). Held against the same caps; JSON only, so a paused
-site, an empty wallet or a spent budget is a 402.
+Not offered: site AI runs on the workspace's agents, which can't embed. After the
+same caller check as `/ai/chat` it answers 503 `provider_unavailable` with a
+message saying embeddings aren't available; nothing is held or billed. Owners and
+the builder agent are never told `embed` exists.
 
-**Builder agent.** The /sites agent has `get_site_ai_settings` (settings, budget,
-presets and `how_to`, the build guidance: call AI from server code with the
-`paw-ai` recipe's `pawAi(env)`, browser calls only when needed and behind a
-preset, always render a resting state for `budget_exhausted` / `unavailable`),
+**Builder agent.** The /sites agent has `get_site_ai_settings` (settings with
+`alias_models` and `online_models`, budget, presets and `how_to`, the build
+guidance: call AI from server code with the `paw-ai` recipe's `pawAi(env)`, only
+online aliases, no tools or embeddings, images only on `vision`, JSON via
+`response_format`, browser calls only when needed and behind a preset, always
+render a resting state for `budget_exhausted` / `unavailable`),
 `set_site_ai_settings` (needs `sites.ai_manage`; pushes the SSE card
 `site_ai_budget_requested {pocket_id, purpose, budget}` so the owner confirms the
 caps) and `upsert_site_ai_preset` (needs `sites.ai_manage`). The agent never sets

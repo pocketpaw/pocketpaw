@@ -63,6 +63,7 @@ from pocketpaw.agents.backend import (
     _accepts_exclusive_tools_kwarg,
     _accepts_image_attachments_kwarg,
     _accepts_images_kwarg,
+    _accepts_isolated_kwarg,
     _accepts_prompt_digest,
     _accepts_prompt_digest_kwarg,
     _accepts_run_limits_kwarg,
@@ -692,6 +693,7 @@ class AgentPool:
         total_tokens_limit: int | None = None,
         soul_recall: bool = True,
         max_turns: int | None = None,
+        isolated: bool = False,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -805,6 +807,13 @@ class AgentPool:
 
         ``soul_recall=False`` leaves the per-message soul recall out of the
         prompt (the cloud sets it on /sites, where each chat is about one site).
+
+        ``isolated=True`` runs the agent's backend and model for a caller that is
+        not the agent's user (a site's AI API): no soul recall, none of the
+        agent's own skills, and a backend that declares ``isolated`` (the Claude
+        SDK) adds no connectors block or bundled skills. With a
+        ``system_message_override`` and no instructions or knowledge, the system
+        prompt is then exactly that override.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -820,7 +829,10 @@ class AgentPool:
         own_skills = (
             frozenset(cfg.get("skill_refs", []) or []) if isinstance(cfg, dict) else frozenset()
         )
-        if own_skills:
+        if isolated:
+            soul_recall = False
+            skill_names = frozenset()
+        elif own_skills:
             skill_names = skill_names | own_skills
 
         # Assemble the system prompt (factored into ``_assemble_system_prompt``
@@ -1040,6 +1052,8 @@ class AgentPool:
             # cached one because a BYOK run is served by a different object.
             if images and _accepts_images_kwarg(run_backend.run):
                 run_kwargs["images"] = images
+            if isolated and _accepts_isolated_kwarg(run_backend.run):
+                run_kwargs["isolated"] = True
             if image_attachments and _accepts_image_attachments_kwarg(run_backend.run):
                 run_kwargs["image_attachments"] = tuple(image_attachments)
 
