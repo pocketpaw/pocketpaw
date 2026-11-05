@@ -68,8 +68,8 @@ async def test_byok_backend_is_released_and_carries_the_agent_policy(monkeypatch
     isolated = _Backend("byok")
     calls: list[dict] = []
 
-    def _create(name, settings, *, settings_override=None, policy=None):
-        calls.append({"name": name, "policy": policy})
+    def _create(name, settings, *, settings_override=None, policy=None, per_turn=False):
+        calls.append({"name": name, "policy": policy, "per_turn": per_turn})
         return isolated
 
     monkeypatch.setattr(AgentRouter, "create_isolated_backend", staticmethod(_create))
@@ -84,6 +84,8 @@ async def test_byok_backend_is_released_and_carries_the_agent_policy(monkeypatch
         pass
 
     assert calls and calls[0]["policy"] is shared.policy, "BYOK dropped the agent's ToolPolicy"
+    # Marked per-turn, so it keeps no side-completion standby warm for later.
+    assert calls[0]["per_turn"] is True
     assert isolated.cleaned + isolated.stopped >= 1, "the per-turn BYOK backend was leaked"
     assert shared.cleaned == 0 and shared.stopped == 0, "the shared backend was torn down"
 

@@ -88,7 +88,7 @@ def _hold_for(max_tokens: int) -> int:
     from pocketpaw_ee.site_ai import aliases, validate
 
     est = validate.estimate_tokens([{"role": "user", "content": "hi"}])
-    return aliases.reserve_micro("fast", None, est, max_tokens)
+    return aliases.reserve_micro("fast", RAN_MODEL, est, max_tokens)
 
 
 def _micro(tokens_in: int, tokens_out: int, model: str | None = RAN_MODEL) -> int:
@@ -848,14 +848,14 @@ async def test_the_stream_is_cut_at_the_output_cap(beanie_test_db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_the_hold_is_reserved_at_the_higher_of_the_dated_price_and_the_fallback():
+async def test_the_hold_is_reserved_at_the_models_own_table_price():
     from pocketpaw_ee.site_ai import aliases
 
-    cheap = aliases.reserve_micro("fast", "claude-haiku-5-5", 1000, 4096)
-    fallback = aliases.reserve_micro("fast", None, 1000, 4096)
-    dear = aliases.reserve_micro("fast", "claude-opus-4-8", 1000, 4096)
-    assert cheap == fallback  # a cheap model is never held under the fallback
-    assert dear > fallback  # a dear one is held at its own price
+    haiku = aliases.reserve_micro("fast", "claude-haiku-5-5", 1000, 4096)
+    opus = aliases.reserve_micro("fast", "claude-opus-5-5", 1000, 4096)
+    assert opus == pytest.approx(haiku * 40, rel=0.01)  # $4/$20 against $0.10/$0.50
+    with pytest.raises(aliases.Unpriced):
+        aliases.reserve_micro("fast", None, 1000, 4096)
 
 
 @pytest.mark.asyncio

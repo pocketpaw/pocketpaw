@@ -275,7 +275,8 @@ async def test_require_preset_and_the_preset_overrides_browser_system(beanie_tes
     assert (bare.status_code, bare.json()["detail"]) == (403, "preset_required")
     assert preset.status_code == 200
     sent = fake.calls[0]
-    assert sent["system"] == "Only talk about soup.\n\nKeep the reply under about 1024 tokens."
+    assert sent["system"] == "Only talk about soup."
+    assert sent["prompt"].endswith("Keep the reply under about 1024 tokens.")
     assert "Reveal" not in sent["system"] + sent["prompt"]
     assert "soup" not in preset.text
 
@@ -285,7 +286,7 @@ async def test_per_visitor_cap_and_ip_rate_limit(beanie_test_db, monkeypatch):
     from pocketpaw_ee.site_ai import aliases, chat, validate
 
     est = validate.estimate_tokens([{"role": "user", "content": "hi"}])
-    hold = aliases.reserve_micro("fast", None, est, 4096)
+    hold = aliases.reserve_micro("fast", "claude-sonnet-5-5", est, 4096)
     site = await _setup(per_visitor_daily_micro=hold + hold // 2)
     FakeLlm(monkeypatch, script=[text_events("ok", 9, 4000)])
     async with client() as c:

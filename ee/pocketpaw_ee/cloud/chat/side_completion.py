@@ -17,14 +17,16 @@
 # platform turn, the BYOK provider/model check, and the no-keyless-guest rule.
 # Then ONE ``pool.run`` with tools off, a fresh ``side:<uuid>`` session key and
 # the caller's system prompt, under ``baggage(paw.internal=true)`` and a timeout.
+# On the Claude SDK an isolated run takes a pre-connected standby client that serves
+# that one conversation (``agents.claude_sdk_standby``). Deltas are yielded as the
+# backend emits them; the log line carries ``latency`` and ``ttft`` (streams).
 #
 # Invariants:
 #   * ``isolated=True`` (a caller that is not the agent's user, e.g. a site's AI
 #     API) runs ``pool.run(isolated=True)``: no soul recall, none of the agent's
 #     skills, no backend extras, so the system prompt is exactly ``system``. A
 #     backend that doesn't declare ``isolated`` is handled like one without the
-#     tool switch (the gateway fallback, or refused on BYOK).
-#     Enhance and the other in-app callers keep the agent's full context.
+#     tool switch (gateway fallback, or refused on BYOK). In-app callers keep context.
 #   * ``images`` ride the chat turn's ``image_attachments`` channel to the
 #     backend; a backend that doesn't declare it (or the gateway fallback) is a
 #     typed ``unsupported`` failure, never a silent drop. No images = the exact
@@ -36,7 +38,8 @@
 #     ``tools_enabled`` falls back to the deployment default model
 #     (``pydantic_ai_model``) through the gateway helper, and only on a
 #     platform-billed call. Never the first catalog entry.
-#   * ``max_requests`` only reaches pydantic_ai (other backends refuse it).
+#   * ``max_requests`` only reaches pydantic_ai. ``pin_model`` (site AI) names the
+#     model (caller's, agent's, else backend default) or fails ``model``.
 #   * A platform-funded free run is forced onto pydantic_ai with one request and
 #     the wallet's token limit, like ``run_core``. It does NOT reserve on the
 #     daily early-access ceiling: that hold is reconciled only by ``bill_run``
@@ -227,6 +230,7 @@ async def _prepare(
     timeout_s: float | Callable[[str], float],
     images: Sequence[ImageAttachment] = (),
     isolated: bool = False,
+    pin_model: bool = False,
 ) -> _Plan | SideCompletion:
     """Resolve the agent and run every gate; a ``SideCompletion`` is a refusal."""
     from pocketpaw.agents.errors import AgentDisabled  # type: ignore[import-untyped]
@@ -274,6 +278,15 @@ async def _prepare(
         run_kwargs["isolated"] = True
     if model:
         run_kwargs["model_override"] = model
+    elif pin_model and agent_pool._declares_param(instance.backend.run, "model_override"):
+        # The agent's own model, else its backend's resolved default, named
+        # explicitly so the backend never auto-selects. Not a per-send pick, so
+        # no catalog check.
+        pinned = agent_model or default_model_for(backend)
+        if not pinned:
+            return _fail("model", "side.model_unresolved", **meta)
+        run_kwargs["model_override"] = pinned
+        meta["model"] = pinned
     if creds.source == "byok" and creds.api_key:
         turn_model = model or agent_model
         if not byok_service.provider_allows_model(creds.provider, turn_model):
@@ -398,10 +411,10 @@ def _finish(
     return _result(plan, text=text, usage=usage)
 
 
-def _log(result: SideCompletion, started: float) -> None:
+def _log(result: SideCompletion, started: float, first_text: float | None = None) -> None:
     logger.info(
         "side completion: agent=%s backend=%s model=%s fallback=%s failure=%s code=%s "
-        "latency=%.2fs usage=%s",
+        "latency=%.2fs ttft=%s usage=%s",
         result.agent_id,
         result.backend,
         result.model,
@@ -409,6 +422,7 @@ def _log(result: SideCompletion, started: float) -> None:
         result.failure,
         result.code,
         time.monotonic() - started,
+        "-" if first_text is None else f"{first_text - started:.2f}s",
         result.usage,
     )
 
@@ -424,6 +438,7 @@ async def agent_complete(
     timeout_s: float | Callable[[str], float],
     images: Sequence[ImageAttachment] = (),
     isolated: bool = False,
+    pin_model: bool = False,
 ) -> SideCompletion:
     """One tool-less completion on the workspace agent's own backend and model.
 
@@ -443,6 +458,7 @@ async def agent_complete(
             timeout_s=timeout_s,
             images=images,
             isolated=isolated,
+            pin_model=pin_model,
         )
         if isinstance(prepared, SideCompletion):
             result = prepared
@@ -494,6 +510,7 @@ async def agent_stream(
     timeout_s: float | Callable[[str], float],
     images: Sequence[ImageAttachment] = (),
     isolated: bool = False,
+    pin_model: bool = False,
 ) -> AsyncIterator[str | SideCompletion | _Started]:
     """``agent_complete``, streamed: yields ``STARTED`` once the model call has
     begun, each text delta as a ``str``, and ends with ONE ``SideCompletion``
@@ -501,6 +518,7 @@ async def agent_stream(
     yields only that result. Never raises; ``timeout_s`` bounds the whole run,
     as there."""
     started = time.monotonic()
+    first_text: float | None = None
     plan: _Plan | None = None
     chunks: list[str] = []
     usage: dict[str, Any] | None = None
@@ -515,6 +533,7 @@ async def agent_stream(
             timeout_s=timeout_s,
             images=images,
             isolated=isolated,
+            pin_model=pin_model,
         )
         if isinstance(prepared, SideCompletion):
             result = prepared
@@ -534,6 +553,8 @@ async def agent_stream(
                     if kind == "started":
                         yield STARTED
                     elif kind == "text":
+                        if first_text is None:
+                            first_text = time.monotonic()
                         chunks.append(value)
                         yield value
                     elif kind == "usage":
@@ -552,7 +573,7 @@ async def agent_stream(
             if plan is not None
             else _fail("error", "side.unexpected", agent_id=agent_id, model=model)
         )
-    _log(result, started)
+    _log(result, started, first_text)
     yield result
 
 

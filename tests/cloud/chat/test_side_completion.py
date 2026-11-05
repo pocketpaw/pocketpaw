@@ -655,3 +655,55 @@ async def test_a_backend_without_isolated_still_serves_an_ordinary_call(seams, u
     result = await _complete()
 
     assert result.ok and len(pool.calls) == 1
+
+
+class _ModelBackend:
+    async def run(
+        self,
+        message,
+        *,
+        system_prompt=None,
+        tools_enabled=True,
+        isolated=False,
+        model_override=None,
+        **_kw,
+    ):  # pragma: no cover
+        yield None
+
+
+async def test_pin_model_sends_the_agents_model_explicitly(seams, use_pool):
+    pool = use_pool(_Pool("claude_agent_sdk", "claude-sonnet-5-5"))
+    pool.instance.backend = _ModelBackend()
+
+    result = await _complete(pin_model=True, isolated=True)
+
+    assert result.ok and result.model == "claude-sonnet-5-5"
+    assert pool.calls[0]["model_override"] == "claude-sonnet-5-5"
+    # The agent's own model is not a per-send pick: no catalog check.
+    assert seams.catalog_checks == []
+
+
+async def test_pin_model_resolves_the_backend_default_when_the_agent_has_none(
+    seams, use_pool, monkeypatch
+):
+    """An agent with no model still sends an explicit model to the backend: the
+    backend's own default, resolved here, so the call never auto-selects."""
+    pool = use_pool(_Pool("claude_agent_sdk", ""))
+    pool.instance.backend = _ModelBackend()
+    monkeypatch.setattr(side_completion, "default_model_for", lambda backend: "claude-haiku-5-5")
+
+    result = await _complete(pin_model=True, isolated=True)
+
+    assert result.ok and result.model == "claude-haiku-5-5"
+    assert pool.calls[0]["model_override"] == "claude-haiku-5-5"
+
+
+async def test_pin_model_refuses_when_no_model_resolves(seams, use_pool, monkeypatch):
+    pool = use_pool(_Pool("claude_agent_sdk", ""))
+    pool.instance.backend = _ModelBackend()
+    monkeypatch.setattr(side_completion, "default_model_for", lambda backend: "")
+
+    result = await _complete(pin_model=True, isolated=True)
+
+    assert (result.failure, result.code, result.sent) == ("model", "side.model_unresolved", False)
+    assert pool.calls == []
