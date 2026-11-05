@@ -3,6 +3,8 @@
 #
 #   figma_inspect(url, depth?)          node outline of the linked frame, or the
 #                                       file's pages and top-level frames
+#   figma_tokens(url, node?)            colour / radius / spacing / type roles, each
+#                                       observed or substituted, as :root / @theme
 #   figma_screenshot(url, node?, ...)   a render as image tiles, saved as a site
 #                                       reference (``save_site_reference`` path) for
 #                                       ``compare_site_to_reference``
@@ -44,10 +46,16 @@ logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_figma"
 INSPECT_TOOL_ID = f"mcp__{SERVER_NAME}__figma_inspect"
+TOKENS_TOOL_ID = f"mcp__{SERVER_NAME}__figma_tokens"
 SCREENSHOT_TOOL_ID = f"mcp__{SERVER_NAME}__figma_screenshot"
 ASSETS_TOOL_ID = f"mcp__{SERVER_NAME}__figma_assets"
 #: Ids the /sites allow-list must carry (``surface_registry``), or they are filtered out.
-FIGMA_TOOL_IDS: tuple[str, ...] = (INSPECT_TOOL_ID, SCREENSHOT_TOOL_ID, ASSETS_TOOL_ID)
+FIGMA_TOOL_IDS: tuple[str, ...] = (
+    INSPECT_TOOL_ID,
+    TOKENS_TOOL_ID,
+    SCREENSHOT_TOOL_ID,
+    ASSETS_TOOL_ID,
+)
 
 DEFAULT_DEPTH = 3
 MAX_DEPTH = 4
@@ -196,6 +204,57 @@ async def _inspect_handler(args: dict) -> dict:
         )
     text = json.dumps(head, separators=(",", ":")) + "\n" + figma_outline.envelope(payload)
     return {"content": [{"type": "text", "text": text}]}
+
+
+# ------------------------------------------------------------------- tokens
+
+VARIABLES_SCOPE = "file_variables:read"
+TOKENS_DEPTH = 4
+
+
+async def _tokens_handler(args: dict) -> dict:
+    from pocketpaw_ee.sites.figma import tokens as figma_tokens
+
+    try:
+        workspace_id, user_id, ref = await _prepare(args, "figma_tokens")
+    except _Refused as refused:
+        return refused.response
+    node = _node_arg(args.get("node"), ref)
+    if not node:
+        return _error_response(
+            "figma_tokens needs a frame: pass `node` (from figma_inspect) or a link with ?node-id=."
+        )
+    variables = None
+    try:
+        source, conn = await source_for(workspace_id, user_id)
+        body = await source.nodes(ref.file_key, [node], TOKENS_DEPTH)
+        if VARIABLES_SCOPE in (getattr(conn, "scopes", None) or []):
+            try:
+                variables = await source.variables(ref.file_key)
+            except FigmaError as exc:
+                if exc.code not in ("not_shared", "unavailable"):
+                    raise
+    except FigmaError as exc:
+        return _figma_error(exc)
+    tokens = figma_tokens.derive(body, variables)
+    out = {
+        "ok": True,
+        "file_key": ref.file_key,
+        "node": node,
+        "source": "variables+derived" if variables else "derived",
+        "tokens": tokens,
+        "css": figma_tokens.css(tokens),
+        "next": (
+            "Map each observed role onto the template's own :root / @theme names (keep "
+            "its names, change the values) and log it observed in the ledger. A "
+            "substituted role keeps the template's value. Fonts not on Google Fonts are "
+            "substituted (sites-reference-match section 5)."
+        ),
+    }
+    warning = _seat_warning(conn)
+    if warning:
+        out["warning"] = warning
+    return {"content": [{"type": "text", "text": json.dumps(out, separators=(",", ":"))}]}
 
 
 # --------------------------------------------------------------- screenshot
@@ -395,6 +454,27 @@ def build_figma_server() -> tuple[str, Any] | None:
         return await _inspect_handler(args)
 
     @tool(
+        "figma_tokens",
+        (
+            "DESIGN TOKENS of a Figma frame by role: colours (canvas, surface, ink, "
+            "muted, accent, border), radius scale, spacing scale, type ramp, display and "
+            "body fonts, shadow. Enterprise variables when the connection may read them, "
+            "else derived from the frame's fills, text, radii and auto-layout gaps. Each "
+            "token is `observed` (with its source) or `substituted` (not in the design: "
+            "keep the template's value). Also returns `css.root` and `css.theme` "
+            "blocks. Args: `url` (required), `node` (frame id; default the link's)."
+        ),
+        {
+            "type": "object",
+            "properties": {"url": {"type": "string"}, "node": {"type": "string"}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+    )
+    async def figma_tokens_tool(args):  # type: ignore[no-untyped-def]
+        return await _tokens_handler(args)
+
+    @tool(
         "figma_screenshot",
         (
             "LOOK at a Figma frame: renders it through Figma and returns image tiles. "
@@ -458,7 +538,7 @@ def build_figma_server() -> tuple[str, Any] | None:
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[figma_inspect, figma_screenshot, figma_assets_tool],
+        tools=[figma_inspect, figma_tokens_tool, figma_screenshot, figma_assets_tool],
     )
     return SERVER_NAME, server
 
@@ -468,6 +548,7 @@ __all__ = [
     "FIGMA_TOOL_IDS",
     "INSPECT_TOOL_ID",
     "SCREENSHOT_TOOL_ID",
+    "TOKENS_TOOL_ID",
     "SERVER_NAME",
     "build_figma_server",
 ]

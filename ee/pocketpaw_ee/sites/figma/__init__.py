@@ -7,6 +7,7 @@
 #   outline.py       depth-limited node outline under a node budget, wrapped in
 #                    the ``<untrusted_design_content>`` envelope
 #   assets.py        SVG sanitising and raster re-encoding
+#   tokens.py        colour / radius / spacing / type roles from variables or nodes
 #
 # The agent tools live in ``agent/mcp_servers/figma.py``; the OAuth grant is the
 # ``figma`` vault provider (``integrations/providers/figma.py``). Nothing here
