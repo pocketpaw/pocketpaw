@@ -42,7 +42,7 @@
 # every milestone back to back in one turn; ``_APP_PLAN_REFINE_RULE`` does the same
 # on a project refine, where the user's go-ahead usually lands.
 # ``_SITE_AI_RULE`` (inside ``_PROJECT_LOOP``) sends AI features to
-# ``get_site_ai_settings`` and the ``paw-ai`` recipe, never a provider SDK or key.
+# ``get_site_ai_settings`` and its ``how_to``, never a provider SDK or key.
 #
 # Cache keys: create and chat read only ``meta`` (``meta_key``); refine and
 # import-create read live state, so they answer ``content_key`` of the rendered text.
@@ -1026,7 +1026,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         + "If the skill is unavailable: "
         "`mcp__pocketpaw_sites_manager__list_site_templates`, then "
         "`mcp__pocketpaw_sites_manager__start_site_from_template` ONCE (it returns the "
-        "pocket_id and the repo's AGENTS.md), then follow the loop below.\n"
+        "pocket_id and the repo's AGENTS.md), then follow the loop below. Never call a "
+        "`create_*_site` tool or the pocket specialist.\n"
         + _PROJECT_LOOP
         + "On `static` there is no server route, so a contact form follows this "
         "contract:\n"
@@ -1479,9 +1480,9 @@ def _react_write_scope() -> str:
 # SDK and a request for an API key. It rides ``_PROJECT_LOOP``, so create,
 # import-create and project refine all carry it once.
 _SITE_AI_RULE = (
-    "AI FEATURES (chatbots, generators, summarisers, vision, RAG) use Paw's AI: call "
-    "`get_site_ai_settings` first and follow its `how_to` (the `paw-ai` recipe). Never "
-    "add a provider SDK or ask for an API key. "
+    "AI FEATURES (chatbots, generators, summarisers, vision, RAG): call "
+    "`get_site_ai_settings` first and follow its `how_to`; never a provider SDK or API "
+    "key. "
 )
 
 #: The loop the project tools run, shared by the create and refine branches. The tool

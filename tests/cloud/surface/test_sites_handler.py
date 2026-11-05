@@ -289,11 +289,11 @@ async def test_every_project_turn_sends_ai_features_to_site_ai() -> None:
     assert len(rule.encode("utf-8")) < 300, len(rule.encode("utf-8"))
     # The tool it names is on the /sites allow-list.
     assert GET_SITE_AI_SETTINGS_TOOL_ID in SITES_TOOL_IDS
-    for phrase in ("`get_site_ai_settings` first", "`how_to`", "`paw-ai`"):
+    for phrase in ("`get_site_ai_settings` first", "`how_to`"):
         assert phrase in rule, phrase
     for feature in ("chatbots", "generators", "summarisers", "vision", "RAG"):
         assert feature in rule, feature
-    assert "Never add a provider SDK or ask for an API key" in rule
+    assert "never a provider SDK or API key" in rule
 
     preambles = [await _preamble_for(engine) for engine in _CREATE_HINTS]
     preambles.append(
