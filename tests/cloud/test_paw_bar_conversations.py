@@ -653,6 +653,51 @@ async def test_patch_rejects_bad_values(client):
 
 
 @pytest.mark.asyncio
+async def test_patch_marks_a_conversation_read(client):
+    """Opening a conversation clears its unread badge for good. Before this
+    field existed only an owner REPLY zeroed the counter, so a thread the owner
+    read but never answered stayed unread forever."""
+    c, store = client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    await _mk_run()
+    await store.upsert_conversation_on_visitor_turn(widget.id, _REF, "ws-1")
+    await store.upsert_conversation_on_visitor_turn(widget.id, _REF, "ws-1")
+    await store.upsert_conversation_on_visitor_turn(widget.id, _REF, "ws-1")
+
+    url = f"/paw-bar/admin/site/{site.id}/conversations/{_REF}"
+    res = await c.patch(url, json={"unread_for_owner": 0})
+    assert res.status_code == 200, res.text
+    assert res.json()["conversation"]["unread_for_owner"] == 0
+    assert (await store.get_conversation(widget.id, _REF, "ws-1")).unread_for_owner == 0
+    listed = (await c.get(f"/paw-bar/admin/site/{site.id}/conversations")).json()["items"][0]
+    assert listed["unread_for_owner"] == 0
+
+    # Reading is not filing: nothing else on the row moved.
+    row = await store.get_conversation(widget.id, _REF, "ws-1")
+    assert row.state is ConversationState.OPEN and row.bot_paused is False
+
+    # A new visitor turn after the read counts again.
+    await store.upsert_conversation_on_visitor_turn(widget.id, _REF, "ws-1")
+    assert (await store.get_conversation(widget.id, _REF, "ws-1")).unread_for_owner == 1
+
+
+@pytest.mark.asyncio
+async def test_patch_unread_accepts_only_zero(client):
+    """The field marks a thread read. It is not a counter a client may set."""
+    c, store = client
+    site = await _site()
+    widget = await store.create_widget(_widget())
+    await _mk_run()
+    await store.upsert_conversation_on_visitor_turn(widget.id, _REF, "ws-1")
+
+    url = f"/paw-bar/admin/site/{site.id}/conversations/{_REF}"
+    assert (await c.patch(url, json={"unread_for_owner": 5})).status_code == 422
+    assert (await c.patch(url, json={"unread_for_owner": -1})).status_code == 422
+    assert (await store.get_conversation(widget.id, _REF, "ws-1")).unread_for_owner == 1
+
+
+@pytest.mark.asyncio
 async def test_patch_mints_a_row_for_a_legacy_conversation(client):
     """A conversation that predates the table is filed on the owner's first action
     — the row is created lazily rather than 404ing."""
