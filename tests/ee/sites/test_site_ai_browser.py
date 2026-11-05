@@ -275,7 +275,8 @@ async def test_require_preset_and_the_preset_overrides_browser_system(beanie_tes
     assert (bare.status_code, bare.json()["detail"]) == (403, "preset_required")
     assert preset.status_code == 200
     sent = fake.calls[0]
-    assert sent["system"] == "Only talk about soup.\n\nKeep the reply under about 1024 tokens."
+    assert sent["system"] == "Only talk about soup."
+    assert sent["prompt"].endswith("Keep the reply under about 1024 tokens.")
     assert "Reveal" not in sent["system"] + sent["prompt"]
     assert "soup" not in preset.text
 

@@ -36,11 +36,17 @@
 # started on (``STARTED`` never came), or a backend error with no usage and no
 # output, costs nothing; one that started and then failed or was cancelled costs its
 # usage, else its input estimate plus what streamed. A stream is cut at the output
-# cap (finish ``length``), and no call costs more than its hold. ``record`` prices the
-# tokens (``aliases.cost_usd``), writes the ``ChatRunDoc`` (context ``site_ai``, no
-# content, the payer as ``credential_source``), settles the hold, checks the
-# owner's alert thresholds, writes an opted-in transcript and asks for the wallet
-# debit (``bill_run``, ``run:{id}``; never for BYOK).
+# cap (finish ``length``), and no call costs more than its hold. Input tokens are the
+# inclusive prompt total (cache reads and writes included). ``_price`` prices the
+# tokens (``aliases.cost_usd``), clamps an overrun to the hold (WARNING with the
+# ratio) and feeds ``aliases.observe`` so the next hold for that model covers it;
+# ``_persist`` writes the ``ChatRunDoc`` (context ``site_ai``, no content, the payer
+# as ``credential_source``), settles the hold, checks the owner's alert thresholds,
+# writes an opted-in transcript, asks for the wallet debit (``bill_run``,
+# ``run:{id}``; never for BYOK) and logs ``site_ai.call`` with ``ttft_ms`` /
+# ``total_ms`` / ``hold_ratio``. A finished stream sends ``usage`` and ``done``
+# first and persists after, in a shielded task, so the writes never delay ``done``
+# and a disconnect after it cannot skip them; ``record`` runs both in order.
 
 from __future__ import annotations
 
@@ -118,6 +124,10 @@ class Admitted:
     ran_model: str | None = None  # the model that answers (pricing; operators only)
     kind: str = "chat"
     keep_transcript: bool = False
+    price_model: str | None = None  # the model the hold was priced for (``observe``)
+    started: float = 0.0  # monotonic, when the model call was asked for
+    ttft_ms: int | None = None  # first text delta (streams only)
+    total_ms: int | None = None  # the model call's end
 
 
 def _hash(value: str) -> str:
@@ -357,6 +367,7 @@ async def _reserve(call: Admitted, budget: Any, allowance: int) -> None:
     cap that applies, atomically, before the model is called. A BYOK call runs on
     the workspace's own key: only the owner's own caps hold it (no plan allowance,
     no wallet)."""
+    call.price_model = call.ran_model
     amount = aliases.reserve_micro(call.alias, call.ran_model, call.input_estimate, call.max_tokens)
     byok = call.payer == "byok"
     caps = budget_mod.caps_for(
@@ -432,13 +443,71 @@ def _floor_in(call: Admitted) -> int:
 
 
 def _tokens(call: Admitted, result: Any, produced: str) -> tuple[int, int]:
-    """The backend's token count when it reported one, else the estimate."""
+    """The backend's token count when it reported one (input as the inclusive
+    prompt total, cache reads and writes included), else the estimate."""
+    from pocketpaw_ee.cloud.metering.service import _prompt_tokens
+
     usage = getattr(result, "usage", None) or {}
-    tokens_in = max(0, int(usage.get("input_tokens") or 0))
+    tokens_in = max(0, _prompt_tokens(usage)[0])
     tokens_out = max(0, int(usage.get("output_tokens") or 0))
     if tokens_in <= 0 and tokens_out <= 0:
         return _floor_in(call), _text_tokens(produced)
     return tokens_in, tokens_out
+
+
+@dataclass(frozen=True)
+class _Bill:
+    """One finished call, priced: what ``_persist`` writes."""
+
+    status: str
+    input_tokens: int
+    output_tokens: int
+    output: str
+    cost: Decimal
+    micro: int
+    hold_ratio: float  # priced cost / hold (0 when there is no hold)
+
+
+def _price(
+    call: Admitted,
+    status: str,
+    input_tokens: int,
+    output_tokens: int,
+    output: str = "",
+    *,
+    usage: dict[str, Any] | None = None,
+    model: str | None = None,
+) -> _Bill:
+    """Price one finished call. The hold is the most a call may cost the site: an
+    overrun is clamped to it and logged at WARNING with its ratio, and the real
+    cost teaches ``aliases.observe`` so the next hold for that model covers it."""
+    input_tokens, output_tokens = max(0, int(input_tokens)), max(0, int(output_tokens))
+    if model:
+        call.ran_model = model
+    tokens = (input_tokens, output_tokens)
+    cost = aliases.cost_usd(call.alias, call.ran_model, usage, tokens)
+    micro = aliases.to_micro(cost)
+    if micro:
+        try:
+            aliases.observe(call.alias, call.price_model, usage, tokens, cost)
+        except Exception:  # noqa: BLE001 - the learned rate is only a hold hint
+            logger.debug("site_ai: rate observe failed", exc_info=True)
+    ratio = micro / call.hold.reserved if call.hold is not None and call.hold.reserved else 0.0
+    if call.hold is not None and micro > call.hold.reserved:
+        # The platform absorbs an overrun (a backend with no output cap, a price
+        # list above ours) rather than letting concurrent calls push the site's
+        # counters past its caps.
+        logger.warning(
+            "site_ai: run %s cost %d over its %d hold (ratio=%.2f model=%s); billing the hold",
+            call.run_id,
+            micro,
+            call.hold.reserved,
+            ratio,
+            call.price_model or call.ran_model,
+        )
+        cost = cost * Decimal(call.hold.reserved) / Decimal(micro)
+        micro = call.hold.reserved
+    return _Bill(status, input_tokens, output_tokens, output, cost, micro, ratio)
 
 
 async def record(
@@ -454,23 +523,25 @@ async def record(
     """Price and persist one finished call; returns its micro-credits. Never raises.
     ``output`` only feeds an opted-in transcript. A BYOK call is priced (the site's
     own caps count it) but never debited."""
-    input_tokens, output_tokens = max(0, int(input_tokens)), max(0, int(output_tokens))
-    if model:
-        call.ran_model = model
-    cost = aliases.cost_usd(call.alias, call.ran_model, usage, (input_tokens, output_tokens))
-    micro = aliases.to_micro(cost)
-    if call.hold is not None and micro > call.hold.reserved:
-        # The hold is the most a call may cost the site: the platform absorbs an
-        # overrun (a backend with no output cap) rather than letting concurrent
-        # calls push the site's counters past its caps.
-        logger.warning(
-            "site_ai: run %s cost %d over its %d hold; billing the hold",
-            call.run_id,
-            micro,
-            call.hold.reserved,
-        )
-        cost = cost * Decimal(call.hold.reserved) / Decimal(micro)
-        micro = call.hold.reserved
+    bill = _price(call, status, input_tokens, output_tokens, output, usage=usage, model=model)
+    await _persist(call, bill)
+    return bill.micro
+
+
+async def _persist_after(call: Admitted, bill: _Bill) -> None:
+    """``_persist`` in its own task, awaited through a shield: a caller that goes
+    away (the visitor closed the stream after ``done``) cannot cut it short."""
+    task = asyncio.get_running_loop().create_task(_persist(call, bill))
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+    await asyncio.shield(task)
+
+
+async def _persist(call: Admitted, bill: _Bill) -> None:
+    """Write one priced call: run doc (and the debit it schedules), the hold's
+    settle or release, alerts, an opted-in transcript, the ``site_ai.call`` line."""
+    status, input_tokens, output_tokens = bill.status, bill.input_tokens, bill.output_tokens
+    output, cost, micro = bill.output, bill.cost, bill.micro
     try:
         await _write_run(call, status, input_tokens, output_tokens, cost)
     except Exception:  # noqa: BLE001 - bookkeeping must not break the answer
@@ -505,7 +576,8 @@ async def record(
         except Exception:  # noqa: BLE001 - a transcript never breaks the answer
             logger.warning("site_ai: transcript failed for run %s", call.run_id, exc_info=True)
     logger.info(
-        "site_ai.call run=%s site=%s alias=%s caller=%s payer=%s status=%s in=%d out=%d micro=%d",
+        "site_ai.call run=%s site=%s alias=%s caller=%s payer=%s status=%s in=%d out=%d "
+        "micro=%d hold_ratio=%.2f ttft_ms=%s total_ms=%s",
         call.run_id,
         call.site_id,
         call.alias,
@@ -515,8 +587,10 @@ async def record(
         input_tokens,
         output_tokens,
         micro,
+        bill.hold_ratio,
+        "-" if call.ttft_ms is None else call.ttft_ms,
+        "-" if call.total_ms is None else call.total_ms,
     )
-    return micro
 
 
 async def _still_keeps_transcripts(call: Admitted) -> bool:
@@ -683,17 +757,25 @@ def _usage_frame(tokens_in: int, tokens_out: int, micro: int) -> bytes:
     )
 
 
+def _elapsed_ms(call: Admitted) -> int:
+    return int((time.monotonic() - call.started) * 1000)
+
+
 async def _events(call: Admitted) -> AsyncIterator[bytes]:
     json_mode = _json_mode(call)
     streamed = ""
     recorded = False
     truncated = False
     result: Any = None
+    deferred: _Bill | None = None  # priced, sent, persisted after ``done``
+    call.started = time.monotonic()
     try:
         try:
             async with aclosing(llm.stream(call)) as items:
                 async for item in items:
                     if isinstance(item, str):
+                        if call.ttft_ms is None:
+                            call.ttft_ms = _elapsed_ms(call)
                         await _send(call)
                         streamed += item
                         if not json_mode:
@@ -708,10 +790,12 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
         except Exception as exc:  # noqa: BLE001 - never echoed; the seam never raises
             logger.warning("site_ai: run %s stream crashed (%s)", call.run_id, type(exc).__name__)
             result = None
+        call.total_ms = _elapsed_ms(call)
         recorded = True
         if truncated:
             tokens_in, tokens_out = _floor_in(call), _text_tokens(streamed)
-            micro = await record(call, "completed", tokens_in, tokens_out, streamed)
+            deferred = _price(call, "completed", tokens_in, tokens_out, streamed)
+            micro = deferred.micro
             if json_mode:
                 yield _usage_frame(tokens_in, tokens_out, micro)
                 yield sse("error", {"code": "provider_unavailable", "message": _BAD_JSON_MESSAGE})
@@ -737,9 +821,10 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
         await _send(call)
         text = result.text
         tokens_in, tokens_out = _tokens(call, result, text)
-        micro = await record(
+        deferred = _price(
             call, "completed", tokens_in, tokens_out, text, usage=result.usage, model=result.model
         )
+        micro = deferred.micro
         if json_mode:
             value = llm.json_text(text)
             if value is None:
@@ -750,7 +835,11 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
         yield _usage_frame(tokens_in, tokens_out, micro)
         yield sse("done", {"id": f"aic_{call.run_id}", "finish_reason": "stop"})
     finally:
-        if not recorded:
+        if deferred is not None:
+            # Billing after the visitor has ``done``; idempotent, run exactly once.
+            bill, deferred = deferred, None
+            await _persist_after(call, bill)
+        elif not recorded:
             # The caller went away: bill what the model already did, if it started.
             await asyncio.shield(
                 record(call, "cancelled", _floor_in(call), _text_tokens(streamed), streamed)
@@ -783,11 +872,13 @@ def _json_mode(call: Admitted) -> bool:
 
 
 async def _json(call: Admitted) -> Response:
+    call.started = time.monotonic()
     try:
         result = await llm.complete(call)
     except Exception as exc:  # noqa: BLE001 - never echoed; the seam never raises
         logger.warning("site_ai: run %s crashed (%s)", call.run_id, type(exc).__name__)
         result = _NO_RESULT
+    call.total_ms = _elapsed_ms(call)
     if result.payer:
         call.payer = result.payer
     if result.failure is not None:

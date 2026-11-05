@@ -16,7 +16,10 @@
 # transcript and ride, in order, as the side completion's ``images``. ``response_format`` json
 # adds a "reply with one JSON value" instruction (plus the schema) to the system
 # prompt and ``json_text`` pulls that value out of the reply. ``max_tokens`` is
-# advisory here (the backends take no output cap), so it rides as an instruction.
+# advisory here (the backends take no output cap), so it rides as an instruction
+# in the PROMPT, after the transcript: the system prompt must stay byte-identical
+# for a site (and preset) whatever each request asks, because it is the cached
+# prefix and the key of the backend's standby client.
 # Tests fake ``side_completion.agent_stream`` / ``agent_complete`` / ``resolve_target``.
 
 from __future__ import annotations
@@ -79,7 +82,8 @@ def render(
     max_tokens: int | None = None,
 ) -> tuple[str, str]:
     """``(system, prompt)`` for one call. System messages (the preset's first) become
-    the system prompt; every other turn goes, in order, into the transcript."""
+    the system prompt; every other turn goes, in order, into the transcript, then
+    the per-request output cap."""
     system_parts = [_text_of(m.get("content")) for m in messages if m["role"] == "system"]
     rules: list[str] = []
     if response_format and response_format.get("type") in ("json_object", "json_schema"):
@@ -90,8 +94,6 @@ def render(
                 "The JSON must match this JSON Schema:\n"
                 + json.dumps(schema, separators=(",", ":"), ensure_ascii=False)
             )
-    if max_tokens:
-        rules.append(f"Keep the reply under about {max_tokens} tokens.")
     system = "\n\n".join(p for p in [*system_parts, *rules] if p.strip())
     counter = [0]
     turns = [
@@ -105,6 +107,8 @@ def render(
         + "\n</conversation>\n\nWrite the assistant's next turn: only its text, without "
         "a role tag."
     )
+    if max_tokens:
+        prompt += f" Keep the reply under about {max_tokens} tokens."
     return system, prompt
 
 

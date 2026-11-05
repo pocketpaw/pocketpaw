@@ -370,7 +370,7 @@ async def test_only_validated_fields_reach_the_model(beanie_test_db, monkeypatch
     assert sent["isolated"] is True
     assert sent["images"] == []
     # The output cap is the alias's, as an instruction (backends take no cap).
-    assert "4096 tokens" in sent["system"]
+    assert "4096 tokens" in sent["prompt"]
     for leaked in ("evil.test", "spoof", "visitor-1", "secret"):
         assert leaked not in sent["system"] + sent["prompt"]
 
@@ -435,7 +435,7 @@ async def test_preset_system_alias_and_caps_win(beanie_test_db, monkeypatch):
     (sent,) = fake.calls
     assert sent["agent_id"] == "agent-smart"
     assert sent["system"].startswith("You are Ada.") and "worker extra" in sent["system"]
-    assert "200 tokens" in sent["system"]
+    assert "200 tokens" in sent["prompt"]
     assert (unknown.status_code, unknown.json()["field"]) == (400, "preset")
     assert "You are Ada." not in good.text
 
