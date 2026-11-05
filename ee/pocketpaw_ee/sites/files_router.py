@@ -27,7 +27,7 @@
 # Its own router module so the route-auth audit (ROUTER_MODULES) can name it.
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
@@ -192,15 +192,20 @@ _EDIT_SESSION = "/sites/by-pocket/{pocket_id}/edit-session"
 @router.post(_EDIT_SESSION, response_model=EditSessionResponse)
 async def start_edit_session(
     pocket_id: str,
+    request: Request,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> EditSessionResponse:
     """Start or renew the visual-edit session on a project draft (a select / design
     tool turned on) and answer the draft: its source-tagged copy is queued when only
-    the untagged one was built, so poll it like ``/native-artifact``. 404 for another
+    the untagged one was built, so poll it like ``/native-artifact``. The request's
+    Origin is recorded as the origin the preview's edit bridge trusts. 404 for another
     workspace's pocket, 403 without edit access, 422 for a site that is not a project."""
     result = await sites_service.start_project_edit_session(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        request_origin=request.headers.get("origin") or None,
     )
     return EditSessionResponse(**result)
 

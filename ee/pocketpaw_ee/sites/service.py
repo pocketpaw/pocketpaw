@@ -10812,6 +10812,12 @@ async def _native_artifact_for_pocket(
     # and has no build to render here.
     engine = normalize_engine(pocket.get("engine"))
     if engine == "project":
+        # A project draft has no armed hash, but the preview proxy still bakes the
+        # recorded view origin into the edit bridge, which drops commands from any
+        # other origin. So record the browser's Origin here too; agent / MCP callers
+        # send none and leave the record as it is.
+        if requested := (builder_origin or "").strip():
+            _record_view_origin(pocket_id, requested)
         return await _project_draft_artifact(
             pocket_id=pocket_id,
             source=pocket.get("source"),
@@ -12397,6 +12403,7 @@ async def start_project_edit_session(
     workspace_id: str,
     user_id: str,
     pocket_id: str,
+    request_origin: str | None = None,
     _store: Any | None = None,
     _pool: Any | None = None,
     _records: Any | None = None,
@@ -12406,7 +12413,9 @@ async def start_project_edit_session(
     every draft build of the pocket is source-tagged, so the first call queues the
     tagged copy of the current source when only the untagged one was built. The
     builder calls this when a select / design tool turns on, and again before the
-    session lapses while it stays on.
+    session lapses while it stays on. ``request_origin`` (the browser's Origin) is
+    recorded as the pocket's view origin, the one the preview proxy's edit bridge
+    trusts; absent, the record is left as it is.
 
     The native-artifact shape plus ``editing`` and ``expires_at`` (ISO 8601). 404 for
     an unknown or another workspace's pocket, 403 without edit access, 422 for a site
@@ -12414,6 +12423,8 @@ async def start_project_edit_session(
     from pocketpaw_ee.sites import project_build, verify_store
 
     pocket = await _project_pocket_for_editing(workspace_id, user_id, pocket_id)
+    if requested := (request_origin or "").strip():
+        _record_view_origin(pocket_id, requested)
     records = _records if _records is not None else verify_store.default_verify_store()
     until = project_build.mark_edit_session(records, pocket_id)
     source = pocket.get("source")

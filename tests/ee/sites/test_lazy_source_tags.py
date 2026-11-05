@@ -347,6 +347,26 @@ async def test_starting_an_edit_session_queues_the_tagged_build(
         assert not project_build.edit_session_active(records, pid)
 
 
+async def test_starting_an_edit_session_records_the_origin_the_bridge_trusts(
+    beanie_test_db, cli_text, stores, enqueued
+):
+    """Select turning on is the moment the bridge has to trust the dashboard, so the
+    session start records the browser's Origin; a call without one leaves it alone."""
+    from pocketpaw_ee.sites import preview_proxy
+
+    pid = await _pocket()
+    _store, records = stores
+    records.write(pid, verify_store.VIEW_ORIGIN_KEY, {"origin": "https://old.paw.test"})
+    async with _client(_app()) as c:
+        r = await c.post(SESSION_URL.format(pid=pid))
+        assert r.status_code == 200, r.text
+        assert preview_proxy.builder_origin_for(pid) == "https://old.paw.test"
+
+        r = await c.post(SESSION_URL.format(pid=pid), headers={"Origin": "https://os.paw.test"})
+        assert r.status_code == 200, r.text
+    assert preview_proxy.builder_origin_for(pid) == "https://os.paw.test"
+
+
 async def test_an_edit_session_needs_a_project_in_this_workspace(beanie_test_db, stores):
     other = await _pocket(workspace_id="ws2", owner_id="u2")
     html = await _pocket(engine="html", source={"index.html": "<h1>Hi</h1>"})
