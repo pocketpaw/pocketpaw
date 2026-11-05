@@ -8,8 +8,10 @@
 # - hidden: off every nav surface, and the route redirects to "/". This is a
 #   UI rule, not access control: the APIs behind a hidden route stay up.
 # - alpha: keeps its nav entry and shows the Alpha pill.
-# - preview: keeps its nav entry; opening it shows an "in the works" modal
-#   once per device. The value names the modal variant.
+# - preview: keeps its nav entry and opening it shows an "in the works" modal.
+#   The value names the modal variant: "in-the-works" shows once per device
+#   and lets the user look around; "in-the-works-blocking" shows on every
+#   visit with only a way back, so the page behind it can't be used.
 #
 # backend:* ids are NOT listed here. They come from ``BackendInfo.beta`` on
 # each registered backend, so each backend keeps one marker. The three stages
@@ -41,6 +43,7 @@ HIDDEN: frozenset[str] = frozenset(
         "/studio/vector",
         "/studio/photo",
         "/studio/design",
+        "/ship",
         # LiveKit is not confirmed on the hosted deployment yet.
         "/meetings",
     }
@@ -52,7 +55,7 @@ ALPHA: frozenset[str] = frozenset(
         "/growth",
         "/deep-work",
         "/agents/activity",
-        "/agent-health",
+        "/agents/health",
         "/discover",
         "/browser",
         "/partners",
@@ -68,7 +71,11 @@ ALPHA: frozenset[str] = frozenset(
 PREVIEW: dict[str, str] = {
     "/foresight": "in-the-works",
     "/belt-next": "in-the-works",
+    "/pockets": "in-the-works",
+    "/fabric": "in-the-works-blocking",
 }
+
+PREVIEW_VARIANTS: frozenset[str] = frozenset({"in-the-works", "in-the-works-blocking"})
 
 
 def beta_backend_ids() -> set[str]:

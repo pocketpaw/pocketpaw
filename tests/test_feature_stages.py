@@ -14,7 +14,14 @@ from fastapi.testclient import TestClient
 import pocketpaw
 from pocketpaw.agents.registry import get_backend_info, list_backends
 from pocketpaw.api.v1.health import router
-from pocketpaw.feature_stages import ALPHA, HIDDEN, PREVIEW, beta_backend_ids, stages
+from pocketpaw.feature_stages import (
+    ALPHA,
+    HIDDEN,
+    PREVIEW,
+    PREVIEW_VARIANTS,
+    beta_backend_ids,
+    stages,
+)
 
 ADAPTERS_DIR = Path(pocketpaw.__file__).parent / "bus" / "adapters"
 
@@ -63,6 +70,22 @@ def test_belt_hidden_and_belt_next_preview():
     assert PREVIEW["/belt-next"] == "in-the-works"
     assert "/belt-next" not in HIDDEN
     assert not _segment_match("/belt-next", "/belt")
+
+
+def test_every_preview_value_is_a_known_variant():
+    assert set(PREVIEW.values()) <= PREVIEW_VARIANTS
+
+
+def test_pockets_and_fabric_preview_ship_hidden():
+    assert PREVIEW["/pockets"] == "in-the-works"
+    assert PREVIEW["/fabric"] == "in-the-works-blocking"
+    assert "/ship" in HIDDEN
+
+
+def test_agent_health_lives_under_agents():
+    assert "/agents/health" in ALPHA
+    assert "/agents/activity" in ALPHA
+    assert "/agent-health" not in ALPHA | HIDDEN | set(PREVIEW)
 
 
 def test_backend_ids_follow_backend_info_beta():

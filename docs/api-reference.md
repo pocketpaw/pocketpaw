@@ -3599,9 +3599,10 @@ should treat as "no stage data".
 ### `GET /api/v1/config/features`
 
 ```json
-{ "alpha": ["/agent-health", "/calendar", "backend:codex_cli", "channel:gchat", "..."],
-  "hidden": ["/automations", "/belt", "/code", "..."],
-  "preview": { "/belt-next": "in-the-works", "/foresight": "in-the-works" } }
+{ "alpha": ["/agents/activity", "/agents/health", "/calendar", "backend:codex_cli", "..."],
+  "hidden": ["/automations", "/belt", "/code", "/ship", "..."],
+  "preview": { "/belt-next": "in-the-works", "/fabric": "in-the-works-blocking",
+               "/foresight": "in-the-works", "/pockets": "in-the-works" } }
 ```
 
 - Ids are paw-enterprise route paths, matched by path segment (`p === id ||
@@ -3612,8 +3613,10 @@ should treat as "no stage data".
 - `alpha`: keeps its nav entry and shows the Alpha pill. `backend:*` ids come
   from each backend's `BackendInfo.beta` (the same flag `GET /api/v1/backends`
   returns as `beta`).
-- `preview`: keeps its nav entry; opening it shows an "in the works" modal once
-  per device. The value names the modal variant.
+- `preview`: keeps its nav entry; opening it shows an "in the works" modal.
+  The value names the variant. `in-the-works` shows once per device and lets
+  the user look around. `in-the-works-blocking` shows on every visit with only
+  a way back, so the page behind it can't be used.
 - The three stages are disjoint, and no route id in one stage segment-matches a
   route id in another.
 
