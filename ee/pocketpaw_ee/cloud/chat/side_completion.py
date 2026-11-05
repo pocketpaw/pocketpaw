@@ -26,8 +26,7 @@
 #     API) runs ``pool.run(isolated=True)``: no soul recall, none of the agent's
 #     skills, no backend extras, so the system prompt is exactly ``system``. A
 #     backend that doesn't declare ``isolated`` is handled like one without the
-#     tool switch (the gateway fallback, or refused on BYOK).
-#     Enhance and the other in-app callers keep the agent's full context.
+#     tool switch (gateway fallback, or refused on BYOK). In-app callers keep context.
 #   * ``images`` ride the chat turn's ``image_attachments`` channel to the
 #     backend; a backend that doesn't declare it (or the gateway fallback) is a
 #     typed ``unsupported`` failure, never a silent drop. No images = the exact
@@ -39,7 +38,8 @@
 #     ``tools_enabled`` falls back to the deployment default model
 #     (``pydantic_ai_model``) through the gateway helper, and only on a
 #     platform-billed call. Never the first catalog entry.
-#   * ``max_requests`` only reaches pydantic_ai (other backends refuse it).
+#   * ``max_requests`` only reaches pydantic_ai. ``pin_model`` (site AI) names the
+#     model (caller's, agent's, else backend default) or fails ``model``.
 #   * A platform-funded free run is forced onto pydantic_ai with one request and
 #     the wallet's token limit, like ``run_core``. It does NOT reserve on the
 #     daily early-access ceiling: that hold is reconciled only by ``bill_run``
@@ -230,6 +230,7 @@ async def _prepare(
     timeout_s: float | Callable[[str], float],
     images: Sequence[ImageAttachment] = (),
     isolated: bool = False,
+    pin_model: bool = False,
 ) -> _Plan | SideCompletion:
     """Resolve the agent and run every gate; a ``SideCompletion`` is a refusal."""
     from pocketpaw.agents.errors import AgentDisabled  # type: ignore[import-untyped]
@@ -277,6 +278,15 @@ async def _prepare(
         run_kwargs["isolated"] = True
     if model:
         run_kwargs["model_override"] = model
+    elif pin_model and agent_pool._declares_param(instance.backend.run, "model_override"):
+        # The agent's own model, else its backend's resolved default, named
+        # explicitly so the backend never auto-selects. Not a per-send pick, so
+        # no catalog check.
+        pinned = agent_model or default_model_for(backend)
+        if not pinned:
+            return _fail("model", "side.model_unresolved", **meta)
+        run_kwargs["model_override"] = pinned
+        meta["model"] = pinned
     if creds.source == "byok" and creds.api_key:
         turn_model = model or agent_model
         if not byok_service.provider_allows_model(creds.provider, turn_model):
@@ -428,6 +438,7 @@ async def agent_complete(
     timeout_s: float | Callable[[str], float],
     images: Sequence[ImageAttachment] = (),
     isolated: bool = False,
+    pin_model: bool = False,
 ) -> SideCompletion:
     """One tool-less completion on the workspace agent's own backend and model.
 
@@ -447,6 +458,7 @@ async def agent_complete(
             timeout_s=timeout_s,
             images=images,
             isolated=isolated,
+            pin_model=pin_model,
         )
         if isinstance(prepared, SideCompletion):
             result = prepared
@@ -498,6 +510,7 @@ async def agent_stream(
     timeout_s: float | Callable[[str], float],
     images: Sequence[ImageAttachment] = (),
     isolated: bool = False,
+    pin_model: bool = False,
 ) -> AsyncIterator[str | SideCompletion | _Started]:
     """``agent_complete``, streamed: yields ``STARTED`` once the model call has
     begun, each text delta as a ``str``, and ends with ONE ``SideCompletion``
@@ -520,6 +533,7 @@ async def agent_stream(
             timeout_s=timeout_s,
             images=images,
             isolated=isolated,
+            pin_model=pin_model,
         )
         if isinstance(prepared, SideCompletion):
             result = prepared

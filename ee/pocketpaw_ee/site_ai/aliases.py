@@ -8,17 +8,15 @@
 # never its prompt, tools, skills or soul: the call goes through
 # ``cloud.chat.side_completion`` isolated, with the site's own system prompt.
 #
-# ``reserve_micro`` is the worst case a call is held against: the input estimate
-# plus ``SDK_OVERHEAD_TOKENS``, all written to the prompt cache (the Claude SDK
-# reports its prompt as cache writes, billed above plain input), plus the full
-# output cap, priced at max(the dated price of the model that will answer, the
-# alias's fallback rate) times the model's learned ``rate_scale``. ``cost_usd``
-# prices what a call used through the meter's own ``resolve_cost`` (the backend's
-# reported cost, else the dated price), falling back to the alias rate so site
-# counters never record a free call. ``observe`` compares that cost with our own
-# estimate for the same tokens; a backend that reports more (its own price list)
-# raises the model's ``rate_scale`` so the next hold covers it. The scale is per
-# process, bounded to [1, ``RATE_SCALE_MAX``], and only ever errs high.
+# Prices come from TOKENS at the verified table rate (``usage_tracker._PRICING``,
+# exact id or a dated suffix of one, plus ``_LONG_CONTEXT`` tiers), never from a
+# backend's ``total_cost_usd`` (the CLI's figure for Haiku 5.5 fit Opus rates).
+# ``price_usd`` = (uncached + cache reads x read rate + writes x 1.25) x input rate
+# + output x output rate. ``reserve_micro`` holds the input estimate plus
+# ``SDK_OVERHEAD_TOKENS``, all written to cache, plus the full output cap, at the
+# rate of the model that will answer. ``cost_usd`` prices what ran (the model the
+# backend reports, else the one asked for). A model with no row raises
+# ``Unpriced``: it is refused, never billed at a guessed rate.
 #
 # Offline aliases: a call that fails because the alias is misconfigured (an unknown
 # model, an agent that is gone) marks it offline for ``OFFLINE_TTL_S`` in this
@@ -31,7 +29,6 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -46,14 +43,12 @@ class AliasSpec:
     max_output_tokens: int
     context_tokens: int
     vision: bool
-    fallback_in_per_m: Decimal  # USD per million input tokens, when nothing prices it
-    fallback_out_per_m: Decimal  # USD per million output tokens
 
 
 ALIASES: dict[str, AliasSpec] = {
-    "fast": AliasSpec("fast", 4_096, 150_000, False, Decimal(1), Decimal(5)),
-    "smart": AliasSpec("smart", 8_192, 150_000, False, Decimal(3), Decimal(15)),
-    "vision": AliasSpec("vision", 4_096, 150_000, True, Decimal(1), Decimal(5)),
+    "fast": AliasSpec("fast", 4_096, 150_000, False),
+    "smart": AliasSpec("smart", 8_192, 150_000, False),
+    "vision": AliasSpec("vision", 4_096, 150_000, True),
 }
 CHAT_ALIASES = ("fast", "smart", "vision")
 
@@ -119,145 +114,135 @@ def _rate_card():
     return load_rate_card()
 
 
+class Unpriced(Exception):
+    """A model with no verified price: site AI refuses to run or guess it."""
+
+    def __init__(self, model: str | None) -> None:
+        self.model = model
+        super().__init__(model or "<none>")
+
+
 # Prompt tokens the Claude CLI adds around the site's own prompt (its prefix and
 # attribution blocks), held so the hold never sits under the real prompt size.
 SDK_OVERHEAD_TOKENS = 200
-# Fallback-rate multipliers for cache traffic: a write at the 1-hour TTL rate (the
-# dearer of the two), a read at a tenth of input.
-CACHE_WRITE_RATE = Decimal(2)
+# Anthropic's cache multipliers on the input rate: a 5-minute write is 1.25x; a
+# read is the table's ``cached_input`` rate, else 0.1x.
+CACHE_WRITE_RATE = Decimal("1.25")
 CACHE_READ_RATE = Decimal("0.1")
-RATE_SCALE_MAX = 50.0
-_RATE_SCALE_KEYS = 256
-# Learned ``reported cost / our estimate`` per price key; see ``observe``.
-_RATE_SCALE: dict[str, float] = {}
+# Long-context tiers the flat table cannot hold: past ``threshold`` prompt tokens
+# the WHOLE request bills at the higher rates (cache rates scale with input).
+_LONG_CONTEXT: dict[str, tuple[int, Decimal, Decimal]] = {
+    "claude-haiku-5-5": (100_000, Decimal("0.50"), Decimal("2.50")),
+}
 
 
-def _fallback_usd(
-    alias: str, input_tokens: int, output_tokens: int, cache_read: int = 0, cache_write: int = 0
-) -> Decimal:
-    """The alias rate. ``input_tokens`` is the inclusive prompt total; its cached
-    parts are priced at the cache rates."""
-    spec = ALIASES[alias]
-    plain = max(0, input_tokens - cache_read - cache_write)
-    prompt = (
-        Decimal(plain)
-        + Decimal(cache_write) * CACHE_WRITE_RATE
-        + Decimal(cache_read) * CACHE_READ_RATE
-    )
-    return (
-        prompt * spec.fallback_in_per_m + Decimal(output_tokens) * spec.fallback_out_per_m
-    ) / Decimal(1_000_000)
+def _table_key(model: str | None) -> str | None:
+    """The verified table row for ``model``: an exact id, or the longest row it
+    extends with a dated suffix (``claude-haiku-4-5-20251001``). Never a looser
+    match, so ``claude`` or a renamed model has no price."""
+    from pocketpaw.usage_tracker import _PRICING
+
+    if not model:
+        return None
+    if model in _PRICING:
+        return model
+    rows = [key for key in _PRICING if model.startswith(key + "-")]
+    return max(rows, key=len) if rows else None
 
 
-def _estimate_usd(
-    alias: str,
+def price_usd(
     model: str | None,
+    *,
     input_tokens: int,
     output_tokens: int,
     cache_read: int = 0,
     cache_write: int = 0,
-) -> Decimal:
-    """Our own price for these tokens: max(the dated price of ``model``, the alias
-    rate). ``input_tokens`` is the inclusive prompt total."""
-    from pocketpaw.usage_tracker import price_run
+) -> Decimal | None:
+    """Provider cost of these tokens at the verified table rate for ``model``;
+    None when the model has no row. ``input_tokens`` is the inclusive prompt
+    total: (uncached + read x read rate + write x write rate) x input rate, plus
+    output x output rate, at the long-context rates past a model's tier."""
+    from pocketpaw.usage_tracker import _PRICING
 
-    priced = None
-    if model:
-        priced = price_run(
-            model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read,
-            cache_write_tokens=cache_write,
-            at=datetime.now(UTC),
-        )
-    fallback = _fallback_usd(alias, input_tokens, output_tokens, cache_read, cache_write)
-    return max(priced or Decimal(0), fallback)
+    key = _table_key(model)
+    if key is None:
+        return None
+    row = _PRICING[key]
+    rate_in = Decimal(str(row["input"]))
+    rate_out = Decimal(str(row["output"]))
+    rate_read = Decimal(str(row["cached_input"])) if "cached_input" in row else None
+    prompt = max(0, int(input_tokens))
+    read, write = max(0, int(cache_read)), max(0, int(cache_write))
+    prompt = max(prompt, read + write)
+    tier = _LONG_CONTEXT.get(key)
+    if tier is not None and prompt > tier[0]:
+        scale = tier[1] / rate_in
+        rate_in, rate_out = tier[1], tier[2]
+        rate_read = rate_read * scale if rate_read is not None else None
+    if rate_read is None:
+        rate_read = rate_in * CACHE_READ_RATE
+    plain = prompt - read - write
+    usd = (
+        Decimal(plain) * rate_in
+        + Decimal(read) * rate_read
+        + Decimal(write) * rate_in * CACHE_WRITE_RATE
+        + Decimal(max(0, int(output_tokens))) * rate_out
+    )
+    return usd / Decimal(1_000_000)
 
 
-def price_key(alias: str, model: str | None) -> str:
-    """What a learned rate scale is kept under: the model, else the alias."""
-    return model or f"alias:{alias}"
-
-
-def rate_scale(alias: str, model: str | None) -> float:
-    return _RATE_SCALE.get(price_key(alias, model), 1.0)
+def is_priced(model: str | None) -> bool:
+    return _table_key(model) is not None
 
 
 def reserve_micro(alias: str, model: str | None, input_tokens: int, output_tokens: int) -> int:
     """The hold: the whole prompt (plus the SDK's overhead) written to the cache
-    and the full output cap, at our price times the model's learned scale."""
+    and the full output cap, at ``model``'s verified rate. Raises ``Unpriced``."""
     prompt = max(0, int(input_tokens)) + SDK_OVERHEAD_TOKENS
-    usd = _estimate_usd(alias, model, prompt, output_tokens, cache_write=prompt)
-    usd *= Decimal(str(rate_scale(alias, model)))
+    usd = price_usd(model, input_tokens=prompt, output_tokens=output_tokens, cache_write=prompt)
+    if usd is None:
+        raise Unpriced(model)
     # +1 so a rounding step can never make the hold smaller than the settle.
     return _rate_card().to_micro_credits(usd) + 1
 
 
-def _cache_parts(usage: dict[str, Any] | None) -> tuple[int, int]:
-    usage = usage or {}
-    read = max(0, int(usage.get("cache_read_tokens") or 0))
-    write = max(0, int(usage.get("cache_write_tokens") or 0))
-    return read, write
+def billed_model(model: str | None, usage: dict[str, Any] | None) -> str | None:
+    """The model a call is priced as: the one the backend says answered, else the
+    one that was asked for."""
+    reported = str((usage or {}).get("model") or "").strip()
+    return reported or model
 
 
 def cost_usd(
     alias: str, model: str | None, usage: dict[str, Any] | None, tokens: tuple[int, int]
 ) -> Decimal:
-    """Provider cost (before markup) of one call: the meter's ``resolve_cost`` over
-    the backend's usage (its reported cost, else the dated price of ``model``, else
-    of the model the usage names), else the alias's fallback rate. ``tokens`` is
-    (inclusive input, output); it prices a call whose usage carries no counts."""
-    from pocketpaw_ee.cloud.metering.service import resolve_cost
+    """Provider cost (before markup) of one call, from its TOKENS at the verified
+    table rate of the model that ran (``billed_model``). The backend's own
+    ``total_cost_usd`` is never used (the CLI's figure for Haiku 5.5 fit Opus
+    rates). ``tokens`` is (inclusive input, output) and prices a call whose usage
+    carries no counts. Raises ``Unpriced`` for a model with no row."""
+    from pocketpaw_ee.cloud.metering.service import _prompt_tokens
 
     input_tokens, output_tokens = tokens
     if input_tokens <= 0 and output_tokens <= 0:
         return Decimal(0)
-    priced = dict(usage or {})
-    priced["model"] = model or priced.get("model")
-    if not (priced.get("input_tokens") or priced.get("output_tokens")):
-        # No counts from the backend: price the estimate. Cache fields would be
-        # added on top of an inclusive total, so they go.
-        for key in ("cache_read_tokens", "cache_write_tokens", "cached_input_tokens"):
-            priced.pop(key, None)
-        priced.update(input_tokens=input_tokens, output_tokens=output_tokens)
-    try:
-        exact = resolve_cost(priced, at=datetime.now(UTC)).cost_usd_exact
-        if exact is not None and exact > 0:
-            return Decimal(exact)
-    except Exception:  # noqa: BLE001 - a call must not die over its own price
-        logger.warning("site_ai: resolve_cost failed; using the fallback rate", exc_info=True)
-    read, write = _cache_parts(usage)
-    return _fallback_usd(alias, input_tokens, output_tokens, read, write)
-
-
-def observe(
-    alias: str,
-    model: str | None,
-    usage: dict[str, Any] | None,
-    tokens: tuple[int, int],
-    cost: Decimal,
-) -> float:
-    """Record what a call cost against our own estimate for its tokens; returns
-    the ratio. A ratio above the key's scale raises it at once; a lower one lets
-    it decay slowly (never below 1), so holds err high."""
-    input_tokens, output_tokens = tokens
-    read, write = _cache_parts(usage)
-    estimate = _estimate_usd(alias, model, input_tokens, output_tokens, read, write)
-    if estimate <= 0 or cost <= 0:
-        return 0.0
-    ratio = float(cost / estimate)
-    key = price_key(alias, model)
-    old = _RATE_SCALE.get(key, 1.0)
-    new = ratio if ratio > old else 0.9 * old + 0.1 * ratio
-    new = min(RATE_SCALE_MAX, max(1.0, new))
-    if new == 1.0:
-        _RATE_SCALE.pop(key, None)
-        return ratio
-    if key not in _RATE_SCALE and len(_RATE_SCALE) >= _RATE_SCALE_KEYS:
-        _RATE_SCALE.pop(next(iter(_RATE_SCALE)))
-    _RATE_SCALE[key] = new
-    return ratio
+    usage = usage or {}
+    ran = billed_model(model, usage)
+    if usage.get("input_tokens") or usage.get("output_tokens"):
+        prompt, read, write = _prompt_tokens(usage)
+        output_tokens = max(0, int(usage.get("output_tokens") or 0))
+    else:
+        prompt, read, write = input_tokens, 0, 0
+    usd = price_usd(
+        ran,
+        input_tokens=prompt,
+        output_tokens=output_tokens,
+        cache_read=read,
+        cache_write=write,
+    )
+    if usd is None:
+        raise Unpriced(ran)
+    return usd
 
 
 def to_micro(usd: Decimal) -> int:
@@ -273,10 +258,11 @@ __all__ = [
     "clear_offline",
     "cost_usd",
     "is_offline",
+    "Unpriced",
+    "billed_model",
+    "is_priced",
     "mark_offline",
-    "observe",
-    "price_key",
-    "rate_scale",
+    "price_usd",
     "reserve_micro",
     "to_micro",
 ]

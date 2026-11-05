@@ -113,9 +113,9 @@ async def gateway_token(site) -> str:
 
 
 DEFAULT_AGENT = "agent-default"
-# Unpriced on purpose: a call then costs the alias fallback rate, the same rate its
-# hold was sized at, so cap tests stay exact.
-RAN_MODEL = "site-ai-test-model"
+# The model every faked agent runs: a priced table model (site AI refuses one it
+# cannot price), so holds and settles are both priced from the same rates.
+RAN_MODEL = "claude-sonnet-5-5"
 
 
 def ok(text: str = "Hello there", tokens_in: int = 10, tokens_out: int = 5, **kw):
@@ -197,7 +197,7 @@ class FakeLlm:
         self.payer_calls.append((workspace_id, user_id, agent_id))
         if self.payer is None:
             return None
-        return SideTarget(agent_id=agent_id or DEFAULT_AGENT, payer=self.payer)
+        return SideTarget(agent_id=agent_id or DEFAULT_AGENT, payer=self.payer, model=RAN_MODEL)
 
     async def _stream(self, **kwargs):
         self.calls.append(kwargs)

@@ -22,8 +22,7 @@
 #      Unavailable("limit", wallet_empty); then the worst case is reserved against
 #      every cap (budget.py; a BYOK call only against the owner's own caps) ->
 #      Unavailable("limit", budget_exhausted)
-# ``Unavailable`` answers a streaming request with one ``unavailable`` SSE event and
-# a JSON request with its 402 / 503.
+# ``Unavailable`` answers a stream with one ``unavailable`` event, JSON with 402 / 503.
 #
 # Then ONE side completion (llm.py -> cloud.chat.side_completion) on the alias's
 # agent and model, as the site owner. Every stream ends with ``done``,
@@ -37,16 +36,18 @@
 # output, costs nothing; one that started and then failed or was cancelled costs its
 # usage, else its input estimate plus what streamed. A stream is cut at the output
 # cap (finish ``length``), and no call costs more than its hold. Input tokens are the
-# inclusive prompt total (cache reads and writes included). ``_price`` prices the
-# tokens (``aliases.cost_usd``), clamps an overrun to the hold (WARNING with the
-# ratio) and feeds ``aliases.observe`` so the next hold for that model covers it;
-# ``_persist`` writes the ``ChatRunDoc`` (context ``site_ai``, no content, the payer
-# as ``credential_source``), settles the hold, checks the owner's alert thresholds,
-# writes an opted-in transcript, asks for the wallet debit (``bill_run``,
-# ``run:{id}``; never for BYOK) and logs ``site_ai.call`` with ``ttft_ms`` /
-# ``total_ms`` / ``hold_ratio``. A finished stream sends ``usage`` and ``done``
-# first and persists after, in a shielded task, so the writes never delay ``done``
-# and a disconnect after it cannot skip them; ``record`` runs both in order.
+# inclusive prompt total (cache reads and writes included). A model with no
+# verified price is refused at admission (ERROR, alias offline). ``_price`` prices
+# the tokens at the table rate of the model that ran (``aliases.cost_usd``; the
+# CLI's ``total_cost_usd`` is only logged, as ``cli_cost_usd``), WARNs when the
+# backend reports another model than the one pinned, and clamps an overrun to the
+# hold (WARNING with the ratio). ``_persist`` writes the ``ChatRunDoc`` (context
+# ``site_ai``, no content, payer as ``credential_source``), settles the hold, checks
+# alerts, writes an opted-in transcript, asks for the debit (``bill_run``,
+# ``run:{id}``; never BYOK) and logs ``site_ai.call`` (models requested/reported,
+# ``cli_cost_usd``, ``hold_ratio``, ``ttft_ms``, ``total_ms``). A finished stream
+# sends ``usage`` and ``done`` first, then persists in a shielded task (a disconnect
+# after ``done`` cannot skip it); ``record`` runs both in order.
 
 from __future__ import annotations
 
@@ -124,7 +125,8 @@ class Admitted:
     ran_model: str | None = None  # the model that answers (pricing; operators only)
     kind: str = "chat"
     keep_transcript: bool = False
-    price_model: str | None = None  # the model the hold was priced for (``observe``)
+    model_reported: str | None = None  # the model the backend says answered
+    cli_cost_usd: float | None = None  # the backend's own cost figure, logged only
     started: float = 0.0  # monotonic, when the model call was asked for
     ttft_ms: int | None = None  # first text delta (streams only)
     total_ms: int | None = None  # the model call's end
@@ -367,7 +369,14 @@ async def _reserve(call: Admitted, budget: Any, allowance: int) -> None:
     cap that applies, atomically, before the model is called. A BYOK call runs on
     the workspace's own key: only the owner's own caps hold it (no plan allowance,
     no wallet)."""
-    call.price_model = call.ran_model
+    if not aliases.is_priced(call.ran_model):
+        logger.error(
+            "site_ai: run %s model %s has no verified price; refusing the call",
+            call.run_id,
+            call.ran_model or "<unresolved>",
+        )
+        aliases.mark_offline(call.workspace_id, call.pocket_id, call.alias, "model.unpriced")
+        raise Unavailable("temporary", "provider_unavailable", stream=call.stream)
     amount = aliases.reserve_micro(call.alias, call.ran_model, call.input_estimate, call.max_tokens)
     byok = call.payer == "byok"
     caps = budget_mod.caps_for(
@@ -478,20 +487,46 @@ def _price(
     usage: dict[str, Any] | None = None,
     model: str | None = None,
 ) -> _Bill:
-    """Price one finished call. The hold is the most a call may cost the site: an
-    overrun is clamped to it and logged at WARNING with its ratio, and the real
-    cost teaches ``aliases.observe`` so the next hold for that model covers it."""
+    """Price one finished call from its tokens at the verified rate of the model
+    that ran. The hold is the most a call may cost the site: an overrun is clamped
+    to it and logged at WARNING with its ratio."""
     input_tokens, output_tokens = max(0, int(input_tokens)), max(0, int(output_tokens))
     if model:
         call.ran_model = model
     tokens = (input_tokens, output_tokens)
-    cost = aliases.cost_usd(call.alias, call.ran_model, usage, tokens)
-    micro = aliases.to_micro(cost)
-    if micro:
+    usage = usage or {}
+    call.model_reported = str(usage.get("model") or "") or None
+    reported_cost = usage.get("total_cost_usd")
+    if isinstance(reported_cost, (int, float)) and not isinstance(reported_cost, bool):
+        call.cli_cost_usd = float(reported_cost)
+    if call.model_reported and call.ran_model and call.model_reported != call.ran_model:
+        logger.warning(
+            "site_ai: run %s model mismatch: requested=%s reported=%s",
+            call.run_id,
+            call.ran_model,
+            call.model_reported,
+        )
+    try:
+        cost = aliases.cost_usd(call.alias, call.ran_model, usage, tokens)
+    except aliases.Unpriced as exc:
+        # The backend answered on a model we hold no verified price for. Never a
+        # guessed rate: the call is priced at the pinned model it was admitted on.
+        logger.error(
+            "site_ai: run %s ran on %s, which has no verified price; pricing it as %s",
+            call.run_id,
+            exc.model,
+            call.ran_model,
+        )
+        unpinned = {k: v for k, v in usage.items() if k != "model"}
         try:
-            aliases.observe(call.alias, call.price_model, usage, tokens, cost)
-        except Exception:  # noqa: BLE001 - the learned rate is only a hold hint
-            logger.debug("site_ai: rate observe failed", exc_info=True)
+            cost = aliases.cost_usd(call.alias, call.ran_model, unpinned, tokens)
+        except aliases.Unpriced:
+            cost = None
+    if cost is None:
+        # Not even the admitted model prices (never expected): bill the hold.
+        micro = call.hold.reserved if call.hold is not None else 0
+        return _Bill(status, input_tokens, output_tokens, output, Decimal(0), micro, 1.0)
+    micro = aliases.to_micro(cost)
     ratio = micro / call.hold.reserved if call.hold is not None and call.hold.reserved else 0.0
     if call.hold is not None and micro > call.hold.reserved:
         # The platform absorbs an overrun (a backend with no output cap, a price
@@ -503,7 +538,7 @@ def _price(
             micro,
             call.hold.reserved,
             ratio,
-            call.price_model or call.ran_model,
+            call.model_reported or call.ran_model,
         )
         cost = cost * Decimal(call.hold.reserved) / Decimal(micro)
         micro = call.hold.reserved
@@ -577,7 +612,8 @@ async def _persist(call: Admitted, bill: _Bill) -> None:
             logger.warning("site_ai: transcript failed for run %s", call.run_id, exc_info=True)
     logger.info(
         "site_ai.call run=%s site=%s alias=%s caller=%s payer=%s status=%s in=%d out=%d "
-        "micro=%d hold_ratio=%.2f ttft_ms=%s total_ms=%s",
+        "micro=%d model_requested=%s model_reported=%s cli_cost_usd=%s hold_ratio=%.2f "
+        "ttft_ms=%s total_ms=%s",
         call.run_id,
         call.site_id,
         call.alias,
@@ -587,6 +623,9 @@ async def _persist(call: Admitted, bill: _Bill) -> None:
         input_tokens,
         output_tokens,
         micro,
+        call.ran_model or "-",
+        call.model_reported or "-",
+        "-" if call.cli_cost_usd is None else call.cli_cost_usd,
         bill.hold_ratio,
         "-" if call.ttft_ms is None else call.ttft_ms,
         "-" if call.total_ms is None else call.total_ms,

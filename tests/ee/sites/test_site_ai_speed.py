@@ -3,11 +3,12 @@
 #
 # Production (2026-11-05, Haiku 5.5 on the Claude SDK backend): almost every call
 # wrote its whole prompt to the cache (cache_write ~750-1250 tokens) and the
-# backend's reported cost ran up to twice the hold ("cost 1638700 over its 813751
-# hold; billing the hold"), so the platform absorbed the difference. These tests
-# pin: a hold that covers a prompt written to cache, a hold that learns a model's
-# real rate after one overrun, ``done`` sent before the billing writes, and a
-# system prompt that stays byte-identical per site across calls.
+# CLI's reported cost (Opus rates on a Haiku call) ran up to twice the hold while
+# owners were billed from that figure, about 40x the Haiku price. These tests pin:
+# pricing from tokens at the verified table rate (never the CLI's figure), a hold
+# that covers a prompt written to cache, unpriced models refused, the model pinned
+# and logged, ``done`` sent before the billing writes, and a system prompt that
+# stays byte-identical per site across calls.
 from __future__ import annotations
 
 import logging
@@ -37,7 +38,6 @@ def _env(monkeypatch):
     from pocketpaw.security.rate_limiter import RateLimiter
 
     monkeypatch.setattr(aliases, "_OFFLINE", {})
-    monkeypatch.setattr(aliases, "_RATE_SCALE", {}, raising=False)
     monkeypatch.setenv("CLOUD_ENCRYPTION_KEY", Fernet.generate_key().decode())
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
     monkeypatch.setattr(redis_client, "get_redis", lambda: fake)
@@ -85,48 +85,129 @@ def test_the_hold_covers_a_prompt_written_to_the_cache():
         "cache_write_tokens": estimate - 2,
         "output_tokens": cap,
     }
-    for model in ("claude-haiku-4-5", "claude-sonnet-4-5", None):
+    for model in ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"):
         hold = aliases.reserve_micro("fast", model, estimate, cap)
         cost = aliases.to_micro(aliases.cost_usd("fast", model, usage, (estimate, cap)))
         assert cost <= hold, f"{model}: cost {cost} over hold {hold}"
 
 
-async def test_a_reported_cost_over_the_hold_is_logged_and_the_next_hold_covers_it(
+def test_the_production_call_prices_at_haiku_rates_not_the_clis_figure():
+    """Production: in=2, out=22, cache_write=752 on claude-haiku-5-5, and the CLI
+    reported total_cost_usd=0.0065918 (Opus 5.5 rates). Site AI prices the tokens
+    from the verified table and ignores the CLI's figure.
+
+    FAILS before the fix: the reported cost won (about 40x the Haiku price)."""
+    from decimal import Decimal
+
+    from pocketpaw_ee.site_ai import aliases
+
+    usage = {
+        "input_tokens": 2,
+        "output_tokens": 22,
+        "cached_input_tokens": 752,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 752,
+        "total_cost_usd": 0.0065918,
+        "model": "claude-haiku-5-5",
+    }
+    cost = aliases.cost_usd("fast", None, usage, (754, 22))
+    # 2 x $0.10 + 752 x $0.125 (a write is 1.25x input) + 22 x $0.50, per MTok
+    expected = (
+        Decimal(2) * Decimal("0.10")
+        + Decimal(752) * Decimal("0.125")
+        + Decimal(22) * Decimal("0.50")
+    ) / Decimal(1_000_000)
+    assert cost == expected
+
+
+def test_haiku_5_5_bills_its_long_context_tier_past_100k():
+    from decimal import Decimal
+
+    from pocketpaw_ee.site_ai import aliases
+
+    m = Decimal(1_000_000)
+    short = aliases.price_usd("claude-haiku-5-5", input_tokens=100_000, output_tokens=1000)
+    long = aliases.price_usd("claude-haiku-5-5", input_tokens=100_001, output_tokens=1000)
+    assert short == (Decimal(100_000) * Decimal("0.10") + Decimal(1000) * Decimal("0.50")) / m
+    assert long == (Decimal(100_001) * Decimal("0.50") + Decimal(1000) * Decimal("2.50")) / m
+
+
+def test_an_unknown_model_has_no_price():
+    from pocketpaw_ee.site_ai import aliases
+
+    for model in ("mystery-model", "claude", "", None):
+        assert aliases.price_usd(model, input_tokens=10, output_tokens=10) is None
+    usage = {"input_tokens": 10, "output_tokens": 10, "model": "mystery-model"}
+    with pytest.raises(aliases.Unpriced):
+        aliases.cost_usd("fast", None, usage, (10, 10))
+
+
+async def test_an_unpriced_model_is_refused_before_the_call(beanie_test_db, monkeypatch, caplog):
+    """A model with no verified price never runs: nothing could bill it honestly."""
+    from pocketpaw_ee.cloud.chat import side_completion
+    from pocketpaw_ee.cloud.chat.side_completion import SideTarget
+
+    site, token = await _setup()
+    fake = FakeLlm(monkeypatch)
+
+    async def _target(workspace_id, user_id, agent_id):
+        return SideTarget(agent_id="agent-x", payer="platform", model="mystery-model")
+
+    monkeypatch.setattr(side_completion, "resolve_target", _target)
+    caplog.set_level(logging.ERROR, logger="pocketpaw_ee.site_ai.chat")
+    async with client() as c:
+        resp = await _post(c, site, token, _body(stream=False))
+
+    assert resp.status_code == 503
+    assert fake.calls == []
+    assert any("no verified price" in r.getMessage() for r in caplog.records)
+
+
+async def test_the_call_log_names_requested_and_reported_models(
     beanie_test_db, monkeypatch, caplog
 ):
-    """The backend's reported cost can price a model above anything we hold for
-    it (production: 1638700 against an 813751 hold). The overrun is clamped and
-    logged at WARNING with its ratio, and the next hold for that model is sized
-    from what it really cost, so it does not overrun again.
-
-    FAILS before the fix: every call held the same and overran the same."""
-    from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc
-
+    """The CLI's own cost is kept only as a comparison field, and a backend that
+    answers on another model than the one pinned is a WARNING."""
     site, token = await _setup()
     usage = {
         "input_tokens": 2,
-        "output_tokens": 19,
-        "cached_input_tokens": 40,
+        "output_tokens": 22,
+        "cache_write_tokens": 752,
         "cache_read_tokens": 0,
-        "cache_write_tokens": 40,
-        # Far above any rate we hold at, as the CLI's own price list can be.
-        "total_cost_usd": 0.01,
+        "total_cost_usd": 0.0065918,
         "model": "claude-haiku-5-5",
     }
-    FakeLlm(monkeypatch, script=["Hi!", ok("Hi!", usage=usage)])
-    caplog.set_level(logging.WARNING, logger="pocketpaw_ee.site_ai.chat")
+    FakeLlm(monkeypatch, script=["Hi", ok("Hi", usage=usage)])
+    caplog.set_level(logging.INFO, logger="pocketpaw_ee.site_ai.chat")
     async with client() as c:
-        await _post(c, site, token, _body(max_output_tokens=64))
-        await _post(c, site, token, _body(max_output_tokens=64))
+        await _post(c, site, token, _body())
 
-    rows = await SiteAiCallDoc.find_all().sort("+created_at").to_list()
-    assert len(rows) == 2
-    first, second = rows
-    assert first.actual_micro == first.reserved_micro  # clamped at its hold
-    over = [r for r in caplog.records if "over its" in r.getMessage()]
-    assert over and "ratio=" in over[0].getMessage()
-    assert second.reserved_micro >= second.actual_micro
-    assert len(over) == 1, "the second call must not overrun its hold again"
+    line = next(r.getMessage() for r in caplog.records if "site_ai.call" in r.getMessage())
+    assert "model_requested=claude-sonnet-5-5" in line
+    assert "model_reported=claude-haiku-5-5" in line
+    assert "cli_cost_usd=0.0065918" in line
+    assert any(
+        r.levelno == logging.WARNING and "model mismatch" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_site_calls_pin_their_model():
+    """Every site AI side call asks the side completion for an explicit model."""
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.site_ai import llm
+
+    call = SimpleNamespace(
+        messages=[{"role": "user", "content": "hi"}],
+        response_format=None,
+        max_tokens=64,
+        workspace_id="ws",
+        owner_id="u",
+        agent_id=None,
+        model=None,
+    )
+    kw = llm._kwargs(call)
+    assert kw["pin_model"] is True and kw["isolated"] is True
 
 
 # ------------------------------------------------------------------ latency

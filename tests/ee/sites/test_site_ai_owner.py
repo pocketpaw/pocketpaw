@@ -244,7 +244,7 @@ def targets(monkeypatch):
         if workspace_id != WS or agent_id not in payers:
             return None
         return side_completion.SideTarget(
-            agent_id=agent_id or "agent-default", payer=payers[agent_id]
+            agent_id=agent_id or "agent-default", payer=payers[agent_id], model="claude-sonnet-5-5"
         )
 
     async def _unknown(model):

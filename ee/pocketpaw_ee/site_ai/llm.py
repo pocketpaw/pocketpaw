@@ -9,6 +9,10 @@
 # backend extras, so the system prompt is exactly what ``render`` builds from the
 # site's (or its preset's) system messages.
 #
+# ``pin_model``: the call always names its model (the alias's pick, else the
+# agent's, else the backend's resolved default), so the backend never auto-selects
+# one and the model billed is the model asked for.
+#
 # ``render`` turns the OpenAI-shaped history into one delimited transcript
 # (``<turn role="...">`` blocks inside ``<conversation>``; a turn's own text cannot
 # open or close a block, the concierge ``_data`` rule). Image parts (``data:`` URLs
@@ -147,6 +151,7 @@ def _kwargs(call: Any) -> dict[str, Any]:
         "timeout_s": TIMEOUT_S,
         "images": images(call.messages),
         "isolated": True,
+        "pin_model": True,
     }
 
 

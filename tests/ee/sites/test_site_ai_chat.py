@@ -366,6 +366,7 @@ async def test_only_validated_fields_reach_the_model(beanie_test_db, monkeypatch
         "timeout_s",
         "images",
         "isolated",
+        "pin_model",
     }
     assert sent["isolated"] is True
     assert sent["images"] == []
