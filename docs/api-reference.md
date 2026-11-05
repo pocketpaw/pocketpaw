@@ -3600,9 +3600,10 @@ should treat as "no stage data".
 
 ```json
 { "alpha": ["/agents/activity", "/agents/health", "/calendar", "backend:codex_cli", "..."],
-  "hidden": ["/automations", "/belt", "/code", "/ship", "..."],
+  "hidden": ["/automations", "/belt", "/code", "..."],
   "preview": { "/belt-next": "in-the-works", "/fabric": "in-the-works-blocking",
-               "/foresight": "in-the-works", "/pockets": "in-the-works" } }
+               "/foresight": "in-the-works", "/pockets": "in-the-works",
+               "/ship": "in-the-works-blocking" } }
 ```
 
 - Ids are paw-enterprise route paths, matched by path segment (`p === id ||

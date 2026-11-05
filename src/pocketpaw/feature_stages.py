@@ -43,7 +43,6 @@ HIDDEN: frozenset[str] = frozenset(
         "/studio/vector",
         "/studio/photo",
         "/studio/design",
-        "/ship",
         # LiveKit is not confirmed on the hosted deployment yet.
         "/meetings",
     }
@@ -73,6 +72,7 @@ PREVIEW: dict[str, str] = {
     "/belt-next": "in-the-works",
     "/pockets": "in-the-works",
     "/fabric": "in-the-works-blocking",
+    "/ship": "in-the-works-blocking",
 }
 
 PREVIEW_VARIANTS: frozenset[str] = frozenset({"in-the-works", "in-the-works-blocking"})

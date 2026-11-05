@@ -76,10 +76,11 @@ def test_every_preview_value_is_a_known_variant():
     assert set(PREVIEW.values()) <= PREVIEW_VARIANTS
 
 
-def test_pockets_and_fabric_preview_ship_hidden():
+def test_pockets_preview_fabric_and_ship_blocking():
     assert PREVIEW["/pockets"] == "in-the-works"
     assert PREVIEW["/fabric"] == "in-the-works-blocking"
-    assert "/ship" in HIDDEN
+    assert PREVIEW["/ship"] == "in-the-works-blocking"
+    assert "/ship" not in HIDDEN
 
 
 def test_agent_health_lives_under_agents():
