@@ -6,10 +6,11 @@
 # the session allowlist is per (workspace, session, user) and fails closed; the
 # REST facade never reads the whole file, retries a short 429 once, cools down on a
 # long one with the upgrade link, maps 403/404, refreshes once on a token refusal
-# and caches by the file's last_touched_at; the outline keeps a node budget and an
-# envelope no layer name can escape; SVG sanitising and raster re-encoding; the
-# tools refuse unpasted files before any request, never use another workspace's
-# grant, save screenshots as references, and ride the /sites allow-list.
+# and downloads renders only from Figma's image hosts; the outline keeps a node
+# budget and an envelope no layer name can escape; SVG sanitising and raster
+# re-encoding; the tools refuse unpasted files before any request, never use another
+# workspace's grant, save screenshots as references, and ride the /sites allow-list.
+# Call counts and the persistent cache live in test_figma_call_budget.py.
 from __future__ import annotations
 
 import io
@@ -162,7 +163,14 @@ class FakeApi:
         if path == f"/v1/files/{KEY}/meta":
             return httpx.Response(
                 200,
-                json={"file": {"name": "Site", "last_touched_at": self.touched, "role": "editor"}},
+                json={
+                    "file": {
+                        "name": "Site",
+                        "last_touched_at": self.touched,
+                        "version": "101",
+                        "role": "editor",
+                    }
+                },
             )
         if path == f"/v1/files/{KEY}":
             assert params == {"depth": "2"}
@@ -272,21 +280,20 @@ async def test_never_reads_the_whole_file(api):
     paths = [(p, q) for p, q in api.calls if p == f"/v1/files/{KEY}"]
     assert paths == [(f"/v1/files/{KEY}", {"depth": "2"})]
     nodes = [q for p, q in api.calls if p.endswith("/nodes")]
-    assert nodes == [{"ids": "1:2", "depth": "6"}]
+    # The index's other viewport (1:3) rides along in the same call.
+    assert nodes == [{"ids": "1:2,1:3", "depth": "6"}]
 
 
-async def test_cache_follows_last_touched_at(api):
-    source = _source(api)
-    await source.nodes(KEY, ["1:2"], 3)
-    await source.nodes(KEY, ["1:2"], 3)
-    assert api.count("/nodes") == 1
-    from pocketpaw_ee.sites.figma import client
+async def test_renders_come_only_from_figmas_image_hosts(api, image_host):
+    from pocketpaw_ee.sites.figma.client import FigmaError
 
-    # The file changes: once the 10-minute meta entry lapses the next read is fresh.
-    api.touched = "2026-11-02T00:00:00Z"
-    client._memory.pop(f"figma:m:conn-1:{KEY}")
-    await source.nodes(KEY, ["1:2"], 3)
-    assert api.count("/nodes") == 2
+    api.status[f"/v1/images/{KEY}"] = httpx.Response(
+        200, json={"images": {"1:2": "https://evil.test/x.png"}}
+    )
+    with pytest.raises(FigmaError) as err:
+        await _source(api).read_render(KEY, ["1:2"], "png", 1.0)
+    assert err.value.code == "render_refused"
+    assert image_host == []
 
 
 async def test_short_429_is_waited_out_once(api):
@@ -505,12 +512,22 @@ class FakeSource:
         self.calls.append(("nodes", key, tuple(ids), depth))
         return _nodes(",".join(ids))
 
-    async def render(self, key, ids, fmt, scale):
-        self.calls.append(("render", key, tuple(ids), fmt, scale))
-        return {i: f"https://{RENDER_HOST}/images/{i}.{fmt}" for i in ids}
+    async def read_render(self, key, ids, fmt="png", scale=1.0, *, strict=True):
+        self.calls.append(("read_render", key, tuple(ids), fmt, scale))
+        if fmt == "svg":
+            svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script/><path d="M0 0"/></svg>'
+            return dict.fromkeys(ids, svg)
+        return dict.fromkeys(ids, _png(1440, 900))
+
+    async def read_raster(self, key, ids):
+        self.calls.append(("read_raster", key, tuple(ids)))
+        return dict.fromkeys(ids, _png(1440, 900))
 
     async def variables(self, key):
         return {}
+
+    async def reads_used(self, key):
+        return 2
 
 
 @pytest.fixture
@@ -627,7 +644,7 @@ def image_host(monkeypatch):
     return seen
 
 
-async def test_screenshot_saves_a_reference(tools, image_host):
+async def test_screenshot_saves_a_reference(tools):
     await _paste()
     saved = SimpleNamespace(
         reference_id="ref_0123456789abcdef", width=1440, height=900, viewport="desktop"
@@ -640,20 +657,20 @@ async def test_screenshot_saves_a_reference(tools, image_host):
     assert out["content"][0]["type"] == "image"
     assert "ref_0123456789abcdef" in out["content"][-1]["text"]
     assert save.await_args.kwargs == {"workspace_id": "w", "pocket_id": "p1"}
-    assert image_host == [f"https://{RENDER_HOST}/images/1:2.png"]
-    assert ("render", KEY, ("1:2",), "png", 1.0) in tools.source.calls
+    assert ("read_render", KEY, ("1:2",), "png", 1.0) in tools.source.calls
 
 
-async def test_screenshot_refuses_a_render_on_another_host(tools, image_host):
+async def test_screenshot_refuses_a_render_on_another_host(tools):
+    from pocketpaw_ee.sites.figma.client import FigmaError
+
     await _paste()
 
-    async def render(key, ids, fmt, scale):
-        return {i: "https://evil.test/x.png" for i in ids}
+    async def read_render(key, ids, fmt="png", scale=1.0, *, strict=True):
+        raise FigmaError("render_refused", "the render came from an unknown host.")
 
-    tools.source.render = render
+    tools.source.read_render = read_render
     out = await tools.mcp._screenshot_handler({"url": URL})
     assert "figma_render_refused" in out["content"][0]["text"]
-    assert image_host == []
 
 
 async def test_screenshot_refuses_a_pocket_in_another_workspace(tools, image_host):
@@ -667,7 +684,7 @@ async def test_screenshot_refuses_a_pocket_in_another_workspace(tools, image_hos
     assert tools.source.calls == []
 
 
-async def test_assets_sanitise_svg_and_store_rasters(tools, image_host):
+async def test_assets_sanitise_svg_and_store_rasters(tools):
     await _paste()
     store = SimpleNamespace(
         put=AsyncMock(return_value=SimpleNamespace(url="https://assets.test/a.webp"))
