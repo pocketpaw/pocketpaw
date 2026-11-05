@@ -1,66 +1,51 @@
 """
-Claude Agent SDK backend for PocketPaw: runs a turn on the Claude Code CLI
-through ``claude_agent_sdk``, keeping one warm CLI subprocess per backend.
+Claude Agent SDK backend: runs a turn on the Claude Code CLI through
+``claude_agent_sdk``, keeping one warm CLI subprocess per backend.
 
-Per-turn state. The SDK applies ``ClaudeAgentOptions`` (system prompt, MCP
-servers, cwd, plugins) only at ``connect()``; a reused client is sent the query
-text and nothing else. So the system prompt holds only session-stable layers,
-and what changes per turn rides the user message in a ``<turn-context>`` block
-(``compose_turn_message``): the caller's ``turn_context`` (KB hits, scope,
-uploads, recall) and the stored history the client has not seen. Each client
-carries a ``_HistoryWatermark``: a turn whose history extends it sends only the
-delta; a diverged history (edit/delete) evicts the client and the replacement
-gets the whole conversation. Stateless launches get the full history,
-native-resume launches none. ``prewarm`` therefore takes no history.
+Per-turn state. Options (system prompt, MCP servers, cwd, plugins) apply only at
+``connect()``, so the system prompt holds session-stable layers and per-turn
+context rides the query text in a ``<turn-context>`` block (``compose_turn_message``).
+A ``_HistoryWatermark`` per client sends only unseen history; a diverged history
+evicts the client. Stateless launches get the full history, native-resume none.
 
-Warm-client key (``_client_cache_key``): session key, cwd, model, allowed and denied
-tools, the prompt's ``stable_digest`` (else a hash of its behavioural prefix), the
-plugin/skills digest, the tenant scope, a per-run ``max_turns`` override and any
-surface-scoped MCP servers the client carries. Any change forces a fresh
-subprocess; the same key gates reuse of a supervisor-leased client (WH-1).
-Skill plugin dirs are content-addressed, shared and reference-counted: each
-run holds one while it streams and the backend caches one per skill set for
-warm clients (a live CLI is bound to its path). The content fingerprint is in
-the plugin digest, so an edited skill rebuilds the client, and a warm or leased
-client whose plugin dir vanished is rebuilt rather than reused.
+Warm-client key (``_client_cache_key``): session, cwd, model, allowed and denied
+tools, the prompt's ``stable_digest`` (else its behavioural prefix), the skills
+digest, tenant scope, a ``max_turns`` override and surface-scoped MCP servers. Any
+change forces a fresh subprocess; the key also gates supervisor-leased clients.
+Skill plugin dirs are content-addressed and reference-counted; a client whose
+plugin dir vanished is rebuilt.
+
+Side completions: an ``isolated`` run with tools off (a site's AI API) never
+touches the warm client. It takes a pre-connected, never-queried standby
+(``claude_sdk_standby.SideStandbys``, keyed like the warm client minus the
+session), sends its one conversation and drops the client; a replacement connects
+in the background. No client ever serves two conversations.
 
 Lifecycle invariants:
-  * A run holds the client via ``_client_in_use`` + ``_lease_token``; only that
-    run releases the lease, and its teardown touches only the client it drove.
-    ``cleanup()`` never releases a lease.
-  * ``prewarm`` never evicts: it no-ops while the client is in use (re-checked
-    under ``_client_lock``) or when a client that already served the session is
-    live, and it takes the turn's ``model_override`` / ``tools_enabled``.
-  * Every ``connect()`` goes through ``_connect_client``, bounded by
-    ``claude_sdk_connect_timeout``; the stateless path bounds its first event
-    by the same setting. A failed connect is disconnected and never cached.
+  * Only the run holding ``_client_in_use`` + ``_lease_token`` releases it and
+    tears down only the client it drove; ``cleanup()`` never releases a lease.
+  * ``prewarm`` never evicts a client in use or one that already served the
+    session, and takes the turn's ``model_override`` / ``tools_enabled``.
+  * Every ``connect()`` is bounded by ``claude_sdk_connect_timeout`` (the stateless
+    path bounds its first event the same way); a failed connect is never cached.
   * A stream that ends without its ResultMessage tears down the backend's own
-    client, or interrupts and retires a supervisor-leased one (``warm_client`` /
-    ``on_client_built``, WH-1).
-  * ``stop(session_key)`` stops only that session's runs (``_RunState``).
-  * The Bun-crash retry replays every ``run`` parameter except ``warm_client``.
-  * API-error text and error results become one error event (a too-old CLI names
+    client, or interrupts and retires a supervisor-leased one.
+  * ``stop(session_key)`` stops only that session's runs; the Bun-crash retry
+    replays every ``run`` parameter except ``warm_client``.
+  * API errors become one error event (a too-old CLI names
     ``POCKETPAW_CLAUDE_SDK_CLI_PATH``); a max-turns stop names the limit.
 
-Options: ``max_turns`` is ``claude_sdk_max_turns`` unless the caller overrides it
-for one run (a Sites app build, via the surface profile): 0 lifts the cap (no
-``max_turns`` sent), N raises it (never lowers it), None leaves it. It is fixed at
-connect(), so an override is part of the warm-client key; an ordinary turn's key
-is unchanged.
-Permissions are always bypassed (headless), ``cli_path`` comes from
-``claude_sdk_cli_path`` (else the bundled CLI), ``max_buffer_size`` is 32 MiB for
-image-returning tools. The subprocess env always carries ``MAX_MCP_OUTPUT_TOKENS``
-(unless already set) and ``ENABLE_CLAUDEAI_MCP_SERVERS=false``; ``ENABLE_TOOL_SEARCH``
-is an operator opt-in (``_apply_tool_search``).
-Tool scope: under bypass ``allowed_tools`` only auto-approves, so the turn's final
-allowed set (ToolPolicy + surface allow/deny/exclusive) is enforced by a PreToolUse
-gate on every tool (``_tool_gate_hook``, deny checked first), a pinned ``tools=``
-built-in list (plus ``_INFRA_TOOLS``) and ``disallowed_tools`` for the deny set.
-A scoped turn (deny, mode list or exclusive cap) starts only the MCP servers owning
-an allowed tool.
-Images ride every persistent send; the stateless ``query()`` cannot carry them.
-Tracing: persistent turns are read through ``receive_response()``, the method
-logfire's SDK instrumentation patches; the stateless path opens its own span.
+Options: ``max_turns`` is ``claude_sdk_max_turns`` unless a run overrides it (0
+lifts the cap, N raises it, never lowers); the override is part of the key.
+Permissions are bypassed (headless); ``cli_path`` comes from ``claude_sdk_cli_path``
+(else the bundled CLI); ``max_buffer_size`` is 32 MiB. The env always carries
+``MAX_MCP_OUTPUT_TOKENS`` (unless set) and ``ENABLE_CLAUDEAI_MCP_SERVERS=false``;
+``ENABLE_TOOL_SEARCH`` is an operator opt-in. The turn's allowed tool set is
+enforced by a PreToolUse gate (``_tool_gate_hook``, deny first), a pinned
+``tools=`` list (plus ``_INFRA_TOOLS``) and ``disallowed_tools``; a scoped turn
+starts only the MCP servers owning an allowed tool. Images ride every persistent
+send (the stateless ``query()`` cannot carry them). Persistent turns are read via
+``receive_response()`` (logfire's patched method); stateless ones open a span.
 """
 
 import asyncio
@@ -83,6 +68,7 @@ from pocketpaw.agents.backend import (
     LeasedClient,
     SessionHandle,
 )
+from pocketpaw.agents.claude_sdk_standby import SideStandbys
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.observability import detached_span
@@ -707,6 +693,24 @@ def _prune_spilled_prompts(
             logger.debug("could not prune spilled system prompt %s", candidate)
 
 
+def _without_run_stderr(options: Any) -> Any:
+    """``options`` for a standby client: the same, minus the calling run's stderr
+    sink (a standby outlives that run). Options that are not a dataclass are
+    returned as they are."""
+    import dataclasses
+
+    if dataclasses.is_dataclass(options) and not isinstance(options, type):
+        try:
+            return dataclasses.replace(options, stderr=_drop_stderr)
+        except (TypeError, ValueError):
+            return options
+    return options
+
+
+def _drop_stderr(line: str) -> None:
+    logger.debug("Claude CLI stderr (standby): %s", line)
+
+
 def _bundled_cli_path() -> Path | None:
     """The CLI shipped inside the ``claude-agent-sdk`` wheel, if there is one.
 
@@ -1209,6 +1213,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # served. ``_client_plugin_paths`` is checked before every reuse.
         self._skills_dir_by_digest: dict[str, Path] = {}
         self._client_plugin_paths: tuple[Path, ...] = ()
+        # Pre-connected one-conversation clients for isolated, tool-less side
+        # completions (``_one_shot_client``). Created on first use.
+        self._side_standbys: SideStandbys | None = None
 
         # Per-run subprocess env injected by the pocket-specialist
         # runtime via ``attach_subprocess_env`` (PR #1222 R1 Blocker 1).
@@ -2579,8 +2586,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         Does NOT release ``_client_in_use``: only the run holding the lease may,
         from its own ``finally``. Releasing it here let a second run take the
-        lease while the first was still streaming.
+        lease while the first was still streaming. Side-completion standbys are
+        disconnected too.
         """
+        if self._side_standbys is not None:
+            await self._side_standbys.close()
         if self._client is not None:
             try:
                 await self._client.disconnect()
@@ -2600,6 +2610,49 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 cleanup_run_skills(root)
             self._skills_dir_by_digest.clear()
         self._client_plugin_paths = ()
+
+    @staticmethod
+    def _is_one_shot(
+        *,
+        isolated: bool,
+        tools_enabled: bool,
+        resume_active: bool,
+        leased: bool,
+    ) -> bool:
+        """An isolated, tool-less side completion (a site's AI API): served by a
+        standby client that answers this one conversation and is then dropped."""
+        return isolated and tools_enabled is False and not resume_active and not leased
+
+    async def _one_shot_client(self, options: Any, key: str) -> Any:
+        """A connected client that has never been sent anything, for one
+        conversation: a standby when one is ready for ``key``, else connected
+        now. Either way a replacement standby is connected in the background."""
+        if self._side_standbys is None:
+            self._side_standbys = SideStandbys()
+        standbys = self._side_standbys
+        client = standbys.take(key)
+        warm = client is not None
+        if client is None:
+            client = self._ClaudeSDKClient(options=options)
+            try:
+                await self._connect_client(client)
+            except BaseException:
+                await self._discard_client(client)
+                raise
+        standby_options = _without_run_stderr(options)
+
+        async def _connect_standby() -> Any:
+            standby = self._ClaudeSDKClient(options=standby_options)
+            try:
+                await self._connect_client(standby)
+            except BaseException:
+                await self._discard_client(standby)
+                raise
+            return standby
+
+        standbys.refill(key, _connect_standby)
+        logger.info("side completion client: %s (key=%s)", "standby" if warm else "cold", key)
+        return client
 
     async def _resilient_query(self, prompt: str, options):
         """Wrap stateless _query with MessageParseError handling.
@@ -3893,6 +3946,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # disconnecting it — the supervisor owns the leased client's lifecycle.
         # None on every legacy / supervised-fresh / stateless run.
         _warm_lease: LeasedClient | None = None
+        # The one-conversation client of an isolated side completion; always
+        # dropped (in the background) when this run ends.
+        _one_shot: Any = None
         # Resolved LLM client — bound by ``_build_options`` below. Declared above
         # the try (feat/claude-sdk-prewarm) so the ``except`` handler's
         # ``llm.format_api_error`` call is safe even when ``_build_options`` itself
@@ -3988,6 +4044,46 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     history=history,
                     turn_context=turn_context,
                 )
+            # An isolated, tool-less side completion (a site's AI API) never
+            # touches the chat warm client: it takes a pre-connected standby that
+            # serves this one conversation and is dropped in the finally.
+            elif self._is_one_shot(
+                isolated=isolated,
+                tools_enabled=tools_enabled,
+                resume_active=_resume_active,
+                leased=False,
+            ):
+                try:
+                    _one_shot = await self._one_shot_client(
+                        options,
+                        self._client_cache_key(
+                            options,
+                            session_key="side",
+                            plugin_digest=plugin_digest,
+                            tenant_scope=self._tenant_scope_key(),
+                            system_prompt_digest=system_prompt_digest,
+                            turn_cap=self._raised_turn_cap(options),
+                        ),
+                    )
+                    turn_text = self._turn_query_text(
+                        None, message, history=history, turn_context=turn_context
+                    )
+                    await _one_shot.query(
+                        stream_one_message(
+                            build_streaming_user_message(turn_text, image_attachments)
+                        )
+                        if image_attachments
+                        else turn_text
+                    )
+                    event_stream = self._resilient_receive(_one_shot)
+                except Exception as client_err:
+                    logger.warning(
+                        "Side completion client failed, falling back to stateless query: %s",
+                        client_err,
+                    )
+                    if _one_shot is not None and self._side_standbys is not None:
+                        self._side_standbys.discard(_one_shot)
+                    _one_shot = None
             # fix/claude-sdk-warm-client-skills: the warm-client bypass for skill
             # runs is REMOVED. ``_client_cache_key`` now folds in
             # ``plugin_digest`` (the skill-identity hash), so a warm client can
@@ -4689,6 +4785,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # its lifecycle and keeps it warm.
             if _warm_lease is not None:
                 _warm_lease.busy = False
+            if _one_shot is not None and self._side_standbys is not None:
+                self._side_standbys.discard(_one_shot)
             self._active_runs.pop(_run_token, None)
             # Release this run's own reference to the skills plugin dir
             # (entity-rooms A2). The warm-client cache holds its own reference

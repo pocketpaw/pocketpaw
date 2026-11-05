@@ -17,6 +17,9 @@
 # platform turn, the BYOK provider/model check, and the no-keyless-guest rule.
 # Then ONE ``pool.run`` with tools off, a fresh ``side:<uuid>`` session key and
 # the caller's system prompt, under ``baggage(paw.internal=true)`` and a timeout.
+# On the Claude SDK an isolated run takes a pre-connected standby client that serves
+# that one conversation (``agents.claude_sdk_standby``). Deltas are yielded as the
+# backend emits them; the log line carries ``latency`` and ``ttft`` (streams).
 #
 # Invariants:
 #   * ``isolated=True`` (a caller that is not the agent's user, e.g. a site's AI
@@ -398,10 +401,10 @@ def _finish(
     return _result(plan, text=text, usage=usage)
 
 
-def _log(result: SideCompletion, started: float) -> None:
+def _log(result: SideCompletion, started: float, first_text: float | None = None) -> None:
     logger.info(
         "side completion: agent=%s backend=%s model=%s fallback=%s failure=%s code=%s "
-        "latency=%.2fs usage=%s",
+        "latency=%.2fs ttft=%s usage=%s",
         result.agent_id,
         result.backend,
         result.model,
@@ -409,6 +412,7 @@ def _log(result: SideCompletion, started: float) -> None:
         result.failure,
         result.code,
         time.monotonic() - started,
+        "-" if first_text is None else f"{first_text - started:.2f}s",
         result.usage,
     )
 
@@ -501,6 +505,7 @@ async def agent_stream(
     yields only that result. Never raises; ``timeout_s`` bounds the whole run,
     as there."""
     started = time.monotonic()
+    first_text: float | None = None
     plan: _Plan | None = None
     chunks: list[str] = []
     usage: dict[str, Any] | None = None
@@ -534,6 +539,8 @@ async def agent_stream(
                     if kind == "started":
                         yield STARTED
                     elif kind == "text":
+                        if first_text is None:
+                            first_text = time.monotonic()
                         chunks.append(value)
                         yield value
                     elif kind == "usage":
@@ -552,7 +559,7 @@ async def agent_stream(
             if plan is not None
             else _fail("error", "side.unexpected", agent_id=agent_id, model=model)
         )
-    _log(result, started)
+    _log(result, started, first_text)
     yield result
 
 
