@@ -585,6 +585,24 @@
       "expected_id": "capability:sites.ai_visibility",
       "rank_within": 1,
       "note": "The Staff site's monthly AI visibility card."
+    },
+    {
+      "intent": "add an AI chatbot that answers questions about my menu",
+      "expected_id": "capability:sites.site_ai",
+      "rank_within": 1,
+      "note": "Site AI: an AI feature on a site goes through get_site_ai_settings and the paw-ai recipe, not a provider SDK."
+    },
+    {
+      "intent": "build an ai recipe generator on my site",
+      "expected_id": "capability:sites.site_ai",
+      "rank_within": 1,
+      "note": "Site AI: a generator feature."
+    },
+    {
+      "intent": "summarise my menu with ai",
+      "expected_id": "capability:sites.site_ai",
+      "rank_within": 1,
+      "note": "Site AI: a summariser feature."
     }
   ]
 }

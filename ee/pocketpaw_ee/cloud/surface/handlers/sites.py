@@ -41,6 +41,8 @@
 # ``sites-app-plan`` skill: PLAN.md and a user check before any UI file, then
 # every milestone back to back in one turn; ``_APP_PLAN_REFINE_RULE`` does the same
 # on a project refine, where the user's go-ahead usually lands.
+# ``_SITE_AI_RULE`` (inside ``_PROJECT_LOOP``) sends AI features to
+# ``get_site_ai_settings`` and its ``how_to``, never a provider SDK or key.
 #
 # Cache keys: create and chat read only ``meta`` (``meta_key``); refine and
 # import-create read live state, so they answer ``content_key`` of the rendered text.
@@ -1025,7 +1027,7 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "`mcp__pocketpaw_sites_manager__list_site_templates`, then "
         "`mcp__pocketpaw_sites_manager__start_site_from_template` ONCE (it returns the "
         "pocket_id and the repo's AGENTS.md), then follow the loop below. Never call a "
-        "`create_*_site` tool or the pocket specialist: every new site is a project.\n"
+        "`create_*_site` tool or the pocket specialist.\n"
         + _PROJECT_LOOP
         + "On `static` there is no server route, so a contact form follows this "
         "contract:\n"
@@ -1262,14 +1264,14 @@ _CRAFT_FLOOR = (
 # Updated 2026-09-27 (feat/sites-visual-research). The half of "is it ready" that
 # _VERIFY_RULE cannot answer: a page that builds cleanly can still look wrong, and
 # nothing let the agent see it. ``preview_site`` returns the draft as images.
+# Create only, after ``_PROJECT_LOOP``: the loop already carries the devices, the
+# two-round limit and the not-visually-checked line, so this rule does not repeat them.
 _LOOK_RULE = (
     "LOOK BEFORE YOU SHOW IT: once verification is `passed`, call "
-    "`mcp__pocketpaw_sites_manager__preview_site` (desktop, then `device: mobile`) "
-    "and look at the page the way a visitor will, next to the references you "
-    "opened. Fix what is off (a weak or empty fold, a placeholder that reads as a "
-    "blob, crowding, overlap, a section that lost the direction) and look again; "
-    "two rounds at most. If it errors, say the page was not visually checked "
-    "rather than implying it was. "
+    "`mcp__pocketpaw_sites_manager__preview_site` as the loop above says and look at "
+    "the page the way a visitor will, next to the references you opened. Fix what "
+    "is off (a weak or empty fold, a placeholder that reads as a blob, crowding, "
+    "overlap, a section that lost the direction). "
 )
 
 # Four rules from the 2026-10-21 Sites user simulation, each with several readers
@@ -1472,6 +1474,17 @@ def _react_write_scope() -> str:
     )
 
 
+# AI features had no pointer in any always-loaded text: the playbook lives in
+# ``sites_ai.HOW_TO``, returned only by ``get_site_ai_settings``, and the
+# pocketpaw-site skill is at its byte cap. So "add a chatbot" could end in a provider
+# SDK and a request for an API key. It rides ``_PROJECT_LOOP``, so create,
+# import-create and project refine all carry it once.
+_SITE_AI_RULE = (
+    "AI FEATURES (chatbots, generators, summarisers, vision, RAG): call "
+    "`get_site_ai_settings` first and follow its `how_to`; never a provider SDK or API "
+    "key. "
+)
+
 #: The loop the project tools run, shared by the create and refine branches. The tool
 #: names are read off ``agent/mcp_servers/sites_project.py``; every one rides
 #: ``SITES_TOOL_IDS``. ``request_site_secret`` is the secrets lane's tool and may be
@@ -1485,7 +1498,9 @@ _PROJECT_LOOP = (
     "`delete_site_files` on the SAME pocket_id. There is no rippleSpec, no pocket specialist "
     "and no create_*_site call here. Follow the repo's AGENTS.md (read_site_file it) over "
     "your framework defaults. Backend features come from recipes: "
-    "`list_site_recipes`, then `apply_site_recipe`; do its glue tasks in order. For each "
+    "`list_site_recipes`, then `apply_site_recipe`; do its glue tasks in order. "
+    + _SITE_AI_RULE
+    + "For each "
     "secret a recipe names, call `request_site_secret` (or, if that tool is missing, "
     "tell the user which secrets to set in the site's settings); NEVER write a secret "
     "value into a file. Every write saves the DRAFT and queues a build "

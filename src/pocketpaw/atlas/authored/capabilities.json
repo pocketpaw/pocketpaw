@@ -584,6 +584,30 @@
       ]
     },
     {
+      "id": "capability:sites.site_ai",
+      "kind": "capability",
+      "name": "AI features on a Paw Site",
+      "summary": "Add an AI feature to a site (a chatbot, a generator, a summariser, vision, search over its content) on Paw's AI, with no provider SDK and no API key.",
+      "narrative": "A site's AI features call Paw's AI API under the site's own budget. The builder agent reads the site's AI settings, budget and presets first, then follows the returned how_to: apply the paw-ai recipe and call AI from the site's server code by default; browser calls only when the app truly needs them, with browser access turned on and a preset so visitors cannot change the system prompt. The owner sets the daily and monthly caps (the agent never sets money); calls stop at the cap and every AI screen shows a friendly resting state instead of an error. Free sites get AI in the draft preview only.",
+      "how": "mcp__pocketpaw_sites_manager__get_site_ai_settings (first; returns how_to), mcp__pocketpaw_sites_manager__set_site_ai_settings, mcp__pocketpaw_sites_manager__upsert_site_ai_preset, then apply_site_recipe with the paw-ai recipe",
+      "surface": "/sites",
+      "requires": [
+        "role:member"
+      ],
+      "keywords": [
+        "ai chatbot",
+        "chatbot on my site",
+        "ai feature",
+        "ai generator",
+        "summarise",
+        "summarize",
+        "paw ai",
+        "site ai budget",
+        "openai api key",
+        "llm on my site"
+      ]
+    },
+    {
       "id": "capability:sites.ai_visibility",
       "kind": "capability",
       "name": "Monthly AI visibility check for a Staff site",
