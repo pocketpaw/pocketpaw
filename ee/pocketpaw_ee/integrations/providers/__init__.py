@@ -19,6 +19,7 @@ from pocketpaw_ee.integrations.providers.airtable import AirtableProvider
 from pocketpaw_ee.integrations.providers.base import IntegrationProvider
 from pocketpaw_ee.integrations.providers.brevo import BrevoProvider
 from pocketpaw_ee.integrations.providers.demo import DemoProvider, demo_enabled
+from pocketpaw_ee.integrations.providers.figma import FigmaProvider
 from pocketpaw_ee.integrations.providers.google_sheets import GoogleSheetsProvider
 from pocketpaw_ee.integrations.providers.hubspot import HubSpotProvider
 from pocketpaw_ee.integrations.providers.lead_webhook import LeadWebhookProvider
@@ -54,6 +55,7 @@ _PROVIDERS: tuple[IntegrationProvider, ...] = (
     AirtableProvider(),
     SupabaseProvider(),
     ResendProvider(),
+    FigmaProvider(),
 )
 
 _INTERNAL = (LeadWebhookProvider(),)
