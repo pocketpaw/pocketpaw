@@ -1,0 +1,29 @@
+[
+  {
+    "label": "pytest errors are credited as caught mutations",
+    "file": "scripts/mutate.py",
+    "find": "proc.returncode not in (0, 1)",
+    "replace": "False",
+    "tests": [
+      "tests/test_mutate_run_errors.py::test_test_run_errors_abort_and_restore_the_applied_mutation"
+    ]
+  },
+  {
+    "label": "preexisting failures are credited to the mutation",
+    "file": "scripts/mutate.py",
+    "find": "(baseline and proc.returncode != 0)",
+    "replace": "False",
+    "tests": [
+      "tests/test_mutate_run_errors.py::test_preexisting_failures_stop_the_sweep_before_mutating"
+    ]
+  },
+  {
+    "label": "a test-target string is split into characters",
+    "file": "scripts/mutate.py",
+    "find": "not isinstance(tests, list)",
+    "replace": "False",
+    "tests": [
+      "tests/test_mutate_run_errors.py::test_malformed_test_targets_are_rejected_before_mutating"
+    ]
+  }
+]
