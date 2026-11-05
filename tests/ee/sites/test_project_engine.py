@@ -1014,3 +1014,32 @@ def test_stage_script_refuses_paths_outside_the_project(tmp_path: Path, assets_d
     code, _output = _run_stage(project)
     assert code != 0
     assert not (project / ".paw" / "out").exists()
+
+
+@pytest.mark.asyncio
+async def test_project_native_artifact_records_the_viewing_origin_for_the_bridge(
+    beanie_test_db, monkeypatch
+):
+    """The preview proxy bakes ``builder_origin_for(pocket)`` into the injected edit
+    bridge, which drops every command from any other origin. A project draft's view
+    must record the browser's Origin like every other lane, or a dashboard that moved
+    hosts keeps a bridge that only trusts the old one and Select silently does nothing."""
+    from pocketpaw_ee.sites import preview_proxy
+
+    records = _Records()
+    monkeypatch.setattr(verify_store, "default_verify_store", lambda: records)
+    monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", "https://configured.paw.test")
+    pocket_id = await _make_project_pocket()
+    # The origin an earlier view recorded, before the dashboard moved.
+    records.write(pocket_id, verify_store.VIEW_ORIGIN_KEY, {"origin": "https://old.paw.test"})
+
+    await sites_service.get_native_artifact(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        builder_origin="https://os.paw.test",
+        _store=_Store(),
+        _pool=_Pool(),
+    )
+
+    assert preview_proxy.builder_origin_for(pocket_id) == "https://os.paw.test"
