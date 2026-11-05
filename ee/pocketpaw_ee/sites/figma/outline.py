@@ -9,6 +9,8 @@
 # ``site_pages`` plans the site from them: one route per frame name (slugified to
 # ``[a-z0-9-]``, deduplicated, ``/`` for Home or the first), and frames that share a
 # name across widths ("Home/Desktop", "Home/Mobile") become that route's viewports.
+# ``node_frames`` gives ``site_pages`` the same input from a ``/nodes`` answer (the
+# linked page or section's child frames), so a link with a node-id needs no index.
 #
 # UNTRUSTED. Layer names and text are written by whoever made the file. Every such
 # string goes through ``clean``: control and bidi characters stripped, whitespace
@@ -255,37 +257,61 @@ def outline(nodes_body: Mapping[str, Any], *, budget: int = MAX_NODES) -> dict[s
     return out
 
 
+_TOP_TYPES = ("FRAME", "COMPONENT", "COMPONENT_SET", "SECTION")
+#: Node types whose children are a page's frames (a page, or a section of frames).
+CONTAINER_TYPES = ("CANVAS", "SECTION")
+
+
+def _tops(nodes: Any) -> list[dict[str, Any]]:
+    tops = []
+    for frame in (nodes or [])[:100]:
+        if not isinstance(frame, Mapping) or frame.get("type") not in _TOP_TYPES:
+            continue
+        box = _box(frame)
+        tops.append(
+            {
+                "id": clean(frame.get("id"), 60),
+                "type": clean(frame.get("type"), 30),
+                "name": clean(frame.get("name")),
+                "width": box.get("width"),
+                "height": box.get("height"),
+            }
+        )
+    return tops
+
+
+def _page(page: Mapping[str, Any], tops: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"id": clean(page.get("id"), 60), "name": clean(page.get("name")), "frames": tops}
+
+
 def frames(index_body: Mapping[str, Any]) -> dict[str, Any]:
     """Pages and their top-level frames from a ``depth=2`` file read."""
     doc = index_body.get("document") if isinstance(index_body.get("document"), Mapping) else {}
-    pages: list[dict[str, Any]] = []
-    for page in (doc.get("children") or [])[:50]:
-        if not isinstance(page, Mapping):
-            continue
-        tops = []
-        for frame in (page.get("children") or [])[:100]:
-            if not isinstance(frame, Mapping):
-                continue
-            if frame.get("type") not in ("FRAME", "COMPONENT", "COMPONENT_SET", "SECTION"):
-                continue
-            box = _box(frame)
-            tops.append(
-                {
-                    "id": clean(frame.get("id"), 60),
-                    "type": clean(frame.get("type"), 30),
-                    "name": clean(frame.get("name")),
-                    "width": box.get("width"),
-                    "height": box.get("height"),
-                }
-            )
-        pages.append(
-            {"id": clean(page.get("id"), 60), "name": clean(page.get("name")), "frames": tops}
-        )
+    pages = [
+        _page(p, _tops(p.get("children")))
+        for p in (doc.get("children") or [])[:50]
+        if isinstance(p, Mapping)
+    ]
     return {
         "file": clean(index_body.get("name")),
         "last_modified": clean(index_body.get("lastModified"), 40),
         "pages": pages,
     }
+
+
+def node_frames(nodes_body: Mapping[str, Any]) -> dict[str, Any]:
+    """``frames(...)``'s shape from a ``/nodes`` answer, so a link with a node-id is
+    planned without the index read: a page or section contributes its child frames,
+    a frame contributes itself."""
+    nodes = nodes_body.get("nodes") if isinstance(nodes_body.get("nodes"), Mapping) else {}
+    pages: list[dict[str, Any]] = []
+    for entry in nodes.values():
+        doc = entry.get("document") if isinstance(entry, Mapping) else None
+        if not isinstance(doc, Mapping):
+            continue
+        kids = doc.get("children") if doc.get("type") in CONTAINER_TYPES else [doc]
+        pages.append(_page(doc, _tops(kids)))
+    return {"file": clean(nodes_body.get("name")), "pages": pages}
 
 
 _VIEWPORT_WORDS = {"desktop", "mobile", "tablet", "phone", "web", "laptop", "wide"}
