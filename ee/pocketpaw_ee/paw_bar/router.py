@@ -3048,11 +3048,12 @@ class ConversationPatchRequest(BaseModel):
     operator note; it never replaces the existing ones. ``tags`` DOES replace (a
     tag set is edited as a whole in the UI).
 
-    ``unread_for_owner`` is deliberately absent: mark-as-read has no UI yet, and
-    the store already supports the write, so this is one field away whenever a
-    surface wants it. A client must NOT fake it locally — a browser-side read flag
-    disagrees with the next poll seconds later, which reads as a counter that
-    un-marks itself. Ask for the field instead.
+    ``unread_for_owner`` is MARK-AS-READ: the only value accepted is ``0`` (422
+    otherwise), so a client clears the badge but can never set a count. The
+    owner's thread sends it when it opens a conversation with unread messages;
+    the next visitor turn counts up from zero again. Send ``conversation_id``
+    with it, or it marks the visitor's conversation in progress instead of the
+    one being read.
     """
 
     state: str | None = None
@@ -3060,6 +3061,7 @@ class ConversationPatchRequest(BaseModel):
     tags: list[str] | None = None
     note: str | None = None
     bot_paused: bool | None = None
+    unread_for_owner: int | None = None
     # WHICH of the visitor's conversations to file (2026-08-19). Absent means the
     # one in progress, which is what every pre-identity client sends and what the
     # store has always written. It is not a patchable FIELD — it is the address —
@@ -4264,6 +4266,7 @@ def _validated_conversation_fields(req: ConversationPatchRequest, author: str) -
       * ``tags`` are trimmed, de-duplicated, and capped in count and length.
       * ``note`` is capped and attributed to the CALLER, never to a client-
         supplied author.
+      * ``unread_for_owner`` accepts only ``0``: it marks the thread read.
     """
     fields: dict[str, Any] = {}
     sent = req.model_fields_set
@@ -4298,6 +4301,12 @@ def _validated_conversation_fields(req: ConversationPatchRequest, author: str) -
             }
     if "bot_paused" in sent and req.bot_paused is not None:
         fields["bot_paused"] = bool(req.bot_paused)
+    if "unread_for_owner" in sent and req.unread_for_owner is not None:
+        # Mark-as-read only. A client that could write any number could hide
+        # a visitor's messages from every other operator on the team.
+        if req.unread_for_owner != 0:
+            raise HTTPException(422, "invalid_unread_for_owner")
+        fields["unread_for_owner"] = 0
     return fields
 
 
