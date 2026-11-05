@@ -57,7 +57,9 @@ async def test_get_returns_settings_budget_presets_and_how_to(beanie_test_db, ag
     await make_site(pid, plan_tier="staff")
     body = _body(await sites_ai._get_handler({"pocket_id": pid}))
     assert body["ok"] is True
-    assert body["settings"]["plan_models"] == ["fast", "smart", "vision", "embed"]
+    assert body["settings"]["plan_models"] == ["fast", "smart", "vision"]
+    assert body["settings"]["online_models"] == ["fast", "smart", "vision"]
+    assert "online_models" in body["how_to"] and ".embed" not in body["how_to"]
     assert body["budget"]["daily_cap_micro"] > 0
     assert body["presets"] == []
     assert "pawAi(env)" in body["how_to"] and "budget_exhausted" in body["how_to"]

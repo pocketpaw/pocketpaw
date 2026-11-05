@@ -4,6 +4,8 @@
 # Reads need ``fabric.read``; every mutation needs ``sites.ai_manage`` (ADMIN) and
 # writes an audit row (service.py). The pocket must be in the caller's workspace.
 #   GET/PUT     /sites/by-pocket/{pocket_id}/ai/settings
+#   GET         /sites/by-pocket/{pocket_id}/ai/models    agents + catalog models an
+#               alias can be mapped to (``alias_models`` on settings)
 #   GET/POST    /sites/by-pocket/{pocket_id}/ai/presets
 #   GET/PUT/DELETE /sites/by-pocket/{pocket_id}/ai/presets/{preset_id}
 #   GET/PUT     /sites/by-pocket/{pocket_id}/ai/budget
@@ -15,7 +17,8 @@
 #   POST /sites/{site_id}/ai/ticket  site key + origin gate + Turnstile -> visitor ticket
 #   POST /sites/{site_id}/ai/chat    PAW_GATEWAY_TOKEN (the site's Worker), or the site
 #                                    key + origin gate + ticket (browser / own preview)
-#   POST /sites/{site_id}/ai/embed   the same callers as chat
+#   POST /sites/{site_id}/ai/embed   the same callers as chat; always 503 (embeddings
+#                                    aren't offered)
 #
 # Wire shapes are pinned by the Sites AI apps contract; see dto.py. Mounted in
 # ``cloud.mount_cloud``; listed in tests/cloud/auth/test_route_auth_audit.py.
@@ -30,6 +33,7 @@ from pocketpaw_ee.site_ai import chat, embed, service
 from pocketpaw_ee.site_ai.dto import (
     SiteAiBudget,
     SiteAiBudgetPut,
+    SiteAiModels,
     SiteAiPreset,
     SiteAiPresetBody,
     SiteAiSettings,
@@ -61,6 +65,13 @@ async def put_settings(
     _: object = _MANAGE,
 ) -> SiteAiSettings:
     return await service.put_settings(ctx.workspace_id or "", ctx.user_id, pocket_id, body)
+
+
+@router.get(_SITE + "/models", response_model=SiteAiModels)
+async def list_models(
+    pocket_id: str, ctx: RequestContext = Depends(request_context), _: object = _READ
+) -> SiteAiModels:
+    return await service.list_models(ctx.workspace_id or "", ctx.user_id, pocket_id)
 
 
 @router.get(_SITE + "/presets", response_model=list[SiteAiPreset])

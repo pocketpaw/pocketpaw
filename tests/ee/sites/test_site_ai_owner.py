@@ -25,7 +25,9 @@ async def test_settings_defaults_and_plan_models(beanie_test_db):
         "browser_access": False,
         "require_preset_for_browser": False,
         "allowed_models": ["fast"],
-        "plan_models": ["fast", "vision", "embed"],
+        "plan_models": ["fast", "vision"],
+        "online_models": ["fast", "vision"],
+        "alias_models": {},
         "keep_transcripts": False,
     }
 
@@ -223,3 +225,137 @@ def test_ai_manage_is_admin():
     from pocketpaw_ee.guards.actions import ACTIONS
 
     assert ACTIONS["sites.ai_manage"].minimum.name == "ADMIN"
+
+
+# ---------------------------------------------------------------- alias models
+
+
+@pytest.fixture
+def targets(monkeypatch):
+    """Agents ``agent-a`` / ``agent-byok`` resolve in WS (the second pays BYOK);
+    the gateway serves every model except ``ghost-model``."""
+    from pocketpaw_ee.cloud.chat import side_completion
+    from pocketpaw_ee.cloud.chat.runs import run_core
+    from pocketpaw_ee.site_ai import aliases
+
+    payers = {None: "platform", "agent-a": "platform", "agent-byok": "byok"}
+
+    async def _resolve(workspace_id, user_id, agent_id):
+        if workspace_id != WS or agent_id not in payers:
+            return None
+        return side_completion.SideTarget(
+            agent_id=agent_id or "agent-default", payer=payers[agent_id]
+        )
+
+    async def _unknown(model):
+        return model == "ghost-model"
+
+    monkeypatch.setattr(side_completion, "resolve_target", _resolve)
+    monkeypatch.setattr(run_core, "_model_is_unknown_to_gateway", _unknown)
+    monkeypatch.setattr(aliases, "_OFFLINE", {})
+
+
+@pytest.mark.asyncio
+async def test_alias_models_are_checked_saved_and_shown(beanie_test_db, targets):
+    from pocketpaw_ee.site_ai import aliases
+
+    pid = await make_pocket()
+    await make_site(pid, plan_tier="staff")
+    url = BASE.format(pid=pid) + "/settings"
+    aliases.mark_offline(WS, pid, "smart", "model.not_available")
+    async with client() as c:
+        before = await c.get(url)
+        good = await c.put(
+            url,
+            json={
+                "alias_models": {
+                    "fast": {"agent_id": "agent-a", "model": "claude-haiku-5-5"},
+                    "smart": {"agent_id": "agent-byok", "model": "ghost-model"},
+                    "vision": {},
+                }
+            },
+        )
+        unknown_agent = await c.put(url, json={"alias_models": {"fast": {"agent_id": "nope"}}})
+        unknown_model = await c.put(
+            url, json={"alias_models": {"fast": {"agent_id": "agent-a", "model": "ghost-model"}}}
+        )
+        extra = await c.put(url, json={"alias_models": {"fast": {"system_prompt": "x"}}})
+        embed = await c.put(url, json={"alias_models": {"embed": {"agent_id": "agent-a"}}})
+    assert before.json()["online_models"] == ["fast", "vision"]  # smart is offline
+    assert good.status_code == 200, good.text
+    assert good.json()["alias_models"] == {
+        "fast": {"agent_id": "agent-a", "model": "claude-haiku-5-5"},
+        # A BYOK agent's own provider judges its model at call time.
+        "smart": {"agent_id": "agent-byok", "model": "ghost-model"},
+    }
+    # A new mapping gives every alias a fresh try.
+    assert good.json()["online_models"] == ["fast", "smart", "vision"]
+    assert unknown_agent.json()["error"]["code"] == "site_ai.agent_not_found"
+    assert unknown_model.json()["error"]["code"] == "site_ai.model_not_available"
+    assert extra.status_code == 422 and embed.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_members_cannot_change_alias_models(beanie_test_db, targets):
+    pid = await make_pocket()
+    async with client(role="member") as c:
+        resp = await c.put(BASE.format(pid=pid) + "/settings", json={"alias_models": {"fast": {}}})
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_models_lists_the_workspace_agents_and_the_chat_catalog(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.catalog import service as catalog_service
+    from pocketpaw_ee.catalog.models import Modality, ModelCatalogEntry
+    from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
+
+    asked = []
+
+    async def _list_models(**kw):
+        asked.append(kw)
+        return [
+            ModelCatalogEntry(
+                id="anthropic/claude-haiku-5-5",
+                display_name="Claude Haiku 5.5",
+                provider="anthropic",
+                modality=Modality("chat"),
+            )
+        ]
+
+    monkeypatch.setattr(catalog_service, "list_models", _list_models)
+    default = Agent(
+        workspace=WS, name="Paw", slug="pocketpaw", owner="someone", visibility="workspace"
+    )
+    mine = Agent(
+        workspace=WS,
+        name="Writer",
+        slug="writer",
+        owner="user-owner",
+        config=AgentConfig(backend="claude_agent_sdk", model="claude-sonnet-5-5"),
+    )
+    hidden = Agent(workspace=WS, name="Theirs", slug="theirs", owner="someone-else")
+    elsewhere = Agent(workspace=OTHER_WS, name="Other", slug="other", owner="user-owner")
+    for doc in (default, mine, hidden, elsewhere):
+        await doc.insert()
+    pid = await make_pocket()
+    async with client() as c:
+        resp = await c.get(BASE.format(pid=pid) + "/models")
+    async with client(workspace_id=OTHER_WS) as c:
+        foreign = await c.get(BASE.format(pid=pid) + "/models")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["default_agent_id"] == str(default.id)
+    agents = {a["name"]: a for a in body["agents"]}
+    assert set(agents) == {"Paw", "Writer"}  # never another user's private agent
+    assert agents["Paw"]["default"] is True
+    assert agents["Writer"] == {
+        "id": str(mine.id),
+        "name": "Writer",
+        "backend": "claude_agent_sdk",
+        "model": "claude-sonnet-5-5",
+        "default": False,
+    }
+    assert [m["id"] for m in body["models"]] == ["anthropic/claude-haiku-5-5"]
+    assert asked == [{"modality": "chat"}] and body["catalog_error"] is False
+    assert "system_prompt" not in resp.text
+    assert foreign.status_code == 404

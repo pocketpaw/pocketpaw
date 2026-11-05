@@ -1376,25 +1376,6 @@ class Settings(BaseSettings):
             "cap can only lower the global one."
         ),
     )
-    # Site AI apps (``pocketpaw_ee.site_ai``): what each model alias a site may
-    # name runs on, as a LiteLLM model name on the proxy. Sites only ever see the
-    # alias; these names never reach a response, an error or a log line.
-    site_ai_model_fast: str = Field(
-        default="claude-haiku-4-5",
-        description="LiteLLM model behind the site AI `fast` alias.",
-    )
-    site_ai_model_smart: str = Field(
-        default="claude-sonnet-4-6",
-        description="LiteLLM model behind the site AI `smart` alias.",
-    )
-    site_ai_model_vision: str = Field(
-        default="claude-haiku-4-5",
-        description="LiteLLM model behind the site AI `vision` alias (must accept images).",
-    )
-    site_ai_model_embed: str = Field(
-        default="text-embedding-3-small",
-        description="LiteLLM embedding model behind the site AI `embed` alias.",
-    )
     # The concierge product catalog (``pocketpaw.paw_bar.catalog_store``). A plan
     # split can come later the way the knowledge-source caps do it.
     pawbar_catalog_max_items: int = Field(

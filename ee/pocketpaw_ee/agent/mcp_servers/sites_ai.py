@@ -2,8 +2,9 @@
 #
 # Three tools on the ``pocketpaw_sites_manager`` server (registered in sites.py,
 # ids in SITES_TOOL_IDS so the /sites allow-list keeps them):
-#   get_site_ai_settings   settings, budget (caps + spend) and presets of one site,
-#                          plus ``how_to``: the build guidance for AI features.
+#   get_site_ai_settings   settings (incl. the alias -> agent/model mapping and which
+#                          aliases are online), budget (caps + spend) and presets of
+#                          one site, plus ``how_to``: the build guidance for AI features.
 #   set_site_ai_settings   turn AI on, browser access, the preset rule, allowed models,
 #                          and push the "set a budget" card (SSE
 #                          ``site_ai_budget_requested``) so the owner picks caps.
@@ -37,16 +38,21 @@ SITE_AI_TOOL_IDS = (
 HOW_TO = (
     "AI features call Paw's AI API; never put a provider key in code or ask for one. "
     "Default: call AI from the site's server code. Apply the `paw-ai` recipe and use "
-    "`pawAi(env).chat({model, messages, tools?, response_format?})` or `.stream(...)` "
-    "(OpenAI-shaped; model is an alias: fast, smart or vision; `embed` via .embed). "
-    "The platform sets env.PAW_GATEWAY_TOKEN, PAW_API_BASE and PAW_SITE_ID. Tool calls "
-    "come back to your code to run; Paw never runs them. Browser calls (`Paw.ai.chat` / "
-    "`Paw.ai.stream` in paw.js) only when the app truly needs them: turn on "
-    "browser_access with set_site_ai_settings, prefer a preset (upsert_site_ai_preset) "
-    "so visitors can't change the system prompt, and keep secrets out of the page. "
-    "Every AI screen needs a friendly resting state for `budget_exhausted` / "
-    "`unavailable` (the site's AI budget ran out or is paused): never a raw error. "
-    "Free sites get AI in the draft preview only."
+    "`pawAi(env).chat({model, messages, response_format?})` or `.stream(...)` "
+    "(OpenAI-shaped; model is an alias: fast, smart or vision). Use only aliases in "
+    "settings.online_models; each runs on the workspace agent and model the owner "
+    "picked (settings.alias_models, Site settings > AI > Models), so never name a "
+    "provider model. No tool calling (tools and tool results are a 400 `unsupported`) "
+    "and no embeddings endpoint, so keep tool logic and retrieval in the site's own "
+    "code and ask for JSON with response_format. Images go to `vision` only, inline as "
+    "data: URLs; a 400 `unsupported` means the owner's model for it can't see images. "
+    "The platform sets env.PAW_GATEWAY_TOKEN, PAW_API_BASE and PAW_SITE_ID. Browser "
+    "calls (`Paw.ai.chat` / `Paw.ai.stream` in paw.js) only when the app truly needs "
+    "them: turn on browser_access with set_site_ai_settings, prefer a preset "
+    "(upsert_site_ai_preset) so visitors can't change the system prompt, and keep "
+    "secrets out of the page. Every AI screen needs a friendly resting state for "
+    "`budget_exhausted` / `unavailable` (the site's AI budget ran out, is paused, or "
+    "the model is down): never a raw error. Free sites get AI in the draft preview only."
 )
 
 
@@ -249,10 +255,11 @@ def make_site_ai_tools(tool: Any) -> list[Any]:
         "get_site_ai_settings",
         (
             "Read a site's AI settings (on/off, browser access, preset rule, allowed "
-            "models, plan models), its budget (caps and spend in micro-credits; 1 credit "
-            "= 1,000,000 micro = $0.01) and presets. Call this before building any AI "
-            "feature (chat, assistant, extraction, writing tool, vision): its `how_to` "
-            "says how to call AI from the site."
+            "models, plan models, online models and the agent/model each alias runs "
+            "on), its budget (caps and spend in micro-credits; 1 credit = 1,000,000 "
+            "micro = $0.01) and presets. Call this before building any AI feature "
+            "(chat, assistant, extraction, writing tool): its `how_to` says how to "
+            "call AI from the site and what it can't do."
         ),
         {
             "type": "object",

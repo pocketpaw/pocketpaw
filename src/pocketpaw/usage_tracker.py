@@ -130,6 +130,14 @@ _PRICING: dict[str, dict[str, float]] = {
     "claude-3-opus-20240229": {"input": 15.0, "output": 75.0, "cached_input": 1.50},
     # Anthropic — current families (added 2026-08-21).
     "claude-fable-5": {"input": 10.0, "output": 50.0, "cached_input": 1.0},
+    # The 5.5 family (Anthropic's model table, cached 2026-10-06). Without these
+    # rows the longest-prefix match priced them as Opus 5 / Sonnet 5 and left
+    # Haiku 5.5 unpriced. Haiku 5.5's rate is for prompts up to 100K tokens
+    # ($0.50 / $2.50 beyond); this flat table can't tier, so a longer prompt is
+    # under-priced here. Its cache-read rate is not published there: 10% of input.
+    "claude-opus-5-5": {"input": 4.0, "output": 20.0, "cached_input": 0.20},
+    "claude-sonnet-5-5": {"input": 2.0, "output": 10.0, "cached_input": 0.20},
+    "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cached_input": 0.01},
     "claude-opus-5": {"input": 5.0, "output": 25.0, "cached_input": 0.50},
     "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cached_input": 0.50},
     "claude-opus-4-7": {"input": 5.0, "output": 25.0, "cached_input": 0.50},

@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 STATUS: dict[str, int] = {
     "invalid_request": 400,
+    "unsupported": 400,
     "unauthorized": 401,
     "budget_exhausted": 402,
     "wallet_empty": 402,
@@ -28,6 +29,7 @@ STATUS: dict[str, int] = {
 
 MESSAGES: dict[str, str] = {
     "invalid_request": "The request isn't valid.",
+    "unsupported": "Site AI can't do that yet.",
     "unauthorized": "This site isn't allowed to call that.",
     "budget_exhausted": "This site's AI budget is used up for now.",
     "wallet_empty": "AI is unavailable for this site right now.",

@@ -5,7 +5,8 @@
 # reads or writes these.
 #
 #   SiteAiSettingsDoc  one per site: on/off, browser access, preset rule, the
-#                      model aliases the owner allows, transcripts opt-in.
+#                      model aliases the owner allows and the agent / model each
+#                      runs on (``alias_models``), transcripts opt-in.
 #   SiteAiPresetDoc    owner-saved system prompt + model + caps. ``system_prompt``
 #                      is server-only: never returned to a site caller.
 #   SiteAiBudgetDoc    one per site: the caps (micro-credits), alert thresholds,
@@ -43,6 +44,8 @@ class SiteAiSettingsDoc(Document):
     browser_access: bool = False
     require_preset_for_browser: bool = False
     allowed_models: list[str] = Field(default_factory=lambda: ["fast"])
+    # alias -> {agent_id, model}; an alias left out runs on the default agent.
+    alias_models: dict[str, dict[str, str | None]] = Field(default_factory=dict)
     keep_transcripts: bool = False
     updated_at: datetime = Field(default_factory=_utcnow)
 

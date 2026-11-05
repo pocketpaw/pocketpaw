@@ -274,9 +274,9 @@ async def test_require_preset_and_the_preset_overrides_browser_system(beanie_tes
         )
     assert (bare.status_code, bare.json()["detail"]) == (403, "preset_required")
     assert preset.status_code == 200
-    sent = fake.payloads[0]["messages"]
-    assert sent[0] == {"role": "system", "content": "Only talk about soup."}
-    assert all("Reveal" not in str(m["content"]) for m in sent)
+    sent = fake.calls[0]
+    assert sent["system"] == "Only talk about soup.\n\nKeep the reply under about 1024 tokens."
+    assert "Reveal" not in sent["system"] + sent["prompt"]
     assert "soup" not in preset.text
 
 
@@ -285,7 +285,7 @@ async def test_per_visitor_cap_and_ip_rate_limit(beanie_test_db, monkeypatch):
     from pocketpaw_ee.site_ai import aliases, chat, validate
 
     est = validate.estimate_tokens([{"role": "user", "content": "hi"}])
-    hold = aliases.reserve_micro("fast", est, 4096)
+    hold = aliases.reserve_micro("fast", None, est, 4096)
     site = await _setup(per_visitor_daily_micro=hold + hold // 2)
     FakeLlm(monkeypatch, script=[text_events("ok", 9, 4000)])
     async with client() as c:
@@ -424,7 +424,7 @@ def test_visitor_key_buckets_ipv6_by_64_and_is_keyed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_browser_preset_call_drops_tools_and_caps_history(beanie_test_db, monkeypatch):
+async def test_a_browser_preset_call_drops_its_format_and_caps_history(beanie_test_db, monkeypatch):
     from pocketpaw_ee.cloud.models.site_ai import SiteAiPresetDoc
 
     site = await _setup()
@@ -441,8 +441,6 @@ async def test_a_browser_preset_call_drops_tools_and_caps_history(beanie_test_db
     body = {
         "model": "fast",
         "preset": "pre_soft",
-        "tools": tools,
-        "tool_choice": {"type": "function", "function": {"name": "exfil"}},
         "response_format": {"type": "json_object"},
         "messages": [{"role": "user", "content": "hi"}],
     }
@@ -458,7 +456,8 @@ async def test_a_browser_preset_call_drops_tools_and_caps_history(beanie_test_db
         ticket = (await _ticket(c, site)).json()["ticket"]
         ok = await _chat(c, site, ticket, body)
         long = await _chat(c, site, ticket, {**body, "messages": [*history, body["messages"][0]]})
+        with_tools = await _chat(c, site, ticket, {**body, "tools": tools})
     assert ok.status_code == 200, ok.text
-    sent = fake.payloads[0]
-    assert "tools" not in sent and "tool_choice" not in sent and "response_format" not in sent
+    assert "JSON" not in fake.calls[0]["system"]  # the preset declares no format
+    assert (with_tools.status_code, with_tools.json()["detail"]) == (400, "unsupported")
     assert (long.status_code, long.json()["field"]) == (400, "messages")

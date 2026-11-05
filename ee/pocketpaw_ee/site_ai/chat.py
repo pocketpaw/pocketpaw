@@ -4,30 +4,40 @@
 #   1. per-IP bucket (in-process)                       -> 429 rate_limited
 #   2. site_gate.authenticate: PAW_GATEWAY_TOKEN = worker; a site key from the
 #      site's own hosts = browser, from its own draft = preview -> 401 / 403
-#   3. body (<= 400 KB) parsed from an allowlist (validate.py)  -> 400 / 413
+#   3. body (<= 400 KB) parsed from an allowlist (validate.py)  -> 400 / 413;
+#      tools and tool turns -> 400 ``unsupported`` (the call runs tool-less);
+#      images only on the vision alias, as data: URLs
 #   4. browser: ``browser_access`` on (-> unavailable browser_disabled); browser and
 #      preview: a live ``X-Paw-Ai-Ticket`` of their kind from this IP (-> 401), a
 #      preset when the site requires one (-> 403 preset_required)
-#   5. preset: its system prompt, model, output cap and temperature win
+#   5. preset: its system prompt, model and output cap win
 #   6. alias allowed by the plan AND the owner, live site on a plan that sells it,
-#      images only on a vision alias, input within the alias context -> 403 / 400
-#   7. site AI off or paused                            -> Unavailable("paused")
-#   8. SiteRateCounter: Worker per site and per hashed ``user``; browser/preview
+#      input within the alias context -> 403 / 400
+#   7. the alias's agent resolves (``aliases.choice`` + ``side_completion.resolve_target``)
+#      and isn't offline -> Unavailable("temporary")
+#   8. site AI off or paused                            -> Unavailable("paused")
+#   9. SiteRateCounter: Worker per site and per hashed ``user``; browser/preview
 #      per (site, IP hash) and per site                  -> 429
-#   9. ``over_billing_limit`` on the workspace wallet -> Unavailable("limit",
-#      wallet_empty), then the worst case is reserved against every cap
-#      (budget.py) -> Unavailable("limit", budget_exhausted)
-# ``Unavailable`` answers a streaming request with one
-# ``unavailable`` SSE event and a JSON request with its 402.
+#  10. a platform-paid call: ``over_billing_limit`` on the workspace wallet ->
+#      Unavailable("limit", wallet_empty); then the worst case is reserved against
+#      every cap (budget.py; a BYOK call only against the owner's own caps) ->
+#      Unavailable("limit", budget_exhausted)
+# ``Unavailable`` answers a streaming request with one ``unavailable`` SSE event and
+# a JSON request with its 402 / 503.
 #
-# Then one LiteLLM call (llm.py) with the validated fields only, retried once when
-# a transient failure happens before the first token. Tool calls are relayed to
-# the caller and never executed. Every stream ends with ``done``, ``unavailable``
-# or ``error``. ``record`` prices the tokens (provider usage; an estimate for a cut
-# stream), writes the ``ChatRunDoc`` (context ``site_ai``, no content), settles the
-# hold to that figure (or releases it when nothing was produced), checks the
+# Then ONE side completion (llm.py -> cloud.chat.side_completion) on the alias's
+# agent and model, as the site owner. Every stream ends with ``done``,
+# ``unavailable`` or ``error``. A failure maps as: ``billing`` -> unavailable limit /
+# 402 wallet_empty; ``unsupported`` (images on a backend that can't see them) ->
+# error / 400 unsupported; ``model`` / ``no_agent`` (and a backend that can't run
+# tool-less) -> the alias goes offline + unavailable temporary / 503; ``timeout`` /
+# ``error`` -> unavailable temporary / 503. Billing: a call the model never started
+# on costs nothing (the hold is released); one that started and then failed costs
+# its usage, else its input estimate plus what streamed. ``record`` prices the
+# tokens (``aliases.cost_usd``), writes the ``ChatRunDoc`` (context ``site_ai``, no
+# content, the payer as ``credential_source``), settles the hold, checks the
 # owner's alert thresholds, writes an opted-in transcript and asks for the wallet
-# debit (``bill_run``, ``run:{id}``).
+# debit (``bill_run``, ``run:{id}``; never for BYOK).
 
 from __future__ import annotations
 
@@ -38,6 +48,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -83,38 +94,26 @@ class Admitted:
     site_id: str
     caller: str  # worker | browser | preview
     alias: str
-    provider_model: str
+    owner_id: str  # the site owner: the identity the side completion runs as
     messages: list[dict[str, Any]]
     max_tokens: int
     input_estimate: int
     stream: bool
+    agent_id: str | None = None  # None = the workspace default agent
+    model: str | None = None  # None = the agent's own model
+    payer: str = "platform"  # platform | byok
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    tools: list[dict[str, Any]] = field(default_factory=list)
-    tool_choice: Any = None
     response_format: dict[str, Any] | None = None
-    temperature: float | None = None
     preset_id: str | None = None
     preset_version: int | None = None
     ip_hash: str = ""
     user_hash: str | None = None
     visitor: str | None = None  # the per-visitor cap's key (hashed)
     hold: budget_mod.Hold | None = None
-    sent: int = 0  # provider requests that left this process (each costs its input)
-    kind: str = "chat"  # chat | embed
+    sent: bool = False  # the model started on the call (it costs its input now)
+    ran_model: str | None = None  # the model that answers (pricing; operators only)
+    kind: str = "chat"
     keep_transcript: bool = False
-
-    def payload(self) -> dict[str, Any]:
-        return llm.build_payload(
-            provider_model=self.provider_model,
-            messages=self.messages,
-            max_tokens=self.max_tokens,
-            workspace_id=self.workspace_id,
-            tags=[f"site:{self.site_id}", "site_ai", f"alias:{self.alias}"],
-            temperature=self.temperature,
-            tools=self.tools,
-            tool_choice=self.tool_choice,
-            response_format=self.response_format,
-        )
 
 
 def _hash(value: str) -> str:
@@ -166,22 +165,74 @@ def admit_browser(
     return ip_hash
 
 
+def refuse_unsupported(parsed: validate.ParsedChat) -> None:
+    """Site AI runs one tool-less completion: tools and tool turns are a clear 400
+    ``unsupported``, never silently dropped. Images go through (vision alias)."""
+    if parsed.tools or parsed.tool_choice is not None:
+        raise AiError("unsupported", "Tool calling isn't supported by site AI yet.", field="tools")
+    for i, msg in enumerate(parsed.messages):
+        if msg["role"] == "tool" or msg.get("tool_calls"):
+            raise AiError(
+                "unsupported",
+                "Tool calls and tool results aren't supported by site AI yet.",
+                field=f"messages[{i}]",
+            )
+
+
 def _apply_preset(parsed: validate.ParsedChat, preset: Any, caller: str) -> list[dict]:
     """The preset's system prompt first. For a browser (or preview) caller the preset
-    is the owner's lock, so the browser's own system messages, tools, tool choice
-    and response format are dropped (presets declare none), and its history may
-    carry at most ``MAX_BROWSER_ASSISTANT_TURNS`` assistant turns: a fabricated
-    history can still argue with the prompt, which is why the lock is soft and
-    Worker-side calls stay the default for anything secret."""
+    is the owner's lock, so the browser's own system messages and response format
+    are dropped (presets declare none), and its history may carry at most
+    ``MAX_BROWSER_ASSISTANT_TURNS`` assistant turns: a fabricated history can still
+    argue with the prompt, which is why the lock is soft and Worker-side calls stay
+    the default for anything secret."""
     messages = parsed.messages
     if caller != "worker":
         messages = [m for m in messages if m["role"] != "system"]
         if sum(m["role"] == "assistant" for m in messages) > MAX_BROWSER_ASSISTANT_TURNS:
             raise invalid("messages", "Too many assistant turns for a browser call.")
-        parsed.tools, parsed.tool_choice, parsed.response_format = [], None, None
+        parsed.response_format = None
     if preset.system_prompt:
         messages = [{"role": "system", "content": preset.system_prompt}, *messages]
     return messages
+
+
+async def _owner_id(site: Any) -> str:
+    owner = str(getattr(site, "owner", "") or "")
+    if owner:
+        return owner
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    try:
+        from beanie import PydanticObjectId
+
+        pocket = await Pocket.get(PydanticObjectId(site.pocket_id))
+    except Exception:  # noqa: BLE001 - no owner refuses below
+        return ""
+    return str(getattr(pocket, "owner", "") or "")
+
+
+async def _target(call: Admitted) -> None:
+    """The alias's agent and who pays for it, by the side completion's own
+    resolution. An agent that no longer resolves is a misconfigured alias."""
+    from pocketpaw_ee.cloud.chat import side_completion
+
+    try:
+        target = (
+            await side_completion.resolve_target(call.workspace_id, call.owner_id, call.agent_id)
+            if call.owner_id
+            else None
+        )
+    except Exception as exc:  # noqa: BLE001 - an unreadable payer refuses, never 500s
+        logger.warning(
+            "site_ai: target check failed for run %s (%s)", call.run_id, type(exc).__name__
+        )
+        raise Unavailable("temporary", "provider_unavailable", stream=call.stream) from None
+    if target is None:
+        aliases.mark_offline(call.workspace_id, call.pocket_id, call.alias, "agent.not_found")
+        raise Unavailable("temporary", "provider_unavailable", stream=call.stream)
+    call.payer = target.payer
+    call.ran_model = call.model or target.model or None
 
 
 async def admit(request: Request, site_id: str) -> Admitted:
@@ -190,19 +241,19 @@ async def admit(request: Request, site_id: str) -> Admitted:
     site, caller = await authenticate(request, site_id)
     workspace_id, pocket_id = site.workspace, site.pocket_id
     parsed = validate.parse_chat(validate.load_json(await validate.read_body(request)))
+    refuse_unsupported(parsed)
     settings = await service.load_settings(workspace_id, pocket_id)
     ip_hash = admit_browser(request, site, caller, settings, parsed.preset, parsed.stream)
 
     alias = parsed.model
     messages = parsed.messages
     cap = aliases.ALIASES[alias].max_output_tokens
-    temperature = parsed.temperature
     preset_id = preset_version = None
     if parsed.preset is not None:
         preset = await service.find_preset(workspace_id, pocket_id, parsed.preset)
         if preset is None:
             raise invalid("preset", "Unknown preset.")
-        alias, temperature = preset.model, preset.temperature
+        alias = preset.model
         cap = min(preset.max_output_tokens, aliases.ALIASES[alias].max_output_tokens)
         messages = _apply_preset(parsed, preset, caller)
         preset_id, preset_version = preset.preset_id, preset.version
@@ -216,14 +267,12 @@ async def admit(request: Request, site_id: str) -> Admitted:
     if alias not in allowed:
         raise AiError("model_not_allowed", field="model")
     spec = aliases.ALIASES[alias]
-    if parsed.images and not spec.vision:
-        raise AiError("model_not_allowed", "Images need the vision model.", field="model")
-    estimate = validate.estimate_tokens(messages, parsed.tools, parsed.response_format)
+    estimate = validate.estimate_tokens(messages, None, parsed.response_format)
     if estimate > spec.context_tokens:
         raise invalid("messages", "The conversation is too long for this model.")
-    provider_model = aliases.provider_model(alias)
-    if not provider_model:
-        raise AiError("provider_unavailable")
+    if aliases.is_offline(workspace_id, pocket_id, alias):
+        raise Unavailable("temporary", "provider_unavailable", stream=parsed.stream)
+    picked = aliases.choice(settings, alias)
 
     call = Admitted(
         site=site,
@@ -232,15 +281,14 @@ async def admit(request: Request, site_id: str) -> Admitted:
         site_id=str(site.id),
         caller=caller,
         alias=alias,
-        provider_model=provider_model,
+        owner_id=await _owner_id(site),
+        agent_id=picked.agent_id,
+        model=picked.model,
         messages=messages,
         max_tokens=min(parsed.max_output_tokens or cap, cap),
         input_estimate=estimate,
         stream=parsed.stream,
-        tools=parsed.tools,
-        tool_choice=parsed.tool_choice,
         response_format=parsed.response_format,
-        temperature=temperature,
         preset_id=preset_id,
         preset_version=preset_version,
         ip_hash=ip_hash,
@@ -253,9 +301,11 @@ async def admit(request: Request, site_id: str) -> Admitted:
         raise Unavailable(
             "paused", "budget_exhausted", "AI is paused for this site.", stream=call.stream
         )
+    await _target(call)
     await _rate_limit(call)
     call.visitor = call.user_hash if call.caller == "worker" else call.ip_hash
-    await _wallet_gate(call)
+    if call.payer != "byok":
+        await _wallet_gate(call)
     await _reserve(call, budget, site_plans.site_ai_allowance_micro(plan))
     return call
 
@@ -278,13 +328,19 @@ async def _wallet_gate(call: Admitted) -> None:
 
 async def _reserve(call: Admitted, budget: Any, allowance: int) -> None:
     """Hold the call's worst case (input estimate + full output cap) against every
-    cap that applies, atomically, before the provider is called."""
-    amount = aliases.reserve_micro(call.alias, call.input_estimate, call.max_tokens)
+    cap that applies, atomically, before the model is called. A BYOK call runs on
+    the workspace's own key: only the owner's own caps hold it (no plan allowance,
+    no wallet)."""
+    amount = aliases.reserve_micro(call.alias, call.ran_model, call.input_estimate, call.max_tokens)
+    byok = call.payer == "byok"
     caps = budget_mod.caps_for(
-        caller=call.caller, budget=budget, allowance=allowance, visitor=call.visitor
+        caller=call.caller,
+        budget=budget,
+        allowance=int(budget.monthly_cap_micro) if byok else allowance,
+        visitor=call.visitor,
     )
     try:
-        wallet = await budget_mod.wallet_cap(call.workspace_id)
+        wallet = None if byok else await budget_mod.wallet_cap(call.workspace_id)
         if wallet is not None:
             caps.append(wallet)
         call.hold = await budget_mod.reserve(
@@ -332,23 +388,31 @@ def _text_tokens(chars: str) -> int:
 
 
 async def _send(call: Admitted) -> None:
-    """Count a provider request as sent BEFORE it is made: from here on the call
+    """Count the call as sent once the model has started on it: from here on it
     costs at least its input, whatever happens to the stream or the process."""
-    call.sent += 1
+    if call.sent:
+        return
+    call.sent = True
     try:
         await budget_mod.mark_sent(call.run_id)
-    except Exception:  # noqa: BLE001 - the in-memory count still bills it
+    except Exception:  # noqa: BLE001 - the in-memory flag still bills it
         logger.warning("site_ai: could not mark run %s sent", call.run_id, exc_info=True)
 
 
-def _unsent(exc: BaseException) -> bool:
-    return isinstance(exc, llm.LlmError) and exc.kind == "connect"
+def _floor_in(call: Admitted) -> int:
+    """Input tokens to bill when the backend's own count is missing: the estimate,
+    and only for a call the model actually started on."""
+    return call.input_estimate if call.sent else 0
 
 
-def _floor_in(call: Admitted, extra_attempts: int = 0) -> int:
-    """Input tokens to bill when the provider's own count is missing: the estimate
-    for every request that left, ``extra_attempts`` beyond the counted one."""
-    return call.input_estimate * max(0, call.sent - extra_attempts)
+def _tokens(call: Admitted, result: Any, produced: str) -> tuple[int, int]:
+    """The backend's token count when it reported one, else the estimate."""
+    usage = getattr(result, "usage", None) or {}
+    tokens_in = max(0, int(usage.get("input_tokens") or 0))
+    tokens_out = max(0, int(usage.get("output_tokens") or 0))
+    if tokens_in <= 0 and tokens_out <= 0:
+        return _floor_in(call), _text_tokens(produced)
+    return tokens_in, tokens_out
 
 
 async def record(
@@ -357,14 +421,20 @@ async def record(
     input_tokens: int,
     output_tokens: int,
     output: str = "",
-    tool_calls: list[dict[str, Any]] | None = None,
+    *,
+    usage: dict[str, Any] | None = None,
+    model: str | None = None,
 ) -> int:
     """Price and persist one finished call; returns its micro-credits. Never raises.
-    ``output`` / ``tool_calls`` only feed an opted-in transcript."""
+    ``output`` only feeds an opted-in transcript. A BYOK call is priced (the site's
+    own caps count it) but never debited."""
     input_tokens, output_tokens = max(0, int(input_tokens)), max(0, int(output_tokens))
-    micro = aliases.actual_micro(call.alias, input_tokens, output_tokens)
+    if model:
+        call.ran_model = model
+    cost = aliases.cost_usd(call.alias, call.ran_model, usage, (input_tokens, output_tokens))
+    micro = aliases.to_micro(cost)
     try:
-        await _write_run(call, status, input_tokens, output_tokens)
+        await _write_run(call, status, input_tokens, output_tokens, cost)
     except Exception:  # noqa: BLE001 - bookkeeping must not break the answer
         logger.warning("site_ai: run doc failed for run %s", call.run_id, exc_info=True)
         try:
@@ -392,16 +462,17 @@ async def record(
                     model=call.alias,
                     messages=call.messages,
                     output=output,
-                    tool_calls=tool_calls or [],
+                    tool_calls=[],
                 )
         except Exception:  # noqa: BLE001 - a transcript never breaks the answer
             logger.warning("site_ai: transcript failed for run %s", call.run_id, exc_info=True)
     logger.info(
-        "site_ai.call run=%s site=%s alias=%s caller=%s status=%s in=%d out=%d micro=%d",
+        "site_ai.call run=%s site=%s alias=%s caller=%s payer=%s status=%s in=%d out=%d micro=%d",
         call.run_id,
         call.site_id,
         call.alias,
         call.caller,
+        call.payer,
         status,
         input_tokens,
         output_tokens,
@@ -423,11 +494,12 @@ async def _still_keeps_transcripts(call: Admitted) -> bool:
 
 async def _debit_direct(call: Admitted, micro: int) -> None:
     """The run doc couldn't be written, so ``bill_run`` will never see this call:
-    debit it here under the same ``run:{run_id}`` key (live mode bills at the proxy)."""
+    debit it here under the same ``run:{run_id}`` key (live mode bills at the proxy;
+    a BYOK call ran on the workspace's own key and is never debited)."""
     from pocketpaw_ee.cloud.credits import service as credits_service
     from pocketpaw_ee.cloud.llm_provisioning import service as provisioning_service
 
-    if micro <= 0 or provisioning_service.spend_mode() == "live":
+    if micro <= 0 or call.payer == "byok" or provisioning_service.spend_mode() == "live":
         return
     await credits_service.debit(
         workspace=call.workspace_id,
@@ -446,7 +518,9 @@ async def _debit_direct(call: Admitted, micro: int) -> None:
     )
 
 
-async def _write_run(call: Admitted, status: str, input_tokens: int, output_tokens: int) -> None:
+async def _write_run(
+    call: Admitted, status: str, input_tokens: int, output_tokens: int, cost: Any
+) -> None:
     from pocketpaw_ee.cloud.chat.runs import service as run_service
     from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 
@@ -470,13 +544,14 @@ async def _write_run(call: Admitted, status: str, input_tokens: int, output_toke
         surface_meta={"site_id": call.site_id, "caller": call.caller, "alias": call.alias},
     )
     await run_service.create_run(spec)
-    # ``model`` is the alias label the owner's spend views show; the provider id is
-    # kept in ``provider_model`` for operators only. ``total_cost_usd`` carries the
-    # provider cost, so the meter prices this run without needing the provider id.
-    cost = aliases.actual_cost_usd(call.alias, input_tokens, output_tokens)
+    # ``bill_run`` never debits a ``byok`` run: the workspace's own key paid.
+    await run_service.set_credential_source(call.run_id, call.payer)
+    # ``model`` is the alias label the owner's spend views show; the model that ran
+    # is kept in ``provider_model`` for operators only. ``total_cost_usd`` carries
+    # the provider cost, so the meter prices this run without needing the model.
     usage = {
         "model": f"site-ai/{call.alias}",
-        "provider_model": call.provider_model,
+        "provider_model": call.ran_model,
         "total_cost_usd": float(cost),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -491,7 +566,8 @@ async def _write_run(call: Admitted, status: str, input_tokens: int, output_toke
         )
     else:
         await run_service.mark_terminal(call.run_id, status=status, usage=usage)
-    _schedule_bill(call.run_id)
+    if call.payer != "byok":
+        _schedule_bill(call.run_id)
 
 
 def _schedule_bill(run_id: str) -> None:
@@ -510,160 +586,165 @@ def _schedule_bill(run_id: str) -> None:
 
 # ------------------------------------------------------------------ run
 
+_UPSTREAM_MESSAGE = "The AI service stopped mid-answer. Try again."
+_BAD_JSON_MESSAGE = "The model's reply wasn't valid JSON. Try again."
+# A failed call that means the alias itself is broken, not this request: it goes
+# offline and operators get one ERROR line.
+_MISCONFIGURED = frozenset({"model", "no_agent"})
+_MISCONFIGURED_CODES = frozenset({"side.backend_unsupported", "byok.base_url_rejected"})
+
+
+def _misconfigured(result: Any) -> bool:
+    return result.failure in _MISCONFIGURED or result.code in _MISCONFIGURED_CODES
+
+
+_IMAGES_MESSAGE = "The model behind this alias can't see images; send text."
+
+
+def _image_field(call: Admitted) -> str:
+    for i, msg in enumerate(call.messages):
+        content = msg.get("content")
+        if isinstance(content, list) and any(p["type"] == "image_url" for p in content):
+            return f"messages[{i}].content"
+    return "messages"
+
+
+def _unsupported(call: Admitted) -> AiError:
+    return AiError("unsupported", _IMAGES_MESSAGE, field=_image_field(call))
+
+
+def _refusal(call: Admitted, result: Any) -> Unavailable:
+    """What a failed call tells the site. Logged by kind, never with backend text."""
+    logger.warning("site_ai: run %s failed (%s, %s)", call.run_id, result.failure, result.code)
+    if result.failure == "billing":
+        return Unavailable("limit", "wallet_empty", stream=call.stream)
+    if _misconfigured(result):
+        aliases.mark_offline(call.workspace_id, call.pocket_id, call.alias, result.code)
+    return Unavailable("temporary", "provider_unavailable", stream=call.stream)
+
+
+async def _bill_failure(call: Admitted, result: Any, produced: str) -> int:
+    """A failed call costs nothing unless the model actually started on it (a
+    timeout or a backend error after the run began); then its usage, else its
+    input estimate plus what it produced."""
+    if result.sent:
+        await _send(call)
+    if not call.sent:
+        return await record(call, "failed", 0, 0)
+    tokens_in, tokens_out = _tokens(call, result, produced)
+    return await record(
+        call, "failed", tokens_in, tokens_out, produced, usage=result.usage, model=result.model
+    )
+
+
+def _usage_frame(tokens_in: int, tokens_out: int, micro: int) -> bytes:
+    return sse(
+        "usage", {"input_tokens": tokens_in, "output_tokens": tokens_out, "credits_micro": micro}
+    )
+
 
 async def _events(call: Admitted) -> AsyncIterator[bytes]:
-    started = False
-    finish = "stop"
-    usage: tuple[int, int] | None = None
+    json_mode = _json_mode(call)
     streamed = ""
-    text = ""
-    calls: dict[int, dict[str, str]] = {}
     recorded = False
+    result: Any = None
     try:
         try:
-            for attempt in (0, 1):
-                try:
-                    await _send(call)
-                    async for ev in llm.stream(call.payload()):
-                        if ev.kind == "text":
-                            started = True
-                            streamed += ev.text
-                            text += ev.text
-                            yield sse("chunk", {"delta": ev.text})
-                        elif ev.kind == "tool":
-                            started = True
-                            frame: dict[str, Any] = {"index": ev.index}
-                            acc = calls.setdefault(ev.index, {"name": "", "arguments": ""})
-                            if ev.id:
-                                frame["id"] = ev.id
-                            if ev.name:
-                                frame["name"] = ev.name
-                                acc["name"] += ev.name
-                                streamed += ev.name
-                            if ev.arguments:
-                                frame["arguments_delta"] = ev.arguments
-                                acc["arguments"] += ev.arguments
-                                streamed += ev.arguments
-                            yield sse("tool_call", frame)
-                        elif ev.kind == "finish":
-                            finish = ev.reason or "stop"
-                        elif ev.kind == "usage":
-                            usage = (ev.input_tokens, ev.output_tokens)
-                    break
-                except llm.LlmError as exc:
-                    if _unsent(exc):
-                        call.sent -= 1
-                    if started or not exc.transient or attempt == 1:
-                        raise
-                    logger.info("site_ai: retrying run %s after %s", call.run_id, exc.kind)
-        except Exception as exc:  # noqa: BLE001 - classified below, never echoed
-            kind = exc.kind if isinstance(exc, llm.LlmError) else type(exc).__name__
-            logger.warning("site_ai: run %s failed (%s)", call.run_id, kind)
-            recorded = True
-            if not started:
-                # A request that left costs its input even with no output.
-                await record(call, "failed", _floor_in(call), 0)
-                if _rejected(exc):
-                    yield sse("error", {"code": "invalid_request", "message": _REJECTED_MESSAGE})
-                else:
-                    yield sse("unavailable", {"reason": "temporary"})
-                return
-            tokens_in, tokens_out = _billed(call, usage, streamed)
-            micro = await record(call, "failed", tokens_in, tokens_out, text, list(calls.values()))
-            yield sse(
-                "usage",
-                {"input_tokens": tokens_in, "output_tokens": tokens_out, "credits_micro": micro},
-            )
-            yield sse("error", {"code": "provider_unavailable", "message": _UPSTREAM_MESSAGE})
-            return
-        tokens_in, tokens_out = _billed(call, usage, streamed)
+            async with aclosing(llm.stream(call)) as items:
+                async for item in items:
+                    if isinstance(item, str):
+                        await _send(call)
+                        streamed += item
+                        if not json_mode:
+                            yield sse("chunk", {"delta": item})
+                    else:
+                        result = item
+        except Exception as exc:  # noqa: BLE001 - never echoed; the seam never raises
+            logger.warning("site_ai: run %s stream crashed (%s)", call.run_id, type(exc).__name__)
+            result = None
         recorded = True
-        micro = await record(call, "completed", tokens_in, tokens_out, text, list(calls.values()))
-        yield sse(
-            "usage",
-            {"input_tokens": tokens_in, "output_tokens": tokens_out, "credits_micro": micro},
+        if result is None or result.failure is not None:
+            result = result or _NO_RESULT
+            micro = await _bill_failure(call, result, streamed)
+            if result.failure == "unsupported":
+                err = _unsupported(call)
+                yield sse("error", {"code": err.code, "message": err.message, "field": err.field})
+            elif streamed and not json_mode:
+                tokens_in, tokens_out = _tokens(call, result, streamed)
+                yield _usage_frame(tokens_in, tokens_out, micro)
+                yield sse("error", {"code": "provider_unavailable", "message": _UPSTREAM_MESSAGE})
+            else:
+                yield sse("unavailable", {"reason": _refusal(call, result).reason})
+            return
+        await _send(call)
+        text = result.text
+        tokens_in, tokens_out = _tokens(call, result, text)
+        micro = await record(
+            call, "completed", tokens_in, tokens_out, text, usage=result.usage, model=result.model
         )
-        yield sse("done", {"id": f"aic_{call.run_id}", "finish_reason": finish})
+        if json_mode:
+            value = llm.json_text(text)
+            if value is None:
+                yield _usage_frame(tokens_in, tokens_out, micro)
+                yield sse("error", {"code": "provider_unavailable", "message": _BAD_JSON_MESSAGE})
+                return
+            yield sse("chunk", {"delta": value})
+        yield _usage_frame(tokens_in, tokens_out, micro)
+        yield sse("done", {"id": f"aic_{call.run_id}", "finish_reason": "stop"})
     finally:
         if not recorded:
-            # The caller went away: bill what the provider already did, at least
-            # the input of every request that left, output or not.
-            tokens_in = _floor_in(call)
-            tokens_out = _text_tokens(streamed)
+            # The caller went away: bill what the model already did, if it started.
             await asyncio.shield(
-                record(call, "cancelled", tokens_in, tokens_out, text, list(calls.values()))
+                record(call, "cancelled", _floor_in(call), _text_tokens(streamed), streamed)
             )
 
 
-def _billed(call: Admitted, usage: tuple[int, int] | None, streamed: str) -> tuple[int, int]:
-    """Tokens to bill for a stream: the provider's count for the last attempt plus
-    the input estimate of any earlier attempt that left; the estimate when the
-    provider reported nothing (or zeros)."""
-    if usage is None or (usage[0] <= 0 and usage[1] <= 0):
-        return _floor_in(call), _text_tokens(streamed)
-    return usage[0] + _floor_in(call, extra_attempts=1), usage[1]
+class _Unfinished:
+    """Stands in for a stream that ended without its result (never expected)."""
+
+    failure = "error"
+    code = "site_ai.no_result"
+    sent = False
+    usage = None
+    model = None
+    text = ""
 
 
-_UPSTREAM_MESSAGE = "The AI service stopped mid-answer. Try again."
-_REJECTED_MESSAGE = "The model rejected this request. Check the messages and tools sent."
+_NO_RESULT = _Unfinished()
 
 
-def _rejected(exc: BaseException) -> bool:
-    """A provider 4xx that isn't a rate limit: the request itself was refused (a
-    tool message with no matching call, a schema the model can't take). Retrying
-    won't help and it isn't an outage."""
-    return (
-        isinstance(exc, llm.LlmError)
-        and not exc.transient
-        and exc.status is not None
-        and 400 <= exc.status < 500
-    )
+def _json_mode(call: Admitted) -> bool:
+    return bool(call.response_format) and call.response_format.get("type") != "text"
 
 
 async def _json(call: Admitted) -> Response:
-    result = None
-    for attempt in (0, 1):
-        try:
-            await _send(call)
-            result = await llm.complete(call.payload())
-            break
-        except Exception as exc:  # noqa: BLE001 - classified, never echoed
-            if not isinstance(exc, llm.LlmError):
-                exc = llm.LlmError(False, type(exc).__name__)
-            if _unsent(exc):
-                call.sent -= 1
-            logger.warning("site_ai: run %s failed (%s)", call.run_id, exc.kind)
-            if not exc.transient or attempt == 1:
-                await record(call, "failed", _floor_in(call), 0)
-                if _rejected(exc):
-                    return error_response(AiError("invalid_request", _REJECTED_MESSAGE))
-                return error_response(AiError("provider_unavailable"))
-    assert result is not None
-    tokens_in, tokens_out = result.input_tokens, result.output_tokens
-    if tokens_in <= 0 and tokens_out <= 0:  # the provider reported no usage
-        produced = (result.content or "") + "".join(
-            c["function"]["name"] + c["function"]["arguments"] for c in result.tool_calls
-        )
-        tokens_in, tokens_out = _floor_in(call), _text_tokens(produced)
-    else:
-        tokens_in += _floor_in(call, extra_attempts=1)
+    try:
+        result = await llm.complete(call)
+    except Exception as exc:  # noqa: BLE001 - never echoed; the seam never raises
+        logger.warning("site_ai: run %s crashed (%s)", call.run_id, type(exc).__name__)
+        result = _NO_RESULT
+    if result.failure is not None:
+        await _bill_failure(call, result, "")
+        if result.failure == "unsupported":
+            return error_response(_unsupported(call))
+        return error_response(_refusal(call, result).error)
+    await _send(call)
+    text = result.text
+    tokens_in, tokens_out = _tokens(call, result, text)
     micro = await record(
-        call,
-        "completed",
-        tokens_in,
-        tokens_out,
-        result.content or "",
-        [c["function"] for c in result.tool_calls],
+        call, "completed", tokens_in, tokens_out, text, usage=result.usage, model=result.model
     )
-    message: dict[str, Any] = {"role": "assistant", "content": result.content}
-    if result.tool_calls:
-        message["tool_calls"] = result.tool_calls
+    content: str | None = text
+    if _json_mode(call):
+        content = llm.json_text(text)
+        if content is None:
+            return error_response(AiError("provider_unavailable", _BAD_JSON_MESSAGE))
     return JSONResponse(
         {
             "id": f"aic_{call.run_id}",
             "model": call.alias,
-            "message": message,
-            "finish_reason": result.finish_reason,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop",
             "usage": {
                 "input_tokens": tokens_in,
                 "output_tokens": tokens_out,
