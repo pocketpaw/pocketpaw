@@ -175,6 +175,7 @@ async def _inspect_handler(args: dict) -> dict:
             mode = "outline"
         else:
             payload = figma_outline.frames(await source.file_index(ref.file_key))
+            payload["site_pages"] = figma_outline.site_pages(payload)
             mode = "frames"
     except FigmaError as exc:
         return _figma_error(exc)
@@ -194,8 +195,9 @@ async def _inspect_handler(args: dict) -> dict:
         head["warning"] = warning
     if mode == "frames":
         head["next"] = (
-            "Pick the frames to build: one page per top-level frame; same-name frames at "
-            "different widths are that page's viewports. Then figma_inspect with `node`."
+            "`site_pages` is the site plan: one route per frame name, and its viewports "
+            "are the authoritative widths (mobile `inferred` when the file has none). "
+            "Then figma_inspect each viewport's `node`."
         )
     elif payload.get("nodes_left_out"):
         head["next"] = (

@@ -1,0 +1,354 @@
+{
+  "_comment": "A mocked Figma file for the build-from-Figma eval: two pages' worth of top-level frames, a home page at two widths, and the node tree of the desktop home frame. Shapes follow Figma's REST answers (GET /v1/files/:key?depth=2, /nodes, /images).",
+  "file_key": "BakeryKey1234567",
+  "pasted": "Build my site from this Figma link https://www.figma.com/design/BakeryKey1234567/Bakery?node-id=1-2",
+  "index": {
+    "name": "Bakery",
+    "lastModified": "2026-11-01T00:00:00Z",
+    "document": {
+      "children": [
+        {
+          "id": "0:1",
+          "type": "CANVAS",
+          "name": "Site",
+          "children": [
+            {
+              "id": "1:2",
+              "type": "FRAME",
+              "name": "Home/Desktop",
+              "absoluteBoundingBox": {
+                "x": 0,
+                "y": 0,
+                "width": 1440,
+                "height": 2400
+              },
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": {
+                    "r": 0.9647058823529412,
+                    "g": 0.9529411764705882,
+                    "b": 0.9333333333333333,
+                    "a": 1
+                  }
+                }
+              ],
+              "layoutMode": "VERTICAL",
+              "itemSpacing": 64,
+              "paddingTop": 96
+            },
+            {
+              "id": "1:3",
+              "type": "FRAME",
+              "name": "Home/Mobile",
+              "absoluteBoundingBox": {
+                "x": 0,
+                "y": 0,
+                "width": 390,
+                "height": 2400
+              },
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": {
+                    "r": 0.9647058823529412,
+                    "g": 0.9529411764705882,
+                    "b": 0.9333333333333333,
+                    "a": 1
+                  }
+                }
+              ],
+              "layoutMode": "VERTICAL",
+              "itemSpacing": 64,
+              "paddingTop": 96
+            },
+            {
+              "id": "1:4",
+              "type": "FRAME",
+              "name": "Menu",
+              "absoluteBoundingBox": {
+                "x": 0,
+                "y": 0,
+                "width": 1440,
+                "height": 2400
+              },
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": {
+                    "r": 0.9647058823529412,
+                    "g": 0.9529411764705882,
+                    "b": 0.9333333333333333,
+                    "a": 1
+                  }
+                }
+              ],
+              "layoutMode": "VERTICAL",
+              "itemSpacing": 64,
+              "paddingTop": 96
+            },
+            {
+              "id": "1:5",
+              "type": "FRAME",
+              "name": "Visit us",
+              "absoluteBoundingBox": {
+                "x": 0,
+                "y": 0,
+                "width": 1440,
+                "height": 2400
+              },
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": {
+                    "r": 0.9647058823529412,
+                    "g": 0.9529411764705882,
+                    "b": 0.9333333333333333,
+                    "a": 1
+                  }
+                }
+              ],
+              "layoutMode": "VERTICAL",
+              "itemSpacing": 64,
+              "paddingTop": 96
+            },
+            {
+              "id": "1:9",
+              "type": "TEXT",
+              "name": "designer note"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "nodes": {
+    "name": "Bakery",
+    "lastModified": "2026-11-01T00:00:00Z",
+    "nodes": {
+      "1:2": {
+        "document": {
+          "id": "1:2",
+          "type": "FRAME",
+          "name": "Home/Desktop",
+          "absoluteBoundingBox": {
+            "x": 0,
+            "y": 0,
+            "width": 1440,
+            "height": 2400
+          },
+          "fills": [
+            {
+              "type": "SOLID",
+              "color": {
+                "r": 0.9647058823529412,
+                "g": 0.9529411764705882,
+                "b": 0.9333333333333333,
+                "a": 1
+              }
+            }
+          ],
+          "layoutMode": "VERTICAL",
+          "itemSpacing": 64,
+          "paddingTop": 96,
+          "children": [
+            {
+              "id": "2:1",
+              "type": "TEXT",
+              "name": "Bread worth the queu",
+              "characters": "Bread worth the queue",
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": {
+                    "r": 0.10980392156862745,
+                    "g": 0.10196078431372549,
+                    "b": 0.09019607843137255,
+                    "a": 1
+                  }
+                }
+              ],
+              "style": {
+                "fontFamily": "Fraunces",
+                "fontSize": 72,
+                "fontWeight": 600
+              },
+              "absoluteBoundingBox": {
+                "x": 0,
+                "y": 0,
+                "width": 600,
+                "height": 72
+              }
+            },
+            {
+              "id": "2:2",
+              "type": "TEXT",
+              "name": "Sourdough, rye and s",
+              "characters": "Sourdough, rye and seasonal bakes from a small oven in Leith. Sourdough, rye and seasonal bakes from a small oven in Leith. Sourdough, rye and seasonal bakes from a small oven in Leith. ",
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": {
+                    "r": 0.10980392156862745,
+                    "g": 0.10196078431372549,
+                    "b": 0.09019607843137255,
+                    "a": 1
+                  }
+                }
+              ],
+              "style": {
+                "fontFamily": "Inter",
+                "fontSize": 18,
+                "fontWeight": 600
+              },
+              "absoluteBoundingBox": {
+                "x": 0,
+                "y": 0,
+                "width": 600,
+                "height": 18
+              }
+            },
+            {
+              "id": "2:3",
+              "type": "FRAME",
+              "name": "Button",
+              "cornerRadius": 999,
+              "itemSpacing": 8,
+              "paddingLeft": 24,
+              "absoluteBoundingBox": {
+                "x": 0,
+                "y": 0,
+                "width": 180,
+                "height": 52
+              },
+              "fills": [
+                {
+                  "type": "SOLID",
+                  "color": {
+                    "r": 0.7215686274509804,
+                    "g": 0.27450980392156865,
+                    "b": 0.12156862745098039,
+                    "a": 1
+                  }
+                }
+              ],
+              "children": [
+                {
+                  "id": "2:4",
+                  "type": "TEXT",
+                  "name": "Order for Saturday",
+                  "characters": "Order for Saturday",
+                  "fills": [
+                    {
+                      "type": "SOLID",
+                      "color": {
+                        "r": 1.0,
+                        "g": 1.0,
+                        "b": 1.0,
+                        "a": 1
+                      }
+                    }
+                  ],
+                  "style": {
+                    "fontFamily": "Inter",
+                    "fontSize": 16,
+                    "fontWeight": 600
+                  },
+                  "absoluteBoundingBox": {
+                    "x": 0,
+                    "y": 0,
+                    "width": 600,
+                    "height": 16
+                  }
+                }
+              ]
+            },
+            {
+              "id": "2:5",
+              "type": "VECTOR",
+              "name": "Logo",
+              "absoluteBoundingBox": {
+                "x": 0,
+                "y": 0,
+                "width": 40,
+                "height": 40
+              }
+            },
+            {
+              "id": "2:6",
+              "type": "RECTANGLE",
+              "name": "Loaf photo",
+              "cornerRadius": 12,
+              "absoluteBoundingBox": {
+                "x": 0,
+                "y": 0,
+                "width": 640,
+                "height": 480
+              },
+              "fills": [
+                {
+                  "type": "IMAGE",
+                  "scaleMode": "FILL"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "expected": {
+    "tool_sequence": [
+      "figma_inspect",
+      "figma_inspect",
+      "figma_tokens",
+      "figma_screenshot",
+      "figma_assets",
+      "compare_site_to_reference"
+    ],
+    "site_pages": [
+      {
+        "route": "/",
+        "name": "Home",
+        "widths": [
+          1440,
+          390
+        ],
+        "mobile": "observed"
+      },
+      {
+        "route": "/menu",
+        "name": "Menu",
+        "widths": [
+          1440
+        ],
+        "mobile": "inferred"
+      },
+      {
+        "route": "/visit-us",
+        "name": "Visit us",
+        "widths": [
+          1440
+        ],
+        "mobile": "inferred"
+      }
+    ],
+    "tokens": {
+      "color.canvas": "#f6f3ee",
+      "color.ink": "#1c1a17",
+      "color.accent": "#b8461f",
+      "font.display": "Fraunces",
+      "font.body": "Inter"
+    },
+    "assets": [
+      {
+        "id": "2:5",
+        "format": "svg"
+      },
+      {
+        "id": "2:6",
+        "format": "webp"
+      }
+    ]
+  }
+}

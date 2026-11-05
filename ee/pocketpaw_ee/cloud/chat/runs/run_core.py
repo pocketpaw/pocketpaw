@@ -2109,21 +2109,26 @@ async def _auto_model_fallback(workspace_id: str, default_model: str) -> str | N
     return None
 
 
-async def _note_figma_links(ctx: ScopeContext, user_content: str, surface: str | None) -> None:
+async def _note_figma_links(ctx: ScopeContext, user_content: str, surface: str | None) -> str:
     """On /sites, record the Figma file keys the user pasted in their OWN message,
-    the only keys the ``pocketpaw_figma`` tools will read (``session_keys``)."""
+    the only keys the ``pocketpaw_figma`` tools will read (``session_keys``), and
+    return the per-turn note that routes the build through the Figma path."""
     if (
         surface != "sites"
         or ctx.kind is not ScopeKind.SESSION
         or "figma.com" not in user_content.lower()
     ):
-        return
+        return ""
     try:
+        from pocketpaw_ee.cloud.surface.handlers.sites import figma_turn_note
         from pocketpaw_ee.sites.figma import session_keys
+        from pocketpaw_ee.sites.figma.urls import find_links
 
         await session_keys.note_message(ctx.workspace_id, ctx.scope_id, ctx.user_id, user_content)
+        return figma_turn_note(find_links(user_content))
     except Exception:  # noqa: BLE001 - the tools then refuse the file; the turn runs
         logger.warning("figma: could not record the pasted links", exc_info=True)
+        return ""
 
 
 async def _drive_agent_loop(
@@ -2147,7 +2152,7 @@ async def _drive_agent_loop(
     # titler names the thread from it, and the pool hands it to the model as
     # the user's turn. A turn with real text passes through untouched.
     user_content = resolve_user_content(user_content, attachments_in)
-    await _note_figma_links(ctx, user_content, surface)
+    figma_note = await _note_figma_links(ctx, user_content, surface)
     pool = get_agent_pool()
     try:
         instance = await pool.get(ctx.target_agent_id)
@@ -2202,6 +2207,10 @@ async def _drive_agent_loop(
     if turn_widgets:
         knowledge_context = (
             f"{knowledge_context}\n\n{turn_widgets}" if knowledge_context else turn_widgets
+        )
+    if figma_note:
+        knowledge_context = (
+            f"{knowledge_context}\n\n{figma_note}" if knowledge_context else figma_note
         )
 
     # Uploaded files are INLINED, and the backend with file tools has to be
