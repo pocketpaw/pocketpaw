@@ -2590,7 +2590,9 @@ class ClaudeSDKBackend(BaseAgentBackend):
         disconnected too.
         """
         if self._side_standbys is not None:
-            await self._side_standbys.close()
+            # A closed pool is never reused: the next side call builds a fresh one.
+            standbys, self._side_standbys = self._side_standbys, None
+            await standbys.close()
         if self._client is not None:
             try:
                 await self._client.disconnect()
@@ -2650,7 +2652,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 raise
             return standby
 
-        standbys.refill(key, _connect_standby)
+        # A backend built for one turn (BYOK) is released right after it: a
+        # standby would be a CLI connected only to be killed.
+        if not getattr(self, "per_turn", False):
+            standbys.refill(key, _connect_standby)
         logger.info("side completion client: %s (key=%s)", "standby" if warm else "cold", key)
         return client
 

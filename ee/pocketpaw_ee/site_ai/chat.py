@@ -126,6 +126,8 @@ class Admitted:
     kind: str = "chat"
     keep_transcript: bool = False
     model_reported: str | None = None  # the model the backend says answered
+    admitted_model: str | None = None  # the model the hold was priced at (never moves)
+    backend: str | None = None  # the backend that answered (whose cost to trust)
     cli_cost_usd: float | None = None  # the backend's own cost figure, logged only
     started: float = 0.0  # monotonic, when the model call was asked for
     ttft_ms: int | None = None  # first text delta (streams only)
@@ -377,6 +379,7 @@ async def _reserve(call: Admitted, budget: Any, allowance: int) -> None:
         )
         aliases.mark_offline(call.workspace_id, call.pocket_id, call.alias, "model.unpriced")
         raise Unavailable("temporary", "provider_unavailable", stream=call.stream)
+    call.admitted_model = call.ran_model
     amount = aliases.reserve_micro(call.alias, call.ran_model, call.input_estimate, call.max_tokens)
     byok = call.payer == "byok"
     caps = budget_mod.caps_for(
@@ -506,20 +509,22 @@ def _price(
             call.ran_model,
             call.model_reported,
         )
+    cost: Decimal | None
     try:
-        cost = aliases.cost_usd(call.alias, call.ran_model, usage, tokens)
+        cost = aliases.cost_usd(call.alias, call.ran_model, usage, tokens, backend=call.backend)
     except aliases.Unpriced as exc:
-        # The backend answered on a model we hold no verified price for. Never a
-        # guessed rate: the call is priced at the pinned model it was admitted on.
+        # The backend answered on a model nothing prices. Never a guessed rate:
+        # the call is priced at the model it was admitted (and held) on.
+        admitted = call.admitted_model or call.ran_model
         logger.error(
             "site_ai: run %s ran on %s, which has no verified price; pricing it as %s",
             call.run_id,
             exc.model,
-            call.ran_model,
+            admitted,
         )
         unpinned = {k: v for k, v in usage.items() if k != "model"}
         try:
-            cost = aliases.cost_usd(call.alias, call.ran_model, unpinned, tokens)
+            cost = aliases.cost_usd(call.alias, admitted, unpinned, tokens, backend=call.backend)
         except aliases.Unpriced:
             cost = None
     if cost is None:
@@ -563,13 +568,17 @@ async def record(
     return bill.micro
 
 
-async def _persist_after(call: Admitted, bill: _Bill) -> None:
-    """``_persist`` in its own task, awaited through a shield: a caller that goes
-    away (the visitor closed the stream after ``done``) cannot cut it short."""
-    task = asyncio.get_running_loop().create_task(_persist(call, bill))
+async def _shielded(coro: Any) -> Any:
+    """Run ``coro`` in its own task, awaited through a shield: a caller that goes
+    away (the visitor closed the stream) cannot cut a billing write short."""
+    task = asyncio.get_running_loop().create_task(coro)
     _BACKGROUND.add(task)
     task.add_done_callback(_BACKGROUND.discard)
-    await asyncio.shield(task)
+    return await asyncio.shield(task)
+
+
+async def _persist_after(call: Admitted, bill: _Bill) -> None:
+    await _shielded(_persist(call, bill))
 
 
 async def _persist(call: Admitted, bill: _Bill) -> None:
@@ -830,6 +839,10 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
             logger.warning("site_ai: run %s stream crashed (%s)", call.run_id, type(exc).__name__)
             result = None
         call.total_ms = _elapsed_ms(call)
+        if result is not None:
+            call.backend = getattr(result, "backend", None) or call.backend
+        # From here every billing write runs shielded (``_shielded`` / the
+        # deferred bill), so ``recorded`` may be set before awaiting them.
         recorded = True
         if truncated:
             tokens_in, tokens_out = _floor_in(call), _text_tokens(streamed)
@@ -846,7 +859,7 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
             call.payer = result.payer
         if result is None or result.failure is not None:
             result = result or _NO_RESULT
-            micro = await _bill_failure(call, result, streamed)
+            micro = await _shielded(_bill_failure(call, result, streamed))
             if result.failure == "unsupported":
                 err = _unsupported(call)
                 yield sse("error", {"code": err.code, "message": err.message, "field": err.field})
@@ -857,7 +870,7 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
             else:
                 yield sse("unavailable", {"reason": _refusal(call, result).reason})
             return
-        await _send(call)
+        await _shielded(_send(call))
         text = result.text
         tokens_in, tokens_out = _tokens(call, result, text)
         deferred = _price(
@@ -918,6 +931,7 @@ async def _json(call: Admitted) -> Response:
         logger.warning("site_ai: run %s crashed (%s)", call.run_id, type(exc).__name__)
         result = _NO_RESULT
     call.total_ms = _elapsed_ms(call)
+    call.backend = getattr(result, "backend", None) or call.backend
     if result.payer:
         call.payer = result.payer
     if result.failure is not None:

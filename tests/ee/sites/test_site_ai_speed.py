@@ -110,7 +110,7 @@ def test_the_production_call_prices_at_haiku_rates_not_the_clis_figure():
         "total_cost_usd": 0.0065918,
         "model": "claude-haiku-5-5",
     }
-    cost = aliases.cost_usd("fast", None, usage, (754, 22))
+    cost = aliases.cost_usd("fast", None, usage, (754, 22), backend="claude_agent_sdk")
     # 2 x $0.10 + 752 x $0.125 (a write is 1.25x input) + 22 x $0.50, per MTok
     expected = (
         Decimal(2) * Decimal("0.10")
@@ -289,3 +289,191 @@ async def test_the_system_prompt_is_byte_identical_across_calls(beanie_test_db, 
     assert first["system"].startswith(SYSTEM)
     assert "What time do you open?" not in second["prompt"]
     assert "about 300 tokens" in second["prompt"]
+
+
+# ------------------------------------------------------------------ other backends
+
+
+def _ladder(monkeypatch, rate_in="0.27", rate_out="1.10"):
+    """The deployment's own price list (the proxy rung of the ladder) knows one
+    non-Anthropic model, as the LiteLLM proxy prices deepseek in production."""
+    from decimal import Decimal
+
+    from pocketpaw import usage_tracker
+
+    real = usage_tracker._price_via_provider
+
+    def _provider(model, inp, out, read, write, at):
+        if model == "deepseek-v3.2":
+            return (Decimal(inp) * Decimal(rate_in) + Decimal(out) * Decimal(rate_out)) / Decimal(
+                1_000_000
+            )
+        return real(model, inp, out, read, write, at)
+
+    monkeypatch.setattr(usage_tracker, "_price_via_provider", _provider)
+
+
+def test_provider_prefixes_are_stripped_before_the_table():
+    from pocketpaw_ee.site_ai import aliases
+
+    plain = aliases.price_usd("claude-haiku-5-5", input_tokens=1000, output_tokens=100)
+    for spelled in ("anthropic:claude-haiku-5-5", "anthropic/claude-haiku-5-5"):
+        assert aliases.price_usd(spelled, input_tokens=1000, output_tokens=100) == plain
+
+
+def test_a_model_off_the_table_is_priced_by_the_existing_ladder(monkeypatch):
+    """A site whose agent runs deepseek on pydantic_ai must stay online: a model
+    with no table row is priced by the deployment's price ladder.
+
+    FAILS before the fix: it was refused as unpriced."""
+    from pocketpaw_ee.site_ai import aliases
+
+    _ladder(monkeypatch)
+    assert aliases.is_priced("deepseek-v3.2")
+    assert aliases.reserve_micro("fast", "deepseek-v3.2", 1000, 256) > 1
+    assert not aliases.is_priced("mystery-model")
+
+
+def test_only_the_claude_sdk_reported_cost_is_distrusted(monkeypatch):
+    """The CLI-cost bug is the Claude Agent SDK's; every other backend keeps the
+    meter's ``resolve_cost`` order (its reported cost first)."""
+    from decimal import Decimal
+
+    from pocketpaw_ee.site_ai import aliases
+
+    _ladder(monkeypatch)
+    usage = {"input_tokens": 1000, "output_tokens": 100, "total_cost_usd": 0.004}
+    other = aliases.cost_usd("fast", "deepseek-v3.2", usage, (1000, 100), backend="pydantic_ai")
+    assert other == Decimal("0.004")
+    sdk = aliases.cost_usd(
+        "fast", "claude-haiku-5-5", usage, (1000, 100), backend="claude_agent_sdk"
+    )
+    assert sdk == aliases.price_usd("claude-haiku-5-5", input_tokens=1000, output_tokens=100)
+
+
+async def test_a_deepseek_site_is_admitted_and_billed(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.chat import side_completion
+    from pocketpaw_ee.cloud.chat.side_completion import SideTarget
+    from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc
+
+    _ladder(monkeypatch)
+    site, token = await _setup()
+    usage = {"input_tokens": 40, "output_tokens": 10, "model": "deepseek-v3.2"}
+    fake = FakeLlm(
+        monkeypatch,
+        script=["ok", ok("ok", model="deepseek-v3.2", backend="pydantic_ai", usage=usage)],
+    )
+
+    async def _target(workspace_id, user_id, agent_id):
+        return SideTarget(agent_id="agent-ds", payer="platform", model="deepseek-v3.2")
+
+    monkeypatch.setattr(side_completion, "resolve_target", _target)
+    async with client() as c:
+        resp = await _post(c, site, token, _body())
+
+    assert [e for e, _ in parse_sse(resp.text)][-1] == "done"
+    assert len(fake.calls) == 1
+    row = await SiteAiCallDoc.find_one(SiteAiCallDoc.state == "settled")
+    assert row is not None and row.actual_micro > 0
+
+
+# ------------------------------------------------------------------ admitted model
+
+
+async def test_an_unpriced_answer_is_repriced_at_the_admitted_model(
+    beanie_test_db, monkeypatch, caplog
+):
+    """The backend answered on a model with no price. The call is priced at the
+    model it was admitted on, not at the one that just failed to price.
+
+    FAILS before the fix: ``ran_model`` was overwritten with the result's model."""
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+    from pocketpaw_ee.site_ai import aliases
+
+    from tests.ee.sites.site_ai_harness import RAN_MODEL
+
+    site, token = await _setup()
+    usage = {"input_tokens": 40, "output_tokens": 10, "model": "mystery-model"}
+    FakeLlm(monkeypatch, script=["ok", ok("ok", model="mystery-model", usage=usage)])
+    caplog.set_level(logging.ERROR, logger="pocketpaw_ee.site_ai.chat")
+    async with client() as c:
+        await _post(c, site, token, _body())
+
+    run = await ChatRunDoc.find_one(ChatRunDoc.context_type == "site_ai")
+    expected = aliases.price_usd(RAN_MODEL, input_tokens=40, output_tokens=10)
+    assert run.usage["total_cost_usd"] == pytest.approx(float(expected))
+    assert any("no verified price" in r.getMessage() for r in caplog.records)
+
+
+# ------------------------------------------------------------------ disconnects
+
+
+async def test_a_disconnect_while_a_failure_is_billed_still_bills_it(beanie_test_db, monkeypatch):
+    """The visitor goes away while the failed call's bill is being written. The
+    bill still lands: the billing path runs in its own shielded task.
+
+    FAILS before the fix: ``recorded`` was set before the await, so the
+    cancellation skipped billing and left the hold for the sweeper."""
+    import asyncio
+
+    from pocketpaw_ee.site_ai import chat
+
+    site, token = await _setup()
+    from tests.ee.sites.site_ai_harness import failed
+
+    usage = {"input_tokens": 40, "output_tokens": 10}
+    FakeLlm(
+        monkeypatch, script=["part", failed("error", "agent.backend_error", sent=True, usage=usage)]
+    )
+    gate, entered, finished = asyncio.Event(), asyncio.Event(), []
+    real = chat._bill_failure
+
+    async def _slow_bill(*a, **kw):
+        entered.set()
+        await gate.wait()
+        micro = await real(*a, **kw)
+        finished.append(micro)
+        return micro
+
+    monkeypatch.setattr(chat, "_bill_failure", _slow_bill)
+    call = await _admitted(site, token, monkeypatch)
+
+    async def _consume():
+        async for _ in chat._events(call):
+            pass
+
+    task = asyncio.create_task(_consume())
+    await asyncio.wait_for(entered.wait(), 5)
+    task.cancel()
+    gate.set()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.gather(*list(chat._BACKGROUND), return_exceptions=True)
+
+    assert finished and finished[0] > 0
+
+
+async def _admitted(site, token, monkeypatch):
+    """An admitted call, through ``chat.admit`` with a minimal request."""
+    import json
+
+    from pocketpaw_ee.site_ai import chat
+    from starlette.requests import Request
+
+    body = json.dumps(_body()).encode()
+
+    async def _receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/api/v1/sites/{site.id}/ai/chat",
+        "headers": [
+            (b"authorization", f"Bearer {token}".encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("203.0.113.7", 4000),
+        "query_string": b"",
+    }
+    return await chat.admit(Request(scope, _receive), str(site.id))

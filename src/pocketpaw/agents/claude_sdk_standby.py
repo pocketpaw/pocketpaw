@@ -19,10 +19,12 @@
 #   * One pool per backend instance: a backend's env (provider key, BYOK
 #     credentials) is not in the key, so standbys never cross backends.
 #   * Bounded: ``per_key`` ready clients per key, ``max_keys`` keys per backend
-#     (least recently used key evicted), and ``GLOBAL_MAX`` standbys per process.
-#     A standby idle past ``idle_s`` is discarded instead of used.
-#   * ``close()`` (from the backend's ``cleanup``) disconnects every standby, and
-#     a refill that finishes after it is discarded, never kept.
+#     (least recently used key evicted), and ``GLOBAL_MAX`` standbys per process,
+#     counted from the moment a connect starts. A standby idle past ``idle_s`` is
+#     discarded instead of used.
+#   * ``close()`` (from the backend's ``cleanup``) cancels in-flight connects and
+#     disconnects every standby concurrently, bounded by ``CLOSE_TIMEOUT_S``; a
+#     closed pool is never reused (the backend builds a fresh one).
 #   * Disconnects run in the background; they never delay a caller.
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ MAX_KEYS = 3
 IDLE_S = 300.0
 # Each standby is a live CLI process (~150-250 MB); cap them per process.
 GLOBAL_MAX = 4
+CLOSE_TIMEOUT_S = 10.0
 
 
 class SideStandbys:
@@ -57,6 +60,7 @@ class SideStandbys:
         self._ready: OrderedDict[str, list[tuple[Any, float]]] = OrderedDict()
         self._filling: set[str] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._fills: set[asyncio.Task[Any]] = set()  # in-flight connects
         self._closed = False
 
     # ------------------------------------------------------------ take / refill
@@ -89,23 +93,42 @@ class SideStandbys:
             self._evict_idle()
             if SideStandbys._global_count >= GLOBAL_MAX:
                 return
+        # The slot is taken now, while the connect is in flight, so concurrent
+        # refills across pools can never start more than GLOBAL_MAX processes.
+        # It passes to the ready entry on success; any other end gives it back,
+        # including a task cancelled before it ever ran.
+        SideStandbys._global_count += 1
+        kept: list[bool] = []
         self._filling.add(key)
-        self._spawn(self._fill(key, connect))
+        task = self._spawn(self._fill(key, connect, kept))
+        if task is None:
+            self._filling.discard(key)
+            self._release_slot()
+            return
+        self._fills.add(task)
 
-    async def _fill(self, key: str, connect: Callable[[], Awaitable[Any]]) -> None:
+        def _done(t: asyncio.Task[Any]) -> None:
+            self._fills.discard(t)
+            self._filling.discard(key)
+            if not kept:
+                self._release_slot()
+
+        task.add_done_callback(_done)
+
+    async def _fill(
+        self, key: str, connect: Callable[[], Awaitable[Any]], kept: list[bool]
+    ) -> None:
         try:
             client = await connect()
         except Exception as exc:  # noqa: BLE001 - a standby is an optimisation
             logger.info("side standby: connect failed (%s)", type(exc).__name__)
             return
-        finally:
-            self._filling.discard(key)
-        if self._closed or SideStandbys._global_count >= GLOBAL_MAX:
+        if self._closed:
             self.discard(client)
             return
+        kept.append(True)
         self._ready.setdefault(key, []).append((client, time.monotonic()))
         self._ready.move_to_end(key)
-        SideStandbys._global_count += 1
         while len(self._ready) > self.max_keys:
             _, evicted = self._ready.popitem(last=False)
             for old, _since in evicted:
@@ -120,14 +143,24 @@ class SideStandbys:
             return
         self._spawn(_disconnect(client))
 
-    async def close(self) -> None:
-        """Disconnect every standby; later refills are discarded on arrival."""
+    async def close(self, timeout: float = CLOSE_TIMEOUT_S) -> None:
+        """Disconnect every standby and cancel in-flight connects (each disconnects
+        its half-started client). Disconnects run concurrently, and the whole
+        close is bounded by ``timeout`` so one hung CLI cannot block a stop."""
         self._closed = True
+        for task in list(self._fills):
+            task.cancel()
         ready, self._ready = self._ready, OrderedDict()
-        for entries in ready.values():
-            for client, _since in entries:
-                self._release_slot()
-                await _disconnect(client)
+        clients = [client for entries in ready.values() for client, _since in entries]
+        for _ in clients:
+            self._release_slot()
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(_disconnect(c) for c in clients), self.settle()),
+                timeout,
+            )
+        except TimeoutError:
+            logger.warning("side standby: close timed out after %.0fs", timeout)
 
     def _evict_idle(self) -> None:
         now = time.monotonic()
@@ -148,16 +181,17 @@ class SideStandbys:
     def _release_slot() -> None:
         SideStandbys._global_count = max(0, SideStandbys._global_count - 1)
 
-    def _spawn(self, coro: Awaitable[Any]) -> None:
+    def _spawn(self, coro: Awaitable[Any]) -> asyncio.Task[Any] | None:
         try:
             task = asyncio.get_running_loop().create_task(coro)  # type: ignore[arg-type]
         except RuntimeError:
             close = getattr(coro, "close", None)
             if close is not None:
                 close()
-            return
+            return None
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
 
     def ready_count(self, key: str | None = None) -> int:
         if key is not None:
@@ -166,8 +200,12 @@ class SideStandbys:
 
     async def settle(self) -> None:
         """Wait for in-flight refills and disconnects (tests, shutdown)."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        while True:
+            pending = [t for t in self._tasks if not t.done()]
+            self._tasks.difference_update([t for t in self._tasks if t.done()])
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _disconnect(client: Any) -> None:

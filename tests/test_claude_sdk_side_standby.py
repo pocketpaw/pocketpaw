@@ -293,7 +293,7 @@ async def test_a_stale_standby_is_not_used() -> None:
     assert world.clients[0].disconnected
 
 
-async def test_a_refill_finishing_after_close_is_discarded() -> None:
+async def test_close_cancels_an_in_flight_refill() -> None:
     pool = SideStandbys()
     world = _World()
     import asyncio
@@ -305,9 +305,111 @@ async def test_a_refill_finishing_after_close_is_discarded() -> None:
         return _Client(world)
 
     pool.refill("k", connect)
-    await pool.close()
+    await pool.close()  # cancels the in-flight connect
     gate.set()
     await pool.settle()
 
     assert pool.ready_count() == 0
-    assert world.clients[0].disconnected
+    assert all(c.disconnected for c in world.clients)
+    assert SideStandbys._global_count == 0
+    pool.refill("k", connect)  # a closed pool takes no new work
+    assert pool.ready_count() == 0 and not pool._fills
+
+
+async def test_side_calls_get_standbys_again_after_a_stop() -> None:
+    """``stop()`` -> ``cleanup()`` closes the pool; the next side call must build
+    a fresh one, not run cold forever after."""
+    world = _World()
+    sdk = _sdk(world)
+
+    await _run(sdk, world, "before the stop", session_key="side:1")
+    await _settle(sdk)
+    await sdk.cleanup()
+    await _run(sdk, world, "after the stop", session_key="side:2")
+    await _settle(sdk)
+    world.connects_in_run = 0
+    await _run(sdk, world, "warm again", session_key="side:3")
+
+    assert world.connects_in_run == 0
+
+
+async def test_a_per_turn_backend_keeps_no_standby() -> None:
+    """A BYOK backend lives for one turn: connecting a standby would spawn a CLI
+    only to kill it on release."""
+    world = _World()
+    sdk = _sdk(world)
+    sdk.per_turn = True
+
+    await _run(sdk, world, "byok visitor", session_key="side:1")
+    await _settle(sdk)
+
+    assert len(world.clients) == 1
+    assert sdk._side_standbys is None or sdk._side_standbys.ready_count() == 0
+
+
+def test_create_isolated_backend_marks_per_turn(monkeypatch) -> None:
+    from pocketpaw.agents import router as router_mod
+
+    class _Plain:
+        def __init__(self, settings):
+            pass
+
+    monkeypatch.setattr(router_mod, "get_backend_class", lambda _n: _Plain)
+    made = router_mod.AgentRouter.create_isolated_backend("x", MagicMock(), per_turn=True)
+    plain = router_mod.AgentRouter.create_isolated_backend("x", MagicMock())
+    assert made.per_turn is True
+    assert getattr(plain, "per_turn", False) is False
+
+
+async def test_the_process_cap_counts_connects_in_flight(monkeypatch) -> None:
+    import asyncio
+
+    monkeypatch.setattr(claude_sdk_standby, "GLOBAL_MAX", 1)
+    world = _World()
+    gate = asyncio.Event()
+    started: list[int] = []
+
+    async def connect():
+        started.append(1)
+        await gate.wait()
+        return _Client(world)
+
+    a, b = SideStandbys(), SideStandbys()
+    a.refill("k", connect)
+    b.refill("k", connect)
+    await asyncio.sleep(0)
+    gate.set()
+    await a.settle()
+    await b.settle()
+
+    assert len(started) == 1
+    assert a.ready_count() + b.ready_count() == 1
+
+
+async def test_close_cancels_connects_and_is_bounded() -> None:
+    import asyncio
+
+    world = _World()
+    gate = asyncio.Event()
+
+    class _Hung(_Client):
+        async def disconnect(self):
+            await asyncio.sleep(3600)
+
+    async def slow():
+        await gate.wait()
+        return _Client(world)
+
+    async def hung():
+        return _Hung(world)
+
+    pool = SideStandbys()
+    pool.refill("hung", hung)
+    await pool.settle()
+    pool.refill("slow", slow)
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(pool.close(timeout=0.2), 2)
+
+    assert SideStandbys._global_count == 0
+    assert pool.ready_count() == 0

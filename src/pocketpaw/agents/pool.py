@@ -1022,6 +1022,7 @@ class AgentPool:
                             if hasattr(instance.backend, "get_tool_policy")
                             else None
                         ),
+                        per_turn=True,
                     )
                 except Exception:
                     # Refuse only where the key would have paid. A backend that
