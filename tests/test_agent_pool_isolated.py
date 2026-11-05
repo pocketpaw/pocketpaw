@@ -7,7 +7,9 @@
 # the override (no soul identity, no "Relevant Past Memories", no skills), the flag
 # reaches only a backend that declares it, and the Claude SDK backend then adds no
 # Data Connectors block and no bundled-skills plugin. An ordinary run keeps all of
-# that, so the contrast is asserted too.
+# that, so the contrast is asserted too. The pydantic_ai backend (the free-run path)
+# is captured on the wire with a FunctionModel: instructions are the site prompt
+# and the only part is the transcript.
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -205,3 +207,48 @@ async def test_the_claude_sdk_adds_no_connectors_or_bundled_skills_when_isolated
     assert "Data Connectors" in ordinary.options.system_prompt
     assert isolated.options.system_prompt == SITE_SYSTEM
     assert not isolated.options_kwargs.get("plugins")
+
+
+async def test_pydantic_ai_sends_only_the_site_prompt_and_transcript(monkeypatch):
+    """The free-run path forces pydantic_ai: capture the request it really puts on
+    the wire for a soul-enabled agent with skills, isolated and tools off."""
+    from pydantic_ai.messages import ModelRequest, SystemPromptPart, UserPromptPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+    from pocketpaw.agents.pydantic_ai import PydanticAIBackend
+    from pocketpaw.config import Settings
+
+    backend = PydanticAIBackend(
+        Settings(
+            pydantic_ai_model="litellm:test-model",
+            litellm_api_base="http://localhost:4000",
+            litellm_api_key="sk-test",
+            pydantic_ai_skills_enabled=True,
+        )
+    )
+    sent: list[tuple[list, AgentInfo]] = []
+
+    async def capture(messages, info: AgentInfo):
+        sent.append((messages, info))
+        yield "ok"
+
+    model = FunctionModel(stream_function=capture)
+    backend._build_model = lambda *_a, **_k: model  # type: ignore[method-assign]
+    pool = _pool(monkeypatch, backend)
+    transcript = '<conversation>\n<turn role="user">\nwhere is the owner?\n</turn>\n</conversation>'
+
+    await _drain(pool, isolated=True)
+
+    ((messages, info),) = sent
+    (request,) = messages
+    assert isinstance(request, ModelRequest)
+    assert request.instructions == SITE_SYSTEM
+    assert not [p for p in request.parts if isinstance(p, SystemPromptPart)]
+    users = [p for p in request.parts if isinstance(p, UserPromptPart)]
+    assert [p.content for p in users] == [transcript]
+    assert len(request.parts) == 1
+    # Tools off: no skill loader, no tool of any kind on the request.
+    assert info.function_tools == [] and not info.output_tools
+    wire = repr(messages)
+    for leaked in ("SOUL", "PAST MEMORY", "AGENT SYSTEM PROMPT", "pocketpaw-create-site"):
+        assert leaked not in wire

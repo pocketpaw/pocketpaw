@@ -24,6 +24,8 @@ from pocketpaw.agents import pool as agent_pool
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import get_settings
 
+_REAL_CHAT_COMPLETION = prompt_soften._chat_completion
+
 WS = "ws-side"
 USER = "user-side"
 DEFAULT_AGENT = "agent-default"
@@ -589,3 +591,32 @@ async def test_isolated_rides_to_the_pool_and_only_when_asked(seams, use_pool):
 
 def test_an_agent_with_no_model_is_priced_at_its_backends_default(seams):
     assert side_completion.default_model_for("pydantic_ai") == "claude-sonnet-4-6"
+
+
+async def test_the_gateway_fallback_sends_only_the_callers_system_and_prompt(
+    seams, use_pool, monkeypatch
+):
+    """A backend that can't run tool-less falls back to the gateway: the request it
+    sends is the caller's system prompt and prompt, nothing of the agent's."""
+    import json
+
+    import httpx
+
+    bodies = []
+
+    def _handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "fallback"}}]})
+
+    monkeypatch.setattr(prompt_soften, "_chat_completion", _REAL_CHAT_COMPLETION)
+    monkeypatch.setattr(prompt_soften, "_TRANSPORT", httpx.MockTransport(_handler))
+    use_pool(_Pool("codex_cli", "gpt-5.6", tools=False))
+
+    result = await _complete(isolated=True)
+
+    assert result.ok and result.fallback
+    ((body),) = bodies
+    assert body["messages"] == [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": "<original_prompt>a bakery</original_prompt>"},
+    ]
