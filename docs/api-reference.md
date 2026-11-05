@@ -6396,11 +6396,13 @@ The call runs as ONE tool-less side completion
 (`cloud/chat/side_completion.agent_complete` / `agent_stream`) on the agent and
 model the owner mapped to the alias, as the site owner: the agent's own backend
 (Claude Agent SDK, pydantic_ai, ...), the catalog check of a picked model, the
-workspace's BYOK key when it has one, and the chat turn's credit gates. The system
-prompt is the site's (or its preset's) system messages; the rest of the history is
-one delimited transcript. `max_output_tokens` and the alias cap ride as an
-instruction (the backends take no output cap). `temperature` is accepted and
-ignored.
+workspace's BYOK key when it has one, and the chat turn's credit gates. The call
+is isolated: no soul recall, none of the agent's skills, no connectors block, so the
+system prompt is exactly the site's (or its preset's) system messages; the rest of
+the history is one delimited transcript. The site owner must still be a member of
+the site's workspace. `max_output_tokens` and the alias cap ride as an instruction,
+and a stream is cut once its text passes the cap (`finish_reason: "length"`).
+`temperature` is accepted and ignored.
 
 - `stream: true` (default) answers `text/event-stream` with `chunk {delta}`,
   `usage {input_tokens, output_tokens, credits_micro}`, and ends with exactly one
@@ -6456,10 +6458,14 @@ per-visitor daily cap for a Worker call that sends `user`. Preview calls use onl
 the preview daily cap. A BYOK call is held only against the owner's own caps (no
 plan allowance, no wallet). A refused hold is `budget_exhausted`; both stream
 `unavailable {reason: "limit"}` (402 for JSON callers). After the call the hold
-settles to the reported usage and the surplus is released. A call the model never
-started on (a gate or credit refusal, a misconfigured alias, a timeout before the
-run began) costs nothing and releases it all; one that started and then failed
-bills its usage, else its input estimate plus what streamed. A sweeper settles a dead call that was sent to its full hold and debits it, and releases one that was never sent. Settles are unconditional; a counter past its cap refuses new holds. With credits enforced, every call is also held on a workspace-wide in-flight counter against the wallet balance plus a 10-credit overdraft (`wallet_empty`). These counters are ours, so the caps hold in LiteLLM `live` spend mode too, where the proxy does the wallet billing.
+settles to the reported usage and the surplus is released, and never above the
+hold (the platform absorbs an overrun). A call the model never started on (a gate
+or credit refusal, a misconfigured alias, a timeout before the run began) or a
+backend error with no usage and no output costs nothing and releases it all; one
+that started and then failed or was disconnected bills its usage, else its input
+estimate plus what streamed. Holds are priced at the higher of the answering
+model's dated price (the agent's model, else its backend's default) and the
+alias's fallback rate. A sweeper settles a dead call that was sent to its full hold and debits it, and releases one that was never sent. Settles are unconditional; a counter past its cap refuses new holds. With credits enforced, every call is also held on a workspace-wide in-flight counter against the wallet balance plus a 10-credit overdraft (`wallet_empty`). These counters are ours, so the caps hold in LiteLLM `live` spend mode too, where the proxy does the wallet billing.
 Crossing an alert threshold of the monthly cap notifies the workspace owner once
 per threshold per month (kind `site_ai_budget`) and emits `site.ai_budget` to the
 site owner.

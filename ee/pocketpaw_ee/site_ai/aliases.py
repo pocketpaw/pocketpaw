@@ -5,12 +5,12 @@
 # a workspace agent and, optionally, a catalog model (``SiteAiSettingsDoc.
 # alias_models``); an unmapped alias runs on the workspace default agent with its own
 # model. ``choice`` reads that mapping. Only the agent's backend and model are used,
-# never its prompt, tools or soul: the call goes through
-# ``cloud.chat.side_completion`` with the site's own system prompt.
+# never its prompt, tools, skills or soul: the call goes through
+# ``cloud.chat.side_completion`` isolated, with the site's own system prompt.
 #
-# ``reserve_micro`` is the worst case a call is held against: the dated price of the
-# model that will answer (the owner's pick, else the agent's own) when the price
-# table knows it, else the alias's fallback rate, over the input estimate plus the
+# ``reserve_micro`` is the worst case a call is held against: max(the dated price of
+# the model that will answer (the owner's pick, else the agent's own, else its
+# backend's default), the alias's fallback rate) over the input estimate plus the
 # full output cap. ``cost_usd`` prices what a call used through the meter's own
 # ``resolve_cost`` (the backend's reported cost, else the dated price of the model
 # that ran), falling back to the same rate so site counters never record a free call.
@@ -130,9 +130,7 @@ def reserve_micro(alias: str, model: str | None, input_tokens: int, output_token
         priced = price_run(
             model, input_tokens=input_tokens, output_tokens=output_tokens, at=datetime.now(UTC)
         )
-    usd = priced if priced is not None and priced > 0 else None
-    if usd is None:
-        usd = _fallback_usd(alias, input_tokens, output_tokens)
+    usd = max(priced or Decimal(0), _fallback_usd(alias, input_tokens, output_tokens))
     # +1 so a rounding step can never make the hold smaller than the settle.
     return _rate_card().to_micro_credits(usd) + 1
 

@@ -178,6 +178,14 @@ class FakeLlm:
         monkeypatch.setattr(side_completion, "agent_stream", self._stream)
         monkeypatch.setattr(side_completion, "agent_complete", self._complete)
         monkeypatch.setattr(side_completion, "resolve_target", self._resolve_target)
+        from pocketpaw_ee.site_ai import chat
+
+        self.member = True  # what ``chat.owner_is_member`` answers
+
+        async def _member(workspace_id, owner_id):
+            return self.member
+
+        monkeypatch.setattr(chat, "owner_is_member", _member)
 
     @property
     def payloads(self) -> list[dict]:

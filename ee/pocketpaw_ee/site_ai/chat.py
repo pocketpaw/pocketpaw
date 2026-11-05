@@ -31,9 +31,12 @@
 # 402 wallet_empty; ``unsupported`` (images on a backend that can't see them) ->
 # error / 400 unsupported; ``model`` / ``no_agent`` (and a backend that can't run
 # tool-less) -> the alias goes offline + unavailable temporary / 503; ``timeout`` /
-# ``error`` -> unavailable temporary / 503. Billing: a call the model never started
-# on costs nothing (the hold is released); one that started and then failed costs
-# its usage, else its input estimate plus what streamed. ``record`` prices the
+# ``error`` -> unavailable temporary / 503. The site owner must still be a member of
+# the site's workspace (else the alias goes offline). Billing: a call the model never
+# started on (``STARTED`` never came), or a backend error with no usage and no
+# output, costs nothing; one that started and then failed or was cancelled costs its
+# usage, else its input estimate plus what streamed. A stream is cut at the output
+# cap (finish ``length``), and no call costs more than its hold. ``record`` prices the
 # tokens (``aliases.cost_usd``), writes the ``ChatRunDoc`` (context ``site_ai``, no
 # content, the payer as ``credential_source``), settles the hold, checks the
 # owner's alert thresholds, writes an opted-in transcript and asks for the wallet
@@ -50,6 +53,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from fastapi import Request
@@ -212,6 +216,22 @@ async def _owner_id(site: Any) -> str:
     return str(getattr(pocket, "owner", "") or "")
 
 
+async def owner_is_member(workspace_id: str, owner_id: str) -> bool:
+    """The site owner is still a member of the site's workspace: the call runs as
+    them, so a former member's identity must not keep paying or resolving."""
+    from beanie import PydanticObjectId
+
+    from pocketpaw_ee.cloud.models.user import User
+
+    try:
+        user = await User.get(PydanticObjectId(owner_id))
+    except Exception:  # noqa: BLE001 - an unreadable owner is not a member
+        return False
+    return user is not None and any(
+        m.workspace == workspace_id for m in getattr(user, "workspaces", None) or ()
+    )
+
+
 async def _target(call: Admitted) -> None:
     """The alias's agent and who pays for it, by the side completion's own
     resolution. An agent that no longer resolves is a misconfigured alias."""
@@ -230,6 +250,9 @@ async def _target(call: Admitted) -> None:
         raise Unavailable("temporary", "provider_unavailable", stream=call.stream) from None
     if target is None:
         aliases.mark_offline(call.workspace_id, call.pocket_id, call.alias, "agent.not_found")
+        raise Unavailable("temporary", "provider_unavailable", stream=call.stream)
+    if not await owner_is_member(call.workspace_id, call.owner_id):
+        aliases.mark_offline(call.workspace_id, call.pocket_id, call.alias, "owner.not_member")
         raise Unavailable("temporary", "provider_unavailable", stream=call.stream)
     call.payer = target.payer
     call.ran_model = call.model or target.model or None
@@ -267,6 +290,9 @@ async def admit(request: Request, site_id: str) -> Admitted:
     if alias not in allowed:
         raise AiError("model_not_allowed", field="model")
     spec = aliases.ALIASES[alias]
+    if parsed.images and not spec.vision:
+        # Checked again here: a preset can move the call onto a text alias.
+        raise AiError("model_not_allowed", "Images need the vision model.", field="model")
     estimate = validate.estimate_tokens(messages, None, parsed.response_format)
     if estimate > spec.context_tokens:
         raise invalid("messages", "The conversation is too long for this model.")
@@ -433,6 +459,18 @@ async def record(
         call.ran_model = model
     cost = aliases.cost_usd(call.alias, call.ran_model, usage, (input_tokens, output_tokens))
     micro = aliases.to_micro(cost)
+    if call.hold is not None and micro > call.hold.reserved:
+        # The hold is the most a call may cost the site: the platform absorbs an
+        # overrun (a backend with no output cap) rather than letting concurrent
+        # calls push the site's counters past its caps.
+        logger.warning(
+            "site_ai: run %s cost %d over its %d hold; billing the hold",
+            call.run_id,
+            micro,
+            call.hold.reserved,
+        )
+        cost = cost * Decimal(call.hold.reserved) / Decimal(micro)
+        micro = call.hold.reserved
     try:
         await _write_run(call, status, input_tokens, output_tokens, cost)
     except Exception:  # noqa: BLE001 - bookkeeping must not break the answer
@@ -624,12 +662,14 @@ def _refusal(call: Admitted, result: Any) -> Unavailable:
 
 
 async def _bill_failure(call: Admitted, result: Any, produced: str) -> int:
-    """A failed call costs nothing unless the model actually started on it (a
-    timeout or a backend error after the run began); then its usage, else its
-    input estimate plus what it produced."""
+    """A failed call costs nothing unless the model actually worked on it: then its
+    reported usage, else its input estimate plus what it produced. A backend error
+    with no usage and no output is a refusal and costs nothing; a timeout after
+    the run began keeps the input estimate."""
     if result.sent:
         await _send(call)
-    if not call.sent:
+    refused = result.failure == "error" and not result.usage and not produced
+    if not call.sent or refused:
         return await record(call, "failed", 0, 0)
     tokens_in, tokens_out = _tokens(call, result, produced)
     return await record(
@@ -647,6 +687,7 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
     json_mode = _json_mode(call)
     streamed = ""
     recorded = False
+    truncated = False
     result: Any = None
     try:
         try:
@@ -657,12 +698,29 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
                         streamed += item
                         if not json_mode:
                             yield sse("chunk", {"delta": item})
+                        if _over_cap(call, streamed):
+                            truncated = True
+                            break
+                    elif llm.is_started(item):
+                        await _send(call)  # STARTED: the model call has begun
                     else:
                         result = item
         except Exception as exc:  # noqa: BLE001 - never echoed; the seam never raises
             logger.warning("site_ai: run %s stream crashed (%s)", call.run_id, type(exc).__name__)
             result = None
         recorded = True
+        if truncated:
+            tokens_in, tokens_out = _floor_in(call), _text_tokens(streamed)
+            micro = await record(call, "completed", tokens_in, tokens_out, streamed)
+            if json_mode:
+                yield _usage_frame(tokens_in, tokens_out, micro)
+                yield sse("error", {"code": "provider_unavailable", "message": _BAD_JSON_MESSAGE})
+                return
+            yield _usage_frame(tokens_in, tokens_out, micro)
+            yield sse("done", {"id": f"aic_{call.run_id}", "finish_reason": "length"})
+            return
+        if result is not None and result.payer:
+            call.payer = result.payer
         if result is None or result.failure is not None:
             result = result or _NO_RESULT
             micro = await _bill_failure(call, result, streamed)
@@ -699,6 +757,12 @@ async def _events(call: Admitted) -> AsyncIterator[bytes]:
             )
 
 
+def _over_cap(call: Admitted, streamed: str) -> bool:
+    """The backstop for a backend with no output cap: cut the stream once its text
+    is past the call's output cap (at a conservative 3 UTF-8 bytes a token)."""
+    return (len(streamed.encode("utf-8")) + 2) // 3 > call.max_tokens
+
+
 class _Unfinished:
     """Stands in for a stream that ended without its result (never expected)."""
 
@@ -707,6 +771,7 @@ class _Unfinished:
     sent = False
     usage = None
     model = None
+    payer = None
     text = ""
 
 
@@ -723,6 +788,8 @@ async def _json(call: Admitted) -> Response:
     except Exception as exc:  # noqa: BLE001 - never echoed; the seam never raises
         logger.warning("site_ai: run %s crashed (%s)", call.run_id, type(exc).__name__)
         result = _NO_RESULT
+    if result.payer:
+        call.payer = result.payer
     if result.failure is not None:
         await _bill_failure(call, result, "")
         if result.failure == "unsupported":

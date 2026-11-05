@@ -2702,6 +2702,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         exclusive_mcp_tools: bool = False,
         tools_enabled: bool = True,
         max_turns: int | None = None,
+        isolated: bool = False,
     ) -> _BuiltOptions:
         """Assemble the ``ClaudeAgentOptions`` a turn (or a prewarm) will run on.
 
@@ -2781,12 +2782,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # (injected by BootstrapContext.to_system_prompt() via INSTRUCTIONS.md)
         identity = system_prompt or _DEFAULT_IDENTITY
 
-        # Inject connector instructions so the agent can use data sources
+        # Inject connector instructions so the agent can use data sources. An
+        # isolated run (a side completion for someone else's site) gets the
+        # caller's prompt and nothing of this deployment's.
         try:
             from pocketpaw.connectors.registry import ConnectorRegistry
 
-            reg = ConnectorRegistry()
-            if reg.available:
+            reg = None if isolated else ConnectorRegistry()
+            if reg is not None and reg.available:
                 names = ", ".join(c["name"] for c in reg.available)
                 identity += (
                     "\n\n# Data Connectors\n"
@@ -3137,7 +3140,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # ``skills=`` option is also gated by setting_sources, but
         # ``plugins=`` is not. Toggle via ``sdk_load_bundled_skills``.
         bundled_loaded = False
-        if self._should_load_bundled_plugin(
+        if not isolated and self._should_load_bundled_plugin(
             enabled=self.settings.sdk_load_bundled_skills, skill_names=skill_names
         ):
             from pocketpaw.bundled_skills import bundled_skills_plugin_dir
@@ -3727,6 +3730,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # A surface's tool-turn override for this run (``_effective_max_turns``):
         # None = keep the setting, 0 = no cap, N = raise to N.
         max_turns: int | None = None,
+        # A side completion run for a caller other than the agent's user (a site's
+        # AI API): no connectors block and no bundled skills, so the system prompt
+        # is exactly ``system_prompt``. ``AgentPool`` forwards it only when True.
+        isolated: bool = False,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -3918,6 +3925,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 tools_enabled=tools_enabled,
                 max_turns=max_turns,
                 stderr_sink=_stderr_lines,
+                isolated=isolated,
             )
             options = _built.options
             options_kwargs = _built.options_kwargs

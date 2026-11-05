@@ -249,20 +249,27 @@ async def test_worker_user_gets_the_per_visitor_cap(beanie_test_db, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_an_error_after_the_model_started_bills_its_input(beanie_test_db, monkeypatch):
+async def test_a_backend_error_bills_what_it_reported_and_nothing_without_usage(
+    beanie_test_db, monkeypatch
+):
     from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc
-    from pocketpaw_ee.site_ai import validate
 
     site, token = await _setup()
-    FakeLlm(monkeypatch, script=[failed("error", "agent.backend_error", sent=True)])
+    usage = {"input_tokens": 30, "output_tokens": 0}
+    FakeLlm(monkeypatch, script=[failed("error", "agent.backend_error", sent=True, usage=usage)])
     async with client() as c:
         await _post(c, site, token, _body())
         await _post(c, site, token, _body(stream=False))
-    est = validate.estimate_tokens([{"role": "user", "content": "hi"}])
     rows = await SiteAiCallDoc.find(SiteAiCallDoc.state == "settled").to_list()
-    assert len(rows) == 2 and all(r.input_tokens == est for r in rows)
-    doc = await _counter(site, "day")
-    assert doc.spent_micro == 2 * _micro(est, 0, None) and doc.held_micro == 0
+    assert len(rows) == 2 and all(r.input_tokens == 30 for r in rows)
+
+    # No usage and no output: the backend refused before doing any work.
+    bare, bare_token = await _setup()
+    FakeLlm(monkeypatch, script=[failed("error", "agent.backend_error", sent=True)])
+    async with client() as c:
+        await _post(c, bare, bare_token, _body())
+    doc = await _counter(bare, "day")
+    assert (doc.spent_micro, doc.held_micro) == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -773,3 +780,120 @@ async def test_live_spend_mode_still_enforces_the_site_caps(beanie_test_db, monk
         resp = await _post(c, site, token, _body())
     assert parse_sse(resp.text) == [("unavailable", {"reason": "limit"})]
     assert fake.payloads == []
+
+
+@pytest.mark.asyncio
+async def test_a_disconnect_after_the_model_started_bills_its_input(beanie_test_db, monkeypatch):
+    """The model call began (``STARTED``) but no token arrived before the caller
+    went away: the request reached the model, so it costs its input."""
+    from pocketpaw_ee.cloud.chat.side_completion import STARTED
+    from pocketpaw_ee.cloud.models.site_ai import SiteAiCallDoc
+    from pocketpaw_ee.site_ai import budget, chat
+    from pocketpaw_ee.site_ai.service import day_period
+
+    site, _token = await _setup()
+    FakeLlm(monkeypatch, script=[STARTED, "late", ok("late")])
+    call = chat.Admitted(
+        site=site,
+        workspace_id=WS,
+        pocket_id=site.pocket_id,
+        site_id=str(site.id),
+        caller="worker",
+        alias="fast",
+        owner_id=OWNER,
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=100,
+        input_estimate=10,
+        stream=True,
+    )
+    call.hold = await budget.reserve(
+        run_id=call.run_id,
+        workspace_id=WS,
+        pocket_id=site.pocket_id,
+        site_id=call.site_id,
+        caller="worker",
+        model="fast",
+        amount=10_000,
+        caps=[budget.Cap("day", day_period(), 100 * MICRO)],
+    )
+    gen = chat._events(call)
+    # Drive the generator until the stream reports the model started, then leave.
+    task = asyncio.ensure_future(gen.__anext__())
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if call.sent:
+            break
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, StopAsyncIteration):
+        pass
+    await gen.aclose()
+    doc = await SiteAiCallDoc.find_one(SiteAiCallDoc.run_id == call.run_id)
+    assert call.sent and doc.state == "settled" and doc.input_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_the_stream_is_cut_at_the_output_cap(beanie_test_db, monkeypatch):
+    site, token = await _setup()
+    fake = FakeLlm(monkeypatch, script=["x" * 300, "y" * 300, "z" * 300, ok("never")])
+    async with client() as c:
+        resp = await _post(c, site, token, _body(max_output_tokens=100))
+    events = parse_sse(resp.text)
+    # The second chunk passes the cap (600 bytes > 100 tokens at 3 bytes each);
+    # the third is never read.
+    assert [e for e, _ in events] == ["chunk", "chunk", "usage", "done"]
+    assert events[-1][1]["finish_reason"] == "length"
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_hold_is_reserved_at_the_higher_of_the_dated_price_and_the_fallback():
+    from pocketpaw_ee.site_ai import aliases
+
+    cheap = aliases.reserve_micro("fast", "claude-haiku-5-5", 1000, 4096)
+    fallback = aliases.reserve_micro("fast", None, 1000, 4096)
+    dear = aliases.reserve_micro("fast", "claude-opus-4-8", 1000, 4096)
+    assert cheap == fallback  # a cheap model is never held under the fallback
+    assert dear > fallback  # a dear one is held at its own price
+
+
+@pytest.mark.asyncio
+async def test_concurrent_overruns_never_push_spend_past_the_cap(beanie_test_db, monkeypatch):
+    """Every call reports usage far above its hold (a backend with no output
+    cap): each settles at its hold, so a burst can't overshoot the daily cap."""
+    hold = _hold_for(1000)
+    cap = hold * 3 + hold // 2
+    site, token = await _setup(daily_cap_micro=cap)
+    fake = FakeLlm(monkeypatch, script=text_events("ok", 9, 900_000))
+    fake.gate = asyncio.Event()
+
+    async def _release_later():
+        await asyncio.sleep(0.5)
+        fake.gate.set()
+
+    async with client() as c:
+        releaser = asyncio.create_task(_release_later())
+        await asyncio.gather(
+            *(_post(c, site, token, _body(max_output_tokens=1000)) for _ in range(10))
+        )
+        await releaser
+    doc = await _counter(site, "day")
+    assert doc.spent_micro <= cap and doc.committed_micro <= cap and doc.held_micro == 0
+
+
+@pytest.mark.asyncio
+async def test_the_payer_the_call_reports_wins(beanie_test_db, monkeypatch):
+    """Admission thought BYOK, but the backend ran on the platform's key: the run
+    is recorded as platform-paid and goes to ``bill_run``."""
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+    from pocketpaw_ee.site_ai import chat
+
+    billed = []
+    monkeypatch.setattr(chat, "_schedule_bill", billed.append)
+    site, token = await _setup()
+    FakeLlm(monkeypatch, script=["ok", ok("ok", 9, 5, payer="platform")], payer="byok")
+    async with client() as c:
+        await _post(c, site, token, _body())
+    run = await ChatRunDoc.find_one(ChatRunDoc.context_type == "site_ai")
+    assert run.credential_source == "platform" and len(billed) == 1

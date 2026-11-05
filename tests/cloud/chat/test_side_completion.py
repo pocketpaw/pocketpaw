@@ -451,7 +451,8 @@ async def test_stream_yields_deltas_then_the_same_result(seams, use_pool):
 
     items = await _stream(agent_id="agent-mine", model="claude-haiku-5-5")
 
-    *deltas, result = items
+    started, *deltas, result = items
+    assert started is side_completion.STARTED
     assert deltas == ["A brief ", "for Crumb & Co."]
     assert result.ok and result.text == "A brief for Crumb & Co."
     assert (result.payer, result.sent, result.agent_id) == ("platform", True, "agent-mine")
@@ -479,8 +480,9 @@ async def test_a_gate_refusal_streams_only_the_result_and_was_never_sent(
 async def test_stream_timeout_is_typed_and_closes_the_generator(seams, use_pool):
     pool = use_pool(_Pool("claude_agent_sdk", delay=1.0))
 
-    (result,) = await _stream(timeout_s=0.05)
+    started, result = await _stream(timeout_s=0.05)
 
+    assert started is side_completion.STARTED
     assert (result.failure, result.sent) == ("timeout", True)
     assert pool.closed
 
@@ -501,7 +503,7 @@ async def test_stream_through_the_gateway_fallback_is_one_delta(seams, use_pool)
 
     items = await _stream()
 
-    assert items[0] == "fallback brief"
+    assert items[0] is side_completion.STARTED and items[1] == "fallback brief"
     assert items[-1].ok and items[-1].fallback and items[-1].sent
 
 
@@ -573,3 +575,17 @@ async def test_a_call_without_images_sends_exactly_what_it_did_before(seams, use
             "system_message_override",
             "tools_enabled",
         }
+
+
+async def test_isolated_rides_to_the_pool_and_only_when_asked(seams, use_pool):
+    pool = use_pool(_Pool("claude_agent_sdk"))
+
+    await _complete(isolated=True)
+    await _stream(isolated=True)
+    await _complete()
+
+    assert [c.get("isolated") for c in pool.calls] == [True, True, None]
+
+
+def test_an_agent_with_no_model_is_priced_at_its_backends_default(seams):
+    assert side_completion.default_model_for("pydantic_ai") == "claude-sonnet-4-6"

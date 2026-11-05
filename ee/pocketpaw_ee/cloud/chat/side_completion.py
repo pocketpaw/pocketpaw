@@ -19,6 +19,10 @@
 # the caller's system prompt, under ``baggage(paw.internal=true)`` and a timeout.
 #
 # Invariants:
+#   * ``isolated=True`` (a caller that is not the agent's user, e.g. a site's AI
+#     API) runs ``pool.run(isolated=True)``: no soul recall, none of the agent's
+#     skills, no backend extras, so the system prompt is exactly ``system``.
+#     Enhance and the other in-app callers keep the agent's full context.
 #   * ``images`` ride the chat turn's ``image_attachments`` channel to the
 #     backend; a backend that doesn't declare it (or the gateway fallback) is a
 #     typed ``unsupported`` failure, never a silent drop. No images = the exact
@@ -130,7 +134,7 @@ class SideTarget:
 
     agent_id: str
     payer: Literal["platform", "byok"]
-    model: str = ""
+    model: str = ""  # the agent's model, else its backend's default ("" = unknown)
 
 
 async def resolve_target(
@@ -152,12 +156,27 @@ async def resolve_target(
     model = ""
     try:
         doc = await Agent.get(PydanticObjectId(target))
-        model = str(doc.config.model or "") if doc is not None else ""
+        if doc is not None:
+            model = str(doc.config.model or "") or default_model_for(str(doc.config.backend))
     except Exception:  # noqa: BLE001 - the model is only a pricing hint
         model = ""
     return SideTarget(
         agent_id=target, payer="byok" if source == "byok" else "platform", model=model
     )
+
+
+def default_model_for(backend: str) -> str:
+    """The model ``backend`` runs when an agent names none ("" when unknown):
+    ``pydantic_ai_model`` for pydantic_ai, else the backend's own model setting
+    as the LLM client resolves it."""
+    if backend == PYDANTIC_AI:
+        return deployment_default_model()
+    try:
+        from pocketpaw.llm.client import resolve_llm_client  # type: ignore[import-untyped]
+
+        return str(resolve_llm_client(get_settings(), backend=backend).model or "")
+    except Exception:  # noqa: BLE001 - only a pricing hint
+        return ""
 
 
 def deployment_default_model() -> str:
@@ -204,6 +223,7 @@ async def _prepare(
     model: str | None,
     timeout_s: float | Callable[[str], float],
     images: Sequence[ImageAttachment] = (),
+    isolated: bool = False,
 ) -> _Plan | SideCompletion:
     """Resolve the agent and run every gate; a ``SideCompletion`` is a refusal."""
     from pocketpaw.agents.errors import AgentDisabled  # type: ignore[import-untyped]
@@ -247,6 +267,8 @@ async def _prepare(
     meta.update(backend=backend, model=model or agent_model or None)
 
     run_kwargs: dict[str, Any] = {"system_message_override": system, "tools_enabled": False}
+    if isolated:
+        run_kwargs["isolated"] = True
     if model:
         run_kwargs["model_override"] = model
     if creds.source == "byok" and creds.api_key:
@@ -315,10 +337,22 @@ async def _prepare(
     )
 
 
+class _Started:
+    """``agent_stream``'s marker: the model call has begun (``sent`` from here)."""
+
+    def __repr__(self) -> str:
+        return "STARTED"
+
+
+STARTED = _Started()
+
+
 async def _events(plan: _Plan) -> AsyncIterator[tuple[str, Any]]:
-    """The run as ``("text", str)`` / ``("usage", dict)`` / ``("error", str)``.
-    Marks the plan ``sent`` before the model is called."""
+    """The run as ``("started", None)``, then ``("text", str)`` / ``("usage",
+    dict)`` / ``("error", str)``. Marks the plan ``sent`` before the model is
+    called."""
     plan.sent = True
+    yield "started", None
     if plan.gateway:
         from pocketpaw_ee.cloud.studio import prompt_soften
 
@@ -384,6 +418,7 @@ async def agent_complete(
     model: str | None = None,
     timeout_s: float | Callable[[str], float],
     images: Sequence[ImageAttachment] = (),
+    isolated: bool = False,
 ) -> SideCompletion:
     """One tool-less completion on the workspace agent's own backend and model.
 
@@ -402,6 +437,7 @@ async def agent_complete(
             model=model,
             timeout_s=timeout_s,
             images=images,
+            isolated=isolated,
         )
         if isinstance(prepared, SideCompletion):
             result = prepared
@@ -431,7 +467,7 @@ async def _complete_plan(plan: _Plan) -> SideCompletion:
                     chunks.append(value)
                 elif kind == "usage":
                     usage = value
-                else:
+                elif kind == "error":
                     return value
         return None
 
@@ -452,11 +488,13 @@ async def agent_stream(
     model: str | None = None,
     timeout_s: float | Callable[[str], float],
     images: Sequence[ImageAttachment] = (),
-) -> AsyncIterator[str | SideCompletion]:
-    """``agent_complete``, streamed: yields each text delta as a ``str`` and ends
-    with ONE ``SideCompletion`` (what ``agent_complete`` would return, with the
-    whole text). A gate refusal yields only that result. Never raises;
-    ``timeout_s`` bounds the whole run, as there."""
+    isolated: bool = False,
+) -> AsyncIterator[str | SideCompletion | _Started]:
+    """``agent_complete``, streamed: yields ``STARTED`` once the model call has
+    begun, each text delta as a ``str``, and ends with ONE ``SideCompletion``
+    (what ``agent_complete`` would return, with the whole text). A gate refusal
+    yields only that result. Never raises; ``timeout_s`` bounds the whole run,
+    as there."""
     started = time.monotonic()
     plan: _Plan | None = None
     chunks: list[str] = []
@@ -471,6 +509,7 @@ async def agent_stream(
             model=model,
             timeout_s=timeout_s,
             images=images,
+            isolated=isolated,
         )
         if isinstance(prepared, SideCompletion):
             result = prepared
@@ -487,7 +526,9 @@ async def agent_stream(
                         kind, value = await asyncio.wait_for(anext(events), timeout=remaining)
                     except StopAsyncIteration:
                         break
-                    if kind == "text":
+                    if kind == "started":
+                        yield STARTED
+                    elif kind == "text":
                         chunks.append(value)
                         yield value
                     elif kind == "usage":
@@ -513,9 +554,11 @@ async def agent_stream(
 __all__ = [
     "SideCompletion",
     "SideFailure",
+    "STARTED",
     "SideTarget",
     "agent_complete",
     "agent_stream",
+    "default_model_for",
     "deployment_default_model",
     "resolve_target",
 ]

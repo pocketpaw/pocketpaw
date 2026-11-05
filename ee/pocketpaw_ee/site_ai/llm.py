@@ -4,9 +4,10 @@
 # and ``stream`` call ``cloud.chat.side_completion.agent_complete`` /
 # ``agent_stream`` on the agent and model the owner mapped to the alias
 # (``aliases.choice``), as the site owner, so the agent's backend, the per-send
-# model check, BYOK, who pays and the credit gates are exactly a chat turn's. Tools
-# are off and the agent's own prompt, tools and soul are never used: ``render``
-# builds the system prompt from the site's (or its preset's) system messages only.
+# model check, BYOK, who pays and the credit gates are exactly a chat turn's. The
+# call is ``isolated``: tools off, no soul recall, none of the agent's skills or
+# backend extras, so the system prompt is exactly what ``render`` builds from the
+# site's (or its preset's) system messages.
 #
 # ``render`` turns the OpenAI-shaped history into one delimited transcript
 # (``<turn role="...">`` blocks inside ``<conversation>``; a turn's own text cannot
@@ -141,6 +142,7 @@ def _kwargs(call: Any) -> dict[str, Any]:
         "model": call.model,
         "timeout_s": TIMEOUT_S,
         "images": images(call.messages),
+        "isolated": True,
     }
 
 
@@ -152,11 +154,17 @@ async def complete(call: Any):
 
 
 async def stream(call: Any) -> AsyncIterator[Any]:
-    """Text deltas (``str``), then one ``SideCompletion``. Never raises."""
+    """``STARTED``, text deltas (``str``), then one ``SideCompletion``. Never raises."""
     from pocketpaw_ee.cloud.chat import side_completion
 
     async for item in side_completion.agent_stream(**_kwargs(call)):
         yield item
 
 
-__all__ = ["TIMEOUT_S", "complete", "images", "json_text", "render", "stream"]
+def is_started(item: Any) -> bool:
+    from pocketpaw_ee.cloud.chat import side_completion
+
+    return item is side_completion.STARTED
+
+
+__all__ = ["TIMEOUT_S", "complete", "is_started", "images", "json_text", "render", "stream"]

@@ -365,7 +365,9 @@ async def test_only_validated_fields_reach_the_model(beanie_test_db, monkeypatch
         "model",
         "timeout_s",
         "images",
+        "isolated",
     }
+    assert sent["isolated"] is True
     assert sent["images"] == []
     # The output cap is the alias's, as an instruction (backends take no cap).
     assert "4096 tokens" in sent["system"]
@@ -711,3 +713,63 @@ async def test_a_site_without_a_pocket_is_unauthorized(beanie_test_db, monkeypat
     async with client() as c:
         resp = await _post(c, site, token, {"model": "fast", "messages": _msgs()})
     assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_a_text_preset_carrying_images_is_refused(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.models.site_ai import SiteAiPresetDoc
+
+    site, token = await _setup(models=["fast", "vision"])
+    await SiteAiPresetDoc(
+        workspace=WS,
+        pocket_id=site.pocket_id,
+        preset_id="pre_txt",
+        name="txt",
+        system_prompt="Text only.",
+        model="fast",
+    ).insert()
+    fake = FakeLlm(monkeypatch)
+    png_url = "data:image/png;base64," + base64.b64encode(PNG).decode()
+    body = {
+        "model": "vision",
+        "preset": "pre_txt",
+        "messages": [
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": png_url}}]}
+        ],
+    }
+    async with client() as c:
+        resp = await _post(c, site, token, body)
+    assert (resp.status_code, resp.json()["detail"]) == (403, "model_not_allowed")
+    assert fake.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_owner_who_left_the_workspace_takes_the_alias_offline(
+    beanie_test_db, monkeypatch, caplog
+):
+    site, token = await _setup()
+    fake = FakeLlm(monkeypatch)
+    fake.member = False
+    caplog.set_level(logging.INFO)
+    async with client() as c:
+        resp = await _post(c, site, token, {"model": "fast", "messages": _msgs()})
+    assert parse_sse(resp.text) == [("unavailable", {"reason": "temporary"})]
+    assert fake.calls == []
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1 and "owner.not_member" in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_owner_membership_reads_the_users_workspaces(beanie_test_db):
+    from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
+    from pocketpaw_ee.site_ai import chat
+
+    user = User(
+        email="owner@example.com",
+        hashed_password="x",
+        workspaces=[WorkspaceMembership(workspace=WS, role="owner")],
+    )
+    await user.insert()
+    assert await chat.owner_is_member(WS, str(user.id)) is True
+    assert await chat.owner_is_member("ws_elsewhere", str(user.id)) is False
+    assert await chat.owner_is_member(WS, "not-an-id") is False
