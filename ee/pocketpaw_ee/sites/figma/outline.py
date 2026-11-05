@@ -5,7 +5,10 @@
 # sizing, wrap, alignment), radius, fills / strokes / effects in short form, text
 # style, and the component an instance comes from. Anything past the budget or the
 # depth is counted, never silently dropped, so the agent knows to screenshot it.
-# ``frames`` lists a file's pages and top-level frames (the ``depth=2`` index).
+# ``frames`` lists a file's pages and top-level frames (the ``depth=2`` index) and
+# ``site_pages`` plans the site from them: one route per frame name (slugified to
+# ``[a-z0-9-]``, deduplicated, ``/`` for Home or the first), and frames that share a
+# name across widths ("Home/Desktop", "Home/Mobile") become that route's viewports.
 #
 # UNTRUSTED. Layer names and text are written by whoever made the file. Every such
 # string goes through ``clean``: control and bidi characters stripped, whitespace
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
@@ -282,6 +286,65 @@ def frames(index_body: Mapping[str, Any]) -> dict[str, Any]:
         "last_modified": clean(index_body.get("lastModified"), 40),
         "pages": pages,
     }
+
+
+_VIEWPORT_WORDS = {"desktop", "mobile", "tablet", "phone", "web", "laptop", "wide"}
+_HOME_SLUGS = {"home", "index", "landing", "homepage", "home-page"}
+MAX_ROUTES = 20
+
+
+def _slug(name: str) -> str:
+    text = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:48].strip("-")
+
+
+def _base_name(name: str) -> str:
+    """ "Home/Desktop", "Home - Mobile", "Home (390)" -> "Home"."""
+    parts = [p.strip() for p in re.split(r"\s*/\s*|\s+[-–]\s+", name) if p.strip()]
+    while len(parts) > 1:
+        last = re.sub(r"[()\s]", "", parts[-1]).lower()
+        if last in _VIEWPORT_WORDS or re.fullmatch(r"\d{3,4}(px)?", last):
+            parts.pop()
+            continue
+        break
+    base = " ".join(parts) if parts else name
+    return re.sub(r"\s*\(\s*\d{3,4}\s*(px)?\s*\)\s*$", "", base).strip() or name
+
+
+def site_pages(index: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The site plan from ``frames(...)``: routes with their authoritative viewports."""
+    groups: dict[str, dict[str, Any]] = {}
+    for page in index.get("pages") or []:
+        for frame in page.get("frames") or []:
+            if frame.get("type") not in ("FRAME", "COMPONENT"):
+                continue
+            base = _base_name(str(frame.get("name") or ""))
+            key = _slug(base) or f"page-{len(groups) + 1}"
+            group = groups.setdefault(key, {"name": base, "viewports": []})
+            group["viewports"].append({"node": frame.get("id"), "width": frame.get("width")})
+    if not groups:
+        return []
+    home = next((k for k in groups if k in _HOME_SLUGS), next(iter(groups)))
+    out: list[dict[str, Any]] = []
+    used: set[str] = set()
+    for key, group in list(groups.items())[:MAX_ROUTES]:
+        route = "/" if key == home else f"/{key}"
+        n = 2
+        while route in used:
+            route = f"/{key}-{n}"
+            n += 1
+        used.add(route)
+        viewports = sorted(group["viewports"], key=lambda v: -(v.get("width") or 0))
+        widths = {v.get("width") for v in viewports}
+        out.append(
+            {
+                "route": route,
+                "name": group["name"],
+                "viewports": viewports,
+                "mobile": "observed" if any((w or 0) < 600 for w in widths) else "inferred",
+            }
+        )
+    return out
 
 
 def envelope(payload: Any) -> str:

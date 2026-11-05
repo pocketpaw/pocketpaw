@@ -40,9 +40,10 @@ _CASES_PATH = Path(__file__).parent / "eval_cases.json"
 # gate" is still the single non-rank-1.
 # If a ranking change LOWERS the strict-hit count below this, the summary
 # test fails; if it raises it, bump the constant in the same PR.
-# Re-measured 2026-11-05 (feat/site-ai-discoverability): 100 of 103; the three
-# new site AI intents all rank capability:sites.site_ai first.
-STRICT_HIT_BASELINE = 100
+# Re-measured with the Figma case added: 101 of 104; the three site AI intents
+# rank capability:sites.site_ai first and the Figma link ranks
+# skill:sites-reference-match first.
+STRICT_HIT_BASELINE = 101
 
 # Search depth for the eval: at least as deep as the largest rank_within,
 # generous enough that "not found at all" is a ranking fact, not a limit

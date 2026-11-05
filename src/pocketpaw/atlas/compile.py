@@ -25,7 +25,8 @@
 #     ``how`` sends the agent to ``get_widget_spec`` for the prop contract.
 #   + ``skill`` entries — one per BUNDLED skill
 #     (``pocketpaw/bundled_skills/_bundled/skills/<slug>/SKILL.md``),
-#     summary/narrative from the frontmatter description. Workspace-
+#     summary/narrative from the frontmatter description, extra search
+#     keywords from ``metadata.atlas_keywords``. Workspace-
 #     installed skills change per install and are deliberately NOT baked
 #     into the artifact (their discovery stays with the system-prompt
 #     skills block).
@@ -501,7 +502,12 @@ def _skill_entries() -> list[AtlasEntry]:
             narrative += f" Arguments: {skill.argument_hint}."
 
         keywords: list[str] = []
-        for word in [slug, skill.name.lower()]:
+        # ``metadata.atlas_keywords`` in the frontmatter: the words a user types for
+        # this skill that its name does not carry ("figma" for sites-reference-match).
+        meta = skill.metadata if isinstance(skill.metadata, dict) else {}
+        extra = meta.get("atlas_keywords")
+        extra_words = [str(w).strip().lower() for w in extra] if isinstance(extra, list) else []
+        for word in [slug, skill.name.lower(), *extra_words[:8]]:
             if word and word not in keywords:
                 keywords.append(word)
 
