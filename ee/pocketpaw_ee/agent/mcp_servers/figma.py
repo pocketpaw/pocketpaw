@@ -244,11 +244,13 @@ async def _tokens_handler(args: dict) -> dict:
         "source": "variables+derived" if variables else "derived",
         "tokens": tokens,
         "css": figma_tokens.css(tokens),
+        "read_as": _read_as(conn),
         "next": (
-            "Map each observed role onto the template's own :root / @theme names (keep "
-            "its names, change the values) and log it observed in the ledger. A "
-            "substituted role keeps the template's value. Fonts not on Google Fonts are "
-            "substituted (sites-reference-match section 5)."
+            "Copy values from `css.root` / `css.theme` (already CSS-safe) onto the "
+            "template's own :root / @theme names (keep its names, change the values) and "
+            "log each observed in the ledger. A substituted role keeps the template's "
+            "value. Fonts not on Google Fonts are substituted (sites-reference-match "
+            "section 5)."
         ),
     }
     warning = _seat_warning(conn)
