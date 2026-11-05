@@ -729,9 +729,9 @@
       "kind": "surface",
       "name": "Agent Health",
       "summary": "Where the workspace's agents fail, what their runs cost, and the run timeline behind each issue.",
-      "narrative": "Agent Health at /agent-health is the workspace-scoped view of agent reliability, read from paw-lens traces: runs, failing rate, cost, cache hits, the open issues grouped by cause, and a per-agent table. Each issue opens at /agent-health/issues/<fingerprint> with the runs it hit, and each run opens its span timeline at /agent-health/runs/<traceId>. Point a user here when they ask why an agent failed, which agent is erroring, or what runs cost; for what agents are doing right now use /agents/activity. Muting or resolving an issue needs a workspace admin.",
+      "narrative": "Agent Health at /agents/health, a tab of the Agents page, is the workspace-scoped view of agent reliability, read from paw-lens traces: runs, failing rate, cost, cache hits, the open issues grouped by cause, and a per-agent table. Each issue opens at /agents/health/issues/<fingerprint> with the runs it hit, and each run opens its span timeline at /agents/health/runs/<traceId>. Point a user here when they ask why an agent failed, which agent is erroring, or what runs cost; for what agents are doing right now use /agents/activity. Muting or resolving an issue needs a workspace admin.",
       "how": "",
-      "surface": "/agent-health",
+      "surface": "/agents/health",
       "requires": [],
       "keywords": [
         "agent health",
@@ -740,7 +740,7 @@
         "agent issues",
         "run timeline"
       ],
-      "slash": "agent-health",
+      "slash": "agents/health",
       "presentation": "window",
       "agent_openable": false
     },
