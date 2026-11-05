@@ -72,6 +72,14 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "homepage": "https://pocketpaw.xyz/",
+    "shortDescription": "Desktop client for the PocketPaw AI assistant",
+    "longDescription": "PocketPaw is a self-hosted AI assistant with a native desktop interface.\nConnect to a PocketPaw backend to chat with agents, manage conversations,\nand configure tools and integrations.",
+    "linux": {
+      "deb": {
+        "section": "utils"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
