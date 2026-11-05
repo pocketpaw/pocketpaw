@@ -11,6 +11,10 @@ class TestStatusTool:
 
     def test_get_system_status_returns_string(self):
         """Status should return a formatted string."""
+        # get_system_status() degrades gracefully without psutil (returns a
+        # "(limited)" message instead of CPU/RAM/Disk figures); this test
+        # exercises the full-stats path, so it needs psutil itself (#715).
+        pytest.importorskip("psutil")
         from pocketpaw.tools import status
 
         result = status.get_system_status()
@@ -23,6 +27,7 @@ class TestStatusTool:
 
     def test_get_system_status_contains_percentages(self):
         """Status should contain percentage values."""
+        pytest.importorskip("psutil")
         from pocketpaw.tools import status
 
         result = status.get_system_status()
