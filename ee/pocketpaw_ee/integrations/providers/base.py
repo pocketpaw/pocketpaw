@@ -276,6 +276,8 @@ class BaseProvider:
     connect_params: tuple[ConnectParam, ...] = ()
     # False for a workspace-only grant no site may link (Figma, read by the agent).
     site_bindable: bool = True
+    # True when only a grant's creator may use it (Figma reads personal files).
+    per_member: bool = False
 
     def availability(self) -> Availability:
         return "available"

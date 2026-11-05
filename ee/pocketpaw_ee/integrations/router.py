@@ -2,7 +2,8 @@
 #
 # ``router`` (owner routes: session + workspace RBAC + the ``sites`` plan feature):
 #   GET    /integrations/providers                       ProviderView[]
-#   GET    /integrations/connections                     ConnectionView[]
+#   GET    /integrations/connections                     ConnectionView[] (``mine``; a
+#                                                        per-member teammate grant: admins only)
 #   POST   /integrations/{provider}/connect              {pocket_id?, params?} -> {authorize_url}
 #   POST   /integrations/connections/{id}/resume         {authorize_url} (creator or admin)
 #   DELETE /integrations/connections/{id}                revoke (creator or admin)
@@ -79,6 +80,7 @@ from pocketpaw_ee.integrations.dto import (
     SiteIntegrationPut,
     SiteIntegrationView,
 )
+from pocketpaw_ee.integrations.providers import get_provider
 
 router = APIRouter(tags=["Integrations"], dependencies=[Depends(require_plan_feature("sites"))])
 public_router = APIRouter(tags=["Integrations"])
@@ -98,9 +100,22 @@ async def list_providers(
 async def list_connections(
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
+    is_admin: bool = Depends(action_allowed_any_workspace("workspace.update")),
 ) -> list[ConnectionView]:
+    """Every workspace connection, marked ``mine`` for the caller's own. A per-member
+    provider's (Figma) teammate grant is listed to admins only, never as usable."""
     rows = await vault.list_connections(ctx.workspace_id or "")
-    return [vault.to_view(r, await bindings.site_count(str(r.id))) for r in rows]
+    visible = [
+        r
+        for r in rows
+        if is_admin
+        or r.created_by == ctx.user_id
+        or not getattr(get_provider(r.provider), "per_member", False)
+    ]
+    return [
+        vault.to_view(r, await bindings.site_count(str(r.id)), viewer_id=ctx.user_id)
+        for r in visible
+    ]
 
 
 @router.post("/integrations/{provider}/connect", response_model=ConnectResponse)
