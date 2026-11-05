@@ -23,7 +23,9 @@
 #   * tier-1 answers (index, nodes, renders) are cached 24 h per connection, file
 #     and the file's ``last_touched_at`` from ``/files/:key/meta`` (tier 3, cached 10
 #     min), so an edited file is read fresh and an unchanged one costs no tier-1
-#     call. Redis when present, else a bounded in-process dict.
+#     call. Redis when present, else a bounded in-process dict;
+#   * ``source_for`` uses only the CALLER's own figma connection (``created_by``),
+#     never another member's: a token reaches its owner's personal files.
 
 from __future__ import annotations
 
@@ -365,19 +367,25 @@ class RestFigmaSource:
 async def _connection(workspace_id: str, user_id: str) -> Any:
     from pocketpaw_ee.integrations import vault
 
-    rows = [c for c in await vault.list_connections(workspace_id) if c.provider == "figma"]
+    # The caller's OWN grant only: a member's token reaches their personal files, so
+    # another member must never read through it.
+    rows = [
+        c
+        for c in await vault.list_connections(workspace_id)
+        if c.provider == "figma" and user_id and c.created_by == user_id
+    ]
     if not rows:
         raise FigmaError(
             "not_connected",
-            "Figma is not connected for this workspace. Connect Figma in Integrations, "
+            "Connect your Figma account in Integrations (each member connects their own), "
             "then paste the link again.",
         )
-    rows.sort(key=lambda c: (c.status != "active", c.created_by != user_id))
+    rows.sort(key=lambda c: c.status != "active")
     return rows[0]
 
 
 async def source_for(workspace_id: str, user_id: str) -> tuple[RestFigmaSource, Any]:
-    """The workspace's Figma source and its connection row (for meta reads)."""
+    """The caller's own Figma source and its connection row (for meta reads)."""
     from pocketpaw_ee.integrations import vault
 
     conn = await _connection(workspace_id, user_id)

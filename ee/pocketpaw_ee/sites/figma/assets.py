@@ -8,7 +8,9 @@
 # same-document ``#id`` (or, on ``<image>``, a base64 PNG / JPEG / GIF / WebP data
 # URI); a ``url(...)`` anywhere (``fill``, ``filter``, ``style``...) must point at
 # ``#id``; ``javascript:`` / ``data:`` / ``@import`` / ``expression(`` in any value
-# drops the attribute. The output is plain serialised XML, never the input bytes.
+# drops the attribute, and so does any backslash or ``<`` (a CSS escape like u\72l(
+# hides a url from that check). No element keeps text: ``title`` / ``desc`` (layer
+# names) are dropped. The output is plain serialised XML, never the input bytes.
 #
 # ``reencode_raster`` decodes a PNG / JPEG / WebP render after a magic-byte sniff
 # and a pixel cap, and writes a fresh PNG or WebP (alpha kept, no metadata), so
@@ -29,7 +31,7 @@ _ELEMENTS = frozenset(
     {
         "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
         "defs", "linearGradient", "radialGradient", "stop", "clipPath", "mask", "pattern",
-        "symbol", "use", "image", "title", "desc", "filter", "feFlood", "feColorMatrix",
+        "symbol", "use", "image", "filter", "feFlood", "feColorMatrix",
         "feOffset", "feGaussianBlur", "feBlend", "feComposite", "feMorphology",
         "feMerge", "feMergeNode", "feDropShadow",
     }
@@ -77,8 +79,8 @@ def _safe_value(name: str, value: str, element: str) -> str | None:
             return None
     if _BAD_VALUE.search(value):
         return None
-    if name == "style" and ("<" in value or "\\" in value):
-        return None
+    if "<" in value or "\\" in value:
+        return None  # a CSS escape (u\72l) would hide a url() from the check above
     return value
 
 
@@ -96,8 +98,6 @@ def _copy(src: ET.Element) -> ET.Element | None:
         safe = _safe_value(attr, str(value), name)
         if safe is not None:
             out.set(attr, safe)
-    if name in ("title", "desc") and src.text:
-        out.text = src.text[:200]
     for child in src:
         kid = _copy(child)
         if kid is not None:
