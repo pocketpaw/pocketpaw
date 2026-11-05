@@ -19,6 +19,9 @@
 # WORKSPACE ONLY. ``site_bindable = False`` and ``actions == {}``: the Sites builder
 # agent reads Figma for the owner (``agent/mcp_servers/figma.py``); a published site
 # can never call it, and the bindings layer refuses to link it to a site.
+# ``per_member``: each member connects their own account and only its creator's
+# tool calls use it (``sites.figma.client.source_for``); the connections list marks
+# ``mine`` and shows a teammate's grant to admins only.
 # ``account_ref`` is Figma's ``user_id_string``; ``meta`` keeps the handle, whether
 # the variables scope was granted, and the plan tier / seat type once Figma reveals
 # them (rate-limit headers, written by the tools); ``connection_attention`` warns a
@@ -72,6 +75,7 @@ class FigmaProvider(BaseProvider):
     plan = "site"
     supports_pkce = True
     site_bindable = False
+    per_member = True
     actions = {}
     settings_fields = ()
     connect_params = (

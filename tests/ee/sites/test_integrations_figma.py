@@ -7,12 +7,14 @@
 # only on Enterprise), Basic-auth form token calls, the grant mapping (user id,
 # handle, 90-day expiry), non-rotating refresh through the vault (the old refresh
 # token is kept, the old access token dies), invalid_grant -> needs_reconnect,
-# no public actions, and every site link path refusing the provider.
+# no public actions, every site link path refusing the provider, and the
+# per-member views (``mine``, a teammate's grant shown to admins only).
 from __future__ import annotations
 
 import base64
 import hashlib
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -330,3 +332,64 @@ async def test_the_gateway_has_nothing_to_call(beanie_test_db, figma):
         resp = await _gw(c, str(site.id), "figma", "get_file", args={})
     assert resp.status_code == 403
     assert _code(resp) == "action_disabled"
+
+
+# ------------------------------------------------------------- ownership
+
+
+async def _rows(*rows: tuple[str, str]) -> None:
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection
+
+    for provider, creator in rows:
+        await IntegrationConnection(
+            workspace="ws_int",
+            provider=provider,
+            created_by=creator,
+            account_ref=f"{provider}-{creator}",
+            account_label=f"{provider} of {creator}",
+        ).insert()
+
+
+@pytest.mark.asyncio
+async def test_provider_view_says_site_bindable_and_per_member(beanie_test_db, figma):
+    async with _client() as c:
+        views = {v["id"]: v for v in (await c.get("/api/v1/integrations/providers")).json()}
+    assert (views["figma"]["site_bindable"], views["figma"]["per_member"]) == (False, True)
+    assert (views["notion"]["site_bindable"], views["notion"]["per_member"]) == (True, False)
+    # A site-bound provider with no public actions still binds (lead notifications).
+    assert views["resend"]["site_bindable"] is True
+
+
+@pytest.mark.asyncio
+async def test_connections_mark_mine_and_hide_a_teammates_figma(beanie_test_db, figma):
+    await _rows(("figma", "user-owner"), ("figma", "user-editor"), ("demo", "user-editor"))
+    async with _client() as c:
+        views = (await c.get("/api/v1/integrations/connections")).json()
+    seen = {(v["provider"], v["created_by"]): v["mine"] for v in views}
+    # The teammate's figma grant is not offered; a shared provider's row still is.
+    assert seen == {("figma", "user-owner"): True, ("demo", "user-editor"): False}
+
+
+@pytest.mark.asyncio
+async def test_admins_see_a_teammates_figma_but_never_as_mine(beanie_test_db, figma):
+    await _rows(("figma", "user-owner"), ("figma", "user-editor"))
+    with patch(
+        "pocketpaw_ee.cloud._core.deps.has_workspace_action", new=AsyncMock(return_value=True)
+    ):
+        async with _client() as c:
+            views = (await c.get("/api/v1/integrations/connections")).json()
+    seen = {(v["provider"], v["created_by"]): v["mine"] for v in views}
+    assert seen == {("figma", "user-owner"): True, ("figma", "user-editor"): False}
+
+
+@pytest.mark.asyncio
+async def test_a_second_member_connecting_the_same_figma_gets_their_own_row(beanie_test_db, figma):
+    from pocketpaw_ee.cloud.models.integration import IntegrationConnection
+
+    async with _client() as c:
+        await _connect(c, figma)
+    async with _client("ws_int", "user-editor") as c:
+        msg, _ = await _connect(c, figma)
+    assert msg["status"] == "active", msg
+    rows = await IntegrationConnection.find(IntegrationConnection.provider == "figma").to_list()
+    assert sorted(r.created_by for r in rows) == ["user-editor", "user-owner"]

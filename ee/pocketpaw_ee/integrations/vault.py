@@ -21,7 +21,8 @@
 #     bound sites. Nothing retries a dead grant.
 #   * No token in a view, an event, an exception message or a log line.
 #
-# ``store_grant`` saves a finished connect or resume flow. A resume names the
+# ``store_grant`` saves a finished connect or resume flow (a per-member provider's
+# reconnect matches the caller's own row only). A resume names the
 # connection it continues and updates that row in place, refusing a different
 # provider account. Non-secret provider state rides ``TokenGrant.meta`` into
 # ``connection.meta``; the view's ``attention`` is the provider's
@@ -125,7 +126,9 @@ def attention(conn: Any) -> str | None:
     return str(text)[:200] if text else None
 
 
-def to_view(conn: Any, site_count: int = 0) -> ConnectionView:
+def to_view(conn: Any, site_count: int = 0, *, viewer_id: str = "") -> ConnectionView:
+    """The connection as ``viewer_id`` sees it (``mine`` when they created it)."""
+    created_by = str(getattr(conn, "created_by", "") or "") or None
     return ConnectionView(
         id=str(conn.id),
         provider=conn.provider,
@@ -135,6 +138,8 @@ def to_view(conn: Any, site_count: int = 0) -> ConnectionView:
         created_at=_utc(conn.createdAt),
         site_count=site_count,
         attention=attention(conn),
+        created_by=created_by,
+        mine=bool(viewer_id) and created_by == viewer_id,
     )
 
 
@@ -188,12 +193,17 @@ async def store_grant(
                 "integrations.resume_mismatch", "That is a different account. Connect it instead."
             )
     elif grant.account_ref:
-        conn = await doc.find_one(
+        same_account = [
             doc.workspace == workspace_id,
             doc.provider == provider,
             doc.account_ref == grant.account_ref,
             doc.status != "revoked",
-        )
+        ]
+        if getattr(get_provider(provider), "per_member", False):
+            # A per-member grant (Figma) is its creator's: another member connecting
+            # the same account gets their own row, never this one's tokens.
+            same_account.append(doc.created_by == user_id)
+        conn = await doc.find_one(*same_account)
     if conn is None:
         conn = doc(workspace=workspace_id, provider=provider, created_by=user_id)
     conn.account_label = grant.account_label or conn.account_label or provider

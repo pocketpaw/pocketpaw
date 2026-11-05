@@ -78,6 +78,12 @@ class ProviderView(BaseModel):
     requires_connection: bool = False
     # Asked for before Connect; empty for every provider that needs nothing.
     connect_params: list[ConnectParamView] = Field(default_factory=list)
+    # False for a workspace-only grant no site may link (Figma): never offer it on
+    # a site's integrations list.
+    site_bindable: bool = True
+    # True when each member connects their own account and only its creator may
+    # use a grant (Figma): a teammate's connection is never "yours".
+    per_member: bool = False
 
 
 class ConnectionView(BaseModel):
@@ -90,6 +96,9 @@ class ConnectionView(BaseModel):
     site_count: int = 0
     # Owner-facing, e.g. "Finish setting up your Stripe account"; null when fine.
     attention: str | None = None
+    # Who connected it, and whether that is the requesting user.
+    created_by: str | None = None
+    mine: bool = False
 
 
 class SiteIntegrationView(BaseModel):

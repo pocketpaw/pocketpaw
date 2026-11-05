@@ -184,6 +184,8 @@ def provider_view(provider: IntegrationProvider) -> ProviderView:
         ],
         settings_fields=settings_rules.field_views(provider),
         requires_connection=provider.kind == "connect",
+        site_bindable=bool(getattr(provider, "site_bindable", True)),
+        per_member=bool(getattr(provider, "per_member", False)),
         connect_params=[
             {
                 "key": p.key,
