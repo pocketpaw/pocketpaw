@@ -274,6 +274,36 @@ async def test_project_refine_builds_every_remaining_milestone_in_one_turn() -> 
     assert "one milestone at a time" not in lower
 
 
+async def test_every_project_turn_sends_ai_features_to_site_ai() -> None:
+    """Regression: "add a chatbot that answers questions about my menu" could end in a
+    provider SDK and a request for an API key, because no always-loaded text named
+    Paw's site AI: its playbook is ``HOW_TO``, returned only by
+    ``get_site_ai_settings``. One short pointer rides ``_PROJECT_LOOP``, so every
+    create hint, the brief-driven create and a project refine carry it exactly once.
+
+    THE MUTATION THAT BREAKS THIS: drop ``_SITE_AI_RULE`` from ``_PROJECT_LOOP``."""
+    from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
+    from pocketpaw_ee.agent.mcp_servers.sites_ai import GET_SITE_AI_SETTINGS_TOOL_ID
+
+    rule = sites_handler._SITE_AI_RULE
+    assert len(rule.encode("utf-8")) < 300, len(rule.encode("utf-8"))
+    # The tool it names is on the /sites allow-list.
+    assert GET_SITE_AI_SETTINGS_TOOL_ID in SITES_TOOL_IDS
+    for phrase in ("`get_site_ai_settings` first", "`how_to`", "`paw-ai`"):
+        assert phrase in rule, phrase
+    for feature in ("chatbots", "generators", "summarisers", "vision", "RAG"):
+        assert feature in rule, feature
+    assert "Never add a provider SDK or ask for an API key" in rule
+
+    preambles = [await _preamble_for(engine) for engine in _CREATE_HINTS]
+    preambles.append(
+        sites_handler._frontend_preamble(SurfaceMeta(route_path="/sites"), _landing_brief())
+    )
+    preambles.append(sites_handler._refine_preamble(_refine_meta(), "project"))
+    for preamble in preambles:
+        assert preamble.count(rule) == 1
+
+
 async def test_create_app_rule_does_not_read_as_one_milestone_per_turn() -> None:
     """The old "builds one milestone at a time" read as one per turn. The create rule says the
     approved plan is built through every milestone without stopping."""

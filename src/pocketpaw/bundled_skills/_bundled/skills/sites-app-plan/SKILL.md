@@ -52,6 +52,9 @@ scene, a page or a game file, write `PLAN.md` at the repo root with
    library such as `@react-three/rapier`, `postprocessing`). Take every version
    and API from the current docs via web search; never guess one from memory.
    Note the import paths the docs show, because they change between majors.
+   If a feature uses AI (a chatbot, a generator, a summariser), note its
+   caller (the Worker by default, the browser only when it must) and the
+   budget state from `get_site_ai_settings`, whose `how_to` you follow.
 7. **Data model** (apps). The entities, where each lives (memory, URL, the
    site's database), and what is derived.
 8. **Assets.** For each model, texture, sound and font: where it comes from

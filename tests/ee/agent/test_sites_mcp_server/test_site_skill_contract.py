@@ -7,7 +7,7 @@
 #     and the integrations/secrets contract;
 #   * the ``sites-app-plan`` bundled skill exists with valid frontmatter, stays
 #     under 500 lines, and carries the plan, the user check, the milestones and the
-#     3D/game quality rules;
+#     3D/game quality rules, and the AI caller and budget line for an AI feature;
 #   * ``connect_site_integration``'s per-provider wiring (``_INTEGRATION_NEXT_STEPS``)
 #     has a line for EVERY registered provider, naming each public action the
 #     provider really exposes, in client (paw.js) and server (``pawCall``) form;
@@ -214,6 +214,17 @@ def test_the_app_plan_skill_builds_every_milestone_after_approval() -> None:
     # The frontmatter and the checklist say the same thing.
     _, front, _ = text.split("---", 2)
     assert "one milestone at a time" not in " ".join(front.lower().split())
+
+
+def test_the_app_plan_skill_plans_the_ai_caller_and_budget() -> None:
+    """An app with an AI feature records in its plan who calls the AI (the Worker by
+    default, the browser only when it must) and the budget state, read from
+    ``get_site_ai_settings`` so the plan follows Paw's AI playbook, not a provider SDK."""
+    lower = " ".join(_app_plan_skill().read_text("utf-8").lower().split())
+    assert "get_site_ai_settings" in lower and "how_to" in lower
+    assert "the worker by default" in lower
+    assert "the browser only when it must" in lower
+    assert "budget state" in lower
 
 
 def _registered_providers():
