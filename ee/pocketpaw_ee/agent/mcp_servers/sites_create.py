@@ -4145,6 +4145,10 @@ _INTEGRATION_NEXT_STEPS = {
     "the owner to set 'Send from' to an address on a domain they verified in Resend; "
     "until then the site reads setup_required and mail goes out from Paw. Visitors "
     "can't send mail through it, and it never replaces a contact form's own handling.",
+    "figma": "Nothing to write in the site, and never link Figma to a site: it is the "
+    "owner's workspace connection that lets you READ a design they paste in this chat. "
+    "A site never calls it. If the owner wants a design rebuilt, ask them to connect "
+    "Figma in Integrations and paste the figma.com/design link.",
     "calendly": "Search the web for Calendly's current inline embed snippet and use "
     "it with the owner's link: in the page HTML on static, in a page component on a "
     "framework template. There are no gateway calls.",
