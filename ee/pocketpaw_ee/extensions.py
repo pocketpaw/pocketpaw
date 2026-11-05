@@ -1251,6 +1251,31 @@ class CloudReferoMcpProvider:
         return list(REFERO_TOOL_IDS)
 
 
+class CloudFigmaMcpProvider:
+    """`pocketpaw.mcp_servers` — the Figma design-read in-process server
+    (``pocketpaw_figma``). Hosts ``figma_inspect`` / ``figma_screenshot`` /
+    ``figma_assets`` for the /sites builder agent.
+
+    Ambient like refero, reachable only where an allow-list names it (/sites).
+    The tools refuse without a workspace ``figma`` grant and read only file keys
+    the owner pasted in the current chat session, so registering it costs a deploy
+    without a Figma app nothing.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.figma import build_figma_server
+
+            return build_figma_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.figma import FIGMA_TOOL_IDS
+
+        return list(FIGMA_TOOL_IDS)
+
+
 class CloudIconsMcpProvider:
     """`pocketpaw.mcp_servers` — the icon-search in-process server
     (``pocketpaw_icons``). Hosts ``search_icons`` only.

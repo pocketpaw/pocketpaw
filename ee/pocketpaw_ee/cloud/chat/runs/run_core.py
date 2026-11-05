@@ -2109,6 +2109,23 @@ async def _auto_model_fallback(workspace_id: str, default_model: str) -> str | N
     return None
 
 
+async def _note_figma_links(ctx: ScopeContext, user_content: str, surface: str | None) -> None:
+    """On /sites, record the Figma file keys the user pasted in their OWN message,
+    the only keys the ``pocketpaw_figma`` tools will read (``session_keys``)."""
+    if (
+        surface != "sites"
+        or ctx.kind is not ScopeKind.SESSION
+        or "figma.com" not in user_content.lower()
+    ):
+        return
+    try:
+        from pocketpaw_ee.sites.figma import session_keys
+
+        await session_keys.note_message(ctx.workspace_id, ctx.scope_id, ctx.user_id, user_content)
+    except Exception:  # noqa: BLE001 - the tools then refuse the file; the turn runs
+        logger.warning("figma: could not record the pasted links", exc_info=True)
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -2130,6 +2147,7 @@ async def _drive_agent_loop(
     # titler names the thread from it, and the pool hands it to the model as
     # the user's turn. A turn with real text passes through untouched.
     user_content = resolve_user_content(user_content, attachments_in)
+    await _note_figma_links(ctx, user_content, surface)
     pool = get_agent_pool()
     try:
         instance = await pool.get(ctx.target_agent_id)
