@@ -15,7 +15,9 @@
 # in the design, value null: the template keeps its own). ``css`` renders the
 # observed ones as a ``:root`` block and a Tailwind 4 ``@theme`` block for the
 # agent to map onto the template's own names. Layer names never reach the output;
-# font family names are cleaned and capped like any design text.
+# every token ``value`` is CSS-safe as stored: hex colours, numbers, a shadow built
+# from numbers, and font families reduced to plain words (``safe_family``).
+# Variable names pick roles but never appear in a ``source``.
 
 from __future__ import annotations
 
@@ -138,7 +140,7 @@ class _Collect:
             if isinstance(size, int | float) and size > 0:
                 size = round(float(size), 1)
                 self.sizes[size] += chars or 1
-                family = clean(style.get("fontFamily"), 60)
+                family = safe_family(style.get("fontFamily"))
                 if family:
                     self.size_family[size][family] += chars or 1
                     self.family_chars[family] += chars or 1
@@ -230,7 +232,8 @@ def from_variables(body: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             for role in COLOR_ROLES:
                 key = f"color.{role}"
                 if key not in out and any(w in name for w in _ROLE_WORDS[role]):
-                    out[key] = _token(colour, f"variable {clean(var.get('name'), 80)}")
+                    # Never the variable's name: it is design text, not a value.
+                    out[key] = _token(colour, f"an Enterprise variable named for {role}")
                     break
         elif kind == "FLOAT" and isinstance(value, int | float):
             if "radius" in name or "corner" in name:
@@ -336,8 +339,25 @@ def derive(
     return {role: from_vars.get(role) or from_tree.get(role) or _missing() for role in _ALL_ROLES}
 
 
+MAX_FAMILY = 40
+MAX_FAMILY_WORDS = 5
+
+
+def safe_family(raw: Any) -> str:
+    """A font family as plain words (letters, digits, spaces, dashes), or ``""`` when
+    the name carries anything else (quotes, braces, tags, colons, slashes) or does
+    not read as a font name (too long, too many words). The token value is this, so
+    nothing quote-, brace- or tag-shaped ever reaches the agent."""
+    text = " ".join(clean(raw, 200).split())
+    if not re.fullmatch(r"[A-Za-z0-9 \-]+", text or "-"):
+        return ""
+    if not text or len(text) > MAX_FAMILY or len(text.split()) > MAX_FAMILY_WORDS:
+        return ""
+    return text
+
+
 def _family(name: str) -> str:
-    safe = re.sub(r"[^A-Za-z0-9 \-]", "", name)[:60].strip()
+    safe = safe_family(name)
     return f'"{safe}"' if safe else ""
 
 
