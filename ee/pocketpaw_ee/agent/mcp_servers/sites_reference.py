@@ -9,8 +9,8 @@
 # Invariants a reader must not break:
 #   * ``save_site_reference`` never fetches an arbitrary URL. It reads this
 #     workspace's own public site assets back from storage (where a chat
-#     attachment on /sites lands), or streams from Refero's image host, matched
-#     exactly, under a size cap and a total deadline. Every other host is refused
+#     attachment on /sites lands), or streams from Refero's or Figma's image
+#     hosts, matched exactly, under a size cap and a total deadline. Every other host is refused
 #     before any request is made;
 #   * the stored file is a re-encoded PNG on the PRIVATE adapter, keyed by
 #     workspace and pocket, and the pocket is opened as the caller first, so a
@@ -28,6 +28,7 @@ import logging
 from typing import Any
 
 from pocketpaw_ee.sites import site_references as refs
+from pocketpaw_ee.sites.figma.client import FIGMA_IMAGE_HOSTS
 
 from ._audit import record_tool_call
 from .sites_create import (
@@ -43,11 +44,12 @@ from .sites_create import (
 logger = logging.getLogger(__name__)
 
 
-#: Hosts a reference may be FETCHED from, matched EXACTLY (no subdomains). Refero's
-#: image CDN only. Inspo's captures live on a shared Vercel Blob domain where any
-#: customer can mint a ``<store>.public.blob.vercel-storage.com`` host, so it is not
-#: here: an owner's design arrives as a chat attachment, not a research capture.
-_FETCH_HOSTS = frozenset({"images.refero.design"})
+#: Hosts a reference may be FETCHED from, matched EXACTLY (no subdomains): Refero's
+#: image CDN and Figma's render hosts (``figma_screenshot`` saves through here).
+#: Inspo's captures live on a shared Vercel Blob domain where any customer can mint
+#: a ``<store>.public.blob.vercel-storage.com`` host, so it is not here: an owner's
+#: design arrives as a chat attachment, not a research capture.
+_FETCH_HOSTS = frozenset({"images.refero.design"}) | FIGMA_IMAGE_HOSTS
 #: Fetch limits: a total deadline for the whole request, not a per-read timeout.
 _FETCH_DEADLINE_S = 20.0
 #: Tests inject an ``httpx.MockTransport`` here.
