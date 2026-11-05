@@ -226,6 +226,8 @@ async def start_connect(
     provider = bindings.provider_or_404(provider_id)
     _connectable(provider)
     checked = checked_params(provider, params)
+    if not getattr(provider, "site_bindable", True):
+        pocket_id = None  # a workspace-only grant (Figma) is never linked to a site
     if pocket_id:
         await bindings.require_edit(workspace_id, user_id, pocket_id)
     state, challenge = await _issue_state(

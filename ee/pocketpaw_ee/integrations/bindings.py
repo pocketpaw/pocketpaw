@@ -47,7 +47,7 @@
 # settings, or on the options route against draft query values checked the same
 # way (``_with_drafts``); neither touches the stored settings until a PUT passes.
 # Moving a binding to another connection (PUT or the OAuth callback) drops its
-# stored remote values: they name things in the old account.
+# stored remote values. ``site_bindable = False`` providers (Figma) never link.
 
 from __future__ import annotations
 
@@ -148,6 +148,17 @@ def provider_or_404(provider_id: str) -> IntegrationProvider:
     provider = get_provider(provider_id)
     if provider is None:
         raise NotFound("integration_provider", provider_id)
+    return provider
+
+
+def site_provider_or_404(provider_id: str) -> IntegrationProvider:
+    """``provider_or_404`` for a site binding: a workspace-only provider
+    (``site_bindable = False``, Figma) can never be linked to a site."""
+    provider = provider_or_404(provider_id)
+    if not getattr(provider, "site_bindable", True):
+        raise ValidationError(
+            "integrations.not_site_bindable", f"{provider.name} is not used by a site."
+        )
     return provider
 
 
@@ -537,7 +548,7 @@ async def upsert(
     is_admin: bool = False,
 ) -> SiteIntegrationView:
     """``PUT /sites/by-pocket/{pocket_id}/integrations/{provider}``."""
-    provider = provider_or_404(provider_id)
+    provider = site_provider_or_404(provider_id)
     pocket = await require_edit(workspace_id, user_id, pocket_id)
     row = await _row(workspace_id, pocket_id, provider.id)
     if row is None:
@@ -589,7 +600,7 @@ async def upsert(
 
 async def link_connection(*, workspace_id: str, user_id: str, pocket_id: str, conn: Any):
     """The OAuth callback's link step: bind ``conn`` to the site (create if needed)."""
-    provider = provider_or_404(conn.provider)
+    provider = site_provider_or_404(conn.provider)
     pocket = await require_edit(workspace_id, user_id, pocket_id)
     row = await _row(workspace_id, pocket_id, provider.id)
     if row is None:
@@ -617,7 +628,7 @@ async def request_from_agent(
 ) -> SiteIntegrationView:
     """``connect_site_integration``: make sure a binding exists (needs_connection for
     a connect provider with no grant yet) and record why the agent wants it."""
-    provider = provider_or_404(provider_id)
+    provider = site_provider_or_404(provider_id)
     pocket = await require_edit(workspace_id, user_id, pocket_id)
     row = await _row(workspace_id, pocket_id, provider.id)
     created = row is None
