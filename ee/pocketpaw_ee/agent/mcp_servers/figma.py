@@ -11,8 +11,8 @@
 #
 # Invariants a reader must not break:
 #   * identity (workspace, user, session) comes from the per-stream ContextVars,
-#     never from args; the workspace's own ``figma`` grant is the only credential,
-#     and no token ever reaches a result;
+#     never from args; the CALLER's own ``figma`` grant is the only credential
+#     (results name it, "read as @handle"), and no token ever reaches a result;
 #   * a file key is read only when the user pasted it in THIS session
 #     (``sites.figma.session_keys``); urls parse through ``sites.figma.urls`` (Figma
 #     hosts only) before anything else runs;
@@ -124,6 +124,13 @@ async def _prepare(args: dict, tool: str) -> tuple[str, str, FigmaRef]:
     return workspace_id, user_id, ref
 
 
+def _read_as(conn: Any) -> str:
+    """``@handle`` of the caller's own Figma account the read went through."""
+    raw = str((getattr(conn, "meta", None) or {}).get("handle") or "")
+    handle = re.sub(r"[^\w .-]", "", raw)[:60].strip()
+    return f"@{handle}" if handle else "your Figma account"
+
+
 def _seat_warning(conn: Any) -> str:
     if (getattr(conn, "meta", None) or {}).get("rate_limit_type") == "low":
         return (
@@ -172,6 +179,7 @@ async def _inspect_handler(args: dict) -> dict:
         "mode": mode,
         "editor": meta.get("editor_type") or "",
         "your_role": meta.get("role") or "",
+        "read_as": _read_as(conn),
     }
     warning = _seat_warning(conn)
     if warning:
@@ -216,7 +224,7 @@ async def _screenshot_handler(args: dict) -> dict:
     if pocket_id and (refused := await _open_pocket(pocket_id, user_id, workspace_id)):
         return refused
     try:
-        source, _ = await source_for(workspace_id, user_id)
+        source, conn = await source_for(workspace_id, user_id)
         urls = await source.render(ref.file_key, [node], "png", scale)
     except FigmaError as exc:
         return _figma_error(exc)
@@ -250,6 +258,7 @@ async def _screenshot_handler(args: dict) -> dict:
             f"Figma frame {node}: {len(tiles)} image(s), top first. Not saved: pass "
             "`pocket_id` once the site exists to store it for compare_site_to_reference."
         )
+    note += f" Read as {_read_as(conn)}."
     return {"content": [*reference_images.image_blocks(tiles), {"type": "text", "text": note}]}
 
 
@@ -295,7 +304,7 @@ async def _assets_handler(args: dict) -> dict:
     except SiteMediaError as exc:
         return _error_response(str(exc))
     try:
-        source, _ = await source_for(workspace_id, user_id)
+        source, conn = await source_for(workspace_id, user_id)
         svg_ids = [n for n, f, _ in items if f == "svg"]
         raster_ids = [n for n, f, _ in items if f != "svg"]
         urls: dict[str, str] = {}
@@ -341,6 +350,7 @@ async def _assets_handler(args: dict) -> dict:
     body = {
         "ok": any(r["ok"] for r in results),
         "assets": results,
+        "read_as": _read_as(conn),
         "next": (
             "Inline each `svg` (or write it as a file in the site's source); reference "
             "each raster `url` directly. Never link Figma's own image URLs: they expire."
