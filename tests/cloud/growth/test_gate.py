@@ -1033,6 +1033,14 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/social/pulse/refresh"): "growth.write",
             ("POST", "/growth/social/pulse/use"): "growth.write",
             ("POST", "/growth/social/ideas/{idea_id}/unschedule"): "growth.write",
+            ("GET", "/growth/social/accounts"): "growth.read",
+            ("POST", "/growth/social/accounts/connect"): "growth.manage",
+            ("POST", "/growth/social/accounts/telegram/check"): "growth.manage",
+            ("DELETE", "/growth/social/accounts/{account_id}"): "growth.manage",
+            ("GET", "/growth/social/accounts/{account_id}/channels"): "growth.read",
+            ("POST", "/growth/social/media"): "growth.manage",
+            ("POST", "/growth/social/posts"): "growth.manage",
+            ("GET", "/growth/social/posts"): "growth.read",
         }
 
         seen: dict[tuple[str, str], str] = {}

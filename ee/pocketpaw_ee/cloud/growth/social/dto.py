@@ -12,7 +12,10 @@
 # at 2000. ``website`` is trimmed and gets ``https://`` when typed bare;
 # anything that is not then an http(s) URL with a host is a 422. ``category``
 # is free text up to 60 characters. Idea edits need at least one field; script
-# beats and hashtags are trimmed and capped.
+# beats and hashtags are trimmed and capped. A post names 1–10 distinct
+# accounts and trimmed, non-empty content of at most 10000 characters, plus up
+# to 25 thread parts held to the same rule and up to 4 media items; whether the
+# media is public and unmixed is the service's check, so it carries an error code.
 
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ from pydantic import BaseModel, Field, StringConstraints, field_validator, model
 from pocketpaw_ee.cloud.growth.social.domain import (
     DEFAULT_IDEA_COUNT,
     MAX_IDEA_COUNT,
+    MAX_POST_IMAGES,
     AnalysisStatus,
     BusinessModel,
     IdeaFormat,
@@ -373,3 +377,127 @@ class AddPulseCompaniesRequest(BaseModel):
 class AddPulseCompaniesResponse(BaseModel):
     added: list[str]
     skipped: list[str]
+
+
+class SocialAccountResponse(BaseModel):
+    id: str
+    platform: str
+    name: str
+    username: str | None
+    picture: str | None
+    disabled: bool
+    can_post: bool
+    needs_channel: bool
+
+
+class SocialAccountPlatformResponse(BaseModel):
+    id: str
+    label: str
+    available: bool
+
+
+class SocialAccountListResponse(BaseModel):
+    items: list[SocialAccountResponse]
+    platforms: list[SocialAccountPlatformResponse]
+    configured: bool
+
+
+class ConnectSocialAccountRequest(BaseModel):
+    platform: str = Field(max_length=64)
+
+
+class TelegramConnectCode(BaseModel):
+    code: str
+    bot_name: str
+    expires_at: str
+
+
+class ConnectSocialAccountResponse(BaseModel):
+    url: str | None
+    telegram: TelegramConnectCode | None = None
+
+
+class CheckTelegramRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+
+
+class CheckTelegramResponse(BaseModel):
+    status: Literal["pending", "connected"]
+    account: SocialAccountResponse | None
+
+
+class SocialChannelResponse(BaseModel):
+    id: str
+    name: str
+
+
+class SocialChannelListResponse(BaseModel):
+    items: list[SocialChannelResponse]
+
+
+class SocialPostTarget(BaseModel):
+    account_id: str = Field(min_length=1, max_length=64)
+    channel: str | None = Field(default=None, max_length=128)
+
+    @field_validator("channel")
+    @classmethod
+    def _channel(cls, v: str | None) -> str | None:
+        return (v or "").strip() or None
+
+
+_PostContent = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=10000)
+]
+
+
+class SocialPostMedia(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    path: str = Field(min_length=1, max_length=2048)
+
+
+class CreateSocialPostRequest(BaseModel):
+    content: _PostContent
+    targets: list[SocialPostTarget] = Field(min_length=1, max_length=10)
+    parts: list[_PostContent] = Field(default_factory=list, max_length=25)
+    media: list[SocialPostMedia] = Field(default_factory=list, max_length=MAX_POST_IMAGES)
+    idea_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def _unique_accounts(self) -> CreateSocialPostRequest:
+        ids = [t.account_id for t in self.targets]
+        if len(set(ids)) != len(ids):
+            raise ValueError("each account may be targeted once")
+        return self
+
+
+class SocialPostCreated(BaseModel):
+    account_id: str
+    platform: str
+    post_id: str
+    media_skipped: bool = False
+
+
+class CreateSocialPostResponse(BaseModel):
+    items: list[SocialPostCreated]
+
+
+class SocialMediaResponse(BaseModel):
+    id: str
+    path: str
+    kind: Literal["image", "video"]
+
+
+class SocialPostResponse(BaseModel):
+    id: str
+    account_id: str
+    platform: str
+    account_name: str
+    content: str
+    state: str
+    url: str | None
+    error: str | None
+    published_at: str | None
+
+
+class SocialPostListResponse(BaseModel):
+    items: list[SocialPostResponse]
