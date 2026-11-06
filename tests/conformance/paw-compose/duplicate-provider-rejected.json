@@ -1,0 +1,70 @@
+{
+  "id": "duplicate-provider-rejected",
+  "asserts": "Publishing a key that is already live in the same scope is rejected. The offending plugin rolls back to FAILED; the incumbent service and its dependents are undisturbed. isolate() is the sanctioned way to run a second implementation.",
+  "semantics": "\u00a71, \u00a73",
+  "plugins": {
+    "p1": {
+      "provides": [
+        "svcA"
+      ]
+    },
+    "p2": {
+      "provides": [
+        "svcA"
+      ]
+    },
+    "c": {
+      "inject": {
+        "required": [
+          "svcA"
+        ]
+      },
+      "record_resolved": [
+        "svcA"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "mount",
+      "plugin": "p1"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "mount",
+      "plugin": "c"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "op": "mount",
+      "plugin": "p2"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "p1": "ACTIVE",
+        "p2": "FAILED",
+        "c": "ACTIVE"
+      }
+    }
+  ],
+  "expect_trace": [
+    "p1:LOADING",
+    "p1:provide:svcA",
+    "p1:ACTIVE",
+    "c:LOADING",
+    "c:resolved:svcA:p1",
+    "c:ACTIVE",
+    "p2:LOADING",
+    "p2:provide:svcA:rejected",
+    "p2:apply:throw",
+    "p2:FAILED"
+  ],
+  "regression_note": "Added 2026-08-25 from review. Python's provide-disposer restored the previous value unconditionally, so an earlier provider unloading CLOBBERED a live later one and a later one unloading RESURRECTED the dead earlier one. TypeScript guarded against clobbering but never restored. No fixture mounted two providers of one key, so neither behavior was reachable."
+}
