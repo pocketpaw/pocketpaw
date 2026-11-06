@@ -189,7 +189,7 @@
   {
     "label": "accept a transform op that changes nothing",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/timeline_ops.py",
-    "find": "        if not any(raw.get(k) is not None for k in (\"x\", \"y\", \"scale\", \"rotation\", \"opacity\")):",
+    "find": "        if not any(\n            raw.get(k) is not None\n            for k in (\"x\", \"y\", \"scale\", \"rotation\", \"opacity\", \"flipX\", \"flipY\")\n        ):",
     "replace": "        if False:",
     "tests": [
       "tests/ee/agent/test_timeline_ops.py::test_an_empty_transform_is_rejected"
