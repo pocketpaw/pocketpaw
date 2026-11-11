@@ -197,7 +197,6 @@ async def test_a_clean_draft_approves_and_skips_the_second_check(recorder, pocke
 @pytest.mark.parametrize(
     ("route", "body", "published"),
     [
-        ("single", None, False),
         ("single", {"confirm_placeholders": True}, True),
         ("bulk", None, False),
     ],
@@ -232,3 +231,84 @@ async def test_the_router_publishes_only_on_publish_anyway(
     else:
         assert deploys == [] and after.status.value == "failed"
         assert after.error.startswith("sites.publish_blocked:")
+
+
+def _approve_client(instinct_store, monkeypatch, deploys: list[dict[str, Any]]) -> Any:
+    from .test_destructive_migration_approval import _instinct_client
+
+    async def _deploy(**kw: Any) -> None:
+        deploys.append(kw)
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _deploy)
+    monkeypatch.setattr("tests.ee.sites.test_destructive_migration_approval.WS", WS)
+    monkeypatch.setattr("tests.ee.sites.test_destructive_migration_approval.USER", USER)
+    return _instinct_client()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_approve_returns_the_block_not_a_stale_approval(
+    beanie_test_db, instinct_store, pocket, monkeypatch
+):
+    """The bug: the gate refused, the route still said 200 "approved", and the client
+    showed "Publishing" then a bare "Not published". The approve must answer 409
+    ``sites.publish_blocked`` with the owner-worded reasons and the override rule, and
+    leave the card pending so "Publish anyway" can approve that same card."""
+    from unittest.mock import patch
+
+    action = await _request(instinct_store)
+    deploys: list[dict[str, Any]] = []
+    client = _approve_client(instinct_store, monkeypatch, deploys)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
+        resp = client.post(f"/instinct/actions/{action.id}/approve", json={})
+
+    assert resp.status_code == 409, resp.text
+    error = resp.json()["error"]
+    assert error["code"] == "sites.publish_blocked"
+    details = error["details"]
+    messages = [f["message"] for f in details["findings"]]
+    assert 'Your site still shows "[Address]" on the home page.' in messages
+    assert {f["page_label"] for f in details["findings"]} == {"the home page"}
+    assert details["override"] == "confirm_placeholders"
+    assert details["can_override"] is True
+    assert details["action_id"] == action.id
+    assert deploys == []
+    after = await instinct_store.get_action(action.id)
+    assert after.status.value == "pending"
+    assert after.parameters["_artifact_change"]["publish_blocked"]["findings"]
+
+
+@pytest.mark.asyncio
+async def test_publish_anyway_approves_the_refused_card(
+    beanie_test_db, instinct_store, pocket, monkeypatch
+):
+    from unittest.mock import patch
+
+    action = await _request(instinct_store)
+    deploys: list[dict[str, Any]] = []
+    client = _approve_client(instinct_store, monkeypatch, deploys)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
+        refused = client.post(f"/instinct/actions/{action.id}/approve", json={})
+        anyway = client.post(
+            f"/instinct/actions/{action.id}/approve", json={"confirm_placeholders": True}
+        )
+
+    assert refused.status_code == 409, refused.text
+    assert anyway.status_code == 200, anyway.text
+    assert len(deploys) == 1
+    after = await instinct_store.get_action(action.id)
+    assert after.status.value == "executed"
+
+
+@pytest.mark.asyncio
+async def test_a_clean_draft_approves_with_200(beanie_test_db, instinct_store, pocket, monkeypatch):
+    from unittest.mock import patch
+
+    pocket["source"] = {"index.html": _CLEAN}
+    action = await _request(instinct_store)
+    deploys: list[dict[str, Any]] = []
+    client = _approve_client(instinct_store, monkeypatch, deploys)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
+        resp = client.post(f"/instinct/actions/{action.id}/approve", json={})
+
+    assert resp.status_code == 200, resp.text
+    assert len(deploys) == 1
