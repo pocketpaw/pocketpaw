@@ -267,6 +267,8 @@ async def _refuse_stale(
                 **refusal.details,
             },
         }
+        if base_parameters is None:
+            action.parameters = parameters  # the executor's copy (no route reread)
         await store.update_parameters(action.id, parameters)
     except Exception:  # noqa: BLE001 - the error text still says why
         logger.warning("artifact-change merge: could not record the stale review on %s", action.id)

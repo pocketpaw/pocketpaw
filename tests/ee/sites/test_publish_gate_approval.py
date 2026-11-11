@@ -364,7 +364,8 @@ async def test_publish_anyway_on_changed_findings_answers_the_new_ones(
     beanie_test_db, instinct_store, pocket, monkeypatch
 ):
     """The owner saw "[Address]"; the draft now shows "[Email]" instead. Their
-    Publish anyway must not cover findings they never saw."""
+    Publish anyway must not cover findings they never saw: the content changed since
+    the card was filed, so it is refused as stale (no override) and fails."""
     from unittest.mock import patch
 
     action = await _request(instinct_store)
@@ -379,13 +380,10 @@ async def test_publish_anyway_on_changed_findings_answers_the_new_ones(
             json={"confirm_placeholders": True, "confirm_findings_digest": old_digest},
         )
 
-    assert resp.status_code == 409, resp.text
-    details = resp.json()["error"]["details"]
-    assert any(f["text"] == "[Email]" for f in details["findings"])
-    assert details["findings_digest"] != old_digest
-    assert details["can_override"] is True
+    assert old_digest
+    _assert_stale_409(resp, action.id)
     assert deploys == []
-    assert (await instinct_store.get_action(action.id)).status.value == "pending"
+    assert (await instinct_store.get_action(action.id)).status.value == "failed"
 
 
 # ── the executor re-checks content that changed after the route's gate ─────────
@@ -396,7 +394,8 @@ async def test_content_changed_after_the_route_gate_is_refused_with_the_block(
     beanie_test_db, instinct_store, pocket, monkeypatch
 ):
     """The route's gate passed a clean draft; the draft changed before the merge.
-    The executor re-runs the gate and the approve answers the same 409 shape."""
+    The executor refuses the card as stale (the content is not what was reviewed)
+    and the approve answers that 409, with no second refusal."""
     from unittest.mock import patch
 
     from pocketpaw_ee.versions import instinct_executor
@@ -416,14 +415,12 @@ async def test_content_changed_after_the_route_gate_is_refused_with_the_block(
     with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
         resp = client.post(f"/instinct/actions/{action.id}/approve", json={})
 
-    assert resp.status_code == 409, resp.text
-    error = resp.json()["error"]
-    assert error["code"] == "sites.publish_blocked"
-    assert any(f["text"] == "[Address]" for f in error["details"]["findings"])
     # The card failed, so it cannot be approved again: Publish files a new one.
-    assert error["details"]["can_override"] is False
+    _assert_stale_409(resp, action.id)
     assert deploys == []
-    assert (await instinct_store.get_action(action.id)).status.value == "failed"
+    after = await instinct_store.get_action(action.id)
+    assert after.status.value == "failed"
+    assert "publish_blocked" not in after.parameters["_artifact_change"]
 
 
 @pytest.mark.asyncio
@@ -470,3 +467,72 @@ async def test_a_refused_approve_keeps_the_stored_proposal(
     stored = await instinct_store.get_action(action.id)
     assert "note" not in stored.parameters
     assert stored.parameters["_artifact_change"]["publish_blocked"]["findings"]
+
+
+# ── a stale review card answers 409 sites.publish_review_stale ─────────────────
+
+
+def _assert_stale_409(resp, action_id: str) -> None:
+    assert resp.status_code == 409, resp.text
+    error = resp.json()["error"]
+    assert error["code"] == "sites.publish_review_stale"
+    assert error["message"] == (
+        "This review is out of date: the site changed since it was filed. Request a new review."
+    )
+    assert error["details"]["can_override"] is False
+    assert error["details"]["action_id"] == action_id
+
+
+@pytest.mark.asyncio
+async def test_a_card_whose_site_changed_since_review_answers_stale_409(
+    beanie_test_db, instinct_store, pocket, monkeypatch
+):
+    """An edit after the review: the single approve refuses with the stale 409 (no
+    override, Publish anyway included), deploys nothing and fails the card."""
+    from unittest.mock import patch
+
+    pocket["source"] = {"index.html": _CLEAN}
+    action = await _request(instinct_store)
+    pocket["source"] = {"index.html": _doc("<p>An edit nobody reviewed.</p>")}
+    deploys: list[dict[str, Any]] = []
+    client = _approve_client(instinct_store, monkeypatch, deploys)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
+        resp = client.post(
+            f"/instinct/actions/{action.id}/approve", json={"confirm_placeholders": True}
+        )
+
+    _assert_stale_409(resp, action.id)
+    assert deploys == []
+    after = await instinct_store.get_action(action.id)
+    assert after.status.value == "failed"
+    assert after.error.startswith("sites.publish_review_stale:")
+    assert after.parameters["_artifact_change"]["publish_stale"]["can_override"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_card_whose_draft_was_superseded_answers_stale_409(
+    beanie_test_db, instinct_store, pocket, monkeypatch
+):
+    """A card without ``reviewed_content_hash`` whose ``to_version_id`` a later edit
+    superseded: the stale 409, never the raw refusal ``versions.publish`` raises for
+    a superseded row."""
+    from unittest.mock import patch
+
+    pocket["source"] = {"index.html": _CLEAN}
+    action = await _request(instinct_store)
+    params = dict(action.parameters)
+    params["_artifact_change"] = {
+        k: v for k, v in params["_artifact_change"].items() if k != "reviewed_content_hash"
+    }
+    await instinct_store.update_parameters(action.id, params)
+    await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"index.html": "y"}
+    )
+    deploys: list[dict[str, Any]] = []
+    client = _approve_client(instinct_store, monkeypatch, deploys)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
+        resp = client.post(f"/instinct/actions/{action.id}/approve", json={})
+
+    _assert_stale_409(resp, action.id)
+    assert deploys == []
+    assert (await instinct_store.get_action(action.id)).status.value == "failed"

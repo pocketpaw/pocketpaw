@@ -25,5 +25,23 @@
     "tests": [
       "tests/ee/sites/test_publish_gate_approval.py"
     ]
+  },
+  {
+    "label": "a single approve of a stale card goes through to the gate instead of the stale 409",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "    if await _review_is_stale(blob, scope_id=scope_id, author=author):\n        refusal = await _refuse_stale(",
+    "replace": "    if False:\n        refusal = await _refuse_stale(",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py"
+    ]
+  },
+  {
+    "label": "a card the executor failed as stale answers a stale 200 approved",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "        (\"sites.publish_review_stale\", \"publish_stale\"),\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_content_changed_after_the_route_gate_is_refused_with_the_block"
+    ]
   }
 ]
