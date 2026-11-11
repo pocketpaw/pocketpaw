@@ -238,8 +238,8 @@
   {
     "label": "preview lane: an explicit build replays an infra failure once polls spent the budget, as run_site_build did in prod",
     "file": "ee/pocketpaw_ee/sites/build_job.py",
-    "find": "        cleared, kept = await _clear_or_keep(\n            pool, job_id, force_pocket=pocket_id if force else None\n        )",
-    "replace": "        cleared, kept = await _clear_or_keep(pool, job_id)",
+    "find": "            force_pocket=pocket_id if force else None,\n            stale_success=rebuild_stale,",
+    "replace": "            stale_success=rebuild_stale,",
     "tests": [
       "tests/ee/sites/test_preview_infra_retry.py"
     ]
@@ -287,6 +287,33 @@
     "replace": "        if isinstance(info.result, asyncio.CancelledError):",
     "tests": [
       "tests/ee/sites/test_cancel_is_not_superseded.py"
+    ]
+  },
+  {
+    "label": "a reopened draft whose files were purged replays the old built result instead of rebuilding",
+    "file": "ee/pocketpaw_ee/sites/build_job.py",
+    "find": "        if (\n            stale_success\n            and info is not None",
+    "replace": "        if (\n            False\n            and info is not None",
+    "tests": [
+      "tests/ee/sites/test_reopen_preview_rebuild.py"
+    ]
+  },
+  {
+    "label": "a refused enqueue answers built with a null preview_url",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        return {\n            **_served(None, None),\n            \"build_status\": \"failed\",\n            \"build_reason\": build_job.RUNG_ARTIFACT_MISSING,\n        }",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_reopen_preview_rebuild.py"
+    ]
+  },
+  {
+    "label": "the preview retry claim ignores the reopen, so a second publish and reopen stalls",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    key, now = (pocket_id, content_hash, epoch), time.monotonic()",
+    "replace": "    key, now = (pocket_id, content_hash, \"\"), time.monotonic()",
+    "tests": [
+      "tests/ee/sites/test_reopen_preview_rebuild.py"
     ]
   }
 ]

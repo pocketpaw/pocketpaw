@@ -20,8 +20,8 @@
   {
     "label": "a publish never returns an opened draft to the published view",
     "file": "ee/pocketpaw_ee/sites/draft_worker.py",
-    "find": "            rec.published_hash, rec.published_url = published_hash, published_url\n            rec.reopened_hash = \"\"",
-    "replace": "            rec.published_hash, rec.published_url = published_hash, published_url",
+    "find": "            if published_at is None or reopened is None or reopened < _aware(published_at):\n                rec.reopened_hash = \"\"",
+    "replace": "            pass",
     "tests": [
       "tests/ee/sites/test_draft_worker.py::test_reopen_turns_the_published_view_into_a_draft_until_the_next_publish",
       "tests/ee/sites/test_draft_worker_service.py::test_a_publish_after_open_draft_brings_back_the_published_view"
@@ -34,6 +34,24 @@
     "replace": "    pass",
     "tests": [
       "tests/ee/sites/test_draft_worker_service.py::test_open_draft_sends_the_published_content_down_the_draft_path"
+    ]
+  },
+  {
+    "label": "a publish purge undoes an open-draft that landed after the deploy",
+    "file": "ee/pocketpaw_ee/sites/draft_worker.py",
+    "find": "reopened is None or reopened < _aware(published_at):",
+    "replace": "True:",
+    "tests": [
+      "tests/ee/sites/test_reopen_preview_rebuild.py"
+    ]
+  },
+  {
+    "label": "an open-draft no-op writes an Opened for editing version row",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    if not opened:\n        return {\"pocket_id\": pocket_id, \"opened\": False, \"reason\": \"already_draft\"}\n    await _ensure_pocket_draft(",
+    "replace": "    await _ensure_pocket_draft(",
+    "tests": [
+      "tests/ee/sites/test_draft_worker_service.py"
     ]
   }
 ]
