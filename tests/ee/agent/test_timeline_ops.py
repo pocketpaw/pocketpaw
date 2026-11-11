@@ -130,6 +130,7 @@ def test_every_contract_op_is_reachable(summary: TimelineSummary) -> None:
         "set_effects": {"clipId": "clip_aaa", "preset": "moody"},
         "set_shake": {"clipId": "clip_aaa", "intensity": 0.5},
         "set_track_effects": {"track": "Video", "preset": "noir"},
+        "set_layout": {"clipId": "clip_aaa", "layout": "pip-br"},
     }
     assert set(minimal) == set(OP_KINDS), "a verb was added without a case here"
     for kind, args in minimal.items():
@@ -758,6 +759,71 @@ def test_effect_props_animate_within_their_range(summary, prop, value, ease, err
     op = {"op": "add_keyframe", "clipId": "clip_aaa", "prop": prop, "atMs": 500, "value": value}
     if ease:
         op["ease"] = ease
+    ops, err = validate_ops([op], summary)
+    if error is None:
+        assert err is None, err
+    else:
+        assert ops is None and error in err
+
+
+@pytest.mark.parametrize(
+    ("fields", "error"),
+    [
+        ({"layout": "side-cam"}, None),
+        ({"layout": "full", "atMs": 8000, "durationMs": 400, "ease": "back"}, None),
+        ({"x": 0.7, "y": 0.3, "w": 0.3, "h": 0.4, "radius": 1, "borderColor": "#ffffff"}, None),
+        ({"off": True}, None),
+        ({"layout": "pip"}, "is not a layout"),
+        ({"w": 3}, "w must be between 0.02 and 2"),
+        ({"radius": -0.1}, "radius must be between 0 and 1"),
+        ({"borderColor": "white"}, 'borderColor must be "#rrggbb"'),
+        ({"durationMs": 20000}, "durationMs must be between 0 and 10000"),
+        ({"ease": "wobble"}, "is not an easing"),
+    ],
+)
+def test_set_layout_checks_presets_fields_and_timing(summary, fields, error) -> None:
+    ops, err = validate_ops([{"op": "set_layout", "clipId": "clip_aaa", **fields}], summary)
+    if error is None:
+        assert err is None and ops[0]["op"] == "set_layout"
+    else:
+        assert ops is None and error in err
+
+
+@pytest.mark.parametrize(
+    ("op", "error"),
+    [
+        ({"op": "set_transform", "clipId": "clip_aaa", "flipX": True}, None),
+        ({"op": "set_transform", "clipId": "clip_aaa", "flipY": 1}, "flipY must be true or false"),
+        ({"op": "set_project", "backdrop": {"colors": ["#000000", "#ffffff"], "angle": 45}}, None),
+        ({"op": "set_project", "backdrop": None}, None),
+        ({"op": "set_project", "backdrop": {"colors": ["#000000"]}}, "backdrop must be null"),
+        (
+            {"op": "set_project", "backdrop": {"colors": ["#000000", "#ffffff"], "angle": 400}},
+            "backdrop.angle must be between 0 and 360",
+        ),
+        (
+            {
+                "op": "add_keyframe",
+                "clipId": "clip_aaa",
+                "prop": "frame.w",
+                "atMs": 500,
+                "value": 0.3,
+            },
+            None,
+        ),
+        (
+            {
+                "op": "add_keyframe",
+                "clipId": "clip_aaa",
+                "prop": "frame.radius",
+                "atMs": 500,
+                "value": 2,
+            },
+            "That is the range of frame.radius",
+        ),
+    ],
+)
+def test_flips_backdrop_and_frame_keyframes(summary, op, error) -> None:
     ops, err = validate_ops([op], summary)
     if error is None:
         assert err is None, err

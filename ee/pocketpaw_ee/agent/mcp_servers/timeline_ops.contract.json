@@ -46,9 +46,15 @@
     "",
     "v8 (2026-11-03): set_track_effects. The set_effects fields on a whole lane;",
     "every video and image clip on it renders them under its own effects.",
-    "add_keyframe also takes fx.<scalar> props and back/elastic/bounce easing."
+    "add_keyframe also takes fx.<scalar> props and back/elastic/bounce easing.",
+    "",
+    "v9 (2026-11-06): set_layout. Draws a video or image clip into a box",
+    "(picture-in-picture, split screen, screen card, presenter cam) with a",
+    "radius, border and shadow, or animates it there from atMs, which is how a",
+    "clip goes full screen mid-shot. add_keyframe takes frame.<field>,",
+    "set_transform takes flipX/flipY, set_project takes a gradient backdrop."
   ],
-  "version": 8,
+  "version": 9,
   "maxOpsPerBatch": 50,
   "ops": [
     "add_caption",
@@ -62,6 +68,7 @@
     "remove_clip",
     "set_chroma",
     "set_effects",
+    "set_layout",
     "set_project",
     "set_shake",
     "set_track_effects",

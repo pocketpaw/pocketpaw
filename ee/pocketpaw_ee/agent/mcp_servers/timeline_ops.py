@@ -19,6 +19,10 @@
 # Ranges are checked here; the browser renders it in WebGL. `fx` keyframes its
 # overall strength.
 #
+# `set_layout` draws a video or image clip into a box (a named layout and/or
+# explicit _FRAME_FIELDS) or, with atMs, animates it there; `set_transform`
+# takes flipX/flipY booleans and `set_project` a two-colour gradient backdrop.
+#
 # `set_track_effects` takes the same fields on a whole lane (`track` is a lane
 # id or name); every video and image clip on it renders them under its own.
 #
@@ -62,6 +66,7 @@ OP_KINDS: frozenset[str] = frozenset(
         "remove_clip",
         "set_chroma",
         "set_effects",
+        "set_layout",
         "set_shake",
         "set_track_effects",
         "set_project",
@@ -91,6 +96,7 @@ _CLIP_OPS: frozenset[str] = frozenset(
         "add_keyframe",
         "clear_keyframes",
         "set_effects",
+        "set_layout",
         "set_shake",
         "zoom_clip",
         "set_chroma",
@@ -191,9 +197,40 @@ _HUE_BANDS: frozenset[str] = frozenset(
 )
 _CURVE_CHANNELS: frozenset[str] = frozenset({"master", "r", "g", "b"})
 # AnimatableProp in schema.ts: the transform props, the overall effects
-# strength `fx`, and `fx.<scalar>` for each effect scalar.
+# strength `fx`, `fx.<scalar>` for each effect scalar, and `frame.<field>`.
 _BASE_ANIM_PROPS: tuple[str, ...] = ("x", "y", "scale", "rotation", "opacity", "volume", "fx")
-_ANIM_PROPS: frozenset[str] = frozenset(_BASE_ANIM_PROPS) | {f"fx.{k}" for k in _FX_SCALARS}
+# Frame in schema.ts: box centre/size as canvas fractions, radius, border, shadow.
+_FRAME_FIELDS: dict[str, tuple[float, float]] = {
+    "x": (-1.0, 2.0),
+    "y": (-1.0, 2.0),
+    "w": (0.02, 2.0),
+    "h": (0.02, 2.0),
+    "radius": _UNIT,
+    "border": _UNIT,
+    "shadow": _UNIT,
+}
+# LAYOUT_IDS in layouts.ts.
+_LAYOUTS: frozenset[str] = frozenset(
+    {
+        "full",
+        "pip-br",
+        "pip-bl",
+        "pip-tr",
+        "pip-tl",
+        "split-left",
+        "split-right",
+        "split-top",
+        "split-bottom",
+        "screen-card",
+        "side-cam",
+        "circle-cam",
+    }
+)
+_ANIM_PROPS: frozenset[str] = (
+    frozenset(_BASE_ANIM_PROPS)
+    | {f"fx.{k}" for k in _FX_SCALARS}
+    | {f"frame.{k}" for k in _FRAME_FIELDS}
+)
 _MAX_CURVE_POINTS = 16
 
 # Ops that bring an asset onto the timeline.
@@ -831,8 +868,47 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
         opacity = raw.get("opacity")
         if opacity is not None and not 0 <= opacity <= 1:
             return f"ops[{i}].opacity must be between 0 and 1."
-        if not any(raw.get(k) is not None for k in ("x", "y", "scale", "rotation", "opacity")):
-            return f"ops[{i}] changes nothing — give x, y, scale, rotation or opacity."
+        for key in ("flipX", "flipY"):
+            if raw.get(key) is not None and not isinstance(raw[key], bool):
+                return f"ops[{i}].{key} must be true or false."
+        if not any(
+            raw.get(k) is not None
+            for k in ("x", "y", "scale", "rotation", "opacity", "flipX", "flipY")
+        ):
+            return (
+                f"ops[{i}] changes nothing — give x, y, scale, rotation, opacity, flipX or flipY."
+            )
+
+    elif kind == "set_layout":
+        layout = raw.get("layout")
+        if layout is not None and layout not in _LAYOUTS:
+            hint = _suggest(str(layout), set(_LAYOUTS))
+            return (
+                f"ops[{i}].layout {layout!r} is not a layout.{hint} "
+                f"Valid layouts: {', '.join(sorted(_LAYOUTS))}."
+            )
+        for key, (lo, hi) in _FRAME_FIELDS.items():
+            err = _check_range(raw.get(key), lo, hi, f"ops[{i}].{key}")
+            if err:
+                return err
+        color = raw.get("borderColor")
+        if color is not None and not (isinstance(color, str) and _HEX_COLOR.fullmatch(color)):
+            return f'ops[{i}].borderColor must be "#rrggbb".'
+        err = _check_number(raw, "atMs", i)
+        if err:
+            return err
+        err = _check_range(raw.get("durationMs"), 0.0, 10000.0, f"ops[{i}].durationMs")
+        if err:
+            return err
+        ease = raw.get("ease")
+        if ease is not None and ease not in _EASINGS:
+            hint = _suggest(str(ease), set(_EASINGS))
+            return (
+                f"ops[{i}].ease {ease!r} is not an easing.{hint} "
+                f"Valid easings: {', '.join(sorted(_EASINGS))}."
+            )
+        if raw.get("off") is not None and not isinstance(raw["off"], bool):
+            return f"ops[{i}].off must be true or false."
 
     elif kind == "zoom_clip":
         # Fractions of the frame, so 0.5/0.5 is centre at any aspect ratio.
@@ -905,8 +981,9 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
             hint = _suggest(str(prop), set(_ANIM_PROPS))
             return (
                 f"ops[{i}].prop {prop!r} cannot be animated.{hint} "
-                f"Animatable: {', '.join(_BASE_ANIM_PROPS)}, or fx.<effect> for any "
-                "set_effects scalar (fx.glitch, fx.vignette, ...)."
+                f"Animatable: {', '.join(_BASE_ANIM_PROPS)}, fx.<effect> for any "
+                "set_effects scalar (fx.glitch, fx.vignette, ...), or frame.<field> "
+                f"({', '.join(_FRAME_FIELDS)})."
             )
         if kind == "add_keyframe":
             if "atMs" not in raw or raw["atMs"] is None:
@@ -918,6 +995,11 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
                 err = _check_range(raw.get("value"), 0.0, 1.0, f"ops[{i}].value")
                 if err:
                     return f"{err} fx is the overall effects strength."
+            elif prop.startswith("frame."):
+                lo, hi = _FRAME_FIELDS[prop[6:]]
+                err = _check_range(raw.get("value"), lo, hi, f"ops[{i}].value")
+                if err:
+                    return f"{err} That is the range of {prop}."
             elif prop.startswith("fx."):
                 lo, hi = _FX_SCALARS[prop[3:]]
                 err = _check_range(raw.get("value"), lo, hi, f"ops[{i}].value")
@@ -967,6 +1049,21 @@ def _validate_verb(kind: str, raw: dict[str, Any], i: int, summary: TimelineSumm
         fit = raw.get("fit")
         if fit is not None and fit not in ("contain", "cover"):
             return f"ops[{i}].fit must be 'contain' or 'cover'."
+        backdrop = raw.get("backdrop")
+        if backdrop is not None:
+            colors = backdrop.get("colors") if isinstance(backdrop, dict) else None
+            if (
+                not isinstance(colors, list)
+                or len(colors) != 2
+                or not all(isinstance(c, str) and _HEX_COLOR.fullmatch(c) for c in colors)
+            ):
+                return (
+                    f'ops[{i}].backdrop must be null or {{colors: ["#rrggbb", "#rrggbb"], '
+                    "angle: 0-360}."
+                )
+            err = _check_range(backdrop.get("angle", 0), 0.0, 360.0, f"ops[{i}].backdrop.angle")
+            if err:
+                return err
 
     return None
 

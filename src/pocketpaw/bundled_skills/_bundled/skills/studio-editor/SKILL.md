@@ -158,6 +158,25 @@ under each clip's own effects. "Make the whole video look like super 8" is one
 `set_shake {clipId, intensity?, speed?, rotation?, off?}` adds handheld camera
 shake. It stacks on top of a zoom and any keyframes instead of replacing them.
 
+## Frames, picture-in-picture and split screen
+
+Layering is lanes plus `set_layout`. Each clip sits on its own lane and gets a
+box: `full`, `pip-br` / `pip-bl` / `pip-tr` / `pip-tl`, `split-left` /
+`split-right` / `split-top` / `split-bottom`, `screen-card`, `side-cam` or
+`circle-cam`, with `x`/`y`/`w`/`h` (canvas fractions), `radius`, `border`,
+`borderColor` and `shadow` to adjust it. Later lanes draw on top.
+
+```json
+[{"op":"set_project","backdrop":{"colors":["#fdf1e6","#ece9ff"],"angle":135}},
+ {"op":"set_layout","clipId":"…s1","layout":"screen-card"},
+ {"op":"set_layout","clipId":"…c1","layout":"side-cam"},
+ {"op":"set_layout","clipId":"…c1","layout":"full","atMs":12000,"durationMs":500}]
+```
+
+With `atMs` the clip moves from wherever it is to the new box, which is how
+"now show the cam full screen" works mid-shot. Without it, `full` (or
+`off: true`) takes the frame off. `set_transform {flipX: true}` mirrors a clip.
+
 ## Zooming in on something
 
 A **marked area** ("At 00:08, marked area x 40-60%, y 20-50% (centre 0.50,
