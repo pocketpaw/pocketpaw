@@ -162,6 +162,8 @@ async def test_an_approve_with_findings_publishes_nothing(recorder) -> None:
     blocked = recorder.parameters["_artifact_change"]["publish_blocked"]
     assert blocked["override"] == "confirm_placeholders"
     assert any(f["text"] == "[Address]" for f in blocked["findings"])
+    # A failed card cannot be approved again, so it offers no Publish anyway.
+    assert blocked["can_override"] is False
 
 
 @pytest.mark.asyncio
@@ -197,7 +199,7 @@ async def test_a_clean_draft_approves_and_skips_the_second_check(recorder, pocke
 @pytest.mark.parametrize(
     ("route", "body", "published"),
     [
-        ("single", {"confirm_placeholders": True}, True),
+        ("single", "anyway", True),
         ("bulk", None, False),
     ],
 )
@@ -218,6 +220,14 @@ async def test_the_router_publishes_only_on_publish_anyway(
     monkeypatch.setattr("tests.ee.sites.test_destructive_migration_approval.WS", WS)
     monkeypatch.setattr("tests.ee.sites.test_destructive_migration_approval.USER", USER)
     client = _instinct_client()
+    if body == "anyway":
+        from pocketpaw_ee.sites import publish_gate
+
+        seen = action.parameters["_artifact_change"]["publish_findings"]
+        body = {
+            "confirm_placeholders": True,
+            "confirm_findings_digest": publish_gate.findings_digest(seen),
+        }
     with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
         if route == "bulk":
             resp = client.post("/instinct/actions/bulk-approve", json={"ids": [action.id]})
@@ -288,8 +298,10 @@ async def test_publish_anyway_approves_the_refused_card(
     client = _approve_client(instinct_store, monkeypatch, deploys)
     with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
         refused = client.post(f"/instinct/actions/{action.id}/approve", json={})
+        digest = refused.json()["error"]["details"]["findings_digest"]
         anyway = client.post(
-            f"/instinct/actions/{action.id}/approve", json={"confirm_placeholders": True}
+            f"/instinct/actions/{action.id}/approve",
+            json={"confirm_placeholders": True, "confirm_findings_digest": digest},
         )
 
     assert refused.status_code == 409, refused.text
@@ -312,3 +324,139 @@ async def test_a_clean_draft_approves_with_200(beanie_test_db, instinct_store, p
 
     assert resp.status_code == 200, resp.text
     assert len(deploys) == 1
+
+
+# ── Publish anyway covers only the findings the owner saw ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_publish_anyway_without_the_digest_is_refused(
+    beanie_test_db, instinct_store, pocket, monkeypatch
+):
+    from unittest.mock import patch
+
+    action = await _request(instinct_store)
+    deploys: list[dict[str, Any]] = []
+    client = _approve_client(instinct_store, monkeypatch, deploys)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
+        resp = client.post(
+            f"/instinct/actions/{action.id}/approve", json={"confirm_placeholders": True}
+        )
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["details"]["findings_digest"]
+    assert deploys == []
+    assert (await instinct_store.get_action(action.id)).status.value == "pending"
+
+
+@pytest.mark.asyncio
+async def test_publish_anyway_on_changed_findings_answers_the_new_ones(
+    beanie_test_db, instinct_store, pocket, monkeypatch
+):
+    """The owner saw "[Address]"; the draft now shows "[Email]" instead. Their
+    Publish anyway must not cover findings they never saw."""
+    from unittest.mock import patch
+
+    action = await _request(instinct_store)
+    deploys: list[dict[str, Any]] = []
+    client = _approve_client(instinct_store, monkeypatch, deploys)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
+        seen = client.post(f"/instinct/actions/{action.id}/approve", json={})
+        old_digest = seen.json()["error"]["details"]["findings_digest"]
+        pocket["source"] = {"index.html": _doc("<p>Write to [Email] for orders.</p>")}
+        resp = client.post(
+            f"/instinct/actions/{action.id}/approve",
+            json={"confirm_placeholders": True, "confirm_findings_digest": old_digest},
+        )
+
+    assert resp.status_code == 409, resp.text
+    details = resp.json()["error"]["details"]
+    assert any(f["text"] == "[Email]" for f in details["findings"])
+    assert details["findings_digest"] != old_digest
+    assert details["can_override"] is True
+    assert deploys == []
+    assert (await instinct_store.get_action(action.id)).status.value == "pending"
+
+
+# ── the executor re-checks content that changed after the route's gate ─────────
+
+
+@pytest.mark.asyncio
+async def test_content_changed_after_the_route_gate_is_refused_with_the_block(
+    beanie_test_db, instinct_store, pocket, monkeypatch
+):
+    """The route's gate passed a clean draft; the draft changed before the merge.
+    The executor re-runs the gate and the approve answers the same 409 shape."""
+    from unittest.mock import patch
+
+    from pocketpaw_ee.versions import instinct_executor
+
+    pocket["source"] = {"index.html": _CLEAN}
+    action = await _request(instinct_store)
+    deploys: list[dict[str, Any]] = []
+    client = _approve_client(instinct_store, monkeypatch, deploys)
+    real_gate = instinct_executor.approve_gate
+
+    async def _gate_then_edit(*a: Any, **kw: Any) -> Any:
+        result = await real_gate(*a, **kw)
+        pocket["source"] = {"index.html": _CAFE}  # an agent edit lands mid-approve
+        return result
+
+    monkeypatch.setattr(instinct_executor, "approve_gate", _gate_then_edit)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
+        resp = client.post(f"/instinct/actions/{action.id}/approve", json={})
+
+    assert resp.status_code == 409, resp.text
+    error = resp.json()["error"]
+    assert error["code"] == "sites.publish_blocked"
+    assert any(f["text"] == "[Address]" for f in error["details"]["findings"])
+    # The card failed, so it cannot be approved again: Publish files a new one.
+    assert error["details"]["can_override"] is False
+    assert deploys == []
+    assert (await instinct_store.get_action(action.id)).status.value == "failed"
+
+
+@pytest.mark.asyncio
+async def test_unchanged_content_skips_the_executor_recheck(recorder, pocket, monkeypatch) -> None:
+    from pocketpaw_ee.sites import verify
+    from pocketpaw_ee.versions import instinct_executor
+
+    pocket["source"] = {"index.html": _CLEAN}
+    calls: list[int] = []
+    real = instinct_executor._gate
+
+    async def _counting(*a: Any, **kw: Any) -> Any:
+        calls.append(1)
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(instinct_executor, "_gate", _counting)
+    await instinct_executor.execute_approved_change(
+        _Action(), gated_hash=verify.publish_content_hash(pocket)
+    )
+
+    assert calls == []
+    assert len(recorder.merges) == 1
+
+
+# ── a refusal does not persist the approver's unreviewed edits ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_refused_approve_keeps_the_stored_proposal(
+    beanie_test_db, instinct_store, pocket, monkeypatch
+):
+    from unittest.mock import patch
+
+    action = await _request(instinct_store)
+    deploys: list[dict[str, Any]] = []
+    client = _approve_client(instinct_store, monkeypatch, deploys)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=instinct_store):
+        resp = client.post(
+            f"/instinct/actions/{action.id}/approve",
+            json={"parameters": {**action.parameters, "note": "edited at approve"}},
+        )
+
+    assert resp.status_code == 409, resp.text
+    stored = await instinct_store.get_action(action.id)
+    assert "note" not in stored.parameters
+    assert stored.parameters["_artifact_change"]["publish_blocked"]["findings"]
