@@ -188,3 +188,264 @@ async def test_the_discard_route_says_why_it_refuses(beanie_test_db, monkeypatch
     resp = await _post_discard(pocket_id)
     assert resp.status_code == 409, resp.text
     assert "published" in resp.text
+
+
+# ---------------------------------------------------------------- what is live
+
+
+async def _live_site(pocket_id: str, source: dict) -> None:
+    """The Site row a successful live deploy of ``source`` leaves."""
+    from pocketpaw_ee.cloud.models.site import Site
+
+    await Site(
+        id=sites_service._live_object_id("ws1", pocket_id),
+        workspace="ws1",
+        pocket_id=pocket_id,
+        owner="u1",
+        name="Proj",
+        deployed=True,
+        live_source_hash=sites_service.source_content_hash(source),
+    ).insert()
+
+
+async def test_discard_refuses_when_the_published_row_is_not_what_is_live(
+    beanie_test_db, monkeypatch
+):
+    """The pointer moves before the deploy: a publish whose deploy failed leaves a
+    published row that never went live. Discard must not restore it."""
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+
+    pocket_id, _registry = await _published_pocket(monkeypatch)
+    await _live_site(pocket_id, {**SOURCE, "src/pages/index.astro": "<h1>Really live</h1>\n"})
+    await _edit(pocket_id)
+    with pytest.raises(ConflictError) as err:
+        await sites_service.discard_pocket_draft(
+            workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+        )
+    assert err.value.code == "sites.discard_live_unknown"
+    assert (await _source(pocket_id))["src/pages/index.astro"] == EDITED
+    assert await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id) is not None
+
+
+async def test_discard_restores_the_row_that_matches_live_not_the_newer_pointer(
+    beanie_test_db, monkeypatch
+):
+    """A newer published row whose deploy failed is skipped for the older row the
+    Site says is live."""
+    pocket_id, _registry = await _published_pocket(monkeypatch)
+    await _live_site(pocket_id, SOURCE)
+    failed = await versions_service.write_draft(
+        scope_type="pocket",
+        scope_id=pocket_id,
+        workspace_id="ws1",
+        content={**SOURCE, "src/pages/index.astro": "<h1>Never deployed</h1>\n"},
+    )
+    await versions_service.publish(
+        scope_type="pocket", scope_id=pocket_id, workspace_id="ws1", version_id=str(failed.id)
+    )
+    await _edit(pocket_id)
+
+    await sites_service.discard_pocket_draft(workspace_id="ws1", user_id="u1", pocket_id=pocket_id)
+    assert await _source(pocket_id) == SOURCE
+
+
+async def test_legacy_project_fallback_refuses_when_the_registry_hash_differs(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+
+    pocket_id, registry = await _published_pocket(monkeypatch)
+    registry.rows[pocket_id].published_hash = "not-the-published-row"
+    await _edit(pocket_id)
+    with pytest.raises(ConflictError) as err:
+        await sites_service.discard_pocket_draft(
+            workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+        )
+    assert err.value.code == "sites.discard_live_unknown"
+    assert (await _source(pocket_id))["src/pages/index.astro"] == EDITED
+
+
+# ---------------------------------------------------------------- stale approvals
+
+
+async def test_a_discarded_draft_can_never_be_published(beanie_test_db, monkeypatch):
+    pocket_id, _registry = await _published_pocket(monkeypatch)
+    await _edit(pocket_id)
+    draft = await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id)
+    await sites_service.discard_pocket_draft(workspace_id="ws1", user_id="u1", pocket_id=pocket_id)
+    with pytest.raises(ValueError):
+        await versions_service.publish(
+            scope_type="pocket", scope_id=pocket_id, workspace_id="ws1", version_id=str(draft.id)
+        )
+    published = await versions_service.get_published(scope_type="pocket", scope_id=pocket_id)
+    assert published is not None and published.content == SOURCE
+
+
+async def test_a_superseded_draft_can_never_be_published(beanie_test_db):
+    v1 = await versions_service.write_draft(
+        scope_type="pocket", scope_id="pk-sup", workspace_id="ws1", content={"n": 1}
+    )
+    await versions_service.write_draft(
+        scope_type="pocket", scope_id="pk-sup", workspace_id="ws1", content={"n": 2}
+    )
+    with pytest.raises(ValueError):
+        await versions_service.publish(
+            scope_type="pocket", scope_id="pk-sup", workspace_id="ws1", version_id=str(v1.id)
+        )
+
+
+async def test_a_review_that_cannot_be_rejected_stops_the_discard(
+    beanie_test_db, monkeypatch, instinct_store
+):
+    from pocketpaw_ee.cloud._core.errors import CloudError
+
+    pocket_id, _registry = await _published_pocket(monkeypatch)
+    await _edit(pocket_id)
+    await sites_service.request_publish_pocket(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+    )
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(instinct_store, "reject", _boom)
+    with pytest.raises(CloudError) as err:
+        await sites_service.discard_pocket_draft(
+            workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+        )
+    assert err.value.status_code == 503 and err.value.code == "sites.discard_unavailable"
+    assert (await _source(pocket_id))["src/pages/index.astro"] == EDITED
+
+
+# ---------------------------------------------------------------- recoverable
+
+
+async def test_discarded_work_stays_in_version_history_and_can_be_restored(
+    beanie_test_db, monkeypatch
+):
+    pocket_id, _registry = await _published_pocket(monkeypatch)
+    await _edit(pocket_id)
+    await sites_service.discard_pocket_draft(workspace_id="ws1", user_id="u1", pocket_id=pocket_id)
+
+    rows = await sites_service.version_history(workspace_id="ws1", pocket_id=pocket_id)
+    kept = [r for r in rows if r.label == "Discarded changes"]
+    assert len(kept) == 1 and kept[0].status == "discarded"
+    assert kept[0].content["src/pages/index.astro"] == EDITED
+
+    back = await sites_service.revert_pocket_version(
+        workspace_id="ws1", user_id="u1", pocket_id=pocket_id, version_no=kept[0].version_no
+    )
+    assert back.content["src/pages/index.astro"] == EDITED
+
+
+async def test_work_with_no_draft_row_is_still_kept(beanie_test_db, monkeypatch):
+    """A source write that recorded no version (an import, a swallowed version
+    write) is snapshotted before the restore, not lost."""
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    pocket_id, _registry = await _published_pocket(monkeypatch)
+    doc = await Pocket.get(pocket_id)
+    doc.source = {**SOURCE, "src/pages/index.astro": EDITED}
+    await doc.save()
+    assert await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id) is None
+
+    await sites_service.discard_pocket_draft(workspace_id="ws1", user_id="u1", pocket_id=pocket_id)
+    rows = await sites_service.version_history(workspace_id="ws1", pocket_id=pocket_id)
+    assert any(
+        r.label == "Discarded changes" and r.content["src/pages/index.astro"] == EDITED
+        for r in rows
+    )
+
+
+# ---------------------------------------------------------------- races and refusals
+
+
+async def test_an_edit_landing_mid_discard_wins_and_the_discard_is_a_409(
+    beanie_test_db, monkeypatch
+):
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+
+    pocket_id, _registry = await _published_pocket(monkeypatch)
+    await _edit(pocket_id)
+    real_write = versions_service.write_draft
+    racing = "<h1>Agent wrote this meanwhile</h1>\n"
+
+    async def _write_then_race(**kw):
+        row = await real_write(**kw)
+        if kw.get("label") == "Discarded changes":
+            await pockets_service.set_project_source(
+                pocket_id, "u1", writes={"src/pages/index.astro": racing}
+            )
+        return row
+
+    monkeypatch.setattr(versions_service, "write_draft", _write_then_race)
+    with pytest.raises(ConflictError) as err:
+        await sites_service.discard_pocket_draft(
+            workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+        )
+    assert err.value.code == "sites.discard_conflict"
+    assert (await _source(pocket_id))["src/pages/index.astro"] == racing
+
+
+async def test_restore_published_source_refuses_a_stale_expected_source(beanie_test_db):
+    from pocketpaw_ee.cloud._core.errors import ConflictError
+
+    pocket_id = await _make_project_pocket()
+    with pytest.raises(ConflictError):
+        await pockets_service.restore_published_source(
+            pocket_id, "u1", expected_source={"stale": "x"}, source={"a": "b"}
+        )
+    assert await _source(pocket_id) == SOURCE
+
+
+async def test_discard_needs_edit_access(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    pocket_id, _registry = await _published_pocket(monkeypatch, user_id="someone-else")
+    doc = await Pocket.get(pocket_id)
+    doc.visibility = "public"
+    await doc.save()
+    with pytest.raises(Forbidden):
+        await sites_service.discard_pocket_draft(
+            workspace_id="ws1", user_id="viewer", pocket_id=pocket_id
+        )
+    assert await _source(pocket_id, user_id="someone-else") == SOURCE
+
+
+async def test_discard_refuses_a_ripple_site(beanie_test_db):
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    _view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id="ws1",
+        owner_id="u1",
+        name="Spec",
+        type_="site",
+        pattern="landing",
+        ripple_spec={"ui": []},
+        engine="ripple",
+        trusted=True,
+    )
+    assert err is None, err
+    with pytest.raises(ValidationError) as exc:
+        await sites_service.discard_pocket_draft(
+            workspace_id="ws1", user_id="u1", pocket_id=pocket_id
+        )
+    assert exc.value.code == "sites.discard_unsupported"
+
+
+async def test_discard_is_audited(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.audit import service as audit_service
+
+    rows: list[tuple] = []
+
+    async def _record(workspace_id, actor_id, action, **kw):
+        rows.append((workspace_id, actor_id, action, kw))
+
+    monkeypatch.setattr(audit_service, "record", _record)
+    pocket_id, _registry = await _published_pocket(monkeypatch)
+    await _edit(pocket_id)
+    await sites_service.discard_pocket_draft(workspace_id="ws1", user_id="u1", pocket_id=pocket_id)
+    assert [(r[0], r[1], r[2]) for r in rows] == [("ws1", "u1", "sites.draft_discarded")]
+    assert rows[0][3]["target_id"] == pocket_id
+    assert rows[0][3]["metadata"]["restored"] is True
