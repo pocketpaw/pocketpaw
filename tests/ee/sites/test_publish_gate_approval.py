@@ -74,6 +74,16 @@ async def test_the_review_card_carries_the_findings(beanie_test_db, instinct_sto
 
 
 @pytest.mark.asyncio
+async def test_the_review_card_records_the_reviewed_content(beanie_test_db, instinct_store, pocket):
+    from pocketpaw_ee.sites import verify
+
+    action = await _request(instinct_store)
+
+    blob = action.parameters["_artifact_change"]
+    assert blob["reviewed_content_hash"] == verify.publish_content_hash(pocket)
+
+
+@pytest.mark.asyncio
 async def test_a_clean_draft_has_a_plain_card(beanie_test_db, instinct_store, pocket):
     pocket["source"] = {"index.html": _CLEAN}
     action = await _request(instinct_store)
