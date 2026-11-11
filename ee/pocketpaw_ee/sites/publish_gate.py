@@ -23,7 +23,10 @@
 #
 # WHO MAY OVERRIDE. Only the owner: ``confirm_placeholders`` from the REST publish or an
 # individual Tray approve, written to the audit log with the findings
-# (:func:`audit_override`). The agent's publish tool files a Tray card instead. A
+# (:func:`audit_override`). The refusal says whether its caller may
+# (``details.can_override``) and fingerprints its findings (``findings_digest``); an
+# approve's override must echo that digest, so it never covers findings the owner did
+# not see. The agent's publish tool files a Tray card instead. A
 # machine republish is exempt only for content that last passed or was confirmed
 # (:func:`gate_publish`, the hash in ``verify_store``'s ``publish-gate`` pointer).
 #
@@ -32,6 +35,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import posixpath
 import time
@@ -60,7 +65,14 @@ _REASONS = {
 class PublishBlocked(CloudError):
     """409: the draft still shows placeholders, made-up contacts or broken forms."""
 
-    def __init__(self, findings: list[dict[str, Any]], more: int = 0) -> None:
+    def __init__(
+        self,
+        findings: list[dict[str, Any]],
+        more: int = 0,
+        *,
+        can_override: bool = True,
+        digest: str = "",
+    ) -> None:
         first = findings[0]["message"] if findings else "Your site has things to fix."
         extra = len(findings) + more - 1
         tail = f" (and {extra} more {'thing' if extra == 1 else 'things'} to fix)" if extra else ""
@@ -69,13 +81,17 @@ class PublishBlocked(CloudError):
             "sites.publish_blocked",
             f"Your site isn't ready to go live yet. {first}{tail} Fix these, or publish "
             "anyway if you meant to.",
-            # ``can_override``: the caller may retry with ``OVERRIDE_FIELD`` (the REST
-            # publish and an individual Tray approve). The agent's tool never can.
+            # ``can_override``: whether THIS caller may retry with ``OVERRIDE_FIELD``
+            # (the REST publish and a pending card's approve may; a failed card and
+            # the agent's tool may not). ``findings_digest`` names exactly these
+            # findings: an approve's Publish anyway must echo it, so it never covers
+            # findings the owner did not see.
             details={
                 "findings": findings,
                 "more": more,
                 "override": OVERRIDE_FIELD,
-                "can_override": True,
+                "can_override": can_override,
+                "findings_digest": digest,
             },
         )
 
@@ -218,9 +234,24 @@ async def pocket_findings(
     return findings
 
 
-def refusal(findings: list[dict[str, Any]]) -> PublishBlocked:
-    """The :class:`PublishBlocked` for ``findings``, capped at :data:`MAX_FINDINGS`."""
-    return PublishBlocked(findings[:MAX_FINDINGS], more=max(0, len(findings) - MAX_FINDINGS))
+def findings_digest(findings: list[dict[str, Any]]) -> str:
+    """A short, order-free fingerprint of a set of findings (rule, page, text), so a
+    "publish anyway" can name exactly the findings the owner saw."""
+    keys = sorted(
+        json.dumps([str(f.get(k) or "") for k in ("rule", "page", "text")]) for f in findings
+    )
+    return hashlib.sha256("\n".join(keys).encode()).hexdigest()[:16]
+
+
+def refusal(findings: list[dict[str, Any]], *, can_override: bool = True) -> PublishBlocked:
+    """The :class:`PublishBlocked` for ``findings``, capped at :data:`MAX_FINDINGS`. The
+    digest covers every finding, including the ones past the cap."""
+    return PublishBlocked(
+        findings[:MAX_FINDINGS],
+        more=max(0, len(findings) - MAX_FINDINGS),
+        can_override=can_override,
+        digest=findings_digest(findings),
+    )
 
 
 def last_gated(pocket_id: str, *, store: Any = None) -> str:

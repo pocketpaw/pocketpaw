@@ -350,6 +350,8 @@ async def _publish_handler(args: dict) -> dict:
         )
     except CloudError as exc:
         if exc.code == "sites.publish_blocked":
+            # The agent never overrides the gate: only the owner can, on a card.
+            exc.details = {**(exc.details or {}), "can_override": False}
             return _error_response(_publish_blocked_text(exc))
         if exc.code == "sites.migration_destructive":
             # Deleting stored rows is the owner's call. File the review card that

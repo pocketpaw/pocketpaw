@@ -1083,7 +1083,8 @@ Refusal: `409`, code `sites.publish_blocked`.
       ],
       "more": 0,
       "override": "confirm_placeholders",
-      "can_override": true
+      "can_override": true,
+      "findings_digest": "3f9a1c0d2b7e4a51"
     }
   }
 }
@@ -1091,8 +1092,10 @@ Refusal: `409`, code `sites.publish_blocked`.
 
 - `findings` holds at most 20 entries, one per offending text; `more` counts the rest.
 - `can_override` says whether the caller may retry with the `override` field. It is
-  `true` on the REST publish and on a single-Action approve; the agent's publish tool
-  never overrides (it files a card, below).
+  `true` on the REST publish and on a pending card's single approve; `false` on a card
+  that already failed and for the agent's publish tool (it files a card, below).
+- `findings_digest` fingerprints exactly these findings (rule, page, text). An
+  approve's Publish anyway must send it back (below).
 - `message` is written for the owner and safe to show as is. `page_label` is "the home
   page" or `the "about" page`; it gains "and N other pages" inside `message` when the
   same text repeats.
@@ -1128,7 +1131,12 @@ with an `_artifact_change` blob). The same gate applies:
     `error` = `sites.publish_blocked: <the refusal message>` and the same
     `publish_blocked` details on the blob.
 - **Publish anyway:** `POST /instinct/actions/{id}/approve` with body
-  `{"confirm_placeholders": true}` merges and deploys past the findings. Only the
+  `{"confirm_placeholders": true, "confirm_findings_digest": "<findings_digest>"}`
+  merges and deploys past the findings. A missing digest, or one that no longer
+  matches the draft's findings, answers a fresh 409 with the current findings and
+  their digest, and the card stays pending. If the draft changes between that
+  check and the merge, the merge checks again; a refusal then fails the card and
+  the approve still answers the same 409 (`can_override: false`). Only the
   single-Action approve accepts it; bulk approve never does. The override is audited
   under the approver (`sites.publish_gate_overridden`).
 - When the owner tells the agent to publish anyway, the agent's publish tool files

@@ -22,11 +22,13 @@
 #     numbers, broken forms) fail the Action with the owner-worded refusal and record
 #     them on the blob as ``publish_blocked``; nothing is promoted or deployed.
 #     ``confirm_placeholders=True`` (an individual approve's "publish anyway") skips it.
-#   * approve_gate(action, approver=..., confirm_placeholders=...) — the same gate
-#     for the single-Action approve route, run BEFORE the Action flips to approved:
-#     a refusal is returned (the route raises it as 409 ``sites.publish_blocked``)
-#     and the card stays pending, so "Publish anyway" approves that same card. The
-#     route then calls the executor with ``gate_checked=True`` so the gate runs once.
+#   * approve_gate(store, action, ...) — the same gate for the single-Action approve
+#     route, run BEFORE the Action flips to approved: a refusal is returned (the
+#     route raises it as 409 ``sites.publish_blocked``) and the card stays pending,
+#     so "Publish anyway" approves that same card. Publish anyway counts only when
+#     it echoes the refusal's ``findings_digest``. A pass returns the content hash it
+#     checked; the route hands it to the executor as ``gated_hash``, which skips its
+#     own check only while the draft still has that hash.
 #   * discard_rejected_change(action) — REJECT = DISCARD: every draft above the
 #     published pointer is discarded in one pass (``discard_all_drafts``); the
 #     published pointer is untouched and nothing deploys. Best effort.
@@ -36,7 +38,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,25 @@ def artifact_change_blob(action: Any) -> dict[str, Any] | None:
     return blob if isinstance(blob, dict) else None
 
 
+class GateResult(NamedTuple):
+    """What the publish gate decided: the refusal (None to go ahead) and the
+    content hash it checked ("" when the pocket could not be read)."""
+
+    refusal: Any
+    content_hash: str
+
+
+def _content_hash(pocket: Any) -> str:
+    from pocketpaw_ee.sites import verify
+
+    if pocket is None:
+        return ""
+    try:
+        return str(verify.publish_content_hash(pocket) or "")
+    except Exception:  # noqa: BLE001 — no hash: nothing can be skipped on it
+        return ""
+
+
 def _confirmed_migration_keys(blob: dict[str, Any]) -> list[str]:
     """The ``name:sha256`` keys of the destructive migrations the card showed."""
     found = blob.get("destructive_migrations")
@@ -83,18 +104,27 @@ async def _gate(
     scope_id: str,
     author: str,
     confirmed: bool,
+    confirm_digest: str | None = None,
     approver: str | None = None,
-) -> Any:
+    can_override: bool = True,
+    base_parameters: dict[str, Any] | None = None,
+) -> GateResult:
     """Run the publish gate on the pocket about to go live. On blocking findings and
-    no ``confirm_placeholders``: record them on the Action's blob as
+    no ``confirm_placeholders``: record them on the Action's stored blob as
     ``publish_blocked`` and return the :class:`~pocketpaw_ee.sites.publish_gate.
-    PublishBlocked` refusal (nothing is merged, nothing deploys). With the approver's
-    "publish anyway" the override is audited under the approver. Content that goes
-    ahead is remembered as vetted, so the deploy's own gate (a machine republish)
-    does not run twice. Returns None when the publish may go ahead."""
+    PublishBlocked` refusal (nothing is merged, nothing deploys). A
+    ``confirm_digest`` other than None must match the current findings, or the
+    confirm does not count. With the approver's "publish anyway" the override is
+    audited under the approver. Content that goes ahead is remembered as vetted, so
+    the deploy's own gate (a machine republish) does not run twice.
+    ``base_parameters`` is what gets written back (the stored proposal, never an
+    approver's unreviewed edits)."""
     from pocketpaw_ee.sites import publish_gate, verify
 
     pocket, findings, skipped = await publish_gate.pocket_check(pocket_id=scope_id, user_id=author)
+    content_hash = _content_hash(pocket)
+    if confirm_digest is not None and confirm_digest != publish_gate.findings_digest(findings):
+        confirmed = False
     if findings and confirmed:
         approver = str(approver or getattr(action, "approved_by", None) or author)
         await publish_gate.audit_override(
@@ -107,15 +137,28 @@ async def _gate(
                 publish_gate.remember_gated(scope_id, verify.publish_content_hash(pocket))
             except Exception:  # noqa: BLE001 — the deploy then gates again; harmless
                 logger.warning("artifact-change merge: could not remember %s", scope_id)
-        return None
-    refusal = publish_gate.refusal(findings)
+        return GateResult(None, content_hash)
+    refusal = publish_gate.refusal(findings, can_override=can_override)
     try:
-        parameters = dict(getattr(action, "parameters", None) or {})
+        stored = base_parameters if base_parameters is not None else action.parameters
+        parameters = dict(stored or {})
+        if isinstance(parameters.get("_artifact_change"), dict):
+            blob = parameters["_artifact_change"]
         parameters["_artifact_change"] = {**blob, "publish_blocked": refusal.details}
         await store.update_parameters(action.id, parameters)
     except Exception:  # noqa: BLE001 — the error text still carries every finding
         logger.warning("artifact-change merge: could not record findings on %s", action.id)
-    return refusal
+    return GateResult(refusal, content_hash)
+
+
+async def _current_hash(scope_id: str, author: str) -> str:
+    """The publish content hash of the pocket as it is now ("" when unreadable)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        return _content_hash(await pockets_service.get(scope_id, author))
+    except Exception:  # noqa: BLE001 — unreadable: the caller re-runs the gate
+        return ""
 
 
 async def _publish_blocked(
@@ -127,15 +170,17 @@ async def _publish_blocked(
     scope_id: str,
     author: str,
     confirmed: bool,
-    checked: bool = False,
+    confirm_digest: str | None = None,
+    gated_hash: str | None = None,
 ) -> bool:
     """:func:`_gate` for an already-approved Action: a refusal fails the Action with
-    the owner-worded message and returns True. ``checked`` means the approve route
-    already ran the gate on this approve (:func:`approve_gate`), so it is not run
-    twice."""
-    if checked:
+    the owner-worded message (recorded with ``can_override`` false: a failed card
+    cannot be approved again) and returns True. ``gated_hash`` is the content the
+    approve route already passed (:func:`approve_gate`); while the draft still has
+    it, the gate does not run twice."""
+    if gated_hash and await _current_hash(scope_id, author) == gated_hash:
         return False
-    refusal = await _gate(
+    refusal, _ = await _gate(
         store,
         action,
         blob,
@@ -143,6 +188,8 @@ async def _publish_blocked(
         scope_id=scope_id,
         author=author,
         confirmed=confirmed,
+        confirm_digest=confirm_digest,
+        can_override=False,
     )
     if refusal is None:
         return False
@@ -151,19 +198,27 @@ async def _publish_blocked(
 
 
 async def approve_gate(
-    store: Any, action: Any, *, approver: str, confirm_placeholders: bool
-) -> Any:
+    store: Any,
+    action: Any,
+    *,
+    approver: str,
+    confirm_placeholders: bool,
+    confirm_digest: str | None,
+    stored_parameters: dict[str, Any] | None,
+) -> GateResult:
     """The publish gate for a single-Action approve, run while the card is still
-    pending. Returns the ``PublishBlocked`` refusal (findings recorded on the blob) or
-    None when the approve may go ahead, including for blobs that do not deploy."""
+    pending. ``refusal`` is the ``PublishBlocked`` (findings recorded on the stored
+    blob, ``stored_parameters``) or None when the approve may go ahead, including for
+    blobs that do not deploy. A Publish anyway counts only with the refusal's
+    ``findings_digest`` (``confirm_digest``). ``content_hash`` is what was checked."""
     blob = artifact_change_blob(action)
     if blob is None:
-        return None
+        return GateResult(None, "")
     scope_type = str(blob.get("scope_type") or "")
     scope_id = str(blob.get("scope_id") or "")
     workspace_id = str(blob.get("workspace") or blob.get("workspace_id") or "")
     if scope_type not in _DEPLOYABLE_SCOPES or not scope_id:
-        return None
+        return GateResult(None, "")
     return await _gate(
         store,
         action,
@@ -172,7 +227,9 @@ async def approve_gate(
         scope_id=scope_id,
         author=str(blob.get("user_id") or "system"),
         confirmed=confirm_placeholders,
+        confirm_digest=confirm_digest or "",
         approver=approver,
+        base_parameters=stored_parameters,
     )
 
 
@@ -182,7 +239,8 @@ async def execute_approved_change(
     human_event_id: Any | None = None,
     confirm_destructive: bool = False,
     confirm_placeholders: bool = False,
-    gate_checked: bool = False,
+    confirm_findings_digest: str | None = None,
+    gated_hash: str | None = None,
 ) -> None:
     """MERGE an approved artifact-change Action (BP-3).
 
@@ -233,7 +291,8 @@ async def execute_approved_change(
         scope_id=scope_id,
         author=str(author or "system"),
         confirmed=confirm_placeholders,
-        checked=gate_checked,
+        confirm_digest=confirm_findings_digest,
+        gated_hash=gated_hash,
     ):
         return
 

@@ -224,11 +224,12 @@ class TestArtifactChangeDispatch:
             human_event_id=None,
             confirm_destructive=False,
             confirm_placeholders=False,
-            gate_checked=False,
+            confirm_findings_digest=None,
+            gated_hash=None,
         ):
             calls["merge"] = action.id
             # The approve route ran the publish gate before approving.
-            calls["gate_checked"] = gate_checked
+            calls["gated_hash"] = gated_hash
             # A plain approve never says "publish anyway".
             calls["confirm_placeholders"] = confirm_placeholders
             calls["confirm_destructive"] = confirm_destructive

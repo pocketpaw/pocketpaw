@@ -234,6 +234,24 @@
     ]
   },
   {
+    "label": "publish anyway ignores the digest: it covers findings the owner never saw",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "    if confirm_digest is not None and confirm_digest != publish_gate.findings_digest(findings):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_publish_anyway_on_changed_findings_answers_the_new_ones"
+    ]
+  },
+  {
+    "label": "executor trusts a stale gate: a draft edited mid-approve goes live unchecked",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "    if gated_hash and await _current_hash(scope_id, author) == gated_hash:\n",
+    "replace": "    if gated_hash:\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_content_changed_after_the_route_gate_is_refused_with_the_block"
+    ]
+  },
+  {
     "label": "bulk approve says publish anyway: a batch click ships placeholders unseen",
     "file": "ee/pocketpaw_ee/instinct/router.py",
     "find": "                await artifact_executor.execute_approved_change(\n                    action, human_event_id=human_event_id\n                )\n",

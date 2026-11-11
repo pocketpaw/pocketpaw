@@ -1249,6 +1249,28 @@ class ApproveRequest(BaseModel):
     # made-up numbers or broken forms: the owner chose "Publish anyway". Only this
     # single-Action approve carries it; bulk approve never does (``publish_gate``).
     confirm_placeholders: bool = False
+    # The ``findings_digest`` of the refusal the owner saw. Publish anyway counts only
+    # when it matches the draft's current findings.
+    confirm_findings_digest: str | None = None
+
+
+async def _raise_if_publish_blocked(store: Any, action_id: str) -> None:
+    """Raise 409 ``sites.publish_blocked`` when the merge executor failed this Action
+    on the publish gate (its blob carries ``publish_blocked``)."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+
+    action = await store.get_action(action_id)
+    if action is None or action.status != ActionStatus.FAILED:
+        return
+    blob = _artifact_change_blob(action) or {}
+    details = blob.get("publish_blocked")
+    error = str(getattr(action, "error", "") or "")
+    if not isinstance(details, dict) or not error.startswith("sites.publish_blocked"):
+        return
+    message = error.split(": ", 1)[1] if ": " in error else error
+    raise CloudError(
+        409, "sites.publish_blocked", message, details={**details, "action_id": action_id}
+    )
 
 
 class EditProposalRequest(BaseModel):
@@ -2436,21 +2458,25 @@ async def approve_action(
     # refusal answers 409 ``sites.publish_blocked`` with the owner-worded findings and
     # leaves the card pending, so "Publish anyway" (``confirm_placeholders``) approves
     # this same card. Approving first and failing later used to return a stale 200
-    # "approved" that the client read as published.
-    publish_gate_checked = False
+    # "approved" that the client read as published. Publish anyway must echo the
+    # refusal's ``findings_digest``, so it covers only the findings the owner saw.
+    # The refusal is recorded on the STORED proposal: the approver's edits are not
+    # persisted without the Correction an approve would write.
+    publish_gate_hash: str | None = None
     if before.status == ActionStatus.PENDING and _artifact_change_blob(after) is not None:
         from pocketpaw_ee.versions import instinct_executor as artifact_executor
 
-        refusal = await artifact_executor.approve_gate(
+        refusal, publish_gate_hash = await artifact_executor.approve_gate(
             store,
             after,
             approver=approver_id,
             confirm_placeholders=req.confirm_placeholders,
+            confirm_digest=req.confirm_findings_digest,
+            stored_parameters=before.parameters,
         )
         if refusal is not None:
             refusal.details = {**(refusal.details or {}), "action_id": after.id}
             raise refusal
-        publish_gate_checked = True
 
     correction: Correction | None = None
     if edited_fields:
@@ -2869,10 +2895,14 @@ async def approve_action(
                 human_event_id=human_event_id,
                 confirm_destructive=True,
                 confirm_placeholders=bool(req is not None and req.confirm_placeholders),
-                gate_checked=publish_gate_checked,
+                confirm_findings_digest=req.confirm_findings_digest or "",
+                gated_hash=publish_gate_hash,
             )
         except Exception:
             logger.exception("artifact-change merge after approval failed (non-fatal)")
+        # The draft changed after the gate above and the executor's re-check refused
+        # it: answer the same 409 shape, never a stale 200 "approved".
+        await _raise_if_publish_blocked(store, approved.id)
 
     # WA-2 — when the approved Action carries a gated ``_admin_action`` blob, fire
     # the whitelisted workspace-admin write (e.g. a member role change) via
