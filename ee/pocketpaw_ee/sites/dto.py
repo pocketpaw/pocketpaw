@@ -708,6 +708,18 @@ class OpenDraftResponse(BaseModel):
     opened: bool
 
 
+class DiscardDraftResponse(BaseModel):
+    """``POST /sites/by-pocket/{pocket_id}/discard-draft``. ``restored`` is False when
+    the source already matched the published version (a no-op success);
+    ``rejected_reviews`` counts pending publish reviews the discard closed."""
+
+    pocket_id: str
+    restored: bool
+    discarded_versions: int
+    rejected_reviews: int
+    published_version_no: int
+
+
 class SiteVersionResponse(BaseModel):
     """One row of a pocket's version timeline (BP-4). Mirrors the durable
     ArtifactVersion row's reading-relevant fields: ``version_no`` (the monotonic

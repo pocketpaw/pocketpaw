@@ -441,6 +441,11 @@ async def branch(
     return row
 
 
+#: Statuses ``publish`` refuses: the owner discarded the draft, or a later edit
+#: replaced it.
+_UNPUBLISHABLE: frozenset[str] = frozenset({"discarded", "superseded"})
+
+
 async def publish(
     *,
     scope_type: str,
@@ -457,7 +462,11 @@ async def publish(
     (TODO(BP-3)) — this is purely the state transition + pointer move.
 
     Raises ``ValueError`` if the version does not exist or belongs to a
-    different artifact/workspace (defensive scope check).
+    different artifact/workspace (defensive scope check), and when the row is
+    ``discarded`` or ``superseded``: a stale approval must never take a draft the
+    owner threw away (or one a later edit replaced) live. The flip is one
+    conditional update, so a discard landing between the read and the write still
+    wins.
 
     Emits ``artifact.version.published`` (BP-4) so the VersionProjection can
     fold the published-pointer move into the per-artifact history timeline.
@@ -465,8 +474,15 @@ async def publish(
     row = await _scoped_row(
         scope_type=scope_type, scope_id=scope_id, workspace_id=workspace_id, version_id=version_id
     )
+    if row.status in _UNPUBLISHABLE:
+        raise ValueError(f"version {version_id} is {row.status} and cannot be published")
+    result = await ArtifactVersion.get_pymongo_collection().update_one(
+        {"_id": row.id, "status": {"$nin": list(_UNPUBLISHABLE)}},
+        {"$set": {"status": "published"}},
+    )
+    if result.matched_count == 0:
+        raise ValueError(f"version {version_id} changed state and cannot be published")
     row.status = "published"
-    await row.save()
     _emit_version_event(
         action="artifact.version.published",
         scope_type=scope_type,
