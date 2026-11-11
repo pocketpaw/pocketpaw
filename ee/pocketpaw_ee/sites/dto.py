@@ -701,11 +701,13 @@ class SiteStatusResponse(BaseModel):
 
 
 class OpenDraftResponse(BaseModel):
-    """``POST /sites/by-pocket/{pocket_id}/open-draft``. ``opened`` is False when the
-    pocket already showed a draft (a no-op success)."""
+    """``POST /sites/by-pocket/{pocket_id}/open-draft``. ``opened`` is False on a no-op
+    success, and ``reason`` says why: ``already_draft``, ``not_project`` or
+    ``draft_workers_off`` (None when opened)."""
 
     pocket_id: str
     opened: bool
+    reason: str | None = None
 
 
 class DiscardDraftResponse(BaseModel):

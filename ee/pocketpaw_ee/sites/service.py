@@ -12387,13 +12387,14 @@ async def open_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: str) 
     (``_project_published_view``) and never builds a draft of it. This marks the
     registry row (``draft_worker.reopen_for_editing``) so the next native-artifact read
     of the same content goes down the normal draft path; the next publish undoes it.
-    It also ensures a draft version row ("Opened for editing"), so Submit for review
-    and History behave as after an edit.
+    A real reopen also ensures a draft version row ("Opened for editing"), so Submit
+    for review and History behave as after an edit; a no-op writes none (a row there
+    would show "unpublished changes" for a draft identical to live).
 
-    ``{"pocket_id", "opened"}``. ``opened`` is False (a no-op success) when the pocket
-    already shows a draft: never published, edited since, not a project, or draft
-    Workers off. 404 for an unknown or another workspace's pocket, 403 without edit
-    access. Idempotent."""
+    ``{"pocket_id", "opened", "reason"}``. ``opened`` is False (a no-op success) with a
+    ``reason``: ``already_draft`` (never published, edited since, or already open),
+    ``not_project`` or ``draft_workers_off``; ``reason`` is None when opened. 404 for
+    an unknown or another workspace's pocket, 403 without edit access. Idempotent."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites import draft_worker, project_build
 
@@ -12403,26 +12404,25 @@ async def open_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: str) 
     if not await pockets_service.has_edit_access(pocket_id, user_id):
         raise Forbidden("pocket.access_denied", "You do not have access to edit this site.")
 
-    await _ensure_pocket_draft(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
-
-    opened = False
     source = pocket.get("source")
-    if (
-        draft_worker.enabled()
-        and normalize_engine(pocket.get("engine")) == "project"
-        and isinstance(source, dict)
-    ):
-        content_hash = project_build.project_content_hash(source)
-        try:
-            opened = await draft_worker.reopen_for_editing(pocket_id, content_hash)
-        except Exception as exc:
-            logger.exception("sites.draft: could not open a draft of %s", pocket_id)
-            raise CloudError(
-                503,
-                "sites.open_draft_unavailable",
-                "The draft could not be opened. Try again in a moment.",
-            ) from exc
-    return {"pocket_id": pocket_id, "opened": opened}
+    if normalize_engine(pocket.get("engine")) != "project" or not isinstance(source, dict):
+        return {"pocket_id": pocket_id, "opened": False, "reason": "not_project"}
+    if not draft_worker.enabled():
+        return {"pocket_id": pocket_id, "opened": False, "reason": "draft_workers_off"}
+    content_hash = project_build.project_content_hash(source)
+    try:
+        opened = await draft_worker.reopen_for_editing(pocket_id, content_hash)
+    except Exception as exc:
+        logger.exception("sites.draft: could not open a draft of %s", pocket_id)
+        raise CloudError(
+            503,
+            "sites.open_draft_unavailable",
+            "The draft could not be opened. Try again in a moment.",
+        ) from exc
+    if not opened:
+        return {"pocket_id": pocket_id, "opened": False, "reason": "already_draft"}
+    await _ensure_pocket_draft(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+    return {"pocket_id": pocket_id, "opened": True, "reason": None}
 
 
 _DISCARD_REASON = "Discarded by owner"
