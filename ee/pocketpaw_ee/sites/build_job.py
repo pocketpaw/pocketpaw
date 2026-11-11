@@ -2078,7 +2078,7 @@ async def _clear_retryable_result(pool: Any, job_id: str) -> bool:
 
 
 async def _clear_or_keep(
-    pool: Any, job_id: str, *, force_pocket: str | None = None
+    pool: Any, job_id: str, *, force_pocket: str | None = None, stale_success: bool = False
 ) -> tuple[bool, bool]:
     """:func:`_clear_retryable_result` for the preview lane: ``(cleared, kept)``, where
     ``kept`` means an infrastructure result stayed (the caller replays an earlier attempt).
@@ -2086,9 +2086,24 @@ async def _clear_or_keep(
     ``force_pocket`` (an explicit build) clears any :func:`_forced_kind` result without
     spending the budget, once per pocket per guard window (:func:`_claim_forced_retry`);
     inside the window, or when the guard is unavailable, the budget rule applies as usual.
+
+    ``stale_success`` (the caller found that render's preview files gone, e.g. purged on
+    publish) clears a SUCCESSFUL ``built`` result too: it describes files that no longer
+    exist, so replaying it would answer ``built`` with nothing to open. The caller bounds
+    how often it asks (``service._claim_preview_retry``).
     """
     try:
         info = await Job(job_id, pool, _queue_name=SITE_BUILD_QUEUE_NAME).result_info()
+        if (
+            stale_success
+            and info is not None
+            and info.success
+            and isinstance(info.result, dict)
+            and info.result.get("status") == "built"
+        ):
+            logger.info("sites.preview: %s built files are gone; clearing its result", job_id)
+            await pool.delete(result_key_prefix + job_id)
+            return True, False
         sup = info is not None and await _result_superseded(pool, job_id, info)
         kind = None if info is None else _retry_kind(info, superseded=sup)
         forced = (
@@ -2199,6 +2214,7 @@ async def enqueue_preview_build(
     generator_input: dict[str, Any],
     timeout_seconds: int | None = None,
     force: bool = False,
+    rebuild_stale: bool = False,
     _pool_override: Any = None,
 ) -> PreviewBuildEnqueue:
     """Queue a preview build for one render, or report the one already running.
@@ -2206,6 +2222,8 @@ async def enqueue_preview_build(
     ``force`` marks an EXPLICIT build request (the agent's ``run_site_build``), never a
     poll or a write-triggered verify: a stored infrastructure failure is retried even past
     the poll budget (:func:`_clear_or_keep`). The site's own failures stay sticky.
+    ``rebuild_stale`` says the caller found this render built but its preview files gone:
+    a stored success result is freed and the build queued again.
 
     No claim write, because there is no row to claim: the deterministic job id IS the
     single-flight guard (see :func:`_preview_job_id`). arq refuses a duplicate id by
@@ -2249,7 +2267,10 @@ async def enqueue_preview_build(
     kept = False
     if job is None:
         cleared, kept = await _clear_or_keep(
-            pool, job_id, force_pocket=pocket_id if force else None
+            pool,
+            job_id,
+            force_pocket=pocket_id if force else None,
+            stale_success=rebuild_stale,
         )
         if cleared:
             job = await _enqueue()

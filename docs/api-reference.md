@@ -1130,6 +1130,16 @@ with an `_artifact_change` blob). The same gate applies:
   - A bulk approve fails the Action: it ends `failed` with
     `error` = `sites.publish_blocked: <the refusal message>` and the same
     `publish_blocked` details on the blob.
+- **A stale card is refused.** The card records `reviewed_content_hash`, the content
+  it was filed for. If the site changed since (an edit after the review), nothing is
+  promoted or deployed, "Publish anyway" included. A single approve answers
+  `409 sites.publish_review_stale` with the message "This review is out of date: the
+  site changed since it was filed. Request a new review." and `details` =
+  `{can_override: false, reviewed_version_id, action_id}`; the card ends `failed`
+  (`error` = `sites.publish_review_stale: <message>`, `publish_stale` on the blob).
+  A bulk approve fails it the same way. The owner requests a new review of the
+  current draft. A card without the hash (filed earlier) is stale when a later edit
+  superseded, or a discard dropped, its `to_version_id`.
 - **Publish anyway:** `POST /instinct/actions/{id}/approve` with body
   `{"confirm_placeholders": true, "confirm_findings_digest": "<findings_digest>"}`
   merges and deploys past the findings. A missing digest, or one that no longer
@@ -4148,7 +4158,7 @@ work without an AI edit first. No body. Gated on `fabric.write` and the `sites` 
 feature like the other by-pocket writes; the caller needs edit access to the pocket.
 
 ```json
-{ "pocket_id": "6650f0...", "opened": true }
+{ "pocket_id": "6650f0...", "opened": true, "reason": null }
 ```
 
 - `opened: true`: the pocket was showing the live site (`preview_mode: "published"`).
@@ -4156,10 +4166,11 @@ feature like the other by-pocket writes; the caller needs edit access to the poc
   `building`, then `full` / `static` / `server_only`) and never answers `published`
   for it again. The state lives on the pocket's draft registry row, so it survives a
   reload and every API process. The next publish returns it to the published view.
-- `opened: false`: a no-op success. The pocket already shows a draft (never published,
-  edited since, not a project, or draft Workers off).
-- Either way the pocket gets a draft version ("Opened for editing") when it has none,
-  so Submit for review and History behave as after an edit.
+- `opened: false`: a no-op success, and `reason` says why: `already_draft` (never
+  published, edited since, or already open), `not_project`, or `draft_workers_off`.
+- Only a real reopen gives the pocket a draft version ("Opened for editing") when it
+  has none, so Submit for review and History behave as after an edit. A no-op writes
+  no version, so a draft identical to live never shows unpublished changes.
 - Idempotent. `404` for an unknown or another workspace's pocket, `403` without edit
   access, `503` (`sites.open_draft_unavailable`) when the registry cannot be written.
 
