@@ -12380,6 +12380,140 @@ async def open_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: str) 
     return {"pocket_id": pocket_id, "opened": opened}
 
 
+_DISCARD_REASON = "Discarded by owner"
+
+
+async def discard_pocket_draft(
+    *, workspace_id: str, user_id: str, pocket_id: str
+) -> dict[str, Any]:
+    """Throw away a pocket's unpublished changes: the builder's Discard.
+
+    Backs ``POST /sites/by-pocket/{pocket_id}/discard-draft``. The draft lives in
+    ``pocket.source`` (what native-artifact builds and publish deploys), so a discard
+    that only relabels version rows leaves the edit in place for the next publish to
+    ship. This puts ``source`` back to the PUBLISHED version row's content (CAS on
+    the source just read, 409 ``sites.discard_conflict`` if an edit lands meanwhile),
+    marks every draft above the published pointer discarded, rejects any pending
+    publish review of the pocket (its candidate is one of those drafts), and for a
+    project pocket purges its drafts the way a publish does, which also ends an
+    "opened for editing", so the builder shows the live site again.
+
+    Refuses rather than half-discards: 409 ``sites.discard_nothing_live`` when the
+    pocket has no published version in this workspace (nothing to go back to), 409
+    ``sites.discard_live_unknown`` when that version holds no files, 422
+    ``sites.discard_unsupported`` for a non-source engine (ripple). 404 for an
+    unknown or another workspace's pocket, 403 without edit access.
+
+    ``{pocket_id, restored, discarded_versions, rejected_reviews,
+    published_version_no}``; ``restored`` is False when the source already matched
+    (idempotent)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import draft_worker, project_build
+    from pocketpaw_ee.versions import service as versions_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if workspace_id != pocket.get("workspace"):
+        raise NotFound("pocket", pocket_id)
+    if not await pockets_service.has_edit_access(pocket_id, user_id):
+        raise Forbidden("pocket.access_denied", "You do not have access to edit this site.")
+    engine = pocket.get("engine")
+    if not is_source_engine(engine):
+        raise ValidationError(
+            "sites.discard_unsupported",
+            "Discard isn't available for this kind of site. Ask the agent to undo the change.",
+        )
+
+    published = await versions_service.get_published(
+        scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id
+    )
+    if published is None or published.workspace_id != workspace_id:
+        raise ConflictError(
+            "sites.discard_nothing_live",
+            "This site hasn't been published yet, so there is no live version to go back to.",
+        )
+    live = published.content if isinstance(published.content, dict) else {}
+    if not live:
+        raise ConflictError(
+            "sites.discard_live_unknown",
+            "The live version of this site couldn't be found, so nothing was discarded.",
+        )
+
+    current = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
+    restored = current != live
+    if restored:
+        await pockets_service.restore_published_source(
+            pocket_id, user_id, expected_source=dict(current), source=dict(live)
+        )
+
+    discarded = await versions_service.discard_all_drafts(
+        scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, workspace_id=workspace_id
+    )
+    rejected = await _reject_pending_publish_reviews(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+
+    if draft_worker.enabled() and normalize_engine(engine) == "project":
+        # The same purge a publish runs, with the published hash and url the row
+        # already remembers: it clears ``reopened_hash`` and drops the draft Worker of
+        # the discarded edit, so the restored content reads as the published view.
+        # Awaited (not scheduled) so the builder's reload right after sees it.
+        try:
+            rec = await draft_worker.default_registry().get(pocket_id)
+            if rec is not None and (rec.published_hash or rec.published_url):
+                await draft_worker.purge_pocket_drafts(
+                    pocket_id,
+                    workspace_id=workspace_id,
+                    reason="discarded",
+                    published_hash=rec.published_hash or project_build.project_content_hash(live),
+                    published_url=rec.published_url,
+                )
+        except Exception:  # noqa: BLE001 - the source is already back; the sweeper retries
+            logger.warning(
+                "sites.draft: drafts of %s not purged after a discard", pocket_id, exc_info=True
+            )
+
+    return {
+        "pocket_id": pocket_id,
+        "restored": restored,
+        "discarded_versions": discarded,
+        "rejected_reviews": rejected,
+        "published_version_no": published.version_no,
+    }
+
+
+async def _reject_pending_publish_reviews(
+    *, workspace_id: str, user_id: str, pocket_id: str
+) -> int:
+    """Reject every pending publish review (``_artifact_change`` card) of the pocket,
+    so a card filed before a discard cannot later approve a discarded draft. Best
+    effort: the drafts are already discarded, and approving a stale card would only
+    redeploy the restored (live) source. Returns how many were rejected."""
+    from pocketpaw.stores import get_instinct_store
+    from pocketpaw_ee.versions.instinct_executor import artifact_change_blob
+
+    try:
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        pending = await store.pending(
+            pocket_id=pocket_id, workspace_id=workspace_id, scope_type=_VERSION_SCOPE_TYPE
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("sites: could not list publish reviews of %s", pocket_id, exc_info=True)
+        return 0
+    rejected = 0
+    for action in pending:
+        blob = artifact_change_blob(action)
+        if blob is None or str(blob.get("scope_id") or "") != pocket_id:
+            continue
+        if str(blob.get("workspace") or blob.get("workspace_id") or "") != workspace_id:
+            continue
+        try:
+            if await store.reject(action.id, reason=_DISCARD_REASON, rejector=user_id):
+                rejected += 1
+        except Exception:  # noqa: BLE001
+            logger.warning("sites: could not reject review %s", action.id, exc_info=True)
+    return rejected
+
+
 async def _project_pocket_for_editing(
     workspace_id: str, user_id: str, pocket_id: str
 ) -> dict[str, Any]:

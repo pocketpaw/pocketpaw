@@ -98,9 +98,7 @@ async def test_discard_puts_the_source_back_to_the_published_content(beanie_test
     assert status.has_unpublished_changes is False
 
 
-async def test_discard_after_open_draft_returns_to_the_published_view(
-    beanie_test_db, monkeypatch
-):
+async def test_discard_after_open_draft_returns_to_the_published_view(beanie_test_db, monkeypatch):
     pocket_id, registry = await _published_pocket(monkeypatch)
     out = await sites_service.open_pocket_draft(
         workspace_id="ws1", user_id="u1", pocket_id=pocket_id

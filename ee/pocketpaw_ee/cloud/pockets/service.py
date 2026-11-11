@@ -3081,6 +3081,37 @@ async def retheme_project_source(
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_RETHEME_LABEL)
 
 
+async def restore_published_source(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected_source: dict[str, Any],
+    source: dict[str, Any],
+) -> None:
+    """Put a source-map pocket's ``source`` back to its published content (Discard,
+    ``sites.service.discard_pocket_draft``). The pocket must still hold exactly
+    ``expected_source`` (409 ``sites.discard_conflict`` otherwise: an edit landed
+    while the discard was reading). Records NO draft version: the restored map is the
+    published version, so the caller marks the drafts above it discarded instead."""
+    from pocketpaw_ee.sites.engines import is_source_engine
+
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    if not is_source_engine(getattr(doc, "engine", "ripple")) or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_source_site",
+            "This site has no source files to put back.",
+        )
+    if doc.source != expected_source:
+        raise ConflictError(
+            "sites.discard_conflict",
+            "This site changed while its changes were being discarded. Try again.",
+        )
+    doc.source = dict(source)
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+
+
 #: Engines whose source map may carry an author dependency manifest.
 _DEPENDENCY_MANIFEST_ENGINES = ("svelte", "react", "html")
 

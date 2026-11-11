@@ -4149,6 +4149,31 @@ feature like the other by-pocket writes; the caller needs edit access to the poc
 - Idempotent. `404` for an unknown or another workspace's pocket, `403` without edit
   access, `503` (`sites.open_draft_unavailable`) when the registry cannot be written.
 
+### `POST /sites/by-pocket/{pocket_id}/discard-draft`
+
+Throws away a pocket's unpublished changes (the builder's Discard). No body. Gated on
+`fabric.write`; the caller needs edit access to the pocket.
+
+```json
+{ "pocket_id": "6650f0...", "restored": true, "discarded_versions": 1,
+  "rejected_reviews": 0, "published_version_no": 4 }
+```
+
+- `pocket.source` goes back to the content of the published version row (every live
+  publish promotes the current draft, or a snapshot of what it deploys, to that row),
+  so the next publish cannot ship the discarded edit. No new version is written.
+- Every draft version above the published pointer becomes `discarded`, so `/status`
+  reads `has_unpublished_changes: false`. A pending publish review of the pocket is
+  rejected ("Discarded by owner").
+- A project pocket's drafts are purged the way a publish purges them, which also ends
+  an open-draft, so `native-artifact` answers `preview_mode: "published"` again.
+- `restored: false` with `discarded_versions: 0` is a no-op success. Idempotent.
+- Refusals leave the pocket untouched: `409 sites.discard_nothing_live` (never
+  published, so there is no live version to go back to), `409 sites.discard_live_unknown`
+  (the published version holds no files), `409 sites.discard_conflict` (an edit landed
+  mid-discard), `422 sites.discard_unsupported` (a ripple site). `404` for an unknown or
+  another workspace's pocket, `403` without edit access.
+
 ### Site data — `/sites/by-pocket/{pocket_id}/data`
 
 The owner's read-only view of a site's database. Both reads take `fabric.read` and
