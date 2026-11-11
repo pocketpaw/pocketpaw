@@ -1130,6 +1130,16 @@ with an `_artifact_change` blob). The same gate applies:
   - A bulk approve fails the Action: it ends `failed` with
     `error` = `sites.publish_blocked: <the refusal message>` and the same
     `publish_blocked` details on the blob.
+- **A stale card is refused.** The card records `reviewed_content_hash`, the content
+  it was filed for. If the site changed since (an edit after the review), nothing is
+  promoted or deployed, "Publish anyway" included. A single approve answers
+  `409 sites.publish_review_stale` with the message "This review is out of date: the
+  site changed since it was filed. Request a new review." and `details` =
+  `{can_override: false, reviewed_version_id, action_id}`; the card ends `failed`
+  (`error` = `sites.publish_review_stale: <message>`, `publish_stale` on the blob).
+  A bulk approve fails it the same way. The owner requests a new review of the
+  current draft. A card without the hash (filed earlier) is stale when a later edit
+  superseded, or a discard dropped, its `to_version_id`.
 - **Publish anyway:** `POST /instinct/actions/{id}/approve` with body
   `{"confirm_placeholders": true, "confirm_findings_digest": "<findings_digest>"}`
   merges and deploys past the findings. A missing digest, or one that no longer

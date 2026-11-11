@@ -807,6 +807,10 @@ _GATED_IMMUTABLE_FIELDS: frozenset[str] = frozenset(
         # approve was refused: the owner's evidence, never editable away
         "publish_findings",
         "publish_blocked",
+        # the content a publish review was filed for: the approve refuses the card
+        # once the pocket holds anything else
+        "reviewed_content_hash",
+        "publish_stale",
     }
 )
 
@@ -1255,22 +1259,27 @@ class ApproveRequest(BaseModel):
 
 
 async def _raise_if_publish_blocked(store: Any, action_id: str) -> None:
-    """Raise 409 ``sites.publish_blocked`` when the merge executor failed this Action
-    on the publish gate (its blob carries ``publish_blocked``)."""
+    """Raise 409 ``sites.publish_blocked`` (or ``sites.publish_review_stale``) when the
+    merge executor failed this Action on the publish gate (its blob carries
+    ``publish_blocked``) or as a stale review (``publish_stale``)."""
     from pocketpaw_ee.cloud._core.errors import CloudError
 
     action = await store.get_action(action_id)
     if action is None or action.status != ActionStatus.FAILED:
         return
     blob = _artifact_change_blob(action) or {}
-    details = blob.get("publish_blocked")
     error = str(getattr(action, "error", "") or "")
-    if not isinstance(details, dict) or not error.startswith("sites.publish_blocked"):
-        return
-    message = error.split(": ", 1)[1] if ": " in error else error
-    raise CloudError(
-        409, "sites.publish_blocked", message, details={**details, "action_id": action_id}
-    )
+    for code, key in (
+        ("sites.publish_blocked", "publish_blocked"),
+        ("sites.publish_review_stale", "publish_stale"),
+    ):
+        details = blob.get(key)
+        if not isinstance(details, dict) or not error.startswith(code):
+            continue
+        message = error.split(": ", 1)[1] if ": " in error else error
+        if key == "publish_stale":
+            details = {k: v for k, v in details.items() if k not in ("code", "message")}
+        raise CloudError(409, code, message, details={**details, "action_id": action_id})
 
 
 class EditProposalRequest(BaseModel):

@@ -28,7 +28,13 @@
 #     so "Publish anyway" approves that same card. Publish anyway counts only when
 #     it echoes the refusal's ``findings_digest``. A pass returns the content hash it
 #     checked; the route hands it to the executor as ``gated_hash``, which skips its
-#     own check only while the draft still has that hash.
+#     own check only while the draft still has that hash. A STALE card is refused
+#     there first (409 ``sites.publish_review_stale``, the card failed).
+#     A STALE card is refused before the gate: the pocket's content no longer matches
+#     the ``reviewed_content_hash`` the card was filed for (or, on a card without one,
+#     a newer draft superseded ``to_version_id``). The Action fails with
+#     ``sites.publish_review_stale`` and ``publish_stale`` on the blob; nothing is
+#     promoted or deployed, and the owner files a new review of the current draft.
 #   * discard_rejected_change(action) — REJECT = DISCARD: every draft above the
 #     published pointer is discarded in one pass (``discard_all_drafts``); the
 #     published pointer is untouched and nothing deploys. Best effort.
@@ -197,6 +203,77 @@ async def _publish_blocked(
     return True
 
 
+def _stale_refusal(blob: dict[str, Any]) -> Any:
+    from pocketpaw_ee.sites.publish_gate import PublishReviewStale
+
+    return PublishReviewStale(str(blob.get("to_version_id") or "") or None)
+
+
+async def _review_is_stale(blob: dict[str, Any], *, scope_id: str, author: str) -> bool:
+    """True when the content the card reviewed is no longer what would deploy.
+
+    ``publish_pocket`` deploys the pocket's CURRENT content, not the ``to_version_id``
+    snapshot, so approving a card filed for older content would ship edits the
+    reviewer never saw and mark the wrong version published. With a
+    ``reviewed_content_hash`` the pocket's current hash must equal it; without one (an
+    older card, or an engine with no content hash) a ``to_version_id`` that a later
+    draft superseded (or a discard dropped) is the signal. An unreadable pocket is not
+    stale here: the deploy reads it again and fails on its own."""
+    reviewed = str(blob.get("reviewed_content_hash") or "")
+    if reviewed:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+        from pocketpaw_ee.sites import verify
+
+        try:
+            pocket = await pockets_service.get(scope_id, author)
+            current = verify.publish_content_hash(pocket)
+        except Exception:  # noqa: BLE001 - see the docstring
+            logger.warning("artifact-change merge: could not read %s to check the review", scope_id)
+            return False
+        if current:
+            return current != reviewed
+    from pocketpaw_ee.versions import service as versions_service
+
+    try:
+        row = await versions_service._scoped_row(
+            scope_type=str(blob.get("scope_type") or ""),
+            scope_id=scope_id,
+            workspace_id=str(blob.get("workspace") or blob.get("workspace_id") or ""),
+            version_id=str(blob.get("to_version_id") or ""),
+        )
+    except Exception:  # noqa: BLE001 - a missing version fails in the merge below
+        return False
+    # A later edit superseded the reviewed draft (or a discard dropped it).
+    return row.status in ("superseded", "discarded")
+
+
+async def _refuse_stale(
+    store: Any, action: Any, blob: dict[str, Any], *, base_parameters: Any = None
+) -> Any:
+    """Fail the card as stale: ``publish_stale`` (the refusal's code, message and
+    details) on its stored blob, ``error`` = ``<code>: <message>``. Returns the
+    :class:`~pocketpaw_ee.sites.publish_gate.PublishReviewStale` refusal."""
+    refusal = _stale_refusal(blob)
+    try:
+        stored = base_parameters if base_parameters is not None else action.parameters
+        parameters = dict(stored or {})
+        if isinstance(parameters.get("_artifact_change"), dict):
+            blob = parameters["_artifact_change"]
+        parameters["_artifact_change"] = {
+            **blob,
+            "publish_stale": {
+                "code": refusal.code,
+                "message": refusal.message,
+                **refusal.details,
+            },
+        }
+        await store.update_parameters(action.id, parameters)
+    except Exception:  # noqa: BLE001 - the error text still says why
+        logger.warning("artifact-change merge: could not record the stale review on %s", action.id)
+    await store.mark_failed(action.id, f"{refusal.code}: {refusal.message}")
+    return refusal
+
+
 async def approve_gate(
     store: Any,
     action: Any,
@@ -219,13 +296,18 @@ async def approve_gate(
     workspace_id = str(blob.get("workspace") or blob.get("workspace_id") or "")
     if scope_type not in _DEPLOYABLE_SCOPES or not scope_id:
         return GateResult(None, "")
+    author = str(blob.get("user_id") or "system")
+    # A card filed for content the site no longer holds: no override, the card fails.
+    if await _review_is_stale(blob, scope_id=scope_id, author=author):
+        refusal = await _refuse_stale(store, action, blob, base_parameters=stored_parameters)
+        return GateResult(refusal, "")
     return await _gate(
         store,
         action,
         blob,
         workspace_id=workspace_id,
         scope_id=scope_id,
-        author=str(blob.get("user_id") or "system"),
+        author=author,
         confirmed=confirm_placeholders,
         confirm_digest=confirm_digest or "",
         approver=approver,
@@ -279,6 +361,14 @@ async def execute_approved_change(
             action.id,
             "artifact-change merge: blob missing scope_type/scope_id/workspace/to_version_id",
         )
+        return
+
+    # A card filed for content the pocket no longer holds is refused outright: the
+    # deploy below ships the CURRENT content, which nobody reviewed.
+    if scope_type in _DEPLOYABLE_SCOPES and await _review_is_stale(
+        blob, scope_id=scope_id, author=str(author or "system")
+    ):
+        await _refuse_stale(store, action, blob)
         return
 
     # The publish gate BEFORE the merge: a refused publish promotes no version, so the

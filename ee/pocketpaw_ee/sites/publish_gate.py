@@ -96,6 +96,24 @@ class PublishBlocked(CloudError):
         )
 
 
+class PublishReviewStale(CloudError):
+    """409: the publish review card was filed for content the site no longer holds.
+    Never overridable: the owner requests a new review of the current draft."""
+
+    CODE = "sites.publish_review_stale"
+    MESSAGE = (
+        "This review is out of date: the site changed since it was filed. Request a new review."
+    )
+
+    def __init__(self, reviewed_version_id: str | None = None) -> None:
+        super().__init__(
+            409,
+            self.CODE,
+            self.MESSAGE,
+            details={"can_override": False, "reviewed_version_id": reviewed_version_id},
+        )
+
+
 def page_label(page: str) -> str:
     """``index.html`` → ``the home page``; ``about/index.html`` → ``the "about" page``."""
     path = page.strip("/")

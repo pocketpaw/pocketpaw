@@ -13477,6 +13477,19 @@ async def _destructive_review(
         return [], "failed"
 
 
+def _reviewed_content_hash(pocket: dict[str, Any] | None) -> str:
+    """``verify.publish_content_hash`` of a pocket, "" when it cannot be read."""
+    if pocket is None:
+        return ""
+    from pocketpaw_ee.sites import verify
+
+    try:
+        return verify.publish_content_hash(pocket)
+    except Exception:  # noqa: BLE001 - the approve then checks the draft head instead
+        logger.warning("sites.publish: no content hash for %s", pocket.get("id"), exc_info=True)
+        return ""
+
+
 async def request_publish_pocket(
     *,
     workspace_id: str,
@@ -13594,8 +13607,15 @@ async def request_publish_pocket(
     # individual approve with ``confirm_placeholders`` publishes past it.
     from pocketpaw_ee.sites import publish_gate
 
-    findings = await publish_gate.pocket_findings(pocket_id=pocket_id, user_id=user_id)
+    gated_pocket, findings, _skipped = await publish_gate.pocket_check(
+        pocket_id=pocket_id, user_id=user_id
+    )
     blob["publish_findings"] = findings
+    # The content this card reviews. The approve refuses the card once the pocket holds
+    # anything else (``versions.instinct_executor``), so an edit after the review is
+    # never shipped under it. "" (unreadable, or an engine with no content hash) falls
+    # back to the draft-head check there.
+    blob["reviewed_content_hash"] = _reviewed_content_hash(gated_pocket)
     description = (
         "Take the current draft of this site live. Approving merges the "
         "reviewed version and deploys it."
