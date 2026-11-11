@@ -68,7 +68,7 @@ def _never_built_without_a_url(art: dict) -> None:
 # ---------------------------------------------------------------- D3: sandbox lane
 
 
-async def test_a_reopened_sandbox_draft_queues_a_fresh_build(arq_like: _ArqLike) -> None:
+async def test_a_reopened_sandbox_draft_queues_a_fresh_build(arq_like: _ArqLike) -> None:  # noqa: F811
     """The record says built, the files are gone (purged on publish) and arq still holds
     the old job's success result: the rebuild frees that result and really queues."""
     records, store = _Records(), _Store()
@@ -98,7 +98,7 @@ async def test_a_reopened_sandbox_draft_queues_a_fresh_build(arq_like: _ArqLike)
     assert arq_like.enqueued == [job_id]
 
 
-async def test_a_plain_refusal_of_a_finished_build_still_attaches(arq_like: _ArqLike) -> None:
+async def test_a_plain_refusal_of_a_finished_build_still_attaches(arq_like: _ArqLike) -> None:  # noqa: F811
     """Outside the evicted-retry path a stored success is not freed (no rebuild per poll)."""
     job_id = build_job._preview_job_id(POCKET, "h1")
     arq_like.finish(job_id, _Info(success=True, result={"status": "built", "reason": None}))

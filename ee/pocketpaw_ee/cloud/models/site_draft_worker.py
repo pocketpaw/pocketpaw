@@ -55,6 +55,9 @@ class SiteDraftWorker(TimestampedDocument):
     # Set to ``published_hash`` when the owner opens a draft of the published content;
     # the next publish clears it.
     reopened_hash: str = ""
+    # When that reopen happened (keys the builder's preview retry; a publish clears
+    # only an older reopen).
+    reopened_at: datetime | None = None
     # Bumped by every write; a deploy writes only by compare-and-set on it.
     version: int = 0
 

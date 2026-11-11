@@ -90,6 +90,7 @@ async def test_a_successful_publish_purges_the_pockets_drafts(beanie_test_db, mo
     pocket_id = await _make_project_pocket()
     doc, content_hash = await _publish(monkeypatch, pocket_id)
     assert doc.deployed is True
+    assert len(purges) == 1 and purges[0].pop("published_at") is not None
     assert purges == [
         {
             "pocket_id": pocket_id,

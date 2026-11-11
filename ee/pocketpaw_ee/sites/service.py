@@ -713,6 +713,7 @@ async def _build_native_artifact(
     content_hash: str,
     engine: str = "svelte",
     keeps_client_bundle: bool = False,
+    rebuild_stale: bool = False,
     _pool: Any | None = None,
 ) -> Any:
     """QUEUE the ARMED build for a native artifact in the ephemeral Daytona lane.
@@ -778,6 +779,7 @@ async def _build_native_artifact(
         content_hash=content_hash,
         engine=engine,
         generator_input=generator_input,
+        rebuild_stale=rebuild_stale,
         _pool_override=_pool,
     )
 
@@ -4917,6 +4919,8 @@ def _schedule_draft_cleanup(site: _SiteDoc, *, engine: str, source: Any) -> None
             reason="published",
             published_hash=published_hash,
             published_url=getattr(site, "url", "") or "",
+            # The deploy has returned: an open-draft after this moment survives the purge.
+            published_at=datetime.now(UTC),
         )
     except Exception:  # noqa: BLE001 - never fail a live publish over draft cleanup
         logger.warning(
@@ -10875,6 +10879,7 @@ async def _native_artifact_for_pocket(
     # what keeps an editing session from billing a sandbox per keystroke.
     cached = store.read(pocket_id, content_hash)
     preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+    rebuild_stale = False
     if (
         cached is not None
         and preview_url is None
@@ -10889,7 +10894,8 @@ async def _native_artifact_for_pocket(
         # instead of billing a sandbox on every view for files the store won't keep.
         preview_url = preview_origin.repair_preview_url(store, pocket_id, content_hash)
         if preview_url is None:
-            cached = None
+            # The rebuild must not replay that render's finished arq result.
+            cached, rebuild_stale = None, True
     if cached is not None:
         body_html, css = cached
         return {
@@ -10919,6 +10925,7 @@ async def _native_artifact_for_pocket(
             content_hash=content_hash,
             engine=engine,
             keeps_client_bundle=keeps_client_bundle,
+            rebuild_stale=rebuild_stale,
             _pool=_pool,
         )
     except Exception as exc:
@@ -10986,7 +10993,7 @@ async def _project_draft_artifact(
     files_source = source if isinstance(source, dict) else None
     project_build.project_files(files_source)  # 422 on a tree that cannot build
     base_hash = project_build.project_content_hash(files_source or {})
-    published = await _project_published_view(pocket_id, base_hash)
+    published, reopen_epoch = await _project_published_view(pocket_id, base_hash)
     records = _records if _records is not None else verify_store.default_verify_store()
     content_hash, tag_input = _project_draft_view(pocket_id, files_source, base_hash, records)
     job_id = build_job._preview_job_id(pocket_id, content_hash)
@@ -11004,7 +11011,22 @@ async def _project_draft_artifact(
             "preview_mode": project_build.PREVIEW_PUBLISHED,
             "capabilities": capabilities,
         }
+
+    def _served(preview_url: str | None, mode: Any) -> dict[str, Any]:
+        return {
+            "pocket_id": pocket_id,
+            "body_html": "",
+            "css": "",
+            "build_status": "none",
+            "build_reason": None,
+            "build_job_id": job_id,
+            "preview_url": preview_url,
+            "preview_mode": mode,
+            "capabilities": capabilities,
+        }
+
     record = project_build.read_build_record(records, pocket_id, job_id)
+    rebuild_stale = False
     if record is not None and record.get("status") == project_build.STATUS_BUILT:
         server_only = record.get("preview_mode") == project_build.PREVIEW_SERVER_ONLY
         preview_url = (
@@ -11018,19 +11040,13 @@ async def _project_draft_artifact(
             and preview_origin.store_supports_preview(store)
             and preview_origin.preview_base_problem() is None
         )
-        # A record whose files the store evicted is rebuilt, at most once per window.
-        if not evicted or not _claim_preview_retry(pocket_id, content_hash):
-            return {
-                "pocket_id": pocket_id,
-                "body_html": "",
-                "css": "",
-                "build_status": "none",
-                "build_reason": None,
-                "build_job_id": job_id,
-                "preview_url": preview_url,
-                "preview_mode": record.get("preview_mode"),
-                "capabilities": capabilities,
-            }
+        # A record whose files the store evicted (or a publish purged) is rebuilt, at
+        # most once per window.
+        if not evicted or not _claim_preview_retry(pocket_id, content_hash, reopen_epoch):
+            return _served(preview_url, record.get("preview_mode"))
+        # arq still holds that build's success result under the same job id: free it,
+        # or the enqueue is refused and the old result answers "built" with no files.
+        rebuild_stale = True
 
     if project_build.is_no_build(files_source):
         built = await project_build.build_no_build_draft(
@@ -11067,6 +11083,7 @@ async def _project_draft_artifact(
             engine="project",
             generator_input=generator_input,
             force=force,
+            rebuild_stale=rebuild_stale,
             _pool_override=_pool,
         )
     except Exception as exc:
@@ -11076,6 +11093,22 @@ async def _project_draft_artifact(
             "sites.preview_build_unavailable",
             "The preview build could not be queued. Try again in a moment.",
         ) from exc
+    if enqueued.status == project_build.STATUS_BUILT:
+        # The id's job already finished. Answer from what it left: "built" with a null
+        # preview_url reads as a build in flight with nothing queued. Only a
+        # server_only build legitimately has no URL.
+        done = project_build.read_build_record(records, pocket_id, enqueued.job_id) or {}
+        mode = done.get("preview_mode")
+        if mode == project_build.PREVIEW_SERVER_ONLY:
+            return _served(None, mode)
+        preview_url = preview_origin.existing_preview_url(store, pocket_id, content_hash)
+        if preview_url is not None:
+            return _served(preview_url, mode)
+        return {
+            **_served(None, None),
+            "build_status": "failed",
+            "build_reason": build_job.RUNG_ARTIFACT_MISSING,
+        }
     if enqueued.status == "queued":
         project_build.write_build_record(
             records,
@@ -11140,20 +11173,22 @@ def _no_build_source(source: Any) -> bool:
     return project_build.is_no_build(source if isinstance(source, dict) else None)
 
 
-async def _project_published_view(pocket_id: str, content_hash: str) -> str | None:
-    """The published URL ("" when unknown) when ``content_hash`` is the pocket's
-    published content and its drafts were purged; ``None`` otherwise (and always
-    with ``PAW_SITES_DRAFT_WORKERS`` off). Never raises."""
+async def _project_published_view(pocket_id: str, content_hash: str) -> tuple[str | None, str]:
+    """``(published, reopen epoch)``. ``published`` is the published URL ("" when
+    unknown) when ``content_hash`` is the pocket's published content and its drafts
+    were purged, ``None`` otherwise (and always with ``PAW_SITES_DRAFT_WORKERS`` off).
+    The epoch names the pocket's last open-draft ("" when none), so a new reopen gets
+    its own preview retry. Never raises."""
     from pocketpaw_ee.sites import draft_worker
 
     if not draft_worker.enabled():
-        return None
+        return None, ""
     try:
-        is_published, url = await draft_worker.published_view(pocket_id, content_hash)
+        is_published, url, epoch = await draft_worker.draft_view(pocket_id, content_hash)
     except Exception:  # noqa: BLE001 - an unreadable registry builds a draft as before
         logger.warning("sites.draft: published view of %s unavailable", pocket_id, exc_info=True)
-        return None
-    return (url or "") if is_published else None
+        return None, ""
+    return ((url or "") if is_published else None), epoch
 
 
 async def _project_site_config(
@@ -11358,17 +11393,19 @@ async def project_site_plan(*, workspace_id: str, pocket_id: str) -> tuple[str |
     return getattr(doc, "plan_tier", None), getattr(doc, "subscription_status", None)
 
 
-#: (pocket, content hash) -> monotonic time of the last attempt to give a draft a
-#: preview URL it lacked (a rebuild, or an html re-materialize). Per process, bounded.
-_preview_retry_at: OrderedDict[tuple[str, str], float] = OrderedDict()
+#: (pocket, content hash, reopen epoch) -> monotonic time of the last attempt to give
+#: a draft a preview URL it lacked (a rebuild, or an html re-materialize). Per process,
+#: bounded. The epoch (``draft_worker.draft_view``) changes on every open-draft, so a
+#: publish that purged the files and a new reopen are retried even inside the window.
+_preview_retry_at: OrderedDict[tuple[str, str, str], float] = OrderedDict()
 _PREVIEW_RETRY_WINDOW = 600.0
 _PREVIEW_RETRY_ENTRIES = 4096
 
 
-def _claim_preview_retry(pocket_id: str, content_hash: str) -> bool:
+def _claim_preview_retry(pocket_id: str, content_hash: str, epoch: str = "") -> bool:
     """True (and the window starts) when this draft may try again to get a preview
     URL; False while a previous attempt is inside ``_PREVIEW_RETRY_WINDOW``."""
-    key, now = (pocket_id, content_hash), time.monotonic()
+    key, now = (pocket_id, content_hash, epoch), time.monotonic()
     last = _preview_retry_at.get(key)
     if last is not None and now - last < _PREVIEW_RETRY_WINDOW:
         return False
