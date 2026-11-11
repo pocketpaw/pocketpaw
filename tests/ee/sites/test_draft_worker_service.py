@@ -282,7 +282,7 @@ async def test_open_draft_sends_the_published_content_down_the_draft_path(
     out = await sites_service.open_pocket_draft(
         workspace_id="ws1", user_id="u1", pocket_id=pocket_id
     )
-    assert out == {"pocket_id": pocket_id, "opened": True}
+    assert out == {"pocket_id": pocket_id, "opened": True, "reason": None}
     draft = await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id)
     assert draft is not None and draft.label == "Opened for editing"
 
@@ -295,7 +295,7 @@ async def test_open_draft_sends_the_published_content_down_the_draft_path(
     again = await sites_service.open_pocket_draft(
         workspace_id="ws1", user_id="u1", pocket_id=pocket_id
     )
-    assert again == {"pocket_id": pocket_id, "opened": False}
+    assert again == {"pocket_id": pocket_id, "opened": False, "reason": "already_draft"}
     assert (await _artifact(pocket_id, pool))["preview_mode"] != "published"
 
 
@@ -327,13 +327,13 @@ async def test_open_draft_is_a_noop_outside_the_published_view(beanie_test_db, m
     out = await sites_service.open_pocket_draft(
         workspace_id="ws1", user_id="u1", pocket_id=pocket_id
     )
-    assert out == {"pocket_id": pocket_id, "opened": False}
+    assert out == {"pocket_id": pocket_id, "opened": False, "reason": "already_draft"}
     assert registry.rows == {}
-    # A draft version still exists, so Submit for review and History work.
-    assert await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id) is not None
+    # A no-op writes no "Opened for editing" row: nothing changed, so nothing to publish.
+    assert await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id) is None
 
 
-async def test_open_draft_with_draft_workers_off_only_ensures_the_draft_version(
+async def test_open_draft_with_draft_workers_off_is_a_noop_with_a_reason(
     beanie_test_db, monkeypatch
 ):
     from pocketpaw_ee.versions import service as versions_service
@@ -344,9 +344,9 @@ async def test_open_draft_with_draft_workers_off_only_ensures_the_draft_version(
     out = await sites_service.open_pocket_draft(
         workspace_id="ws1", user_id="u1", pocket_id=pocket_id
     )
-    assert out == {"pocket_id": pocket_id, "opened": False}
+    assert out == {"pocket_id": pocket_id, "opened": False, "reason": "draft_workers_off"}
     assert registry.rows[pocket_id].reopened_hash == ""
-    assert await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id) is not None
+    assert await versions_service.get_draft(scope_type="pocket", scope_id=pocket_id) is None
 
 
 async def test_the_mongo_registry_round_trips_the_reopened_hash(beanie_test_db):
@@ -378,9 +378,10 @@ async def test_the_open_draft_route_opens_a_published_pocket(beanie_test_db, mon
     _published_registry(monkeypatch, pocket_id)
     resp = await _post_open_draft(pocket_id)
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"pocket_id": pocket_id, "opened": True}
+    assert resp.json() == {"pocket_id": pocket_id, "opened": True, "reason": None}
     resp = await _post_open_draft(pocket_id)
-    assert resp.status_code == 200 and resp.json() == {"pocket_id": pocket_id, "opened": False}
+    assert resp.status_code == 200
+    assert resp.json() == {"pocket_id": pocket_id, "opened": False, "reason": "already_draft"}
 
 
 async def test_the_open_draft_route_is_404_for_an_unknown_or_foreign_pocket(
