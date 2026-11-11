@@ -249,7 +249,7 @@ async def test_a_blocked_agent_publish_explains_the_owner_path() -> None:
     out = await _agent({}, publish, AsyncMock())
     text = out["content"][0]["text"]
     assert publish.await_args.kwargs.get("confirm_placeholders") in (None, False)
-    assert "Tray" in text and "confirm_placeholders: true" in text
+    assert "Approvals" in text and "confirm_placeholders: true" in text
 
 
 async def test_the_approval_executor_audits_a_publish_anyway(monkeypatch, pocket) -> None:

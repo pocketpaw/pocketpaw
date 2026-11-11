@@ -13328,8 +13328,8 @@ async def request_publish_pocket(
         recommendation=(
             "Check the data the migrations delete, then approve this card on its own."
             if destructive
-            else "Fix what the card lists and ask again, or choose Publish anyway to take "
-            "it live as it is."
+            else "Fix what the card lists and ask again. To take it live as it is, approve "
+            "this card on its own: it then shows what is blocking and a Publish anyway button."
             if findings
             else "Review the draft, then approve to publish."
         ),

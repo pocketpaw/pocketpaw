@@ -262,9 +262,10 @@ def _publish_blocked_text(exc: Any) -> str:
         "phone, WhatsApp, email, hours) and never invent one; make every form POST to a "
         "real handler and exercise it with play_test_site (exercise_forms: true). Then "
         "publish again. Tell the owner plainly what is missing. You cannot publish past "
-        "these yourself: if the owner wants it live as it is, call publish again with "
-        "`confirm_placeholders: true`, which sends a review card to the owner in the Tray "
-        "where only they can choose Publish anyway."
+        "these yourself: if the owner wants it live as it is, tell them to click Publish in "
+        "the site builder, where the Publish panel lists these and offers Publish anyway. "
+        "Or call publish again with `confirm_placeholders: true`, which sends them a review "
+        "card in Approvals; approving it shows the same list and a Publish anyway button."
     )
 
 
@@ -281,7 +282,7 @@ async def _request_owner_override(workspace_id: str, user_id: str, pocket_id: st
         logger.warning("sites publish: could not file the publish-anyway card", exc_info=True)
         return _error_response(
             "Not published. Only the owner can publish past these findings: ask them to "
-            "use Publish anyway in the site's publish dialog."
+            "click Publish in the site builder and choose Publish anyway under the list."
         )
     blob = (getattr(action, "parameters", None) or {}).get("_artifact_change") or {}
     return _success_response(
@@ -292,9 +293,10 @@ async def _request_owner_override(workspace_id: str, user_id: str, pocket_id: st
             "publish_findings": blob.get("publish_findings") or [],
             "message": (
                 "Not published. Only the owner can take the site live past these "
-                "findings, so a review card was sent to them in the Tray. Tell the owner "
-                "what `publish_findings` lists and that they can choose Publish anyway on "
-                "that card. Do not retry the publish."
+                "findings, so a review card was sent to them in Approvals. Tell the owner "
+                "what `publish_findings` lists, and that approving the card (or clicking "
+                "Publish in the site builder) shows the list with a Publish anyway "
+                "button. Do not retry the publish."
             ),
         }
     )
@@ -348,6 +350,8 @@ async def _publish_handler(args: dict) -> dict:
         )
     except CloudError as exc:
         if exc.code == "sites.publish_blocked":
+            # The agent never overrides the gate: only the owner can, on a card.
+            exc.details = {**(exc.details or {}), "can_override": False}
             return _error_response(_publish_blocked_text(exc))
         if exc.code == "sites.migration_destructive":
             # Deleting stored rows is the owner's call. File the review card that
@@ -616,8 +620,8 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
                     "description": (
                         "The owner wants it live although publish was refused for "
                         "placeholders, a made-up number or a broken form. This does NOT "
-                        "publish: it sends the owner a Tray card where only they can "
-                        "choose Publish anyway."
+                        "publish: it sends the owner a review card in Approvals where "
+                        "only they can choose Publish anyway."
                     ),
                 },
             },

@@ -218,10 +218,37 @@
   {
     "label": "approve route drops publish anyway: the Tray button never takes the site live",
     "file": "ee/pocketpaw_ee/instinct/router.py",
-    "find": "                confirm_placeholders=bool(req is not None and req.confirm_placeholders),\n",
-    "replace": "                confirm_placeholders=False,\n",
+    "find": "            confirm_placeholders=req.confirm_placeholders,\n",
+    "replace": "            confirm_placeholders=False,\n",
     "tests": [
       "tests/ee/sites/test_publish_gate_approval.py::test_the_router_publishes_only_on_publish_anyway"
+    ]
+  },
+  {
+    "label": "refused approve answers 200: the client reads a blocked publish as published",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "            raise refusal\n",
+    "replace": "            pass\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_a_refused_approve_returns_the_block_not_a_stale_approval"
+    ]
+  },
+  {
+    "label": "publish anyway ignores the digest: it covers findings the owner never saw",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "    if confirm_digest is not None and confirm_digest != publish_gate.findings_digest(findings):\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_publish_anyway_on_changed_findings_answers_the_new_ones"
+    ]
+  },
+  {
+    "label": "executor trusts a stale gate: a draft edited mid-approve goes live unchecked",
+    "file": "ee/pocketpaw_ee/versions/instinct_executor.py",
+    "find": "    if gated_hash and await _current_hash(scope_id, author) == gated_hash:\n",
+    "replace": "    if gated_hash:\n",
+    "tests": [
+      "tests/ee/sites/test_publish_gate_approval.py::test_content_changed_after_the_route_gate_is_refused_with_the_block"
     ]
   },
   {
