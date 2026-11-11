@@ -261,6 +261,11 @@ class Site(TimestampedDocument):
     # flips True) — never on a preview/edit build, never on a plain updatedAt bump.
     # None until the pocket has been deployed at least once (old rows read null).
     deployed_at: datetime | None = None
+    # The content hash (``sites.service.source_content_hash``) of the source map that
+    # live deploy shipped, written in the SAME save that marks it deployed, so it never
+    # names content that did not go live. Discard restores only a version whose content
+    # hashes to this. Empty for a ripple site and for rows deployed before it existed.
+    live_source_hash: str = ""
     # SA-4: when this site's visitors STARTED being counted (UTC), and None whenever
     # they are not being counted at all. Read it as a state rather than as history —
     # "counting is on, and it began at this stamp".

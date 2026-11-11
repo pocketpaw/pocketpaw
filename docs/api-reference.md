@@ -4159,20 +4159,31 @@ Throws away a pocket's unpublished changes (the builder's Discard). No body. Gat
   "rejected_reviews": 0, "published_version_no": 4 }
 ```
 
-- `pocket.source` goes back to the content of the published version row (every live
-  publish promotes the current draft, or a snapshot of what it deploys, to that row),
-  so the next publish cannot ship the discarded edit. No new version is written.
+- `pocket.source` goes back to the content that is LIVE: the newest version whose
+  content hashes to the `Site.live_source_hash` the last live deploy recorded. A site
+  deployed before that field existed falls back (project sites only) to the draft
+  registry's `published_hash` matching the published row. Anything else is refused,
+  because the published pointer moves before the deploy and can name content that
+  never went live.
+- Before the restore, the current source is saved as its own `discarded` version
+  ("Discarded changes"), so it can be brought back with `POST .../versions/{n}/revert`.
 - Every draft version above the published pointer becomes `discarded`, so `/status`
-  reads `has_unpublished_changes: false`. A pending publish review of the pocket is
-  rejected ("Discarded by owner").
+  reads `has_unpublished_changes: false`. Pending publish reviews of the pocket are
+  rejected ("Discarded by owner") before anything is written, and
+  `versions.publish` refuses `discarded` / `superseded` rows, so a stale approval
+  can't take a discarded draft live.
+- The source is written with one conditional update on the source as read; an edit
+  that lands mid-discard wins. There is no per-pocket publish lock.
 - A project pocket's drafts are purged the way a publish purges them, which also ends
   an open-draft, so `native-artifact` answers `preview_mode: "published"` again.
+- Audited as `sites.draft_discarded`.
 - `restored: false` with `discarded_versions: 0` is a no-op success. Idempotent.
 - Refusals leave the pocket untouched: `409 sites.discard_nothing_live` (never
-  published, so there is no live version to go back to), `409 sites.discard_live_unknown`
-  (the published version holds no files), `409 sites.discard_conflict` (an edit landed
-  mid-discard), `422 sites.discard_unsupported` (a ripple site). `404` for an unknown or
-  another workspace's pocket, `403` without edit access.
+  published), `409 sites.discard_live_unknown` (what is live can't be proven; publish
+  once more), `409 sites.discard_conflict` (an edit landed mid-discard), `503
+  sites.discard_unavailable` (a pending review couldn't be rejected), `422
+  sites.discard_unsupported` (a ripple site). `404` for an unknown or another
+  workspace's pocket, `403` without edit access.
 
 ### Site data — `/sites/by-pocket/{pocket_id}/data`
 

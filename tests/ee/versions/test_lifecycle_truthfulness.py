@@ -186,13 +186,13 @@ async def test_nothing_writes_the_legacy_reverted_status(beanie_test_db):
     v1 = await versions.write_draft(
         scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"n": 1}
     )
-    await versions.write_draft(  # supersedes v1
-        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"n": 2}
-    )
     await versions.publish(
         scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v1.id)
     )
     await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"n": 2}
+    )
+    await versions.write_draft(  # supersedes n=2
         scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"n": 3}
     )
     await versions.discard_all_drafts(scope_type="pocket", scope_id=POCKET, workspace_id=WS)

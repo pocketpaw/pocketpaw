@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html as html_lib
 import json
 import logging
@@ -38,7 +39,7 @@ import re
 import secrets
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -3518,6 +3519,11 @@ async def _deploy_site_doc(
     # "last shipped", not "first shipped"). It is NOT a plain updatedAt bump, so it
     # stays a true "last deployed" marker.
     now = datetime.now(UTC)
+    # What went live, by content, in the same save that marks the site deployed:
+    # Discard restores only a version whose content hashes to this.
+    live_source_hash = (
+        source_content_hash(source) if is_source_engine(engine) and isinstance(source, dict) else ""
+    )
     doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None:
         doc = _SiteDoc(
@@ -3528,6 +3534,7 @@ async def _deploy_site_doc(
             name=site_name,
             script_name=site_id,
             deployed=True,
+            live_source_hash=live_source_hash,
             deployed_at=now,
             # SA-4: the stamp says counting is ON and began here. A first publish that
             # deployed no counter records None, which the read reports as "nothing has
@@ -3563,6 +3570,7 @@ async def _deploy_site_doc(
         doc.script_name = site_id
         doc.deployed = True
         doc.deployed_at = now
+        doc.live_source_hash = live_source_hash
         doc.deploy_target = mode
         doc.url = url
         # SA-4, and unlike ``deployed_at`` this is NOT "last" — it is "since", so a
@@ -12381,6 +12389,65 @@ async def open_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: str) 
 
 
 _DISCARD_REASON = "Discarded by owner"
+_DISCARD_SNAPSHOT_LABEL = "Discarded changes"
+#: How many version rows (newest first) Discard scans for the content that is live.
+_DISCARD_SCAN_LIMIT = 100
+
+
+def source_content_hash(source: Mapping[str, Any]) -> str:
+    """A content hash of a source map alone (no engine or generator terms), so the
+    same files hash the same across a generator upgrade. ``Site.live_source_hash``
+    stores it for what a live deploy shipped."""
+    payload = json.dumps(dict(source), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _live_unknown() -> ConflictError:
+    return ConflictError(
+        "sites.discard_live_unknown",
+        "The live version of this site can't be confirmed, so nothing was discarded. "
+        "Publish the site once more and Discard will work again.",
+    )
+
+
+async def _discard_target(
+    *, workspace_id: str, pocket_id: str, engine: str | None, rows: list[Any]
+) -> Any:
+    """The version row whose content is PROVABLY what is live, or raise.
+
+    Proof is the hash the last live deploy recorded on the Site
+    (``live_source_hash``): the newest row whose content hashes to it, published rows
+    first. A site deployed before that field existed falls back, for a project, to the
+    draft registry's ``published_hash`` against the published row (that hash carries
+    the generator version, so it only matches when nothing was upgraded since).
+    Anything else is 409 ``sites.discard_live_unknown``: a published pointer moves
+    before the deploy and its version write is best effort, so it alone proves
+    nothing."""
+    site = await _canonical_site_doc(workspace_id, pocket_id)
+    live_hash = (getattr(site, "live_source_hash", "") or "") if site and site.deployed else ""
+    ordered = [r for r in rows if r.status == "published"] + [
+        r for r in rows if r.status != "published"
+    ]
+    if live_hash:
+        for row in ordered[:_DISCARD_SCAN_LIMIT]:
+            content = row.content if isinstance(row.content, dict) else {}
+            if content and source_content_hash(content) == live_hash:
+                return row
+        raise _live_unknown()
+
+    from pocketpaw_ee.sites import draft_worker, project_build
+
+    published = next((r for r in rows if r.status == "published"), None)
+    if published is not None and normalize_engine(engine) == "project" and published.content:
+        try:
+            rec = await draft_worker.default_registry().get(pocket_id)
+        except Exception:  # noqa: BLE001 - no registry, no proof
+            rec = None
+        if rec is not None and rec.published_hash == project_build.project_content_hash(
+            published.content
+        ):
+            return published
+    raise _live_unknown()
 
 
 async def discard_pocket_draft(
@@ -12389,20 +12456,25 @@ async def discard_pocket_draft(
     """Throw away a pocket's unpublished changes: the builder's Discard.
 
     Backs ``POST /sites/by-pocket/{pocket_id}/discard-draft``. The draft lives in
-    ``pocket.source`` (what native-artifact builds and publish deploys), so a discard
-    that only relabels version rows leaves the edit in place for the next publish to
-    ship. This puts ``source`` back to the PUBLISHED version row's content (CAS on
-    the source just read, 409 ``sites.discard_conflict`` if an edit lands meanwhile),
-    marks every draft above the published pointer discarded, rejects any pending
-    publish review of the pocket (its candidate is one of those drafts), and for a
-    project pocket purges its drafts the way a publish does, which also ends an
-    "opened for editing", so the builder shows the live site again.
+    ``pocket.source`` (what native-artifact builds and publish deploys), so this puts
+    ``source`` back to the content that is LIVE, proven by :func:`_discard_target`.
 
-    Refuses rather than half-discards: 409 ``sites.discard_nothing_live`` when the
-    pocket has no published version in this workspace (nothing to go back to), 409
-    ``sites.discard_live_unknown`` when that version holds no files, 422
-    ``sites.discard_unsupported`` for a non-source engine (ripple). 404 for an
-    unknown or another workspace's pocket, 403 without edit access.
+    Order, each step failing closed before the source is touched:
+      1. auth (404 / 403), engine (422 ``sites.discard_unsupported`` for ripple), a
+         published version in this workspace (409 ``sites.discard_nothing_live``), and
+         the provably-live target (409 ``sites.discard_live_unknown``);
+      2. reject every pending publish review of the pocket (503
+         ``sites.discard_unavailable`` if one can't be rejected), so no stale approval
+         can publish a draft this discards;
+      3. snapshot the current source as its own version ("Discarded changes", marked
+         discarded below), so the work can be restored from version history;
+      4. write the target with a single conditional update (409
+         ``sites.discard_conflict`` if anything wrote the source since step 1);
+      5. mark the drafts above the published pointer discarded, purge a project's
+         drafts the way a publish does (ends an open-draft), and audit.
+
+    There is no per-pocket publish lock to take; the conditional write and
+    ``versions.publish`` refusing discarded rows are what make a racing publish safe.
 
     ``{pocket_id, restored, discarded_versions, rejected_reviews,
     published_version_no}``; ``restored`` is False when the source already matched
@@ -12423,33 +12495,47 @@ async def discard_pocket_draft(
             "Discard isn't available for this kind of site. Ask the agent to undo the change.",
         )
 
-    published = await versions_service.get_published(
-        scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id
-    )
-    if published is None or published.workspace_id != workspace_id:
+    rows = [
+        r
+        for r in await versions_service.list_versions(
+            scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, branch="main"
+        )
+        if r.workspace_id == workspace_id
+    ]
+    published = next((r for r in rows if r.status == "published"), None)
+    if published is None:
         raise ConflictError(
             "sites.discard_nothing_live",
             "This site hasn't been published yet, so there is no live version to go back to.",
         )
-    live = published.content if isinstance(published.content, dict) else {}
-    if not live:
-        raise ConflictError(
-            "sites.discard_live_unknown",
-            "The live version of this site couldn't be found, so nothing was discarded.",
-        )
+    target = await _discard_target(
+        workspace_id=workspace_id, pocket_id=pocket_id, engine=engine, rows=rows
+    )
+    live = dict(target.content)
+
+    rejected = await _reject_pending_publish_reviews(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
 
     current = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
     restored = current != live
     if restored:
+        # Not best effort: a discard that can't keep a copy of what it replaces
+        # doesn't happen.
+        await versions_service.write_draft(
+            scope_type=_VERSION_SCOPE_TYPE,
+            scope_id=pocket_id,
+            workspace_id=workspace_id,
+            content=dict(current),
+            author=user_id,
+            label=_DISCARD_SNAPSHOT_LABEL,
+        )
         await pockets_service.restore_published_source(
-            pocket_id, user_id, expected_source=dict(current), source=dict(live)
+            pocket_id, user_id, expected_source=dict(current), source=live
         )
 
     discarded = await versions_service.discard_all_drafts(
         scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, workspace_id=workspace_id
-    )
-    rejected = await _reject_pending_publish_reviews(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
     )
 
     if draft_worker.enabled() and normalize_engine(engine) == "project":
@@ -12472,33 +12558,70 @@ async def discard_pocket_draft(
                 "sites.draft: drafts of %s not purged after a discard", pocket_id, exc_info=True
             )
 
+    await _audit_discard(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        metadata={
+            "restored": restored,
+            "discarded_versions": discarded,
+            "rejected_reviews": rejected,
+            "restored_version_no": target.version_no,
+        },
+    )
     return {
         "pocket_id": pocket_id,
         "restored": restored,
         "discarded_versions": discarded,
         "rejected_reviews": rejected,
-        "published_version_no": published.version_no,
+        "published_version_no": target.version_no,
     }
+
+
+async def _audit_discard(
+    *, workspace_id: str, user_id: str, pocket_id: str, metadata: dict[str, Any]
+) -> None:
+    """``sites.draft_discarded`` in the workspace audit log. Best effort: the discard
+    already happened, and a missing audit row must not report it as failed."""
+    try:
+        from pocketpaw_ee.cloud.audit import service as audit_service
+
+        await audit_service.record(
+            workspace_id,
+            user_id,
+            "sites.draft_discarded",
+            target_type="pocket",
+            target_id=pocket_id,
+            metadata=metadata,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("sites: discard of %s not audited", pocket_id, exc_info=True)
 
 
 async def _reject_pending_publish_reviews(
     *, workspace_id: str, user_id: str, pocket_id: str
 ) -> int:
     """Reject every pending publish review (``_artifact_change`` card) of the pocket,
-    so a card filed before a discard cannot later approve a discarded draft. Best
-    effort: the drafts are already discarded, and approving a stale card would only
-    redeploy the restored (live) source. Returns how many were rejected."""
+    so a card filed before a discard cannot later approve a discarded draft. Fails
+    CLOSED: any list or reject failure raises 503 ``sites.discard_unavailable``
+    before the discard touches the source. Returns how many were rejected."""
     from pocketpaw.stores import get_instinct_store
     from pocketpaw_ee.versions.instinct_executor import artifact_change_blob
 
+    unavailable = CloudError(
+        503,
+        "sites.discard_unavailable",
+        "A pending publish review of this site couldn't be closed, so nothing was "
+        "discarded. Try again in a moment.",
+    )
     try:
         store = get_instinct_store(workspace_id=workspace_id or None)
         pending = await store.pending(
             pocket_id=pocket_id, workspace_id=workspace_id, scope_type=_VERSION_SCOPE_TYPE
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("sites: could not list publish reviews of %s", pocket_id, exc_info=True)
-        return 0
+        raise unavailable from exc
     rejected = 0
     for action in pending:
         blob = artifact_change_blob(action)
@@ -12507,10 +12630,13 @@ async def _reject_pending_publish_reviews(
         if str(blob.get("workspace") or blob.get("workspace_id") or "") != workspace_id:
             continue
         try:
-            if await store.reject(action.id, reason=_DISCARD_REASON, rejector=user_id):
-                rejected += 1
-        except Exception:  # noqa: BLE001
+            done = await store.reject(action.id, reason=_DISCARD_REASON, rejector=user_id)
+        except Exception as exc:
             logger.warning("sites: could not reject review %s", action.id, exc_info=True)
+            raise unavailable from exc
+        if done is None:
+            raise unavailable
+        rejected += 1
     return rejected
 
 

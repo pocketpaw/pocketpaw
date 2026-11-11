@@ -3091,8 +3091,12 @@ async def restore_published_source(
     """Put a source-map pocket's ``source`` back to its published content (Discard,
     ``sites.service.discard_pocket_draft``). The pocket must still hold exactly
     ``expected_source`` (409 ``sites.discard_conflict`` otherwise: an edit landed
-    while the discard was reading). Records NO draft version: the restored map is the
-    published version, so the caller marks the drafts above it discarded instead."""
+    while the discard was reading). The write is ONE conditional ``update_one`` keyed
+    on the source as stored, so an edit landing after the read is never overwritten.
+    Records NO draft version: the caller snapshots what it replaces first, then marks
+    the drafts above the published pointer discarded."""
+    from datetime import UTC, datetime
+
     from pocketpaw_ee.sites.engines import is_source_engine
 
     doc = await _fetch_pocket(pocket_id)
@@ -3102,13 +3106,23 @@ async def restore_published_source(
             "pocket.not_source_site",
             "This site has no source files to put back.",
         )
+    conflict = ConflictError(
+        "sites.discard_conflict",
+        "This site changed while its changes were being discarded. Nothing was discarded.",
+    )
     if doc.source != expected_source:
-        raise ConflictError(
-            "sites.discard_conflict",
-            "This site changed while its changes were being discarded. Try again.",
-        )
+        raise conflict
+    # Filter on the map exactly as it was just read (the stored key order), so the
+    # match fails if anything wrote the source since.
+    now = datetime.now(UTC)
+    result = await _PocketDoc.get_pymongo_collection().update_one(
+        {"_id": doc.id, "source": doc.source},
+        {"$set": {"source": dict(source), "updatedAt": now}},
+    )
+    if result.matched_count == 0:
+        raise conflict
     doc.source = dict(source)
-    await doc.save()
+    doc.updatedAt = now
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
 
 
