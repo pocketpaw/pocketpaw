@@ -2432,6 +2432,26 @@ async def approve_action(
     # never smuggle a foreign workspace past a gate that already cleared.
     _assert_gated_workspaces(after, workspace_id)
 
+    # A site publish card: run the publish gate while the card is still PENDING. A
+    # refusal answers 409 ``sites.publish_blocked`` with the owner-worded findings and
+    # leaves the card pending, so "Publish anyway" (``confirm_placeholders``) approves
+    # this same card. Approving first and failing later used to return a stale 200
+    # "approved" that the client read as published.
+    publish_gate_checked = False
+    if before.status == ActionStatus.PENDING and _artifact_change_blob(after) is not None:
+        from pocketpaw_ee.versions import instinct_executor as artifact_executor
+
+        refusal = await artifact_executor.approve_gate(
+            store,
+            after,
+            approver=approver_id,
+            confirm_placeholders=req.confirm_placeholders,
+        )
+        if refusal is not None:
+            refusal.details = {**(refusal.details or {}), "action_id": after.id}
+            raise refusal
+        publish_gate_checked = True
+
     correction: Correction | None = None
     if edited_fields:
         patches = compute_patches(before, after)
@@ -2849,6 +2869,7 @@ async def approve_action(
                 human_event_id=human_event_id,
                 confirm_destructive=True,
                 confirm_placeholders=bool(req is not None and req.confirm_placeholders),
+                gate_checked=publish_gate_checked,
             )
         except Exception:
             logger.exception("artifact-change merge after approval failed (non-fatal)")

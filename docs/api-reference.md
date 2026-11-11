@@ -1082,13 +1082,17 @@ Refusal: `409`, code `sites.publish_blocked`.
         }
       ],
       "more": 0,
-      "override": "confirm_placeholders"
+      "override": "confirm_placeholders",
+      "can_override": true
     }
   }
 }
 ```
 
 - `findings` holds at most 20 entries, one per offending text; `more` counts the rest.
+- `can_override` says whether the caller may retry with the `override` field. It is
+  `true` on the REST publish and on a single-Action approve; the agent's publish tool
+  never overrides (it files a card, below).
 - `message` is written for the owner and safe to show as is. `page_label` is "the home
   page" or `the "about" page`; it gains "and N other pages" inside `message` when the
   same text repeats.
@@ -1115,12 +1119,14 @@ with an `_artifact_change` blob). The same gate applies:
   and the recommendation offers "Publish anyway". The approver cannot edit these
   fields away.
 - **At approve time** the gate runs again on the current draft, BEFORE anything is
-  merged. A plain approve (`POST /instinct/actions/{id}/approve` with no flag) or any
-  bulk approve of a draft with findings publishes nothing: no version is promoted, no
-  deploy runs, the draft stays a draft. The Action ends `failed` with
-  `error` = `sites.publish_blocked: <the refusal message>`, and
-  `parameters._artifact_change.publish_blocked` = the same `details` object as the
-  409 (`findings`, `more`, `override`).
+  merged. Nothing is promoted or deployed for a draft with findings:
+  - A single approve (`POST /instinct/actions/{id}/approve` without the flag) answers
+    the same `409 sites.publish_blocked`, with `details.action_id` naming the card.
+    The card is NOT approved: it stays `pending`, so "Publish anyway" approves the
+    same card. `parameters._artifact_change.publish_blocked` holds the `details`.
+  - A bulk approve fails the Action: it ends `failed` with
+    `error` = `sites.publish_blocked: <the refusal message>` and the same
+    `publish_blocked` details on the blob.
 - **Publish anyway:** `POST /instinct/actions/{id}/approve` with body
   `{"confirm_placeholders": true}` merges and deploys past the findings. Only the
   single-Action approve accepts it; bulk approve never does. The override is audited
@@ -1128,9 +1134,9 @@ with an `_artifact_change` blob). The same gate applies:
 - When the owner tells the agent to publish anyway, the agent's publish tool files
   this same card (`approval_required: true`, `action_id`, `publish_findings`) instead
   of publishing; the owner's "Publish anyway" on it is the only override.
-- A failed Action cannot be approved again. After fixing, the agent files a new
-  request; or the owner uses "Publish anyway" on a card that already shows the
-  findings.
+- A failed Action (from a bulk approve) cannot be approved again. After fixing, the
+  agent files a new request; Publish in the site builder files one too and shows its
+  findings with "Publish anyway".
 
 ## Sites — Durable Objects
 

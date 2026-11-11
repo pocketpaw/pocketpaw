@@ -69,7 +69,14 @@ class PublishBlocked(CloudError):
             "sites.publish_blocked",
             f"Your site isn't ready to go live yet. {first}{tail} Fix these, or publish "
             "anyway if you meant to.",
-            details={"findings": findings, "more": more, "override": OVERRIDE_FIELD},
+            # ``can_override``: the caller may retry with ``OVERRIDE_FIELD`` (the REST
+            # publish and an individual Tray approve). The agent's tool never can.
+            details={
+                "findings": findings,
+                "more": more,
+                "override": OVERRIDE_FIELD,
+                "can_override": True,
+            },
         )
 
 

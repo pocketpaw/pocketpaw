@@ -22,6 +22,11 @@
 #     numbers, broken forms) fail the Action with the owner-worded refusal and record
 #     them on the blob as ``publish_blocked``; nothing is promoted or deployed.
 #     ``confirm_placeholders=True`` (an individual approve's "publish anyway") skips it.
+#   * approve_gate(action, approver=..., confirm_placeholders=...) — the same gate
+#     for the single-Action approve route, run BEFORE the Action flips to approved:
+#     a refusal is returned (the route raises it as 409 ``sites.publish_blocked``)
+#     and the card stays pending, so "Publish anyway" approves that same card. The
+#     route then calls the executor with ``gate_checked=True`` so the gate runs once.
 #   * discard_rejected_change(action) — REJECT = DISCARD: every draft above the
 #     published pointer is discarded in one pass (``discard_all_drafts``); the
 #     published pointer is untouched and nothing deploys. Best effort.
@@ -69,7 +74,7 @@ def _confirmed_migration_keys(blob: dict[str, Any]) -> list[str]:
     return sorted({str(d["key"]) for d in found if isinstance(d, dict) and d.get("key")})
 
 
-async def _publish_blocked(
+async def _gate(
     store: Any,
     action: Any,
     blob: dict[str, Any],
@@ -78,18 +83,20 @@ async def _publish_blocked(
     scope_id: str,
     author: str,
     confirmed: bool,
-) -> bool:
+    approver: str | None = None,
+) -> Any:
     """Run the publish gate on the pocket about to go live. On blocking findings and
     no ``confirm_placeholders``: record them on the Action's blob as
-    ``publish_blocked``, fail the Action with the owner-worded refusal, and return
-    True (nothing is merged, nothing deploys). With the approver's "publish anyway"
-    the override is audited under the approver. Content that goes ahead is remembered
-    as vetted, so the deploy's own gate (a machine republish) does not run twice."""
+    ``publish_blocked`` and return the :class:`~pocketpaw_ee.sites.publish_gate.
+    PublishBlocked` refusal (nothing is merged, nothing deploys). With the approver's
+    "publish anyway" the override is audited under the approver. Content that goes
+    ahead is remembered as vetted, so the deploy's own gate (a machine republish)
+    does not run twice. Returns None when the publish may go ahead."""
     from pocketpaw_ee.sites import publish_gate, verify
 
     pocket, findings, skipped = await publish_gate.pocket_check(pocket_id=scope_id, user_id=author)
     if findings and confirmed:
-        approver = str(getattr(action, "approved_by", None) or author)
+        approver = str(approver or getattr(action, "approved_by", None) or author)
         await publish_gate.audit_override(
             workspace_id=workspace_id, actor_id=approver, pocket_id=scope_id, findings=findings
         )
@@ -100,7 +107,7 @@ async def _publish_blocked(
                 publish_gate.remember_gated(scope_id, verify.publish_content_hash(pocket))
             except Exception:  # noqa: BLE001 — the deploy then gates again; harmless
                 logger.warning("artifact-change merge: could not remember %s", scope_id)
-        return False
+        return None
     refusal = publish_gate.refusal(findings)
     try:
         parameters = dict(getattr(action, "parameters", None) or {})
@@ -108,8 +115,65 @@ async def _publish_blocked(
         await store.update_parameters(action.id, parameters)
     except Exception:  # noqa: BLE001 — the error text still carries every finding
         logger.warning("artifact-change merge: could not record findings on %s", action.id)
+    return refusal
+
+
+async def _publish_blocked(
+    store: Any,
+    action: Any,
+    blob: dict[str, Any],
+    *,
+    workspace_id: str,
+    scope_id: str,
+    author: str,
+    confirmed: bool,
+    checked: bool = False,
+) -> bool:
+    """:func:`_gate` for an already-approved Action: a refusal fails the Action with
+    the owner-worded message and returns True. ``checked`` means the approve route
+    already ran the gate on this approve (:func:`approve_gate`), so it is not run
+    twice."""
+    if checked:
+        return False
+    refusal = await _gate(
+        store,
+        action,
+        blob,
+        workspace_id=workspace_id,
+        scope_id=scope_id,
+        author=author,
+        confirmed=confirmed,
+    )
+    if refusal is None:
+        return False
     await store.mark_failed(action.id, f"{refusal.code}: {refusal.message}")
     return True
+
+
+async def approve_gate(
+    store: Any, action: Any, *, approver: str, confirm_placeholders: bool
+) -> Any:
+    """The publish gate for a single-Action approve, run while the card is still
+    pending. Returns the ``PublishBlocked`` refusal (findings recorded on the blob) or
+    None when the approve may go ahead, including for blobs that do not deploy."""
+    blob = artifact_change_blob(action)
+    if blob is None:
+        return None
+    scope_type = str(blob.get("scope_type") or "")
+    scope_id = str(blob.get("scope_id") or "")
+    workspace_id = str(blob.get("workspace") or blob.get("workspace_id") or "")
+    if scope_type not in _DEPLOYABLE_SCOPES or not scope_id:
+        return None
+    return await _gate(
+        store,
+        action,
+        blob,
+        workspace_id=workspace_id,
+        scope_id=scope_id,
+        author=str(blob.get("user_id") or "system"),
+        confirmed=confirm_placeholders,
+        approver=approver,
+    )
 
 
 async def execute_approved_change(
@@ -118,6 +182,7 @@ async def execute_approved_change(
     human_event_id: Any | None = None,
     confirm_destructive: bool = False,
     confirm_placeholders: bool = False,
+    gate_checked: bool = False,
 ) -> None:
     """MERGE an approved artifact-change Action (BP-3).
 
@@ -168,6 +233,7 @@ async def execute_approved_change(
         scope_id=scope_id,
         author=str(author or "system"),
         confirmed=confirm_placeholders,
+        checked=gate_checked,
     ):
         return
 

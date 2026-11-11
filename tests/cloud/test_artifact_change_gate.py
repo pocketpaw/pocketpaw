@@ -219,9 +219,16 @@ class TestArtifactChangeDispatch:
         calls: dict = {}
 
         async def _fake_merge(
-            action, *, human_event_id=None, confirm_destructive=False, confirm_placeholders=False
+            action,
+            *,
+            human_event_id=None,
+            confirm_destructive=False,
+            confirm_placeholders=False,
+            gate_checked=False,
         ):
             calls["merge"] = action.id
+            # The approve route ran the publish gate before approving.
+            calls["gate_checked"] = gate_checked
             # A plain approve never says "publish anyway".
             calls["confirm_placeholders"] = confirm_placeholders
             calls["confirm_destructive"] = confirm_destructive
