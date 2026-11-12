@@ -13938,25 +13938,32 @@ async def version_history(*, workspace_id: str, pocket_id: str) -> list[Any]:
 async def revert_pocket_version(
     *, workspace_id: str, user_id: str, pocket_id: str, version_no: int
 ) -> Any:
-    """Revert a pocket's site to a prior version by ordinal (P2b-backend).
+    """Revert a pocket's site to a prior version by ordinal: the History page's Revert.
 
-    Backs ``POST /sites/by-pocket/{pocket_id}/versions/{version_no}/revert``.
-    Revert is FORWARD-MOVING: it writes a NEW draft (on the main branch) whose
-    content is a snapshot of the target version's content, then the normal
-    review/publish flow applies (the operator can request-publish that draft and
-    take the reverted content live through the merge gate). It never mutates
-    history — the version log stays append-only and the revert is its own
-    auditable lineage step.
+    Backs ``POST /sites/by-pocket/{pocket_id}/versions/{version_no}/revert``. The
+    site IS ``pocket.source`` (``rippleSpec`` on ripple): native-artifact, the
+    publish gate, publish and the agent read it. So a revert writes the target
+    version's content there first (``pockets_service.restore_version_content``, a
+    compare-and-set on the content read below: 409 ``sites.revert_conflict`` when an
+    edit landed meanwhile, and that edit stays), then records the revert as a NEW
+    draft row on main (``versions.revert``: forward-moving, history stays
+    append-only). A project site whose reverted source is the published content
+    is reopened like ``open_pocket_draft``, so the builder builds the reverted draft
+    instead of showing the live site.
 
-    The router carries the human-friendly ``version_no`` (the timeline ordinal the
-    UI shows); the versions ``revert`` keys on the durable ``version_id``, so this
-    resolves the ordinal → the row via the SAME tenant-scoped, main-branch log
-    ``version_history`` reads. A version_no the pocket does not have (or one under
-    another workspace — the rows are pre-filtered on ``workspace_id``) raises
-    ``ValueError`` (the router maps it to a 404). Returns the new draft
-    ``ArtifactVersion``.
+    404 (``NotFound``) for an unknown or another workspace's pocket, 403 without edit
+    access (checked by the content write, before any row is recorded). A
+    ``version_no`` the pocket does not have in this workspace raises ``ValueError``
+    (the router maps it to a 404). Returns the new draft ``ArtifactVersion``.
     """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.versions import service as versions_service
+
+    wire = await pockets_service.get(pocket_id, user_id)
+    if wire.get("workspace") != workspace_id:
+        raise NotFound("pocket", pocket_id)
+    engine = wire.get("engine")
+    current = wire.get("source") if is_source_engine(engine) else wire.get("rippleSpec")
 
     rows = await versions_service.list_versions(
         scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, branch="main"
@@ -13967,14 +13974,40 @@ async def revert_pocket_version(
     )
     if target is None:
         raise ValueError(f"no version v{version_no} for pocket {pocket_id} — cannot revert")
+    content = dict(target.content) if isinstance(target.content, dict) else {}
 
-    return await versions_service.revert(
+    await pockets_service.restore_version_content(
+        pocket_id,
+        user_id,
+        expected=dict(current) if isinstance(current, dict) else None,
+        content=content,
+    )
+    row = await versions_service.revert(
         scope_type=_VERSION_SCOPE_TYPE,
         scope_id=pocket_id,
         workspace_id=workspace_id,
         version_id=str(target.id),
         author=user_id,
     )
+    if normalize_engine(engine) == "project":
+        await _reopen_reverted_draft(pocket_id, content)
+    return row
+
+
+async def _reopen_reverted_draft(pocket_id: str, source: dict[str, Any]) -> None:
+    """Take a reverted project site out of the published view (the registry mark
+    ``open_pocket_draft`` sets), so native-artifact builds the draft the revert
+    recorded. A no-op when the reverted source is not the published content. Best
+    effort: the source is already reverted, and a failed mark leaves the builder on
+    the live site until the next edit."""
+    from pocketpaw_ee.sites import draft_worker, project_build
+
+    if not draft_worker.enabled():
+        return
+    try:
+        await draft_worker.reopen_for_editing(pocket_id, project_build.project_content_hash(source))
+    except Exception:  # noqa: BLE001
+        logger.warning("sites.draft: reverted draft of %s not reopened", pocket_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

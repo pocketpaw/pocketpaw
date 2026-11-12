@@ -9,17 +9,12 @@ The import-linter pins that boundary: sites, kb, connectors, reconcile, the
 schedulers and the jobs worker reach pockets THROUGH this module, so a new
 caller that needs a field adds a function here rather than a second reader.
 
-Public API: ``create`` / ``get`` / ``get_for_wire`` / ``can_read`` /
-``list_pockets`` / ``update`` / ``delete``; ``ensure_home_pocket``;
-``duplicate_pocket`` and the ``copy_site_snapshot`` it writes through; the
-share-link, collaborator, team and agent mutators; the per-pocket backend +
-write/tool allowlist setters; ``merge_spec``; ``site_render_inputs``; the
-``set_{svelte,react,html}_source_file`` edit lane, ``set_project_source`` and the
-html-to-project upgrade pair (``convert_html_to_project`` / ``restore_upgraded_html``),
-and
-``set_site_dependency_manifest`` (the only writer of ``paw.dependencies.json``);
-``scan_source_site_pockets`` + ``migrate_legacy_build_shell``; and the
-``agent_*`` granular ``rippleSpec.ui`` ops the pocket-specialist drives over MCP.
+Public API: CRUD (``create`` / ``get`` / ``get_for_wire`` / ``list_pockets`` /
+``update`` / ``delete``), ``duplicate_pocket`` / ``copy_site_snapshot``, the
+share, collaborator, team, agent and backend mutators, ``merge_spec``, every
+``pocket.source`` writer (the per-file edit lane, ``set_project_source``, the
+upgrade pair, Discard's and Revert's restores, the dependency manifest, the
+build-shell migration, imports) and the ``agent_*`` ``rippleSpec.ui`` ops.
 
 INVARIANTS a reader must not break:
 
@@ -46,6 +41,9 @@ INVARIANTS a reader must not break:
   overlays per key through ``_layer_safe_update_spec`` unless ``reset_state`` is
   set or a ``template_slug`` recompile is in play. The typed ``RippleSpec`` is an
   INTERNAL representation only: every reader, and both stored shapes, stay dicts.
+* EVERY ``source`` WRITE IS A COMPARE-AND-SET (``_commit_fields``), never a
+  ``doc.save()``: a save re-sends the whole map it read and drops a concurrent
+  edit to another file. Writers retry from a fresh read (``_retry_source_race``).
 * DRAFT ``ArtifactVersion`` SNAPSHOTS ARE BEST-EFFORT. A version-store failure
   logs and never breaks the write it was recording.
 * ``resolve_webhook_pocket`` COMPARES IN CONSTANT TIME and returns ``None`` for
@@ -336,6 +334,65 @@ async def _fetch_pocket(pocket_id: str) -> _PocketDoc:
     if doc is None:
         raise NotFound("pocket", pocket_id)
     return doc
+
+
+#: How many times a source writer re-reads and re-applies its change when another
+#: write landed between its read and its conditional update.
+_SOURCE_WRITE_ATTEMPTS = 5
+
+
+class _SourceRaced(Exception):
+    """A conditional source write matched nothing: the field changed since the read."""
+
+
+async def _commit_fields(
+    doc: _PocketDoc, changes: dict[str, Any], *, guard_field: str = "source"
+) -> None:
+    """Write ``changes`` to the pocket in ONE ``update_one`` that matches only while
+    ``guard_field`` still holds the value ``doc`` was read with (compare-and-set).
+
+    Every ``source`` writer persists through this instead of ``doc.save()``: a save
+    re-sends the whole document, so two writers editing different files would each
+    put back the map they read and one edit would vanish. Raises ``_SourceRaced``
+    when the guard no longer matches; nothing is written then. On success ``doc``
+    carries the written values, so the event and the version row see them."""
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    result = await _PocketDoc.get_pymongo_collection().update_one(
+        {"_id": doc.id, guard_field: getattr(doc, guard_field)},
+        {"$set": {**changes, "updatedAt": now}},
+    )
+    if result.matched_count == 0:
+        raise _SourceRaced(str(doc.id))
+    for name, value in changes.items():
+        setattr(doc, name, value)
+    doc.updatedAt = now
+
+
+def _retry_source_race(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Re-run a source writer from its read when its conditional write raced.
+
+    The writer re-reads the pocket, re-runs its checks (a guard or an
+    ``expected_source`` that no longer holds raises its own error) and re-applies
+    its change on the fresh map, so a concurrent edit to another file is kept.
+    After ``_SOURCE_WRITE_ATTEMPTS`` lost races it answers 409
+    ``pocket.source_busy``."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        for _ in range(_SOURCE_WRITE_ATTEMPTS):
+            try:
+                return await fn(*args, **kwargs)
+            except _SourceRaced:
+                continue
+        raise ConflictError(
+            "pocket.source_busy",
+            "This site's files kept changing while saving. Try again in a moment.",
+        )
+
+    return wrapper
 
 
 def _check_domain_owner(domain_pocket: Pocket, user_id: str) -> None:
@@ -2598,6 +2655,7 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     return await _resolved_wire_dict(doc, user_id)
 
 
+@_retry_source_race
 async def set_svelte_source_file(
     pocket_id: str,
     user_id: str,
@@ -2663,8 +2721,7 @@ async def set_svelte_source_file(
     # dict field is not always detected as dirty by the ODM).
     updated = dict(doc.source)
     updated[component_path] = new_source
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     # Branch primitive (BP-3): a svelte source edit ALSO writes a draft
     # ArtifactVersion. BP-1 only hooked the rippleSpec write (merge_spec →
@@ -2679,6 +2736,7 @@ async def set_svelte_source_file(
     return await _resolved_wire_dict(doc, user_id), previous_source
 
 
+@_retry_source_race
 async def remove_svelte_source_file(
     pocket_id: str,
     user_id: str,
@@ -2715,8 +2773,7 @@ async def remove_svelte_source_file(
     # sibling writer rebuilds the map rather than popping in place.
     updated = dict(doc.source)
     del updated[component_path]
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(
         doc, author=user_id, label=_edit_label(component_path)
@@ -2724,6 +2781,7 @@ async def remove_svelte_source_file(
     return await _resolved_wire_dict(doc, user_id)
 
 
+@_retry_source_race
 async def set_react_source_file(
     pocket_id: str,
     user_id: str,
@@ -2789,8 +2847,7 @@ async def set_react_source_file(
     # ``set_svelte_source_file``.
     updated = dict(doc.source)
     updated[component_path] = new_source
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     # Branch primitive (BP-3): a source-map edit ALSO writes a draft
     # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
@@ -2803,6 +2860,7 @@ async def set_react_source_file(
     return await _resolved_wire_dict(doc, user_id)
 
 
+@_retry_source_race
 async def set_html_source_file(
     pocket_id: str,
     user_id: str,
@@ -2867,8 +2925,7 @@ async def set_html_source_file(
     # ``set_svelte_source_file``.
     updated = dict(doc.source)
     updated[file_path] = new_source
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     # Branch primitive (BP-3): a source-map edit ALSO writes a draft
     # ArtifactVersion snapshotting the FULL map, so the edit is a reviewable draft
@@ -2879,6 +2936,7 @@ async def set_html_source_file(
     return await _resolved_wire_dict(doc, user_id)
 
 
+@_retry_source_race
 async def set_project_source(
     pocket_id: str,
     user_id: str,
@@ -2939,11 +2997,10 @@ async def set_project_source(
         meta_changed = True
     changed = updated != doc.source
     if changed or meta_changed:
-        # Reassign fresh dicts so Beanie tracks the change (same note as the peers).
-        doc.source = updated
+        changes: dict[str, Any] = {"source": updated}
         if meta_changed:
-            doc.site_meta = meta
-        await doc.save()
+            changes["site_meta"] = meta
+        await _commit_fields(doc, changes)
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     if changed:
         await _record_pocket_svelte_draft_version(
@@ -2961,6 +3018,7 @@ _UPGRADE_LABEL_AFTER = "Upgraded to a static project"
 _UPGRADE_LABEL_UNDONE = "Undid the upgrade to a static project"
 
 
+@_retry_source_race
 async def convert_html_to_project(
     pocket_id: str,
     user_id: str,
@@ -3000,24 +3058,29 @@ async def convert_html_to_project(
     )
     prior_meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
     prior_meta.pop("upgraded_from", None)
-    doc.engine = "project"
-    doc.source = dict(source)
-    doc.site_meta = {
-        **prior_meta,
-        "project": dict(project),
-        "upgraded_from": {
-            **upgraded_from,
-            "version_id": str(snapshot.id),
-            "version_no": snapshot.version_no,
-            "site_meta": prior_meta,
+    await _commit_fields(
+        doc,
+        {
+            "engine": "project",
+            "source": dict(source),
+            "site_meta": {
+                **prior_meta,
+                "project": dict(project),
+                "upgraded_from": {
+                    **upgraded_from,
+                    "version_id": str(snapshot.id),
+                    "version_no": snapshot.version_no,
+                    "site_meta": prior_meta,
+                },
+            },
         },
-    }
-    await doc.save()
+    )
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_UPGRADE_LABEL_AFTER)
     return {"version_id": str(snapshot.id), "version_no": snapshot.version_no}
 
 
+@_retry_source_race
 async def restore_upgraded_html(
     pocket_id: str,
     user_id: str,
@@ -3038,10 +3101,9 @@ async def restore_upgraded_html(
             "sites.upgrade_conflict",
             "This site changed while the upgrade was being undone. Reload it and try again.",
         )
-    doc.engine = "html"
-    doc.source = dict(source)
-    doc.site_meta = dict(site_meta) or None
-    await doc.save()
+    await _commit_fields(
+        doc, {"engine": "html", "source": dict(source), "site_meta": dict(site_meta) or None}
+    )
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_UPGRADE_LABEL_UNDONE)
 
@@ -3049,6 +3111,7 @@ async def restore_upgraded_html(
 _RETHEME_LABEL = "Pointed the site's CSS at its theme tokens"
 
 
+@_retry_source_race
 async def retheme_project_source(
     pocket_id: str,
     user_id: str,
@@ -3070,13 +3133,13 @@ async def retheme_project_source(
             "sites.upgrade_conflict",
             "This site changed while its CSS was being updated. Reload it and try again.",
         )
-    doc.source = dict(source)
+    changes: dict[str, Any] = {"source": dict(source)}
     meta = dict(doc.site_meta) if isinstance(doc.site_meta, dict) else {}
     record = meta.get("upgraded_from")
     if upgraded_source_hash is not None and isinstance(record, dict):
         meta["upgraded_from"] = {**record, "source_hash": upgraded_source_hash}
-        doc.site_meta = meta
-    await doc.save()
+        changes["site_meta"] = meta
+    await _commit_fields(doc, changes)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_RETHEME_LABEL)
 
@@ -3095,8 +3158,6 @@ async def restore_published_source(
     on the source as stored, so an edit landing after the read is never overwritten.
     Records NO draft version: the caller snapshots what it replaces first, then marks
     the drafts above the published pointer discarded."""
-    from datetime import UTC, datetime
-
     from pocketpaw_ee.sites.engines import is_source_engine
 
     doc = await _fetch_pocket(pocket_id)
@@ -3112,24 +3173,56 @@ async def restore_published_source(
     )
     if doc.source != expected_source:
         raise conflict
-    # Filter on the map exactly as it was just read (the stored key order), so the
-    # match fails if anything wrote the source since.
-    now = datetime.now(UTC)
-    result = await _PocketDoc.get_pymongo_collection().update_one(
-        {"_id": doc.id, "source": doc.source},
-        {"$set": {"source": dict(source), "updatedAt": now}},
-    )
-    if result.matched_count == 0:
-        raise conflict
-    doc.source = dict(source)
-    doc.updatedAt = now
+    try:
+        await _commit_fields(doc, {"source": dict(source)})
+    except _SourceRaced:
+        raise conflict from None
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+
+
+async def restore_version_content(
+    pocket_id: str,
+    user_id: str,
+    *,
+    expected: dict[str, Any] | None,
+    content: dict[str, Any],
+) -> bool:
+    """Put a site's content back to a version's (Revert, ``sites.service.
+    revert_pocket_version``): ``source`` on a source engine, ``rippleSpec`` on ripple.
+
+    The pocket must still hold exactly ``expected`` in that field, else 409
+    ``sites.revert_conflict``: an edit landed while the revert was reading, and it
+    wins. ONE conditional ``update_one`` keyed on the field as read, like Discard's
+    :func:`restore_published_source`. Records NO version: the caller writes the
+    revert row after this succeeds. Returns False (nothing written) when the field
+    already equals ``content``."""
+    from pocketpaw_ee.sites.engines import is_source_engine
+
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    field = "source" if is_source_engine(getattr(doc, "engine", "ripple")) else "rippleSpec"
+    conflict = ConflictError(
+        "sites.revert_conflict",
+        "This site changed while it was being reverted. Nothing was reverted.",
+    )
+    current = getattr(doc, field)
+    if (current or None) != (expected or None):
+        raise conflict
+    if current == content:
+        return False
+    try:
+        await _commit_fields(doc, {field: dict(content)}, guard_field=field)
+    except _SourceRaced:
+        raise conflict from None
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return True
 
 
 #: Engines whose source map may carry an author dependency manifest.
 _DEPENDENCY_MANIFEST_ENGINES = ("svelte", "react", "html")
 
 
+@_retry_source_race
 async def set_site_dependency_manifest(
     pocket_id: str,
     user_id: str,
@@ -3172,9 +3265,7 @@ async def set_site_dependency_manifest(
         if updated.get(manifest_path) == contents:
             return await _resolved_wire_dict(doc, user_id)
         updated[manifest_path] = contents
-    # Reassign a fresh dict so Beanie tracks the change (same note as the peers).
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(doc, author=user_id, label=_edit_label(manifest_path))
     return await _resolved_wire_dict(doc, user_id)
@@ -3215,6 +3306,7 @@ async def scan_source_site_pockets(
     ]
 
 
+@_retry_source_race
 async def migrate_legacy_build_shell(
     pocket_id: str,
     *,
@@ -3264,8 +3356,7 @@ async def migrate_legacy_build_shell(
         updated[manifest_path] = manifest
     if updated == doc.source:
         return False
-    doc.source = updated
-    await doc.save()
+    await _commit_fields(doc, {"source": updated})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     await _record_pocket_svelte_draft_version(
         doc, author=author, label="Moved build-shell files to the generator"
@@ -3273,6 +3364,7 @@ async def migrate_legacy_build_shell(
     return True
 
 
+@_retry_source_race
 async def set_imported_source(
     pocket_id: str,
     *,
@@ -3299,10 +3391,7 @@ async def set_imported_source(
             "pocket.not_html_site",
             "Only an imported site's pocket can receive imported source.",
         )
-    # Reassign a fresh dict so Beanie tracks the change (mirrors
-    # set_svelte_source_file's dirty-tracking note).
-    doc.source = dict(source)
-    await doc.save()
+    await _commit_fields(doc, {"source": dict(source)})
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
 
 

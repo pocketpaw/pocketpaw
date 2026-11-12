@@ -142,8 +142,8 @@
   {
     "label": "the write stops emitting PocketUpdated, so the search index / soul memory / ripple invalidation desync (cloud rule 9)",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "    updated[component_path] = new_source\n    doc.source = updated\n    await doc.save()\n    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
-    "replace": "    updated[component_path] = new_source\n    doc.source = updated\n    await doc.save()\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
+    "find": "    updated[component_path] = new_source\n    await _commit_fields(doc, {\"source\": updated})\n    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
+    "replace": "    updated[component_path] = new_source\n    await _commit_fields(doc, {\"source\": updated})\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
     "tests": [
       "tests/ee/sites/test_react_component_edit.py::test_pockets_service_emits_pocket_updated"
     ]
