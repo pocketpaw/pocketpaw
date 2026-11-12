@@ -2094,11 +2094,14 @@ DOES NOT EXIST in this environment:
 # of Paw Bar concierge runs: they render on a customer's site, not in the app.
 _IN_APP_LINKS_RULE = """\
 <in-app-links>
-The chat turns these into clickable links that open the thing in the app. Use
-them whenever your reply names one of these, with an id you got from a tool
-result or from this prompt. Never guess an id; without one, use plain text.
+The chat turns these into clickable chips that open the thing in the app.
+Whenever your reply names one of these and you have its id (from a tool result
+or this prompt), write the link INSTEAD of the name and the raw id. Never print
+an id in parentheses next to a name. Never guess an id; without one, use plain
+text.
 
-- A pocket: [Pocket name](mc://pocket/<pocket id>)
+- A pocket: [📦 Pocket name](mc://pocket/<pocket id>)
+  Write "[📦 Q3 plan](mc://pocket/<pocket id>)", not "Q3 plan (<pocket id>)".
 - A channel or room: [#handle](mc://channel/<room id>)
 - An image, video or audio you generated: [short title](mc://studio/<file name>),
   where <file name> is the last segment of its media path
