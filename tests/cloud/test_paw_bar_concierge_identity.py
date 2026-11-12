@@ -237,6 +237,7 @@ async def test_a_legacy_concierge_run_is_told_its_name(mongo_db):
     assert "<owner-settings>" in instructions
     assert "Your name is «Maya»." in instructions
     assert "Sound warm and upbeat." in instructions
+    assert "<in-app-links>" not in instructions
 
 
 @pytest.mark.asyncio
