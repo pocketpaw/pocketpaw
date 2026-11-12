@@ -127,3 +127,85 @@ async def test_a_retry_reruns_the_guard_and_never_overwrites_a_moved_file(
     assert err.value.code == "sites.project_file_conflict"
     assert reads == 2
     assert (await _source(pocket_id))["src/pages/index.astro"] == racing
+
+
+def _source_write_after_first_read(monkeypatch, pocket_id: str, path: str, contents: str) -> None:
+    """The first pocket read (the non-source writer's) is followed, before it
+    returns, by a complete agent source write: the writer then saves a doc whose
+    ``source`` is stale."""
+    real = pockets_service._fetch_pocket
+    reads = 0
+
+    async def _fetch(pid: str) -> Any:
+        nonlocal reads
+        doc = await real(pid)
+        reads += 1
+        if reads == 1:
+            await pockets_service.set_project_source(pocket_id, "u1", writes={path: contents})
+        return doc
+
+    monkeypatch.setattr(pockets_service, "_fetch_pocket", _fetch)
+
+
+async def test_a_rename_racing_an_agent_source_write_keeps_both(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.cloud.pockets.dto import UpdatePocketRequest
+
+    pocket_id = await _make_project_pocket()
+    _source_write_after_first_read(monkeypatch, pocket_id, "src/agent.ts", "agent\n")
+
+    await pockets_service.update(pocket_id, "u1", UpdatePocketRequest(name="Renamed"))
+
+    after = await pockets_service.get(pocket_id, "u1")
+    assert after["name"] == "Renamed"
+    assert after["source"]["src/agent.ts"] == "agent\n"
+
+
+async def test_a_share_change_racing_an_agent_source_write_keeps_both(beanie_test_db, monkeypatch):
+    pocket_id = await _make_project_pocket()
+    _source_write_after_first_read(monkeypatch, pocket_id, "src/agent.ts", "agent\n")
+
+    await pockets_service.generate_share_link(pocket_id, "u1", "view")
+
+    after = await pockets_service.get(pocket_id, "u1")
+    assert after["source"]["src/agent.ts"] == "agent\n"
+
+
+async def test_two_ripple_spec_writers_both_land(beanie_test_db, monkeypatch):
+    """A rippleSpec writer re-applies its change on a fresh read when another spec
+    write landed between its read and its save."""
+    from pocketpaw_ee.cloud.models.pocket import Pocket
+
+    _view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id="ws1",
+        owner_id="u1",
+        name="Spec",
+        type_="site",
+        pattern="landing",
+        ripple_spec={"ui": []},
+        engine="ripple",
+        trusted=True,
+    )
+    assert err is None, err
+    real = pockets_service._fetch_pocket
+    reads = 0
+
+    async def _fetch(pid: str) -> Any:
+        nonlocal reads
+        doc = await real(pid)
+        reads += 1
+        if reads == 1:
+            stored = await Pocket.get_pymongo_collection().find_one({"_id": doc.id})
+            spec = dict(stored["rippleSpec"])
+            spec["state"] = {"theirs": 1}
+            await Pocket.get_pymongo_collection().update_one(
+                {"_id": doc.id}, {"$set": {"rippleSpec": spec}}
+            )
+        return doc
+
+    monkeypatch.setattr(pockets_service, "_fetch_pocket", _fetch)
+
+    await pockets_service.merge_spec("ws1", "u1", pocket_id, {"merge": {"title": "Mine"}})
+
+    spec = (await pockets_service.get(pocket_id, "u1"))["rippleSpec"]
+    assert spec.get("title") == "Mine"
+    assert spec.get("state", {}).get("theirs") == 1
