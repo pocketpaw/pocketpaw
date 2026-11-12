@@ -1,0 +1,57 @@
+{
+  "id": "dep-disappears",
+  "asserts": "Withdrawing a required service unloads dependents back to PENDING (not DISPOSED) and disposes their effects.",
+  "semantics": "\u00a72, \u00a73",
+  "plugins": {
+    "b": {
+      "inject": {
+        "required": [
+          "svcX"
+        ]
+      },
+      "effects": [
+        "e1"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "op": "provide",
+      "service": "svcX"
+    },
+    {
+      "op": "mount",
+      "plugin": "b"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "b": "ACTIVE"
+      }
+    },
+    {
+      "op": "withdraw",
+      "service": "svcX"
+    },
+    {
+      "op": "settle"
+    },
+    {
+      "expect_state": {
+        "b": "PENDING"
+      }
+    }
+  ],
+  "expect_trace": [
+    "root:provide:svcX",
+    "b:LOADING",
+    "b:effect:e1:setup",
+    "b:ACTIVE",
+    "root:withdraw:svcX",
+    "b:UNLOADING",
+    "b:effect:e1:dispose",
+    "b:PENDING"
+  ]
+}
