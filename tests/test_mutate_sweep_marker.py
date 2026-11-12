@@ -23,9 +23,8 @@ from pathlib import Path
 
 import pytest
 
-# Both mutate test files share one xdist worker: the sweeps rewrite
-# ee/pocketpaw_ee/sites/build_state.py in place and own the repo-root
-# .mutation-sweep-active marker, which --validate reads.
+# Share a worker with the validator: sweeps rewrite the tracked sentinel fixture
+# and own the repo-root .mutation-sweep-active marker, which --validate reads.
 pytestmark = pytest.mark.xdist_group("mutate")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -51,12 +50,16 @@ def _write_plan(tmp_path: Path, mutations: list[dict]) -> Path:
 
 
 def _target() -> str:
-    """A repo file with a stable, unique anchor. build_state.py is this sprint's and
-    its frozenset literal appears exactly once."""
-    return "ee/pocketpaw_ee/sites/build_state.py"
+    """An inert tracked fixture, usable without the enterprise package installed."""
+    return "tests/fixtures/mutate_restore_target.txt"
 
 
-_ANCHOR = 'IN_FLIGHT_STATUSES: frozenset[str] = frozenset({"queued", "building"})'
+_ANCHOR = 'RESTORE_TARGET_SENTINEL = "original"'
+_GUARD = "tests/test_mutate_sweep_marker.py::test_mutation_fixture_is_original"
+
+
+def test_mutation_fixture_is_original() -> None:
+    assert _ANCHOR in (REPO_ROOT / _target()).read_text(encoding="utf-8")
 
 
 class TestTheMarkerNeverOutlivesItsSweep:
@@ -65,11 +68,11 @@ class TestTheMarkerNeverOutlivesItsSweep:
             tmp_path,
             [
                 {
-                    "label": "queued stops counting as in-flight",
+                    "label": "flip the restore fixture sentinel",
                     "file": _target(),
                     "find": _ANCHOR,
-                    "replace": 'IN_FLIGHT_STATUSES: frozenset[str] = frozenset({"building"})',
-                    "tests": ["tests/ee/sites/test_build_state.py"],
+                    "replace": 'RESTORE_TARGET_SENTINEL = "mutated"',
+                    "tests": [_GUARD],
                 }
             ],
         )
@@ -89,7 +92,7 @@ class TestTheMarkerNeverOutlivesItsSweep:
                     "file": _target(),
                     "find": "this text is definitely not in the file",
                     "replace": "nor is this",
-                    "tests": ["tests/ee/sites/test_build_state.py"],
+                    "tests": [_GUARD],
                 }
             ],
         )
@@ -108,11 +111,11 @@ class TestTheMarkerNeverOutlivesItsSweep:
             tmp_path,
             [
                 {
-                    "label": "queued stops counting as in-flight",
+                    "label": "flip the restore fixture sentinel",
                     "file": _target(),
                     "find": _ANCHOR,
-                    "replace": 'IN_FLIGHT_STATUSES: frozenset[str] = frozenset({"building"})',
-                    "tests": ["tests/ee/sites/test_build_state.py"],
+                    "replace": 'RESTORE_TARGET_SENTINEL = "mutated"',
+                    "tests": [_GUARD],
                 }
             ],
         )
@@ -136,15 +139,15 @@ class TestABadAnchorIsLoud:
                     "label": "good anchor that would be caught",
                     "file": _target(),
                     "find": _ANCHOR,
-                    "replace": 'IN_FLIGHT_STATUSES: frozenset[str] = frozenset({"building"})',
-                    "tests": ["tests/ee/sites/test_build_state.py"],
+                    "replace": 'RESTORE_TARGET_SENTINEL = "mutated"',
+                    "tests": [_GUARD],
                 },
                 {
                     "label": "bad anchor later in the same plan",
                     "file": _target(),
                     "find": "definitely absent",
                     "replace": "x",
-                    "tests": ["tests/ee/sites/test_build_state.py"],
+                    "tests": [_GUARD],
                 },
             ],
         )
@@ -253,11 +256,11 @@ class TestAPreExistingMarkerRefusesTheRun:
             tmp_path,
             [
                 {
-                    "label": "queued stops counting as in-flight",
+                    "label": "flip the restore fixture sentinel",
                     "file": _target(),
                     "find": _ANCHOR,
-                    "replace": 'IN_FLIGHT_STATUSES: frozenset[str] = frozenset({"building"})',
-                    "tests": ["tests/ee/sites/test_build_state.py"],
+                    "replace": 'RESTORE_TARGET_SENTINEL = "mutated"',
+                    "tests": [_GUARD],
                 }
             ],
         )
