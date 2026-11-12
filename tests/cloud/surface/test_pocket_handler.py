@@ -12,9 +12,11 @@ from __future__ import annotations
 import pytest
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.pockets import service as pockets_service
-from pocketpaw_ee.cloud.pockets.dto import CreatePocketRequest
+from pocketpaw_ee.cloud.pockets.dto import AddWidgetRequest, CreatePocketRequest
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
 from pocketpaw_ee.cloud.surface.handlers import pocket as pocket_handler
+
+from pocketpaw.prompt.entity import ID_TAIL_CHARS
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -42,6 +44,10 @@ async def test_pocket_handler_summarizes_existing_pocket() -> None:
         user_id,
         CreatePocketRequest(name="Sales Pipeline"),
     )
+    await pockets_service.add_widget(
+        pocket["_id"], user_id, AddWidgetRequest(name="Revenue", type="native")
+    )
+    pocket = await pockets_service.get(pocket["_id"], user_id)
 
     preamble = (
         await pocket_handler.build_preamble(
@@ -54,6 +60,8 @@ async def test_pocket_handler_summarizes_existing_pocket() -> None:
     assert pocket["_id"] in preamble
     # The current-pocket tag carries the widget count.
     assert "widgets=" in preamble
+    assert pocket["widgets"][0]["_id"][-ID_TAIL_CHARS:] in preamble
+    assert "id=?" not in preamble
 
 
 async def test_pocket_handler_unknown_pocket_id_falls_back() -> None:
