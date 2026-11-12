@@ -93,5 +93,33 @@
     "tests": [
       "tests/ee/sites/test_source_write_race.py::test_a_retry_reruns_the_guard_and_never_overwrites_a_moved_file"
     ]
+  },
+  {
+    "label": "a non-source save resends every field it read, so a rename puts back a stale source over an agent edit",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        if state is not None and key in state and state[key] == value:\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_a_rename_racing_an_agent_source_write_keeps_both",
+      "tests/ee/sites/test_source_write_race.py::test_a_share_change_racing_an_agent_source_write_keeps_both"
+    ]
+  },
+  {
+    "label": "a changed rippleSpec is saved unconditionally, so a concurrent spec write is lost",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        if state is not None and key in _CONTENT_FIELDS:\n            query[key] = state.get(key)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_two_ripple_spec_writers_both_land"
+    ]
+  },
+  {
+    "label": "merge_spec is not retried, so the loser of a spec race fails instead of re-applying",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "@_retry_source_race\nasync def merge_spec(",
+    "replace": "async def merge_spec(",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_two_ripple_spec_writers_both_land"
+    ]
   }
 ]

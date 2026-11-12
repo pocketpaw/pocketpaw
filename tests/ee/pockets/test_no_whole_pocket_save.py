@@ -15,9 +15,10 @@ EE = Path(__file__).resolve().parents[3] / "ee" / "pocketpaw_ee"
 
 #: The pockets service is the Pocket write owner: every ``.save()`` there must be
 #: on one of these receivers, which hold documents that are NOT a Pocket (builtin
-#: widget rows, chat sessions, backend credentials).
+#: widget rows, chat sessions, backend credentials; ``stand_in`` is the test-double
+#: branch of ``_save_pocket``).
 SERVICE = "cloud/pockets/service.py"
-SERVICE_ALLOWED = {"existing"}
+SERVICE_ALLOWED = {"existing", "stand_in"}
 
 _SAVE = re.compile(r"\b(\w+)\.(save|replace)\(\s*\)")
 #: Elsewhere, a name bound from a Pocket read (``x = await Pocket.get(...)``,

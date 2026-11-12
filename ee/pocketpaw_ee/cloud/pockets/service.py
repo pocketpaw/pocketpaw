@@ -248,7 +248,7 @@ async def apply_derived_surface_profile(
             skill_names=skill_names,
             system_message_override=sys_override,
         )
-    await doc.save()
+    await _save_pocket(doc)
 
 
 def _promote_ripple_spec(raw: Any) -> RippleSpec | dict[str, Any] | None:
@@ -368,6 +368,52 @@ async def _commit_fields(
     for name, value in changes.items():
         setattr(doc, name, value)
     doc.updatedAt = now
+    doc._save_state()
+
+
+#: Fields that hold a site's content. A whole-document save resent the copy the
+#: writer read and dropped a concurrent edit, so ``_save_pocket`` only writes them
+#: when they changed, and then only while the stored copy is still the one read.
+_CONTENT_FIELDS = ("source", "rippleSpec")
+
+
+async def _save_pocket(doc: _PocketDoc) -> None:
+    """Persist a Pocket the caller read and changed: the one save every non-insert
+    write in this module goes through (never ``Document.save``).
+
+    ``$set`` s only the fields that differ from the state Beanie captured at the read
+    (``use_state_management``), so a rename never resends ``source``. A changed
+    content field is written compare-and-set on the value read: when another write
+    changed it meanwhile nothing is written and ``_SourceRaced`` is raised, which
+    ``_retry_source_race`` turns into a re-run from a fresh read."""
+    from datetime import UTC, datetime
+
+    from beanie.odm.utils.dump import get_dict
+
+    if not isinstance(doc, _PocketDoc):
+        # An in-memory test double standing in for a Pocket: it has its own save.
+        stand_in: Any = doc
+        await stand_in.save()
+        return
+    state = doc.get_saved_state()
+    doc.updatedAt = datetime.now(UTC)
+    data = get_dict(doc, to_db=True, keep_nulls=doc.get_settings().keep_nulls)
+    query: dict[str, Any] = {"_id": doc.id}
+    changes: dict[str, Any] = {}
+    for key, value in data.items():
+        if key in ("_id", "revision_id"):
+            continue
+        if state is not None and key in state and state[key] == value:
+            continue
+        if state is not None and key in _CONTENT_FIELDS:
+            query[key] = state.get(key)
+        changes[key] = value
+    result = await _PocketDoc.get_pymongo_collection().update_one(query, {"$set": changes})
+    if result.matched_count == 0:
+        if len(query) > 1:
+            raise _SourceRaced(str(doc.id))
+        raise NotFound("pocket", str(doc.id))
+    doc._save_state()
 
 
 def _retry_source_race(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -756,13 +802,13 @@ async def _mutate_list_field(pocket_id: str, field: str, value: str, action: str
         if value not in current:
             current.append(value)
             setattr(doc, field, current)
-            await doc.save()
+            await _save_pocket(doc)
             changed = True
     else:
         if value in current:
             current.remove(value)
             setattr(doc, field, current)
-            await doc.save()
+            await _save_pocket(doc)
             changed = True
     if changed:
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -1764,7 +1810,7 @@ async def _seed_home_pocket_widgets(doc: _PocketDoc) -> None:
 
     if widget_docs:
         doc.widgets = widget_docs
-        await doc.save()
+        await _save_pocket(doc)
 
 
 async def ensure_home_pocket(workspace_id: str, user_id: str) -> tuple[dict, bool]:
@@ -2559,6 +2605,7 @@ async def duplicate_pocket(
     return wire
 
 
+@_retry_source_race
 async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dict:
     """Update pocket fields. Edit-access required; visibility changes require ownership."""
     doc = await _fetch_pocket(pocket_id)
@@ -2650,7 +2697,7 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     #   exactly as the create path does — same shape, same normalization.
     if "surface_profile" in body.model_fields_set:
         doc.surface_profile = body.surface_profile
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
@@ -3395,6 +3442,7 @@ async def set_imported_source(
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
 
 
+@_retry_source_race
 async def merge_spec(
     workspace_id: str,
     user_id: str,
@@ -3542,7 +3590,7 @@ async def merge_spec(
 
     # Persist + emit.
     doc.rippleSpec = normalized
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     # Branch primitive (BP-1): record a draft ArtifactVersion snapshot of the
     # mutated rippleSpec. ADDITIVE — the destructive overwrite above already
@@ -3887,7 +3935,7 @@ async def add_widget(pocket_id: str, user_id: str, body: AddWidgetRequest) -> di
         }
     )
     doc.widgets.append(widget)
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
@@ -3917,7 +3965,7 @@ async def update_widget(
         widget.assignedAgent = body.assigned_agent
     if body.span is not None:
         widget.span = body.span
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
@@ -3930,7 +3978,7 @@ async def remove_widget(pocket_id: str, widget_id: str, user_id: str) -> dict:
     doc.widgets = [w for w in doc.widgets if w.id != widget_id]
     if len(doc.widgets) == before:
         raise NotFound("widget", widget_id)
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
@@ -3961,7 +4009,7 @@ async def reorder_widgets(pocket_id: str, user_id: str, widget_ids: list[str]) -
         )
     widgets_by_id = {w.id: w for w in doc.widgets}
     doc.widgets = [widgets_by_id[wid] for wid in ordered]
-    await doc.save()
+    await _save_pocket(doc)
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
 
@@ -3978,7 +4026,7 @@ async def generate_share_link(pocket_id: str, user_id: str, access: str) -> dict
     token = secrets.token_urlsafe(32)
     doc.share_link_token = token
     doc.share_link_access = access
-    await doc.save()
+    await _save_pocket(doc)
     # no-event: share-link state is owner-only; the token comes back inline
     # in this REST response. Broadcasting would leak the token.
     return {"token": token, "access": access, "url": f"/shared/{token}"}
@@ -3990,7 +4038,7 @@ async def revoke_share_link(pocket_id: str, user_id: str) -> None:
 
     doc.share_link_token = None
     doc.share_link_access = "view"
-    await doc.save()
+    await _save_pocket(doc)
     # no-event: see ``generate_share_link``.
 
 
@@ -4002,7 +4050,7 @@ async def update_share_link(pocket_id: str, user_id: str, access: str) -> dict:
         raise NotFound("share_link", pocket_id)
 
     doc.share_link_access = access
-    await doc.save()
+    await _save_pocket(doc)
     # no-event: see ``generate_share_link``.
     return {
         "token": doc.share_link_token,
@@ -4441,7 +4489,7 @@ async def _heal_node_ids(doc: _PocketDoc) -> None:
                 changed = True
     if changed:
         try:
-            await doc.save()
+            await _save_pocket(doc)
         except Exception as exc:  # noqa: BLE001
             logger.warning("pocket %s node-id heal save failed: %s", doc.id, exc)
 
@@ -4565,6 +4613,7 @@ async def agent_list(workspace_id: str, user_id: str) -> list[dict]:
     ]
 
 
+@_retry_source_race
 async def agent_update(
     pocket_id: str,
     *,
@@ -4610,7 +4659,9 @@ async def agent_update(
             except MissingRequiredPropError as exc:
                 return None, format_required_prop_violations_for_agent(exc.violations)
     try:
-        await doc.save()
+        await _save_pocket(doc)
+    except _SourceRaced:
+        raise
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4684,6 +4735,7 @@ def _merge_authored_sources_logged(
     return authored, skipped
 
 
+@_retry_source_race
 async def agent_add_widget(
     pocket_id: str,
     widget: dict,
@@ -4738,7 +4790,9 @@ async def agent_add_widget(
     if sources is not None:
         authored, skipped = _merge_authored_sources_logged(doc, sources)
     try:
-        await doc.save()
+        await _save_pocket(doc)
+    except _SourceRaced:
+        raise
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4748,6 +4802,7 @@ async def agent_add_widget(
     return view, None
 
 
+@_retry_source_race
 async def agent_update_widget(
     pocket_id: str,
     widget_id: str,
@@ -4816,7 +4871,9 @@ async def agent_update_widget(
     if sources is not None:
         authored, skipped = _merge_authored_sources_logged(doc, sources)
     try:
-        await doc.save()
+        await _save_pocket(doc)
+    except _SourceRaced:
+        raise
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4826,6 +4883,7 @@ async def agent_update_widget(
     return view, None
 
 
+@_retry_source_race
 async def agent_remove_widget(pocket_id: str, widget_id: str) -> tuple[dict | None, str | None]:
     doc, err = await _agent_load_doc(pocket_id)
     if err:
@@ -4835,7 +4893,9 @@ async def agent_remove_widget(pocket_id: str, widget_id: str) -> tuple[dict | No
     if len(doc.widgets) == before:
         return None, f"widget {widget_id} not found in pocket {pocket_id}"
     try:
-        await doc.save()
+        await _save_pocket(doc)
+    except _SourceRaced:
+        raise
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4898,12 +4958,15 @@ async def _load_and_ensure_ids(
     if spec_ops.ensure_ids(ui):
         # Persist newly-assigned ids so subsequent ops can target them.
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, None, f"id-assignment save failed: {exc}"
     return doc, ui, None
 
 
+@_retry_source_race
 async def agent_add_node(
     pocket_id: str,
     *,
@@ -4941,7 +5004,9 @@ async def agent_add_node(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4951,6 +5016,7 @@ async def agent_add_node(
         )
 
 
+@_retry_source_race
 async def agent_replace_node(
     pocket_id: str,
     *,
@@ -4979,7 +5045,9 @@ async def agent_replace_node(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -4989,6 +5057,7 @@ async def agent_replace_node(
         )
 
 
+@_retry_source_race
 async def agent_set_node_prop(
     pocket_id: str,
     *,
@@ -5022,7 +5091,9 @@ async def agent_set_node_prop(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5037,6 +5108,7 @@ async def agent_set_node_prop(
         )
 
 
+@_retry_source_race
 async def agent_set_prop_array_item(
     pocket_id: str,
     *,
@@ -5115,7 +5187,9 @@ async def agent_set_prop_array_item(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5130,6 +5204,7 @@ async def agent_set_prop_array_item(
         )
 
 
+@_retry_source_race
 async def agent_append_prop_array_item(
     pocket_id: str,
     *,
@@ -5199,7 +5274,9 @@ async def agent_append_prop_array_item(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5213,6 +5290,7 @@ async def agent_append_prop_array_item(
         )
 
 
+@_retry_source_race
 async def agent_remove_prop_array_item(
     pocket_id: str,
     *,
@@ -5269,7 +5347,9 @@ async def agent_remove_prop_array_item(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5283,6 +5363,7 @@ async def agent_remove_prop_array_item(
         )
 
 
+@_retry_source_race
 async def agent_move_node(
     pocket_id: str,
     *,
@@ -5314,7 +5395,9 @@ async def agent_move_node(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5329,6 +5412,7 @@ async def agent_move_node(
         )
 
 
+@_retry_source_race
 async def agent_remove_node(
     pocket_id: str,
     *,
@@ -5353,7 +5437,9 @@ async def agent_remove_node(
         if doc.rippleSpec is not None:
             doc.rippleSpec = normalize_ripple_spec(doc.rippleSpec) or doc.rippleSpec
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5400,6 +5486,7 @@ def _state_root(doc: _PocketDoc) -> tuple[dict[str, Any], str | None]:
     return state, None
 
 
+@_retry_source_race
 async def agent_set_state(
     pocket_id: str,
     *,
@@ -5426,7 +5513,9 @@ async def agent_set_state(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5441,6 +5530,7 @@ async def agent_set_state(
         )
 
 
+@_retry_source_race
 async def agent_append_state(
     pocket_id: str,
     *,
@@ -5464,7 +5554,9 @@ async def agent_append_state(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5479,6 +5571,7 @@ async def agent_append_state(
         )
 
 
+@_retry_source_race
 async def agent_remove_state(
     pocket_id: str,
     *,
@@ -5500,7 +5593,9 @@ async def agent_remove_state(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5510,6 +5605,7 @@ async def agent_remove_state(
         )
 
 
+@_retry_source_race
 async def agent_patch_state(
     pocket_id: str,
     *,
@@ -5532,7 +5628,9 @@ async def agent_patch_state(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5570,6 +5668,7 @@ def _sources_root(doc: _PocketDoc) -> dict[str, Any]:
     return spec
 
 
+@_retry_source_race
 async def agent_set_source(
     pocket_id: str,
     *,
@@ -5608,7 +5707,9 @@ async def agent_set_source(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5622,6 +5723,7 @@ async def agent_set_source(
         )
 
 
+@_retry_source_race
 async def agent_remove_source(
     pocket_id: str,
     *,
@@ -5641,7 +5743,9 @@ async def agent_remove_source(
         spec = _sources_root(doc)
         sources_ops.remove_source(spec, source_key)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5665,6 +5769,7 @@ async def agent_remove_source(
 # config decides whether the write may actually fire.
 
 
+@_retry_source_race
 async def agent_set_action(
     pocket_id: str,
     *,
@@ -5710,7 +5815,9 @@ async def agent_set_action(
         except ValueError as exc:
             return None, str(exc)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -5724,6 +5831,7 @@ async def agent_set_action(
         )
 
 
+@_retry_source_race
 async def agent_remove_action(
     pocket_id: str,
     *,
@@ -5743,7 +5851,9 @@ async def agent_remove_action(
         spec = _sources_root(doc)
         actions_ops.remove_action(spec, action_key)
         try:
-            await doc.save()
+            await _save_pocket(doc)
+        except _SourceRaced:
+            raise
         except Exception as exc:  # noqa: BLE001
             return None, f"save failed: {exc}"
         await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
@@ -6363,7 +6473,7 @@ async def set_pocket_write_policy(
     # callers (bus handlers, jobs) re-parse here, matching the entry-point
     # validation rule.
     doc.allowed_writes = [_AllowedWriteDoc.model_validate(rule) for rule in allowed_writes]
-    await doc.save()
+    await _save_pocket(doc)
 
     _audit_backend_config(
         actor=user_id,
@@ -6413,7 +6523,7 @@ async def set_pocket_tool_policy(
     # validated through `ToolGrantDTO`, but internal callers (bus handlers,
     # jobs) re-parse here, matching the entry-point validation rule.
     doc.allowed_tools = [_ToolGrantDoc.model_validate(grant) for grant in allowed_tools]
-    await doc.save()
+    await _save_pocket(doc)
 
     _audit_backend_config(
         actor=user_id,
@@ -6481,7 +6591,7 @@ async def set_pocket_approval_route(
         # mode == "owner" → store None (the explicit default).
 
     doc.approval_route = new_route
-    await doc.save()
+    await _save_pocket(doc)
 
     _audit_backend_config(
         actor=user_id,
@@ -6712,7 +6822,7 @@ async def rotate_webhook_secret(workspace_id: str, user_id: str, pocket_id: str)
             "This pocket has no backend configured — set one before a webhook secret",
         )
     doc.webhook_secret = _new_webhook_secret()
-    await doc.save()
+    await _save_pocket(doc)
     _audit_backend_config(
         actor=user_id,
         action="pocket.backend.webhook_rotate",
@@ -6869,7 +6979,7 @@ async def set_pocket_connector_permissions(
         doc.allowed_connectors = allowed_connectors
     else:
         doc.allowed_connectors = None
-    await doc.save()
+    await _save_pocket(doc)
     logger.info(
         "pocket.connector_permissions.set",
         extra={
@@ -6901,7 +7011,7 @@ async def grant_pocket_connector(
         doc.allowed_connectors = [*current, connector_name]
     else:
         return  # already granted
-    await doc.save()
+    await _save_pocket(doc)
     logger.info(
         "pocket.connector_permissions.grant",
         extra={
@@ -6926,7 +7036,7 @@ async def revoke_pocket_connector(
     next_list = [c for c in current if c != connector_name]
     # Keep the list (even empty) to distinguish "no restrictions" from "nothing allowed"
     doc.allowed_connectors = next_list
-    await doc.save()
+    await _save_pocket(doc)
     logger.info(
         "pocket.connector_permissions.revoke",
         extra={
