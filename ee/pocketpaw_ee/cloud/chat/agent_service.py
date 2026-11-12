@@ -1904,6 +1904,8 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     override = ctx.resolved_profile.system_message_override if ctx.resolved_profile else None
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
+    if ctx.kind is not ScopeKind.CONCIERGE:
+        parts.append(_IN_APP_LINKS_RULE)
     # Artifact-delivery rule (ART-4): the agent builds files in a per-tenant jail
     # the user can't reach, so a downloadable result MUST go through
     # deliver_artifact (which lands it in tenant blob storage and returns a real
@@ -2084,6 +2086,25 @@ DOES NOT EXIST in this environment:
   plainly. Don't fabricate instructions for a different environment.
 </runtime-identity>"""
 
+
+# In-app links. The chat renders ``mc://<kind>/<id>`` markdown links as chips
+# that open the thing in the app (paw-enterprise chat/mc-links.ts), and @slug
+# as an agent chip that opens the agent. Only kinds whose ids the agent actually
+# gets from tools or the prompt are listed, so it never has to guess one. Left out
+# of Paw Bar concierge runs: they render on a customer's site, not in the app.
+_IN_APP_LINKS_RULE = """\
+<in-app-links>
+The chat turns these into clickable links that open the thing in the app. Use
+them whenever your reply names one of these, with an id you got from a tool
+result or from this prompt. Never guess an id; without one, use plain text.
+
+- A pocket: [Pocket name](mc://pocket/<pocket id>)
+- A channel or room: [#handle](mc://channel/<room id>)
+- An image, video or audio you generated: [short title](mc://studio/<file name>),
+  where <file name> is the last segment of its media path
+  (/api/v1/media/<file name>).
+- An agent or a teammate: write @<slug>, e.g. @research-agent, not a link.
+</in-app-links>"""
 
 # Artifact delivery (ART-4). The cloud agent's working directory is a per-tenant
 # jail on the server's filesystem — the user has no shell, no SSH, and cannot
