@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -8231,11 +8231,11 @@ wheels = [
 
 [[package]]
 name = "types-aiofiles"
-version = "25.1.0.20260409"
+version = "25.1.0.20260518"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/6c/66/9e62a2692792bc96c0f423f478149f4a7b84720704c546c8960b0a047c89/types_aiofiles-25.1.0.20260409.tar.gz", hash = "sha256:49e67d72bdcf9fe406f5815758a78dc34a1249bb5aa2adba78a80aec0a775435", size = 14812, upload-time = "2026-04-09T04:22:35.308Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/42/f5b9b90162d2196f016b87228d6bf43f2c2c0c6501bfd5415001b3eb68bb/types_aiofiles-25.1.0.20260518.tar.gz", hash = "sha256:c0c95eb78755d4fa7b397d4f0332c632714dd7cd0d17f49b96e31d4d7a8d8c76", size = 14891, upload-time = "2026-05-18T06:05:27.804Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/d0/28236f869ba4dfb223ecdbc267eb2bdb634b81a561dd992230a4f9ec48fa/types_aiofiles-25.1.0.20260409-py3-none-any.whl", hash = "sha256:923fedb532c772cc0f62e0ce4282725afa82ca5b41cabd9857f06b55e5eee8de", size = 14372, upload-time = "2026-04-09T04:22:34.328Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/3d/7a9ed9faafeae3aa3b5bc22fa5b979ff9cf3c83ecbe919b58eae07795b8c/types_aiofiles-25.1.0.20260518-py3-none-any.whl", hash = "sha256:f776bdfb4bec17f743d9ef042e61edf03bdcc7821fc08556fba9b63d873fdea9", size = 14377, upload-time = "2026-05-18T06:05:26.871Z" },
 ]
 
 [[package]]
