@@ -256,9 +256,10 @@ skipped. All keys are secrets, stored encrypted and never logged.
 
 | Setting | Env Variable | Type | Default | Description |
 |---------|-------------|------|---------|-------------|
-| `web_search_provider` | `POCKETPAW_WEB_SEARCH_PROVIDER` | enum | `tavily` | Search provider (`tavily`, `brave`) |
+| `web_search_provider` | `POCKETPAW_WEB_SEARCH_PROVIDER` | enum | `tavily` | Search provider (`tavily`, `brave`, `youcom`) |
 | `tavily_api_key` | `POCKETPAW_TAVILY_API_KEY` | string | — | Tavily API key |
 | `brave_search_api_key` | `POCKETPAW_BRAVE_SEARCH_API_KEY` | string | — | Brave Search key |
+| `youcom_api_key` | `POCKETPAW_YOUCOM_API_KEY` | string | — | Optional You.com key (`youcom` works without one; falls back to `YDC_API_KEY`) |
 
 ## Image Generation
 

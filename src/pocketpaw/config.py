@@ -1630,7 +1630,9 @@ class Settings(BaseSettings):
     web_search_provider: str = Field(
         default="tavily",
         description=(
-            "Web search provider: 'tavily', 'brave', 'parallel', or 'litellm'. "
+            "Web search provider: 'tavily', 'brave', 'parallel', 'youcom', or 'litellm'. "
+            "'youcom' works without a key (You.com's free keyless tier); set "
+            "``youcom_api_key`` (or ``YDC_API_KEY``) for the keyed API. "
             "'litellm' routes through the LiteLLM proxy's Search API "
             "(``POST {litellm_api_base}/v1/search``) instead of calling a "
             "vendor directly, so it reuses the proxy credentials already "
@@ -1671,6 +1673,13 @@ class Settings(BaseSettings):
     tavily_api_key: str | None = Field(default=None, description="Tavily search API key")
     brave_search_api_key: str | None = Field(default=None, description="Brave Search API key")
     parallel_api_key: str | None = Field(default=None, description="Parallel AI API key")
+    youcom_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Optional You.com API key. The 'youcom' search provider works without "
+            "one; with one it uses the keyed Web Search API. Falls back to YDC_API_KEY."
+        ),
+    )
     # Stock photography (Paw Sites imagery — search_stock_images). Both optional;
     # with neither set, stock search returns [] and sites ship text-only.
     pexels_api_key: str | None = Field(default=None, description="Pexels stock-photo API key")

@@ -505,3 +505,125 @@ class TestSearchBaseUrlOverride:
             await tool.execute(query="q")
 
         assert client.post.call_args[0][0] == "https://gw.example.com/v1/search"
+
+
+def _mock_async_client(mock_client_cls, resp):
+    mock_client = AsyncMock()
+    mock_client.get.return_value = resp
+    mock_client.post.return_value = resp
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client_cls.return_value = mock_client
+    return mock_client
+
+
+def _youcom_resp(payload):
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = payload
+    return resp
+
+
+class TestYouComProvider:
+    """The opt-in 'youcom' provider: keyless by default, keyed when a key is set."""
+
+    @patch("pocketpaw.tools.builtin.web_search.get_settings")
+    async def test_keyless_search_uses_the_free_endpoint(self, mock_settings, tool, monkeypatch):
+        monkeypatch.delenv("YDC_API_KEY", raising=False)
+        mock_settings.return_value = MagicMock(web_search_provider="youcom", youcom_api_key=None)
+        resp = _youcom_resp(
+            {
+                "results": {
+                    "web": [
+                        {
+                            "title": "Python Docs",
+                            "url": "https://docs.python.org",
+                            "description": "Official Python documentation",
+                        },
+                        {"title": "No URL", "url": ""},
+                    ],
+                    "news": [
+                        {
+                            "title": "Python 3.14 released",
+                            "url": "https://news.example/py314",
+                            "snippets": ["Release notes"],
+                        }
+                    ],
+                }
+            }
+        )
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = _mock_async_client(mock_client_cls, resp)
+            result = await tool.execute(query="python docs", num_results=3)
+
+        assert "Python Docs" in result
+        assert "Python 3.14 released" in result
+        assert "Release notes" in result
+        assert "No URL" not in result
+        mock_client.post.assert_not_called()
+        call = mock_client.get.call_args
+        assert call.args[0] == "https://api.you.com/v1/agents/search"
+        assert call.kwargs["params"] == {"query": "python docs", "count": 3}
+        assert call.kwargs["headers"]["User-Agent"] == "youdotcom-integration/pocketpaw-pocketpaw"
+        assert "X-API-Key" not in call.kwargs["headers"]
+
+    @patch("pocketpaw.tools.builtin.web_search.get_settings")
+    async def test_keyed_search_posts_with_the_api_key(self, mock_settings, tool):
+        mock_settings.return_value = MagicMock(
+            web_search_provider="youcom", youcom_api_key="ydc-key"
+        )
+        resp = _youcom_resp({"results": {"web": [{"title": "A", "url": "https://a.example"}]}})
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = _mock_async_client(mock_client_cls, resp)
+            result = await tool.execute(query="q", num_results=2)
+
+        assert "https://a.example" in result
+        mock_client.get.assert_not_called()
+        call = mock_client.post.call_args
+        assert call.args[0] == "https://ydc-index.io/v1/search"
+        assert call.kwargs["headers"]["X-API-Key"] == "ydc-key"
+        assert call.kwargs["json"] == {"query": "q", "count": 2}
+
+    @patch("pocketpaw.tools.builtin.web_search.get_settings")
+    async def test_ydc_api_key_env_is_the_fallback(self, mock_settings, tool, monkeypatch):
+        monkeypatch.setenv("YDC_API_KEY", "env-key")
+        mock_settings.return_value = MagicMock(web_search_provider="youcom", youcom_api_key=None)
+        resp = _youcom_resp({"results": {"web": []}})
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = _mock_async_client(mock_client_cls, resp)
+            result = await tool.execute(query="q")
+
+        assert "No results found" in result
+        assert mock_client.post.call_args.kwargs["headers"]["X-API-Key"] == "env-key"
+
+    @patch("pocketpaw.tools.builtin.web_search.get_settings")
+    async def test_keyless_rate_limit_explains_the_key(self, mock_settings, tool, monkeypatch):
+        monkeypatch.delenv("YDC_API_KEY", raising=False)
+        mock_settings.return_value = MagicMock(web_search_provider="youcom", youcom_api_key=None)
+        resp = MagicMock()
+        resp.status_code = 429
+        resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "429", request=MagicMock(), response=MagicMock(status_code=429)
+        )
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            _mock_async_client(mock_client_cls, resp)
+            result = await tool.execute(query="q")
+
+        assert "Error" in result
+        assert "POCKETPAW_YOUCOM_API_KEY" in result
+
+    @patch("pocketpaw.tools.builtin.web_search.get_settings")
+    async def test_unknown_provider_lists_youcom(self, mock_settings, tool):
+        mock_settings.return_value = MagicMock(web_search_provider="bogus")
+        assert "youcom" in await tool.execute(query="q")
+
+    def test_default_provider_is_unchanged(self):
+        from pocketpaw.config import Settings
+
+        assert Settings.model_fields["web_search_provider"].default == "tavily"
+        assert Settings.model_fields["youcom_api_key"].default is None

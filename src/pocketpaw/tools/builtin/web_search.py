@@ -20,8 +20,14 @@
 #   returns ``extra_forbidden`` and the call 500s). The id rides the
 #   ``x-litellm-end-user-id`` header instead, which the proxy consumes and does
 #   not forward.
+# 2026-11-12: added the opt-in 'youcom' provider. It works with no key on
+#   You.com's free keyless tier (GET api.you.com/v1/agents/search); when
+#   POCKETPAW_YOUCOM_API_KEY (or YDC_API_KEY) is set it calls the keyed Web
+#   Search API (POST ydc-index.io/v1/search) instead. The default provider is
+#   unchanged.
 
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -35,10 +41,14 @@ logger = logging.getLogger(__name__)
 _TAVILY_URL = "https://api.tavily.com/search"
 _BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
 _PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1beta/search"
+_YOUCOM_KEYLESS_URL = "https://api.you.com/v1/agents/search"
+_YOUCOM_KEYED_URL = "https://ydc-index.io/v1/search"
+# Sent only on requests to You.com hosts, so You.com can attribute the traffic.
+_YOUCOM_USER_AGENT = "youdotcom-integration/pocketpaw-pocketpaw"
 
 
 class WebSearchTool(BaseTool):
-    """Search the web using Tavily, Brave, or Parallel AI Search API."""
+    """Search the web using Tavily, Brave, Parallel AI, You.com, or the LiteLLM proxy."""
 
     @property
     def name(self) -> str:
@@ -97,12 +107,15 @@ class WebSearchTool(BaseTool):
             return await self._search_brave(query, num_results, settings.brave_search_api_key)
         elif provider == "parallel":
             return await self._search_parallel(query, num_results, settings.parallel_api_key)
+        elif provider == "youcom":
+            api_key = getattr(settings, "youcom_api_key", None) or os.environ.get("YDC_API_KEY")
+            return await self._search_youcom(query, num_results, api_key)
         elif provider == "litellm":
             return await self._search_litellm(query, num_results, settings)
         else:
             return self._error(
                 f"Unknown search provider '{provider}'. "
-                "Use 'tavily', 'brave', 'parallel', or 'litellm'."
+                "Use 'tavily', 'brave', 'parallel', 'youcom', or 'litellm'."
             )
 
     async def _search_tavily(self, query: str, num_results: int, api_key: str | None) -> str:
@@ -218,6 +231,60 @@ class WebSearchTool(BaseTool):
 
         except httpx.HTTPStatusError as e:
             return self._error(f"Parallel AI API error: {e.response.status_code}")
+        except Exception as e:
+            return self._error(f"Search failed: {e}")
+
+    async def _search_youcom(self, query: str, num_results: int, api_key: str | None) -> str:
+        """Search with You.com. No key needed; a key switches to the keyed API.
+
+        Without a key this uses the free keyless tier (about 100 searches a
+        day). With one it uses the Web Search API for higher limits. Both
+        return ``{"results": {"web": [...], "news": [...]}}``.
+        """
+        api_key = (api_key or "").strip()
+        headers = {"User-Agent": _YOUCOM_USER_AGENT, "Accept": "application/json"}
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                if api_key:
+                    resp = await client.post(
+                        _YOUCOM_KEYED_URL,
+                        headers={**headers, "X-API-Key": api_key},
+                        json={"query": query, "count": num_results},
+                    )
+                else:
+                    resp = await client.get(
+                        _YOUCOM_KEYLESS_URL,
+                        headers=headers,
+                        params={"query": query, "count": num_results},
+                    )
+                resp.raise_for_status()
+                data = resp.json()
+
+            block = data.get("results") or {}
+            items = list(block.get("web") or []) + list(block.get("news") or [])
+            items = [r for r in items if r.get("url")]
+            if not items:
+                return f"No results found for: {query}"
+
+            # Normalize You.com results to common format
+            normalized = [
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("url", ""),
+                    "content": r.get("description") or " ".join(r.get("snippets") or []),
+                }
+                for r in items[:num_results]
+            ]
+            return self._format_results(query, normalized)
+
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status == 429 and not api_key:
+                return self._error(
+                    "You.com keyless daily limit reached (429). "
+                    "Set POCKETPAW_YOUCOM_API_KEY for higher limits."
+                )
+            return self._error(f"You.com API error: {status}")
         except Exception as e:
             return self._error(f"Search failed: {e}")
 
