@@ -26,8 +26,8 @@
 #   * the published view (``published_view``): a purged row remembers the published
 #     content hash and url, so the builder shows the live site for that content
 #     instead of rebuilding a draft. ``reopen_for_editing`` sets ``reopened_hash`` to
-#     that hash so it builds a draft again; the next publish clears it, and a purge
-#     that is not a publish keeps it.
+#     that hash (and ``reopened_at``) so it builds a draft again; the next publish
+#     clears a reopen older than itself, and a purge that is not a publish keeps it.
 #   * ``proxy_target``: which token the preview origin proxies (only the deployed
 #     hash of a ``live`` row; an older hash of a proxied draft is ``SUPERSEDED``).
 #   * Durable Objects (``durable_objects``): the row keeps the draft script's tag
@@ -66,6 +66,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
+from pocketpaw_ee.sites.site_secrets import PLATFORM_SIGNING_SECRETS
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +87,9 @@ GUARD_MODULE = "__paw_draft_guard.mjs"
 DRAFT_KEY_BINDING = "PAW_DRAFT_KEY"
 DRAFT_KEY_HEADER = "x-paw-draft-key"
 
-#: Session-signing secrets a draft never shares with production.
-SIGNING_SECRETS = ("BETTER_AUTH_SECRET", "AUTH_SECRET", "SESSION_SECRET")
+#: Session-signing secrets a draft never shares with production (the platform
+#: mints the live ones at publish, so no owner is asked for them).
+SIGNING_SECRETS = PLATFORM_SIGNING_SECRETS
 #: ``NAME__DRAFT`` binds as ``NAME`` in a draft, in place of the live value.
 DRAFT_SUFFIX = "__DRAFT"
 #: Platform env set to the draft's preview origin; wins over owner values.
@@ -169,16 +171,26 @@ def draft_resource_id(pocket_id: str) -> str:
     return f"draft{env_tag()}{_pid(pocket_id)}"
 
 
+def signing_value_for(signing_value: str, name: str) -> str:
+    """One draft signing secret per name: HMAC-SHA256(draft secret, name), so no two
+    names share a value and none of them is the stored secret itself."""
+    import hashlib
+    import hmac
+
+    return hmac.new(signing_value.encode(), name.encode(), hashlib.sha256).hexdigest()
+
+
 def draft_secrets(owner: Mapping[str, str], *, signing_value: str) -> dict[str, str]:
     """The secrets a draft binds: ONLY each owner ``NAME__DRAFT`` (bound as ``NAME``)
-    plus the draft's own session-signing value. A production value never reaches a
-    draft; a secret with no draft value is simply not bound."""
+    plus the draft's own session-signing value per name (``signing_value_for``). A
+    production value never reaches a draft; a secret with no draft value is simply
+    not bound."""
     out: dict[str, str] = {}
     for name, value in owner.items():
         if name.endswith(DRAFT_SUFFIX) and len(name) > len(DRAFT_SUFFIX):
             out[name[: -len(DRAFT_SUFFIX)]] = value
     for name in SIGNING_SECRETS:
-        out[name] = signing_value
+        out[name] = signing_value_for(signing_value, name)
     return out
 
 
@@ -251,6 +263,9 @@ class DraftRecord:
     # The owner opened a draft of the published content (``reopen_for_editing``):
     # equal to ``published_hash`` means "build a draft", not "show the live site".
     reopened_hash: str = ""
+    # When that reopen happened: keys the builder's per-reopen preview retry, and a
+    # publish's purge clears only a reopen older than the publish.
+    reopened_at: datetime | None = None
     version: int = 0
 
     def to_dict(self) -> dict[str, Any]:
@@ -440,11 +455,21 @@ async def published_view(
     """``(True, url or None)`` when ``content_hash`` is what this pocket last
     published and its drafts were purged: the builder shows the live site. A
     content the owner reopened for editing (``reopened_hash``) builds a draft."""
+    is_published, url, _epoch = await draft_view(pocket_id, content_hash, registry=registry)
+    return is_published, url
+
+
+async def draft_view(
+    pocket_id: str, content_hash: str, *, registry: Any = None
+) -> tuple[bool, str | None, str]:
+    """:func:`published_view` plus the reopen epoch: the ISO time of the pocket's last
+    ``reopen_for_editing`` ("" when none). One registry read."""
     rec = await (registry or default_registry()).get(pocket_id)
+    epoch = _aware(rec.reopened_at).isoformat() if rec is not None and rec.reopened_at else ""
     if not _in_published_view(rec, content_hash):
-        return False, None
+        return False, None, epoch
     assert rec is not None
-    return True, rec.published_url or None
+    return True, rec.published_url or None, epoch
 
 
 def _in_published_view(rec: DraftRecord | None, content_hash: str) -> bool:
@@ -466,7 +491,7 @@ async def reopen_for_editing(pocket_id: str, content_hash: str, *, registry: Any
         if not _in_published_view(rec, content_hash):
             return False
         assert rec is not None
-        rec.reopened_hash = content_hash
+        rec.reopened_hash, rec.reopened_at = content_hash, datetime.now(UTC)
         # Compare-and-set so a purge or deploy writing the row meanwhile is not undone.
         if await registry.cas(rec, rec.version):
             _invalidate(pocket_id)
@@ -1027,6 +1052,7 @@ async def purge_pocket_drafts(
     reason: str,
     published_hash: str = "",
     published_url: str = "",
+    published_at: datetime | None = None,
     forget: bool = False,
     cf: Any = None,
     registry: Any = None,
@@ -1035,19 +1061,32 @@ async def purge_pocket_drafts(
     """Delete every draft of a pocket: its preview tokens and files, its draft
     Worker and its draft-only D1 / KV / R2. True when nothing is left. ``forget``
     drops the row too (the site or pocket is gone); otherwise the row stays
-    ``purged`` and remembers what was published."""
+    ``purged`` and remembers what was published. ``published_at`` (when the deploy
+    returned) keeps an open-draft that landed after it: only an older reopen is
+    cleared, and the first write is a compare-and-set so a reopen racing it is not
+    overwritten."""
     registry = registry or default_registry()
     if store is None:
         from pocketpaw_ee.sites import service as sites_service
 
         store = sites_service._default_artifact_store()
     rec = await registry.get(pocket_id)
-    if rec is not None:
+    for _attempt in range(3):
+        if rec is None:
+            break
         if published_hash or published_url:
-            # A publish ends any "opened for editing": back to the published view.
+            # A publish ends any "opened for editing" older than itself: back to the
+            # published view.
             rec.published_hash, rec.published_url = published_hash, published_url
-            rec.reopened_hash = ""
+            reopened = _aware(rec.reopened_at)
+            if published_at is None or reopened is None or reopened < _aware(published_at):
+                rec.reopened_hash = ""
         rec.state, rec.deployed_hash = "deleting", ""
+        if await registry.cas(rec, rec.version):
+            break
+        rec = await registry.get(pocket_id)
+    else:
+        assert rec is not None
         await registry.put(rec)
     _invalidate(pocket_id)
     previews_ok = _purge_previews(store, pocket_id)

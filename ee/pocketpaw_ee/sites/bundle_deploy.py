@@ -191,6 +191,10 @@ class BundleDeployResult:
     migration_tags: tuple[str, ...] = ()
 
 
+#: Plain-text vars that ride with ``PAW_GATEWAY_TOKEN`` (``integrations.bindings.platform_vars``).
+GATEWAY_VARS = frozenset({"PAW_API_BASE", "PAW_SITE_ID"})
+
+
 def _refuse(message: str) -> ValidationError:
     return ValidationError("sites.bundle_invalid", message)
 
@@ -688,11 +692,16 @@ def load_bundle(build_dir: str | Path, provisioned: ProvisionedResources) -> Paw
 
 
 def _map_into(bundle: PawBundle, manifest: dict, provisioned: ProvisionedResources) -> None:
-    if not bundle.modules and provisioned.secrets:
+    if not bundle.modules and (provisioned.secrets or GATEWAY_VARS & provisioned.plain_text.keys()):
         # An assets-only Worker (a no-build site, a static build) has no code to read a
-        # secret, so none is sent to Cloudflare. Its pages reach the integrations
-        # gateway from the browser instead (paw.js + the public site key).
-        provisioned = replace(provisioned, secrets={})
+        # secret, so none is sent to Cloudflare, nor the vars that go with the gateway
+        # token. Its pages reach the integrations gateway from the browser instead
+        # (paw.js + the public site key).
+        provisioned = replace(
+            provisioned,
+            secrets={},
+            plain_text={k: v for k, v in provisioned.plain_text.items() if k not in GATEWAY_VARS},
+        )
     bindings, binding_warnings = map_bindings(
         manifest.get("bindingRequests"),
         manifest.get("droppedBindings"),

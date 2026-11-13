@@ -157,60 +157,83 @@ async def test_preview_does_not_stamp_deployed_at(beanie_test_db, monkeypatch, t
 # ---------------------------------------------------------------------------
 
 WS = "ws-rev"
-POCKET = "pocket-rev"
 USER = "user-rev"
+ONE = {"index.html": "<h1>one</h1>\n"}
+TWO = {"index.html": "<h1>two</h1>\n"}
+
+
+async def _pocket(source: dict) -> str:
+    """An html site pocket in ``WS`` owned by ``USER``; a revert reads and writes it."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    _view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id=WS,
+        owner_id=USER,
+        name="Rev",
+        type_="site",
+        pattern="landing",
+        ripple_spec=None,
+        engine="html",
+        source=dict(source),
+        trusted=True,
+    )
+    assert err is None, err
+    return pocket_id
 
 
 async def test_revert_creates_draft_from_prior_version(beanie_test_db):
     """``revert_pocket_version`` writes a NEW forward-moving DRAFT whose content is a
     snapshot of the target version — the normal review/publish flow then applies."""
+    pocket = await _pocket(TWO)
     # v1 (published live), v2 (a later edit). We revert back to v1.
     v1 = await versions.write_draft(
-        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": "one"}
+        scope_type="pocket", scope_id=pocket, workspace_id=WS, content=dict(ONE)
     )
     await versions.publish(
-        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v1.id)
+        scope_type="pocket", scope_id=pocket, workspace_id=WS, version_id=str(v1.id)
     )
     await versions.write_draft(
-        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": "two"}
+        scope_type="pocket", scope_id=pocket, workspace_id=WS, content=dict(TWO)
     )
 
     new_draft = await sites_service.revert_pocket_version(
-        workspace_id=WS, user_id=USER, pocket_id=POCKET, version_no=v1.version_no
+        workspace_id=WS, user_id=USER, pocket_id=pocket, version_no=v1.version_no
     )
 
     # A NEW draft, forward of the head, carrying v1's content (revert never mutates
     # history — it is a fresh snapshot the operator can then publish).
     assert new_draft.status == "draft"
-    assert new_draft.content == {"v": "one"}
+    assert new_draft.content == ONE
     assert new_draft.version_no > v1.version_no
     assert new_draft.author == USER
     assert new_draft.label == f"Revert to v{v1.version_no}"
 
     # It is the current draft for the pocket (request-publish would pick it up).
-    head_draft = await versions.get_draft(scope_type="pocket", scope_id=POCKET)
+    head_draft = await versions.get_draft(scope_type="pocket", scope_id=pocket)
     assert head_draft is not None
     assert head_draft.id == new_draft.id
 
 
 async def test_revert_unknown_version_no_raises(beanie_test_db):
     """An unknown version_no → ValueError (the router maps it to a 404)."""
+    pocket = await _pocket(ONE)
     await versions.write_draft(
-        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": 1}
+        scope_type="pocket", scope_id=pocket, workspace_id=WS, content=dict(ONE)
     )
     with pytest.raises(ValueError):
         await sites_service.revert_pocket_version(
-            workspace_id=WS, user_id=USER, pocket_id=POCKET, version_no=999
+            workspace_id=WS, user_id=USER, pocket_id=pocket, version_no=999
         )
 
 
 async def test_revert_is_tenant_scoped(beanie_test_db):
     """A version_no that exists only under ANOTHER workspace is 'not found' for this
     caller — the tenant guard treats it as no such version → ValueError."""
+    pocket = await _pocket(ONE)
     foreign = await versions.write_draft(
-        scope_type="pocket", scope_id=POCKET, workspace_id="ws-OTHER", content={"v": 1}
+        scope_type="pocket", scope_id=pocket, workspace_id="ws-OTHER", content=dict(TWO)
     )
     with pytest.raises(ValueError):
         await sites_service.revert_pocket_version(
-            workspace_id=WS, user_id=USER, pocket_id=POCKET, version_no=foreign.version_no
+            workspace_id=WS, user_id=USER, pocket_id=pocket, version_no=foreign.version_no
         )

@@ -164,6 +164,9 @@ ROUTER_MODULES = [
     # Sites integrations. Owner routes take request_context; the three public ones
     # are on the allowlist below. Authz is asserted in tests/ee/sites/test_integrations_*.
     ("integrations", "pocketpaw_ee.integrations.router"),
+    # Site AI apps. Owner routes take request_context (sites.ai_manage to write);
+    # authz is asserted in tests/ee/sites/test_site_ai_*.
+    ("site_ai", "pocketpaw_ee.site_ai.router"),
     # Early access (EA-7): one public route, on the allowlist below.
     ("early_access", "pocketpaw_ee.cloud.early_access.router"),
 ]
@@ -174,6 +177,7 @@ ROUTER_ATTRS: dict[str, tuple[str, ...]] = {
     "pocketpaw_ee.cloud.ai_visibility.router": ("router", "site_router"),
     "pocketpaw_ee.cloud.partners.router": ("router", "pros_router"),
     "pocketpaw_ee.integrations.router": ("router", "public_router"),
+    "pocketpaw_ee.site_ai.router": ("router", "public_router"),
 }
 
 #: Routes that are public BY DESIGN, each with the reason it has to be.
@@ -267,6 +271,18 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
         "PAW_GATEWAY_TOKEN (constant-time), Turnstile on writes, SiteRateCounter"
     ),
     "POST /integrations/webhooks/{provider}": "provider webhook; provider signature verified",
+    "POST /sites/{site_id}/ai/ticket": (
+        "site AI visitor ticket; per-IP bucket, site key + origin gate, Turnstile "
+        "(fail closed), per-IP mint rate limit"
+    ),
+    "POST /sites/{site_id}/ai/embed": (
+        "site AI embeddings; same gates as /ai/chat (token, or site key + origin + "
+        "ticket), plan allowlist, rate and spend caps"
+    ),
+    "POST /sites/{site_id}/ai/chat": (
+        "site AI API; per-IP bucket, then PAW_GATEWAY_TOKEN (constant-time) or the "
+        "site key + origin gate + visitor ticket, per-site/visitor rate and spend caps"
+    ),
     "GET /integrations/social/{provider}/authorize": (
         "visitor sign-in consent page; the site must bind social_login with that "
         "provider on, return_to must be the site's own host, per-IP counter"
@@ -281,6 +297,18 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     "POST /integrations/social/redeem": (
         "site Worker only; the site's PAW_GATEWAY_TOKEN (constant-time) plus a "
         "single-use 60s ticket bound to the site and the visitor's cookie nonce"
+    ),
+    "POST /integrations/owner-sign-in/redeem": (
+        "site Worker only; the site's PAW_GATEWAY_TOKEN (constant-time) plus a "
+        "single-use 60s owner ticket bound to the site id, minted for a Paw session"
+    ),
+    "POST /integrations/owner-sign-in/check": (
+        "site Worker only; the site's PAW_GATEWAY_TOKEN (constant-time); answers one "
+        "site account's current role, failures capped per IP and site"
+    ),
+    "POST /integrations/owner-sign-in/peek": (
+        "site Worker only; the site's PAW_GATEWAY_TOKEN (constant-time); shows a "
+        "ticket's name/email/role without spending it, failures capped per IP and site"
     ),
     # --- git smart-HTTP: authenticates in-handler, not via a FastAPI dep ---
     "GET /codegit/{owner}/{repo}/info/refs": "git protocol; own token auth in-handler",

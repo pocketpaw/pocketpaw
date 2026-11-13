@@ -5,7 +5,9 @@
 # ``SiteResponse`` is the one wire shape for a site, mapped from the document in
 # ``service._to_response``; every field defaults so rows written before it existed
 # still serialize. Owner switches (``badge_hidden``, ``ai_training_allowed``) are the
-# stored PREFERENCE and reach the live page on the next publish. Status and
+# stored PREFERENCE and reach the live page on the next publish. ``generation`` /
+# ``generation_session_id`` (list row and by-pocket status) say whether the agent
+# run that created the site is still building it; None on deployed sites. Status and
 # analytics responses carry counts and states only, never diagnostics text.
 # Length caps on owner-typed text live here, so an over-long value is a 422 at the
 # edge rather than a silently truncated record.
@@ -13,10 +15,30 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
+
+
+def utc_iso(moment: datetime | None) -> str | None:
+    """A stamp as ISO-8601 in UTC with an explicit offset, or None.
+
+    Mongo stores datetimes with no zone, so a value written tz-aware reads back
+    NAIVE; it was UTC when written, so a naive value is tagged UTC. A zone-less ISO
+    string on the wire is parsed by the browser as LOCAL time, which put "Last
+    deployed" hours off for anyone outside UTC. Every timestamp the sites API
+    returns goes through here (string fields) or ``UtcDateTime`` (typed fields).
+    """
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat()
+
+
+# A datetime field that serializes as ``utc_iso`` does: UTC with an offset.
+UtcDateTime = Annotated[datetime, PlainSerializer(utc_iso, return_type=str, when_used="json")]
 
 
 class PublishRequest(BaseModel):
@@ -37,6 +59,10 @@ class PublishRequest(BaseModel):
     # ``deleted_classes`` / ``renamed_classes`` migration). Only the owner's publish
     # dialog sends it. See ``sites.durable_objects``.
     confirm_do_data_loss: list[str] = Field(default_factory=list)
+    # The owner chose to go live although the draft still shows placeholders, a
+    # made-up phone number or a form that saves nothing (409 ``sites.publish_blocked``
+    # lists them). See ``sites.publish_gate``.
+    confirm_placeholders: bool = False
 
 
 class SitePlanRequestBody(BaseModel):
@@ -259,6 +285,13 @@ class SiteResponse(BaseModel):
     # set of rungs is closed forever, for the same reason it must not error on an
     # unrecognised ``build_status``.
     build_reason: str | None = None
+    # Is the agent run that CREATED this site still working on it? ``generating`` |
+    # ``waiting`` (that run ended on an unanswered ``ask_user``) | ``ready``; None =
+    # never tracked (behave as before). Resolved on read (``sites.generation``), and
+    # always None for a deployed site. Independent of ``build_status`` and publish.
+    generation: Literal["generating", "waiting", "ready"] | None = None
+    # The chat session the creating run lives in, so a reload can reattach to it.
+    generation_session_id: str | None = None
     # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,
     # title}], asset_count, asset_bytes, forms: [{page, original_action, rewired}],
     # scripts, warnings} (from-url adds status/source_url). None for every
@@ -607,6 +640,10 @@ class SiteStatusResponse(BaseModel):
     build_status: str = "none"
     build_reason: str | None = None
     build_job_id: str | None = None
+    # The same ``generation`` pair ``SiteResponse`` carries (see there): the by-pocket
+    # read is what the builder polls after a reload. None with no Site doc.
+    generation: Literal["generating", "waiting", "ready"] | None = None
+    generation_session_id: str | None = None
     # ── The site's BILLING state on the by-pocket read ──────────────────────────
     #
     # The frontend has declared these on its own ``SiteStatusResponse`` since BC-11
@@ -664,11 +701,25 @@ class SiteStatusResponse(BaseModel):
 
 
 class OpenDraftResponse(BaseModel):
-    """``POST /sites/by-pocket/{pocket_id}/open-draft``. ``opened`` is False when the
-    pocket already showed a draft (a no-op success)."""
+    """``POST /sites/by-pocket/{pocket_id}/open-draft``. ``opened`` is False on a no-op
+    success, and ``reason`` says why: ``already_draft``, ``not_project`` or
+    ``draft_workers_off`` (None when opened)."""
 
     pocket_id: str
     opened: bool
+    reason: str | None = None
+
+
+class DiscardDraftResponse(BaseModel):
+    """``POST /sites/by-pocket/{pocket_id}/discard-draft``. ``restored`` is False when
+    the source already matched the published version (a no-op success);
+    ``rejected_reviews`` counts pending publish reviews the discard closed."""
+
+    pocket_id: str
+    restored: bool
+    discarded_versions: int
+    rejected_reviews: int
+    published_version_no: int
 
 
 class SiteVersionResponse(BaseModel):
@@ -1493,7 +1544,7 @@ class SiteTransferResponse(BaseModel):
     from_workspace_id: str
     to_workspace_id: str = ""
     offered_by: str = ""
-    offered_at: datetime | None = None
+    offered_at: UtcDateTime | None = None
     status: str = "none"
 
 
@@ -1538,12 +1589,12 @@ class OriginClaimResponse(BaseModel):
     host: str
     token: str
     status: str
-    expires_at: datetime
+    expires_at: UtcDateTime
     # The two places the owner may publish it, rendered rather than described, so
     # the panel can offer a copy button instead of an instruction to interpret.
     well_known_url: str
     meta_tag: str
-    verified_at: datetime | None = None
+    verified_at: UtcDateTime | None = None
     method: str = ""
 
 
@@ -1560,7 +1611,7 @@ class OriginVerificationResponse(BaseModel):
     host: str
     status: str
     method: str
-    verified_at: datetime | None = None
+    verified_at: UtcDateTime | None = None
 
 
 class ForeignConciergeBindRequest(BaseModel):
@@ -1609,7 +1660,7 @@ class ForeignConciergeOrigin(BaseModel):
 
     host: str
     verified: bool
-    verified_at: datetime | None = None
+    verified_at: UtcDateTime | None = None
     verification_fresh: bool = False
 
 
@@ -1663,7 +1714,7 @@ class ForeignConciergeResponse(BaseModel):
     origins: list[ForeignConciergeOrigin] = Field(default_factory=list)
     plan_tier: str = ""
     subscription_status: str = "none"
-    renewal_date: datetime | None = None
+    renewal_date: UtcDateTime | None = None
     # The resolver's own answer to "would a visitor get a bar that talks?" —
     # ``auth.site_keys.concierge_available``, the predicate every public paw-bar
     # seam asks. Kept beside the snippet because they can disagree for one

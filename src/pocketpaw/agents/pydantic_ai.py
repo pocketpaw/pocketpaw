@@ -1196,7 +1196,7 @@ class PydanticAIBackend:
                 "pip_spec": "pocketpaw[pydantic-ai]",
                 "verify_import": "pydantic_ai",
             },
-            beta=True,
+            # Not beta: this is the cloud chat default path.
         )
 
     def __init__(self, settings: Settings, policy: ToolPolicy | None = None) -> None:
@@ -2691,6 +2691,13 @@ class PydanticAIBackend:
         # builtins below the MCP layer are dropped too, because no MCP allow set
         # reaches them and a deny list cannot enumerate them. In the cache key.
         exclusive_tools: bool = False,
+        # An isolated run (a side completion for a site's AI API). Honoured by
+        # construction: this backend adds nothing to the system prompt the pool
+        # assembled (no soul, skills or agent layers of its own; skills only ride
+        # as a tool, which ``tools_enabled=False`` drops), so there is nothing to
+        # switch off. Declared so the pool forwards it and ``side_completion``
+        # knows this backend is safe to run isolated.
+        isolated: bool = False,
         # Accepted and deliberately unused — each is Claude-SDK plumbing with no
         # analogue here, and each is safe to drop:
         #   ``session_handle`` /  native CLI-session resume and warm-client

@@ -113,8 +113,11 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
     - ``sweep_do_usage``: daily Durable Object usage per site from Cloudflare GraphQL
       analytics; flips ``do_throttled`` past the plan's ceiling. Fails open; at most
       once an interval; no-op unless PAW_SITES_DURABLE_OBJECTS is on.
+    - ``sweep_slug_redirects``: delete the redirect Worker of a renamed site's old
+      address once its 30-day hold ends, freeing the name.
     - ``sweep_do_teardowns``: retry DO teardowns a site delete could not finish, with
       backoff, then hand them to an operator (same flag).
+    - ``sweep_expired_holds``: release site AI budget holds whose call died.
     - ``backfill_tenant_keys`` (tick only): mint LiteLLM tenant keys for up to 50
       live workspaces with none, since workspace create never retries a failed
       mint. Skipped on the boot pass, where a down proxy would hold startup.
@@ -128,10 +131,12 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
     from pocketpaw_ee.cloud.llm_provisioning.service import backfill_tenant_keys
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.cloud.partners.service import sweep_partner_tiers
+    from pocketpaw_ee.site_ai.budget import sweep_expired_holds
     from pocketpaw_ee.sites.do_metering import sweep_do_teardowns, sweep_do_usage
     from pocketpaw_ee.sites.draft_worker import sweep_draft_workers
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
     from pocketpaw_ee.sites.renewal_sweeper import sweep_site_renewals
+    from pocketpaw_ee.sites.slug_redirect import sweep_slug_redirects
 
     cluster = [
         sweep_stale_runs,
@@ -143,7 +148,9 @@ def _sweeps() -> tuple[list[Any], list[Any]]:
         sweep_subscription_grace,
         sweep_draft_workers,
         sweep_do_usage,
+        sweep_slug_redirects,
         sweep_do_teardowns,
+        sweep_expired_holds,
         backfill_tenant_keys,
     ]
     return cluster, [sweep_agent_jails]
@@ -1242,6 +1249,31 @@ class CloudReferoMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.refero import REFERO_TOOL_IDS
 
         return list(REFERO_TOOL_IDS)
+
+
+class CloudFigmaMcpProvider:
+    """`pocketpaw.mcp_servers` — the Figma design-read in-process server
+    (``pocketpaw_figma``). Hosts ``figma_inspect`` / ``figma_screenshot`` /
+    ``figma_assets`` for the /sites builder agent.
+
+    Ambient like refero, reachable only where an allow-list names it (/sites).
+    The tools refuse without a workspace ``figma`` grant and read only file keys
+    the owner pasted in the current chat session, so registering it costs a deploy
+    without a Figma app nothing.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.figma import build_figma_server
+
+            return build_figma_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.figma import FIGMA_TOOL_IDS
+
+        return list(FIGMA_TOOL_IDS)
 
 
 class CloudIconsMcpProvider:

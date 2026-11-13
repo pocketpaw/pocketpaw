@@ -1,0 +1,20 @@
+[
+  {
+    "label": "another workspace's site is discarded because the tenant check is gone",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    from pocketpaw_ee.versions import service as versions_service\n\n    pocket = await pockets_service.get(pocket_id, user_id)\n    if workspace_id != pocket.get(\"workspace\"):\n        raise NotFound(\"pocket\", pocket_id)",
+    "replace": "    from pocketpaw_ee.versions import service as versions_service\n\n    pocket = await pockets_service.get(pocket_id, user_id)\n    pass",
+    "tests": [
+      "tests/ee/sites/test_discard_draft.py::test_the_discard_route_is_a_404_for_another_workspace"
+    ]
+  },
+  {
+    "label": "a reader without edit access discards the owner's draft because the edit check is gone",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    from pocketpaw_ee.versions import service as versions_service\n\n    pocket = await pockets_service.get(pocket_id, user_id)\n    if workspace_id != pocket.get(\"workspace\"):\n        raise NotFound(\"pocket\", pocket_id)\n    if not await pockets_service.has_edit_access(pocket_id, user_id):\n        raise Forbidden(\"pocket.access_denied\", \"You do not have access to edit this site.\")",
+    "replace": "    from pocketpaw_ee.versions import service as versions_service\n\n    pocket = await pockets_service.get(pocket_id, user_id)\n    if workspace_id != pocket.get(\"workspace\"):\n        raise NotFound(\"pocket\", pocket_id)\n    pass",
+    "tests": [
+      "tests/ee/sites/test_discard_draft.py::test_discard_needs_edit_access"
+    ]
+  }
+]

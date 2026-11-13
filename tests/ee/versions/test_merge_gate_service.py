@@ -314,6 +314,14 @@ class _FakeSvelteDoc:
         self.save_calls += 1
 
 
+async def _fake_commit(doc, changes, *, guard_field="source"):  # type: ignore[no-untyped-def]
+    """Stands in for the pockets service's conditional write (the fake doc is not in
+    Mongo); counts as the doc's one persist."""
+    for name, value in changes.items():
+        setattr(doc, name, value)
+    await doc.save()
+
+
 def _wire_stubs(monkeypatch: pytest.MonkeyPatch, fake_doc: _FakeSvelteDoc) -> None:
     async def _fake_fetch(pocket_id: str):  # type: ignore[no-untyped-def]
         return fake_doc
@@ -328,6 +336,7 @@ def _wire_stubs(monkeypatch: pytest.MonkeyPatch, fake_doc: _FakeSvelteDoc) -> No
         return None
 
     monkeypatch.setattr(pockets_service, "_fetch_pocket", _fake_fetch)
+    monkeypatch.setattr(pockets_service, "_commit_fields", _fake_commit)
     monkeypatch.setattr(pockets_service, "_pocket_to_domain", lambda doc: object())
     monkeypatch.setattr(pockets_service, "_check_domain_edit_access", lambda *a, **k: None)
     monkeypatch.setattr(pockets_service, "_resolved_wire_dict", _fake_resolved_wire_dict)

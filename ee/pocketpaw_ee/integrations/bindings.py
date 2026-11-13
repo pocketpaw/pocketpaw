@@ -47,7 +47,7 @@
 # settings, or on the options route against draft query values checked the same
 # way (``_with_drafts``); neither touches the stored settings until a PUT passes.
 # Moving a binding to another connection (PUT or the OAuth callback) drops its
-# stored remote values: they name things in the old account.
+# stored remote values. ``site_bindable = False`` providers (Figma) never link.
 
 from __future__ import annotations
 
@@ -113,10 +113,18 @@ async def require_edit(workspace_id: str, user_id: str, pocket_id: str):
     return doc
 
 
-async def require_owner(workspace_id: str, user_id: str, pocket_id: str):
+async def require_owner(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    *,
+    action: str = "sites.integration.export",
+):
+    """The pocket, when ``user_id`` owns it; else a ``sites.not_owner`` 403, audited
+    under ``action`` (what the caller was trying to do)."""
     doc = await pocket_in_workspace(workspace_id, pocket_id)
     if doc.owner != user_id:
-        _deny(user_id, workspace_id, pocket_id, "sites.integration.export", "sites.not_owner")
+        _deny(user_id, workspace_id, pocket_id, action, "sites.not_owner")
         raise Forbidden("sites.not_owner", "Only the site owner can do that.")
     return doc
 
@@ -143,6 +151,17 @@ def provider_or_404(provider_id: str) -> IntegrationProvider:
     return provider
 
 
+def site_provider_or_404(provider_id: str) -> IntegrationProvider:
+    """``provider_or_404`` for a site binding: a workspace-only provider
+    (``site_bindable = False``, Figma) can never be linked to a site."""
+    provider = provider_or_404(provider_id)
+    if not getattr(provider, "site_bindable", True):
+        raise ValidationError(
+            "integrations.not_site_bindable", f"{provider.name} is not used by a site."
+        )
+    return provider
+
+
 # ------------------------------------------------------------------- views
 
 
@@ -165,6 +184,8 @@ def provider_view(provider: IntegrationProvider) -> ProviderView:
         ],
         settings_fields=settings_rules.field_views(provider),
         requires_connection=provider.kind == "connect",
+        site_bindable=bool(getattr(provider, "site_bindable", True)),
+        per_member=bool(getattr(provider, "per_member", False)),
         connect_params=[
             {
                 "key": p.key,
@@ -529,7 +550,7 @@ async def upsert(
     is_admin: bool = False,
 ) -> SiteIntegrationView:
     """``PUT /sites/by-pocket/{pocket_id}/integrations/{provider}``."""
-    provider = provider_or_404(provider_id)
+    provider = site_provider_or_404(provider_id)
     pocket = await require_edit(workspace_id, user_id, pocket_id)
     row = await _row(workspace_id, pocket_id, provider.id)
     if row is None:
@@ -581,7 +602,7 @@ async def upsert(
 
 async def link_connection(*, workspace_id: str, user_id: str, pocket_id: str, conn: Any):
     """The OAuth callback's link step: bind ``conn`` to the site (create if needed)."""
-    provider = provider_or_404(conn.provider)
+    provider = site_provider_or_404(conn.provider)
     pocket = await require_edit(workspace_id, user_id, pocket_id)
     row = await _row(workspace_id, pocket_id, provider.id)
     if row is None:
@@ -609,7 +630,7 @@ async def request_from_agent(
 ) -> SiteIntegrationView:
     """``connect_site_integration``: make sure a binding exists (needs_connection for
     a connect provider with no grant yet) and record why the agent wants it."""
-    provider = provider_or_404(provider_id)
+    provider = site_provider_or_404(provider_id)
     pocket = await require_edit(workspace_id, user_id, pocket_id)
     row = await _row(workspace_id, pocket_id, provider.id)
     created = row is None
@@ -669,6 +690,15 @@ async def ensure_gateway_token(workspace_id: str, pocket_id: str) -> None:
         )
     except Exception:  # noqa: BLE001
         logger.warning("integrations: could not mint the gateway token", exc_info=True)
+
+
+def platform_vars(site: Any) -> dict[str, str]:
+    """The plain-text vars a Worker holding ``PAW_GATEWAY_TOKEN`` needs to use it:
+    ``PAW_API_BASE`` (the public API, ending in /api/v1) and ``PAW_SITE_ID``. Read by
+    paw-sites' ``pawCall``, the social sign-in and the owner sign-in routes."""
+    from pocketpaw_ee.integrations import oauth
+
+    return {"PAW_API_BASE": f"{oauth.callback_base()}/api/v1", "PAW_SITE_ID": str(site.id)}
 
 
 async def ensure_gateway_token_if_linked(workspace_id: str, pocket_id: str) -> bool:

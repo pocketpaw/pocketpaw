@@ -830,6 +830,48 @@ async def test_newsletter_dedupes_and_exports_csv_to_the_owner_only(beanie_test_
 
 
 @pytest.mark.asyncio
+async def test_newsletter_subscribers_lists_count_and_latest_to_the_owner_only(beanie_test_db):
+    """The owner sees how many people signed up and the newest few next to Export,
+    instead of having to download a CSV to find out whether anyone did."""
+    from pocketpaw_ee.cloud.models.integration import NewsletterSubscriber
+
+    pid = await _pocket()
+    site = await _site(pid)
+    other = await _pocket()
+    await _link(pid, "newsletter")
+    base = datetime(2026, 10, 1, tzinfo=UTC)
+    for i in range(23):
+        await NewsletterSubscriber(
+            workspace=WS,
+            pocket_id=pid,
+            site_id=str(site.id),
+            email=f"p{i:02d}@example.com",
+            createdAt=base + timedelta(minutes=i),
+        ).insert()
+    await NewsletterSubscriber(workspace=WS, pocket_id=other, email="else@example.com").insert()
+    url = f"/api/v1/sites/by-pocket/{pid}/integrations/newsletter/subscribers"
+
+    async with _client() as c:
+        resp = await c.get(url)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 23
+    assert len(body["latest"]) == 20
+    assert body["latest"][0]["email"] == "p22@example.com"
+    assert body["latest"][-1]["email"] == "p03@example.com"
+    assert body["latest"][0]["subscribed_at"].endswith("+00:00")
+    assert resp.headers["cache-control"] == "no-store"
+
+    from unittest.mock import patch
+
+    with patch("pocketpaw_ee.guards.audit.log_denial") as log_denial:
+        async with _client(WS, EDITOR) as c:
+            denied = await c.get(url)
+    assert denied.status_code == 403
+    assert log_denial.call_args.kwargs["action"] == "sites.integration.newsletter.list"
+
+
+@pytest.mark.asyncio
 async def test_gateway_cors_answers_preflight_for_the_gateway_path_only():
     from pocketpaw_ee.integrations.gateway import GatewayCors
 
@@ -856,6 +898,33 @@ async def test_gateway_cors_answers_preflight_for_the_gateway_path_only():
         "/api/v1/sites/s1/x/newsletter/subscribe",
         "/api/v1/integrations/connections",
     ]
+
+
+@pytest.mark.asyncio
+async def test_site_cors_covers_the_ai_paths_and_lets_the_ticket_header_through():
+    from pocketpaw_ee.integrations.site_gate import GatewayCors
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    app = GatewayCors(inner)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        pre = await c.options(
+            "/api/v1/sites/s1/ai/chat",
+            headers={"origin": ORIGIN, "access-control-request-method": "POST"},
+        )
+        post = await c.post("/api/v1/sites/s1/ai/ticket", headers={"origin": ORIGIN})
+        owner = await c.post("/api/v1/sites/by-pocket/p1/ai/settings", headers={"origin": ORIGIN})
+        deep = await c.post("/api/v1/sites/s1/ai/chat/extra", headers={"origin": ORIGIN})
+    assert pre.status_code == 204 and pre.headers["access-control-allow-origin"] == ORIGIN
+    assert "x-paw-ai-ticket" in pre.headers["access-control-allow-headers"]
+    assert "authorization" not in pre.headers["access-control-allow-headers"]
+    assert post.headers["access-control-allow-origin"] == ORIGIN
+    assert "access-control-allow-origin" not in deep.headers
+    # The owner routes sit at /sites/by-pocket/{id}/ai/{name}: that shape is two
+    # segments deeper than the site path, so it never gets the open CORS answer.
+    assert "access-control-allow-origin" not in owner.headers
 
 
 # ---------------------------------------------------------- webhooks + orders
@@ -1015,6 +1084,8 @@ async def test_connect_tool_pushes_the_card_and_creates_the_binding(beanie_test_
         "settings_fields",
         "requires_connection",
         "connect_params",
+        "site_bindable",
+        "per_member",
     }
     assert set(data["site_integration"]) == {
         "provider",

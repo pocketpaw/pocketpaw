@@ -43,6 +43,9 @@ turn, daily turns, early-access reservation), which attempt 1 already paid.
 A run that ends with nothing to show (blank text and only stream_start,
 thinking, token_usage or chunk frames, no artifact, no question) is failed with
 ``run.empty_reply``, so an accepted run always ends in a reply or a visible error.
+Assistant text blocks split by a tool call or a thought are joined with a
+paragraph break (``_with_block_break``), carried inside the chunk frame so the
+live stream and the persisted text match.
 Every other terminal path persists the streamed text as an assistant ``Message`` with
 its steps, records token usage (latest-wins), and sets the stream TTL. A
 completed run that asked an ``ask_user`` question (either backend spelling,
@@ -1502,6 +1505,23 @@ def _chunk_text(event_data: dict[str, Any]) -> str:
     return content if isinstance(content, str) else ""
 
 
+# Frames that end the assistant text block before them: the next chunk starts a
+# new block. The PE stream client breaks on the same frames
+# (ChatSession.buildChatCallbacks), and since the break rides inside the chunk
+# frame the live reply and the persisted one are the same string.
+_BLOCK_BREAK_EVENTS = frozenset({"tool_start", "tool_result", "thinking"})
+BLOCK_SEPARATOR = "\n\n"
+
+
+def _with_block_break(full_text: str, chunk_text: str) -> str:
+    """``chunk_text`` as the first chunk of a new text block: a paragraph break
+    in front, unless there is no text yet or either side already has
+    whitespace. Without it two blocks ran together ("archive.The build...")."""
+    if not full_text or not chunk_text or full_text[-1].isspace() or chunk_text[0].isspace():
+        return chunk_text
+    return BLOCK_SEPARATOR + chunk_text
+
+
 def _ask_user_record(run_id: str, frame: dict[str, Any] | None) -> dict[str, Any] | None:
     """The ``MessageAskUser`` dict for a run's last ``ask_user_question`` frame.
 
@@ -2089,6 +2109,28 @@ async def _auto_model_fallback(workspace_id: str, default_model: str) -> str | N
     return None
 
 
+async def _note_figma_links(ctx: ScopeContext, user_content: str, surface: str | None) -> str:
+    """On /sites, record the Figma file keys the user pasted in their OWN message,
+    the only keys the ``pocketpaw_figma`` tools will read (``session_keys``), and
+    return the per-turn note that routes the build through the Figma path."""
+    if (
+        surface != "sites"
+        or ctx.kind is not ScopeKind.SESSION
+        or "figma.com" not in user_content.lower()
+    ):
+        return ""
+    try:
+        from pocketpaw_ee.cloud.surface.handlers.sites import figma_turn_note
+        from pocketpaw_ee.sites.figma import session_keys
+        from pocketpaw_ee.sites.figma.urls import find_links
+
+        await session_keys.note_message(ctx.workspace_id, ctx.scope_id, ctx.user_id, user_content)
+        return figma_turn_note(find_links(user_content))
+    except Exception:  # noqa: BLE001 - the tools then refuse the file; the turn runs
+        logger.warning("figma: could not record the pasted links", exc_info=True)
+        return ""
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -2110,6 +2152,7 @@ async def _drive_agent_loop(
     # titler names the thread from it, and the pool hands it to the model as
     # the user's turn. A turn with real text passes through untouched.
     user_content = resolve_user_content(user_content, attachments_in)
+    figma_note = await _note_figma_links(ctx, user_content, surface)
     pool = get_agent_pool()
     try:
         instance = await pool.get(ctx.target_agent_id)
@@ -2164,6 +2207,10 @@ async def _drive_agent_loop(
     if turn_widgets:
         knowledge_context = (
             f"{knowledge_context}\n\n{turn_widgets}" if knowledge_context else turn_widgets
+        )
+    if figma_note:
+        knowledge_context = (
+            f"{knowledge_context}\n\n{figma_note}" if knowledge_context else figma_note
         )
 
     # Uploaded files are INLINED, and the backend with file tools has to be
@@ -3791,6 +3838,9 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
         ask_frame: dict[str, Any] | None = None
         # Whether any frame other than ``_PASSIVE_EVENTS`` reached the client.
         acted = False
+        # A tool call or a thought since the last chunk: the next chunk opens a
+        # new text block (``_with_block_break``).
+        block_break = False
         agent_events = _iter_agent_events(spec, ctx)
         try:
             async for event_name, event_data in agent_events:
@@ -3806,11 +3856,20 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
                     # the stream to stop, and it stops at the same event it
                     # always did. Only the durable record gains the text.
                     if event_name == "chunk":
-                        full_text += _chunk_text(event_data)
+                        chunk_text = _chunk_text(event_data)
+                        if block_break:
+                            chunk_text = _with_block_break(full_text, chunk_text)
+                        full_text += chunk_text
                     cancelled = True
                     break
                 if event_name == "chunk":
                     chunk_text = _chunk_text(event_data)
+                    if block_break and chunk_text:
+                        block_break = False
+                        separated = _with_block_break(full_text, chunk_text)
+                        if separated != chunk_text:
+                            chunk_text = separated
+                            event_data = {**event_data, "content": chunk_text}
                     full_text += chunk_text
                     if repetition.feed(chunk_text):
                         # UX-4: the model is looping on one sentence or paragraph.
@@ -3844,8 +3903,11 @@ async def execute_run(spec: RunSpec, *, retry: bool = False) -> None:
                 elif event_name in ("tool_start", "tool_result"):
                     # Text on either side of a tool call is not one run of text.
                     repetition.break_run()
+                    block_break = True
                     if event_name == "tool_result":
                         tool_work_done = True
+                elif event_name == "thinking":
+                    block_break = True
                 elif event_name == "ask_user_question":
                     if isinstance(event_data, dict):
                         ask_frame = event_data

@@ -13,7 +13,8 @@
 #
 # Shared by every engine: ``verify_site`` / ``preview_site`` (the three-layer
 # verdict and a screenshot of the draft; ``play_test_site`` in sites_play_test.py
-# reuses the preview target helpers), ``set_site_dependencies`` (the only writer
+# reuses the preview target helpers and ``compare_site_to_reference`` in
+# sites_reference.py reuses ``_capture_draft``), ``set_site_dependencies`` (the only writer
 # of ``paw.dependencies.json``), ``list_site_assets``, ``request_site_secret`` /
 # ``list_site_secrets`` (names and status only, never values), and
 # ``list_site_integrations`` / ``connect_site_integration`` (one-click Connect: the
@@ -25,8 +26,10 @@
 #     publish path and the REST router use) before it writes; the refusal says what
 #     the call did not do (create / edit / read) in plain words a user can read;
 #   * creates persist a DRAFT and mint a draft Site doc (``_mint_draft_site``); they
-#     never publish. Edits stage a draft too, and report ``verification`` per the
-#     verify contract (static check now, build and browser verdict on the next call);
+#     never publish. That mint is the only place a site is stamped
+#     ``generation="generating"`` (with the run's chat session). Edits stage a
+#     draft too, and report ``verification`` per the verify contract (static check
+#     now, build and browser verdict on the next call);
 #   * ``_INTEGRATION_NEXT_STEPS`` has one wiring line per registered provider, in
 #     client (paw.js / ``Paw.call``) and server (``pawCall`` with
 #     ``env.PAW_GATEWAY_TOKEN``) form where both exist. A provider added to the
@@ -125,6 +128,10 @@ VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
 PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
 # Play the draft in a remote browser (sites_play_test.py). Same server.
 PLAY_TEST_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__play_test_site"
+# Store a design the owner supplied on the pocket, and compare the draft against it
+# (sites_reference.py). Same server.
+SAVE_SITE_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__save_site_reference"
+COMPARE_SITE_TO_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__compare_site_to_reference"
 
 # Site secrets: ask the owner for one by name, list names + status. No values.
 REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
@@ -148,6 +155,8 @@ SITES_CREATE_TOOL_IDS = (
     VERIFY_SITE_TOOL_ID,
     PREVIEW_SITE_TOOL_ID,
     PLAY_TEST_SITE_TOOL_ID,
+    SAVE_SITE_REFERENCE_TOOL_ID,
+    COMPARE_SITE_TO_REFERENCE_TOOL_ID,
     REQUEST_SITE_SECRET_TOOL_ID,
     LIST_SITE_SECRETS_TOOL_ID,
     LIST_SITE_INTEGRATIONS_TOOL_ID,
@@ -774,12 +783,29 @@ async def _mint_draft_site(workspace_id: str, user_id: str, pocket_id: str, name
     (one doc per pocket). Best-effort: the pocket already exists in Mongo (the primary
     contract), so a mint failure logs and returns rather than undoing a successful
     create — the site is simply not yet listable (the prior behaviour), never a hard
-    error. The plan gate already ran before ``agent_create``, so this adds no gate."""
+    error. The plan gate already ran before ``agent_create``, so this adds no gate.
+
+    Only the create tools call this, so it is the one place that marks a site as
+    being generated: the chat session of the current run rides along and the fresh
+    draft starts as ``generation="generating"`` (``sites.generation``), which lets a
+    reload mid-build show the build. No session (or a failure reading it) just
+    leaves the flag unset; it never fails the create."""
+    generation_session_id: str | None = None
+    try:
+        from pocketpaw_ee.cloud.chat import agent_service
+
+        generation_session_id = agent_service.current_session_mongo_id() or None
+    except Exception:  # noqa: BLE001 — the generation flag is best-effort
+        logger.debug("create-site: no chat session for the generation flag", exc_info=True)
     try:
         from pocketpaw_ee.sites.service import create_draft_site
 
         await create_draft_site(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, name=name
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            name=name,
+            generation_session_id=generation_session_id,
         )
     except Exception:  # noqa: BLE001 — draft-doc mint is best-effort, never fails a create
         logger.warning(
@@ -3346,6 +3372,76 @@ async def _draft_document(
     )
 
 
+async def _capture_draft(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    viewport: dict[str, int],
+    path: str = "",
+    wait_ms: int | None = None,
+    log_tag: str = "preview_site",
+) -> tuple[bytes, str, dict[str, Any] | None]:
+    """Photograph a pocket's current draft with Browser Rendering at ``viewport``.
+
+    Returns ``(png, url, None)`` (``url`` is the draft address for a template-built
+    site, ``""`` for one rendered from markup), or ``(b"", "", error_response)``
+    saying why there is no picture. Shared by ``preview_site`` and
+    ``compare_site_to_reference`` so both photograph the same draft the same way.
+    """
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except CloudError as exc:
+        return b"", "", _error_response(f"{exc.code}: {exc.message}")
+
+    try:
+        document, url, reason = await _draft_document(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, pocket=pocket
+        )
+    except Exception as exc:  # noqa: BLE001 — a preview is never a gate on the build
+        logger.warning("sites.%s: draft assembly failed", log_tag, exc_info=True)
+        return b"", "", _error_response(f"could not assemble the draft: {exc}")
+    if not document and not url:
+        return b"", "", _error_response(reason)
+
+    # A url capture runs the page's own scripts, so it waits for them to settle; an
+    # html capture keeps the plain ``load`` unless the agent asked for a pause.
+    if url:
+        target: dict[str, Any] = {"url": _join_preview_url(url, path)}
+        settle = _PREVIEW_URL_SETTLE_MS if wait_ms is None else wait_ms
+    else:
+        target = {"html": document}
+        settle = wait_ms or 0
+    try:
+        from pocketpaw_ee.sites.service import _cf_client
+
+        image = await _cf_client().capture_screenshot(
+            **target,
+            viewport=viewport,
+            goto_options={"waitUntil": _PREVIEW_WAIT_UNTIL, "timeout": 20_000},
+            screenshot_options={"fullPage": True},
+            wait_for_timeout=settle,
+        )
+    except CloudError as exc:
+        return (
+            b"",
+            "",
+            _error_response(
+                f"screenshots are unavailable on this deployment ({exc.message}). Rely on "
+                "verify_site and re-read your source against the design instead."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sites.%s: capture failed", log_tag, exc_info=True)
+        return b"", "", _error_response(f"the screenshot failed: {exc}")
+    if not image:
+        return b"", "", _error_response("the screenshot came back empty.")
+    return image, url, None
+
+
 @_with_previous_verification("preview_site", timed=False)
 async def _preview_site_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__preview_site``.
@@ -3386,52 +3482,18 @@ async def _preview_site_handler(args: dict) -> dict:
         return gate
 
     from pocketpaw.tools.builtin import reference_images
-    from pocketpaw_ee.cloud._core.errors import CloudError
-    from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    try:
-        pocket = await pockets_service.get(pocket_id, user_id)
-    except CloudError as exc:
-        return _error_response(f"{exc.code}: {exc.message}")
-
-    try:
-        document, url, reason = await _draft_document(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, pocket=pocket
-        )
-    except Exception as exc:  # noqa: BLE001 — a preview is never a gate on the build
-        logger.warning("sites.preview_site: draft assembly failed", exc_info=True)
-        return _error_response(f"could not assemble the draft: {exc}")
-    if not document and not url:
-        return _error_response(reason)
-
-    # A url capture runs the page's own scripts, so it waits for them to settle; an
-    # html capture keeps the plain ``load`` unless the agent asked for a pause.
-    if url:
-        target: dict[str, Any] = {"url": _join_preview_url(url, path)}
-        settle = _PREVIEW_URL_SETTLE_MS if wait_ms is None else wait_ms
-    else:
-        target = {"html": document}
-        settle = wait_ms or 0
-    try:
-        from pocketpaw_ee.sites.service import _cf_client
-
-        image = await _cf_client().capture_screenshot(
-            **target,
-            viewport=dict(_PREVIEW_VIEWPORTS[device]),
-            goto_options={"waitUntil": _PREVIEW_WAIT_UNTIL, "timeout": 20_000},
-            screenshot_options={"fullPage": True},
-            wait_for_timeout=settle,
-        )
-    except CloudError as exc:
-        return _error_response(
-            f"screenshots are unavailable on this deployment ({exc.message}). Rely on "
-            "verify_site and re-read your source against the design instead."
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("sites.preview_site: capture failed", exc_info=True)
-        return _error_response(f"the screenshot failed: {exc}")
-    if not image:
-        return _error_response("the screenshot came back empty.")
+    image, url, failure = await _capture_draft(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        viewport=dict(_PREVIEW_VIEWPORTS[device]),
+        path=path,
+        wait_ms=wait_ms,
+        log_tag="preview_site",
+    )
+    if failure is not None:
+        return failure
 
     try:
         tiles = reference_images.to_tiles(
@@ -3794,6 +3856,9 @@ async def _request_site_secret_handler(args: dict) -> dict:
     ) is not None:
         return gate
     pocket_id = pocket_id.strip()
+    name = str(args.get("name") or "").strip()
+    if site_secrets.is_platform_managed(name):
+        return await _refuse_platform_secret(workspace_id, user_id, pocket_id, name)
     try:
         view = await site_secrets.request_secret(
             workspace_id=workspace_id,
@@ -3826,6 +3891,40 @@ async def _request_site_secret_handler(args: dict) -> dict:
             "secret": view.model_dump(mode="json"),
             "message": message,
         }
+    )
+
+
+async def _refuse_platform_secret(
+    workspace_id: str, user_id: str, pocket_id: str, name: str
+) -> dict:
+    """``request_site_secret`` for a name the platform sets itself: no card, no
+    pending row. A signing secret is minted on the spot (publish would mint it
+    anyway), so the agent can go on as if it were set."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import site_secrets
+
+    base = name.removesuffix(site_secrets.DRAFT_SUFFIX)
+    if base == site_secrets.GATEWAY_TOKEN_SECRET:
+        return _error_response(
+            f"{name} is set automatically by Paw when the owner links an integration. "
+            "Do not ask the owner for it. If the site needs a provider, call "
+            "connect_site_integration instead."
+        )
+    try:
+        # The same access rule as a request: edit access to a pocket in this workspace.
+        await site_secrets._require_edit(workspace_id, user_id, pocket_id)
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    try:
+        await site_secrets.ensure_signing_secrets(
+            workspace_id=workspace_id, pocket_id=pocket_id, names=[base]
+        )
+    except Exception:  # noqa: BLE001 - publish mints it again; the answer is the same
+        logger.warning("request_site_secret: could not mint %s now", base, exc_info=True)
+    return _error_response(
+        f"{name} is a signing secret that Paw creates automatically for every site "
+        f"(drafts get their own). Do not ask the owner for it and never mention it to "
+        f"them. Read it in the Worker as env.{base}; publishing binds it."
     )
 
 
@@ -3885,8 +3984,11 @@ def make_request_site_secret_tool(tool: Any) -> Any:
             "in the builder's secure input; you NEVER receive, write or ask for the "
             "value, and must not put one in source, .dev.vars or chat. `name` is the "
             "env var the Worker reads (UPPER_SNAKE_CASE, max 64 chars, e.g. "
-            "STRIPE_SECRET_KEY); `description` tells the owner what it is and where to "
-            "get it. Publishing binds every set secret as env.<NAME>."
+            "STRIPE_SECRET_KEY); `description` tells the owner, in plain words, what it is "
+            "and where to get it. Publishing binds every set secret as env.<NAME>. Never "
+            "for signing secrets (BETTER_AUTH_SECRET, SESSION_SECRET, AUTH_SECRET) or "
+            "PAW_GATEWAY_TOKEN: Paw creates those itself and refuses the "
+            "request. Only ask for what the owner really has to choose or bring."
         ),
         {
             "type": "object",
@@ -4043,6 +4145,10 @@ _INTEGRATION_NEXT_STEPS = {
     "the owner to set 'Send from' to an address on a domain they verified in Resend; "
     "until then the site reads setup_required and mail goes out from Paw. Visitors "
     "can't send mail through it, and it never replaces a contact form's own handling.",
+    "figma": "Nothing to write in the site, and never link Figma to a site: it is the "
+    "owner's workspace connection that lets you READ a design they paste in this chat. "
+    "A site never calls it. If the owner wants a design rebuilt, ask them to connect "
+    "Figma in Integrations and paste the figma.com/design link.",
     "calendly": "Search the web for Calendly's current inline embed snippet and use "
     "it with the owner's link: in the page HTML on static, in a page component on a "
     "framework template. There are no gateway calls.",
@@ -4258,6 +4364,8 @@ __all__ = [
     "LIST_SITE_INTEGRATIONS_TOOL_ID",
     "LIST_SITE_SECRETS_TOOL_ID",
     "PLAY_TEST_SITE_TOOL_ID",
+    "SAVE_SITE_REFERENCE_TOOL_ID",
+    "COMPARE_SITE_TO_REFERENCE_TOOL_ID",
     "REACT_REQUIRED_KEYS",
     "REACT_RESERVED_FILES",
     "REACT_RESERVED_PREFIX",

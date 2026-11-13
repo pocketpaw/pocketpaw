@@ -41,10 +41,12 @@ from pocketpaw_ee.cloud._core.rate_limit import rate_limit_slug_check
 from pocketpaw_ee.cloud.auth.service import resolve_display_names
 from pocketpaw_ee.sites import import_service, ownership, prompt_enhance, site_upgrade
 from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.sites.dashboard_router import router as site_dashboard_router
 from pocketpaw_ee.sites.data_router import router as site_data_router
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
+    DiscardDraftResponse,
     DomainRequest,
     DomainStatusResponse,
     EnhancePromptRequest,
@@ -106,6 +108,7 @@ from pocketpaw_ee.sites.dto import (
     SlugAvailability,
     SlugRenameRequest,
     VersionHistoryResponse,
+    utc_iso,
 )
 from pocketpaw_ee.versions import service as versions_service
 
@@ -116,8 +119,9 @@ router = APIRouter(
 
 # The Data dashboard routes (``sites.data_router``) go in FIRST so they inherit the
 # plan gate and win the match: ``.../data/inventory`` would otherwise be taken by the
-# legacy ``.../data/{table}`` read below.
+# legacy ``.../data/{table}`` read below. The AI dashboards (``.../data/dashboards``) too.
 router.include_router(site_data_router)
+router.include_router(site_dashboard_router)
 
 
 async def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
@@ -206,6 +210,7 @@ async def publish_site(
         prewarm_origin=request.headers.get("origin") or None,
         confirm_destructive_migrations=body.confirm_destructive_migrations,
         confirm_do_data_loss=list(body.confirm_do_data_loss),
+        confirm_placeholders=body.confirm_placeholders,
     )
     return sites_service._to_response(doc)
 
@@ -860,7 +865,7 @@ async def versions_by_pocket(
                 status=shown[str(r.id)],
                 label=r.label,
                 author=names.get(r.author, r.author) if r.author else None,
-                created_at=r.created_at.isoformat(),
+                created_at=utc_iso(r.created_at) or "",
             )
             for r in rows
         ],
@@ -976,6 +981,24 @@ async def open_draft_by_pocket(
     return OpenDraftResponse(**out)
 
 
+@router.post("/sites/by-pocket/{pocket_id}/discard-draft", response_model=DiscardDraftResponse)
+async def discard_draft_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> DiscardDraftResponse:
+    """Discard a pocket's unpublished changes: its source goes back to the published
+    version, the drafts above it are marked discarded, a pending publish review is
+    rejected, and the builder shows the live site again. Idempotent. 409 when nothing
+    was ever published (no live version to go back to) or an edit landed mid-discard,
+    422 for a site kind with no source files, 404 for a missing or another
+    workspace's pocket, 403 without edit access."""
+    out = await sites_service.discard_pocket_draft(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return DiscardDraftResponse(**out)
+
+
 @router.post(
     "/sites/by-pocket/{pocket_id}/versions/{version_no}/revert",
     response_model=SiteVersionResponse,
@@ -1014,7 +1037,7 @@ async def revert_version_by_pocket(
         status=draft.status,
         label=draft.label,
         author=draft.author,
-        created_at=draft.created_at.isoformat(),
+        created_at=utc_iso(draft.created_at) or "",
     )
 
 

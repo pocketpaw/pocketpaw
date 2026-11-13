@@ -445,6 +445,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
         from pocketpaw_ee.agent.mcp_servers.ask import ASK_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.browser import BROWSER_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.craft import TOOL_IDS as CRAFT_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.figma import FIGMA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.files import FILES_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.fx import FX_TOOL_IDS
@@ -502,6 +503,9 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # The tools return empty when no Refero token is configured, so
             # naming them costs an unconfigured deploy nothing.
             | frozenset(REFERO_TOOL_IDS)
+            # figma: read the design the owner pasted (inspect, render, export).
+            # The tools refuse files the owner did not paste in this session.
+            | frozenset(FIGMA_TOOL_IDS)
             # Opt-in EXTERNAL servers (``POCKETPAW_SITES_MCP_SERVERS``), for a
             # server the operator configured themselves. Empty by default.
             | _external_sites_mcp_grants()

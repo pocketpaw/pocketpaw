@@ -207,6 +207,10 @@ class Pocket(TimestampedDocument):
 
     class Settings:
         name = "pockets"
+        # The pockets service writes only the fields that changed since the read
+        # (``_save_pocket``), so a rename can't resend a stale ``source`` over an
+        # agent edit. That diff needs the state Beanie captures at the read.
+        use_state_management = True
         indexes = [
             # The list query is a $or over owner / team / shared_with /
             # visibility, always anchored on ``workspace``. The inline

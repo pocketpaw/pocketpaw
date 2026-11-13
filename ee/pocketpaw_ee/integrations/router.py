@@ -2,7 +2,8 @@
 #
 # ``router`` (owner routes: session + workspace RBAC + the ``sites`` plan feature):
 #   GET    /integrations/providers                       ProviderView[]
-#   GET    /integrations/connections                     ConnectionView[]
+#   GET    /integrations/connections                     ConnectionView[] (``mine``; a
+#                                                        per-member teammate grant: admins only)
 #   POST   /integrations/{provider}/connect              {pocket_id?, params?} -> {authorize_url}
 #   POST   /integrations/connections/{id}/resume         {authorize_url} (creator or admin)
 #   DELETE /integrations/connections/{id}                revoke (creator or admin)
@@ -12,9 +13,13 @@
 #   GET    /sites/by-pocket/{pocket_id}/integrations/{provider}/fields/{key}/options
 #          ?<depends_on key>=<draft>                     {options} (select choices; 409/422/502)
 #   GET    /sites/by-pocket/{pocket_id}/integrations/newsletter/export.csv  (owner)
+#   GET    /sites/by-pocket/{pocket_id}/integrations/newsletter/subscribers
+#          {count, latest[20]} newest first (owner)
 #   GET    /sites/by-pocket/{pocket_id}/orders?limit&cursor
 #   POST   /sites/by-pocket/{pocket_id}/orders/{order_id}/refunds
 #          {amount_minor?, idempotency_key} -> OrderView (pocket owner or admin)
+#   POST   /sites/by-pocket/{pocket_id}/owner-sign-in   {next?} -> {url, role, expires_in}
+#          (edit access; owner_sign_in.py)
 #
 # ``public_router`` (no session by design; each names its own credential):
 #   GET  /integrations/{provider}/start      one-time ticket -> browser cookie -> provider
@@ -30,6 +35,10 @@
 #   GET  /integrations/social/{provider}/callback    single-use broker state
 #   POST /integrations/social/redeem          PAW_GATEWAY_TOKEN + ticket + nonce
 #                                            (all three: social_broker.py)
+#   POST /integrations/owner-sign-in/redeem   PAW_GATEWAY_TOKEN + ticket
+#   POST /integrations/owner-sign-in/check    PAW_GATEWAY_TOKEN + account id -> role
+#   POST /integrations/owner-sign-in/peek     PAW_GATEWAY_TOKEN + ticket -> who (unspent)
+#                                            (both: owner_sign_in.py)
 #
 # Wire shapes are pinned by the Wave 0 contract and its Wave 1 / Wave 2 addenda;
 # see dto.py. Mounted in ``cloud.mount_cloud``; both routers are in
@@ -46,10 +55,12 @@ from pocketpaw_ee.cloud._core.deps import (
     require_action_any_workspace,
     require_plan_feature,
 )
+from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.integrations import (
     bindings,
     gateway,
     oauth,
+    owner_sign_in,
     refunds,
     social_broker,
     vault,
@@ -60,6 +71,8 @@ from pocketpaw_ee.integrations.dto import (
     ConnectionView,
     ConnectResponse,
     FieldOptionsView,
+    NewsletterSubscribers,
+    NewsletterSubscriberView,
     OrdersPage,
     OrderView,
     ProviderView,
@@ -67,6 +80,7 @@ from pocketpaw_ee.integrations.dto import (
     SiteIntegrationPut,
     SiteIntegrationView,
 )
+from pocketpaw_ee.integrations.providers import get_provider
 
 router = APIRouter(tags=["Integrations"], dependencies=[Depends(require_plan_feature("sites"))])
 public_router = APIRouter(tags=["Integrations"])
@@ -86,9 +100,22 @@ async def list_providers(
 async def list_connections(
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
+    is_admin: bool = Depends(action_allowed_any_workspace("workspace.update")),
 ) -> list[ConnectionView]:
+    """Every workspace connection, marked ``mine`` for the caller's own. A per-member
+    provider's (Figma) teammate grant is listed to admins only, never as usable."""
     rows = await vault.list_connections(ctx.workspace_id or "")
-    return [vault.to_view(r, await bindings.site_count(str(r.id))) for r in rows]
+    visible = [
+        r
+        for r in rows
+        if is_admin
+        or r.created_by == ctx.user_id
+        or not getattr(get_provider(r.provider), "per_member", False)
+    ]
+    return [
+        vault.to_view(r, await bindings.site_count(str(r.id)), viewer_id=ctx.user_id)
+        for r in visible
+    ]
 
 
 @router.post("/integrations/{provider}/connect", response_model=ConnectResponse)
@@ -169,6 +196,36 @@ async def export_newsletter(
             "Content-Disposition": 'attachment; filename="newsletter-subscribers.csv"',
             "Cache-Control": "no-store",
         },
+    )
+
+
+@router.get(_SITE + "/integrations/newsletter/subscribers", response_model=NewsletterSubscribers)
+async def newsletter_subscribers(
+    pocket_id: str,
+    response: Response,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> NewsletterSubscribers:
+    """How many signed up and the newest 20, for the owner only (the export's rule:
+    the addresses are personal data)."""
+    from pocketpaw_ee.integrations.providers.newsletter import (
+        latest_subscribers,
+        subscriber_count,
+    )
+    from pocketpaw_ee.sites.dto import utc_iso
+
+    workspace_id = ctx.workspace_id or ""
+    await bindings.require_owner(
+        workspace_id, ctx.user_id, pocket_id, action="sites.integration.newsletter.list"
+    )
+    latest = await latest_subscribers(workspace_id, pocket_id)
+    response.headers["Cache-Control"] = "no-store"
+    return NewsletterSubscribers(
+        count=await subscriber_count(workspace_id, pocket_id),
+        latest=[
+            NewsletterSubscriberView(email=email, subscribed_at=utc_iso(stamp))
+            for email, stamp in latest
+        ],
     )
 
 
@@ -388,3 +445,37 @@ async def social_callback(
 async def social_redeem(request: Request) -> JSONResponse:
     """The site Worker trades a ticket (+ its nonce) for the visitor's profile."""
     return await social_broker.redeem(request)
+
+
+@router.post(_SITE + "/owner-sign-in", response_model=owner_sign_in.OwnerSignInLink)
+async def owner_sign_in_link(
+    pocket_id: str,
+    body: owner_sign_in.OwnerSignInBody,
+    response: Response,
+    ctx: RequestContext = Depends(request_context),
+    user: object = Depends(current_active_user),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> owner_sign_in.OwnerSignInLink:
+    """A one-time link that signs this Paw user in to the site's owner page."""
+    response.headers["Cache-Control"] = "no-store"
+    return await owner_sign_in.issue(
+        workspace_id=ctx.workspace_id or "", user=user, pocket_id=pocket_id, next_path=body.next
+    )
+
+
+@public_router.post("/integrations/owner-sign-in/redeem")
+async def owner_sign_in_redeem(request: Request) -> JSONResponse:
+    """The site Worker trades an owner-page ticket for the owner identity, once."""
+    return await owner_sign_in.redeem(request)
+
+
+@public_router.post("/integrations/owner-sign-in/check")
+async def owner_sign_in_check(request: Request) -> JSONResponse:
+    """The site Worker re-checks a site account's role (owner, staff or none)."""
+    return await owner_sign_in.check(request)
+
+
+@public_router.post("/integrations/owner-sign-in/peek")
+async def owner_sign_in_peek(request: Request) -> JSONResponse:
+    """The site Worker asks who a ticket would sign in, without spending it."""
+    return await owner_sign_in.peek(request)

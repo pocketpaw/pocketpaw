@@ -1037,6 +1037,125 @@ read a private pocket, `422` (`pocket.not_a_site`) when the pocket is not a site
 and `402` (`billing.pocket_limit`) when the workspace is at its plan's pocket cap.
 Returns `403` (`plan.feature_denied`) when the workspace's plan does not include Sites.
 
+## Sites — publish gate
+
+### `POST /sites/publish`: `confirm_placeholders`
+
+A live publish is refused while the draft still shows something the owner never
+gave or that does not work. The check reads what goes live: the html or no-build
+files, or the stored build of the current content (a project publish deploys exactly
+that build and returns `409 sites.project_build_required` without it). A svelte or
+react draft with no stored build is checked on the build the publish makes, before
+anything deploys. On the async build lane (react, static svelte) the publish returns
+at once and the check runs in the worker: a refusal deploys nothing, the site's
+`build_status` becomes `failed` with `build_reason` `deploy_failed:publish_blocked`,
+and the agent's `get_site_build_status` carries `publish_blocked`, the same `details`
+object as the 409 (no REST route returns those details yet). Only a checker crash lets a publish through (logged as
+`metric=sites_publish_gate_fail_open`). Previews are never gated.
+
+`confirm_placeholders: boolean` (default `false`) publishes past the findings: the
+owner saw the list and chose to go live anyway. The override is written to the
+workspace audit log (`sites.publish_gate_overridden`, target the pocket, metadata
+`{count, findings: [{rule, reason, page, text}]}`). Only the owner's publish dialog
+sends it; the agent's publish tool cannot (it files a Tray card instead, see below).
+
+Platform republishes (a plan sale, a payment restamp, an AI-visibility fix, an
+approved plan request) skip the check only when the content is exactly what last
+passed it or was confirmed; otherwise they are refused the same way.
+
+Refusal: `409`, code `sites.publish_blocked`.
+
+```json
+{
+  "error": {
+    "code": "sites.publish_blocked",
+    "message": "Your site isn't ready to go live yet. Your site still shows \"[Address]\" on the home page. (and 2 more things to fix) Fix these, or publish anyway if you meant to.",
+    "details": {
+      "findings": [
+        {
+          "rule": "SC-HONEST-07",
+          "reason": "placeholder",
+          "page": "index.html",
+          "page_label": "the home page",
+          "text": "[Address]",
+          "message": "Your site still shows \"[Address]\" on the home page."
+        }
+      ],
+      "more": 0,
+      "override": "confirm_placeholders",
+      "can_override": true,
+      "findings_digest": "3f9a1c0d2b7e4a51"
+    }
+  }
+}
+```
+
+- `findings` holds at most 20 entries, one per offending text; `more` counts the rest.
+- `can_override` says whether the caller may retry with the `override` field. It is
+  `true` on the REST publish and on a pending card's single approve; `false` on a card
+  that already failed and for the agent's publish tool (it files a card, below).
+- `findings_digest` fingerprints exactly these findings (rule, page, text). An
+  approve's Publish anyway must send it back (below).
+- `message` is written for the owner and safe to show as is. `page_label` is "the home
+  page" or `the "about" page`; it gains "and N other pages" inside `message` when the
+  same text repeats.
+- `reason` values:
+
+| `reason` | `rule` | What it means |
+|---|---|---|
+| `placeholder` | `SC-HONEST-07` | Placeholder copy: `[Address]`, `[Phone]`, `[Your …]`, lorem ipsum, an example.com address, "Your Name" outside a label, `XXXXX XXXXX`. |
+| `invented_contact` | `SC-HONEST-03` | A phone number that looks made up (sequential or repeated digits such as 9876543210, a 555 number, 07700 900xxx). It may ring a stranger. |
+| `form_saves_nothing` | `SC-LINK-04` | A form that submits back to its own page with nothing to receive it, so what visitors type is lost. |
+| `form_failed` | `SC-FORM-01` | The agent submitted test data to the form on the draft (`play_test_site` with `exercise_forms`) and it failed. |
+
+Send the same request again with `"confirm_placeholders": true` to publish anyway.
+
+### Approval path (`request_publish_pocket` → Tray → approve)
+
+When the agent asks to publish, it files a review card instead (an Instinct Action
+with an `_artifact_change` blob). The same gate applies:
+
+- **At request time** the card carries the findings:
+  `parameters._artifact_change.publish_findings` is the same list of finding objects
+  as above (`[]` when clean). When it is not empty, the title ends in
+  `(needs fixes)`, the description lists the owner messages after `NOT READY YET:`,
+  and the recommendation offers "Publish anyway". The approver cannot edit these
+  fields away.
+- **At approve time** the gate runs again on the current draft, BEFORE anything is
+  merged. Nothing is promoted or deployed for a draft with findings:
+  - A single approve (`POST /instinct/actions/{id}/approve` without the flag) answers
+    the same `409 sites.publish_blocked`, with `details.action_id` naming the card.
+    The card is NOT approved: it stays `pending`, so "Publish anyway" approves the
+    same card. `parameters._artifact_change.publish_blocked` holds the `details`.
+  - A bulk approve fails the Action: it ends `failed` with
+    `error` = `sites.publish_blocked: <the refusal message>` and the same
+    `publish_blocked` details on the blob.
+- **A stale card is refused.** The card records `reviewed_content_hash`, the content
+  it was filed for. If the site changed since (an edit after the review), nothing is
+  promoted or deployed, "Publish anyway" included. A single approve answers
+  `409 sites.publish_review_stale` with the message "This review is out of date: the
+  site changed since it was filed. Request a new review." and `details` =
+  `{can_override: false, reviewed_version_id, action_id}`; the card ends `failed`
+  (`error` = `sites.publish_review_stale: <message>`, `publish_stale` on the blob).
+  A bulk approve fails it the same way. The owner requests a new review of the
+  current draft. A card without the hash (filed earlier) is stale when a later edit
+  superseded, or a discard dropped, its `to_version_id`.
+- **Publish anyway:** `POST /instinct/actions/{id}/approve` with body
+  `{"confirm_placeholders": true, "confirm_findings_digest": "<findings_digest>"}`
+  merges and deploys past the findings. A missing digest, or one that no longer
+  matches the draft's findings, answers a fresh 409 with the current findings and
+  their digest, and the card stays pending. If the draft changes between that
+  check and the merge, the merge checks again; a refusal then fails the card and
+  the approve still answers the same 409 (`can_override: false`). Only the
+  single-Action approve accepts it; bulk approve never does. The override is audited
+  under the approver (`sites.publish_gate_overridden`).
+- When the owner tells the agent to publish anyway, the agent's publish tool files
+  this same card (`approval_required: true`, `action_id`, `publish_findings`) instead
+  of publishing; the owner's "Publish anyway" on it is the only override.
+- A failed Action (from a bulk approve) cannot be approved again. After fixing, the
+  agent files a new request; Publish in the site builder files one too and shows its
+  findings with "Publish anyway".
+
 ## Sites — Durable Objects
 
 Project sites may declare SQLite-backed Durable Objects, behind
@@ -1563,7 +1682,7 @@ the owner:
   "audiences": ["shop"],
   "live_url": "https://bakery.pawsites.workers.dev",
   "tags": ["bakery", "shop"],
-  "show_creator": false,
+  "show_creator": true,
   "created_at": "2026-10-01T09:00:00Z",
   "updated_at": "2026-10-01T09:00:00Z"
 }
@@ -1584,8 +1703,11 @@ Discover index, and so do `tags` and `show_creator`. `tags` holds at most 8
 tags, each 1 to 32 characters of `a-z`, `0-9` and `-`; they are normalised on
 save and PATCH (trimmed, lowercased, spaces and underscores become `-`,
 duplicates dropped), and anything still outside that set is a `422`.
-`show_creator` (default `false`) puts the owner's display name on the public
-Discover card; with it off the card names no one. A template saved from a site
+`show_creator` puts the owner's display name and profile picture on the public
+Discover card; with it off the card names no one. It defaults to `true` on
+`POST` (a new template shows its maker unless they switch it off). A `PATCH`
+that leaves the field out keeps the stored value, and a template saved before
+the field existed reads as `false` until its owner turns it on. A template saved from a site
 that was itself made with `use` remembers which template that was, and its
 Discover listing links back to it (`remixed_from`). `live_url` is the source site's live URL when that site is
 deployed, else `null`; it is re-read on save, on every `PATCH` and on every
@@ -1612,10 +1734,11 @@ workspace; `site_template.used` and `.reported` in the acting user's workspace
 Save a site pocket as a template the caller owns.
 
 ```json
-{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private", "kind": "site", "audiences": [], "tags": ["bakery"], "show_creator": false }
+{ "pocket_id": "665f...", "name": "Bakery", "description": "Optional, up to 500 chars", "visibility": "private", "kind": "site", "audiences": [], "tags": ["bakery"], "show_creator": true }
 ```
 
-`name` is 1 to 100 characters; `visibility` defaults to `private`. The caller
+`name` is 1 to 100 characters; `visibility` defaults to `private`;
+`show_creator` defaults to `true`. The caller
 needs read access to the pocket, as for a duplicate. Response `200`: the
 template's metadata.
 
@@ -1647,8 +1770,8 @@ One template's metadata, if you can see it; otherwise `404`.
 ### `PATCH /site-templates/{template_id}`
 
 Change any of `name`, `description`, `visibility`, `kind`, `audiences`, `tags`,
-`show_creator`. Owner only (`404` for anyone
-else). Setting `visibility` to `public` runs the publish checks. `version` does
+`show_creator`. A field left out keeps its stored value. Owner only (`404` for
+anyone else). Setting `visibility` to `public` runs the publish checks. `version` does
 not change. Response `200`: the metadata.
 
 ### `DELETE /site-templates/{template_id}`
@@ -1716,6 +1839,10 @@ change it. Input images are never published: `recipe.params` drops
 Discover (`source: "studio_template"`), private or deleted takes the listing
 down. `kind` is `image`, `video` or `music` (an `audio` generation publishes as
 `music`). Cover URLs stay backend-relative (`/api/v1/media/...`) here.
+`show_creator` puts the owner's display name and profile picture on the
+Discover card, as for site templates: `true` by default on `POST`, kept by a
+`PATCH` that leaves it out, and `false` for a template published before the
+field existed.
 
 ```json
 {
@@ -1731,6 +1858,7 @@ down. `kind` is `image`, `video` or `music` (an `audio` generation publishes as
   "cover": {"url": "/api/v1/media/fox.png", "mime": "image/png", "width": 1024, "height": 1024, "poster_url": null},
   "recipe": {"kind": "image", "model": "flux", "prompt": "a red fox", "params": {"aspectRatio": "1:1", "count": 1}},
   "uses_input_images": false,
+  "show_creator": true,
   "hidden": false,
   "created_at": "2026-10-02T09:00:00Z",
   "updated_at": "2026-10-02T09:00:00Z"
@@ -1740,10 +1868,11 @@ down. `kind` is `image`, `video` or `music` (an `audio` generation publishes as
 ### `POST /studio-templates`
 
 ```json
-{ "generation_id": "gen_abc", "asset_id": "a2", "title": "Red fox", "description": "", "audiences": ["design"], "visibility": "public" }
+{ "generation_id": "gen_abc", "asset_id": "a2", "title": "Red fox", "description": "", "audiences": ["design"], "visibility": "public", "show_creator": true }
 ```
 
-`asset_id` is optional (default: the generation's first asset). Response `200`:
+`asset_id` is optional (default: the generation's first asset); `show_creator`
+defaults to `true`. Response `200`:
 the template. Errors: `404` for a generation that isn't in your workspace or an
 unknown `asset_id`; `409` (`studio_templates.not_ready`) unless the generation
 succeeded.
@@ -1756,8 +1885,8 @@ default 50), `cursor`. Response `200`:
 
 ### `PATCH /studio-templates/{template_id}`
 
-Any of `title`, `description`, `audiences`, `visibility`. Owner only; anyone
-else gets `404`. The cover and recipe never change. A template hidden by
+Any of `title`, `description`, `audiences`, `visibility`, `show_creator`; a
+field left out keeps its stored value. Owner only; anyone else gets `404`. The cover and recipe never change. A template hidden by
 Discover reports stays hidden after a private and public round trip.
 
 ### `DELETE /studio-templates/{template_id}`
@@ -1797,20 +1926,25 @@ the workspace, reports or the source item's id):
   "media_kind": null,
   "media_url": null,
   "tags": ["bakery", "shop"],
-  "creator": { "name": "Ada Baker" },
+  "creator": { "name": "Ada Baker", "avatar_url": "https://lh3.googleusercontent.com/a/ada" },
   "remixed_from": { "slug": "corner-bakery", "title": "Corner bakery" }
 }
 ```
 
 `updated_at` is when the listing's content last changed (a re-sync that
 changes nothing leaves it; featuring or hiding moves it). `tags` are the
-source's tags, lowercase `a-z0-9-`, at most 8. `creator` is `{"name": ...}`
-only when the owner opted in (`show_creator` on the site template) and has a
-display name; otherwise `null`. It is never an email or an id. `remixed_from`
+source's tags, lowercase `a-z0-9-`, at most 8. `creator` is
+`{"name": ..., "avatar_url": ...}` only when the owner opted in (`show_creator`
+on the site or studio template) and has a display name; otherwise `null`. Both
+fields are read live from the owner's profile, so a rename or a new picture
+shows at once. `avatar_url` is the profile picture when it is an absolute
+`http(s)` URL (an OAuth sign-in picture, say) and `null` otherwise: an uploaded
+picture is a signed-in `/uploads/...` path a logged-out page can't load, and a
+`data:` URL is never served. `creator` is never an email or an id. `remixed_from`
 is the listing this item was made from (a site created with `use`, then saved
 as a public template), or `null` for an original, or when that listing is
-hidden or no longer public. Studio template listings always have `tags: []`,
-`creator: null` and `remixed_from: null` for now.
+hidden or no longer public. Studio template listings always have `tags: []`
+and `remixed_from: null` for now.
 
 `slug` is the listing's URL handle: the title lowercased and folded to
 `a-z0-9` with `-` between words (`Café Crème & Co!` is `cafe-creme-co`), cut
@@ -3477,6 +3611,40 @@ every role-gated entry stays hidden.
   "download") lifts that. Exact ties are deterministic: verbs last, then the
   entry whose name the query covers more, then kind, then id.
 
+## Feature Stages
+
+Which app surfaces are alpha, hidden or preview in this release. The list is
+code-reviewed constants in `src/pocketpaw/feature_stages.py`; the route is
+`src/pocketpaw/api/v1/health.py`. It needs a signed-in caller (an active cloud
+user, or a caller holding the `chat` scope: dashboard session, master token,
+genuine localhost, chat-scoped API key). Anyone else gets 403, which a client
+should treat as "no stage data".
+
+### `GET /api/v1/config/features`
+
+```json
+{ "alpha": ["/agents/activity", "/agents/health", "/calendar", "backend:codex_cli", "..."],
+  "hidden": ["/automations", "/belt", "/code", "..."],
+  "preview": { "/belt-next": "in-the-works", "/fabric": "in-the-works-blocking",
+               "/foresight": "in-the-works", "/pockets": "in-the-works",
+               "/ship": "in-the-works-blocking" } }
+```
+
+- Ids are paw-enterprise route paths, matched by path segment (`p === id ||
+  p.startsWith(id + "/")`, so `/belt` never matches `/belt-next`), or runtime
+  ids `channel:<adapter>` / `backend:<name>`.
+- `hidden`: off every nav surface, and the route redirects to `/`. This is a UI
+  rule, not access control: the APIs behind a hidden route stay up.
+- `alpha`: keeps its nav entry and shows the Alpha pill. `backend:*` ids come
+  from each backend's `BackendInfo.beta` (the same flag `GET /api/v1/backends`
+  returns as `beta`).
+- `preview`: keeps its nav entry; opening it shows an "in the works" modal.
+  The value names the variant. `in-the-works` shows once per device and lets
+  the user look around. `in-the-works-blocking` shows on every visit with only
+  a way back, so the page behind it can't be used.
+- The three stages are disjoint, and no route id in one stage segment-matches a
+  route id in another.
+
 ## Belt — Architecture Read
 
 ### `GET /api/v1/belt/architecture?repo=<path>`
@@ -3990,7 +4158,7 @@ work without an AI edit first. No body. Gated on `fabric.write` and the `sites` 
 feature like the other by-pocket writes; the caller needs edit access to the pocket.
 
 ```json
-{ "pocket_id": "6650f0...", "opened": true }
+{ "pocket_id": "6650f0...", "opened": true, "reason": null }
 ```
 
 - `opened: true`: the pocket was showing the live site (`preview_mode: "published"`).
@@ -3998,12 +4166,49 @@ feature like the other by-pocket writes; the caller needs edit access to the poc
   `building`, then `full` / `static` / `server_only`) and never answers `published`
   for it again. The state lives on the pocket's draft registry row, so it survives a
   reload and every API process. The next publish returns it to the published view.
-- `opened: false`: a no-op success. The pocket already shows a draft (never published,
-  edited since, not a project, or draft Workers off).
-- Either way the pocket gets a draft version ("Opened for editing") when it has none,
-  so Submit for review and History behave as after an edit.
+- `opened: false`: a no-op success, and `reason` says why: `already_draft` (never
+  published, edited since, or already open), `not_project`, or `draft_workers_off`.
+- Only a real reopen gives the pocket a draft version ("Opened for editing") when it
+  has none, so Submit for review and History behave as after an edit. A no-op writes
+  no version, so a draft identical to live never shows unpublished changes.
 - Idempotent. `404` for an unknown or another workspace's pocket, `403` without edit
   access, `503` (`sites.open_draft_unavailable`) when the registry cannot be written.
+
+### `POST /sites/by-pocket/{pocket_id}/discard-draft`
+
+Throws away a pocket's unpublished changes (the builder's Discard). No body. Gated on
+`fabric.write`; the caller needs edit access to the pocket.
+
+```json
+{ "pocket_id": "6650f0...", "restored": true, "discarded_versions": 1,
+  "rejected_reviews": 0, "published_version_no": 4 }
+```
+
+- `pocket.source` goes back to the content that is LIVE: the newest version whose
+  content hashes to the `Site.live_source_hash` the last live deploy recorded. A site
+  deployed before that field existed falls back (project sites only) to the draft
+  registry's `published_hash` matching the published row. Anything else is refused,
+  because the published pointer moves before the deploy and can name content that
+  never went live.
+- Before the restore, the current source is saved as its own `discarded` version
+  ("Discarded changes"), so it can be brought back with `POST .../versions/{n}/revert`.
+- Every draft version above the published pointer becomes `discarded`, so `/status`
+  reads `has_unpublished_changes: false`. Pending publish reviews of the pocket are
+  rejected ("Discarded by owner") before anything is written, and
+  `versions.publish` refuses `discarded` / `superseded` rows, so a stale approval
+  can't take a discarded draft live.
+- The source is written with one conditional update on the source as read; an edit
+  that lands mid-discard wins. There is no per-pocket publish lock.
+- A project pocket's drafts are purged the way a publish purges them, which also ends
+  an open-draft, so `native-artifact` answers `preview_mode: "published"` again.
+- Audited as `sites.draft_discarded`.
+- `restored: false` with `discarded_versions: 0` is a no-op success. Idempotent.
+- Refusals leave the pocket untouched: `409 sites.discard_nothing_live` (never
+  published), `409 sites.discard_live_unknown` (what is live can't be proven; publish
+  once more), `409 sites.discard_conflict` (an edit landed mid-discard), `503
+  sites.discard_unavailable` (a pending review couldn't be rejected), `422
+  sites.discard_unsupported` (a ripple site). `404` for an unknown or another
+  workspace's pocket, `403` without edit access.
 
 ### Site data — `/sites/by-pocket/{pocket_id}/data`
 
@@ -5863,8 +6068,8 @@ Every site response now carries two fields:
 **A rename does not take effect when you make it.** A live build cannot be redeployed
 without rebuilding the draft, so the request reserves the name and the site's next
 publish moves it: it deploys under the new name, re-points every custom domain, then
-deletes the old Worker. Until then `slug` and `url` still show the current address.
-Show `slug_pending` as "goes live when you next publish".
+replaces the old Worker with a redirect (below). Until then `slug` and `url` still show
+the current address. Show `slug_pending` as "goes live when you next publish".
 
 ### `GET /sites/slug-available?slug=<raw>&site_id=<optional>`
 
@@ -5927,6 +6132,21 @@ Worker and `slug_pending` is kept, so publishing again retries the move.
 
 **The old name is held for 30 days** after the move. No other workspace can take it in
 that time; yours can take it back. `paw-site-<id>` names are never held.
+
+**The old address keeps working for those 30 days.** The old Worker is replaced by a
+small redirect Worker that answers every request with a `308` (the method is kept) to
+the same path and query on the site's current address (`Cache-Control: private,
+max-age=300`). The redirect Worker has no bindings, and the old Worker's cron triggers
+are cleared. It only ever points at the site's own current address: a later rename
+re-points every old address of the site, so A → B → C sends A straight to C. The site
+itself may take one of its old names back (the redirect is replaced by the site); no
+other site can while it redirects (`taken`). A name some site serves at or is moving
+to is never replaced or deleted by a redirect. When the 30 days end, a background
+sweep deletes the redirect Worker and the name is free. Deleting the site deletes its
+redirects too. If the redirect cannot be deployed, the old Worker is deleted instead,
+as before. **A site with Durable Objects cannot redirect**: its old Worker is deleted
+on the rename and the old link stops working. Source:
+`ee/pocketpaw_ee/sites/slug_redirect.py`.
 
 ### `DELETE /sites/{site_id}/slug/pending`
 
@@ -6168,6 +6388,172 @@ leave it out to refund everything left. Returns the `OrderView`.
   keeps it `reserved` and also answers `502`; retry with the same key.
 - Razorpay refunds go to the order's captured payment (stored from the paid
   webhook, or looked up for an order recorded before that) at normal speed.
+
+## Sites — AI apps
+
+A published site can call an OpenAI-shaped LLM API through us (our provider keys,
+via LiteLLM), billed to the owner's workspace wallet and bounded by the site's hard
+caps. Callers name a model alias (`fast`, `smart`, `vision`, `embed`); a provider
+model id never appears in a request, response, error or log. Money is integer
+micro-credits (1 credit = 1,000,000 micro = $0.01).
+
+### Owner routes
+
+Session auth. Reads need `fabric.read`; every write needs `sites.ai_manage`
+(workspace ADMIN) and writes an audit row. A pocket in another workspace is a 404.
+
+| Route | Body / result |
+|---|---|
+| `GET/PUT /sites/by-pocket/{pocket_id}/ai/settings` | `SiteAiSettings`: `enabled`, `browser_access`, `require_preset_for_browser`, `allowed_models`, `alias_models`, `keep_transcripts`; `plan_models` and `online_models` (the plan's aliases not offline right now) are read-only. `allowed_models` outside the plan is a 422 `site_ai.model_not_in_plan`. `alias_models` is `{fast?, smart?, vision?}`, each `{agent_id?, model?}`: the workspace agent the alias runs on (none = the workspace default agent) and an optional catalog model (none = the agent's own). A PUT replaces the whole map; an agent the owner can't use is a 422 `site_ai.agent_not_found`, a model the gateway doesn't serve (on a platform-paid agent) a 422 `site_ai.model_not_available`. Only the agent's backend and model are used, never its prompt, tools or soul. |
+| `GET /sites/by-pocket/{pocket_id}/ai/models` | `SiteAiModels`: `agents` (`{id, name, backend, model, default}`, the workspace agents the caller may use, concierges left out), `models` (the chat entries of `GET /catalog/models`, with this workspace's `availability`), `default_agent_id`, and `catalog_error` (true when the catalog was unreachable; agents still listed). Feeds the per-alias pickers. |
+| `GET/POST /sites/by-pocket/{pocket_id}/ai/presets` | `SiteAiPreset[]` / create `{name, system_prompt, model, max_output_tokens, temperature}` (201, at most 50 per site) |
+| `GET/PUT/DELETE /sites/by-pocket/{pocket_id}/ai/presets/{id}` | a PUT bumps `version`; calls pin the version they ran with |
+| `GET/PUT /sites/by-pocket/{pocket_id}/ai/budget` | `SiteAiBudget`: `monthly_cap_micro`, `daily_cap_micro`, `per_visitor_daily_micro`, `preview_daily_cap_micro`, `alert_thresholds` (1-100, up to 5), `paused`; read-only `spent_today_micro`, `spent_month_micro`, `allowance_month_micro` |
+| `GET /sites/by-pocket/{pocket_id}/ai/usage?from&to` | `SiteAiUsage`: settled spend by day, model alias and caller (`worker`, `browser`, `preview`); up to 92 days, default the last 30 |
+| `GET /sites/by-pocket/{pocket_id}/ai/transcripts?limit&before` | opt-in transcripts, newest first (`sites.ai_manage`: they are visitors' words). Written only while `keep_transcripts` is on, kept 30 days, deleted when it is turned off |
+
+Plans (`cloud/billing/site_plans.py`): `free` gets `fast` in its own draft
+preview only; `site` adds `vision`; `staff` adds `smart`. The monthly
+allowance (`site` 500 credits, `staff` 2,000) is the plan's hard ceiling on a
+site's AI spend; the owner's monthly cap can only lower it.
+
+### `POST /sites/{site_id}/ai/ticket`
+
+Browser callers only: `X-Paw-Site-Key` from one of the site's own hosts (or its
+own draft preview). Body `{turnstile_token}` → `{ticket, expires_at}`. The ticket
+is an HMAC over the site, the caller's IP hash, the caller kind and an expiry about
+20 minutes out, signed with `POCKETPAW_SITE_AI_TICKET_SECRET` (else derived from
+`AUTH_SECRET`; with neither, tickets are refused with 503). Refused with 403
+`browser_disabled` unless the owner turned on browser access. Turnstile fails
+closed: the site's own Turnstile widget when it has one, else the platform secret;
+with neither configured the ticket is refused (403 `turnstile_required`) unless the
+dev-only `PAW_SITE_AI_ALLOW_NO_TURNSTILE=1` is set on a non-production box. The
+answer's hostname must be one of the site's own hosts. The visitor address is the
+`CF-Connecting-IP` when the hop our proxy saw is a Cloudflare edge, else that hop
+(`POCKETPAW_SITE_AI_TRUSTED_HOPS`, default 1); IPv6 is bucketed by /64 and the
+bucket is HMAC'd with the ticket secret. A browser call naming a preset loses its
+own system messages and response format, and may carry at most 20 assistant
+turns. A draft preview gets a `preview` ticket without
+Turnstile (its origin is the draft's unguessable host). 10 tickets a minute per
+visitor address.
+
+### `POST /sites/{site_id}/ai/chat`
+
+No session. Auth is `Authorization: Bearer <PAW_GATEWAY_TOKEN>` (the site's
+Worker), or for browser callers `X-Paw-Site-Key` + the origin gate +
+`X-Paw-Ai-Ticket`. Browser calls need browser access (else `unavailable {reason:
+"browser_disabled"}`, 403 for JSON), a live ticket from the same address (else 401
+`unauthorized`; re-mint and retry), and a preset when the owner requires one (403
+`preset_required`). With a preset, any `system` message a browser sends is dropped.
+Browser calls are held against the per-visitor daily cap (keyed on the hashed
+address) and limited to 20 a minute per address and 300 a minute per site. A call
+from the site's own draft preview needs a `preview` ticket, works on the free
+plan, and is held only against the preview daily cap. Body: `{model, messages, preset?, response_format?,
+max_output_tokens?, temperature?, stream?, user?}`; only these fields are read,
+and nothing else from the body is forwarded. `user` is hashed and only feeds a
+per-user rate limit.
+
+The call runs as ONE tool-less side completion
+(`cloud/chat/side_completion.agent_complete` / `agent_stream`) on the agent and
+model the owner mapped to the alias, as the site owner: the agent's own backend
+(Claude Agent SDK, pydantic_ai, ...), the catalog check of a picked model, the
+workspace's BYOK key when it has one, and the chat turn's credit gates. The call
+is isolated: no soul recall, none of the agent's skills, no connectors block, so the
+system prompt is exactly the site's (or its preset's) system messages; the rest of
+the history is one delimited transcript. The site owner must still be a member of
+the site's workspace. `max_output_tokens` and the alias cap ride as an instruction,
+and a stream is cut once its text passes the cap (`finish_reason: "length"`).
+`temperature` is accepted and ignored.
+
+- `stream: true` (default) answers `text/event-stream` with `chunk {delta}`,
+  `usage {input_tokens, output_tokens, credits_micro}`, and ends with exactly one
+  of `done {id, finish_reason}`, `unavailable {reason}` or `error {code,
+  message}`.
+- `stream: false` answers `ChatResponse` JSON: `{id, model (the alias), message,
+  finish_reason, usage}`.
+- No tool calling: `tools`, `tool_choice`, `tool` messages and assistant
+  `tool_calls` are a 400 `unsupported` (with `field`: `tools` or `messages[i]`),
+  never silently dropped.
+- Images (vision alias only, user messages only; `data:` URLs must be
+  png/jpeg/gif/webp and match their magic bytes, up to 5 MB and 8 per request;
+  remote image URLs are refused) reach the model on the chat turn's
+  `image_attachments` channel. An agent whose backend can't take images answers
+  `error {code: "unsupported", field: "messages[i].content"}` (400 for JSON
+  callers), unbilled.
+- `response_format` `json_object` / `json_schema` adds a reply-with-JSON
+  instruction (and the schema) to the system prompt; the reply's JSON value is
+  returned re-serialised (a stream sends it as one `chunk`). A reply with no JSON
+  is `error {code: "provider_unavailable"}` (503 for JSON callers), billed.
+- A preset's system prompt, model and output cap win over the request.
+- Limits: 400 KB body, 200 messages, input within the alias context (an image
+  counts as 6,000 tokens in the hold).
+- Failures: a credit or billing refusal streams `unavailable {reason: "limit"}`
+  (402 `wallet_empty`). A misconfigured alias (an unknown model, an agent that is
+  gone, a backend that can't run tool-less) streams `unavailable {reason:
+  "temporary"}` (503 `provider_unavailable`), logs one ERROR line marked
+  `alias_misconfigured` and takes the alias offline for 5 minutes (the owner
+  saving a new mapping clears it). A timeout or backend error streams
+  `unavailable {reason: "temporary"}` before any output; mid-stream it streams
+  `usage` for what was produced, then `error`.
+- Errors are JSON `{detail: code, message, field?, retry_after?}`: 400
+  `invalid_request` / `unsupported`, 401 `unauthorized`, 402 `budget_exhausted` / `wallet_empty`,
+  403 `browser_disabled` / `preset_required` / `model_not_allowed` /
+  `origin_not_allowed`, 413 `request_too_large`, 429 `rate_limited`, 503
+  `provider_unavailable`. A paused site streams `unavailable {reason: "paused"}`
+  (JSON callers get 402 `budget_exhausted`).
+
+Each call writes a `ChatRunDoc` (`context_type: "site_ai"`, token counts only, no
+content, `credential_source` = who paid) and a platform-paid one is debited
+through `bill_run` keyed `run:{run_id}`; the ledger `ref` carries `kind:
+"site_ai"`, `pocket_id` and `site_id`. A BYOK call (the workspace's own key paid)
+is recorded and counted against the owner's own caps, never debited. Cost comes
+from `resolve_cost` (the backend's reported cost, else the dated price of the
+model that ran), else the alias's fallback rate.
+
+**Hard caps.** Before the model is called, a platform-paid call's workspace wallet is checked
+(`over_billing_limit`: empty wallet, monthly ceiling, kill switch → `wallet_empty`)
+and the call's worst case (pessimistic input estimate + the full output cap, priced
+with the RateCard markup) is reserved atomically against every cap that applies:
+the site's daily cap and monthly cap (bounded by the plan allowance), plus the
+per-visitor daily cap for a Worker call that sends `user`. Preview calls use only
+the preview daily cap. A BYOK call is held only against the owner's own caps (no
+plan allowance, no wallet). A refused hold is `budget_exhausted`; both stream
+`unavailable {reason: "limit"}` (402 for JSON callers). After the call the hold
+settles to the reported usage and the surplus is released, and never above the
+hold (the platform absorbs an overrun). A call the model never started on (a gate
+or credit refusal, a misconfigured alias, a timeout before the run began) or a
+backend error with no usage and no output costs nothing and releases it all; one
+that started and then failed or was disconnected bills its usage, else its input
+estimate plus what streamed. Holds are priced at the higher of the answering
+model's dated price (the agent's model, else its backend's default) and the
+alias's fallback rate. A sweeper settles a dead call that was sent to its full hold and debits it, and releases one that was never sent. Settles are unconditional; a counter past its cap refuses new holds. With credits enforced, every call is also held on a workspace-wide in-flight counter against the wallet balance plus a 10-credit overdraft (`wallet_empty`). These counters are ours, so the caps hold in LiteLLM `live` spend mode too, where the proxy does the wallet billing.
+Crossing an alert threshold of the monthly cap notifies the workspace owner once
+per threshold per month (kind `site_ai_budget`) and emits `site.ai_budget` to the
+site owner.
+
+### `POST /sites/{site_id}/ai/embed`
+
+Not offered: site AI runs on the workspace's agents, which can't embed. After the
+same caller check as `/ai/chat` it answers 503 `provider_unavailable` with a
+message saying embeddings aren't available; nothing is held or billed. Owners and
+the builder agent are never told `embed` exists.
+
+**Builder agent.** The /sites agent has `get_site_ai_settings` (settings with
+`alias_models` and `online_models`, budget, presets and `how_to`, the build
+guidance: call AI from server code with the `paw-ai` recipe's `pawAi(env)`, only
+online aliases, no tools or embeddings, images only on `vision`, JSON via
+`response_format`, browser calls only when needed and behind a preset, always
+render a resting state for `budget_exhausted` / `unavailable`),
+`set_site_ai_settings` (needs `sites.ai_manage`; pushes the SSE card
+`site_ai_budget_requested {pocket_id, purpose, budget}` so the owner confirms the
+caps) and `upsert_site_ai_preset` (needs `sites.ai_manage`). The agent never sets
+caps or transcripts.
+
+**Transfer and delete.** A site transfer moves its AI settings, presets and budget
+to the new workspace (new calls bill the new owner), releases holds in flight and
+deletes transcripts; usage rows stay with the workspace that paid for them, and the
+spend counters are keyed by the site, so a transfer never resets its caps. A site
+delete removes every site AI row; the credit ledger keeps its debits.
 
 ## Deleting a site
 
@@ -7705,6 +8091,44 @@ for svelte and react. Errors, none of which mean the site is broken:
   `PAW_CF_API_TOKEN` / `PAW_CF_ZONE_ID`): screenshots are unavailable on this
   deployment.
 
+#### `save_site_reference`
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. The pocket must be readable by the caller and in the chat's workspace. |
+| `image_url` | string | Required. The public URL of an image the owner attached in chat or uploaded to this site (read back from storage, never fetched), or a Refero screenshot (streamed from `images.refero.design` only, exact host, size-capped, one 20 s deadline). Every other host is refused before any request. |
+
+Stores a design the owner supplied on the pocket. The image must be PNG, JPEG,
+WebP or GIF, at most 10 MB, 40 megapixels, 20,000px a side and 30:1 tall, and at
+least 200px wide. It is re-encoded to a fresh PNG (first frame, RGB, no metadata) and kept on
+the private upload adapter at `sites-references/{workspace}/{pocket}/{reference_id}.png`,
+at most 20 per pocket; a site delete removes them. Returns JSON `{ok, reference_id, width, height, looks_like}`;
+the id is `ref_` plus a content hash, so saving the same image twice returns the
+same id. `looks_like` is the guessed width class (`desktop` or `mobile`).
+
+#### `compare_site_to_reference`
+
+| Arg | Type | Notes |
+|-----|------|-------|
+| `pocket_id` | string | Required. |
+| `reference_id` | string | Required. A `ref_...` id from `save_site_reference`. |
+| `viewport` | `desktop` \| `mobile` \| integer | Optional. `desktop` is 1280px, `mobile` 390px, or an exact CSS width (320-1920). Default: guessed from the reference. |
+| `path` | string | Optional route on a template-built draft, validated like `preview_site`'s. |
+| `wait_ms` | integer | Optional settle wait, clamped to 0-8000, as in `preview_site`. |
+
+Photographs the draft through the same capture path as `preview_site`, at the
+chosen width, scales the reference to that width and compares the top of both
+(the shorter page, capped at three tiles). The difference is taken on lightly
+blurred copies, so anti-aliasing does not count, and averaged over a grid of
+square cells. Returns MCP `image` blocks (one REFERENCE | BUILD side-by-side per
+tile, then a heatmap with the top regions boxed and numbered) and one text block:
+the match (share of grid cells under the threshold), a score per tile, up to five
+mismatch regions in CSS px with a 0-100 score, and both page heights. The whole
+result stays under 700 KB of base64; lower tile pairs are dropped first, and the
+heatmap is always kept. A score measures pixels, not fidelity, so a substituted
+font or a placeholder image lowers it. Errors mean no comparison ran, never that
+the site is broken.
+
 #### `play_test_site`
 
 | Arg | Type | Notes |
@@ -7759,6 +8183,28 @@ it; override with `PAW_SITES_HARNESS_DIR`). Set `PAW_SITES_VERIFY_IMAGE` to a Da
 sandbox image carrying bun, node and Playwright 1.62.1's Chromium; without it the
 sandbox tries `playwright-core install chromium` and, if the browser still cannot
 launch, the browser layer is `unverified` / `browser_unavailable`.
+
+#### `GET /sites` and `GET /sites/by-pocket/{pocket_id}/status` — `generation`
+
+```json
+"generation": "generating | waiting | ready | null",
+"generation_session_id": "<chat session id> | null"
+```
+
+Whether the agent run that CREATED the site is still working on it, so a reload
+mid-build can show the build instead of the bare template. Only the agent create
+tools stamp it (`generating`, with the chat session the run lives in); edits,
+imports, remixes, upgrades and publish never do. `waiting` means that session's
+newest run ended on an unanswered `ask_user`; `ready` means it ended otherwise.
+Two endings keep the current value instead of settling: a run cancelled or
+interrupted less than 60 s ago (a follow-up message cancels the run in flight
+before the next one exists), and a reply whose question was just answered (the
+next run is about to start). Both reads re-check rows that are `generating` or `waiting` against the session's
+runs and write the settled value back, so the flag cannot stick; a new run in the
+same session reads `generating` again. `null` means never tracked (behave as
+before), and a deployed site always reads `null` for both fields. Independent of
+`status`, `is_live` and the `build_*` fields; publish, previews and billing never
+read it.
 
 ### Build state on the `publish` response
 
@@ -8423,7 +8869,7 @@ the split is the security model:
 | `POST /paw-bar/admin/site/{site_id}/catalog/import/csv` | Read the products in an uploaded CSV (multipart, field `file`, at most 2 MB, else 413 `too_large`). Writes nothing; same response shape as the preview, `source: "csv"`. See [CSV import](#csv-import). Behind `paw_bar.manage`. |
 | `GET /paw-bar/admin/site/{site_id}/conversations` | The inbox. One row per CONVERSATION, not per visitor — a visitor who asked four separate questions is four rows, each carrying its own `conversation_id` and its own last sentence. Supports `?state=open\|needs_human\|snoozed\|closed`, carries per-state `counts`, and each row joins its lifecycle state, unread count, tags and whether an action is pending. |
 | `GET /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | One conversation's transcript, interleaving visitor, assistant, owner and system turns by timestamp. Pass `conversation_id` to read ONE thread; without it the visitor's whole history is merged into a single transcript. Both sources narrow together — narrowing only the runs would interleave one thread's questions with every reply a human ever sent that visitor. Narrowing reads each turn's own session-key token rather than rebuilding a key from the conversation id and the widget's current agent, so a conversation that predates conversation identity — or one answered before its widget was bound to a dedicated agent — opens instead of 404-ing. A conversation the visitor really holds returns an empty transcript rather than a 404 when it has nothing in it yet. |
-| `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | Move state, snooze, tag, or append a private note. Send `conversation_id` to file the thread you are READING; omit it and the visitor's conversation in progress is filed instead. |
+| `PATCH /paw-bar/admin/site/{site_id}/conversations/{customer_ref}` | Move state, snooze, tag, append a private note, or mark the thread read with `unread_for_owner: 0` (any other value is a 422 `invalid_unread_for_owner`). Send `conversation_id` to file the thread you are READING; omit it and the visitor's conversation in progress is filed instead. |
 | `POST /paw-bar/admin/site/{site_id}/conversations/{customer_ref}/reply` | Reply as the owner. Persists the turn, mutes the bot, clears unread, and reopens a closed or snoozed conversation. Send `conversation_id` so the reply lands in the thread being answered — without it an answer to an older question surfaces inside whichever conversation the visitor has open now. A `conversation_id` belonging to another visitor or another site is a 404, never a silent fallback. |
 | `GET /paw-bar/admin/agent/{agent_id}/conversations` | The same inbox scoped to an agent rather than a site — the union across every site that agent serves. |
 | `GET /paw-bar/admin/site/{site_id}/decisions` | Gated actions awaiting a human. |

@@ -1,29 +1,20 @@
 ---
 name: sites-craft
 description: |
-  The CRAFT MECHANICS for a Paw Site: how to actually build the type scale, the
-  colour ramp, the spacing rhythm and the surface treatment, with exact values.
-  Invoke it WHILE AUTHORING sections, at the moment you lock tokens and again
-  whenever you set a font size, pick a colour step, space a group, round a
-  corner, or style a state. `pocketpaw-design-taste` chooses WHICH font, WHICH
-  palette family and WHICH layout composition; this decides HOW those are
-  constructed so they read as one system instead of a pile of one-off values.
-  It answers "what line-height does a heading take", "how do I build a ramp",
-  "what radius does a nested element get", "how much space separates two
-  groups". Generative, not corrective: `sites-check` (REVIEW mode) checks a
-  built page against these same rules; this one is for while you are writing it.
+  The CRAFT MECHANICS for a Paw Site: how the type scale, colour ramp, spacing
+  rhythm and surfaces are built, with exact values. Invoke it WHILE AUTHORING,
+  when you lock tokens and whenever you set a size, a colour step, a gap, a
+  radius or a state. `pocketpaw-design-taste` chooses WHICH font, palette and
+  composition; this decides HOW they are constructed. Also the product-surface
+  rules for dashboards and app screens, responsive transforms and the font
+  ledger. `sites-check` reviews a built page against these rules.
 ---
 
 # Sites: craft mechanics
 
-Taste picks the ingredients. Craft is what makes them read as one system.
-
-`pocketpaw-design-taste` decides WHICH display face, WHICH aesthetic family,
-WHICH accent, and WHICH layout composition. Every one of those choices still has
-to be *built*, and the difference between a page that looks designed and a page
-that looks assembled is almost entirely in this file: a real scale instead of
-four arbitrary sizes, a ramp whose steps each have a job, groups separated by
-space that means something, radii that agree.
+Taste picks the ingredients; craft makes them read as one system: a real scale
+instead of four arbitrary sizes, a ramp whose steps each have a job, space
+that means something, radii that agree.
 
 **Precedence** is stated once, in `pocketpaw-design-taste`: it governs every
 CHOICE, this file governs the CONSTRUCTION of whatever it chose. Where a value
@@ -71,7 +62,7 @@ a page tiring.
 
 **Wrap deliberately.** `text-wrap: balance` on headings so a two-line headline
 splits evenly. `text-wrap: pretty` on body so no single word is stranded on the
-last line. Both are one line of CSS and both are visible.
+last line.
 
 **Tabular numerals on anything that changes or aligns.** Prices in a pricing
 table, stats in a row, countdown digits:
@@ -96,9 +87,8 @@ different grid from the type is why a page can have a correct scale and still
 feel unsettled.
 
 **Count what you shipped, then cut.** A finished page should hold no more than
-six to eight distinct font sizes, four text colours and four weights. Squint at
-it: if you cannot tell two sizes apart, they are one size and one of them is
-noise.
+six to eight distinct font sizes, four text colours and four weights. If you
+cannot tell two sizes apart, one of them is noise.
 
 **Fluid type belongs in `clamp()`, not in breakpoints.**
 `clamp(2.5rem, 5vw, 4.5rem)` for a display line removes a whole class of
@@ -177,9 +167,8 @@ get by not asking.
 
 ---
 
-**Tell the browser which scheme the page is in.** This is the most-skipped line
-in dark design and the failure is never in your CSS. It is in the parts of the
-page the browser paints for you.
+**Tell the browser which scheme the page is in.** The failure is in the parts
+of the page the browser paints for you.
 
 ```html
 <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)">
@@ -275,10 +264,6 @@ off for anything whose visual mass is not centred. A play triangle wants
 `0.5-1px` to the right; a chevron or arrow wants a nudge toward its point. **The
 test:** drop the icon into a circle. If it does not look centred, it is not.
 
-**Visual mass is not stroke width.** At the same stroke, a circle reads lighter
-than a square and a diagonal reads thinner than a horizontal. Match what the eye
-weighs, not what the box measures.
-
 **Nothing at rest casts a shadow.** Separate resting surfaces by a step of tone
 or a hairline. A layered transparent `box-shadow` is for what floats: a menu, a
 dialog, a sticky bar. On a dark ground, elevation is a lighter surface. Keep
@@ -311,8 +296,7 @@ states from CSS colour and opacity. Outline is the default variant; fill marks
 active.
 
 **Load the hero eagerly, everything else lazily.** The largest image above the
-fold carries `fetchpriority="high"` and NO `loading="lazy"` (lazy-loading the
-LCP image is the most common self-inflicted slowdown). Everything below the fold
+fold carries `fetchpriority="high"` and NO `loading="lazy"`. Everything below the fold
 takes `loading="lazy"` and `decoding="async"`.
 Every `<img>` carries explicit `width` and `height` (or an `aspect-ratio`) so
 the page does not reflow as images arrive.
@@ -455,6 +439,33 @@ pushes the form down.
 **Say what happened and what to do**, next to the field that broke. Error copy is
 governed by `sites-conversion-structure` section 6; the three rungs there apply to
 every message a form can produce.
+
+---
+
+## Product surfaces: dashboards and app screens
+
+Data, status and actions are louder than the nav and frame around them. No
+hero, testimonials, campaign copy or card mosaic inside an app view.
+
+- **Every state ships with the happy path:** loading (space reserved), empty
+  (the action that fills it), error (beside what failed, input kept), partial,
+  no permission, offline, success. Dimensions hold across states.
+- **Live figures** take `tabular-nums`, right-aligned in columns.
+- **A newer request wins.** Tag each fetch and drop any response older than the
+  latest, or a slow reply overwrites what the user just asked for.
+
+## Responsive transforms and the font ledger
+
+Name one transform per section before writing breakpoints: **preserve**,
+**reflow** (columns to rows), **collapse** (nav to menu, tabs to accordion),
+**reorder** (only for priority), **crop** (reframe on the focal point),
+**simplify** (fewer decorative layers), **hide** (decoration only, never
+content or a control). One DOM; layout changes in CSS.
+
+When a face stands in for another (a commercial font, a guess from an image),
+keep a font ledger, one row per role: reference face, shipped face, weights,
+status (observed, inferred, substituted), line breaks match. Pick the
+substitute by its line breaks at the reference width, not glyph likeness.
 
 ---
 

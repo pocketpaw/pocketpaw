@@ -200,3 +200,17 @@ Re-fetch upstream `skills/better-{typography,colors,layout,ui}/SKILL.md`. Check
 the numeric values against the ones inlined here — upstream states they are exact,
 so drift matters. Re-check the design-taste coverage claim above before assuming
 this file is still additive.
+
+## Third source: design-to-code
+
+- **Source:** https://github.com/Atharvsinh-codez/skills (MIT, Atharv Jadav),
+  `design-to-code/references/interface-craft.md` and `typography-and-fonts.md`
+- **Commit:** `f56c173a3c95`
+- **License:** MIT. Attribution retained; the body is a rewrite, not a copy.
+
+What landed: the product-surface section (work surface over chrome, the state
+matrix, the stale-response guard), the seven named responsive transforms, and
+the font ledger. All of it sits above `## 5. The floor`, so refine turns do not
+pay for it. Bytes came from the frontmatter description, the intro, the
+visual-mass paragraph, and a few sentences that restated their own rule. Full provenance:
+`sites-reference-match/VENDORED.md`.

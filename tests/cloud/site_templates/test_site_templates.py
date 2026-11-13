@@ -13,9 +13,10 @@
 # hides); pagination; the Sites plan gate, size and count caps; that deleting a
 # template leaves its pockets alone; the source refusals; audit rows; and the
 # routes; and the screenshot copied onto the public asset rail (save, refresh,
-# delete purge, prefix isolation). The asset detector's per-shape tests: test_private_assets.py.
+# delete purge, prefix isolation); ``show_creator`` on by default for a new
+# save and kept by a PATCH that doesn't name it. The asset detector's per-shape
+# tests: test_private_assets.py.
 # Mutation plan: tests/mutations/site_templates.json.
-# Updated 2026-10-01 (feat/discover-index): META_KEYS gains kind, audiences, live_url.
 from __future__ import annotations
 
 from typing import Any
@@ -45,6 +46,8 @@ META_KEYS = {
     "kind",
     "audiences",
     "live_url",
+    "tags",
+    "show_creator",
     "id",
     "name",
     "description",
@@ -667,6 +670,34 @@ async def test_public_use_obeys_the_callers_pocket_cap(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # Sharing: PATCH
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_show_creator_is_on_for_a_new_save_and_kept_by_patch(client: AsyncClient) -> None:
+    src = await _site()
+    resp = await client.post(
+        "/api/v1/site-templates", json={"pocket_id": str(src.id), "name": "Tpl"}
+    )
+    assert resp.status_code == 200, resp.text
+    tid = resp.json()["id"]
+    assert resp.json()["show_creator"] is True
+    assert (await SiteTemplate.get(tid)).show_creator is True
+
+    resp = await client.patch(f"/api/v1/site-templates/{tid}", json={"name": "Renamed"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["show_creator"] is True
+    resp = await client.patch(f"/api/v1/site-templates/{tid}", json={"show_creator": False})
+    assert resp.json()["show_creator"] is False
+    resp = await client.patch(f"/api/v1/site-templates/{tid}", json={"description": "D"})
+    assert resp.json()["show_creator"] is False
+    assert (await SiteTemplate.get(tid)).show_creator is False
+
+    # Opting out at save time.
+    resp = await client.post(
+        "/api/v1/site-templates",
+        json={"pocket_id": str(src.id), "name": "Quiet", "show_creator": False},
+    )
+    assert resp.json()["show_creator"] is False
 
 
 @pytest.mark.asyncio

@@ -17,8 +17,8 @@
 # ``remixed_from_source_id`` (the template the source site was made from), and
 # carry ``tags`` / ``show_creator``; the reindex re-reads each one's
 # ``live_url``. Studio template rows come from ``studio_templates.service_admin``
-# already in listing shape; its ``use`` returns the template's
-# ``{recipe, uses_input_images}`` and creates nothing.
+# already in listing shape (``show_creator`` included); its ``use`` returns the
+# template's ``{recipe, uses_input_images}`` and creates nothing.
 
 from __future__ import annotations
 

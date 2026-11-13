@@ -29,7 +29,7 @@ stop. Implement only if the user also asks for the fixes, then re-check what
 you changed.
 
 Every rule has an id: `SC-<GROUP>-<NN>`. Groups: BUILD, HONEST, LINK, COPY,
-LAYOUT, A11Y, MOBILE, SCORE. Cite the id in a finding, so a tool, a review and
+LAYOUT, A11Y, MOBILE, REF, SCORE. Cite the id in a finding, so a tool, a review and
 a later fix all point at the same rule. Ids are stable: a retired rule keeps
 its number and is never reused.
 
@@ -51,8 +51,8 @@ the brief or the direction says.
   states something false. Fix before the draft is shown.
 - `MEDIUM`: a visible system failure or a strong tell.
 - `LOW`: isolated polish or a weak tell.
-- `WARN`: worth telling the owner, never a reason to hold the draft or to
-  refuse publish. Placeholders are always WARN.
+- `WARN`: worth telling the owner, never a reason to hold the draft.
+- `BLOCKS PUBLISH`: the publish gate refuses until fixed or the owner confirms.
 
 Tells are ranked strongest first inside each group. A **strong** tell convicts
 alone. A **weak** tell never convicts alone: report it only when three or more
@@ -134,8 +134,10 @@ are not tells.
   big numbers (`+47%`, `10x`, `50,000+ teams`) where the brief gave none. Drop
   the strip; do not fill it.
 - **SC-HONEST-03 Default people and promptonyms** (HIGH). Sarah Chen, Elena
-  Vasquez, Elara Voss, John or Jane Doe, Acme, Lumina, Nexus, `johndoe@example.com`,
-  `555` numbers. Use the owner's real names or a labelled placeholder.
+  Vasquez, Elara Voss, John or Jane Doe, Acme, Lumina, Nexus, `johndoe@example.com`.
+  Use the owner's real names or a labelled placeholder. A made-up phone or
+  WhatsApp number (9876543210, 1234567890, `555`, 07700 900xxx) BLOCKS PUBLISH:
+  it rings a stranger. Ask the owner for theirs.
 - **SC-HONEST-04 Unearned badges** (MEDIUM). "Most popular", "Best value",
   "Trusted by" or a rating on something the brief did not single out.
 - **SC-HONEST-05 Fact-diff after any rewrite** (HIGH). Every name, number,
@@ -144,10 +146,10 @@ are not tells.
 - **SC-HONEST-06 Declining a claim** (MEDIUM). When the page needs proof you do
   not have, leave `[NEED: proof]` or say only what is true. Do not soften an
   unsupported claim into a vaguer one ("among the best").
-- **SC-HONEST-07 Placeholders left** (WARN). Sweep for `[`, `[NEED:`, `[Phone]`,
-  lorem ipsum, `example.com`, "Your Company", "Your Name". Keep them in the
-  draft and list every one in the reply so the owner can fill them. Never a
-  publish block.
+- **SC-HONEST-07 Placeholders left** (BLOCKS PUBLISH). Sweep for `[`, `[NEED:`,
+  `[Phone]`, `[Address]`, lorem ipsum, `example.com`, "Your Company", "Your Name".
+  A draft may keep them; list every one in the reply and ask the owner for the
+  real address, phone, WhatsApp, email and hours. Never invent them.
 - **SC-HONEST-08 Asset honesty** (HIGH). Every `src` is a URL a tool returned
   or the user supplied, never a made-up path. A found stock photo never stands
   in for the client's own product, room, team or food.
@@ -168,12 +170,14 @@ Checkable from source without a render. List every dead control by its label.
   `javascript:void(0)`, no `onclick` that does nothing. Wire it or remove it.
 - **SC-LINK-03 Internal paths resolve** (HIGH). Every link to another page
   points at a page that exists. A nav item for a page you did not build goes.
-- **SC-LINK-04 Forms submit somewhere** (HIGH). Every form has a real submit
-  target (the site's form endpoint or a tool-provided action) and a visible
-  success state.
+- **SC-LINK-04 Forms submit somewhere** (BLOCKS PUBLISH). Every form POSTs to a
+  real handler (a server route, `data-paw-subscribe`, a submit script) and shows
+  a success state. A GET back to the page saves nothing. Before saying ready,
+  run `play_test_site` with `exercise_forms: true` on each page with a form.
 - **SC-LINK-05 Toggles change state** (MEDIUM). Menus, tabs, accordions and
   theme switches change something visible and expose it (`aria-expanded`,
-  `aria-selected`).
+  `aria-selected`). Status flows only move forward: the primary action is the
+  next state (New, Packed, Delivered); never "Mark packed" after Delivered.
 - **SC-LINK-06 Footer and legal links** (MEDIUM). Every footer link is real.
   Privacy and terms appear where the business collects data, and point at
   pages that exist or are removed.
@@ -355,6 +359,22 @@ The rules are `sites-craft` section 5. These are the checks.
   value, and in a media and copy block the picture comes first.
 - **SC-MOBILE-09 Text off the edge** (MEDIUM). At least 16px side padding at
   every width, set once on the page wrapper.
+
+## REF: built to a supplied design
+
+Only when the user supplied a screenshot, mockup or frame (`sites-reference-match`).
+
+- **SC-REF-01 Correction order** (HIGH). Compare beside the reference at its
+  width and fix the biggest mismatch first: content and state, page shell and
+  section heights, grid and alignment, fonts and line breaks, images and crop,
+  spacing, colour and surface, small details, states and motion. A global cause
+  (font, container width) before its symptoms.
+- **SC-REF-02 Two passes** (HIGH). At least two compare-and-fix passes, each on
+  a fresh capture. One look is not a check.
+- **SC-REF-03 One verdict** (HIGH). The reply ends on exactly one: READY,
+  READY WITH SUBSTITUTIONS (a commercial font or missing asset was swapped;
+  list each), NOT READY (name what remains), or UNVERIFIED (no comparison
+  ran). Never "pixel-perfect".
 
 ## SCORE: the judgement pass
 

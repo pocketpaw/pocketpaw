@@ -1,18 +1,20 @@
 # StudioTemplate Beanie document — a Studio generation published as a template.
 #
-# Created 2026-10-02 (feat/studio-templates): a FROZEN SNAPSHOT of one Studio
-# generation (``StudioGeneration``), never a pointer to it. ``cover`` is copied
-# from one of the generation's assets (``url`` stays backend-relative,
-# ``/api/v1/media/...``; Discover absolutizes it) and ``recipe`` is the
-# generation's ``{kind, model, prompt, params}`` with every input-image field
-# stripped (the inputs were the owner's own uploads and never leave the
-# workspace). ``uses_input_images`` records that the original run had inputs,
-# so a remix knows it must ask for its own.
+# A FROZEN SNAPSHOT of one Studio generation (``StudioGeneration``), never a
+# pointer to it. ``cover`` is copied from one of the generation's assets
+# (``url`` stays backend-relative, ``/api/v1/media/...``; Discover absolutizes
+# it) and ``recipe`` is the generation's ``{kind, model, prompt, params}`` with
+# every input-image field stripped (the inputs were the owner's own uploads and
+# never leave the workspace). ``uses_input_images`` records that the original
+# run had inputs, so a remix knows it must ask for its own.
 #
 # ``kind`` is the Discover kind: "image" | "video" | "music" (a generation's
 # "audio" maps to "music"); ``recipe.kind`` keeps the generation's own kind.
 # ``visibility`` / ``hidden`` / ``reports`` mirror ``SiteTemplate``: "private"
 # (owner only), "workspace", "public" (listed on Discover unless hidden).
+# ``show_creator`` puts the owner's name and picture on the Discover card; it
+# defaults to ``False`` here so a row saved before the field existed stays
+# anonymous (the publish request, not this model, turns it on for new ones).
 #
 # Only ``ee.cloud.studio_templates.service`` and ``service_admin`` import this
 # doc (import-linter "StudioTemplates" contract).
@@ -44,6 +46,7 @@ class StudioTemplate(TimestampedDocument):
     # {kind, model, prompt, params}; params never carry input-image fields.
     recipe: dict[str, Any] = Field(default_factory=dict)
     uses_input_images: bool = False
+    show_creator: bool = False
     hidden: bool = False
     reports: list[dict[str, Any]] = Field(default_factory=list)
 

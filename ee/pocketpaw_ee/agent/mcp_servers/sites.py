@@ -59,6 +59,7 @@ import logging
 from typing import Any
 
 from ._audit import record_tool_call
+from .sites_ai import SITE_AI_TOOL_IDS
 from .sites_project import SITES_PROJECT_TOOL_IDS, agent_error_text
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,10 @@ PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
 # Play the draft (keys, clicks, console errors) in a remote browser. Must ride
 # SITES_TOOL_IDS like every other tool on this server.
 PLAY_TEST_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__play_test_site"
+# Store an owner-supplied design on the pocket and compare the draft against it
+# (sites_reference.py). Must ride SITES_TOOL_IDS like every other tool here.
+SAVE_SITE_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__save_site_reference"
+COMPARE_SITE_TO_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__compare_site_to_reference"
 # Per-site secrets: request one from the owner by name, list names + status. Must
 # ride SITES_TOOL_IDS like every other tool on this server.
 REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
@@ -162,6 +167,8 @@ SITES_TOOL_IDS = (
     VERIFY_SITE_TOOL_ID,
     PREVIEW_SITE_TOOL_ID,
     PLAY_TEST_SITE_TOOL_ID,
+    SAVE_SITE_REFERENCE_TOOL_ID,
+    COMPARE_SITE_TO_REFERENCE_TOOL_ID,
     REQUEST_SITE_SECRET_TOOL_ID,
     LIST_SITE_SECRETS_TOOL_ID,
     LIST_SITE_INTEGRATIONS_TOOL_ID,
@@ -169,6 +176,8 @@ SITES_TOOL_IDS = (
     # The project engine's tools (sites_project.py): base templates, backend
     # recipes, the generic file tools and the sandbox build. Must ride here too.
     *SITES_PROJECT_TOOL_IDS,
+    # Site AI apps (sites_ai.py): read settings, change them, save a preset.
+    *SITE_AI_TOOL_IDS,
 )
 
 
@@ -239,6 +248,60 @@ async def _request_destructive_approval(
     )
 
 
+def _publish_blocked_text(exc: Any) -> str:
+    """The publish gate's refusal, as the next step for the agent: fix each finding (or
+    ask the owner for the real detail), never pass the override on its own."""
+    details = exc.details or {}
+    lines = [f"- {f.get('message', '')}" for f in details.get("findings") or ()]
+    if details.get("more"):
+        lines.append(f"- and {details['more']} more")
+    return (
+        "sites.publish_blocked: NOT published. The draft is not ready to go live:\n"
+        + "\n".join(lines)
+        + "\nFix each one: ask the owner for any real detail you do not have (address, "
+        "phone, WhatsApp, email, hours) and never invent one; make every form POST to a "
+        "real handler and exercise it with play_test_site (exercise_forms: true). Then "
+        "publish again. Tell the owner plainly what is missing. You cannot publish past "
+        "these yourself: if the owner wants it live as it is, tell them to click Publish in "
+        "the site builder, where the Publish panel lists these and offers Publish anyway. "
+        "Or call publish again with `confirm_placeholders: true`, which sends them a review "
+        "card in Approvals; approving it shows the same list and a Publish anyway button."
+    )
+
+
+async def _request_owner_override(workspace_id: str, user_id: str, pocket_id: str) -> dict:
+    """The agent asked to publish past the gate: file a Tray review card that lists the
+    findings instead. Only the owner's "Publish anyway" on that card takes it live."""
+    from pocketpaw_ee.sites import service as sites_service
+
+    try:
+        action = await sites_service.request_publish_pocket(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        )
+    except Exception:  # noqa: BLE001 - the agent still learns nothing was published
+        logger.warning("sites publish: could not file the publish-anyway card", exc_info=True)
+        return _error_response(
+            "Not published. Only the owner can publish past these findings: ask them to "
+            "click Publish in the site builder and choose Publish anyway under the list."
+        )
+    blob = (getattr(action, "parameters", None) or {}).get("_artifact_change") or {}
+    return _success_response(
+        {
+            "ok": False,
+            "approval_required": True,
+            "action_id": str(action.id),
+            "publish_findings": blob.get("publish_findings") or [],
+            "message": (
+                "Not published. Only the owner can take the site live past these "
+                "findings, so a review card was sent to them in Approvals. Tell the owner "
+                "what `publish_findings` lists, and that approving the card (or clicking "
+                "Publish in the site builder) shows the list with a Publish anyway "
+                "button. Do not retry the publish."
+            ),
+        }
+    )
+
+
 async def _publish_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__publish``.
 
@@ -271,6 +334,9 @@ async def _publish_handler(args: dict) -> dict:
         )
     name_raw = args.get("name")
     name = name_raw if isinstance(name_raw, str) else ""
+    if args.get("confirm_placeholders") is True:
+        # The agent never grants the override: the owner does, on a Tray card.
+        return await _request_owner_override(workspace_id, user_id, pocket_id)
 
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites import service as sites_service
@@ -283,6 +349,10 @@ async def _publish_handler(args: dict) -> dict:
             name=name,
         )
     except CloudError as exc:
+        if exc.code == "sites.publish_blocked":
+            # The agent never overrides the gate: only the owner can, on a card.
+            exc.details = {**(exc.details or {}), "can_override": False}
+            return _error_response(_publish_blocked_text(exc))
         if exc.code == "sites.migration_destructive":
             # Deleting stored rows is the owner's call. File the review card that
             # names what would be lost; approving that card is the only thing that
@@ -545,6 +615,15 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
                         "Optional site name. Defaults to the pocket's own name when omitted."
                     ),
                 },
+                "confirm_placeholders": {
+                    "type": "boolean",
+                    "description": (
+                        "The owner wants it live although publish was refused for "
+                        "placeholders, a made-up number or a broken form. This does NOT "
+                        "publish: it sends the owner a review card in Approvals where "
+                        "only they can choose Publish anyway."
+                    ),
+                },
             },
             "required": ["pocket_id"],
             "additionalProperties": False,
@@ -697,6 +776,14 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     from pocketpaw_ee.agent.mcp_servers.sites_play_test import make_play_test_site_tool
 
     play_test_site = make_play_test_site_tool(tool)
+    # Store an owner-supplied design and compare the draft against it. Same server.
+    from pocketpaw_ee.agent.mcp_servers.sites_reference import (
+        make_compare_site_to_reference_tool,
+        make_save_site_reference_tool,
+    )
+
+    save_site_reference = make_save_site_reference_tool(tool)
+    compare_site_to_reference = make_compare_site_to_reference_tool(tool)
     # Site secrets: ask the owner for one by name; list names + status. Same server.
     request_site_secret = make_request_site_secret_tool(tool)
     list_site_secrets = make_list_site_secrets_tool(tool)
@@ -708,6 +795,10 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     from pocketpaw_ee.agent.mcp_servers.sites_project import make_project_tools
 
     project_tools = make_project_tools(tool)
+    # Site AI apps: settings, the budget card, presets. Same server.
+    from pocketpaw_ee.agent.mcp_servers.sites_ai import make_site_ai_tools
+
+    site_ai_tools = make_site_ai_tools(tool)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
@@ -729,11 +820,14 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
             verify_site,
             preview_site,
             play_test_site,
+            save_site_reference,
+            compare_site_to_reference,
             request_site_secret,
             list_site_secrets,
             list_site_integrations,
             connect_site_integration,
             *project_tools,
+            *site_ai_tools,
         ],
     )
     return SERVER_NAME, server
@@ -753,11 +847,13 @@ __all__ = [
     "EDIT_REACT_COMPONENT_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "GET_SITE_BUILD_STATUS_TOOL_ID",
+    "COMPARE_SITE_TO_REFERENCE_TOOL_ID",
     "PLAY_TEST_SITE_TOOL_ID",
     "PREVIEW_SITE_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "READ_SITE_SOURCE_TOOL_ID",
     "REQUEST_SITE_SECRET_TOOL_ID",
+    "SAVE_SITE_REFERENCE_TOOL_ID",
     "SERVER_NAME",
     "SET_SITE_DEPENDENCIES_TOOL_ID",
     "SITES_TOOL_IDS",

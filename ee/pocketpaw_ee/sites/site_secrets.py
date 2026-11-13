@@ -21,10 +21,12 @@
 #   * The site delete cascade calls ``purge_for_pocket``; it is best effort there.
 #     A site transfer calls ``move_for_pocket`` to re-key the rows to the new
 #     workspace (the Fernet key is deployment-wide, so tokens move as they are).
-#   * ``ensure_generated_secret`` / ``secret_matches`` serve platform-minted secrets
-#     (the integrations gateway's ``PAW_GATEWAY_TOKEN``). The first skips the owner
-#     gate, so its callers authorize first; the second compares in constant time
-#     here, so the value still never leaves this module.
+#   * ``ensure_generated_secret`` / ``secret_matches`` serve platform-minted secrets:
+#     the integrations gateway's ``PAW_GATEWAY_TOKEN`` and the session-signing secrets
+#     in ``PLATFORM_SIGNING_SECRETS`` (``ensure_signing_secrets``, at recipe apply and
+#     publish, so no owner is ever asked for one). The first skips the owner gate, so
+#     its callers authorize first; the second compares in constant time here, so the
+#     value still never leaves this module.
 #   * ``set_managed_secret`` / ``delete_managed_secrets`` serve integration-written
 #     secrets (Supabase's project keys), tagged ``managed_by``. They skip the owner
 #     gate too (the caller is an integration hook the owner set up) but are audited
@@ -38,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -59,6 +62,27 @@ MAX_SECRETS_PER_SITE = 50
 
 Requester = Literal["agent", "user"]
 Status = Literal["set", "pending"]
+
+#: Session-signing secrets the platform mints per site. An owner never types one:
+#: publish mints the ones a build requests (``ensure_signing_secrets``) and a draft
+#: binds its own value for each (``draft_worker.draft_secrets``). Only names that
+#: clearly sign the app's own sessions: a JWT_SECRET may verify tokens from another
+#: system, so it stays the owner's to set.
+PLATFORM_SIGNING_SECRETS = ("BETTER_AUTH_SECRET", "AUTH_SECRET", "SESSION_SECRET")
+#: The integrations gateway token (``integrations.bindings.GATEWAY_TOKEN_NAME``),
+#: minted when the owner links an integration.
+GATEWAY_TOKEN_SECRET = "PAW_GATEWAY_TOKEN"
+DRAFT_SUFFIX = "__DRAFT"
+SIGNING_SECRET_DESCRIPTION = (
+    "Created by Paw. Keeps your site's sign-ins secure. Nothing for you to do."
+)
+
+
+def is_platform_managed(name: str) -> bool:
+    """True for a name the platform sets itself (a signing secret, its ``__DRAFT``
+    twin, the gateway token): the agent must never ask the owner for it."""
+    base = (name or "").strip().removesuffix(DRAFT_SUFFIX)
+    return base in PLATFORM_SIGNING_SECRETS or base == GATEWAY_TOKEN_SECRET
 
 
 class SiteSecretView(BaseModel):
@@ -366,22 +390,64 @@ async def ensure_generated_secret(
 
     For secrets the platform owns (a per-site gateway token), so it skips the owner
     gate and the per-site cap: the caller has already authorized the action that
-    needs it. A pending row of the same name is filled in."""
+    needs it. A pending row of the same name is filled in.
+
+    Insert-if-absent, so two callers racing (or a stale read) can never replace a
+    value: a new row relies on the unique (workspace, pocket_id, name) index, and a
+    pending row is filled only by an update that still sees it empty."""
     import secrets as _secrets
+
+    from pymongo.errors import DuplicateKeyError
 
     name = validate_name(name)
     row = await _row(workspace_id, pocket_id, name)
     if row is not None and row.encrypted_value:
         return False
+    fields = {
+        "encrypted_value": crypto.encrypt(_secrets.token_urlsafe(32)),
+        "description": description[:MAX_DESCRIPTION_CHARS],
+        "value_set_by": "system",
+        "value_set_at": datetime.now(UTC),
+    }
     if row is None:
-        row = _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name)
-    row.encrypted_value = crypto.encrypt(_secrets.token_urlsafe(32))
-    row.description = description[:MAX_DESCRIPTION_CHARS]
-    row.value_set_by = "system"
-    row.value_set_at = datetime.now(UTC)
-    await row.save()
+        try:
+            await _doc()(workspace=workspace_id, pocket_id=pocket_id, name=name, **fields).insert()
+        except DuplicateKeyError:
+            return False
+    else:
+        coll = _doc().get_pymongo_collection()
+        done = await coll.update_one(
+            {"_id": row.id, "encrypted_value": {"$in": [None, ""]}}, {"$set": fields}
+        )
+        if done.modified_count != 1:
+            return False
     logger.info("site_secrets: generated %s on pocket %s", name, pocket_id)
     return True
+
+
+async def ensure_signing_secrets(
+    *, workspace_id: str, pocket_id: str, names: Iterable[object]
+) -> list[str]:
+    """Mint each platform signing secret in ``names``, or with a pending request
+    (a site built when the agent still asked the owner), that has no value yet.
+    An owner-set value is kept; other names are ignored. Returns the minted names.
+    Needs CLOUD_ENCRYPTION_KEY like every secret write; the caller authorized the
+    action that needs them."""
+    if not workspace_id or not pocket_id:
+        return []
+    asked = {str(n) for n in names}
+    asked |= {r.name for r in await _rows(workspace_id, pocket_id) if not r.encrypted_value}
+    return [
+        name
+        for name in PLATFORM_SIGNING_SECRETS
+        if name in asked
+        and await ensure_generated_secret(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            name=name,
+            description=SIGNING_SECRET_DESCRIPTION,
+        )
+    ]
 
 
 async def set_managed_secret(

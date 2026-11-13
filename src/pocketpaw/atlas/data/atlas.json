@@ -503,6 +503,31 @@
     },
     {
       "gist": "",
+      "how": "mcp__pocketpaw_sites_manager__get_site_ai_settings (first; returns how_to), mcp__pocketpaw_sites_manager__set_site_ai_settings, mcp__pocketpaw_sites_manager__upsert_site_ai_preset, then apply_site_recipe with the paw-ai recipe",
+      "id": "capability:sites.site_ai",
+      "keywords": [
+        "ai chatbot",
+        "chatbot on my site",
+        "ai feature",
+        "ai generator",
+        "summarise",
+        "summarize",
+        "paw ai",
+        "site ai budget",
+        "openai api key",
+        "llm on my site"
+      ],
+      "kind": "capability",
+      "name": "AI features on a Paw Site",
+      "narrative": "A site's AI features call Paw's AI API under the site's own budget; each model alias (fast, smart, vision) runs on the workspace agent and model the owner picked, with no tool calling or embeddings and images on vision only. The builder agent reads the site's AI settings, budget and presets first, then follows the returned how_to: apply the paw-ai recipe and call AI from the site's server code by default; browser calls only when the app truly needs them, with browser access turned on and a preset so visitors cannot change the system prompt. The owner sets the daily and monthly caps (the agent never sets money); calls stop at the cap and every AI screen shows a friendly resting state instead of an error. Free sites get AI in the draft preview only.",
+      "requires": [
+        "role:member"
+      ],
+      "summary": "Add an AI feature to a site (a chatbot, a generator, a summariser, vision, search over its content) on Paw's AI, with no provider SDK and no API key.",
+      "surface": "/sites"
+    },
+    {
+      "gist": "",
       "how": "HTTP only, no agent tool: POST /api/v1/studio-templates {generation_id, asset_id?, title, description?, audiences?, visibility?}; GET /api/v1/studio-templates?limit&cursor (your own); PATCH {title?, description?, audiences?, visibility?} or DELETE /api/v1/studio-templates/{id}; POST /api/v1/discover/{id}/use on a studio listing returns {source, result: {recipe, uses_input_images}}",
       "id": "capability:studio.publish_template",
       "keywords": [
@@ -2410,9 +2435,25 @@
       ],
       "kind": "skill",
       "name": "sites-craft",
-      "narrative": "The CRAFT MECHANICS for a Paw Site: how to actually build the type scale, the colour ramp, the spacing rhythm and the surface treatment, with exact values. Invoke it WHILE AUTHORING sections, at the moment you lock tokens and again whenever you set a font size, pick a colour step, space a group, round a corner, or style a state. `pocketpaw-design-taste` chooses WHICH font, WHICH palette family and WHICH layout composition; this decides HOW those are constructed so they read as one system instead of a pile of one-off values. It answers \"what line-height does a heading take\", \"how do I build a ramp\", \"what radius does a nested element get\", \"how much space separates two groups\". Generative, not corrective: `sites-check` (REVIEW mode) checks a built page against these same rules; this one is for while you are writing it.",
+      "narrative": "The CRAFT MECHANICS for a Paw Site: how the type scale, colour ramp, spacing rhythm and surfaces are built, with exact values. Invoke it WHILE AUTHORING, when you lock tokens and whenever you set a size, a colour step, a gap, a radius or a state. `pocketpaw-design-taste` chooses WHICH font, palette and composition; this decides HOW they are constructed. Also the product-surface rules for dashboards and app screens, responsive transforms and the font ledger. `sites-check` reviews a built page against these rules.",
       "requires": [],
-      "summary": "The CRAFT MECHANICS for a Paw Site: how to actually build the type scale, the colour ramp, the spacing rhythm and the surface treatment, with exact values.",
+      "summary": "The CRAFT MECHANICS for a Paw Site: how the type scale, colour ramp, spacing rhythm and surfaces are built, with exact values.",
+      "surface": ""
+    },
+    {
+      "gist": "",
+      "how": "a user invokes it as /sites-reference-match in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:sites-reference-match",
+      "keywords": [
+        "sites-reference-match",
+        "figma",
+        "figma link"
+      ],
+      "kind": "skill",
+      "name": "sites-reference-match",
+      "narrative": "Build a site from a Figma link, or TO a screenshot or mockup the user supplied. Invoke it ONLY when the user hands you such a reference and asks for the site to look like it; never for an open brief. It sets the source mode (the supplied design outranks taste), inventories every reference, keeps an observed / inferred / substituted ledger, locks a fidelity contract, identifies fonts and substitutes open ones, names a responsive transform per section, then compares the build against the reference in a fixed correction order for at least two passes and ends on one verdict: READY, READY WITH SUBSTITUTIONS, NOT READY or UNVERIFIED.",
+      "requires": [],
+      "summary": "Build a site from a Figma link, or TO a screenshot or mockup the user supplied.",
       "surface": ""
     },
     {
@@ -2535,12 +2576,12 @@
       ],
       "kind": "surface",
       "name": "Agent Health",
-      "narrative": "Agent Health at /agent-health is the workspace-scoped view of agent reliability, read from paw-lens traces: runs, failing rate, cost, cache hits, the open issues grouped by cause, and a per-agent table. Each issue opens at /agent-health/issues/<fingerprint> with the runs it hit, and each run opens its span timeline at /agent-health/runs/<traceId>. Point a user here when they ask why an agent failed, which agent is erroring, or what runs cost; for what agents are doing right now use /agents/activity. Muting or resolving an issue needs a workspace admin.",
+      "narrative": "Agent Health at /agents/health, a tab of the Agents page, is the workspace-scoped view of agent reliability, read from paw-lens traces: runs, failing rate, cost, cache hits, the open issues grouped by cause, and a per-agent table. Each issue opens at /agents/health/issues/<fingerprint> with the runs it hit, and each run opens its span timeline at /agents/health/runs/<traceId>. Point a user here when they ask why an agent failed, which agent is erroring, or what runs cost; for what agents are doing right now use /agents/activity. Muting or resolving an issue needs a workspace admin.",
       "presentation": "window",
       "requires": [],
-      "slash": "agent-health",
+      "slash": "agents/health",
       "summary": "Where the workspace's agents fail, what their runs cost, and the run timeline behind each issue.",
-      "surface": "/agent-health"
+      "surface": "/agents/health"
     },
     {
       "agent_openable": false,

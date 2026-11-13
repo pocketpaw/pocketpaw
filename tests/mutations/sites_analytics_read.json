@@ -237,7 +237,7 @@
   },
   {
     "label": "a naive stored stamp reaches the wire without its zone — a client reads a UTC instant as local time, so the chart's x-axis silently starts hours off",
-    "file": "ee/pocketpaw_ee/sites/service.py",
+    "file": "ee/pocketpaw_ee/sites/dto.py",
     "find": "    if moment.tzinfo is None:\n        moment = moment.replace(tzinfo=UTC)\n    return moment.astimezone(UTC).isoformat()",
     "replace": "    return moment.isoformat()",
     "tests": [
@@ -432,6 +432,15 @@
     "replace": "    start = max(\n        _analytics_series_floor(now - timedelta(days=days), interval),\n        _analytics_series_floor(since, interval),\n    )",
     "tests": [
       "tests/ee/sites/test_sites_analytics_read.py"
+    ]
+  },
+  {
+    "label": "the site response sends deployed_at without its zone again, so Last deployed reads hours off for anyone outside UTC",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        deployed_at=utc_iso(deployed_at),\n        # When the row was made.",
+    "replace": "        deployed_at=deployed_at.isoformat() if deployed_at is not None else None,\n        # When the row was made.",
+    "tests": [
+      "tests/ee/sites/test_site_times_are_utc.py"
     ]
   }
 ]

@@ -32,6 +32,7 @@ from pocketpaw_ee.agent.mcp_servers.external_actions import (
     SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
 )
 from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.figma import SERVER_NAME as _FIGMA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.files import SERVER_NAME as _FILES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.fx import SERVER_NAME as _FX_MCP_SERVER_NAME
@@ -148,6 +149,9 @@ def _strip_builtin_servers(result: dict) -> dict:
     # skills reach for Refero's design research without an opt-in, and the tools
     # answer empty when no token is configured rather than disappearing.
     out.pop(_REFERO_MCP_SERVER_NAME, None)
+    # ``pocketpaw_figma`` is ambient too; its tools read only Figma files the
+    # owner pasted in the current /sites session, so registration is not the door.
+    out.pop(_FIGMA_MCP_SERVER_NAME, None)
     # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
     # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
     # (loom_model_path unset -> not registered) but stripped defensively: a

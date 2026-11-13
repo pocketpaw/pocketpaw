@@ -684,10 +684,11 @@ async def test_the_deploy_provisioner_mints_the_token_for_a_linked_site(
 
     monkeypatch.setattr(binding_provisioner, "ensure_bindings", _ensure)
     await SiteIntegration(workspace="ws1", pocket_id="pk-prov", provider="demo").insert()
-    site = SimpleNamespace(workspace="ws1", pocket_id="pk-prov", plan_tier=None)
+    site = SimpleNamespace(id="site-prov", workspace="ws1", pocket_id="pk-prov", plan_tier=None)
     provision = sites_service._bundle_provisioner(site, None)
     res = await provision([])
     assert set(res.secrets) == {"PAW_GATEWAY_TOKEN"}
+    assert res.plain_text["PAW_SITE_ID"] == "site-prov"
 
 
 def test_an_assets_only_worker_binds_no_secrets(tmp_path):

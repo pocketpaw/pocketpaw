@@ -16,11 +16,16 @@
 #   * the first-publish claim skips another site's pending name (and backs off when one
 #     lands between its write and its verify) and another workspace's held name;
 #   * apply at publish: routes re-pointed IN PLACE (PUT, same ids -- a second POST for
-#     the same pattern is a Cloudflare 10020), old Worker deleted, doc updated, old slug
-#     held; a failed re-point puts every route back, deletes the new Worker and keeps
-#     ``slug_pending``; a failed deploy changes nothing; a failed old-Worker delete does
-#     not fail the publish; a legacy ``paw-site-<id>`` rename holds nothing; a pending
-#     name that appeared in the account is refused.
+#     the same pattern is a Cloudflare 10020), old Worker replaced by a redirect, doc
+#     updated, old slug held; a failed re-point puts every route back, deletes the new
+#     Worker and keeps ``slug_pending``; a failed deploy changes nothing; a redirect
+#     that cannot deploy falls back to deleting the old Worker and never fails the
+#     publish; a legacy ``paw-site-<id>`` rename holds nothing; a pending name that
+#     appeared in the account is refused;
+#   * the old address redirects (``slug_redirect``): a 308 to the same path and query
+#     on the new host, only ever to the site's current address (chained renames
+#     collapse, an own old name can be taken back), removed when the hold expires and
+#     when the site is deleted, and the Worker never lets a request pick the host.
 #
 # MUTATIONS THAT BREAK THIS FILE: tests/mutations/sites_rename.json.
 #
@@ -42,6 +47,7 @@ from pocketpaw_ee.cloud._core.errors import ConflictError, RateLimited, Validati
 from pocketpaw_ee.cloud.models.released_slug import ReleasedSlug
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain
+from pocketpaw_ee.cloud.models.site_redirect import SiteRedirect
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.cloudflare_client import CloudflareClient
 
@@ -62,6 +68,11 @@ class _FakeCF:
         self.log: list[tuple[str, ...]] = []
         self.fail_route: set[tuple[str, str]] = set()
         self.fail_delete: set[str] = set()
+        self.fail_put: set[str] = set()
+        # Script name -> the source uploaded through the API (the redirect Workers).
+        self.sources: dict[str, bytes] = {}
+        self.uploads: list[dict] = []
+        self.forced: list[str] = []
 
     async def update_worker_route(self, route_id, *, pattern, script):
         self.log.append(("route", route_id, script))
@@ -69,11 +80,38 @@ class _FakeCF:
             raise RuntimeError(f"cloudflare refused route {route_id}")
         self.routes[route_id] = script
 
-    async def delete_account_script(self, name):
+    async def delete_account_script(self, name, *, force=False):
         self.log.append(("delete", name))
+        if force:
+            self.forced.append(name)
         if name in self.fail_delete:
             raise RuntimeError(f"cloudflare refused to delete {name}")
         self.account.discard(name)
+
+    async def put_worker(self, *, script_name, target, modules, main_module, bindings, **kw):
+        self.log.append(("put", script_name, target))
+        self.uploads.append(
+            {
+                "name": script_name,
+                "target": target,
+                "main_module": main_module,
+                "bindings": bindings,
+                "modules": [m.name for m in modules],
+                **kw,
+            }
+        )
+        if script_name in self.fail_put:
+            raise RuntimeError(f"cloudflare refused to upload {script_name}")
+        [module] = [m for m in modules if m.name == main_module]
+        self.sources[script_name] = module.content
+        self.account.add(script_name)
+        return True
+
+    async def clear_schedules(self, name):
+        self.log.append(("schedules", name))
+
+    async def enable_workers_dev(self, name):
+        self.log.append(("subdomain", name))
 
     def deleted(self) -> list[str]:
         return [e[1] for e in self.log if e[0] == "delete" and e[1] not in self.fail_delete]
@@ -153,6 +191,10 @@ async def _row(oid) -> dict:
 
 async def _holds() -> list[dict]:
     return await ReleasedSlug.get_pymongo_collection().find({}).to_list(None)
+
+
+async def _redirects() -> list[dict]:
+    return await SiteRedirect.get_pymongo_collection().find({}).sort("name", 1).to_list(None)
 
 
 async def _available(raw: str, *, workspace: str = WS, site_id: Any = None):
@@ -583,9 +625,14 @@ async def test_a_rename_moves_the_worker_and_both_domains(beanie_test_db, cf):
     # Both routes now answer from the new Worker, re-pointed in place (same ids)...
     assert cf.routes == {"r0": "acme-cakes", "r1": "acme-cakes"}
     assert [d["cf_route_id"] for d in row["domains"]] == ["r0", "r1"]
-    # ...and only then was the old Worker deleted.
-    assert cf.log[-1] == ("delete", "acme-bakery")
-    assert cf.deleted() == ["acme-bakery"]
+    # ...and only then was the old Worker replaced by a redirect to the new address.
+    assert cf.log[-3:] == [
+        ("put", "acme-bakery", "account"),
+        ("schedules", "acme-bakery"),
+        ("subdomain", "acme-bakery"),
+    ]
+    assert b'"https://acme-cakes.acct.workers.dev"' in cf.sources["acme-bakery"]
+    assert cf.deleted() == []
     assert (row["slug"], row["worker_name"], row["slug_pending"]) == (
         "acme-cakes",
         "acme-cakes",
@@ -638,8 +685,22 @@ async def test_a_failed_deploy_changes_nothing(beanie_test_db, cf):
 
 
 @pytest.mark.asyncio
-async def test_a_failed_old_worker_delete_does_not_fail_the_publish(beanie_test_db, cf):
+async def test_a_failed_redirect_falls_back_to_deleting_the_old_worker(beanie_test_db, cf):
     oid = await _seed_live("pk-r", pending="acme-cakes")
+    cf.account.add("acme-bakery")
+    cf.fail_put.add("acme-bakery")
+
+    await _publish("pk-r", _Deployer())
+
+    assert cf.deleted() == ["acme-bakery"]
+    assert await _redirects() == []
+    assert (await _row(oid))["slug"] == "acme-cakes"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_redirect_and_delete_do_not_fail_the_publish(beanie_test_db, cf):
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    cf.fail_put.add("acme-bakery")
     cf.fail_delete.add("acme-bakery")
 
     await _publish("pk-r", _Deployer())
@@ -659,7 +720,9 @@ async def test_a_legacy_site_renames_and_holds_nothing(beanie_test_db, cf):
 
     assert deploy.names == ["acme-cakes"]
     assert (row["slug"], row["worker_name"]) == ("acme-cakes", "acme-cakes")
-    assert cf.deleted() == [f"paw-site-{oid}"]
+    # The legacy address was a live link too, so it redirects; it is just never held.
+    assert [r["name"] for r in await _redirects()] == [f"paw-site-{oid}"]
+    assert cf.deleted() == []
     assert await _holds() == []
 
 
@@ -689,6 +752,500 @@ async def test_a_republish_without_a_pending_rename_stays_put(beanie_test_db, cf
     assert deploy.names == ["acme-bakery"]
     assert cf.log == []
     assert (await _row(oid))["slug"] == "acme-bakery"
+
+
+# ── the old address redirects ────────────────────────────────────────────────
+
+
+async def _rename(oid, pocket_id: str, raw: str) -> None:
+    await _reserve(oid, raw)
+    await _publish(pocket_id, _Deployer())
+
+
+@pytest.mark.asyncio
+async def test_the_old_address_308s_to_the_new_one_for_the_hold(beanie_test_db, cf):
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    cf.account.add("acme-bakery")
+
+    await _publish("pk-r", _Deployer())
+
+    [redirect] = await _redirects()
+    assert (redirect["name"], redirect["site_id"], redirect["workspace_id"]) == (
+        "acme-bakery",
+        str(oid),
+        WS,
+    )
+    assert redirect["target_url"] == "https://acme-cakes.acct.workers.dev"
+    # Lives exactly as long as the hold on the old name.
+    [hold] = await _holds()
+    assert redirect["expires_at"] - redirect["created_at"] == timedelta(days=30)
+    assert abs(redirect["expires_at"] - hold["hold_until"]) < timedelta(seconds=5)
+    # The old name still answers, from the redirect Worker.
+    assert "acme-bakery" in cf.account
+    src = cf.sources["acme-bakery"].decode()
+    assert "status: 308" in src
+    assert 'const TARGET = "https://acme-cakes.acct.workers.dev";' in src
+
+
+_RUN_WORKER = r"""
+const src = require("fs").readFileSync(process.argv[2], "utf8");
+const mod = { exports: {} };
+new Function("module", src.replace("export default", "module.exports ="))(mod);
+const out = [];
+for (const url of process.argv.slice(3)) {
+  const res = mod.exports.fetch(new Request(url));
+  out.push([res.status, res.headers.get("location"), res.headers.get("cache-control")]);
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def test_the_redirect_worker_keeps_path_and_query_and_never_changes_host(tmp_path):
+    import json
+    import shutil
+    import subprocess
+    from urllib.parse import urlsplit
+
+    from pocketpaw_ee.sites.slug_redirect import redirect_worker_source
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    worker = tmp_path / "redirect.js"
+    worker.write_bytes(redirect_worker_source("https://acme-cakes.acct.workers.dev"))
+    runner = tmp_path / "run.js"
+    runner.write_text(_RUN_WORKER)
+    urls = [
+        "https://acme-bakery.acct.workers.dev/menu/today?table=4&x=%2F",
+        "https://acme-bakery.acct.workers.dev/",
+        "https://acme-bakery.acct.workers.dev//evil.example/steal?to=https://evil.example",
+        "https://acme-bakery.acct.workers.dev/@evil.example",
+        "https://acme-bakery.acct.workers.dev/a%0d%0aSet-Cookie:%20x=1?b=%0d%0a",
+        "https://acme-bakery.acct.workers.dev/\\evil.example/x",
+        "https://acme-bakery.acct.workers.dev/%2F%2Fevil.example/x",
+        "https://acme-bakery.acct.workers.dev/caf%C3%A9/%E0%A4%AE%E0%A5%87%E0%A4%A8%E0%A5%82",
+    ]
+    done = subprocess.run(
+        [node, str(runner), str(worker), *urls], capture_output=True, text=True, check=True
+    )
+    got = json.loads(done.stdout)
+
+    # 308 keeps the method (a form POST to the old address stays a POST); the short
+    # private cache lets a rename-back take effect within minutes.
+    assert got[0] == [
+        308,
+        "https://acme-cakes.acct.workers.dev/menu/today?table=4&x=%2F",
+        "private, max-age=300",
+    ]
+    assert got[1][1] == "https://acme-cakes.acct.workers.dev/"
+    for _status, location, _cache in got:
+        assert urlsplit(location).hostname == "acme-cakes.acct.workers.dev", location
+        assert "\r" not in location and "\n" not in location, location
+    # Encoded slashes and unicode stay encoded path bytes on the target host.
+    assert got[6][1] == "https://acme-cakes.acct.workers.dev/%2F%2Fevil.example/x"
+    assert got[7][1].endswith("/caf%C3%A9/%E0%A4%AE%E0%A5%87%E0%A4%A8%E0%A5%82")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://acme-cakes.acct.workers.dev",
+        "javascript:alert(1)",
+        "https://user:pw@acme-cakes.acct.workers.dev",
+        "https://evil.example@acme-cakes.acct.workers.dev",
+        "https://acme-cakes.acct.workers.dev:8443",
+        "https://",
+        "https://acme cakes.workers.dev",
+        "https://acme-cakes",
+        "//acme-cakes.acct.workers.dev",
+        "",
+    ],
+)
+def test_a_redirect_only_ever_targets_a_plain_https_host(url):
+    from pocketpaw_ee.sites.slug_redirect import redirect_origin, redirect_worker_source
+
+    with pytest.raises(ValueError):
+        redirect_origin(url)
+    with pytest.raises(ValueError):
+        redirect_worker_source(url)
+
+
+def test_a_redirect_targets_the_origin_of_the_sites_address():
+    from pocketpaw_ee.sites.slug_redirect import redirect_origin
+
+    assert redirect_origin("https://Acme-Cakes.acct.workers.dev/some/page?q=1") == (
+        "https://acme-cakes.acct.workers.dev"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_bad_site_address_deletes_the_old_worker_instead(beanie_test_db, cf):
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    cf.account.add("acme-bakery")
+
+    class _HttpDeployer(_Deployer):
+        async def __call__(self, site_id, project_dir, *, worker_name=None, **_):
+            self.names.append(worker_name)
+            return f"http://{worker_name}.acct.workers.dev"
+
+    await _publish("pk-r", _HttpDeployer())
+
+    assert "acme-bakery" not in cf.sources
+    assert cf.deleted() == ["acme-bakery"]
+    assert await _redirects() == []
+    assert (await _row(oid))["slug"] == "acme-cakes"
+
+
+@pytest.mark.asyncio
+async def test_a_chained_rename_sends_every_old_address_straight_to_the_newest(beanie_test_db, cf):
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+
+    await _publish("pk-r", _Deployer())
+    await _rename(oid, "pk-r", "acme-pies")
+
+    redirects = await _redirects()
+    assert [(r["name"], r["target_url"]) for r in redirects] == [
+        ("acme-bakery", "https://acme-pies.acct.workers.dev"),
+        ("acme-cakes", "https://acme-pies.acct.workers.dev"),
+    ]
+    assert b'"https://acme-pies.acct.workers.dev"' in cf.sources["acme-bakery"]
+    assert b'"https://acme-pies.acct.workers.dev"' in cf.sources["acme-cakes"]
+    assert (await _row(oid))["slug"] == "acme-pies"
+
+
+@pytest.mark.asyncio
+async def test_a_site_can_take_its_own_old_address_back(beanie_test_db, cf):
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    cf.account.add("acme-bakery")
+    await _publish("pk-r", _Deployer())
+
+    assert (await _available("acme-bakery", site_id=oid)).available
+    await _reserve(oid, "acme-bakery")
+    deploy = _Deployer()
+    await _publish("pk-r", deploy)
+
+    assert deploy.names == ["acme-bakery"]
+    assert (await _row(oid))["slug"] == "acme-bakery"
+    # acme-bakery is the site again; only acme-cakes redirects, to it.
+    assert [(r["name"], r["target_url"]) for r in await _redirects()] == [
+        ("acme-cakes", "https://acme-bakery.acct.workers.dev"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_another_site_cannot_take_a_redirecting_address(beanie_test_db, cf):
+    await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    other = await _seed_live("pk-other", slug="acme-other")
+
+    mine = await _available("acme-bakery", site_id=other)
+    elsewhere = await _available("acme-bakery", workspace=OTHER_WS)
+
+    assert (mine.available, mine.reason) == (False, "taken")
+    assert not elsewhere.available
+
+
+@pytest.mark.asyncio
+async def test_an_expired_redirect_is_removed_and_the_address_freed(beanie_test_db, cf):
+    from pocketpaw_ee.sites.slug_redirect import sweep_slug_redirects
+
+    await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    now = datetime.now(UTC)
+
+    early = await sweep_slug_redirects(cf=cf, now=now + timedelta(days=29))
+    assert early == {"expired": 0, "removed": 0}
+    assert "acme-bakery" in cf.account
+
+    late = await sweep_slug_redirects(cf=cf, now=now + timedelta(days=31))
+    assert late == {"expired": 1, "removed": 1}
+    assert cf.deleted() == ["acme-bakery"]
+    assert await _redirects() == []
+    assert "acme-bakery" not in cf.account
+
+
+@pytest.mark.asyncio
+async def test_an_expired_redirect_that_cannot_be_deleted_waits_for_the_next_tick(
+    beanie_test_db, cf
+):
+    from pocketpaw_ee.sites.slug_redirect import sweep_slug_redirects
+
+    await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    cf.fail_delete.add("acme-bakery")
+
+    out = await sweep_slug_redirects(cf=cf, now=datetime.now(UTC) + timedelta(days=31))
+
+    assert out == {"expired": 1, "removed": 0}
+    assert [r["name"] for r in await _redirects()] == ["acme-bakery"]
+
+
+def test_the_redirect_sweep_runs_on_the_shared_heartbeat():
+    from pocketpaw_ee import extensions
+    from pocketpaw_ee.sites.slug_redirect import sweep_slug_redirects
+
+    cluster, _per_host = extensions._sweeps()
+    assert sweep_slug_redirects in cluster
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_site_removes_its_redirects(beanie_test_db, cf):
+    from pocketpaw_ee.sites import delete_cascade
+    from pocketpaw_ee.sites.delete_job import _DeleteDeps
+
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    await _rename(oid, "pk-r", "acme-pies")
+    site = await _SiteDoc.get(oid)
+
+    await delete_cascade._delete_script(site=site, deps=_DeleteDeps(cloudflare=cf, assets=None))
+
+    assert sorted(cf.deleted()) == ["acme-bakery", "acme-cakes", "acme-pies"]
+    assert await _redirects() == []
+
+
+# ── redirect guards (security review) ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_redirect_upload_is_a_bare_account_worker(beanie_test_db, cf):
+    await _seed_live("pk-r", pending="acme-cakes")
+
+    await _publish("pk-r", _Deployer())
+
+    [upload] = cf.uploads
+    assert upload["name"] == "acme-bakery"
+    assert upload["target"] == "account"
+    assert upload["bindings"] == []
+    assert upload["modules"] == [upload["main_module"]]
+    assert upload["compatibility_date"]
+    # Any cron the old site had is cleared, and workers.dev serves it (previews off
+    # is enable_workers_dev's own body).
+    assert ("schedules", "acme-bakery") in cf.log
+    assert ("subdomain", "acme-bakery") in cf.log
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_never_lands_on_a_name_a_site_serves(beanie_test_db, cf):
+    from pocketpaw_ee.sites import slug_redirect
+
+    await _seed_live("pk-other", slug="acme-taken")
+
+    done = await slug_redirect.deploy_redirect(
+        cf,
+        name="acme-taken",
+        site_id="site-x",
+        workspace_id=WS,
+        url="https://acme-cakes.acct.workers.dev",
+        days=30,
+    )
+
+    assert done is False
+    assert cf.uploads == []
+    assert await _redirects() == []
+
+
+@pytest.mark.asyncio
+async def test_a_retarget_drops_a_redirect_whose_name_a_site_now_claims(beanie_test_db, cf):
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    # Another site now has acme-bakery pending (the row should not exist any more,
+    # but if it does the redirect must never be written over that site's name).
+    await _seed_live("pk-other", slug="acme-other", pending="acme-bakery")
+    before = cf.sources["acme-bakery"]
+
+    await _rename(oid, "pk-r", "acme-pies")
+
+    assert cf.sources["acme-bakery"] == before
+    assert [r["name"] for r in await _redirects()] == ["acme-cakes"]
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_never_deletes_a_name_a_site_has_pending(beanie_test_db, cf):
+    from pocketpaw_ee.sites.slug_redirect import sweep_slug_redirects
+
+    await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    await _seed_live("pk-other", slug="acme-other", pending="acme-bakery")
+
+    out = await sweep_slug_redirects(cf=cf, now=datetime.now(UTC) + timedelta(days=31))
+
+    assert out == {"expired": 1, "removed": 1}
+    assert cf.deleted() == []
+    assert await _redirects() == []
+
+
+@pytest.mark.asyncio
+async def test_remove_site_redirects_skips_a_name_another_site_serves(beanie_test_db, cf):
+    from pocketpaw_ee.sites.slug_redirect import remove_site_redirects
+
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    await _seed_live("pk-other", slug="acme-other")
+    await _SiteDoc.get_pymongo_collection().update_one(
+        {"pocket_id": "pk-other"}, {"$set": {"slug": "acme-bakery"}}
+    )
+
+    await remove_site_redirects(cf, site_id=str(oid))
+
+    assert cf.deleted() == []
+    assert await _redirects() == []
+
+
+@pytest.mark.asyncio
+async def test_taking_an_old_address_back_drops_its_row_before_the_deploy(beanie_test_db, cf):
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    await _reserve(oid, "acme-bakery")
+    seen_at_deploy: list[list[str]] = []
+
+    class _Watching(_Deployer):
+        async def __call__(self, site_id, project_dir, *, worker_name=None, **kw):
+            seen_at_deploy.append([r["name"] for r in await _redirects()])
+            return await super().__call__(site_id, project_dir, worker_name=worker_name, **kw)
+
+    await _publish("pk-r", _Watching())
+
+    assert seen_at_deploy == [[]]
+    assert [(r["name"], r["target_url"]) for r in await _redirects()] == [
+        ("acme-cakes", "https://acme-bakery.acct.workers.dev"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_expired_own_redirect_is_not_a_take_back(beanie_test_db, cf):
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    await SiteRedirect.get_pymongo_collection().update_many(
+        {}, {"$set": {"expires_at": datetime.now(UTC) - timedelta(minutes=1)}}
+    )
+
+    out = await _available("acme-bakery", site_id=oid)
+
+    assert (out.available, out.reason) == (False, "taken")
+
+
+@pytest.mark.asyncio
+async def test_an_own_redirect_row_does_not_override_another_sites_worker(beanie_test_db, cf):
+    oid = await _seed_live("pk-r", slug="acme-cakes")
+    now = datetime.now(UTC)
+    await SiteRedirect(
+        name="acme-bakery",
+        site_id=str(oid),
+        workspace_id=WS,
+        target_url="https://acme-cakes.acct.workers.dev",
+        created_at=now,
+        expires_at=now + timedelta(days=30),
+    ).insert()
+    other = await _seed_live("pk-other", slug="acme-other")
+    await _SiteDoc.get_pymongo_collection().update_one(
+        {"_id": other}, {"$set": {"worker_name": "acme-bakery"}}
+    )
+
+    out = await _available("acme-bakery", site_id=oid)
+
+    assert (out.available, out.reason) == (False, "taken")
+
+
+@pytest.mark.asyncio
+async def test_a_durable_object_site_deletes_its_old_worker_instead(beanie_test_db, cf, caplog):
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    await _SiteDoc.get_pymongo_collection().update_one(
+        {"_id": oid}, {"$set": {"do_classes": ["Counter"]}}
+    )
+    cf.account.add("acme-bakery")
+
+    with caplog.at_level("ERROR"):
+        await _publish("pk-r", _Deployer())
+
+    assert cf.uploads == []
+    assert cf.forced == ["acme-bakery"]
+    assert await _redirects() == []
+    assert "old address" in caplog.text and "acme-bakery" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_rename_only_forgets_its_own_rows_for_the_new_name(beanie_test_db, cf):
+    await _seed_live("pk-r", pending="acme-cakes")
+    now = datetime.now(UTC)
+    await SiteRedirect(
+        name="acme-cakes",
+        site_id="someone-else",
+        workspace_id=OTHER_WS,
+        target_url="https://elsewhere.acct.workers.dev",
+        created_at=now,
+        expires_at=now + timedelta(days=30),
+    ).insert()
+
+    await _publish("pk-r", _Deployer())
+
+    assert ("acme-cakes", "someone-else") in [(r["name"], r["site_id"]) for r in await _redirects()]
+
+
+@pytest.mark.asyncio
+async def test_deleting_mid_chain_after_a_failed_retarget_removes_everything(beanie_test_db, cf):
+    from pocketpaw_ee.sites import delete_cascade
+    from pocketpaw_ee.sites.delete_job import _DeleteDeps
+
+    oid = await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    cf.fail_put.add("acme-bakery")
+    await _rename(oid, "pk-r", "acme-pies")
+    # acme-bakery could not be re-pointed: it still sends people to acme-cakes,
+    # which now redirects to acme-pies (one hop longer, never broken).
+    targets = {r["name"]: r["target_url"] for r in await _redirects()}
+    assert targets == {
+        "acme-bakery": "https://acme-cakes.acct.workers.dev",
+        "acme-cakes": "https://acme-pies.acct.workers.dev",
+    }
+
+    site = await _SiteDoc.get(oid)
+    await delete_cascade._delete_script(site=site, deps=_DeleteDeps(cloudflare=cf, assets=None))
+
+    assert sorted(cf.deleted()) == ["acme-bakery", "acme-cakes", "acme-pies"]
+    assert await _redirects() == []
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_without_cloudflare_credentials_keeps_its_rows(
+    beanie_test_db, cf, monkeypatch
+):
+    from pocketpaw_ee.sites.slug_redirect import sweep_slug_redirects
+
+    await _seed_live("pk-r", pending="acme-cakes")
+    await _publish("pk-r", _Deployer())
+    monkeypatch.setattr(sites_service, "_cf_account_client", lambda: None)
+
+    out = await sweep_slug_redirects(now=datetime.now(UTC) + timedelta(days=31))
+
+    assert out == {"expired": 1, "removed": 0}
+    assert [r["name"] for r in await _redirects()] == ["acme-bakery"]
+
+
+@pytest.mark.asyncio
+async def test_clear_schedules_puts_an_empty_cron_list():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["body"] = request.read()
+        return httpx.Response(200, json={"success": True, "result": {"schedules": []}})
+
+    client = CloudflareClient(
+        account_id="acct_1",
+        api_token="tok_1",
+        zone_id="zone_1",
+        dispatch_namespace="paw-sites",
+        _transport=httpx.MockTransport(handler),
+    )
+    await client.clear_schedules("acme-bakery")
+
+    assert (seen["method"], seen["path"]) == (
+        "PUT",
+        "/client/v4/accounts/acct_1/workers/scripts/acme-bakery/schedules",
+    )
+    assert seen["body"].replace(b" ", b"") == b"[]"
 
 
 # ── the Cloudflare call ──────────────────────────────────────────────────────

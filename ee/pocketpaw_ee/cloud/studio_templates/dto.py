@@ -1,9 +1,12 @@
 # Studio templates — request / response schemas.
 #
-# Created 2026-10-02 (feat/studio-templates). Requests and responses are distinct
-# models. ``cover.url`` / ``cover.poster_url`` stay backend-relative
-# (``/api/v1/media/...``) here; only the Discover listing absolutizes them.
-# ``recipe.params`` never carries input-image fields (stripped on publish).
+# Requests and responses are distinct models. ``cover.url`` /
+# ``cover.poster_url`` stay backend-relative (``/api/v1/media/...``) here; only
+# the Discover listing absolutizes them. ``recipe.params`` never carries
+# input-image fields (stripped on publish). ``show_creator`` (the owner's name
+# and picture on the public Discover card) defaults to ``True`` on publish only;
+# PATCH leaves it alone unless the body names it, and a stored row that predates
+# the field reads as ``False``.
 
 from __future__ import annotations
 
@@ -32,6 +35,8 @@ class PublishStudioTemplateRequest(BaseModel):
     description: str = Field(default="", max_length=500)
     audiences: list[Audience] = Field(default_factory=list, max_length=4)
     visibility: Visibility = "private"
+    #: On by default for a new template; the owner opts out.
+    show_creator: bool = True
 
 
 class PatchStudioTemplateRequest(BaseModel):
@@ -43,6 +48,7 @@ class PatchStudioTemplateRequest(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     audiences: list[Audience] | None = Field(default=None, max_length=4)
     visibility: Visibility | None = None
+    show_creator: bool | None = None
 
 
 class ListStudioTemplatesRequest(BaseModel):
@@ -95,6 +101,7 @@ class StudioTemplateResponse(BaseModel):
     cover: StudioTemplateCover
     recipe: StudioTemplateRecipe
     uses_input_images: bool
+    show_creator: bool = False
     hidden: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
