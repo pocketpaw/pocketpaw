@@ -1189,6 +1189,7 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.social.memes",
     "pocketpaw_ee.cloud.growth.social.pulse",
     "pocketpaw_ee.cloud.growth.social.changes",
+    "pocketpaw_ee.cloud.growth.social.repo_metrics",
     "pocketpaw_ee.cloud.growth.social.postiz",
 ]
 forbidden_modules = [
@@ -1200,6 +1201,7 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.social_idea",
     "pocketpaw_ee.cloud.models.social_pulse",
     "pocketpaw_ee.cloud.models.social_postiz_org",
+    "pocketpaw_ee.cloud.models.repo_metric",
 ]
 
 [[tool.importlinter.contracts]]

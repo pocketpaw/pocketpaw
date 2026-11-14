@@ -1,6 +1,6 @@
 # ee/pocketpaw_ee/cloud/growth/social/service.py — the Growth › Social service
-# and the SOLE owner of the SocialProfile, SocialIdea, SocialPulse and
-# SocialPostizOrg doc writes (service-is-repo; the import-linter "Growth"
+# and the SOLE owner of the SocialProfile, SocialIdea, SocialPulse,
+# SocialPostizOrg and RepoMetric doc writes (service-is-repo; the import-linter "Growth"
 # contract keeps the router, DTOs, domain, the agents and the Postiz client off
 # the doc classes).
 #
@@ -40,6 +40,12 @@
 # dropped. Survivors are stored ``new`` with ``source="daily"`` and a
 # ``suggested_at`` slot from ``DAILY_SLOT_HOURS_UTC``. Nothing here posts.
 #
+# Repo metrics: ``run_repo_metrics`` (the 06:30 UTC cron, a cross-workspace read)
+# stores one ``RepoMetric`` per (workspace, repo, yesterday UTC) for every active
+# profile's valid ``github_repos``, reading each repo once per run. A rerun the same
+# day refreshes that day's row in place, never a second row. ``repo_metrics`` reads
+# one workspace's rows back.
+#
 # Accounts: each profile's social accounts live in its own Postiz org, created
 # on the first connect and never on a read. Its API key is stored encrypted, and
 # the key is checked before Postiz is called, because org creation is not
@@ -68,7 +74,7 @@ import hashlib
 import logging
 import re
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -152,6 +158,12 @@ from pocketpaw_ee.cloud.growth.social.postiz import (
     resolve_postiz,
     resolve_telegram_updates,
 )
+from pocketpaw_ee.cloud.growth.social.repo_metrics import (
+    RepoSnapshot,
+    is_repo_slug,
+    resolve_repo_metrics_fn,
+)
+from pocketpaw_ee.cloud.models.repo_metric import RepoMetric as _MetricDoc
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as _IdeaDoc
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as _PostizOrgDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile as _ProfileDoc
@@ -794,6 +806,99 @@ async def run_daily_drafts(now: datetime | None = None) -> dict[str, int]:
     )
     # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
     return counts
+
+
+_SNAPSHOT_FIELDS = (
+    "stars",
+    "forks",
+    "views",
+    "uniques",
+    "clones",
+    "clone_uniques",
+    "traffic_available",
+)
+
+
+async def _store_metric(workspace_id: str, snap: RepoSnapshot, now: datetime) -> None:
+    """Write the day's row, or refresh it in place when a rerun finds one."""
+    fields: dict[str, Any] = {k: getattr(snap, k) for k in _SNAPSHOT_FIELDS}
+    fields["referrers"] = [dict(r) for r in snap.referrers]
+    fields["captured_at"] = now
+    key = {"workspace": workspace_id, "repo": snap.repo, "day": snap.day}
+    doc = await _MetricDoc.find_one(key)
+    if doc is None:
+        try:
+            await _MetricDoc(**key, **fields).insert()
+            return
+        except DuplicateKeyError:  # a parallel run inserted it first
+            doc = await _MetricDoc.find_one(key)
+            if doc is None:
+                raise
+    for k, v in fields.items():
+        setattr(doc, k, v)
+    await doc.save()
+
+
+async def run_repo_metrics(now: datetime | None = None) -> dict[str, int]:
+    """Store yesterday's (UTC) stars, forks and traffic for every active profile's repos.
+
+    One row per (workspace, repo, day); a rerun refreshes it. Each repo is read once per run
+    and one failing repo never stops the rest. Runs from the growth worker's cron."""
+    now = _aware(now or datetime.now(UTC))
+    counts = {"repos": 0, "stored": 0, "failed": 0}
+    metrics_fn = resolve_repo_metrics_fn()
+    if metrics_fn is None:
+        return counts
+    day = (now - timedelta(days=1)).date().isoformat()
+    # global-read: the sweep runs for every workspace; each doc carries its own tenant.
+    docs = await _ProfileDoc.find({"active": True}).to_list()
+    pairs: set[tuple[str, str]] = set()
+    for doc in docs:
+        for repo in doc.github_repos or ():
+            if is_repo_slug(repo):
+                pairs.add((doc.workspace, repo))
+            else:
+                logger.warning("repo metrics: skipping invalid repo slug %r", repo)
+    counts["repos"] = len(pairs)
+    snaps: dict[str, RepoSnapshot] = {}
+    for workspace_id, repo in sorted(pairs):
+        try:
+            if repo not in snaps:
+                snaps[repo] = await metrics_fn(repo, day=day)
+            await _store_metric(workspace_id, snaps[repo], now)
+            counts["stored"] += 1
+        except Exception:  # noqa: BLE001
+            counts["failed"] += 1
+            logger.warning("repo metrics: %s failed", repo, exc_info=True)
+    logger.info(
+        "repo metrics: day=%s repos=%d stored=%d failed=%d",
+        day,
+        counts["repos"],
+        counts["stored"],
+        counts["failed"],
+    )
+    # no-event: Growth › Social has no realtime subscriber; readers re-fetch.
+    return counts
+
+
+async def repo_metrics(workspace_id: str, repo: str, since: date) -> list[RepoSnapshot]:
+    """This workspace's stored days for one repo from ``since`` (inclusive), oldest first."""
+    docs = (
+        await _MetricDoc.find(
+            {"workspace": workspace_id, "repo": repo, "day": {"$gte": since.isoformat()}}
+        )
+        .sort("day")
+        .to_list()
+    )
+    return [
+        RepoSnapshot(
+            repo=d.repo,
+            day=d.day,
+            referrers=tuple(d.referrers),
+            **{k: getattr(d, k) for k in _SNAPSHOT_FIELDS},
+        )
+        for d in docs
+    ]
 
 
 async def draft_daily(ctx: RequestContext, profile_id: str | None = None) -> SocialIdeaListResponse:
@@ -1943,6 +2048,8 @@ __all__ = [
     "draft_daily",
     "draft_daily_for_profile",
     "run_daily_drafts",
+    "run_repo_metrics",
+    "repo_metrics",
     "get_profile",
     "list_ideas",
     "update_idea",

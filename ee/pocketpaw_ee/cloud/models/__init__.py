@@ -312,6 +312,7 @@ from pocketpaw_ee.cloud.models.prospect import Prospect
 from pocketpaw_ee.cloud.models.push_subscription import PushSubscription
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.released_slug import ReleasedSlug
+from pocketpaw_ee.cloud.models.repo_metric import RepoMetric
 from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
@@ -778,6 +779,8 @@ def get_all_documents():
         SocialIdea,
         SocialPulse,
         SocialPostizOrg,
+        # Growth › Social daily repo stars and traffic; same import boundary.
+        RepoMetric,
         PushSubscription,
         VapidKeypair,
         WorkspaceSensePreference,
