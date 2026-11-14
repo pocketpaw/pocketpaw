@@ -1030,6 +1030,10 @@ def mount_cloud(app: FastAPI) -> None:
         agent_analyze,
         set_production_analyze_fn,
     )
+    from pocketpaw_ee.cloud.growth.social.changes import (
+        github_changes,
+        set_production_changes_fn,
+    )
     from pocketpaw_ee.cloud.growth.social.ideas import (
         agent_generate_ideas,
         agent_make_media,
@@ -1039,6 +1043,7 @@ def mount_cloud(app: FastAPI) -> None:
 
     set_production_analyze_fn(agent_analyze)
     set_production_ideas_fn(agent_generate_ideas)
+    set_production_changes_fn(github_changes)
     set_production_media_fn(agent_make_media)
 
     from pocketpaw_ee.cloud.growth.social.memes import (
