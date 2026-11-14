@@ -294,6 +294,9 @@ class SocialIdeaResponse(BaseModel):
     source: IdeaSource
     suggested_at: str | None
     post_ids: list[str]
+    published_url: str
+    published_at: str | None
+    x_post_id: str
     created_at: str | None
     updated_at: str | None
 

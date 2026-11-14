@@ -8,7 +8,9 @@
 # ``suggested_at``, the time it suggests posting). Rows written before
 # ``source`` existed have no key and read as "manual". ``post_ids`` are the
 # Postiz post ids of every successful post made from the idea (now or
-# scheduled); older rows read as empty.
+# scheduled); older rows read as empty. ``published_url`` / ``published_at`` /
+# ``x_post_id`` record the live X post once the metrics sweep finds it in
+# Postiz; empty until then (and on older rows).
 #
 # Only ``ee.cloud.growth.social.service`` may import this doc class
 # (import-linter "Growth" contract).
@@ -46,6 +48,9 @@ class SocialIdea(TimestampedDocument):
     source: str = "manual"
     suggested_at: datetime | None = None
     post_ids: list[str] = Field(default_factory=list)
+    published_url: str = ""
+    published_at: datetime | None = None
+    x_post_id: str = ""
 
     class Settings:
         name = "growth_social_ideas"

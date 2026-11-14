@@ -61,6 +61,9 @@
 # Media is stored on the deployment's public bucket (not in Postiz, whose storage
 # is local or R2-only), content-addressed under the workspace and profile. The
 # posts list never creates an org.
+# Post metrics: ``run_post_metrics`` (the 07:00 UTC cron) records each X idea's
+# live post from Postiz, then stores append-only X metric snapshots at 1/3/7/28
+# days through the capped, read-only ``x_api`` reader. Nothing here writes to X.
 
 from __future__ import annotations
 
@@ -91,12 +94,14 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     DAILY_SLOT_HOURS_UTC,
     DESCRIPTION_FIELDS,
     MEDIA_EXTENSIONS,
+    METRIC_AGE_BUCKETS,
     POSTABLE_PLATFORMS,
     SOCIAL_ACCOUNT_PLATFORMS,
     VIDEO_PLATFORMS,
     AnalysisOutcome,
     AnalysisRequest,
     GeneratedIdea,
+    PostMetrics,
     SocialAnalysis,
     SocialIdea,
     SocialProfile,
@@ -145,6 +150,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
 )
+from pocketpaw_ee.cloud.growth.social.metrics import METRIC_FIELDS
 from pocketpaw_ee.cloud.growth.social.postiz import (
     PostizClient,
     PostizError,
@@ -153,6 +159,7 @@ from pocketpaw_ee.cloud.growth.social.postiz import (
     resolve_telegram_updates,
 )
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as _IdeaDoc
+from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric as _MetricDoc
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as _PostizOrgDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile as _ProfileDoc
 from pocketpaw_ee.cloud.models.social_pulse import SocialPulse as _PulseDoc
@@ -289,6 +296,9 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         source=doc.source,
         suggested_at=doc.suggested_at,
         post_ids=tuple(doc.post_ids or ()),
+        published_url=doc.published_url,
+        published_at=doc.published_at,
+        x_post_id=doc.x_post_id,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -316,6 +326,9 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         source=i.source,
         suggested_at=iso_utc(i.suggested_at),
         post_ids=list(i.post_ids),
+        published_url=i.published_url,
+        published_at=iso_utc(i.published_at),
+        x_post_id=i.x_post_id,
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
     )
@@ -1911,7 +1924,206 @@ async def list_posts(
     return SocialPostListResponse(items=items)
 
 
+# ---------------------------------------------------------------------------
+# Post metrics (published record + X metric snapshots)
+# ---------------------------------------------------------------------------
+
+PUBLISHED_LOOKBACK = timedelta(days=30)
+METRIC_LATE_DAYS = 3
+_X_STATUS_URL = re.compile(r"^https?://(?:[\w-]+\.)?(?:x|twitter)\.com/(?:[^/?#]+/)*status/(\d+)")
+
+
+def x_status_id(url: Any) -> str:
+    """The numeric post id in an x.com / twitter.com ``.../status/<id>`` URL, else ''."""
+    m = _X_STATUS_URL.match(url) if isinstance(url, str) else None
+    return m.group(1) if m else ""
+
+
+def _parse_iso(value: Any, default: datetime) -> datetime:
+    try:
+        return _aware(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError:
+        return default
+
+
+def due_bucket(published_at: datetime, now: datetime) -> int | None:
+    """The one age bucket a snapshot taken ``now`` belongs to: the largest bucket the post
+    has reached. Smaller missed buckets are never back-filled (their numbers would be
+    today's, not that age's), so each bucket's snapshot is taken in its own window."""
+    age = now - _aware(published_at)
+    reached = [b for b in METRIC_AGE_BUCKETS if age >= timedelta(days=b)]
+    return reached[-1] if reached else None
+
+
+async def _fill_published(
+    postiz: PostizClient, workspace_id: str, profile: str, docs: list[_IdeaDoc], now: datetime
+) -> int:
+    """Record the live X post of each idea Postiz reports as published. Returns how many."""
+    org = await _postiz_org(workspace_id, profile)
+    if org is None:
+        return 0
+    raw = await postiz.list_posts(
+        decrypt(org.api_key_enc),
+        (now - PUBLISHED_LOOKBACK).isoformat(),
+        (now + POSTS_LOOKAHEAD).isoformat(),
+    )
+    posts = {str(p.get("id")): p for p in raw if p.get("id")}
+    filled = 0
+    for doc in docs:
+        for pid in doc.post_ids:
+            post = posts.get(pid) or {}
+            x_id = x_status_id(post.get("releaseURL"))
+            if post.get("state") != "PUBLISHED" or not x_id:
+                continue
+            # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
+            await _IdeaDoc.find_one({"_id": doc.id, "workspace": workspace_id}).update(
+                {
+                    "$set": {
+                        "published_url": post["releaseURL"],
+                        "published_at": _parse_iso(post.get("publishDate"), now),
+                        "x_post_id": x_id,
+                    }
+                }
+            )
+            filled += 1
+            break
+    return filled
+
+
+async def _snapshot_workspace(
+    metrics_fn: Any, workspace_id: str, docs: list[_IdeaDoc], now: datetime
+) -> tuple[int, int]:
+    """Store each idea's due bucket that is not stored yet. Returns (due, stored)."""
+    ids = [str(d.id) for d in docs]
+    stored = {
+        (m.idea, m.age_bucket)
+        for m in await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": ids}}).to_list()
+    }
+    due: list[tuple[_IdeaDoc, int]] = []
+    for doc in docs:
+        bucket = due_bucket(doc.published_at, now) if doc.published_at else None
+        if bucket is not None and (str(doc.id), bucket) not in stored:
+            due.append((doc, bucket))
+    if not due:
+        return 0, 0
+    read = await metrics_fn(workspace_id, sorted({d.x_post_id for d, _ in due}))
+    saved = 0
+    for doc, bucket in due:
+        counts = read.get(doc.x_post_id)
+        if not counts:
+            continue  # unread (cap, error, deleted post): never store zeros for it
+        try:
+            await _MetricDoc(
+                workspace=workspace_id,
+                profile=doc.profile,
+                idea=str(doc.id),
+                x_post_id=doc.x_post_id,
+                age_bucket=bucket,
+                captured_at=now,
+                **{k: int(counts.get(k, 0)) for k in METRIC_FIELDS},
+            ).insert()
+            saved += 1
+        except DuplicateKeyError:
+            pass  # another run stored this bucket first; snapshots are never overwritten
+    # no-event: an append-only metrics log; nothing listens, the Today strip re-fetches.
+    return len(due), saved
+
+
+async def run_post_metrics(now: datetime | None = None) -> dict[str, int]:
+    """Record what got published and snapshot its X metrics, for every workspace.
+
+    Step A: X ideas with Postiz ``post_ids`` and no ``x_post_id`` (created in the last
+    ``PUBLISHED_LOOKBACK``) get ``published_url`` / ``published_at`` / ``x_post_id`` from
+    the published Postiz post, when Postiz is configured. Step B: X ideas published within
+    the last 28 + ``METRIC_LATE_DAYS`` days get one snapshot of their ``due_bucket`` when
+    that bucket is not stored yet, read in one batched call per workspace. A failing
+    profile or workspace never stops the rest. Read-only towards X. Runs from the growth
+    worker's 07:00 UTC cron."""
+    from pocketpaw_ee.cloud.growth.social import metrics as social_metrics
+
+    now = now or datetime.now(UTC)
+    counts = {"filled": 0, "workspaces": 0, "due": 0, "stored": 0, "failed": 0}
+    metrics_fn = social_metrics.resolve_metrics_fn()
+    if metrics_fn is None:
+        return counts
+
+    postiz = resolve_postiz()
+    if postiz is not None:
+        # global-read: the sweep runs for every workspace; each doc carries its own tenant.
+        pending = await _IdeaDoc.find(
+            {
+                "platform": "x",
+                "post_ids.0": {"$exists": True},
+                "x_post_id": {"$in": ["", None]},
+                "createdAt": {"$gte": now - PUBLISHED_LOOKBACK},
+            }
+        ).to_list()
+        groups: dict[tuple[str, str], list[_IdeaDoc]] = {}
+        for doc in pending:
+            groups.setdefault((doc.workspace, doc.profile), []).append(doc)
+        for (workspace_id, profile), docs in groups.items():
+            try:
+                counts["filled"] += await _fill_published(postiz, workspace_id, profile, docs, now)
+            except Exception:  # noqa: BLE001
+                counts["failed"] += 1
+                logger.warning("post metrics: lookup %s failed", workspace_id, exc_info=True)
+
+    # global-read: the sweep runs for every workspace; each doc carries its own tenant.
+    published = await _IdeaDoc.find(
+        {
+            "platform": "x",
+            "x_post_id": {"$gt": ""},
+            "published_at": {
+                "$gte": now - timedelta(days=METRIC_AGE_BUCKETS[-1] + METRIC_LATE_DAYS)
+            },
+        }
+    ).to_list()
+    by_workspace: dict[str, list[_IdeaDoc]] = {}
+    for doc in published:
+        by_workspace.setdefault(doc.workspace, []).append(doc)
+    counts["workspaces"] = len(by_workspace)
+    for workspace_id, docs in by_workspace.items():
+        try:
+            due, saved = await _snapshot_workspace(metrics_fn, workspace_id, docs, now)
+            counts["due"] += due
+            counts["stored"] += saved
+        except Exception:  # noqa: BLE001
+            counts["failed"] += 1
+            logger.warning("post metrics: workspace=%s failed", workspace_id, exc_info=True)
+    logger.info(
+        "post metrics: filled=%d workspaces=%d due=%d stored=%d failed=%d",
+        counts["filled"],
+        counts["workspaces"],
+        counts["due"],
+        counts["stored"],
+        counts["failed"],
+    )
+    return counts
+
+
+async def latest_metrics(workspace_id: str, idea_ids: list[str]) -> dict[str, PostMetrics]:
+    """The most recently captured snapshot of each idea, within ``workspace_id`` only."""
+    latest: dict[str, _MetricDoc] = {}
+    rows = await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": idea_ids}}).to_list()
+    for m in rows:
+        if m.idea not in latest or _aware(m.captured_at) > _aware(latest[m.idea].captured_at):
+            latest[m.idea] = m
+    return {
+        idea: PostMetrics(
+            workspace_id=m.workspace,
+            idea_id=m.idea,
+            x_post_id=m.x_post_id,
+            age_bucket=m.age_bucket,
+            captured_at=m.captured_at,
+            **{k: getattr(m, k) for k in METRIC_FIELDS},
+        )
+        for idea, m in latest.items()
+    }
+
+
 __all__ = [
+    "latest_metrics",
+    "run_post_metrics",
     "check_telegram",
     "connect_account",
     "create_post",
