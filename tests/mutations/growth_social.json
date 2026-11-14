@@ -214,5 +214,41 @@
     "tests": [
       "tests/cloud/growth/social/test_daily_drafts.py"
     ]
+  },
+  {
+    "label": "schedule: a scheduled post still goes out as type now",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        \"type\": \"now\" if body.scheduled_at is None else \"schedule\",\n",
+    "replace": "        \"type\": \"now\",\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
+  },
+  {
+    "label": "schedule: an offset time reaches Postiz without converting to UTC",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/dto.py",
+    "find": "        when = (v if v.tzinfo else v.replace(tzinfo=UTC)).astimezone(UTC)\n",
+    "replace": "        when = v if v.tzinfo else v.replace(tzinfo=UTC)\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
+  },
+  {
+    "label": "schedule: a time in the past is accepted",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/dto.py",
+    "find": "        if when < datetime.now(UTC) - SCHEDULE_SKEW:\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
+  },
+  {
+    "label": "idea link: the Postiz ids are never written onto the idea",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            {\"$addToSet\": {\"post_ids\": {\"$each\": [i.post_id for i in items]}}}\n",
+    "replace": "            {\"$addToSet\": {\"post_ids\": {\"$each\": []}}}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_accounts.py"
+    ]
   }
 ]

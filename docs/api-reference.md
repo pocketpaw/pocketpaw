@@ -10395,6 +10395,7 @@ stored with `status: "new"` and returned as `{items}`:
       "status": "new",
       "source": "manual",
       "suggested_at": null,
+      "post_ids": [],
       "created_at": "2026-10-06T10:05:00+00:00",
       "updated_at": "2026-10-06T10:05:00+00:00"
     }
@@ -10413,7 +10414,10 @@ stored with `status: "new"` and returned as `{items}`:
 
 Every idea carries `source`: `manual` when a person asked for it, `daily` when
 the daily drafting below wrote it. `suggested_at` is the UTC time the daily
-drafting suggests posting it, and `null` on manual ideas.
+drafting suggests posting it, and `null` on manual ideas. `post_ids` lists the
+Postiz post ids of every successful `POST /posts` made with this idea's
+`idea_id` (posted now or scheduled), oldest first, with no repeats; it is `[]`
+until the idea is posted.
 
 ### `POST /api/v1/growth/social/ideas/daily`
 
@@ -10522,12 +10526,12 @@ Channels add these:
 ### Posts — `/api/v1/growth/social/posts`
 
 "Post now" publishes one post, optionally a thread and media, to connected
-accounts through Postiz. Slack and X can be posted to for now.
+accounts through Postiz, now or at a `scheduled_at` time. Slack and X can be posted to for now.
 
 | Route | What it does |
 |---|---|
 | `POST /media` (`growth.manage`) | Multipart, one `file` field → `{id, path, kind}`. Stores one image or video on the deployment's public bucket for a later post, at `growth-social/<workspace>/<profile>/<sha256>.<ext>`. The type is read from the file's bytes, not its name or `Content-Type`: PNG, JPEG, WebP, GIF (`kind: "image"`, at most 10 MB) or a web-playable MP4 (`kind: "video"`, at most 50 MB; QuickTime is refused). `id` is the content's SHA-256, `path` its public URL; pass `{id, path}` back in a post's `media`. Needs `POCKETPAW_UPLOAD_ADAPTER=s3` and `S3_PUBLIC_BUCKET`; Postiz is not involved. |
-| `POST /posts` (`growth.manage`) | `{content, targets: [{account_id, channel}], parts, media, idea_id}` → `{items: [{account_id, platform, post_id, media_skipped}]}`. `content` is trimmed and must be 1–10000 characters. `targets` is 1–10 distinct accounts; `channel` is a channel id from the channels route, required for accounts with `needs_channel` and `null` otherwise. `parts` (optional, ≤ 25, each trimmed and 1–10000 characters) are thread replies after `content`: an X thread, Slack thread replies. `media` (optional) is up to 4 images or exactly one video, each `{id, path}` from the media route; it attaches to `content`, never to the parts. `idea_id` (optional) names the idea of this profile the post came from; it is checked, not changed. Every target, the media and the idea are checked before anything is sent, so one bad one refuses the whole post and nothing goes out. Postiz publishes asynchronously: the post starts `queued` and usually becomes `published` within seconds. |
+| `POST /posts` (`growth.manage`) | `{content, targets: [{account_id, channel}], parts, media, idea_id, scheduled_at}` → `{items: [{account_id, platform, post_id, media_skipped}]}`. `content` is trimmed and must be 1–10000 characters. `targets` is 1–10 distinct accounts; `channel` is a channel id from the channels route, required for accounts with `needs_channel` and `null` otherwise. `parts` (optional, ≤ 25, each trimmed and 1–10000 characters) are thread replies after `content`: an X thread, Slack thread replies. `media` (optional) is up to 4 images or exactly one video, each `{id, path}` from the media route; it attaches to `content`, never to the parts. `idea_id` (optional) names the idea of this profile the post came from; once Postiz has created the posts, their ids are added to the idea's `post_ids` (a failed post adds nothing). `scheduled_at` (optional, ISO 8601) queues the post for that time through Postiz's own scheduler (`type: "schedule"`); a time without an offset is read as UTC, and one more than a minute in the past is a 422. Without it the post goes out now (`type: "now"`). Every target, the media and the idea are checked before anything is sent, so one bad one refuses the whole post and nothing goes out. Postiz publishes asynchronously: the post starts `queued` and usually becomes `published` within seconds of its time (now, or `scheduled_at`). |
 | `GET /posts` (`growth.read`) | `{items: [{id, account_id, platform, account_name, content, state, url, error, published_at}]}`: the profile's posts from the last 7 days (and the next day), newest first. `?ids=a,b` returns only those post ids; unknown ids are left out. `state` is `queued \| published \| error \| draft`. `url` is the published post's link when the platform gives one, `error` the failure reason when Postiz reports one, and `published_at` is set only once the post is `published`. A profile with no connected accounts yet gets `{items: []}`. Poll it with `ids` after posting. |
 
 | Status | Code | When |
@@ -10546,7 +10550,7 @@ local (`127.0.0.1` URLs) or Cloudflare R2 only.
 | Status | Code | When |
 |---|---|---|
 | 503 | `social.accounts_unavailable` | No Postiz configured. |
-| 422 | — | Empty or over-long `content` or part, more than 25 parts, more than 4 media items, no targets or more than 10, or the same account twice. |
+| 422 | — | Empty or over-long `content` or part, more than 25 parts, more than 4 media items, no targets or more than 10, the same account twice, or a `scheduled_at` that is not a date or is more than a minute in the past. |
 | 404 | `social_account.not_found` | A target is not one of this profile's accounts. |
 | 404 | `social_idea.not_found` | `idea_id` is unknown, malformed, or another profile's or workspace's idea. |
 | 422 | `social.media_not_public` | A posted media `path` is not a public http(s) URL. |
