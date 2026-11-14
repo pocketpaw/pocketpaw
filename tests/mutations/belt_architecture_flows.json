@@ -1,0 +1,115 @@
+[
+  {
+    "label": "architecture flows: a non-dict model element raises",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []\n",
+    "replace": "    return list(value) if isinstance(value, list) else []\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_a_model_with_non_dict_elements_still_checks_flows",
+      "tests/cloud/test_belt_architecture_flows.py::test_the_read_serves_flows_and_warnings_past_a_non_dict_system"
+    ]
+  },
+  {
+    "label": "architecture flows: a bad top-level shape is iterated",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "    if not isinstance(data, dict) or not isinstance(data.get(\"flows\"), list):\n",
+    "replace": "    if not isinstance(data, dict):\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_a_malformed_file_is_one_warning_never_a_raise"
+    ]
+  },
+  {
+    "label": "architecture flows: unknown keys pass the hand check",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "    if extra := sorted(obj.keys() - required - optional):\n",
+    "replace": "    if extra := sorted(set()):\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_the_hand_check_agrees_with_the_published_schema",
+      "tests/cloud/test_belt_architecture_flows.py::test_a_flow_off_the_schema_is_dropped_and_warned"
+    ]
+  },
+  {
+    "label": "architecture flows: string caps are not checked",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "        if not isinstance(obj[key], str) or not lo <= len(obj[key]) <= hi:\n",
+    "replace": "        if not isinstance(obj[key], str):\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_the_hand_check_agrees_with_the_published_schema"
+    ]
+  },
+  {
+    "label": "architecture flows: a non-boolean reverse passes",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "        if \"reverse\" in step and not isinstance(step[\"reverse\"], bool):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_the_hand_check_agrees_with_the_published_schema"
+    ]
+  },
+  {
+    "label": "architecture flows: an unknown id is kept",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "            if key in step and step[key] not in ids\n",
+    "replace": "            if False\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_a_flow_with_an_unknown_end_is_dropped_and_warned_others_kept",
+      "tests/cloud/test_belt_architecture_flows.py::test_the_read_serves_flows_and_warnings_past_a_non_dict_system"
+    ]
+  },
+  {
+    "label": "architecture flows: reverse is ignored",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "                hop = (step[\"from\"], step[\"to\"])[:: -1 if step.get(\"reverse\") else 1]\n",
+    "replace": "                hop = (step[\"from\"], step[\"to\"])\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_a_reverse_step_is_the_reply_along_the_forward_relationship"
+    ]
+  },
+  {
+    "label": "architecture flows: every hop reads as explicit",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "                step = {**step, \"implied\": hop not in rels}\n",
+    "replace": "                step = {**step, \"implied\": False}\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_a_reverse_step_is_the_reply_along_the_forward_relationship",
+      "tests/cloud/test_belt_architecture_flows.py::test_a_hop_with_no_relationship_is_kept_as_implied"
+    ]
+  },
+  {
+    "label": "architecture flows: a git failure reads as no file",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "    code, entry, err = await _run(argv, cwd=repo_path)\n    if code != 0:\n        return [], [_warn(None, None, f\"flows.json is unreadable: {err.strip()[:200]}\")]\n",
+    "replace": "    code, entry, err = await _run(argv, cwd=repo_path)\n    if code != 0:\n        return [], []\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_any_other_git_failure_or_an_oversized_blob_is_a_warning"
+    ]
+  },
+  {
+    "label": "architecture flows: a tree at the path is read as a blob",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "    if kind != \"blob\":\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_any_other_git_failure_or_an_oversized_blob_is_a_warning"
+    ]
+  },
+  {
+    "label": "architecture flows: an oversized blob is read whole",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "    if int(size) > MAX_MODEL_BYTES:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_any_other_git_failure_or_an_oversized_blob_is_a_warning"
+    ]
+  },
+  {
+    "label": "architecture flows: the flows file is never read",
+    "file": "ee/pocketpaw_ee/cloud/belt/architecture_flows.py",
+    "find": "    return check(data, model)\n",
+    "replace": "    return [], []\n",
+    "tests": [
+      "tests/cloud/test_belt_architecture_flows.py::test_load_flows_reads_the_sha_and_a_missing_file_is_empty",
+      "tests/cloud/test_belt_architecture_flows.py::test_the_read_serves_flows_and_warnings_past_a_non_dict_system"
+    ]
+  }
+]

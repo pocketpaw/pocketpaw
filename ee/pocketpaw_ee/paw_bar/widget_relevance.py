@@ -11,7 +11,8 @@
 # craft.ts: ``ask`` keywords and ``hints``) with ripple_widget_intents.json merged
 # on top, a local overlay so a new steering keyword does not wait on a ripple
 # release: extra ``intents`` keywords per widget, figure's per-figure keywords
-# (``figures``) and a curated ``line`` for map and weather-forecast. An entry's
+# (``figures``) and a curated ``line`` for map, weather-forecast (now.wind is
+# text) and habit-tracker (its icon keys, which the manifest line folds away). An entry's
 # ``hint`` is steering appended to the widget's line (a core widget's hint rides
 # every turn); a ``line`` replaces the manifest line. figure's and iso-scene's
 # lines are built here: figure's from the figure catalog, the sliders and anchors

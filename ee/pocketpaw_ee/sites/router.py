@@ -1,7 +1,12 @@
 # ee/pocketpaw_ee/sites/router.py — REST surface for the Sites control plane.
 #
-# Thin FastAPI handlers over ``sites.service``: publish and preview, the native
-# editing and asset routes, custom domains, slugs and renames, owner settings
+# Thin FastAPI handlers over ``sites.service``: publish and preview, opening a draft
+# of a published project site, the composer's Enhance button
+# (``sites.prompt_enhance``), the native editing and asset routes
+# (upload, list, delete, Studio generate and copy-from-Studio via
+# ``sites.media_generation``),
+# the html-to-project upgrade and its undo
+# (``sites.site_upgrade``), custom domains, slugs and renames, owner settings
 # (metadata, branding, AI visibility, client record and invoices), site-plan
 # requests, analytics and entitlements, transfers, export, delete, origin claims
 # and the foreign-origin concierge.
@@ -34,13 +39,18 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.cloud._core.rate_limit import rate_limit_slug_check
 from pocketpaw_ee.cloud.auth.service import resolve_display_names
-from pocketpaw_ee.sites import import_service, ownership
+from pocketpaw_ee.sites import import_service, ownership, prompt_enhance, site_upgrade
 from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.sites.dashboard_router import router as site_dashboard_router
+from pocketpaw_ee.sites.data_router import router as site_data_router
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
+    DiscardDraftResponse,
     DomainRequest,
     DomainStatusResponse,
+    EnhancePromptRequest,
+    EnhancePromptResponse,
     ForeignConciergeBindRequest,
     ForeignConciergeOrigin,
     ForeignConciergeRebindRequest,
@@ -54,6 +64,7 @@ from pocketpaw_ee.sites.dto import (
     LeafEditVerdict,
     MakeEditableRequest,
     NativeArtifactResponse,
+    OpenDraftResponse,
     OriginClaimRequest,
     OriginClaimResponse,
     OriginVerificationResponse,
@@ -62,9 +73,12 @@ from pocketpaw_ee.sites.dto import (
     SiteAiVisibilityUpdate,
     SiteAnalyticsResponse,
     SiteAssetDeleteRequest,
+    SiteAssetFromStudioRequest,
+    SiteAssetGenerateRequest,
     SiteAssetListResponse,
     SiteAssetResponse,
     SiteBrandingUpdate,
+    SiteBuildListResponse,
     SiteBuildLogResponse,
     SiteBuildResponse,
     SiteClientResponse,
@@ -76,6 +90,7 @@ from pocketpaw_ee.sites.dto import (
     SiteEntitlementsResponse,
     SiteExportResponse,
     SiteInvoiceCreate,
+    SiteMediaAssetsResponse,
     SiteMetadataUpdate,
     SitePlanRequestBody,
     SitePlanRequestResponse,
@@ -83,13 +98,17 @@ from pocketpaw_ee.sites.dto import (
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
+    SiteTokensRewriteResponse,
     SiteTransferListResponse,
     SiteTransferOfferRequest,
     SiteTransferResponse,
+    SiteUpgradeResponse,
+    SiteUpgradeRevertResponse,
     SiteVersionResponse,
     SlugAvailability,
     SlugRenameRequest,
     VersionHistoryResponse,
+    utc_iso,
 )
 from pocketpaw_ee.versions import service as versions_service
 
@@ -97,6 +116,12 @@ router = APIRouter(
     tags=["Sites"],
     dependencies=[Depends(require_plan_feature("sites"))],
 )
+
+# The Data dashboard routes (``sites.data_router``) go in FIRST so they inherit the
+# plan gate and win the match: ``.../data/inventory`` would otherwise be taken by the
+# legacy ``.../data/{table}`` read below. The AI dashboards (``.../data/dashboards``) too.
+router.include_router(site_data_router)
+router.include_router(site_dashboard_router)
 
 
 async def _may_buy_site_plan(user: object, workspace_id: str) -> bool:
@@ -185,6 +210,7 @@ async def publish_site(
         prewarm_origin=request.headers.get("origin") or None,
         confirm_destructive_migrations=body.confirm_destructive_migrations,
         confirm_do_data_loss=list(body.confirm_do_data_loss),
+        confirm_placeholders=body.confirm_placeholders,
     )
     return sites_service._to_response(doc)
 
@@ -259,6 +285,39 @@ async def request_site_plan(
         status="pending",
         site_plan_key=tier.key,
         monthly_price_usd=int(tier.monthly_price_usd or 0),
+    )
+
+
+@router.post("/sites/enhance-prompt", response_model=EnhancePromptResponse)
+async def enhance_site_prompt(
+    body: EnhancePromptRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> EnhancePromptResponse:
+    """The composer's Enhance button: a sharper brief that is still the user's
+    idea, or up to three fact questions when the idea is too thin. Runs on the
+    workspace's Sites agent (or ``agent_id``) with the composer's ``model``.
+    Always a 200; any failure (no agent, backend error, timeout, guard, rate
+    limit, credits) returns the original prompt with ``changed=false`` so the
+    composer never breaks, and ``reason`` tells the client which case it was."""
+    answers = [
+        prompt_enhance.EnhanceAnswer(question=a.question, answer=a.answer)
+        for a in body.answers or []
+    ]
+    result = await prompt_enhance.enhance_prompt(
+        body.prompt,
+        answers or None,
+        user_id=ctx.user_id,
+        workspace_id=ctx.workspace_id,
+        model=body.model,
+        agent_id=body.agent_id,
+    )
+    return EnhancePromptResponse(
+        prompt=result.prompt,
+        questions=result.questions,
+        changed=result.changed,
+        reason=result.reason,
+        sources=result.sources,
     )
 
 
@@ -454,10 +513,11 @@ async def import_site(
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteResponse:
     """Import an uploaded site zip (SI-4): unpack safely in memory (zip-slip +
-    decompression-bomb guards in the service), mint the html pocket + DRAFT Site
-    doc, publish through the existing html/static deploy path (binary files ride
-    the generator's ``assets`` base64 sideband), persist the ``import_report`` on
-    the Site doc, and return the SiteResponse (carrying the report).
+    decompression-bomb guards in the service), mint a ``static`` starter project
+    pocket + DRAFT Site doc, publish it through the no-build project lane (images
+    and video move to the public asset rail, since the source map holds text only),
+    persist the ``import_report`` on the Site doc, and return the SiteResponse
+    (carrying the report).
 
     The 25MB upload cap gates PROCESSING, not ingress: Starlette's multipart
     parser spools the whole request body to a temp file before this handler
@@ -477,7 +537,7 @@ async def import_site(
         data=data,
         name=name,
     )
-    return sites_service._to_response(doc, pattern=import_service.IMPORT_PATTERN, engine="html")
+    return sites_service._to_response(doc, pattern=import_service.IMPORT_PATTERN, engine="project")
 
 
 @router.post(
@@ -635,6 +695,28 @@ async def latest_build_by_pocket(
     return SiteBuildResponse(**result)
 
 
+@router.get("/sites/by-pocket/{pocket_id}/builds", response_model=SiteBuildListResponse)
+async def list_builds_by_pocket(
+    pocket_id: str,
+    limit: int = Query(20, ge=1, le=50),
+    offset: int = Query(0, ge=0, le=1_000),
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteBuildListResponse:
+    """A project pocket's recent builds, newest first and paged: id, status, reason,
+    trigger (``draft`` / ``agent``), start / finish times and content hash, no logs.
+    Same auth and scoping as ``builds/latest``; a pocket that never built is an empty
+    page."""
+    result = await sites_service.project_builds(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        limit=limit,
+        offset=offset,
+    )
+    return SiteBuildListResponse(**result)
+
+
 @router.get(
     "/sites/by-pocket/{pocket_id}/builds/{job_id}/log",
     response_model=SiteBuildLogResponse,
@@ -673,12 +755,14 @@ async def site_data_tables_by_pocket(
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
 ) -> SiteDataTablesResponse:
-    """List a DYNAMIC site's data tables for the operator data-view (DS-3):
+    """List a DYNAMIC or database-backed PROJECT site's data tables (DS-3):
     {pocket_id, available, reason, tables}. The table list comes from the pocket
     spec's ``objects`` (the declared D1 tables), so it is populated even when the
     live D1 is not reachable. ``available`` is False with
     ``reason="live_on_cloudflare_only"`` in local/dev mode (no live D1) so the UI
-    degrades cleanly — it can show the schema but explain why no rows load.
+    degrades cleanly — it can show the schema but explain why no rows load. A
+    ``project`` site's tables are introspected from its live D1 (none in local
+    mode, and ``reason="not_published"`` before its database exists).
 
     A NON-dynamic pocket (a static landing / brochure) has no data store, so the
     service raises ValidationError("sites.not_dynamic") → 422. A missing /
@@ -693,6 +777,8 @@ async def site_data_tables_by_pocket(
 async def site_data_rows_by_pocket(
     pocket_id: str,
     table: str,
+    limit: int | None = Query(None, ge=1),
+    offset: int = Query(0, ge=0, le=1_000_000),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.read")),
 ) -> SiteDataRowsResponse:
@@ -705,11 +791,19 @@ async def site_data_rows_by_pocket(
     interpolated into SQL; every value binds through query params. In local/dev
     mode (no live D1) ``available`` is False with
     ``reason="live_on_cloudflare_only"`` and ``rows`` empty, but ``columns`` is
-    still listed from the spec. A NON-dynamic pocket → 422
+    still listed from the spec. ``limit`` (capped server-side) and ``offset`` page
+    the rows. A ``project`` site reads its tables from the live D1 instead (unknown
+    table → 404; ``reason="not_published"`` before its database exists). Auth
+    tables' credential columns read "•••". A NON-dynamic pocket → 422
     ("sites.not_dynamic"); a missing / access-denied pocket → 404 / 403.
     Tenant-scoped on ctx."""
     return await sites_service.read_site_data_table(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, table=table
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        table=table,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -771,7 +865,7 @@ async def versions_by_pocket(
                 status=shown[str(r.id)],
                 label=r.label,
                 author=names.get(r.author, r.author) if r.author else None,
-                created_at=r.created_at.isoformat(),
+                created_at=utc_iso(r.created_at) or "",
             )
             for r in rows
         ],
@@ -814,6 +908,97 @@ async def request_publish_by_pocket(
     )
 
 
+@router.post("/sites/by-pocket/{pocket_id}/upgrade", response_model=SiteUpgradeResponse)
+async def upgrade_site_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteUpgradeResponse:
+    """Upgrade an html site (imported ones included) into a static project in place
+    (``sites.site_upgrade``). Needs edit rights on the pocket, like publish. 422
+    ``sites.upgrade_unsupported`` for any other engine, 422 ``sites.upgrade_no_index``
+    with no root index.html, 409 ``sites.upgrade_file_exists`` when the site already
+    has the starter's paw.template.json or AGENTS.md, 409 ``sites.upgrade_conflict``
+    when an edit raced the upgrade, 503 ``sites.upgrade_starter_unavailable`` when the
+    starter cannot be read. The live site keeps serving until the next publish."""
+    result = await site_upgrade.upgrade_html_site(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteUpgradeResponse(**result)
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/upgrade/revert", response_model=SiteUpgradeRevertResponse
+)
+async def revert_site_upgrade_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteUpgradeRevertResponse:
+    """Undo the upgrade: back to html with the old source and site_meta. 422
+    ``sites.upgrade_not_upgraded`` when the site was never upgraded, 409
+    ``sites.upgrade_revert_stale`` once it was edited after the upgrade, 409
+    ``sites.upgrade_snapshot_missing`` when the snapshot version is gone."""
+    result = await site_upgrade.revert_html_upgrade(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteUpgradeRevertResponse(**result)
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/upgrade/tokens", response_model=SiteTokensRewriteResponse
+)
+async def retheme_site_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteTokensRewriteResponse:
+    """Opt-in re-run for a site already on the static starter: point its own CSS at
+    ``styles/tokens.css`` so theme edits reach it (``sites.site_upgrade.retheme_site``).
+    Rendering is unchanged; it saves only when something changed. 422
+    ``sites.tokens_unsupported`` unless it is a static project with a tokens file, 409
+    ``sites.upgrade_conflict`` when an edit raced it."""
+    result = await site_upgrade.retheme_site(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return SiteTokensRewriteResponse(**result)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/open-draft", response_model=OpenDraftResponse)
+async def open_draft_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> OpenDraftResponse:
+    """Open a draft of a published project site: the builder stops showing the live
+    site for the published content and builds a draft of it, so the editing tools
+    work. ``opened`` is False when the pocket already shows a draft. Idempotent; the
+    next publish returns it to the published view. A missing or another workspace's
+    pocket is a 404, no edit access a 403."""
+    out = await sites_service.open_pocket_draft(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return OpenDraftResponse(**out)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/discard-draft", response_model=DiscardDraftResponse)
+async def discard_draft_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> DiscardDraftResponse:
+    """Discard a pocket's unpublished changes: its source goes back to the published
+    version, the drafts above it are marked discarded, a pending publish review is
+    rejected, and the builder shows the live site again. Idempotent. 409 when nothing
+    was ever published (no live version to go back to) or an edit landed mid-discard,
+    422 for a site kind with no source files, 404 for a missing or another
+    workspace's pocket, 403 without edit access."""
+    out = await sites_service.discard_pocket_draft(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+    return DiscardDraftResponse(**out)
+
+
 @router.post(
     "/sites/by-pocket/{pocket_id}/versions/{version_no}/revert",
     response_model=SiteVersionResponse,
@@ -852,7 +1037,7 @@ async def revert_version_by_pocket(
         status=draft.status,
         label=draft.label,
         author=draft.author,
-        created_at=draft.created_at.isoformat(),
+        created_at=utc_iso(draft.created_at) or "",
     )
 
 
@@ -1008,6 +1193,7 @@ async def download_site_export(
 @router.delete("/sites/{site_id}", response_model=SiteDeleteQueuedResponse, status_code=202)
 async def delete_site(
     site_id: str,
+    force: bool = Query(default=False),
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteDeleteQueuedResponse:
@@ -1028,9 +1214,12 @@ async def delete_site(
     service — a workspace member who may edit a site may not destroy it. The owner
     check is in the service rather than here because jobs, bus handlers and MCP tools
     reach services directly; see ``sites_service.start_site_delete``.
+
+    ``?force=true`` deletes even when that export fails (the owner chose to lose the
+    data); the export is still attempted first.
     """
     return await sites_service.start_site_delete(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, site_id=site_id, force=force
     )
 
 
@@ -1371,6 +1560,151 @@ async def delete_site_asset(
         await store.delete(workspace_id=ctx.workspace_id, pocket_id=pocket_id, key=body.key)
     except PublicAssetError as exc:
         raise HTTPException(403, str(exc)) from exc
+
+
+# ``SiteMediaError.reason`` → HTTP status. ``failed`` is the provider or the store
+# breaking, not the caller's input, hence 502.
+_SITE_MEDIA_STATUS = {
+    "not_found": 404,
+    "generation_not_found": 404,
+    "missing": 404,
+    "no_store": 503,
+    "invalid": 400,
+    "bad_source": 400,
+    "unsupported": 400,
+    "rejected": 400,
+    "not_ready": 409,
+    "unavailable": 503,
+    "busy": 503,
+    "failed": 502,
+}
+
+_IMAGE_ASPECTS = ("1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3")
+_VIDEO_ASPECTS = ("16:9", "9:16", "1:1")
+
+
+def _asset_dto(asset: Any) -> SiteAssetResponse:
+    return SiteAssetResponse(
+        key=asset.key, url=asset.url, mime=asset.mime, size=asset.size, filename=asset.filename
+    )
+
+
+def _media_response(result: Any) -> SiteMediaAssetsResponse:
+    return SiteMediaAssetsResponse(
+        assets=[_asset_dto(a) for a in result.assets],
+        poster=_asset_dto(result.poster) if result.poster is not None else None,
+        generation_id=result.generation_id,
+        errors=list(result.errors),
+    )
+
+
+def _site_media_http_error(exc: Any, *, what: str, hint: str) -> HTTPException:
+    status = _SITE_MEDIA_STATUS.get(exc.reason, 502)
+    if exc.reason == "no_store":
+        return HTTPException(
+            503,
+            "Public asset storage is not configured for this deployment "
+            "(set POCKETPAW_UPLOAD_ADAPTER=s3 and S3_PUBLIC_BUCKET).",
+        )
+    if exc.reason == "not_found":
+        return HTTPException(404, "No site with that id in this workspace.")
+    if exc.reason == "failed":
+        return HTTPException(
+            502,
+            f"{what} failed: {exc.message}. Nothing was added to the site. {hint}",
+        )
+    return HTTPException(status, exc.message)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/assets/generate", response_model=SiteMediaAssetsResponse)
+async def generate_site_asset(
+    pocket_id: str,
+    body: SiteAssetGenerateRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteMediaAssetsResponse:
+    """Generate an image (1-4) or a short video with Studio and publish it.
+
+    Same gate as upload, plus pocket ownership and the early-access refusal
+    (Studio spend never reaches the credit ledger). Lands in the /studio history
+    with ``source="sites"``. A video renders synchronously and can take minutes.
+    """
+    # TODO(SM-2): meter this. Studio generation is unmetered today
+    # (StudioModel.credits is decorative); this route spends with no debit.
+    from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed
+    from pocketpaw_ee.sites import media_generation
+
+    aspect_ratio = body.aspect_ratio or "16:9"
+    if body.kind == "image":
+        if body.image_url or body.duration is not None or body.engine is not None:
+            raise HTTPException(400, "image_url, duration and engine apply to video only.")
+        if aspect_ratio not in _IMAGE_ASPECTS:
+            raise HTTPException(400, f"aspect_ratio must be one of {', '.join(_IMAGE_ASPECTS)}.")
+    else:
+        if body.count != 1:
+            raise HTTPException(400, "count applies to images only; a video is one clip.")
+        if aspect_ratio not in _VIDEO_ASPECTS:
+            raise HTTPException(400, f"aspect_ratio must be one of {', '.join(_VIDEO_ASPECTS)}.")
+
+    _asset_store_or_503()
+    await assert_early_access_allowed(ctx.workspace_id)
+
+    what = "Image generation" if body.kind == "image" else "Video generation"
+    try:
+        if body.kind == "image":
+            result = await media_generation.generate_site_image_assets(
+                workspace_id=ctx.workspace_id,
+                pocket_id=pocket_id,
+                prompt=body.prompt,
+                count=body.count,
+                aspect_ratio=aspect_ratio,
+            )
+        else:
+            result = await media_generation.generate_site_video_asset(
+                workspace_id=ctx.workspace_id,
+                pocket_id=pocket_id,
+                prompt=body.prompt,
+                image_url=body.image_url,
+                aspect_ratio=aspect_ratio,
+                duration_sec=body.duration or 5,
+                video_engine=body.engine,
+            )
+    except media_generation.SiteMediaError as exc:
+        raise _site_media_http_error(
+            exc, what=what, hint="Try again in a moment, or change the prompt."
+        ) from exc
+    return _media_response(result)
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/assets/from-studio", response_model=SiteMediaAssetsResponse
+)
+async def add_studio_generation_to_site(
+    pocket_id: str,
+    body: SiteAssetFromStudioRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteMediaAssetsResponse:
+    """Publish an existing Studio generation of this workspace onto the site.
+
+    Reads only the generation's own stored media (never a URL), so a repeat copy
+    is idempotent (content-addressed keys). A video's poster comes back as
+    ``poster``. Another workspace's generation is a 404, like a missing one.
+    """
+    from pocketpaw_ee.sites import media_generation
+
+    _asset_store_or_503()
+    try:
+        result = await media_generation.copy_studio_generation(
+            workspace_id=ctx.workspace_id,
+            pocket_id=pocket_id,
+            generation_id=body.generation_id,
+        )
+    except media_generation.SiteMediaError as exc:
+        raise _site_media_http_error(
+            exc, what="Copying from Studio", hint="Try again in a moment."
+        ) from exc
+    return _media_response(result)
 
 
 @router.get("/sites/import/brief/{brief_id}", response_model=ImportBriefStatusResponse)

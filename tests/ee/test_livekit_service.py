@@ -160,6 +160,29 @@ class TestService:
     @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_URL", "wss://test.livekit.cloud")
     @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_KEY", "test-key")
     @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_SECRET", "test-secret")
+    async def test_create_room_bot_token_may_publish_microphone_only(self, mock_lk_context):
+        """Ask Paw voices answers on the bot's mic track: mic yes, camera/screen/data no."""
+        import jwt
+        from pocketpaw_ee.cloud.livekit.service import create_room
+
+        mock_room = MagicMock()
+        mock_room.name = "group-call-test123"
+        mock_lk_context.create_room = AsyncMock(return_value=mock_room)
+
+        result = await create_room("test123")
+
+        claims = jwt.decode(result["bot_token"], options={"verify_signature": False})
+        assert claims["sub"] == "call-bot"
+        video = claims["video"]
+        assert video["canPublish"] is True
+        assert video["canPublishSources"] == ["microphone"]
+        assert video["canPublishData"] is False
+        assert video["canSubscribe"] is True
+
+    @pytest.mark.asyncio
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_URL", "wss://test.livekit.cloud")
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_KEY", "test-key")
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_SECRET", "test-secret")
     async def test_generate_participant_token(self):
         from pocketpaw_ee.cloud.livekit.service import generate_participant_token
 

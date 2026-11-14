@@ -31,11 +31,18 @@
 # header bound to the body's sha256, so a forged header can't shadow a real event.
 # Orders are keyed by the Razorpay order id (``order_...``) the link created, which
 # payments and refunds also carry:
-# ``payment_link.paid`` -> order.paid (only for links we made: notes.site_id),
-# a full ``refund.processed`` -> order.refunded, ``payment.failed`` -> order.failed;
-# the last two only touch an order that already exists (an early refund is
-# answered 500 by webhooks.py, so Razorpay redelivers it). ``account_ref`` =
-# ``account_id``, so webhooks.py refuses an event whose account isn't the site's.
+# ``payment_link.paid`` -> order.paid (only for links we made: notes.site_id; the
+# payment id rides along as ``payment_ref``), ``refund.processed`` (partial or
+# full) -> order.refunded with the payment's cumulative ``amount_refunded`` and the
+# refund id, ``payment.failed`` -> order.failed; the last two only touch an order
+# that already exists (an early refund is answered 500 by webhooks.py, so Razorpay
+# redelivers it). ``account_ref`` = ``account_id``, so webhooks.py refuses an event
+# whose account isn't the site's.
+#
+# ``refund_payment``: ``POST /v1/payments/{payment_id}/refund`` (speed normal) with
+# our refund id as ``X-Refund-Idempotency`` and ``receipt``. An order recorded
+# before payment ids were kept looks its captured payment up
+# (``GET /v1/orders/{id}/payments``). A 400 is a refusal (``RefundRefused``).
 
 from __future__ import annotations
 
@@ -44,6 +51,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from collections.abc import Mapping
@@ -70,6 +78,7 @@ from pocketpaw_ee.integrations.providers.base import (
     InvalidGrant,
     NormalizedEvent,
     ProviderError,
+    RefundRefused,
     SettingOption,
     SettingsField,
     TokenGrant,
@@ -83,6 +92,9 @@ MODE_ENV = f"{ENV_PREFIX}_MODE"
 AUTHORIZE_URL = "https://auth.razorpay.com/authorize"
 TOKEN_URL = "https://auth.razorpay.com/token"
 PAYMENT_LINKS_URL = "https://api.razorpay.com/v1/payment_links"
+API = "https://api.razorpay.com/v1"
+_PAYMENT_ID = re.compile(r"pay_[A-Za-z0-9]{1,40}")
+_ORDER_ID = re.compile(r"order_[A-Za-z0-9]{1,40}")
 SCOPE = "read_write"
 DEFAULT_CURRENCY = "INR"
 # Razorpay's minimum charge for the 2-decimal currencies we offer (INR: 100 paise).
@@ -258,6 +270,7 @@ def _paid_order(link: Mapping[str, Any], payment: Mapping[str, Any]) -> dict[str
     qty = max(1, _int(notes.get("qty")) or 1)
     return {
         "order_id": str(payment.get("order_id") or link.get("order_id") or ""),
+        "payment_ref": str(payment.get("id") or ""),
         "amount_minor": amount,
         "currency": str(link.get("currency") or payment.get("currency") or "").upper(),
         "customer_email": email if isinstance(email, str) and email else None,
@@ -272,12 +285,58 @@ def _paid_order(link: Mapping[str, Any], payment: Mapping[str, Any]) -> dict[str
     }
 
 
-def _fully_refunded(payment: Mapping[str, Any]) -> bool:
-    """Only a full refund settles an order; a partial one leaves it paid."""
+def _refunded_minor(payment: Mapping[str, Any]) -> int:
+    """The payment's cumulative refunded amount; a ``full`` one without a figure is
+    all of it."""
+    refunded = _int(payment.get("amount_refunded")) or 0
     if payment.get("refund_status") == "full":
-        return True
-    amount, refunded = _int(payment.get("amount")), _int(payment.get("amount_refunded"))
-    return bool(amount and refunded is not None and amount > 0 and refunded >= amount)
+        refunded = max(refunded, _int(payment.get("amount")) or 0)
+    return max(refunded, 0)
+
+
+_REFUND_STATUS = {"processed": "succeeded", "pending": "pending", "failed": "failed"}
+
+
+async def _captured_payment(get_token: Any, order_id: str) -> str:
+    if not _ORDER_ID.fullmatch(order_id):
+        raise RefundRefused("razorpay order has no order id")
+    resp = await oauth_http.authed(
+        get_token, "GET", f"{API}/orders/{order_id}/payments", provider="razorpay"
+    )
+    if resp.status_code >= 400:
+        raise ProviderError(f"razorpay: order payments answered {resp.status_code}")
+    for item in oauth_http.body_of(resp).get("items") or []:
+        if isinstance(item, Mapping) and item.get("status") == "captured":
+            payment_id = str(item.get("id") or "")
+            if _PAYMENT_ID.fullmatch(payment_id):
+                return payment_id
+    raise RefundRefused("razorpay order has no captured payment")
+
+
+async def _refund_payment(order: Any, amount_minor: int, key: str, get_token: Any):
+    payment_id = str(order.payment_ref or "")
+    if not _PAYMENT_ID.fullmatch(payment_id):
+        payment_id = await _captured_payment(get_token, str(order.external_id or ""))
+    resp = await oauth_http.authed(
+        get_token,
+        "POST",
+        f"{API}/payments/{payment_id}/refund",
+        provider="razorpay",
+        json={
+            "amount": int(amount_minor),
+            "speed": "normal",
+            "receipt": key[:40],
+            "notes": {"paw_refund": key, "site_id": _note(order.site_id or "")},
+        },
+        headers={"X-Refund-Idempotency": key},
+    )
+    if resp.status_code == 400:
+        raise RefundRefused("razorpay: refund refused")
+    if resp.status_code >= 400:
+        raise ProviderError(f"razorpay: refund answered {resp.status_code}")
+    body = oauth_http.body_of(resp)
+    status = _REFUND_STATUS.get(str(body.get("status") or ""), "pending")
+    return status, str(body.get("id") or "")
 
 
 def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -298,8 +357,15 @@ def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]
         if not site_id or not data["order_id"]:
             return "ignored", {}, ""
         return "order.paid", data, site_id
-    if kind == "refund.processed" and order_id and _fully_refunded(payment):
-        return "order.refunded", {"order_id": order_id, "only_if_exists": True}, site_id
+    if kind == "refund.processed" and order_id and _refunded_minor(payment):
+        refund = _entity(payload, "refund")
+        data = {
+            "order_id": order_id,
+            "only_if_exists": True,
+            "refunded_minor": _refunded_minor(payment),
+            "refund_ref": str(refund.get("id") or ""),
+        }
+        return "order.refunded", data, site_id
     if kind == "payment.failed" and order_id:
         return "order.failed", {"order_id": order_id, "only_if_exists": True}, site_id
     return "ignored", {}, ""
@@ -413,6 +479,11 @@ class RazorpayProvider(BaseProvider):
             refresh_token=str(body.get("refresh_token") or ""),
             expires_in=_int(body.get("expires_in")),
         )
+
+    async def refund_payment(
+        self, order: Any, amount_minor: int, key: str, get_token: Any
+    ) -> tuple[str, str]:
+        return await _refund_payment(order, amount_minor, key, get_token)
 
     def verify_webhook(self, body: bytes, headers: Mapping[str, str]) -> NormalizedEvent | None:
         if not verify_signature(body, headers.get("x-razorpay-signature", ""), webhook_secret()):

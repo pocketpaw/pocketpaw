@@ -5,7 +5,9 @@
 # cursor is a CloudError 4xx, not a 500); the per-IP 60/min limit; POST /use and
 # /report need sign-in, use counts a remix, three distinct reporters drop the
 # listing from the anonymous index, and the 11th report in an hour is 429
-# ``discover.report_rate_limited``. Slug lookups are in test_discover_slug.py.
+# ``discover.report_rate_limited``; ``?tag=`` filters case-insensitively and a tag
+# outside the dialect matches nothing rather than erroring. Slug lookups are in
+# test_discover_slug.py.
 #
 # Auth runs through the real ``current_user_id`` / ``current_workspace_id``; only
 # ``current_active_user`` is swapped for a toggle (the meetings router-test shape).
@@ -43,6 +45,10 @@ PUBLIC_KEYS = {
     "created_at",
     "media_kind",
     "media_url",
+    "tags",
+    "updated_at",
+    "creator",
+    "remixed_from",
 }
 
 
@@ -141,6 +147,15 @@ async def test_anonymous_list_serves_only_public_unhidden_allow_list(client) -> 
     assert set(body) == {"items", "next_cursor"}
     assert [item["id"] for item in body["items"]] == [shown]
     assert set(body["items"][0]) == PUBLIC_KEYS
+
+
+async def test_tag_query_param_filters_and_never_500s(client) -> None:
+    await _upsert("a", title="Bakery", tags=["bread"])
+    await _upsert("b", title="Arcade", tags=["game"])
+
+    assert await _titles(client, tag="Bread") == ["Bakery"]
+    assert await _titles(client, tag="café / !") == []
+    assert (await client.get(URL, params={"tag": "x" * 41})).status_code == 422
 
 
 async def test_anonymous_get_one_by_slug(client) -> None:

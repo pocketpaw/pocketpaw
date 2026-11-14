@@ -30,8 +30,8 @@
   {
     "label": "an issue already labelled needs-spec is commented on again",
     "file": "ee/pocketpaw_ee/cloud/mandates/patrols.py",
-    "find": "if not isinstance(labels, list) or NEEDS_SPEC in {lb.get(\"name\") for lb in labels}:",
-    "replace": "if not isinstance(labels, list):",
+    "find": "        if label in {lb.get(\"name\") for lb in labels}:\n            return \"already\"",
+    "replace": "        if False:\n            return \"already\"",
     "tests": [
       "tests/cloud/test_belt_plan_policy.py::test_flag_needs_spec_skips_labelled_and_foreign_sources"
     ]

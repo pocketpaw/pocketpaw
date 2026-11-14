@@ -109,6 +109,8 @@ class RetrievalLayer:
         # message is the prewarm case (``message=""``) and must not pay a soul
         # round-trip — nor render a block, or the prewarmed client's behavioural
         # prefix would diverge from turn 1's and turn 1 would evict it.
+        if not ctx.soul_recall:
+            return _NOTHING
         if not (instance.soul_manager and instance.soul_manager.soul and ctx.message.strip()):
             return _NOTHING
 

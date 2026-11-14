@@ -114,6 +114,16 @@ class User(BeanieBaseUser, Document):  # type: ignore[misc]
     # ``workspaces[].role``, which is also a bare str.
     platform_role: str | None = None
 
+    # Early access grant (credits.service.grant_early_access). The workspace is
+    # claimed once, atomically, and only ever one the user OWNS; the grant then
+    # lands there under the per-user ledger key. ``granted_at`` is stamped after
+    # the ledger grant and is only a fast path: the ledger key is the guarantee.
+    early_access_workspace_id: str | None = None
+    early_access_granted_at: datetime | None = None
+    # First "notify me when plans open" click (early_access.service.notify_plans).
+    # Set once and never moved, so a repeat click keeps the original time.
+    notify_plans_at: datetime | None = None
+
     class Settings:
         name = "users"
         email_collation = None

@@ -10,10 +10,15 @@
 # ``paw-sites-gen project-build``, deployed only from its ``paw-build.json``).
 #
 # Invariants: every predicate routes through :func:`normalize_engine`, which falls an
-# unknown engine back to ripple (never raises). Only the ``resolve_*`` functions read
-# the filesystem; everything else is pure. The FE mirror is
-# paw-enterprise ``core/sites/engines.ts``; :func:`engine_capabilities` is the wire
-# shape it reads.
+# unknown engine back to ripple (never raises; a non-empty unknown value logs a warning
+# once). Only the ``resolve_*`` functions read the filesystem, plus
+# :func:`engine_capabilities` for ``project``, whose visual-edit flags ask the generator
+# (``visual_edit.visual_edit_supported``, cached); everything else is pure.
+# The FE mirror is paw-enterprise ``core/sites/engines.ts``; :func:`site_capabilities`
+# (the engine's :func:`engine_capabilities` plus the site's ``has_database`` and
+# ``data_viewer``) is the wire shape every site read carries, and
+# :func:`site_has_database` is the one answer to "does this site own a D1 database".
+# :func:`is_upgradable` names the engines "Upgrade this site" converts to ``project``.
 """Engine capability predicates for Paw Sites.
 
 Five site-generation engines are modeled:
@@ -89,8 +94,12 @@ validation should validate the engine string at their own entry point.
 
 from __future__ import annotations
 
+import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_ENGINE = "ripple"
 
@@ -163,16 +172,32 @@ _SVELTE_STATIC_OUTPUT_REL = "build"
 PAW_BUILD_FILENAME = "paw-build.json"
 
 
+#: Every engine a pocket may carry. A new engine is added HERE (and to the sets above
+#: that describe it) or it reads as ripple; ``tests/ee/sites/test_engines.py`` fails on
+#: any engine literal in the codebase that is not in this set.
+KNOWN_ENGINES: frozenset[str] = _SOURCE_MAP_ENGINES | {_DEFAULT_ENGINE}
+
+#: Unknown engine values already warned about, so a bad row on a hot read path logs
+#: once per process rather than once per request.
+_WARNED_UNKNOWN: set[str] = set()
+
+
 def normalize_engine(engine: str | None) -> str:
     """Normalize a pocket's raw engine value to a known engine string.
 
-    Empty / ``None`` / unknown → ``"ripple"`` (see the module docstring for why we
-    fall back rather than raise). A known engine passes through unchanged. Every
-    other predicate in this module routes through here, so the fallback policy lives
-    in exactly one place.
+    ``None`` / empty → ``"ripple"``, silently: that is every legacy pocket. A
+    non-empty value outside :data:`KNOWN_ENGINES` (a typo, or an engine this build
+    predates) also reads as ``"ripple"`` (see the module docstring for why we fall
+    back rather than raise), but logs a warning the first time it is seen, so a
+    missing registration shows up instead of quietly turning a site into ripple. A
+    known engine passes through unchanged. Every other predicate in this module
+    routes through here, so the fallback policy lives in exactly one place.
     """
-    if engine in _SOURCE_MAP_ENGINES or engine == _DEFAULT_ENGINE:
+    if engine in KNOWN_ENGINES:
         return engine  # type: ignore[return-value]  # narrowed to a known non-None str
+    if engine and isinstance(engine, str) and engine not in _WARNED_UNKNOWN:
+        _WARNED_UNKNOWN.add(engine)
+        logger.warning("sites.engines: unknown engine %r, treating it as ripple", engine)
     return _DEFAULT_ENGINE
 
 
@@ -291,25 +316,132 @@ def build_requires_sandbox(engine: str | None) -> bool:
     return normalize_engine(engine) in _AUTHORED_PROJECT_ENGINES
 
 
+def has_spec_edit_lane(engine: str | None) -> bool:
+    """True when the content is a rippleSpec the builder renders and addresses
+    itself: its sections and widgets are picked straight off the spec, with no armed
+    build. Only ``ripple``; the complement of :func:`is_source_engine`."""
+    return not is_source_engine(engine)
+
+
+#: Engines the owner can convert in place into a ``project`` on the ``static`` starter
+#: (``POST /sites/by-pocket/{id}/upgrade``, ``sites.site_upgrade``): their source map
+#: already is a static tree, so the conversion only adds the starter's manifest.
+_UPGRADABLE_ENGINES: frozenset[str] = frozenset({"html"})
+
+
+def is_upgradable(engine: str | None) -> bool:
+    """True when "Upgrade this site" can turn this engine into a ``project``. Only
+    ``html`` (which covers imported sites). Reads the raw value, never
+    :func:`normalize_engine`: an unknown engine must not pass as one of these."""
+    return engine in _UPGRADABLE_ENGINES
+
+
 def engine_capabilities(engine: str | None) -> dict[str, bool]:
     """The edit/build capabilities the frontend gates its tools on, as a wire dict.
 
-    * ``select`` — a click on the rendered page maps back to source (an armed native
-      edit lane, or html's own write-back lane).
+    Every flag is a composition of the predicates above; there is no per-engine table.
+
+    * ``select`` — a click on the rendered page maps back to content: ripple's own
+      spec, an armed native edit lane (svelte, react) or html's write-back lane.
     * ``text`` — an in-place text edit can be spliced back into source.
     * ``code`` — the content is a file tree the generic file editor can open.
     * ``build_log`` — drafts build in the sandbox and keep a per-build log
       (``GET /sites/by-pocket/{id}/builds/{job_id}/log``).
+    * ``design`` — the Design rail's property inspector: needs both an armed build to
+      inspect and a write-back lane to save into (svelte only).
+    * ``sections`` — a click can resolve to a whole section: ripple's spec sections,
+      or the ``data-paw-section`` anchors an armed build stamps (svelte, react).
+    * ``structure`` — an element can be deleted, duplicated or moved up / down in its
+      source (``POST /sites/by-pocket/{id}/visual-edit``). Project only.
+    * ``upgradable`` — the owner can convert the site into a ``static`` project
+      (:func:`is_upgradable`). Html only.
 
-    ``project`` answers ``{select: False, text: False, code: True, build_log: True}``:
-    it has no generator-owned anchors yet, so edits go through files and the agent.
+    ``project`` answers ``code``/``build_log`` True and ``design``/``sections`` False.
+    Its ``select``/``text``/``structure`` are True only when the generator has
+    ``visual-edit``: its drafts carry ``data-paw-src`` stamps and an edit is written back
+    to the stamped file. Otherwise they are False and edits go through files and the agent.
     """
     has_scaffold = has_generator_scaffold(engine)
+    native = has_native_edit_lane(engine)
+    write_back = has_write_back_lane(engine)
+    spec = has_spec_edit_lane(engine)
+    visual = False
+    if build_requires_sandbox(engine):
+        from pocketpaw_ee.sites.visual_edit import visual_edit_supported
+
+        visual = visual_edit_supported()
     return {
-        "select": has_scaffold and (has_native_edit_lane(engine) or has_write_back_lane(engine)),
-        "text": has_scaffold and has_write_back_lane(engine),
+        "select": spec or (has_scaffold and (native or write_back)) or visual,
+        "text": (has_scaffold and write_back) or visual,
         "code": is_source_engine(engine),
         "build_log": build_requires_sandbox(engine),
+        "design": native and write_back,
+        "sections": spec or native,
+        "structure": visual,
+        "upgradable": is_upgradable(engine),
+    }
+
+
+#: Recipes whose binding gives a ``project`` site its own D1 database (paw-sites
+#: ``recipes/d1-drizzle/recipe.json`` declares ``bindings: [{type: d1}]``).
+D1_RECIPES: frozenset[str] = frozenset({"d1-drizzle"})
+
+
+def spec_is_dynamic(pattern: str | None, ripple_spec: Mapping[str, object] | None) -> bool:
+    """True when a ripple pocket is a DYNAMIC site (reads/writes a per-tenant D1).
+
+    ``pattern == "dynamic"`` is authoritative (the create-dynamic-site tool stamps it).
+    As a safety net, a spec declaring top-level ``sources`` / ``actions`` / ``auth`` is
+    dynamic too, mirroring the generator's own classifier."""
+    if pattern == "dynamic":
+        return True
+    if not isinstance(ripple_spec, Mapping):
+        return False
+    return bool(ripple_spec.get("sources") or ripple_spec.get("actions") or ripple_spec.get("auth"))
+
+
+def project_recipes(site_meta: Mapping[str, object] | None) -> list[str]:
+    """The recipe ids recorded in ``site_meta.project.recipes`` (strings only)."""
+    project = site_meta.get("project") if isinstance(site_meta, Mapping) else None
+    recipes = project.get("recipes") if isinstance(project, Mapping) else None
+    return [r for r in recipes if isinstance(r, str)] if isinstance(recipes, list) else []
+
+
+def site_has_database(
+    *,
+    d1_database_id: str | None = None,
+    site_meta: Mapping[str, object] | None = None,
+    pattern: str | None = None,
+    ripple_spec: Mapping[str, object] | None = None,
+) -> bool:
+    """Does this site own a D1 database? True when ANY of:
+
+    * the Site already has a bound D1 (``Site.d1_database_id``, stamped by a dynamic
+      publish or the project bundle provisioner);
+    * a ``project`` applied a D1 recipe (:data:`D1_RECIPES`);
+    * a ripple pocket is dynamic (:func:`spec_is_dynamic`), which publish binds a D1 for.
+    """
+    if d1_database_id:
+        return True
+    if D1_RECIPES.intersection(project_recipes(site_meta)):
+        return True
+    return spec_is_dynamic(pattern, ripple_spec)
+
+
+# Engines whose database the owner's data viewer (GET /sites/by-pocket/{id}/data)
+# can read: the dynamic lanes from their declared ``objects``, project from D1 itself.
+DATA_VIEWER_ENGINES: frozenset[str] = frozenset({"ripple", "svelte", "project"})
+
+
+def site_capabilities(engine: str | None, *, has_database: bool) -> dict[str, bool]:
+    """The capabilities a site read carries: :func:`engine_capabilities` plus the
+    per-site ``has_database`` (:func:`site_has_database`) and ``data_viewer`` (the
+    site has a database AND the data endpoint serves its engine)."""
+    data_viewer = has_database and normalize_engine(engine) in DATA_VIEWER_ENGINES
+    return {
+        **engine_capabilities(engine),
+        "has_database": has_database,
+        "data_viewer": data_viewer,
     }
 
 

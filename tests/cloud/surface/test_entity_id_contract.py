@@ -248,6 +248,11 @@ _KNOWN_ADDRESSABLE_KINDS = frozenset(
         # PocketPaw entity. The agent gets it from ``list_site_recipes`` output in
         # the same turn, like ``style`` below.
         "recipe",
+        # ``reference`` — ``pocketpaw_sites_manager.compare_site_to_reference`` takes a
+        # required ``reference_id``: a content-addressed ``ref_<hex>`` id for an image
+        # stored on the pocket, minted by ``save_site_reference`` in the same turn. No
+        # prompt block lists references; the agent only gets one from that result.
+        "reference",
         "run",
         "scenario",
         # ``style`` — ``pocketpaw_refero.get_style`` takes a required

@@ -389,6 +389,7 @@ async def test_publish_without_entitlement_is_forbidden_and_creates_no_site(mong
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("payments_open")
 async def test_workspace_plan_sub_still_routes_to_workspace_path(mongo_db):
     """A subscription delivery WITHOUT a site_id is the unchanged BC-7 workspace
     path — it grants workspace credits / changes the plan, proving BC-9 routing

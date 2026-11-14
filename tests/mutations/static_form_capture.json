@@ -65,19 +65,10 @@
     ]
   },
   {
-    "label": "static capture: the react track loses the contract while html keeps it",
+    "label": "static capture: a new static site loses the native form contract, so its contact form posts to itself and the lead is lost",
     "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"`<form>` with flat named fields.\\n\"\r\n            + native_form_contract()\r\n            + \"CHANGES GO THROUGH THE EDIT TOOL.",
-    "replace": "            \"`<form>` with flat named fields.\\n\"\r\n            + \"CHANGES GO THROUGH THE EDIT TOOL.",
-    "tests": [
-      "tests/cloud/surface/test_sites_handler.py"
-    ]
-  },
-  {
-    "label": "static capture: the ripple track is handed markup instructions it cannot act on",
-    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"URLs. The lead-capture form must be FLAT native \"\r\n            '`input`/`textarea`/`button{type:\"submit\"}` widgets — NEVER the `form` or '",
-    "replace": "            \"URLs. \" + native_form_contract() + \"The lead-capture form must be FLAT native \"\r\n            '`input`/`textarea`/`button{type:\"submit\"}` widgets — NEVER the `form` or '",
+    "find": "        + \"On `static` there is no server route, so a contact form follows this \"\r\n        \"contract:\\n\"\r\n        + native_form_contract()\r\n",
+    "replace": "        + \"On `static` there is no server route, so a contact form follows this \"\r\n        \"contract:\\n\"\r\n",
     "tests": [
       "tests/cloud/surface/test_sites_handler.py"
     ]
@@ -119,12 +110,12 @@
     ]
   },
   {
-    "label": "static capture: the svelte track loses the contract",
-    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            + native_form_contract()\r\n            + \"CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further \"\r\n            \"change the user asks for in this conversation — 'make the hero \"",
-    "replace": "            + \"CHANGES GO THROUGH THE EDIT TOOL. Once the site exists, ANY further \"\r\n            \"change the user asks for in this conversation — 'make the hero \"",
+    "label": "static capture: a project publish stops resolving the lead-form placeholders, so a static site's contact form posts to a literal __CAPTURE_API_BASE__",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        project_build.apply_capture_tokens_to_bundle(Path(work), manifest, site_config)\n",
+    "replace": "",
     "tests": [
-      "tests/cloud/surface/test_sites_handler.py"
+      "tests/ee/sites/test_project_no_build.py::test_a_static_site_publishes_its_contact_form_wired"
     ]
   }
 ]

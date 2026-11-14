@@ -1,15 +1,12 @@
 # tests/cloud/discover/test_source_contract.py — the generic DiscoverSource contract.
 #
-# Created 2026-10-02 (feat/discover-source-contract). A fake source backed by an
-# in-memory dict proves the index is source-generic: ``sync_source`` lists a
-# public row (a hidden one as a hidden listing) and removes a private or missing
-# one; ``reindex`` reports created / updated / unchanged / removed; a row whose
-# kind the source doesn't declare is refused; an unknown source or one without
-# ``iter_public`` is ``discover.reindex_unsupported``; and the periodic pass
-# reindexes every registered source, carrying on past one that raises.
-#
-# Updated 2026-10-02 (feat/studio-templates): the builtin sources now include
-# ``studio_template``.
+# A fake source backed by an in-memory dict proves the index is source-generic:
+# ``sync_source`` lists a public row (a hidden one as a hidden listing) and
+# withdraws a private or missing one; ``reindex`` reports created / updated /
+# unchanged / removed; a row whose kind the source doesn't declare is refused; an
+# unknown source or one without ``iter_public`` is ``discover.reindex_unsupported``;
+# and the periodic pass reindexes every registered source (the builtins include
+# ``studio_template``), carrying on past one that raises.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -66,7 +63,10 @@ def rows(monkeypatch, builtin_sources) -> dict[str, dict[str, Any]]:
 
 
 async def _listing(source_id: str, source: str = FAKE) -> DiscoverListing | None:
-    return await DiscoverListing.find_one({"source": source, "source_id": source_id})
+    """The listing while it is listed (a withdrawn row reads None)."""
+    return await DiscoverListing.find_one(
+        {"source": source, "source_id": source_id, "withdrawn": {"$ne": True}}
+    )
 
 
 @pytest.mark.asyncio

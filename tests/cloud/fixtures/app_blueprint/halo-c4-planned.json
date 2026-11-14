@@ -1,0 +1,300 @@
+{
+ "version": "1.0",
+ "scope": "creative-apps/halo (planned)",
+ "authored": true,
+ "model": {
+  "systems": [
+   {
+    "id": "creative-apps",
+    "name": "creative-apps",
+    "containers": [
+     {
+      "id": "halo-model",
+      "name": "HaloModel",
+      "components": [
+       {
+        "id": "halo-project",
+        "name": "Project and compositions",
+        "paths": [
+         "Sources/HaloModel/HaloProject.swift",
+         "Sources/HaloModel/CompositionSettings.swift",
+         "Sources/HaloModel/CompositionDraft.swift",
+         "Sources/HaloModel/NameKey.swift",
+         "Sources/HaloModel/RefusedRename.swift",
+         "Sources/HaloModel/CompositionDeleteCommand.swift",
+         "Sources/HaloModel/HaloStatusText.swift"
+        ]
+       },
+       {
+        "id": "halo-layers",
+        "name": "Layers",
+        "paths": [
+         "Sources/HaloModel/HaloLayer.swift",
+         "Sources/HaloModel/HaloLayerDefaults.swift"
+        ]
+       },
+       {
+        "id": "halo-timeline",
+        "name": "Timeline and playback",
+        "paths": [
+         "Sources/HaloModel/HaloTimeline.swift",
+         "Sources/HaloModel/HaloPlayback.swift"
+        ]
+       },
+       {
+        "id": "halo-commands",
+        "name": "Commands and availability",
+        "paths": [
+         "Sources/HaloModel/HaloCommand.swift",
+         "Sources/HaloModel/Availability/"
+        ]
+       },
+       {
+        "id": "halo-contracts",
+        "name": "Use-case contracts",
+        "paths": [
+         "Sources/HaloModel/Contracts/"
+        ]
+       },
+       {
+        "id": "halo-services",
+        "name": "Services and live conformances",
+        "paths": [
+         "Sources/HaloModel/HaloServices.swift",
+         "Sources/HaloModel/Live/"
+        ]
+       },
+       {
+        "id": "halo-fakes",
+        "name": "Fakes and fixtures",
+        "paths": [
+         "Sources/HaloModel/Fakes/",
+         "Sources/HaloModel/HaloFixtures.swift"
+        ]
+       },
+       {
+        "id": "halo-viewer-model",
+        "name": "Viewer state",
+        "paths": [
+         "Sources/HaloModel/HaloViewerState.swift",
+         "Sources/HaloModel/HaloViewerDrag.swift"
+        ]
+       },
+       {
+        "id": "halo-keying",
+        "name": "Keys and easing",
+        "paths": [
+         "Sources/HaloModel/HaloKeying.swift",
+         "Sources/HaloModel/HaloKeySelection.swift"
+        ]
+       },
+       {
+        "id": "halo-layer-edits",
+        "name": "Layer housekeeping",
+        "paths": [
+         "Sources/HaloModel/HaloLayerEdits.swift"
+        ]
+       },
+       {
+        "id": "halo-history",
+        "name": "Undo and redo",
+        "paths": [
+         "Sources/HaloModel/HaloHistory.swift"
+        ]
+       },
+       {
+        "id": "halo-files",
+        "name": "Project files",
+        "paths": [
+         "Sources/HaloModel/HaloFiles.swift"
+        ]
+       },
+       {
+        "id": "halo-frames",
+        "name": "Rendered frames",
+        "paths": [
+         "Sources/HaloModel/FrameRenderer.swift",
+         "Sources/HaloModel/HaloRenderFrame.swift"
+        ]
+       },
+       {
+        "id": "halo-render-out",
+        "name": "Render to files",
+        "paths": [
+         "Sources/HaloModel/HaloRenderJob.swift"
+        ]
+       },
+       {
+        "id": "halo-text",
+        "name": "Text layers",
+        "paths": [
+         "Sources/HaloModel/HaloTextEdits.swift"
+        ]
+       }
+      ]
+     },
+     {
+      "id": "halo-app",
+      "name": "HaloApp",
+      "components": [
+       {
+        "id": "halo-scene",
+        "name": "App scene and launch",
+        "paths": [
+         "Sources/HaloApp/HaloApp.swift",
+         "Sources/HaloApp/HaloLaunch.swift"
+        ]
+       },
+       {
+        "id": "halo-window",
+        "name": "Window and command router",
+        "paths": [
+         "Sources/HaloApp/HaloWindow.swift",
+         "Sources/HaloApp/HaloControls.swift",
+         "Sources/HaloApp/HaloWindow+Viewer.swift",
+         "Sources/HaloApp/HaloWindow+Playback.swift",
+         "Sources/HaloApp/HaloWindow+Keys.swift",
+         "Sources/HaloApp/HaloWindow+Layers.swift",
+         "Sources/HaloApp/HaloWindow+Edit.swift",
+         "Sources/HaloApp/HaloWindow+File.swift",
+         "Sources/HaloApp/HaloWindow+Easing.swift",
+         "Sources/HaloApp/HaloWindow+Render.swift",
+         "Sources/HaloApp/HaloWindow+Text.swift"
+        ]
+       },
+       {
+        "id": "halo-menus",
+        "name": "Menus",
+        "paths": [
+         "Sources/HaloApp/HaloCommands.swift",
+         "Sources/HaloApp/HaloCompositionCommands.swift",
+         "Sources/HaloApp/HaloFileMenu.swift",
+         "Sources/HaloApp/HaloEditMenu.swift",
+         "Sources/HaloApp/HaloAnimationMenu.swift"
+        ]
+       },
+       {
+        "id": "halo-viewer",
+        "name": "Viewer",
+        "paths": [
+         "Sources/HaloApp/HaloViewer.swift",
+         "Sources/HaloApp/HaloViewerCanvas.swift",
+         "Sources/HaloApp/HaloViewerGestures.swift",
+         "Sources/HaloApp/HaloRenderedFrameView.swift",
+         "Sources/HaloApp/HaloTransport.swift",
+         "Sources/HaloApp/HaloPlaybackDriver.swift"
+        ]
+       },
+       {
+        "id": "halo-timeline-view",
+        "name": "Timeline view",
+        "paths": [
+         "Sources/HaloApp/HaloTimelineView.swift"
+        ]
+       },
+       {
+        "id": "halo-inspector",
+        "name": "Inspector",
+        "paths": [
+         "Sources/HaloApp/HaloCompositionInspector.swift",
+         "Sources/HaloApp/HaloLayerList.swift",
+         "Sources/HaloApp/HaloLayerInspector.swift",
+         "Sources/HaloApp/HaloEasingInspector.swift",
+         "Sources/HaloApp/HaloTextInspector.swift"
+        ]
+       },
+       {
+        "id": "halo-sheets",
+        "name": "Sheets and alerts",
+        "paths": [
+         "Sources/HaloApp/NewCompositionSheet.swift",
+         "Sources/HaloApp/RenameRefusalAlert.swift",
+         "Sources/HaloApp/HaloRenderSheet.swift"
+        ]
+       },
+       {
+        "id": "halo-platform",
+        "name": "Platform pieces",
+        "paths": [
+         "Sources/HaloApp/HaloDocumentType.swift",
+         "Sources/HaloApp/HaloFrameImage.swift",
+         "Sources/HaloApp/HaloPNGWriter.swift",
+         "Sources/HaloApp/HaloMovieWriter.swift",
+         "Sources/HaloApp/HaloTextRasterizer.swift"
+        ]
+       }
+      ]
+     },
+     {
+      "id": "halo-tests",
+      "name": "Halo tests",
+      "components": [
+       {
+        "id": "halo-model-tests",
+        "name": "HaloModelTests",
+        "paths": [
+         "Tests/HaloModelTests/"
+        ]
+       },
+       {
+        "id": "halo-snapshots",
+        "name": "Halo snapshots and goldens",
+        "paths": [
+         "Tests/AppSnapshotTests/Halo"
+        ]
+       },
+       {
+        "id": "halo-journeys",
+        "name": "Halo journeys",
+        "paths": [
+         "UITests/HaloJourneyTests"
+        ]
+       }
+      ]
+     },
+     {
+      "id": "suiteui",
+      "name": "SuiteUI",
+      "components": [
+       {
+        "id": "suiteui-sources",
+        "name": "SuiteUI sources",
+        "paths": [
+         "Sources/SuiteUI/"
+        ]
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "id": "creative-core",
+    "name": "creative-core",
+    "containers": [
+     {
+      "id": "flarecore",
+      "name": "FlareCore",
+      "components": [
+       {
+        "id": "flarecore-sources",
+        "name": "FlareCore sources",
+        "paths": []
+       }
+      ]
+     },
+     {
+      "id": "coreraster",
+      "name": "CoreRaster",
+      "components": [
+       {
+        "id": "coreraster-sources",
+        "name": "CoreRaster sources",
+        "paths": []
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ }
+}

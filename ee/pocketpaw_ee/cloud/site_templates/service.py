@@ -33,10 +33,14 @@
 #     on save; delete purges the template prefix, also best-effort.
 #   * ``live_url`` is the source site's deployed URL (``_source_live_url``),
 #     re-read on save and on every metadata update; ``None`` when not deployed.
+#   * ``remixed_from_template_id`` is stamped once, at save, from the source
+#     pocket's ``template_id`` (set by ``use_template``), so a template saved
+#     from a remixed site names the template it came from. Never on the wire
+#     here; Discover resolves it to the parent listing.
 #
-# Updated 2026-10-01 (feat/discover-index): save / PATCH store ``kind`` and
-# ``audiences`` and stamp ``live_url``; responses carry all three. The Discover
-# index syncs from the existing events; this module never imports discover.
+# The Discover index syncs from this module's events (``kind``, ``audiences``,
+# ``tags``, ``show_creator`` and ``live_url`` feed the listing); this module
+# never imports discover.
 
 from __future__ import annotations
 
@@ -110,6 +114,8 @@ class _MetaRow(BaseModel):
     kind: str = "site"
     audiences: list[str] = Field(default_factory=list)
     live_url: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    show_creator: bool = False
     createdAt: datetime | None = None
     updatedAt: datetime | None = None
 
@@ -132,6 +138,8 @@ def _meta(doc: SiteTemplate | _MetaRow, viewer: str) -> dict:
         kind=doc.kind,
         audiences=tuple(doc.audiences),
         live_url=doc.live_url,
+        tags=tuple(doc.tags),
+        show_creator=doc.show_creator,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -327,6 +335,9 @@ async def save_template(
         snapshot=snapshot,
         kind=body.kind,
         audiences=body.audiences,
+        tags=body.tags,
+        show_creator=body.show_creator,
+        remixed_from_template_id=source.get("template_id"),
         live_url=await _source_live_url(workspace_id, body.pocket_id),
     )
     await doc.insert()

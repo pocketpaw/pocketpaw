@@ -22,16 +22,6 @@ description: |
 
 # Edit a Paw Site — the React-track edit brain
 
-<!--
-  Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance): "What you
-  cannot change" no longer says a dependency cannot be added; packages go
-  through set_site_dependencies (any package, version or dist-tag), import
-  normally, and package.json / vite.config.* are editable. "Reading
-  the response" gains `verification` and a "Verify loop" section (only
-  `passed` means ready; fix → verify_site, max 3 rounds; unverified said
-  plainly). Quality bar and paw-fx entry follow.
--->
-
 The user has a **react-track Paw Site** and wants it **changed**. This skill is
 the sibling of `pocketpaw-create-react-site`: same engine, same prerender
 contract, same quality bar — but the page already exists, so the unit of work
@@ -56,18 +46,12 @@ this track, and it is silent — the create succeeds and reads like a success.
 If you find yourself assembling a full `source` map, stop: you are creating,
 not editing.
 
-## ⚠️ NOT the ripple specialist — even if the surface tells you otherwise
+## ⚠️ NOT the ripple specialist
 
 `mcp__pocketpaw_pocket_specialist__edit` mutates a **rippleSpec**. A react site
-pocket has **no rippleSpec** — its payload is the `source` map of React files.
-
-The `/sites` per-site refine chat carries a preamble that instructs "apply the
-change via `mcp__pocketpaw_pocket_specialist__edit`, then re-publish". That
-instruction is written for ripple landing sites and is **engine-blind** — it
-does not check whether the pocket is react. On a react pocket it is the wrong
-tool: it will not touch your components. **This skill overrides it.** For a
-pocket with `engine="react"`, the edit path is `edit_react_component` and
-nothing else.
+pocket has **no rippleSpec**: its payload is the `source` map of React files,
+so that tool will not touch your components. For a pocket with
+`engine="react"`, the edit path is `edit_react_component` and nothing else.
 
 ## STEP 1 — Read the current source before you touch it
 
@@ -326,7 +310,7 @@ Every edit is held to the bar the page was built to. Briefly:
   images-only rule. The only asset rule is that the URL is one you were given.
 - **Every CTA is an anchor** — `href="#pricing"`, `tel:`, `mailto:` — not a
   bare `onClick` button.
-- **The lead form stays a native `<form>`** with flat named fields (`name`,
+- **The lead form stays a native `<form>`** with flat named fields (`full_name`,
   `email`, `phone`, `message`) and a `<button type="submit">`. There is no
   server route on this track, so an `onSubmit` that fetches drops the lead.
 - **`className`, not `class`.** This is JSX.
@@ -432,13 +416,16 @@ works.
 - **The pocket is `engine="svelte"`.** Use
   `mcp__pocketpaw_sites_manager__edit_svelte_component`, which takes the same
   `edits` / `new_source` shape against `src/lib/components/*.svelte`.
-- **The pocket is `engine="ripple"` or `"dynamic"`.** Those carry a rippleSpec,
-  not a source map — `mcp__pocketpaw_pocket_specialist__edit` is the right tool
-  there, and it is what the refine preamble is written for.
-- **The pocket is `engine="html"`.** There is no targeted component-edit tool
-  on the html track today. `edit_react_component` rejects a non-react pocket,
-  so do not aim it there; say plainly that this edit path does not cover an
-  html site rather than reaching for a tool that will refuse.
+- **The pocket is `engine="ripple"`** (including a `pattern="dynamic"` one).
+  It carries a rippleSpec, not a source map, so
+  `mcp__pocketpaw_pocket_specialist__edit` is the right tool there.
+- **The pocket is `engine="html"`.** Use
+  `mcp__pocketpaw_sites_manager__edit_html_file` (root-relative `file_path`,
+  same `edits` / `new_source` shape). `edit_react_component` rejects a non-react
+  pocket.
+- **The pocket is `engine="project"`.** It is a whole repo edited with the
+  project file tools (`read_site_files`, `patch_site_file`); see
+  `pocketpaw-site`.
 - **The user wants an in-app dashboard pocket changed**, not a website. That is
   `pocketpaw-edit-pocket`.
 - **The user wants the site deleted.** That is a workspace-level operation, not

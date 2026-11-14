@@ -61,6 +61,10 @@ class DailyMeter(StrEnum):
     FILE_COMPREHENSION = "file_comprehension"
     FILE_TRANSCRIPTION = "file_transcription"
     ILLUSTRATION = "illustration"
+    # Whole credits of unpaid early-access chat spend, counted on the one
+    # platform subject ``("workspace", "__platform__")``: reservations at run
+    # start, reconciled to the real spend at ``bill_run``.
+    EARLY_ACCESS_CREDITS = "early_access_credits"
 
 
 @dataclass(frozen=True)

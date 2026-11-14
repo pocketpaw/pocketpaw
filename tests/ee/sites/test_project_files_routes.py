@@ -2,12 +2,12 @@
 # (``sites/files_router.py``), end to end against a mongomock pocket: the auth matrix
 # (no session, no membership, another workspace, a private pocket), path safety, the
 # size caps, the non-project refusal, exact-once patching, and that a write changes the
-# content hash and queues that hash's draft build. Only the arq enqueue is stubbed.
+# content hash and queues that hash's draft build, and the raw PLAN.md read behind the
+# chat's plan artifact. Only the arq enqueue is stubbed.
 from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -81,7 +81,7 @@ def enqueued(monkeypatch) -> list[str]:
     async def _enqueue(*, pocket_id, content_hash, engine, generator_input, **_kw):
         assert engine == "project"
         hashes.append(content_hash)
-        return SimpleNamespace(
+        return build_job.PreviewBuildEnqueue(
             status="queued", job_id=f"site-preview-{pocket_id}-{content_hash}", reason=None
         )
 
@@ -130,7 +130,12 @@ async def test_list_read_write_patch_delete(beanie_test_db, enqueued) -> None:
 
         r = await c.get(f"{url}/content", params={"path": "AGENTS.md"})
         assert r.status_code == 200, r.text
-        assert r.json() == {"path": "AGENTS.md", "size": 6, "content": "# map\n"}
+        assert r.json() == {
+            "path": "AGENTS.md",
+            "size": 6,
+            "content": "# map\n",
+            "hash": _sha("# map\n"),
+        }
 
         r = await c.put(url, json={"files": {"src/pages/about.astro": "<h1>About</h1>\n"}})
         assert r.status_code == 200, r.text
@@ -192,6 +197,159 @@ async def test_patch_needs_exactly_one_match(beanie_test_db, enqueued) -> None:
         assert r.status_code == 422, r.text
     assert (await _source(pid))["a.ts"] == "x\nx\n"
     assert enqueued == []
+
+
+# ---------------------------------------------------------------------------
+# Base hashes: the server refuses to overwrite a file that moved on
+# ---------------------------------------------------------------------------
+
+
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def test_put_with_a_matching_base_hash_writes(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    page = "src/pages/index.astro"
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {page: "<h1>Mine</h1>\n"}, "base_hashes": {page: _sha(SOURCE[page])}},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["hashes"] == {page: _sha("<h1>Mine</h1>\n")}
+    assert (await _source(pid))[page] == "<h1>Mine</h1>\n"
+
+
+async def test_put_over_a_changed_file_is_409_with_theirs(beanie_test_db, enqueued) -> None:
+    """The agent saved index.astro after the owner opened it: the owner's save, sent
+    with the hash it loaded, must not land, and the answer carries the current text."""
+    pid = await _pocket()
+    page = "src/pages/index.astro"
+    stale = _sha(SOURCE[page])
+    await project_tools.write_files(
+        workspace_id="ws1", user_id="u1", pocket_id=pid, files={page: "<h1>Agent</h1>\n"}
+    )
+    enqueued.clear()
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={
+                "files": {page: "<h1>Owner</h1>\n", "src/new.ts": "export {}\n"},
+                "base_hashes": {page: stale},
+            },
+        )
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "sites.project_file_conflict"
+    assert err["details"]["conflicts"] == [
+        {
+            "path": page,
+            "current_hash": _sha("<h1>Agent</h1>\n"),
+            "current_content": "<h1>Agent</h1>\n",
+        }
+    ]
+    source = await _source(pid)
+    assert source[page] == "<h1>Agent</h1>\n"
+    assert "src/new.ts" not in source  # all or nothing
+    assert enqueued == []
+
+
+async def test_a_null_base_means_the_file_must_not_exist(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {"AGENTS.md": "# mine\n"}, "base_hashes": {"AGENTS.md": None}},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["error"]["details"]["conflicts"][0]["current_content"] == "# map\n"
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {"src/fresh.ts": "1\n"}, "base_hashes": {"src/fresh.ts": None}},
+        )
+        assert r.status_code == 200, r.text
+
+
+async def test_a_base_for_a_deleted_file_is_409_with_no_content(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {"gone.ts": "1\n"}, "base_hashes": {"gone.ts": _sha("0\n")}},
+        )
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["details"]["conflicts"] == [
+        {"path": "gone.ts", "current_hash": None, "current_content": None}
+    ]
+    assert "gone.ts" not in await _source(pid)
+
+
+async def test_a_base_for_a_path_not_written_is_422(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    async with _client(_app()) as c:
+        r = await c.put(
+            BASE.format(pid=pid),
+            json={"files": {"a.ts": "1\n"}, "base_hashes": {"b.ts": _sha("1\n")}},
+        )
+    assert r.status_code == 422, r.text
+
+
+async def test_patch_with_a_stale_base_hash_is_409(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    url = f"{BASE.format(pid=pid)}/patch"
+    edits = [{"old": "map", "new": "x"}]
+    async with _client(_app()) as c:
+        r = await c.post(url, json={"path": "AGENTS.md", "edits": edits, "base_hash": "0" * 64})
+        assert r.status_code == 409, r.text
+        assert r.json()["error"]["details"]["conflicts"][0]["current_hash"] == _sha("# map\n")
+        assert (await _source(pid))["AGENTS.md"] == "# map\n"
+        r = await c.post(
+            url, json={"path": "AGENTS.md", "edits": edits, "base_hash": _sha("# map\n")}
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["hashes"] == {"AGENTS.md": _sha("# x\n")}
+
+
+async def test_a_write_racing_between_read_and_save_is_409(
+    beanie_test_db, enqueued, monkeypatch
+) -> None:
+    """The check runs again on the document the save is about to persist, so a write
+    that lands after the route read the pocket still cannot be overwritten."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+
+    pid = await _pocket()
+    real_load = project_tools.load_project
+
+    async def _load_then_race(**kw):
+        pocket = await real_load(**kw)
+        await pockets_service.set_project_source(pid, "u1", writes={"AGENTS.md": "# agent\n"})
+        return pocket
+
+    monkeypatch.setattr(project_tools, "load_project", _load_then_race)
+    with pytest.raises(CloudError) as exc:
+        await project_tools.write_files(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id=pid,
+            files={"AGENTS.md": "# owner\n"},
+            base_hashes={"AGENTS.md": _sha("# map\n")},
+        )
+    assert exc.value.status_code == 409
+    assert (await _source(pid))["AGENTS.md"] == "# agent\n"
+
+
+async def test_no_base_keeps_last_write_wins(beanie_test_db, enqueued) -> None:
+    pid = await _pocket()
+    await project_tools.write_files(
+        workspace_id="ws1", user_id="u1", pocket_id=pid, files={"AGENTS.md": "# agent\n"}
+    )
+    async with _client(_app()) as c:
+        r = await c.put(BASE.format(pid=pid), json={"files": {"AGENTS.md": "# owner\n"}})
+    assert r.status_code == 200, r.text
+    assert (await _source(pid))["AGENTS.md"] == "# owner\n"
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +443,78 @@ async def test_package_json_and_missing_files(beanie_test_db, enqueued) -> None:
 
 
 # ---------------------------------------------------------------------------
+# The raw PLAN.md read (the chat's plan artifact opens it)
+# ---------------------------------------------------------------------------
+
+SOURCE_FILE = "/api/v1/sites/by-pocket/{pid}/source-file"
+PLANNED = {**SOURCE, "PLAN.md": "# Plan\n\n- [ ] Milestone 1\n", "docs/PLAN.md": "# nested\n"}
+
+
+async def test_source_file_serves_the_current_plan_as_markdown(beanie_test_db, enqueued) -> None:
+    pid = await _pocket(source=PLANNED)
+    async with _client(_app()) as c:
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.status_code == 200, r.text
+        assert r.text == PLANNED["PLAN.md"]
+        assert r.headers["content-type"] == "text/markdown; charset=utf-8"
+        assert r.headers["cache-control"] == "no-store"
+        assert r.headers["x-content-type-options"] == "nosniff"
+
+        r = await c.post(
+            f"{BASE.format(pid=pid)}/patch",
+            json={"path": "PLAN.md", "edits": [{"old": "- [ ]", "new": "- [x]"}]},
+        )
+        assert r.status_code == 200, r.text
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.text == "# Plan\n\n- [x] Milestone 1\n"
+
+
+@pytest.mark.parametrize(
+    ("path", "code"),
+    [
+        ("docs/PLAN.md", "sites.source_file_not_allowed"),
+        ("AGENTS.md", "sites.source_file_not_allowed"),
+        ("package.json", "sites.source_file_not_allowed"),
+        ("../PLAN.md", "sites.project_bad_path"),
+        ("/PLAN.md", "sites.project_bad_path"),
+        (".env", "sites.project_bad_path"),
+        ("a\x00b", "sites.project_bad_path"),
+    ],
+)
+async def test_source_file_refuses_every_other_path(beanie_test_db, enqueued, path, code) -> None:
+    pid = await _pocket(source=PLANNED)
+    async with _client(_app()) as c:
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": path})
+    assert r.status_code == 422, r.text
+    assert r.json()["error"]["code"] == code
+
+
+async def test_source_file_missing_oversize_and_binary(
+    beanie_test_db, enqueued, monkeypatch
+) -> None:
+    async with _client(_app()) as c:
+        pid = await _pocket()
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.status_code == 404, r.text
+
+        pid = await _pocket(source={**SOURCE, "PLAN.md": "a\x00b"})
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.status_code == 422 and r.json()["error"]["code"] == "sites.source_file_binary"
+
+        monkeypatch.setattr(project_tools, "MAX_SOURCE_FILE_BYTES", 4)
+        pid = await _pocket(source=PLANNED)
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+        assert r.status_code == 422 and r.json()["error"]["code"] == "sites.source_file_too_large"
+
+
+async def test_source_file_refuses_a_non_project_pocket(beanie_test_db, enqueued) -> None:
+    pid = await _pocket(engine="html", source={"index.html": "<p>x</p>", "PLAN.md": "# p\n"})
+    async with _client(_app()) as c:
+        r = await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"})
+    assert r.status_code == 422 and r.json()["error"]["code"] == "sites.not_a_project"
+
+
+# ---------------------------------------------------------------------------
 # Auth matrix
 # ---------------------------------------------------------------------------
 
@@ -294,11 +524,14 @@ async def _every_route(c: AsyncClient, pid: str) -> list:
     return [
         await c.get(url),
         await c.get(f"{url}/content", params={"path": "AGENTS.md"}),
+        await c.get(SOURCE_FILE.format(pid=pid), params={"path": "PLAN.md"}),
         await c.put(url, json={"files": {"x.ts": "1"}}),
         await c.post(
             f"{url}/patch", json={"path": "AGENTS.md", "edits": [{"old": "map", "new": "m"}]}
         ),
         await c.request("DELETE", url, json={"paths": ["AGENTS.md"]}),
+        await c.post(f"/api/v1/sites/by-pocket/{pid}/edit-session"),
+        await c.delete(f"/api/v1/sites/by-pocket/{pid}/edit-session"),
     ]
 
 
@@ -352,7 +585,8 @@ async def test_every_route_carries_the_guards() -> None:
     from pocketpaw_ee.sites.files_router import router
 
     routes = [r for r in router.routes if getattr(r, "path", "").startswith("/sites/")]
-    assert len(routes) == 5
+    # five file routes, the raw PLAN.md read, visual-edit, edit-session start and end
+    assert len(routes) == 9
     for route in routes:
         deps = [repr(d.call) for d in route.dependant.dependencies]
         assert any("request_context" in d for d in deps), (route.path, deps)

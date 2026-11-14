@@ -75,8 +75,8 @@
   {
     "label": "apply-fix republish passes a plan key - could change the site's plan",
     "file": "ee/pocketpaw_ee/cloud/ai_visibility/service.py",
-    "find": "            workspace_id=workspace_id, user_id=user_id, pocket_id=site.pocket_id\n",
-    "replace": "            workspace_id=workspace_id, user_id=user_id, pocket_id=site.pocket_id, site_plan_key=\"free\"\n",
+    "find": "            pocket_id=site.pocket_id,\n",
+    "replace": "            pocket_id=site.pocket_id,\n            site_plan_key=\"free\",\n",
     "tests": [
       "tests/cloud/ai_visibility/test_site_card.py::test_apply_fix"
     ]

@@ -56,6 +56,8 @@ export POCKETPAW_MODEL_TIER_COMPLEX="claude-opus-4-6"
 
 The router works with the Claude Agent SDK backend (and any backend that supports model overrides).
 
+In the cloud, an agent that has its own model set always runs that model; the router only picks for agents with no model. A model chosen for a single message wins over both.
+
 ## Example Classifications
 
 | Message | Classification |

@@ -2,27 +2,20 @@
 # visual styles + real product screens) to the claude_agent_sdk cloud chat
 # backend.
 #
-# Updated: 2026-09-27 (feat/sites-visual-research) — NEW ``view_reference``: the
-# screenshot of a screen (by uuid) or a style preview (by ``preview_url``) comes
-# back as IMAGE blocks the agent can look at. The search tools only ever returned
-# URLs the agent had no way to open, and reproducing a rejected site by hand
-# showed that opening the pictures is what changed the result. Full-page shots
-# are tiled (``pocketpaw.tools.builtin.reference_images``) so every section stays
-# legible to the model.
+# WHY IN-PROCESS: the site-authoring skills run on the claude_agent_sdk backend,
+# which only sees IN-PROCESS MCP servers; a plain BaseTool is invisible to it,
+# the same reason stock_images.py / site_media.py / sites_create.py exist. The
+# method for using these tools (search several angles, open the pictures, lock
+# one direction, keep a decision ledger) lives in the bundled `sites-references`
+# skill; this file is the data half.
 #
-# Created: 2026-09-15 (feat/refero-design-research). The site-authoring skills
-# (pocketpaw-create-svelte-site, pocketpaw-create-react-site,
-# pocketpaw-design-taste) run on the claude_agent_sdk backend, which only sees
-# IN-PROCESS MCP servers — a plain BaseTool is invisible to it, the same reason
-# stock_images.py / site_media.py / sites_create.py exist. So design research
-# MUST be surfaced here for site authoring to reach it.
-#
-# WHY IT EARNS ITS PLACE: the /sites anti-slop surface is built from
-# PROHIBITIONS — the 2026-09-12 audit counted 32, concentrated in one skill
-# embedded on the create path only. A prohibition list bounds how bad the output
-# gets; a reference sets what good looks like. A Refero style carries colour
-# ROLES, a type scale, spacing, elevation and explicit do/don't rules taken from
-# a page that shipped.
+# WHY IT EARNS ITS PLACE: a prohibition list bounds how bad output gets; a
+# reference sets what good looks like. A Refero style carries colour ROLES, a
+# type scale, spacing, elevation and explicit do/don't rules taken from a page
+# that shipped. ``view_reference`` returns the screenshot of a screen (by uuid)
+# or a style preview (by ``preview_url``) as IMAGE blocks, tiled through
+# ``pocketpaw.tools.builtin.reference_images`` so every section stays legible:
+# opening the picture, not reading the description, is what changes the result.
 #
 # What this file does: clones the stock_images.py shape — one
 # ``create_sdk_mcp_server`` with an SDK import-guard, ``SERVER_NAME`` /

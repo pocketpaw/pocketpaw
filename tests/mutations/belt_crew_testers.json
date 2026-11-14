@@ -255,8 +255,8 @@
   {
     "label": "a failed foreman call leaves the shift in planning",
     "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
-    "find": "            state=\"done\",\n            outcome=f\"{_FOREMAN_FAILED}: {exc}\",",
-    "replace": "            state=\"planning\",\n            outcome=f\"{_FOREMAN_FAILED}: {exc}\",",
+    "find": "                state=\"done\",\n                outcome=f\"{_FOREMAN_FAILED}: {exc}\",",
+    "replace": "                state=\"planning\",\n                outcome=f\"{_FOREMAN_FAILED}: {exc}\",",
     "tests": [
       "tests/cloud/test_belt_foreman_failure.py::test_a_failed_foreman_call_finishes_the_shift"
     ]
@@ -300,8 +300,8 @@
   {
     "label": "the runs list drops each run's screenshots",
     "file": "ee/pocketpaw_ee/cloud/belt/service.py",
-    "find": "            for s in blob.get(\"screenshots\") or []\n            if isinstance(s, dict)\n        ],\n    }",
-    "replace": "            for s in []\n        ],\n    }",
+    "find": "            for s in blob.get(\"screenshots\") or []\n            if isinstance(s, dict)\n        ],\n        \"lead\": _lead_row(blob),",
+    "replace": "            for s in []\n        ],\n        \"lead\": _lead_row(blob),",
     "tests": [
       "tests/cloud/test_belt_console.py::test_run_screenshots_are_listed_and_served"
     ]
@@ -400,8 +400,8 @@
   {
     "label": "resume picks up a tester older than the run timeout",
     "file": "ee/pocketpaw_ee/cloud/belt/cloud_station.py",
-    "find": "and time.time() - at < timeout\n    )\n\n\ndef _is_lead",
-    "replace": "and True\n    )\n\n\ndef _is_lead",
+    "find": "and time.time() - at < timeout\n    )\n\n\n_COUNTS",
+    "replace": "and True\n    )\n\n\n_COUNTS",
     "tests": [
       "tests/cloud/test_belt_cloud_station.py::test_resume_tracks_a_landed_runs_open_tester_pr"
     ]
@@ -463,8 +463,8 @@
   {
     "label": "an open PR closing the issue never puts its sighting in flight",
     "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
-    "find": "\"in_flight\": open_pr is not None or any(",
-    "replace": "\"in_flight\": any(",
+    "find": "\"in_flight\": open_pr is not None\n",
+    "replace": "\"in_flight\": False\n",
     "tests": [
       "tests/cloud/test_belt_github_issues_patrol.py::test_an_open_pr_that_closes_the_issue_keeps_its_sighting_in_flight",
       "tests/cloud/test_belt_github_issues_patrol.py::test_the_foreman_does_not_plan_an_issue_an_open_pr_closes"

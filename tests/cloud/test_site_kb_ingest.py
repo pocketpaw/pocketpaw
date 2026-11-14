@@ -252,6 +252,44 @@ def test_page_count_is_capped():
     assert len(docs) == kb_ingest._MAX_DOCUMENTS
 
 
+def test_left_out_pages_are_named_with_a_reason():
+    """The owner's index view lists what the concierge never read: a page with
+    too little text, and every page past the cap, not just a count."""
+    source = {f"p{i:03}.html": f"<p>{_long('Page about our services.')}</p>" for i in range(62)}
+    source["empty.html"] = "<div></div>"
+    skips: list[dict] = []
+
+    docs = kb_ingest.extract_site_documents(engine="html", source=source, skips=skips)
+
+    assert len(docs) == kb_ingest._MAX_DOCUMENTS
+    assert {"path": "empty.html", "reason": "too_short", "detail": ""} in skips
+    capped = [s["path"] for s in skips if s["reason"] == "page_cap"]
+    assert capped == ["p060.html", "p061.html"]
+
+
+def test_a_foreign_crawl_reports_its_cap_and_its_notes():
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.sites.foreign_grounding import GROUNDING_MAX_PAGES
+
+    report = kb_ingest.SiteKnowledgeReport()
+    harvest = SimpleNamespace(
+        source={f"p{i}.html": "x" for i in range(GROUNDING_MAX_PAGES - 1)},
+        pages_failed=1,
+        skipped_by_robots=2,
+        warnings=["skipped https://a.example/events — HTTP 500"],
+    )
+
+    kb_ingest._note_harvest(report, harvest)
+
+    assert report.page_cap == GROUNDING_MAX_PAGES
+    assert report.capped is True
+    assert (report.pages_failed, report.skipped_by_robots) == (1, 2)
+    assert report.skips == [
+        {"path": "", "reason": "crawl", "detail": "skipped https://a.example/events — HTTP 500"}
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Sync
 # --------------------------------------------------------------------------- #
@@ -448,6 +486,15 @@ async def test_one_failed_page_does_not_lose_the_others(monkeypatch):
     assert report.ingested == 1
     assert report.skipped == 1
     assert site.kb_article_ids == ["site-home"]
+    # The owner sees which page was lost and why, and when the rest were read.
+    assert site.kb_crawl_report["skips"] == [
+        {"path": "about.html", "reason": "ingest_failed", "detail": ""}
+    ]
+    assert site.kb_crawl_report["page_cap"] == kb_ingest._MAX_DOCUMENTS
+    assert site.kb_crawl_report["capped"] is False
+    home = site.kb_page_index[""]
+    assert home["crawled_at"] and home["chars"] > 0
+    assert home["sections"][0]["chars"] > 0
 
 
 @pytest.mark.asyncio
@@ -532,6 +579,7 @@ async def test_sync_only_writes_its_own_fields(monkeypatch):
         "kb_page_index",
         "kb_synced_at",
         "kb_sync_error",
+        "kb_crawl_report",
     }
 
 

@@ -5,7 +5,7 @@
 # ``CardProfile``. ``PAWBAR_PROFILE`` (the default) mirrors paw-bar's lib/spec-card.ts:
 # small bounds, the vendored pawbar-manifest.json widgets, the manifest's actions, host
 # events limited to add_to_cart / checkout, and the ``send_to_team`` lead form only
-# with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes ripple-manifest.json
+# with lead capture on. ``RIPPLE_PROFILE`` (ops sites) takes the bundled Ripple manifest
 # minus deferred widgets and page chrome (its ``illustration`` SVG is held to
 # illustration_svg's policy and its annotations to ids the widget keeps, ``bill-split``
 # to plain numbers, the games, habit-tracker and focus-timer to literal data (``_PLAY_CHECKS``),
@@ -26,10 +26,10 @@
 # A ripple body that is not JSON only for missing closers, surplus closers, a
 # trailing or missing comma, or a raw control character in a string (``_repair``,
 # never inside a string or past the root) is repaired once and then checked like
-# any body; a ripple
-# node's declared props written flat on the node are moved under ``props``
-# (``_lift_flat_props``, which also renames a widget alias, ``RIPPLE_ALIASES``) before the checks,
-# and the moved card is the one sent.
+# any body. On either profile a node's declared props (its own manifest's) written
+# flat on the node are moved under ``props`` (``_lift_flat_props``; on ripple it also
+# renames a widget alias, ``RIPPLE_ALIASES``) before the checks, and the moved card
+# is the one sent and the one ``card_ids`` and ``has_lead_form`` read.
 #
 # Hydration runs after the checks and is not checked again: product data comes only
 # from the site catalog, and on the ripple profile ``_fill_store`` fills menu-order,
@@ -39,7 +39,8 @@
 # and ``has_lead_form`` read a body for the runner; ``PartialScan`` judges a body
 # still streaming, flagging only what the finished card is sure to fail.
 #
-# Both manifests are vendored (``.source`` beside ripple-manifest.json says how);
+# pawbar-manifest.json is vendored here; the full Ripple catalog is core's bundled
+# pocketpaw/ripple/manifest.json (``.source`` beside each says how to refresh);
 # the drift tests in tests/cloud/test_paw_bar_concierge_v2_output.py and
 # tests/cloud/test_paw_bar_ripple_profile.py pin their hashes, and the shared
 # parity fixtures live in tests/fixtures/card_parity/.
@@ -58,6 +59,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 
+from pocketpaw.ripple.manifest import BUNDLED_MANIFEST_PATH, load_bundled_manifest
 from pocketpaw_ee.paw_bar.illustration_svg import svg_ids, svg_violation
 
 logger = logging.getLogger(__name__)
@@ -125,8 +127,8 @@ PAWBAR_PROFILE = CardProfile(
     manifest=MANIFEST,
 )
 
-RIPPLE_MANIFEST_PATH = Path(__file__).with_name("ripple-manifest.json")
-RIPPLE_MANIFEST: dict[str, Any] = json.loads(RIPPLE_MANIFEST_PATH.read_text(encoding="utf-8"))
+RIPPLE_MANIFEST_PATH = BUNDLED_MANIFEST_PATH
+RIPPLE_MANIFEST: dict[str, Any] = load_bundled_manifest()
 # Craft rule id to its one-sentence text, from the manifest's ``craft`` (ripple's
 # craft.ts); the concierge's authoring rules that repeat a craft rule lead with it.
 CRAFT_RULES: dict[str, str] = {r["id"]: r["text"] for r in RIPPLE_MANIFEST["craft"]["rules"]}
@@ -588,14 +590,20 @@ def _catalog_index(catalog: Iterable[Any] | None) -> dict[str, Any]:
     return index
 
 
-def _card_verbs(verbs: Iterable[str] | None) -> list[str]:
+def _card_verbs(verbs: Iterable[str] | None, profile: CardProfile | None = None) -> list[str]:
+    """The declared ``verbs`` a card may emit: ``HOST_EVENTS``, plus a profile's own
+    host events (chat's ``chat.send``) other than the ``SERVER_WIRED`` ones."""
+    # Chat profile: chat.send comes from CHAT_PROFILE.host_events, not HOST_EVENTS.
     declared = set(verbs or ())
-    return [v for v in HOST_EVENTS if v in declared]
+    wired = {event for _, event in SERVER_WIRED.values()}
+    extra = tuple(e for e in (profile.host_events if profile else ()) if e not in wired)
+    return [v for v in dict.fromkeys((*HOST_EVENTS, *extra)) if v in declared]
 
 
 def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, Any]]:
     """Catalog items for the model's ids, in the model's order, unknown and
-    repeated ids dropped. Every field comes from the catalog."""
+    repeated ids dropped. Every field comes from the catalog. A price of 0 means
+    no listed price and is left out, so paw-bar shows none rather than $0.00."""
     if not isinstance(ids, list):
         return []
     items: list[dict[str, Any]] = []
@@ -606,11 +614,12 @@ def _items(ids: Any, index: dict[str, Any], verbs: list[str]) -> list[dict[str, 
         if product is None or pid in seen:
             continue
         seen.add(pid)
+        price = int(_field(product, "price_cents", 0) or 0)
         items.append(
             {
                 "id": pid,
                 "name": str(_field(product, "name") or pid),
-                "price_cents": int(_field(product, "price_cents", 0) or 0),
+                **({"price_cents": price} if price else {}),
                 "currency": str(_field(product, "currency") or "USD"),
                 "image_url": str(_field(product, "image_url") or ""),
                 "url": str(_field(product, "url") or ""),
@@ -2372,7 +2381,7 @@ def validate_and_hydrate(
             raise _Reject("state is not an object")
         if len(_serialize(spec)) > profile.max_chars:
             raise _Reject(f"longer than {profile.max_chars} characters")
-        events = _card_verbs(verbs)
+        events = _card_verbs(verbs, profile)
         if profile.strict:
             _check_strict(spec, events, lead_capture, profile)
         else:
@@ -2697,7 +2706,7 @@ def _repaired(body: str, profile: CardProfile) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# Flat props repair (strict profile)
+# Flat props repair
 # --------------------------------------------------------------------------- #
 
 
@@ -2707,18 +2716,26 @@ _NODE_KEYS: frozenset[str] = frozenset(
     {"type", "id", "props", "children", "else_children", "show", "each"}
     | {"item_as", "index_as", "bind", "state"}
 )
-# Each ripple widget's declared props a flat node key may be lifted into: not a
-# node key, not a handler key, and not ``value`` on a widget that binds it.
-_LIFTABLE: dict[str, frozenset[str]] = {
-    w["type"]: frozenset(
-        k
-        for k in w.get("props") or {}
-        if k not in _NODE_KEYS
-        and not _is_handler_key(k)
-        and not (k == "value" and "bind" in w["props"])
-    )
-    for w in RIPPLE_MANIFEST["widgets"]
-}
+
+
+# Each widget's declared props a flat node key may be lifted into: not a node key,
+# not a handler key, and not ``value`` on a widget that binds it.
+def _liftable(manifest: dict[str, Any]) -> dict[str, frozenset[str]]:
+    return {
+        w["type"]: frozenset(
+            k
+            for k in w.get("props") or {}
+            if k not in _NODE_KEYS
+            and not _is_handler_key(k)
+            and not (k == "value" and "bind" in w["props"])
+        )
+        for w in manifest["widgets"]
+    }
+
+
+_LIFTABLE = _liftable(RIPPLE_MANIFEST)
+# By profile name, each read from that profile's own manifest.
+_LIFTABLE_BY_PROFILE = {RIPPLE_PROFILE.name: _LIFTABLE, PAWBAR_PROFILE.name: _liftable(MANIFEST)}
 
 
 def _is_alias_node(value: dict[str, Any], canonical: str) -> bool:
@@ -2733,12 +2750,15 @@ def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
     """``ui`` with, in place, every widget node's top-level keys that its manifest
     entry declares as props (``_LIFTABLE``) moved into ``props`` (made when
     missing; a key ``props`` already holds stays put, the flat one beside it),
-    at any depth: children, node slots inside props, flow steps, a node written under
-    an alias (``RIPPLE_ALIASES``, ``_is_alias_node``) renamed first. A node's own
-    ``props`` object is never read as a node. Strict profile only; the caller
+    at any depth. On the strict profile that is children, node slots inside props and
+    flow steps, a node written under an alias (``RIPPLE_ALIASES``, ``_is_alias_node``)
+    renamed first; on pawbar only children, as ``_check_tree`` walks (a form field is
+    not a node). A node's own ``props`` object is never read as a node. The caller
     checks the result in full. Returns it and how many keys moved."""
-    if not profile.strict:
-        return ui, 0
+    # Chat profile: a profile on the ripple manifest under another name lifts the same.
+    table = _LIFTABLE_BY_PROFILE.get(profile.name) or (
+        _LIFTABLE if profile.manifest is RIPPLE_MANIFEST else {}
+    )
     moved = 0
     stack = [ui]
     while stack:
@@ -2750,18 +2770,21 @@ def _lift_flat_props(ui: Any, profile: CardProfile) -> tuple[Any, int]:
             continue
         kind = value.get("type")
         props = value.get("props", {})
-        canonical = RIPPLE_ALIASES.get(kind) if isinstance(kind, str) else None
+        canonical = RIPPLE_ALIASES.get(kind) if profile.strict and isinstance(kind, str) else None
         if canonical and isinstance(props, dict) and _is_alias_node(value, canonical):
             value["type"] = canonical
             if canonical == "board-game" and "game" not in {*value, *props}:
                 value["props"] = props = {**props, "game": kind}
             kind = canonical
         if isinstance(kind, str) and isinstance(props, dict):
-            liftable = _LIFTABLE.get(kind, frozenset())
+            liftable = table.get(kind, frozenset())
             flat = [k for k in value if k in liftable and k not in props]
             if flat:
                 value["props"] = props = {**props, **{k: value.pop(k) for k in flat}}
                 moved += len(flat)
+            if not profile.strict:
+                stack.extend(value.get(k) for k in ("children", "else_children"))
+                continue
             # A node: its props' values may hold nodes, never the props object.
             stack.extend(props.values())
             stack.extend(v for k, v in value.items() if k != "props")
@@ -2855,6 +2878,34 @@ def _render_card(
     return f"{_FENCE}pawbar-card\n{body}{_FENCE}"
 
 
+def rejection_reason(
+    body: str,
+    *,
+    verbs: Iterable[str] | None = HOST_EVENTS,
+    lead_capture: bool = False,
+    profile: CardProfile = PAWBAR_PROFILE,
+) -> str:
+    """Why ``render_card`` dropped ``body``, in the refusing check's own words (a
+    rule and a JSON Pointer, never the card's values), for the concierge's one
+    repair turn. Read the way ``render_card`` reads it (repaired, flat props
+    lifted); a generic line when it is not one spec or the strict walk passes it."""
+    spec = _parse(body, unique=profile.strict)
+    if spec is None and (fixed := _repaired(body, profile)) is not None:
+        spec = _parse(fixed, unique=profile.strict)
+    if not _is_spec(spec):
+        return "it is not one complete JSON object holding ui"
+    try:
+        spec["ui"], _ = _lift_flat_props(spec["ui"], profile)
+        if len(_serialize(spec)) > profile.max_chars:
+            return f"it is longer than {profile.max_chars} characters"
+        _check_strict(spec, _card_verbs(verbs, profile), lead_capture, profile)
+    except _Reject as exc:
+        return f"{exc} (at {exc.path})" if exc.path else str(exc)
+    except Exception:  # noqa: BLE001 — same as render_card: never raises
+        return "a check could not read it"
+    return "it breaks a card rule"
+
+
 def has_lead_form(body: str, profile: CardProfile = PAWBAR_PROFILE) -> bool:
     """Whether a card body holds a send_to_team form, as a Ripple spec node (in
     any flow step too) or a legacy ``{"kind": "form"}`` card. Says nothing about
@@ -2867,7 +2918,7 @@ def has_lead_form(body: str, profile: CardProfile = PAWBAR_PROFILE) -> bool:
         return raw.get("verb") == LEAD_VERB
     if not _is_spec(raw):
         return False
-    ui = raw["ui"]
+    ui, _ = _lift_flat_props(raw["ui"], profile)
     stack = [ui]
     if isinstance(ui, dict) and any(field in ui for field in _FLOW_FIELDS):
         try:
@@ -2915,7 +2966,7 @@ def card_ids(body: str, profile: CardProfile = PAWBAR_PROFILE) -> list[str]:
         raw = _parse(_repaired(body, profile) or "")
     out: dict[str, None] = {}
     if _is_spec(raw):
-        _ids_in(raw["ui"], out, [profile.max_nodes])
+        _ids_in(_lift_flat_props(raw["ui"], profile)[0], out, [profile.max_nodes])
     elif isinstance(raw, dict):
         for item in raw.get("items") if isinstance(raw.get("items"), list) else []:
             pid = item.get("id") if isinstance(item, dict) else None
@@ -3223,6 +3274,7 @@ __all__ = [
     "card_verdict",
     "compact_manifest",
     "has_lead_form",
+    "rejection_reason",
     "render_card",
     "scan_partial",
     "validate_and_hydrate",

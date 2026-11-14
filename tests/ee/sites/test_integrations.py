@@ -2,8 +2,10 @@
 #
 # Covers the vault (encryption, never in a DTO, leased refresh with rotation,
 # needs_reconnect), hosted OAuth (single-use state, callback links the site), owner
-# routes and their authz, the public gateway's gate order (every error code,
-# Turnstile on writes only, the PAW_GATEWAY_TOKEN path), the built-in newsletter
+# routes and their authz, the public gateway's gate order (every error code, the
+# site's own draft preview origin admitted and every other preview origin refused,
+# Turnstile on writes only, the PAW_GATEWAY_TOKEN path, the owner's extra lead-intake
+# hosts never admitted), the built-in newsletter
 # (dedupe + CSV), webhook dedupe + orders, and the agent tools' SSE payload.
 # The ``demo`` provider is the fake connect provider; no network anywhere.
 from __future__ import annotations
@@ -583,6 +585,99 @@ async def test_gateway_auth_gates(beanie_test_db):
 
 
 @pytest.mark.asyncio
+async def test_gateway_ignores_the_owners_extra_lead_intake_hosts(beanie_test_db):
+    """``Site.lead_intake_origins`` widens lead capture only: an owner-typed,
+    unverified host must not be able to call the site's integrations."""
+    pid = await _pocket()
+    site = await _site(pid)
+    await site.set({"lead_intake_origins": ["forms.partner.test"]})
+    await _link(pid, "newsletter")
+    async with _client() as c:
+        own = await _gw(
+            c,
+            str(site.id),
+            "newsletter",
+            "subscribe",
+            args={"email": "a@b.co"},
+            headers={"x-paw-site-key": SITE_KEY, "origin": ORIGIN},
+        )
+        extra = await _gw(
+            c,
+            str(site.id),
+            "newsletter",
+            "subscribe",
+            args={"email": "a@b.co"},
+            headers={"x-paw-site-key": SITE_KEY, "origin": "https://forms.partner.test"},
+        )
+    assert own.status_code == 200, own.text
+    assert (extra.status_code, _code(extra)) == (403, "origin_denied")
+
+
+class _DraftTokens:
+    """The artifact store's draft-token surface: token -> (pocket, content hash)."""
+
+    def __init__(self, tokens: dict[str, tuple[str, str]]) -> None:
+        self.tokens = tokens
+
+    def resolve_preview_token(self, token):
+        return self.tokens.get(token)
+
+    def write_dist(self, *a):
+        return True
+
+    def read_dist(self, *a):
+        return None
+
+    def write_preview_token(self, *a):
+        return True
+
+    def read_preview_token(self, *a):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_gateway_accepts_the_sites_own_draft_preview_origin(beanie_test_db, monkeypatch):
+    from pocketpaw_ee.sites import preview_origin
+    from pocketpaw_ee.sites import service as sites_service
+
+    monkeypatch.setenv("PAW_SITES_PREVIEW_BASE_URL", "https://preview.paw.test")
+    pid = await _pocket()
+    other_pid = await _pocket()
+    site = await _site(pid)
+    await _link(pid, "newsletter")
+    own, foreign, unknown = "a" * 32, "b" * 32, "c" * 32
+    store = _DraftTokens({own: (pid, "h1"), foreign: (other_pid, "h2")})
+    monkeypatch.setattr(sites_service, "_default_artifact_store", lambda: store)
+    preview_origin._clear_caches()
+
+    async def call(origin: str):
+        return await _gw(
+            c,
+            str(site.id),
+            "newsletter",
+            "subscribe",
+            args={"email": "a@b.co"},
+            headers={"x-paw-site-key": SITE_KEY, "origin": origin},
+        )
+
+    try:
+        async with _client() as c:
+            ok = await call(f"https://{own}.preview.paw.test")
+            other_draft = await call(f"https://{foreign}.preview.paw.test")
+            stale = await call(f"https://{unknown}.preview.paw.test")
+            wrong_scheme = await call(f"http://{own}.preview.paw.test")
+            wrong_port = await call(f"https://{own}.preview.paw.test:8443")
+            not_a_token = await call("https://evil.preview.paw.test")
+            lookalike = await call(f"https://{own}.preview.paw.test.evil.test")
+    finally:
+        preview_origin._clear_caches()
+    assert ok.status_code == 200, ok.text
+    assert ok.json() == {"ok": True, "result": {"subscribed": True}}
+    for denied in (other_draft, stale, wrong_scheme, wrong_port, not_a_token, lookalike):
+        assert (denied.status_code, _code(denied)) == (403, "origin_denied")
+
+
+@pytest.mark.asyncio
 async def test_gateway_binding_gates(beanie_test_db):
     pid = await _pocket()
     site = await _site(pid)
@@ -735,6 +830,48 @@ async def test_newsletter_dedupes_and_exports_csv_to_the_owner_only(beanie_test_
 
 
 @pytest.mark.asyncio
+async def test_newsletter_subscribers_lists_count_and_latest_to_the_owner_only(beanie_test_db):
+    """The owner sees how many people signed up and the newest few next to Export,
+    instead of having to download a CSV to find out whether anyone did."""
+    from pocketpaw_ee.cloud.models.integration import NewsletterSubscriber
+
+    pid = await _pocket()
+    site = await _site(pid)
+    other = await _pocket()
+    await _link(pid, "newsletter")
+    base = datetime(2026, 10, 1, tzinfo=UTC)
+    for i in range(23):
+        await NewsletterSubscriber(
+            workspace=WS,
+            pocket_id=pid,
+            site_id=str(site.id),
+            email=f"p{i:02d}@example.com",
+            createdAt=base + timedelta(minutes=i),
+        ).insert()
+    await NewsletterSubscriber(workspace=WS, pocket_id=other, email="else@example.com").insert()
+    url = f"/api/v1/sites/by-pocket/{pid}/integrations/newsletter/subscribers"
+
+    async with _client() as c:
+        resp = await c.get(url)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 23
+    assert len(body["latest"]) == 20
+    assert body["latest"][0]["email"] == "p22@example.com"
+    assert body["latest"][-1]["email"] == "p03@example.com"
+    assert body["latest"][0]["subscribed_at"].endswith("+00:00")
+    assert resp.headers["cache-control"] == "no-store"
+
+    from unittest.mock import patch
+
+    with patch("pocketpaw_ee.guards.audit.log_denial") as log_denial:
+        async with _client(WS, EDITOR) as c:
+            denied = await c.get(url)
+    assert denied.status_code == 403
+    assert log_denial.call_args.kwargs["action"] == "sites.integration.newsletter.list"
+
+
+@pytest.mark.asyncio
 async def test_gateway_cors_answers_preflight_for_the_gateway_path_only():
     from pocketpaw_ee.integrations.gateway import GatewayCors
 
@@ -761,6 +898,33 @@ async def test_gateway_cors_answers_preflight_for_the_gateway_path_only():
         "/api/v1/sites/s1/x/newsletter/subscribe",
         "/api/v1/integrations/connections",
     ]
+
+
+@pytest.mark.asyncio
+async def test_site_cors_covers_the_ai_paths_and_lets_the_ticket_header_through():
+    from pocketpaw_ee.integrations.site_gate import GatewayCors
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    app = GatewayCors(inner)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        pre = await c.options(
+            "/api/v1/sites/s1/ai/chat",
+            headers={"origin": ORIGIN, "access-control-request-method": "POST"},
+        )
+        post = await c.post("/api/v1/sites/s1/ai/ticket", headers={"origin": ORIGIN})
+        owner = await c.post("/api/v1/sites/by-pocket/p1/ai/settings", headers={"origin": ORIGIN})
+        deep = await c.post("/api/v1/sites/s1/ai/chat/extra", headers={"origin": ORIGIN})
+    assert pre.status_code == 204 and pre.headers["access-control-allow-origin"] == ORIGIN
+    assert "x-paw-ai-ticket" in pre.headers["access-control-allow-headers"]
+    assert "authorization" not in pre.headers["access-control-allow-headers"]
+    assert post.headers["access-control-allow-origin"] == ORIGIN
+    assert "access-control-allow-origin" not in deep.headers
+    # The owner routes sit at /sites/by-pocket/{id}/ai/{name}: that shape is two
+    # segments deeper than the site path, so it never gets the open CORS answer.
+    assert "access-control-allow-origin" not in owner.headers
 
 
 # ---------------------------------------------------------- webhooks + orders
@@ -919,6 +1083,9 @@ async def test_connect_tool_pushes_the_card_and_creates_the_binding(beanie_test_
         "actions",
         "settings_fields",
         "requires_connection",
+        "connect_params",
+        "site_bindable",
+        "per_member",
     }
     assert set(data["site_integration"]) == {
         "provider",

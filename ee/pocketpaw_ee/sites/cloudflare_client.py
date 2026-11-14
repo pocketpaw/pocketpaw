@@ -13,8 +13,7 @@
 #     ``bundle_deploy`` for ``paw-build.json`` builds: metadata + one part per
 #     module, with compat flags, an ``assets`` block and the optional
 #     ``placement`` / ``observability`` / ``limits`` blocks ``bundle_deploy``
-#     decides (``worker_settings``). The two legacy shapes are
-#     byte-for-byte what existing engines have always sent.
+#     decides (``worker_settings``). The legacy shapes are byte-for-byte unchanged.
 #   * Static assets: ``upload_assets`` runs the dispatch assets-upload-session,
 #     uploads the requested buckets (base64 multipart, session JWT as Bearer, never
 #     the account token) and returns the completion JWT for ``put_worker``. Asset
@@ -29,19 +28,34 @@
 #   * Cloudflare for SaaS: custom hostnames (create, poll, delete). The CNAME target
 #     is configured (``PAW_CF_CNAME_TARGET``), never derived from the zone id, and
 #     create refuses when it is unset. No ``custom_metadata``: it is entitlement-gated.
-#   * Worker routes: ``<hostname>/*`` -> the site's Worker, updated in place on a
-#     rename (a second POST for the same pattern is a 409).
+#   * Worker routes: ``<hostname>/*`` -> the site's Worker, updated in place on rename.
 #   * D1: ``create_database``, ``find_database`` (exact name, crash recovery),
 #     ``delete_database``, ``query_d1`` and ``query_d1_batch`` (parameterized, never
-#     interpolated SQL). ``create_database`` adds the operator's
+#     interpolated SQL), ``d1_info`` (``version``: Time Travel needs ``production``),
+#     ``d1_bookmark`` / ``d1_restore`` (Time Travel: the bookmark at or before a
+#     moment; an in-place restore that answers the ``previous_bookmark`` undoing it;
+#     a moment before the database's history, code 7400, is a 422
+#     ``sites.data_restore_out_of_window``),
+#     ``export_d1_sql`` (the D1 export API: poll with the bookmark,
+#     then fetch the signed URL with a client that carries NO token, since the URL is
+#     another host). ``create_database`` adds the operator's
 #     ``PAW_SITES_D1_LOCATION_HINT`` (``primary_location_hint``) and, opt-in,
-#     ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication: auto``) to the create
-#     body; both only shape NEW databases.
+#     ``PAW_SITES_D1_READ_REPLICATION`` (``read_replication: auto``); NEW databases only.
 #   * KV and R2 for ``binding_provisioner``: namespaces (find by title, create,
-#     delete) and buckets (exists, create, delete, expire-all lifecycle). The REST API
-#     has no object list/delete for R2, so a non-empty bucket delete reports False
-#     instead of raising, and the caller decides what to do with it.
-#   * Browser Rendering: ``capture_screenshot`` returns image bytes (url or html).
+#     delete) and buckets (exists, create, delete, expire-all lifecycle). A non-empty
+#     bucket delete reports False and teardown sets the expire-all rule; it does NOT
+#     empty the bucket through the object API, deliberately (a day of grace).
+#   * R2 objects and KV keys for the Sites Data dashboard: ``r2_list`` / ``r2_get``
+#     (a stream, ``R2Object``) / ``r2_put`` / ``r2_delete`` and ``kv_list_keys`` /
+#     ``kv_get`` (``KvValue``: capped bytes, full size, UTF-8 text) / ``kv_metadata``
+#     / ``kv_put`` (raw, or multipart value + metadata) / ``kv_delete``. R2 keys go in
+#     the path with "/" literal (``_r2_key_path``), KV keys fully percent-encoded
+#     (``_kv_key_path``); a "." / ".." segment is refused before any request in both,
+#     because httpx collapses dot segments and would send the call to another URL
+#     (``objects/../..`` is the bucket itself). Downloads ask for ``identity`` and
+#     stream raw bytes, so Content-Length is the stored size.
+#   * Browser Rendering: ``capture_screenshot`` returns image bytes (url or html);
+#     ``browser_run_cdp`` gives the Browser Run CDP socket + auth for play-tests.
 #   * Analytics Engine: ``query_analytics_sql`` sends raw SQL and reads a body with
 #     no ``success`` key, so it deliberately does not use ``_unwrap`` on success.
 #
@@ -51,6 +65,7 @@
 # treat a 404 as already done so a resumed teardown never fails on a finished step.
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -58,9 +73,10 @@ import logging
 import mimetypes
 import os
 import posixpath
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -285,6 +301,58 @@ def _map_status(cf_status: str, ssl_status: str) -> HostnameStatus:
     return HostnameStatus.ERROR
 
 
+def _dot_segment(key: str) -> bool:
+    return any(seg in (".", "..") for seg in key.split("/"))
+
+
+def _r2_key_path(key: str) -> str:
+    """``key`` as the path tail of an R2 object URL: "/" kept literal (R2 reads a
+    %2F as part of the name), everything else percent-encoded. ValidationError for
+    an empty key or a "." / ".." segment, which httpx would resolve away."""
+    if not key or _dot_segment(key):
+        raise ValidationError("sites.data_bad_file_key", "That file name can't be used.")
+    return quote(key, safe="/")
+
+
+def _kv_key_path(key: str) -> str:
+    """``key`` as one percent-encoded path segment ("/" included). ValidationError
+    for "" or any "/"-separated "." / ".." segment (the same rule as R2 keys)."""
+    if key == "" or _dot_segment(key):
+        raise ValidationError("sites.data_bad_kv_key", "That key name can't be used.")
+    return quote(key, safe="")
+
+
+@dataclass
+class R2Object:
+    """An open R2 download. ``iter_bytes`` streams the body and closes the connection
+    when done; call ``aclose`` to abandon it unread."""
+
+    content_type: str
+    size: int | None
+    etag: str
+    _resp: httpx.Response
+    _client: httpx.AsyncClient
+
+    async def iter_bytes(self) -> AsyncIterator[bytes]:
+        try:
+            async for chunk in self._resp.aiter_raw():
+                yield chunk
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        await self._resp.aclose()
+        await self._client.aclose()
+
+
+@dataclass(frozen=True)
+class KvValue:
+    data: bytes  # at most ``max_bytes`` of the value
+    size: int  # the whole value's size
+    truncated: bool  # ``data`` is only the start of the value
+    text: str | None  # ``data`` decoded as UTF-8, when whole and valid
+
+
 class CloudflareClient:
     def __init__(
         self,
@@ -313,6 +381,19 @@ class CloudflareClient:
     @property
     def account_id(self) -> str:
         return self._account_id
+
+    def browser_run_cdp(self, *, keep_alive_ms: int) -> tuple[str, dict[str, str]]:
+        """The Browser Run CDP socket and the headers to open it with, for
+        ``connect_over_cdp``. Connecting acquires a fresh remote browser that lives
+        ``keep_alive_ms`` (clamped to Cloudflare's 10000-1200000) unless closed
+        first. Same token and permission (Browser Rendering - Edit) as
+        ``capture_screenshot``; the token rides only in the returned header."""
+        keep = max(10_000, min(int(keep_alive_ms), 1_200_000))
+        url = (
+            f"wss://api.cloudflare.com/client/v4/accounts/{self._account_id}"
+            f"/browser-run/devtools/browser?keep_alive={keep}"
+        )
+        return url, dict(self._headers)
 
     @staticmethod
     def _unwrap(resp: httpx.Response) -> dict:
@@ -668,6 +749,17 @@ class CloudflareClient:
             resp = await client.post(url, json={"enabled": True, "previews_enabled": False})
         self._unwrap(resp)
 
+    async def clear_schedules(self, script_name: str) -> None:
+        """Remove every cron trigger from an ACCOUNT-LEVEL script.
+
+        ``PUT /accounts/{id}/workers/scripts/{name}/schedules`` with ``[]``
+        (https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/schedules/methods/update/).
+        A script replaced by a redirect must not keep firing the old site's crons."""
+        url = f"{_CF_API}/accounts/{self._account_id}/workers/scripts/{script_name}/schedules"
+        async with self._client() as client:
+            resp = await client.put(url, json=[])
+        self._unwrap(resp)
+
     async def workers_dev_subdomain(self) -> str:
         """The account's workers.dev subdomain (the ``<sub>`` in
         ``<script>.<sub>.workers.dev``), or ``""`` when the account has none.
@@ -947,9 +1039,11 @@ class CloudflareClient:
         """Delete an R2 bucket. True when it is gone (a 404 included), False when
         Cloudflare refused because it still holds objects.
 
-        Cloudflare only deletes an empty bucket, and its REST API has no object
-        list or delete (that is the S3 API, a different credential), so this cannot
-        empty one itself. A 409 is the not-empty answer; any other failure raises."""
+        Cloudflare only deletes an empty bucket. The REST API can list and delete
+        objects (``r2_list`` / ``r2_delete``), but teardown deliberately doesn't empty
+        a bucket here: the caller sets the expire-all lifecycle rule instead, which
+        leaves a day of grace on the draft-discard path. A 409 is the not-empty
+        answer; any other failure raises."""
         async with self._client() as client:
             resp = await client.delete(self._bucket_url(name))
         if resp.status_code == 404:
@@ -977,6 +1071,250 @@ class CloudflareClient:
         }
         async with self._client() as client:
             resp = await client.put(f"{self._bucket_url(name)}/lifecycle", json=body)
+        self._unwrap(resp)
+
+    # -- R2 objects (Sites Data dashboard) ------------------------------------
+    # https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/
+
+    def _object_url(self, bucket: str, key: str) -> str:
+        return f"{self._bucket_url(bucket)}/objects/{_r2_key_path(key)}"
+
+    async def r2_list(
+        self,
+        bucket: str,
+        *,
+        prefix: str = "",
+        delimiter: str | None = "/",
+        cursor: str | None = None,
+        per_page: int = 200,
+    ) -> dict:
+        """One page of objects under ``prefix``: ``{objects: [{key, size, etag,
+        last_modified, content_type}], folders: [full prefixes ending "/"], cursor
+        (None on the last page), truncated}``. ``delimiter=None`` lists keys flat."""
+        params: dict[str, Any] = {}
+        if prefix:
+            params["prefix"] = prefix
+        if delimiter:
+            params["delimiter"] = delimiter
+        if cursor:
+            params["cursor"] = cursor
+        params["per_page"] = max(1, min(int(per_page), 1000))
+        async with self._client() as client:
+            resp = await client.get(f"{self._bucket_url(bucket)}/objects", params=params)
+        rows = self._unwrap(resp)
+        info = resp.json().get("result_info") or {}
+        objects = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or not isinstance(row.get("key"), str):
+                continue
+            meta = row.get("http_metadata")
+            meta = meta if isinstance(meta, dict) else {}
+            try:
+                size = int(row.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            objects.append(
+                {
+                    "key": row["key"],
+                    "size": size,
+                    "etag": str(row.get("etag") or ""),
+                    "last_modified": row.get("last_modified"),
+                    "content_type": str(meta.get("contentType") or ""),
+                }
+            )
+        folders = [f for f in (info.get("delimited") or []) if isinstance(f, str)]
+        truncated = bool(info.get("is_truncated"))
+        next_cursor = info.get("cursor") if truncated else None
+        return {
+            "objects": objects,
+            "folders": folders,
+            "cursor": str(next_cursor) if next_cursor else None,
+            "truncated": truncated,
+        }
+
+    async def r2_get(self, bucket: str, key: str) -> R2Object | None:
+        """Open a download of one object (None when there is none). The body is not
+        read here: iterate ``R2Object.iter_bytes`` or call ``aclose``."""
+        url = self._object_url(bucket, key)
+        client = self._client()
+        try:
+            request = client.build_request("GET", url, headers={"Accept-Encoding": "identity"})
+            resp = await client.send(request, stream=True)
+        except BaseException:
+            await client.aclose()
+            raise
+        if resp.status_code // 100 != 2:
+            try:
+                await resp.aread()
+            finally:
+                await resp.aclose()
+                await client.aclose()
+            if resp.status_code == 404:
+                return None
+            self._unwrap(resp)
+        length = resp.headers.get("content-length", "")
+        return R2Object(
+            content_type=resp.headers.get("content-type", ""),
+            size=int(length) if length.isdigit() else None,
+            etag=resp.headers.get("etag", "").strip('"'),
+            _resp=resp,
+            _client=client,
+        )
+
+    async def r2_put(
+        self,
+        bucket: str,
+        key: str,
+        body: bytes | AsyncIterable[bytes],
+        *,
+        content_type: str,
+        size: int | None = None,
+    ) -> dict:
+        """Write one object with ``content_type``. A streamed ``body`` needs its
+        ``size``, sent as Content-Length (never a chunked body). Returns ``{key, size,
+        etag, uploaded}`` (Cloudflare answers ``size`` as a string)."""
+        headers = {"Content-Type": content_type}
+        if not isinstance(body, bytes | bytearray):
+            if size is None:
+                raise ValueError("r2_put: a streamed body needs its size")
+            headers["Content-Length"] = str(size)
+        url = self._object_url(bucket, key)
+        async with httpx.AsyncClient(
+            headers=self._headers, transport=self._transport, timeout=120.0
+        ) as client:
+            resp = await client.put(url, content=body, headers=headers)
+        result = self._unwrap(resp)
+        result = result if isinstance(result, dict) else {}
+        try:
+            stored = int(result.get("size") or size or 0)
+        except (TypeError, ValueError):
+            stored = size or 0
+        return {
+            "key": str(result.get("key") or key),
+            "size": stored,
+            "etag": str(result.get("etag") or ""),
+            "uploaded": result.get("uploaded"),
+        }
+
+    async def r2_delete(self, bucket: str, key: str) -> None:
+        """Delete one object. Idempotent on a 404."""
+        url = self._object_url(bucket, key)
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
+        self._unwrap(resp)
+
+    # -- KV keys (Sites Data dashboard) ---------------------------------------
+
+    def _kv_url(self, namespace_id: str) -> str:
+        return f"{_CF_API}/accounts/{self._account_id}/storage/kv/namespaces/{namespace_id}"
+
+    async def kv_list_keys(
+        self, namespace_id: str, *, prefix: str = "", cursor: str | None = None, limit: int = 200
+    ) -> dict:
+        """One page of keys: ``{keys: [{name, expiration, metadata}], cursor}`` (cursor
+        None on the last page). ``limit`` is clamped to Cloudflare's 10-1000."""
+        params: dict[str, Any] = {}
+        if prefix:
+            params["prefix"] = prefix
+        if cursor:
+            params["cursor"] = cursor
+        params["limit"] = max(10, min(int(limit), 1000))
+        async with self._client() as client:
+            resp = await client.get(f"{self._kv_url(namespace_id)}/keys", params=params)
+        rows = self._unwrap(resp)
+        info = resp.json().get("result_info") or {}
+        keys = [
+            {
+                "name": row["name"],
+                "expiration": row.get("expiration"),
+                "metadata": row.get("metadata"),
+            }
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict) and isinstance(row.get("name"), str)
+        ]
+        next_cursor = info.get("cursor")
+        return {"keys": keys, "cursor": str(next_cursor) if next_cursor else None}
+
+    async def kv_get(
+        self, namespace_id: str, key: str, *, max_bytes: int | None = None
+    ) -> KvValue | None:
+        """A key's value (None when there is none). Reads the whole value to learn its
+        size but keeps at most ``max_bytes`` of it."""
+        url = f"{self._kv_url(namespace_id)}/values/{_kv_key_path(key)}"
+        kept = bytearray()
+        size = 0
+        async with self._client() as client, client.stream("GET", url) as resp:
+            if resp.status_code // 100 != 2:
+                await resp.aread()
+                if resp.status_code == 404:
+                    return None
+                self._unwrap(resp)
+            async for chunk in resp.aiter_bytes():
+                size += len(chunk)
+                room = len(chunk) if max_bytes is None else max_bytes - len(kept)
+                if room > 0:
+                    kept += chunk[:room]
+        truncated = len(kept) < size
+        text: str | None = None
+        if not truncated:
+            try:
+                text = bytes(kept).decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+        return KvValue(data=bytes(kept), size=size, truncated=truncated, text=text)
+
+    async def kv_metadata(self, namespace_id: str, key: str) -> Any:
+        """A key's metadata (None when the key or its metadata is missing)."""
+        url = f"{self._kv_url(namespace_id)}/metadata/{_kv_key_path(key)}"
+        async with self._client() as client:
+            resp = await client.get(url)
+        if resp.status_code == 404:
+            return None
+        result = self._unwrap(resp)
+        return result if result != {} else None
+
+    async def kv_put(
+        self,
+        namespace_id: str,
+        key: str,
+        value: bytes,
+        *,
+        metadata: Any = None,
+        expiration_ttl: int | None = None,
+    ) -> None:
+        """Write a key: the raw value, or a multipart ``value`` + ``metadata`` (JSON)
+        when ``metadata`` is given. A write replaces the key's value, metadata and
+        expiry together. ``expiration_ttl`` (seconds, >= 60) rides in the query."""
+        url = f"{self._kv_url(namespace_id)}/values/{_kv_key_path(key)}"
+        params = {"expiration_ttl": int(expiration_ttl)} if expiration_ttl else None
+        async with self._client() as client:
+            if metadata is None:
+                resp = await client.put(
+                    url,
+                    params=params,
+                    content=value,
+                    headers={"Content-Type": "application/octet-stream"},
+                )
+            else:
+                resp = await client.put(
+                    url,
+                    params=params,
+                    files={
+                        "value": (None, value),
+                        "metadata": (None, json.dumps(metadata), "application/json"),
+                    },
+                )
+        self._unwrap(resp)
+
+    async def kv_delete(self, namespace_id: str, key: str) -> None:
+        """Delete a key. Idempotent on a 404."""
+        url = f"{self._kv_url(namespace_id)}/values/{_kv_key_path(key)}"
+        async with self._client() as client:
+            resp = await client.delete(url)
+        if resp.status_code == 404:
+            return
         self._unwrap(resp)
 
     async def capture_screenshot(
@@ -1122,6 +1460,162 @@ class CloudflareClient:
             found = found if isinstance(found, list) else []
             rows.append([r for r in found if isinstance(r, dict)])
         return rows
+
+    async def query_d1_raw(self, *, database_id: str, sql: str, params: list | None = None) -> dict:
+        """Run ONE statement through D1's ``raw`` endpoint and return ``{columns, rows,
+        changes}``: the column names in order (repeats kept), each row as a list, and
+        ``meta.changes``. The Data dashboard's SQL console reads this way so a result
+        with no rows still names its columns and two columns of one name both survive.
+
+        Same rules as ``query_d1``: the caller passes one fully-formed statement and
+        every value rides ``params``. A failed statement raises ValidationError
+        ``sites.cloudflare_error`` carrying D1's own message."""
+        url = f"{self._d1_url(database_id)}/raw"
+        async with self._client() as client:
+            resp = await client.post(url, json={"sql": sql, "params": params or []})
+        result = self._unwrap(resp)
+        statements = result if isinstance(result, list) else []
+        first = statements[0] if statements and isinstance(statements[0], dict) else {}
+        if first.get("success") is False:
+            raise ValidationError(
+                "sites.cloudflare_error", str(first.get("error") or "D1 query statement failed")
+            )
+        results = first.get("results") if isinstance(first.get("results"), dict) else {}
+        columns = results.get("columns") if isinstance(results.get("columns"), list) else []
+        rows = results.get("rows") if isinstance(results.get("rows"), list) else []
+        meta = first.get("meta") if isinstance(first.get("meta"), dict) else {}
+        changes = meta.get("changes")
+        return {
+            "columns": [str(c) for c in columns],
+            "rows": [r for r in rows if isinstance(r, list)],
+            "changes": changes if isinstance(changes, int) and not isinstance(changes, bool) else 0,
+        }
+
+    def _d1_url(self, database_id: str) -> str:
+        return f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}"
+
+    @staticmethod
+    def _time_travel_unwrap(resp: httpx.Response) -> Any:
+        """``_unwrap``, except that Cloudflare's code 7400 ("Provided timestamp is
+        too old": before the database existed, or past retention) is the caller's
+        choice of moment, so it is a 422 ``sites.data_restore_out_of_window``."""
+        if resp.status_code == 400:
+            try:
+                errors = (resp.json() or {}).get("errors") or []
+            except (json.JSONDecodeError, ValueError, AttributeError):
+                errors = []
+            if any(isinstance(e, dict) and e.get("code") == 7400 for e in errors):
+                raise ValidationError(
+                    "sites.data_restore_out_of_window",
+                    "That time is before this database's history begins.",
+                )
+        return CloudflareClient._unwrap(resp)
+
+    async def d1_info(self, database_id: str) -> dict:
+        """The database's details (``GET /d1/database/{id}``): ``version``
+        (``production`` or ``alpha``; Time Travel needs ``production``),
+        ``file_size``, ``name`` …"""
+        async with self._client() as client:
+            resp = await client.get(self._d1_url(database_id))
+        result = self._unwrap(resp)
+        return result if isinstance(result, dict) else {}
+
+    async def d1_bookmark(self, database_id: str, timestamp: str | None = None) -> str:
+        """The Time Travel bookmark nearest at or before ``timestamp`` (ISO 8601 / RFC
+        3339), or of the database's current state when None.
+        ``GET /d1/database/{id}/time_travel/bookmark``."""
+        params = {"timestamp": timestamp} if timestamp else None
+        async with self._client() as client:
+            resp = await client.get(
+                f"{self._d1_url(database_id)}/time_travel/bookmark", params=params
+            )
+        result = self._time_travel_unwrap(resp)
+        bookmark = result.get("bookmark") if isinstance(result, dict) else None
+        if not isinstance(bookmark, str) or not bookmark:
+            raise ValidationError("sites.cloudflare_error", "D1 returned no bookmark")
+        return bookmark
+
+    async def d1_restore(
+        self, database_id: str, *, bookmark: str | None = None, timestamp: str | None = None
+    ) -> dict:
+        """Restore the database IN PLACE to ``bookmark`` or ``timestamp`` (exactly
+        one). Destructive: it cancels in-flight queries. Returns ``{bookmark,
+        previous_bookmark, message}``; restoring to ``previous_bookmark`` undoes it.
+        ``POST /d1/database/{id}/time_travel/restore``."""
+        if bool(bookmark) == bool(timestamp):
+            raise ValidationError(
+                "sites.cloudflare_error", "A D1 restore needs exactly one of bookmark or timestamp."
+            )
+        params = {"bookmark": bookmark} if bookmark else {"timestamp": timestamp}
+        async with self._client() as client:
+            resp = await client.post(
+                f"{self._d1_url(database_id)}/time_travel/restore", params=params
+            )
+        result = self._time_travel_unwrap(resp)
+        result = result if isinstance(result, dict) else {}
+        previous = result.get("previous_bookmark")
+        if not isinstance(previous, str) or not previous:
+            raise ValidationError("sites.cloudflare_error", "D1 restore returned no bookmark")
+        return {
+            "bookmark": str(result.get("bookmark") or ""),
+            "previous_bookmark": previous,
+            "message": str(result.get("message") or ""),
+        }
+
+    async def export_d1_sql(
+        self, database_id: str, *, poll_interval: float = 2.0, max_polls: int = 150
+    ) -> str:
+        """The whole database as SQL text (schema and rows), via the D1 export API.
+
+        ``POST /accounts/{acct}/d1/database/{id}/export`` with ``output_format:
+        polling``; re-POSTs with ``current_bookmark`` until ``status`` is
+        ``complete`` (its ``result.signed_url`` is the dump, valid an hour) or
+        ``error``. The database serves no queries while it exports, and stopping the
+        polls cancels the export. https://developers.cloudflare.com/api/resources/d1/
+        subresources/database/methods/export/
+
+        Raises ValidationError ``sites.d1_export_failed`` on an export error, on a
+        poll budget spent (default about five minutes), or on a download URL that is
+        not https. The signed URL is fetched WITHOUT the account token."""
+        url = f"{_CF_API}/accounts/{self._account_id}/d1/database/{database_id}/export"
+        body: dict[str, Any] = {"output_format": "polling"}
+        result: dict = {}
+        async with self._client() as client:
+            for attempt in range(max(1, max_polls)):
+                result = self._unwrap(await client.post(url, json=body)) or {}
+                status = result.get("status")
+                if status == "complete":
+                    break
+                if status == "error" or result.get("success") is False:
+                    raise ValidationError(
+                        "sites.d1_export_failed",
+                        f"Cloudflare could not export the database: "
+                        f"{str(result.get('error') or 'unknown error')[:_ERROR_DETAIL_MAX]}",
+                    )
+                bookmark = result.get("at_bookmark")
+                if bookmark:
+                    body["current_bookmark"] = bookmark
+                if attempt + 1 < max_polls:
+                    await asyncio.sleep(poll_interval)
+            else:
+                raise ValidationError(
+                    "sites.d1_export_failed", "The database export did not finish in time."
+                )
+        signed = str((result.get("result") or {}).get("signed_url") or "")
+        if not signed.startswith("https://"):
+            raise ValidationError(
+                "sites.d1_export_failed", "Cloudflare returned no usable export download."
+            )
+        # A separate client on purpose: the signed URL is a storage host, and the
+        # account token must never be sent anywhere but the Cloudflare API.
+        async with httpx.AsyncClient(transport=self._transport, timeout=120.0) as raw:
+            resp = await raw.get(signed)
+        if resp.status_code // 100 != 2:
+            raise ValidationError(
+                "sites.d1_export_failed",
+                f"Downloading the database export failed ({resp.status_code}).",
+            )
+        return resp.text
 
     async def get_script_migration_tag(self, script_name: str, *, target: str) -> str | None:
         """The Durable Object migration tag last applied to the script, or None (no

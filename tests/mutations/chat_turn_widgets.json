@@ -1,0 +1,44 @@
+[
+  {
+    "label": "chat gets per-turn picks: run_core drops the per-turn widget block",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    if turn_widgets:\n",
+    "replace": "    if False:\n",
+    "tests": ["tests/cloud/runs/test_run_core_chat_turn_widgets.py"]
+  },
+  {
+    "label": "chat gets per-turn picks: the block goes into the keyed instructions layer",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    turn_widgets = chat_turn_widgets(behavior_instructions, user_content, history or ())\n",
+    "replace": "    turn_widgets = chat_turn_widgets(behavior_instructions, user_content, history or ())\n    behavior_instructions += turn_widgets\n",
+    "tests": ["tests/cloud/runs/test_run_core_chat_turn_widgets.py"]
+  },
+  {
+    "label": "chat gets per-turn picks: no named figure detail",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "            *(widget_relevance.full_line(name, message, history) for name in picked),\n",
+    "replace": "            *(widget_relevance.full_line(name) for name in picked),\n",
+    "tests": ["tests/cloud/runs/test_run_core_chat_turn_widgets.py"]
+  },
+  {
+    "label": "prefer purpose-built widget: rule left out of the chat prompt",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "            PURPOSE_BUILT_FIRST_RULE,\n",
+    "replace": "",
+    "tests": ["tests/cloud/runs/test_run_core_chat_turn_widgets.py"]
+  },
+  {
+    "label": "prefer purpose-built widget: chat keeps the shared node budget line",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    return tuple(r.replace(_PRIMITIVES_SIZE, _CHAT_PRIMITIVES_SIZE) for r in rules)\n",
+    "replace": "    return tuple(rules)\n",
+    "tests": ["tests/cloud/runs/test_run_core_chat_turn_widgets.py"]
+  },
+  {
+    "label": "prefer purpose-built widget: figure and model ids left out of the chat prompt",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_service.py",
+    "find": "            widget_relevance.full_line(\"model-viewer\"),\n",
+    "replace": "",
+    "tests": ["tests/cloud/runs/test_run_core_chat_turn_widgets.py"]
+  }
+]

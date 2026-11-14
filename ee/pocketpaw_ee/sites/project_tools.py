@@ -6,8 +6,9 @@
 # (``sites/files_router.py``) call, so the two share one path policy, one set of caps
 # and one rebuild rule.
 #
-# The four CLI commands here install nothing and run no author code: they copy and
-# edit files. Only ``project-build`` runs author code, and that stays in the Daytona
+# The CLI commands here (these four, and ``visual_edit``'s stdin-JSON ``visual-edit`` /
+# ``stamp-html`` through :func:`run_cli`) install nothing and run no author code: they
+# copy and edit files. Only ``project-build`` runs author code, and that stays in the Daytona
 # sandbox (``project_build``). Every temp dir is removed before the call returns.
 #
 # Invariants:
@@ -22,21 +23,28 @@
 #   * every file operation resolves the pocket through ``sites.service.project_pocket``
 #     (read rule + workspace match + engine ``project``), writes through
 #     ``pockets.service.set_project_source`` (edit access), and queues the draft build
-#     of the new source, so a write always answers ``verification``.
+#     of the new source, so a write always answers ``verification``;
+#   * a write that names a file's base hash (sha256 of the text the caller read,
+#     :func:`file_hash`) is checked against the pocket it loaded and again by
+#     ``set_project_source`` on the document it is about to save. A mismatch is a 409
+#     ``sites.project_file_conflict`` carrying the current hash and text, and nothing
+#     is saved. A write with no base is last-write-wins.
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 import shutil
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
 from pocketpaw_ee.sites import project_build
 from pocketpaw_ee.sites.engines import safe_rel
+from pocketpaw_ee.sites.visual_edit import file_hash
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +59,13 @@ MAX_PATHS_PER_CALL = 200
 MAX_READ_FILE_BYTES = 200_000
 MAX_READ_CALL_BYTES = 400_000
 MAX_PATH_CHARS = 512
+
+#: The agent's plan for an app or game (the ``sites-app-plan`` skill), at the repo root.
+#: The only file :func:`read_source_file` serves, and the one the agent's file tools
+#: show in chat as an artifact card.
+PLAN_FILE = "PLAN.md"
+#: The most :func:`read_source_file` returns (a write is already capped at the same).
+MAX_SOURCE_FILE_BYTES = MAX_WRITE_FILE_BYTES
 
 #: Lockfiles a dependency change makes stale.
 LOCKFILES = ("bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock")
@@ -125,22 +140,22 @@ def _last_json(stdout: str) -> dict[str, Any] | None:
 
 
 async def run_cli(
-    args: list[str], *, timeout: float = CLI_TIMEOUT_SEC
+    args: list[str], *, timeout: float = CLI_TIMEOUT_SEC, stdin: bytes | None = None
 ) -> tuple[int, dict[str, Any] | None, str]:
-    """Run one CLI command; ``(exit code, last JSON line of stdout, stderr tail)``."""
+    """Run one CLI command; ``(exit code, last JSON line of stdout, stderr tail)``.
+    ``stdin`` is written to the command's stdin (the JSON-in commands)."""
+    pipes: dict[str, Any] = {"stdout": asyncio.subprocess.PIPE, "stderr": asyncio.subprocess.PIPE}
+    if stdin is not None:
+        pipes["stdin"] = asyncio.subprocess.PIPE
     try:
-        proc = await _create_subprocess_exec(
-            *cli_argv(),
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        proc = await _create_subprocess_exec(*cli_argv(), *args, **pipes)
     except OSError as exc:
         raise ProjectCliError(
             "generator_missing", f"The site generator could not be started ({exc})."
         ) from exc
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+        talk = proc.communicate(stdin) if stdin is not None else proc.communicate()
+        stdout, stderr = await asyncio.wait_for(talk, timeout)
     except TimeoutError as exc:
         try:
             proc.kill()
@@ -539,17 +554,20 @@ def source_of(pocket: Mapping[str, Any]) -> dict[str, Any]:
     return dict(source) if isinstance(source, dict) else {}
 
 
-async def build_verification(*, workspace_id: str, user_id: str, pocket_id: str) -> dict[str, Any]:
+async def build_verification(
+    *, workspace_id: str, user_id: str, pocket_id: str, trigger: str = "draft"
+) -> dict[str, Any]:
     """Queue the draft build of the pocket's current source and say so: ``pending``
     with the job id, ``passed`` when that exact source already built, ``failed`` when
     the tree cannot build at all (no package.json), ``unverified`` when the queue is
-    down. Never raises."""
+    down. Never raises. ``trigger`` (``draft`` for the HTTP routes, ``agent`` for the
+    agent's tools) is recorded on the build for the builds list."""
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites import service as sites_service
 
     try:
         art = await sites_service.queue_project_build(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger
         )
     except CloudError as exc:
         return {"status": "failed", "build": "failed", "reason": exc.code, "message": exc.message}
@@ -572,6 +590,81 @@ async def build_verification(*, workspace_id: str, user_id: str, pocket_id: str)
     }
 
 
+def normalize_bases(bases: Any, writes: Mapping[str, str]) -> dict[str, str | None]:
+    """``{path: base hash or None}`` with normalized paths. Every path must be one the
+    call writes (422 otherwise): a base for a file left alone checks nothing."""
+    if bases is None:
+        return {}
+    if not isinstance(bases, Mapping):
+        raise ValidationError(
+            "sites.project_bad_base", "`base_hashes` must be an object of {path: hash or null}."
+        )
+    out: dict[str, str | None] = {}
+    for raw, base in bases.items():
+        if base is not None and not isinstance(base, str):
+            raise ValidationError(
+                "sites.project_bad_base", f"The base hash of {raw!r} must be a string or null."
+            )
+        rel = normalize_path(raw)
+        if rel not in writes:
+            raise ValidationError(
+                "sites.project_bad_base", f"{rel} has a base hash but is not being written."
+            )
+        out[rel] = base
+    return out
+
+
+def check_bases(source: Mapping[str, Any], bases: Mapping[str, str | None]) -> None:
+    """409 ``sites.project_file_conflict`` when any file's stored hash is not its base
+    (``None``: the file must not exist). ``details.conflicts`` gives each refused
+    path's ``current_hash`` and ``current_content`` (both null when it is gone), so
+    the caller can show theirs without another read."""
+    conflicts = []
+    for path, base in bases.items():
+        current = source.get(path)
+        current = current if isinstance(current, str) else None
+        now = file_hash(current) if current is not None else None
+        if now != base:
+            conflicts.append({"path": path, "current_hash": now, "current_content": current})
+    if conflicts:
+        names = ", ".join(c["path"] for c in conflicts[:10])
+        raise CloudError(
+            409,
+            "sites.project_file_conflict",
+            f"{names} changed since it was read, so nothing was saved. Load the current "
+            "version, or save again without a base hash to overwrite it.",
+            {"conflicts": conflicts},
+        )
+
+
+#: Recipes that give the site accounts and an owner page Paw can link to.
+OWNER_PAGE_RECIPES = frozenset({"better-auth"})
+#: Where the accounts recipe's owner sign-in lands (``next=/admin`` in its AGENTS.md).
+DEFAULT_ADMIN_PATH = "/admin"
+_ADMIN_PATH_MAX = 200
+_ADMIN_PATH_RE = re.compile(r"^/(?!/)[A-Za-z0-9._~\-/]*$")
+
+
+def admin_path_or_error(value: Any) -> str:
+    """A site-relative owner page path ("/admin", "/owner/orders"), trimmed.
+
+    Raises ``ValueError`` for anything Paw must not turn into a link: no leading
+    slash, a protocol-relative or absolute URL, whitespace, a query or fragment, or a
+    ``..`` segment."""
+    path = value.strip() if isinstance(value, str) else ""
+    if (
+        not path
+        or len(path) > _ADMIN_PATH_MAX
+        or not _ADMIN_PATH_RE.match(path)
+        or ".." in path.split("/")
+    ):
+        raise ValueError(
+            "admin_path must be a path on the site that starts with one '/', like "
+            "/admin or /owner/orders: letters, digits, '-', '_', '.', '~' and '/' only."
+        )
+    return path
+
+
 async def save_changes(
     *,
     user_id: str,
@@ -580,14 +673,20 @@ async def save_changes(
     writes: Mapping[str, str] | None = None,
     deletes: list[str] | None = None,
     add_recipe: str | None = None,
+    admin_path: str | None = None,
     label: str | None = None,
+    bases: Mapping[str, str | None] | None = None,
 ) -> list[str]:
     """Size-check and persist one change in one save. Returns the lockfiles dropped
-    because the change edits package.json's dependency lists."""
+    because the change edits package.json's dependency lists. ``bases`` (path -> base
+    hash) is checked against ``source`` here and again on the document the save
+    persists (``set_project_source``'s ``guard``)."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     writes = dict(writes or {})
     deletes = list(deletes or [])
+    bases = dict(bases or {})
+    check_bases(source, bases)
     check_write_sizes(writes)
     dropped = stale_lockfiles(source, writes, deletes)
     gone = set(deletes) | set(dropped)
@@ -600,7 +699,9 @@ async def save_changes(
         writes=writes,
         deletes=[*deletes, *dropped],
         add_recipe=add_recipe,
+        admin_path=admin_path,
         label=label,
+        guard=(lambda current: check_bases(current, bases)) if bases else None,
     )
     return dropped
 
@@ -628,9 +729,9 @@ async def list_files(
 async def read_files(
     *, workspace_id: str, user_id: str, pocket_id: str, paths: Any
 ) -> list[dict[str, Any]]:
-    """``[{path, size, content}]`` in request order, deduplicated, FULL contents (a
-    caller that saves a file back must never get a truncated one). Any unknown path
-    is a 404 naming it."""
+    """``[{path, size, content, hash}]`` in request order, deduplicated, FULL contents
+    (a caller that saves a file back must never get a truncated one); ``hash`` is the
+    base a later write may name. Any unknown path is a 404 naming it."""
     if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
         raise ValidationError("sites.project_bad_path", "Name at least one file path to read.")
     if len(paths) > MAX_PATHS_PER_CALL:
@@ -649,15 +750,54 @@ async def read_files(
     missing = [p for p in wanted if not isinstance(source.get(p), str)]
     if missing:
         raise NotFound("site_file", ", ".join(missing[:10]))
-    return [{"path": p, "size": _text_bytes(source[p]), "content": source[p]} for p in wanted]
+    return [
+        {
+            "path": p,
+            "size": _text_bytes(source[p]),
+            "content": source[p],
+            "hash": file_hash(source[p]),
+        }
+        for p in wanted
+    ]
+
+
+async def read_source_file(*, workspace_id: str, user_id: str, pocket_id: str, path: Any) -> str:
+    """One draft file's current text for the raw read route. Only :data:`PLAN_FILE`
+    is served: any other path that passes :func:`normalize_path` is a 422
+    ``sites.source_file_not_allowed`` (a bad path is ``sites.project_bad_path``), a
+    missing file is a 404, and text past :data:`MAX_SOURCE_FILE_BYTES` or holding a NUL
+    is a 422. Same pocket resolution as :func:`read_files`."""
+    rel = normalize_path(path)
+    if rel != PLAN_FILE:
+        raise ValidationError(
+            "sites.source_file_not_allowed", f"Only {PLAN_FILE} can be read this way."
+        )
+    (file,) = await read_files(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, paths=[rel]
+    )
+    if file["size"] > MAX_SOURCE_FILE_BYTES:
+        raise ValidationError(
+            "sites.source_file_too_large",
+            f"{rel} is larger than {MAX_SOURCE_FILE_BYTES} bytes.",
+        )
+    if "\x00" in file["content"]:
+        raise ValidationError("sites.source_file_binary", f"{rel} is not a text file.")
+    return file["content"]
 
 
 async def write_files(
-    *, workspace_id: str, user_id: str, pocket_id: str, files: Any
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    files: Any,
+    base_hashes: Any = None,
+    trigger: str = "draft",
 ) -> dict[str, Any]:
     """Create or overwrite files: ``{pocket_id, written, created, lockfile_removed,
-    verification}``. Every path and size is checked before anything is saved; one bad
-    path saves nothing."""
+    hashes, verification}``. Every path and size is checked before anything is saved;
+    one bad path saves nothing. ``base_hashes`` (path -> hash read, or None for "must
+    not exist") turns a file that moved into a 409 instead of an overwrite."""
     if not isinstance(files, Mapping) or not files:
         raise ValidationError(
             "sites.project_no_files", "Send `files`: an object of {path: full contents}."
@@ -669,6 +809,7 @@ async def write_files(
                 "sites.project_bad_file", f"The contents of {raw!r} must be a string."
             )
         writes[normalize_path(raw)] = contents
+    bases = normalize_bases(base_hashes, writes)
     pocket = await load_project(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
     source = source_of(pocket)
     dropped = await save_changes(
@@ -677,24 +818,35 @@ async def write_files(
         source=source,
         writes=writes,
         label=f"Edited {len(writes)} files" if len(writes) > 1 else None,
+        bases=bases,
     )
     return {
         "pocket_id": pocket_id,
         "written": sorted(writes),
+        "sizes": {p: _text_bytes(writes[p]) for p in sorted(writes)},
         "created": sorted(p for p in writes if p not in source),
         "lockfile_removed": dropped,
+        "hashes": {p: file_hash(writes[p]) for p in sorted(writes)},
         "verification": await build_verification(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger
         ),
     }
 
 
 async def patch_file(
-    *, workspace_id: str, user_id: str, pocket_id: str, path: Any, edits: Any
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    path: Any,
+    edits: Any,
+    base_hash: str | None = None,
+    trigger: str = "draft",
 ) -> dict[str, Any]:
     """Apply ``[{old, new}]`` blocks to one existing file; each ``old`` must match the
     running text exactly once (``sites.service.apply_edits``), else nothing is saved.
-    ``{pocket_id, path, lockfile_removed, verification}``."""
+    ``base_hash`` (optional) is the file's hash as read: a file that moved is a 409.
+    ``{pocket_id, path, lockfile_removed, hashes, verification}``."""
     from pocketpaw_ee.sites.service import apply_edits
 
     if not isinstance(edits, list) or not edits:
@@ -715,22 +867,26 @@ async def patch_file(
     source = source_of(pocket)
     if not isinstance(source.get(rel), str):
         raise NotFound("site_file", rel)
+    bases: dict[str, str | None] = {rel: base_hash} if base_hash else {}
+    check_bases(source, bases)
     new_text = apply_edits(source[rel], blocks)
     dropped = await save_changes(
-        user_id=user_id, pocket_id=pocket_id, source=source, writes={rel: new_text}
+        user_id=user_id, pocket_id=pocket_id, source=source, writes={rel: new_text}, bases=bases
     )
     return {
         "pocket_id": pocket_id,
         "path": rel,
         "lockfile_removed": dropped,
+        "hashes": {rel: file_hash(new_text)},
+        "sizes": {rel: _text_bytes(new_text)},
         "verification": await build_verification(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger
         ),
     }
 
 
 async def delete_files(
-    *, workspace_id: str, user_id: str, pocket_id: str, paths: Any
+    *, workspace_id: str, user_id: str, pocket_id: str, paths: Any, trigger: str = "draft"
 ) -> dict[str, Any]:
     """Delete files: ``{pocket_id, deleted, verification}``. Every path must exist
     (else 404, nothing deleted); package.json cannot be deleted."""
@@ -762,18 +918,22 @@ async def delete_files(
         "pocket_id": pocket_id,
         "deleted": rels,
         "verification": await build_verification(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger=trigger
         ),
     }
 
 
 __all__ = [
     "build_verification",
+    "check_bases",
     "delete_files",
+    "file_hash",
     "list_files",
     "load_project",
+    "normalize_bases",
     "patch_file",
     "read_files",
+    "read_source_file",
     "save_changes",
     "source_of",
     "write_files",
@@ -781,8 +941,10 @@ __all__ = [
     "LOCKFILES",
     "MAX_READ_CALL_BYTES",
     "MAX_READ_FILE_BYTES",
+    "MAX_SOURCE_FILE_BYTES",
     "MAX_WRITE_CALL_BYTES",
     "MAX_WRITE_FILE_BYTES",
+    "PLAN_FILE",
     "ProjectCliError",
     "apply_recipe",
     "check_project_totals",

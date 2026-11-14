@@ -1,9 +1,5 @@
 """SD-6 — the behavioural eval that gates every remaining /sites prompt cut.
 
-New package 2026-09-08 (feat/sites-design-skills).
-Updated 2026-09-27 (feat/sites-visual-research): layout scorers removed with the
-layout rules.
-
 WHAT THIS IS FOR. ``docs/design/drafts/2026-09-08-sites-system-prompt-diet.md``
 lists four slices that would take ~810 tokens out of a 14,094-token /sites create
 turn, and gates all four on a measurement that did not exist: does the prompt
@@ -36,21 +32,23 @@ and it runs in CI with no model and no key.
 WHAT IT MEASURES. One behaviour per rule the prompt spends tokens producing, so a
 cut that silently removes one is visible:
 
-  vision-ledger        the Creative Direction Declaration is stated (MODULE 1)
+  vision-ledger        the direction notes (Vision Ledger, Design Read) stay out
+                       of the shipped source (MODULE 1, ART DIRECTION)
   background           the page ground is not plain #fff / #000 (MODULE 2.B)
-  no-em-dash           zero em/en dashes in VISIBLE text (MODULE 4)
-  no-filler            no Elevate / Seamless / Unleash / Supercharge (MODULE 4)
-  no-placeholder       no John Doe / Acme / Lorem ipsum (MODULE 4)
+  no-em-dash           zero em dashes in VISIBLE text, en dashes only in
+                       numeric ranges (MODULE 4)
+  no-filler            no Elevate / Seamless / Unleash / Supercharge (SC-COPY)
+  no-placeholder       no John Doe / Acme / Lorem ipsum (SC-HONEST)
   measure-capped       body copy carries a max-width (design-taste 2.F, craft 1)
   floor-hit-area       interactive targets reach 44px (craft 5)
   floor-focus          a visible focus style survives (craft 5)
   floor-reduced-motion motion is gated on prefers-reduced-motion (craft 5)
-  rotation             two briefs in one run do not resolve to the same accent
-                       and the same nav (MODULE 2.G colour-consistency + the
-                       repetition ban that `sites-theme-system` exists to check)
+  rotation             two briefs in one industry do not resolve to the same
+                       palette (design-taste 2.E: variety is structural and
+                       comes from the subject, never one template recoloured)
 
 The last one is the only cross-fixture scorer, and it is the one a cut to
-`sites-theme-system` or to the rotation language in PHASE 2 would break first.
+design-taste 2.E or to the variety language in PHASE 2 would break first.
 
 HOW TO RUN IT. There is no baseline in this repo yet, deliberately: this branch
 had no model credentials, and a fabricated baseline is worse than an absent one.

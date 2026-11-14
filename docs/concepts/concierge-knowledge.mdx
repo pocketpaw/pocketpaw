@@ -315,6 +315,21 @@ Everything in a file or a page is data. It is only ever extracted and quoted ins
 the knowledge block, never followed as an instruction. Like other owner uploads, it is
 never listed as a public "Source" under a reply, because it has no public URL.
 
+### Seeing what the concierge knows
+
+Paw Bar → Knowledge opens an index of everything above: every page the last sync
+read, with its sections, when it was read and how much text it holds; the pages it
+left out and why (too little text, no section compiled, a crawl error, or past the
+page cap: 60 pages for a hosted site, 25 for a connected site's crawl); each file and
+link; the pinned answers; and anything on the concierge agent's own scope. Opening a
+page or a file shows the compiled text the concierge searches. The routes are
+`…/knowledge/index` and `…/knowledge/article/{id}`; see the API reference.
+
+The concierge's agent in /agents shows the same view in its Knowledge tab. It is
+one store, not a copy: adding, removing or re-syncing in either place changes what
+both show. `GET /agents/{id}/knowledge` carries `site_id` and `foreign` for an agent
+bound to a site, which is how the editor knows to show it.
+
 ## What the visitor sees as sources
 
 A reply can end with a short "Sources" list — up to three of the site's own pages,

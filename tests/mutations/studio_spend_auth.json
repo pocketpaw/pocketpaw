@@ -4,13 +4,17 @@
     "file": "ee/pocketpaw_ee/cloud/studio/router.py",
     "find": "    language: str | None = Form(default=None, description=\"BCP-47 language hint (e.g. en-US)\"),\n    workspace_id: str = Depends(current_workspace_id),\n) -> schemas.TranscriptResponse:",
     "replace": "    language: str | None = Form(default=None, description=\"BCP-47 language hint (e.g. en-US)\"),\n) -> schemas.TranscriptResponse:",
-    "tests": ["tests/cloud/studio/test_studio_spend_routes_require_a_session.py"]
+    "tests": [
+      "tests/cloud/studio/test_studio_spend_routes_require_a_session.py"
+    ]
   },
   {
     "label": "drop the session from the music route",
     "file": "ee/pocketpaw_ee/cloud/studio/router.py",
-    "find": "@router.post(\"/music\", response_model=schemas.Generation)",
-    "replace": "@router.post(\"/music-renamed\", response_model=schemas.Generation)",
-    "tests": ["tests/cloud/studio/test_studio_spend_routes_require_a_session.py"]
+    "find": "    \"/music\",\n    response_model=schemas.Generation,\n",
+    "replace": "    \"/music-renamed\",\n    response_model=schemas.Generation,\n",
+    "tests": [
+      "tests/cloud/studio/test_studio_spend_routes_require_a_session.py"
+    ]
   }
 ]

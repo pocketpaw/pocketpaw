@@ -17,10 +17,16 @@
 # Invariants: the file tools refuse every engine but ``project`` (the other engines
 # have their own edit tools and path rules); every write queues the draft build of
 # the new source and answers ``verification.status: "pending"`` with the job id,
-# like the fast-edit contract; a recipe conflict writes nothing; secret VALUES are
+# like the fast-edit contract, while ``run_site_build`` is the explicit build that
+# retries a stored infrastructure failure (``force``) and says when it could only
+# replay the previous attempt's; a recipe conflict writes nothing; secret VALUES are
 # never written by any tool here — recipes return secret NAMES and the agent asks
 # the owner through ``request_site_secret`` (another lane; absent tools are named in
 # text only, never called from here).
+#
+# A successful write or patch of the repo-root ``PLAN.md`` (the ``sites-app-plan``
+# skill's plan) also records one chat artifact for the run (``plan_artifact_meta``,
+# replaced on each later save) so the user can open the plan from the reply.
 #
 # Agent text for Durable Objects (the realtime-room recipe): ``recipe_next_steps`` adds
 # the per-template entry wiring after an apply, and ``agent_error_text`` turns every
@@ -36,6 +42,7 @@ from typing import Any
 
 from pocketpaw.agents.mcp_arg_coercion import coerce_json_object_args
 from pocketpaw_ee.sites.capacity import reason_message
+from pocketpaw_ee.sites.site_secrets import is_platform_managed
 
 from ._audit import record_tool_call
 from .sites_create import (
@@ -106,6 +113,12 @@ PUBLISHED_PREVIEW_NOTE = (
     "get a new draft."
 )
 
+#: Prefixed to a failure the build lane replayed instead of retrying (retry limit spent).
+PREVIOUS_ATTEMPT_NOTE = (
+    "This is the previous attempt's result for these exact files, not a new build: the "
+    "retry limit is reached, so try again in a few minutes or edit the files."
+)
+
 
 def _draft_worker_note(record: dict[str, Any] | None) -> str:
     """Why the draft did not run its server code, when the owner can fix it: drafts
@@ -123,7 +136,9 @@ def _draft_worker_note(record: dict[str, Any] | None) -> str:
 
 
 SECRETS_RULE = (
-    "Never write a secret value into any file. For each secret name, call "
+    "Never write a secret value into any file. Signing secrets (BETTER_AUTH_SECRET, "
+    "SESSION_SECRET, AUTH_SECRET) and PAW_GATEWAY_TOKEN are created by Paw: "
+    "never request them or mention them to the owner. For any other secret name, call "
     "`request_site_secret` (pocket_id, name, description) so the owner fills it in; "
     "`list_site_secrets` shows which are set. If those tools are not available, tell "
     "the user which secrets the site needs and that they set them in the site's "
@@ -254,7 +269,7 @@ async def _begin(tool: str) -> tuple[str | None, str | None, dict | None]:
         status="ok",
         ok=True,
     )
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (gate := await _require_sites_plan_or_error(workspace_id, tool=tool)) is not None:
         return None, None, gate
     return workspace_id, user_id, None
 
@@ -296,7 +311,7 @@ async def _queue_build(workspace_id: str, user_id: str, pocket_id: str) -> dict[
     from pocketpaw_ee.sites import project_tools
 
     out = await project_tools.build_verification(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger="agent"
     )
     if out.get("status") == "pending":
         out["next"] = "call run_site_build to wait for it, or get_site_build_log to read it"
@@ -324,6 +339,13 @@ def _file_error(tool: str, exc: Exception) -> dict[str, Any]:
         return _error_response(
             f"{exc.code}: {exc.message}. Nothing was changed; call list_site_files to see the tree."
         )
+    if isinstance(exc, CloudError) and exc.code == "sites.project_file_conflict":
+        paths = [c.get("path") for c in (exc.details or {}).get("conflicts") or []]
+        return _error_response(
+            f"{exc.code}: {', '.join(p for p in paths if p)} changed since you read it "
+            "(the owner may be editing it). Nothing was saved. Call read_site_file again "
+            "and apply your change to the current text."
+        )
     return _cli_error(exc)
 
 
@@ -337,6 +359,7 @@ async def _persist(
     writes: dict[str, str] | None = None,
     deletes: list[str] | None = None,
     add_recipe: str | None = None,
+    admin_path: str | None = None,
     label: str | None = None,
 ) -> tuple[list[str], dict | None]:
     """``project_tools.save_changes`` as ``(lockfiles_dropped, error)``."""
@@ -350,6 +373,7 @@ async def _persist(
             writes=writes,
             deletes=deletes,
             add_recipe=add_recipe,
+            admin_path=admin_path,
             label=label,
         )
     except Exception as exc:  # noqa: BLE001
@@ -462,7 +486,8 @@ async def _start_site_from_template_handler(args: dict) -> dict:
             "canonical snippets). Follow it over your own framework defaults.",
             "Need a database, accounts or storage? list_site_recipes, then "
             "apply_site_recipe for each, before writing the features that use them.",
-            "Request each secret a recipe returns with request_site_secret.",
+            "Request each owner secret a recipe returns with request_site_secret; skip "
+            "signing secrets and PAW_GATEWAY_TOKEN, which Paw creates itself.",
             "Design before the first UI file: research real sites (the gate in your "
             "instructions), state the locked palette, type pairing and layout idea in "
             "one line, load pocketpaw-design-taste, then retheme the tokens file "
@@ -508,6 +533,23 @@ async def _list_site_recipes_handler(args: dict) -> dict:
     return _success_response({"ok": True, "recipes": recipes, "message": message})
 
 
+async def _mint_platform_secrets(workspace_id: str, pocket_id: str, names: list[str]) -> None:
+    """A recipe's platform secrets exist from the moment it is applied, so the Worker
+    reads them whether or not the build lists them. Never fails the apply: publish
+    mints them again."""
+    from pocketpaw_ee.integrations import bindings as integration_bindings
+    from pocketpaw_ee.sites import site_secrets
+
+    try:
+        await site_secrets.ensure_signing_secrets(
+            workspace_id=workspace_id, pocket_id=pocket_id, names=names
+        )
+        if integration_bindings.GATEWAY_TOKEN_NAME in names:
+            await integration_bindings.ensure_gateway_token(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("apply_site_recipe: platform secrets not minted yet", exc_info=True)
+
+
 async def _apply_site_recipe_handler(args: dict) -> dict:
     tool = "apply_site_recipe"
     workspace_id, user_id, err = await _begin(tool)
@@ -525,6 +567,26 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
 
     from pocketpaw_ee.sites import project_tools
     from pocketpaw_ee.sites import service as sites_service
+
+    # Where the owner page lives (``site_meta.admin_path``), for a recipe that makes
+    # one: the agent's own path, else the one already recorded, else the default.
+    admin_path: str | None = None
+    if args.get("admin_path") is not None:
+        try:
+            admin_path = project_tools.admin_path_or_error(args.get("admin_path"))
+        except ValueError as exc:
+            return _error_response(f"{tool}: {exc} Nothing was changed.")
+    if recipe_id in project_tools.OWNER_PAGE_RECIPES and admin_path is None:
+        meta = pocket.get("siteMeta") or pocket.get("site_meta") or {}
+        try:
+            admin_path = project_tools.admin_path_or_error(
+                meta.get("admin_path") if isinstance(meta, dict) else None
+            )
+        except ValueError:
+            # Nothing recorded, or a value that is not a plain site path.
+            admin_path = project_tools.DEFAULT_ADMIN_PATH
+    if recipe_id not in project_tools.OWNER_PAGE_RECIPES:
+        admin_path = None
 
     try:
         recipe = await project_tools.find_recipe(recipe_id)
@@ -575,7 +637,14 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
         "glue_tasks": result.get("agentTasks") or [],
         "verify": result.get("verify") or [],
     }
-    requests["secret_names"] = [s["name"] for s in requests["secrets"]]
+    # Signing secrets and the gateway token are Paw's to create (publish mints them),
+    # so only the rest are names the agent requests from the owner.
+    for s in requests["secrets"]:
+        s["set_by"] = "paw" if is_platform_managed(str(s["name"])) else "owner"
+    requests["secret_names"] = [s["name"] for s in requests["secrets"] if s["set_by"] == "owner"]
+    requests["platform_secret_names"] = [
+        s["name"] for s in requests["secrets"] if s["set_by"] == "paw"
+    ]
     if result.get("errors"):
         return _structured_error(
             {
@@ -613,12 +682,19 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
             }
         )
     if result.get("alreadyApplied") or not writes:
+        if admin_path:
+            _dropped, err = await _persist(
+                tool, workspace_id, user_id, pocket_id, source, admin_path=admin_path
+            )
+            if err:
+                return err
         return _success_response(
             {
                 "ok": True,
                 "status": "already_applied",
                 "recipe": recipe_id,
                 "written": [],
+                **({"admin_path": admin_path} if admin_path else {}),
                 **requests,
                 "next_steps": recipe_next_steps(recipe_id, template),
                 "message": f"{recipe_id} is already applied; nothing changed. {SECRETS_RULE}",
@@ -633,10 +709,12 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
         source,
         writes=writes,
         add_recipe=recipe_id,
+        admin_path=admin_path,
         label=f"Applied recipe {recipe_id}",
     )
     if err:
         return err
+    await _mint_platform_secrets(workspace_id, pocket_id, requests["platform_secret_names"])
     verification = await _queue_build(workspace_id, user_id, pocket_id)
     return _success_response(
         {
@@ -649,6 +727,7 @@ async def _apply_site_recipe_handler(args: dict) -> dict:
             "packages_added": result.get("packagesAdded") or [],
             "migrations": result.get("migrations") or [],
             "lockfile_removed": dropped,
+            **({"admin_path": admin_path} if admin_path else {}),
             **requests,
             "verification": verification,
             "next_steps": recipe_next_steps(recipe_id, template),
@@ -720,7 +799,7 @@ async def _read(tool: str, args: dict, paths: Any) -> dict:
     budget = project_tools.MAX_READ_CALL_BYTES
     for f in files:
         data = f["content"].encode("utf-8")
-        entry: dict[str, Any] = {"path": f["path"], "size": f["size"]}
+        entry: dict[str, Any] = {"path": f["path"], "size": f["size"], "hash": f["hash"]}
         if budget <= 0:
             entry["omitted"] = True
             meta.append(entry)
@@ -762,6 +841,42 @@ def _draft_body(result: dict[str, Any], message: str) -> dict[str, Any]:
     return _success_response(out)
 
 
+def plan_artifact_meta(pocket_id: str, size: int) -> dict[str, Any]:
+    """The chat artifact for a project site's PLAN.md: the ``deliver_artifact`` meta
+    keys plus ``src``, the raw read route the card opens (so it shows the CURRENT plan,
+    milestones ticked), and ``kind`` / ``pocket_id`` for the card."""
+    from urllib.parse import quote
+
+    from pocketpaw_ee.sites.project_tools import PLAN_FILE
+
+    return {
+        "file_id": f"site-file:{pocket_id}:{PLAN_FILE}",
+        "name": PLAN_FILE,
+        "mime": "text/markdown",
+        "size": size,
+        "src": f"/api/v1/sites/by-pocket/{quote(pocket_id, safe='')}/source-file?path={PLAN_FILE}",
+        "kind": "site_plan",
+        "pocket_id": pocket_id,
+    }
+
+
+def _record_plan_artifact(pocket_id: str, result: dict[str, Any]) -> None:
+    """After a successful write or patch: when the repo-root PLAN.md was among the
+    files saved, put it in chat as one artifact for the run (a later save replaces the
+    earlier entry). Best-effort, like ``deliver``: never fails the save."""
+    from pocketpaw_ee.sites.project_tools import PLAN_FILE
+
+    size = (result.get("sizes") or {}).get(PLAN_FILE)
+    if not isinstance(size, int):
+        return
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import record_delivered_artifact
+
+        record_delivered_artifact(plan_artifact_meta(pocket_id, size), replace=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("recording the PLAN.md artifact failed", exc_info=True)
+
+
 async def _write_site_files_handler(args: dict) -> dict:
     tool = "write_site_files"
     workspace_id, user_id, err = await _begin(tool)
@@ -769,7 +884,7 @@ async def _write_site_files_handler(args: dict) -> dict:
         return err
     from pocketpaw_ee.sites import project_tools
 
-    args = coerce_json_object_args(args, ("files",))
+    args = coerce_json_object_args(args, ("files", "base_hashes"))
     pocket_id = args.get("pocket_id")
     if not isinstance(pocket_id, str) or not pocket_id:
         return _error_response(f"{tool} requires a `pocket_id` (the project site).")
@@ -779,9 +894,12 @@ async def _write_site_files_handler(args: dict) -> dict:
             user_id=user_id,
             pocket_id=pocket_id,
             files=args.get("files"),
+            base_hashes=args.get("base_hashes"),
+            trigger="agent",
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
+    _record_plan_artifact(pocket_id, result)
     return _draft_body(result, "Saved to the draft; nothing is live.")
 
 
@@ -803,9 +921,12 @@ async def _patch_site_file_handler(args: dict) -> dict:
             pocket_id=pocket_id,
             path=args.get("path"),
             edits=args.get("edits"),
+            base_hash=args.get("base_hash") if isinstance(args.get("base_hash"), str) else None,
+            trigger="agent",
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
+    _record_plan_artifact(pocket_id, result)
     return _draft_body(result, "Saved to the draft; nothing is live.")
 
 
@@ -826,6 +947,7 @@ async def _delete_site_files_handler(args: dict) -> dict:
             user_id=user_id,
             pocket_id=pocket_id,
             paths=args.get("paths"),
+            trigger="agent",
         )
     except Exception as exc:  # noqa: BLE001
         return _file_error(tool, exc)
@@ -870,8 +992,14 @@ async def _run_site_build_handler(args: dict) -> dict:
     from pocketpaw_ee.sites import service as sites_service
 
     try:
+        # An explicit build: a stored infrastructure failure is tried again rather than
+        # replayed (the retry budget only stops poll loops).
         art = await sites_service.queue_project_build(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            trigger="agent",
+            force=True,
         )
     except CloudError as exc:
         return _error_response(agent_error_text(exc.code, exc.message))
@@ -883,7 +1011,7 @@ async def _run_site_build_handler(args: dict) -> dict:
         record = await _wait_for_build(pocket_id, job_id)
         if record and record.get("status") == "built":
             art = await sites_service.queue_project_build(
-                workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+                workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, trigger="agent"
             )
     status = (
         "built"
@@ -943,6 +1071,9 @@ async def _run_site_build_handler(args: dict) -> dict:
             f"Still {status} after {int(RUN_BUILD_WAIT_SEC)}s. Keep working and call "
             "run_site_build or get_site_build_log again shortly; do not report the site as built."
         )
+    if status == "failed" and art.get("build_previous_attempt"):
+        body["previous_attempt"] = True
+        body["message"] = f"{PREVIOUS_ATTEMPT_NOTE} {body['message']}"
     out = _with_text_blocks(body, blocks)
     if status == "failed":
         out["is_error"] = True
@@ -1076,10 +1207,13 @@ def make_project_tools(tool: Any) -> list[Any]:
             "Add one backend recipe to a project site: writes its files, packages, "
             "wrangler binding requests (names only), migrations and AGENTS.md section "
             "into the draft. Returns glue_tasks (do them, in order), secret names and "
-            "env names. For each secret call request_site_secret; NEVER write a secret "
+            "env names. For each owner secret call request_site_secret (never for signing "
+            "secrets or PAW_GATEWAY_TOKEN: Paw creates those); NEVER write a secret "
             "value into a file. On a conflict NOTHING is written and the conflicts are "
             "returned. Refused when the site's plan is below the recipe's plan. "
-            "`dry_run` shows what would change."
+            "`dry_run` shows what would change. For better-auth, `admin_path` is the "
+            "site path of the owner page you build (default /admin); Paw links the "
+            "owner there, so pass it again if you put the owner page elsewhere."
         ),
         {
             "type": "object",
@@ -1091,6 +1225,14 @@ def make_project_tools(tool: Any) -> list[Any]:
                     "description": "Recipe id from list_site_recipes.",
                 },
                 "dry_run": {"type": "boolean", "description": "Plan only; write nothing."},
+                "admin_path": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": (
+                        "better-auth only: the owner page's path on the site, e.g. "
+                        "/admin or /owner/orders. Default /admin."
+                    ),
+                },
             },
             "required": ["pocket_id", "recipe_id"],
             "additionalProperties": False,
@@ -1169,7 +1311,9 @@ def make_project_tools(tool: Any) -> list[Any]:
             "node_modules, .git, .paw/, paw-build.json and real .env / .dev.vars files "
             "are refused (secret values never go in the source). Changing package.json "
             "dependencies drops the stale lockfile. Saves to the draft and queues a "
-            "build (verification.status pending). Prefer patch_site_file for small edits."
+            "build (verification.status pending). Prefer patch_site_file for small edits. "
+            "Pass base_hashes with the hash read_site_file gave you so a file the owner "
+            "changed since is refused instead of overwritten."
         ),
         {
             "type": "object",
@@ -1179,6 +1323,14 @@ def make_project_tools(tool: Any) -> list[Any]:
                     "type": "object",
                     "additionalProperties": {"type": "string"},
                     "description": "{relative path: full file contents}.",
+                },
+                "base_hashes": {
+                    "type": "object",
+                    "additionalProperties": {"type": ["string", "null"]},
+                    "description": (
+                        "Optional {relative path: hash from read_site_file}; null means "
+                        "the file must not exist yet."
+                    ),
                 },
             },
             "required": ["pocket_id", "files"],
@@ -1213,6 +1365,10 @@ def make_project_tools(tool: Any) -> list[Any]:
                         "required": ["old", "new"],
                         "additionalProperties": False,
                     },
+                },
+                "base_hash": {
+                    "type": "string",
+                    "description": "Optional: the file's hash from read_site_file.",
                 },
             },
             "required": ["pocket_id", "path", "edits"],

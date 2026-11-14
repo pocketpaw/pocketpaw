@@ -22,44 +22,16 @@ Grammar must mirror ``ripple/src/lib/core/expression-resolver.ts``. Any
 new token / method added to the resolver should be added here too — the
 two files together are the contract.
 
-Changes:
-  - 2026-07-09 (RCR-3b, catalog gate fail-closed): added
-    ``CatalogUnavailableError`` (subclasses ``CatalogViolationError`` so
-    existing strict-path handlers block it) for the fail-closed posture in
-    ``pockets/service._gate_catalog`` when the manifest can't be fetched and
-    ``ripple_catalog_gate_require_manifest`` is enabled. The shared formatters
-    render a synthetic ``{"unavailable": True}`` violation as a clear message.
-  - 2026-06-19 (feat/typed-ripplespec-phase2): DUAL-PATH READER. Every public
-    spec reader (``validate_ripple_spec`` + ``_logged`` / ``_strict``,
-    ``validate_against_catalog_*``, ``validate_action_wiring_*``,
-    ``validate_required_props_*``, ``find_unreferenced_state_keys``) now accepts
-    ``RippleSpec | dict | None``. A new ``_as_flat_dict`` helper flattens a
-    typed ``RippleSpec`` to its BSON-equivalent dict so the existing whole-spec
-    tree walks run unchanged; a legacy dict passes through. Promote-on-read,
-    no migration.
-  - 2026-05-31 (constraint-zone enforcer): added the required-prop gate —
-    ``MissingRequiredPropError`` plus ``validate_required_props_strict``
-    (agent-generation path, RAISES) and ``..._logged`` (human/import path,
-    structured warn, does not block). Mirrors the catalog / action-wiring
-    strict/logged split. The pure walk + the manifest required-prop reader
-    live in OSS ``pocketpaw.ripple.manifest``; this module supplies the
-    EE-side strict/logged wiring + the agent-readable error formatting. It
-    is the rippleSpec analogue of the genesis "Constraint Zones" 🔒 HARD
-    ``required_fields`` zone.
-  - 2026-05-30 (issue #1301): added ``find_unreferenced_state_keys`` —
-    a pure ui-walk collector (mirrors ``find_unwired_live_buttons``) that
-    returns top-level ``state`` keys no ui node references. Closes the
-    silent-orphan-state gap where an add-widget intent landing as a
-    state-only merge patch persisted with nothing rendering it. Used by
-    ``pockets/service.merge_spec`` to emit a NON-BLOCKING warning.
-  - 2026-05-22 (Increment 5): added the catalog-as-allowlist gate —
-    ``CatalogViolationError`` plus ``validate_against_catalog_strict``
-    (agent-generation path, RAISES) and ``..._logged`` (human/import
-    path, structured warn, does not block). Mirrors the
-    ``validate_ripple_spec_strict`` / ``..._logged`` split. The catalog
-    walk + the embed URL/host policy live in OSS ``pocketpaw.ripple.manifest``;
-    this module supplies the EE-side strict/logged wiring + the
-    agent-readable error formatting.
+Beyond expressions, it wires the OSS manifest walkers in
+``pocketpaw.ripple.manifest`` (catalog allow-list + embed policy, action
+wiring, required props) into two modes each: ``..._strict`` raises a typed
+error for the agent-generation path (``CatalogUnavailableError`` when the
+manifest cannot be fetched and ``ripple_catalog_gate_require_manifest`` is on)
+and ``..._logged`` warns per violation without blocking (human / import path).
+Every reader accepts ``RippleSpec | dict | None`` via ``_as_flat_dict``.
+``find_unreferenced_state_keys`` reports state keys no ui node reads, and
+``log_chat_spec_quality`` writes one log-only quality line per chat card
+(unknown props, missing required props) without blocking or changing it.
 """
 
 from __future__ import annotations
@@ -74,8 +46,10 @@ from pocketpaw.bundled_templates.schema import RippleSpec
 from pocketpaw.ripple.manifest import (
     check_embed_nodes_in_spec,
     find_unwired_live_buttons,
+    get_manifest,
     validate_action_verbs,
     validate_against_catalog,
+    validate_against_manifest,
     validate_required_props,
 )
 
@@ -1032,3 +1006,55 @@ __all__ = [
     "validate_ripple_spec_logged",
     "validate_ripple_spec_strict",
 ]
+
+
+async def log_chat_spec_quality(spec: dict[str, Any] | None, *, run_id: str | None = None) -> None:
+    """Log one ``ripple_chat_spec.quality`` line for a chat card: node count,
+    widget types, unknown props and missing required props per type.
+
+    Log-only: never raises, never blocks, never changes the spec
+    (``apply_aliases=False``). A missing manifest skips the check silently.
+    """
+    try:
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        manifest = await get_manifest(
+            settings.ripple_manifest_url, ttl_seconds=settings.ripple_manifest_ttl_seconds
+        )
+        if not manifest or not isinstance(spec, dict):
+            return
+        flat = _as_flat_dict(spec)
+        unknown = validate_against_manifest(flat, manifest, apply_aliases=False)
+        missing = validate_required_props(flat, manifest)
+        types: list[str] = []
+
+        def _collect(node: Any) -> None:
+            if not isinstance(node, dict):
+                return
+            if isinstance(node.get("type"), str):
+                types.append(node["type"])
+            for key in ("children", "else_children"):
+                for child in node.get(key) or []:
+                    _collect(child)
+
+        _collect(flat.get("ui") if isinstance(flat, dict) else None)
+        log.info(
+            "ripple_chat_spec.quality",
+            extra={
+                "run_id": run_id,
+                "node_count": len(types),
+                "widget_types": sorted(set(types)),
+                "unknown_prop_count": sum(len(i.get("unknown_props") or []) for i in unknown),
+                "unknown_props": sorted(
+                    {f"{i.get('type')}.{p}" for i in unknown for p in i.get("unknown_props") or []}
+                ),
+                "item_alias_count": sum(len(i.get("item_issues") or []) for i in unknown),
+                "missing_required_count": sum(len(i.get("missing") or []) for i in missing),
+                "missing_required": sorted(
+                    {f"{i.get('type')}.{p}" for i in missing for p in i.get("missing") or []}
+                ),
+            },
+        )
+    except Exception:  # noqa: BLE001 — a quality log line must never break a reply
+        log.debug("ripple_chat_spec.quality failed", exc_info=True)

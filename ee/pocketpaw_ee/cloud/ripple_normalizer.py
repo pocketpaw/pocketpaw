@@ -1,52 +1,30 @@
-"""Minimal ripple spec normalizer — ensures envelope fields and widget IDs.
+"""Ripple spec normalizer: the one repair pass every rippleSpec goes through.
 
-Changes: 2026-05-21 (#1172) — ``normalize_ripple_spec`` now stamps a
-stable ``n_xxxxxxxx`` id on every node of a UISpec ``ui`` tree (and
-each ``panes`` value) via ``spec_ops.ensure_ids``. Every persist path
-routes through this normalizer, so stored specs always carry node ids
-and the chat agent can address nodes with granular edit ops. Previously
-ids were minted only at the start of a granular mutation op, leaving a
-freshly created pocket's tree id-less and unaddressable.
+Chat cards (``chat/runs/run_core.py``), the shared agent bridge and every
+pocket persist/read path in ``pockets/`` call ``normalize_ripple_spec``, so a
+repair added here covers all of them. It accepts a typed ``RippleSpec`` or a
+flat dict and always returns a flat dict (the persisted and wire shape).
 
-Changes: 2026-05-22 (PR #1177, RFC 04 alpha) — ``normalize_ripple_spec``
-now runs ``_lift_rest_sources`` before everything else. The
-pocket-authoring agent reliably emits a hallucinated data-source shape:
-a ``rippleSpec.tool_specs`` REST list (with invented ``kind`` / ``url``
-/ ``auto_fetch`` / ``into`` fields) instead of the RFC 04
-``rippleSpec.sources`` block, and refresh buttons wired with a ``source_id``
-field instead of ``source``. The runtime reads only ``sources`` and only
-``handler.source``, so that output is inert. Prompt guidance has not
-beaten the model's prior, so we translate the output deterministically:
-lift the REST entries into ``sources`` and repair the button handlers.
+What it does, in order:
 
-Changes: 2026-05-22 (RFC 05 M2a) — ``normalize_ripple_spec`` now runs
-``_lift_write_actions`` right after ``_lift_rest_sources``. The authoring
-agent emits a write the same hallucinated way it emits a read: an inline
-``{action: "api", method: "POST", url: "/x", body: {...}}`` handler
-instead of a ``rippleSpec.actions`` write binding triggered by
-``call_binding``. We lift any such handler whose ``url`` is a RELATIVE
-path into the ``actions`` block and rewrite the handler to
-``call_binding``. An ABSOLUTE-URL ``api`` call is a DIFFERENT intent (a
-third-party endpoint) and is left as ``api`` — never redirected onto the
-pocket's credentialed backend. ``call_binding`` handlers wired with the
-wrong binding-name field (``action_id`` / ``name``) are repaired to
-``binding``.
+- Lifts the authoring agent's invented REST read shape (``tool_specs``,
+  ``source_id`` buttons, ad-hoc interval keys) into the RFC 04 ``sources``
+  block, and relative-URL inline ``api`` writes into the RFC 05 ``actions``
+  block with ``call_binding`` handlers. Absolute-URL ``api`` calls are a
+  third-party intent and stay as they are.
+- Fills the envelope (``lifecycle``, ``title``/``name``, ``color``,
+  ``metadata``) and finds the ui tree under ``ui``, a misnamed alias
+  (``root``/``tree``/...), a bare root node, or ``panes``.
+- Walks every node fixing control-flow misnames: ``each`` reads ``items`` /
+  ``item_as`` / ``index_as`` only at node level, so copies the agent put in
+  ``props`` are lifted (node level wins) and a ``bind`` alias becomes
+  ``items``; ``if`` gets its ``condition`` from ``bind``/``when``/``if``.
+  Dead ``entity-detail`` actions are dropped.
+- Stamps a stable ``n_xxxxxxxx`` id on every ui node so edit ops can
+  address it.
 
-Changes: 2026-05-22 (RFC 04 M3) — ``_lifted_source_entry`` now carries an
-interval through. The authoring agent declares "poll every N seconds"
-under any of several invented keys (``interval`` / ``interval_seconds``
-/ ``poll_seconds`` / …); ``_coerce_interval`` picks the first that parses
-to a positive int, writes it as ``refresh_interval_seconds`` on the
-lifted source, and appends ``"interval"`` to its refresh policy. The
-interval scheduler floors a sub-minimum value at run time.
-
-Changes: 2026-06-19 (feat/typed-ripplespec-phase2) — DUAL-PATH READER.
-``normalize_ripple_spec`` now accepts ``RippleSpec | dict | None``. A typed
-``RippleSpec`` is flattened to its BSON-equivalent dict via ``to_flat_dict``
-at entry; the function ALWAYS returns a flat dict (never a ``RippleSpec``) so
-the persisted document and the wire stay ``Record<string, any>`` — the
-no-migration / byte-equivalent invariant. All existing tree repairs operate
-on the flat dict, unchanged.
+Invariant: pure and idempotent. Input is never mutated, and a spec already
+in canonical shape comes back structurally unchanged (plus ids).
 """
 
 from __future__ import annotations
@@ -530,6 +508,10 @@ def _short_id() -> str:
     return secrets.token_hex(4)
 
 
+# Fields Ripple reads only at node level on ``each`` (never from props).
+_EACH_NODE_FIELDS = ("items", "item_as", "index_as")
+
+
 def _fix_control_flow_node(node: dict[str, Any]) -> dict[str, Any]:
     """Fix node-level control-flow field misnames the agent commonly
     gets wrong on `each` and `if`.
@@ -546,6 +528,16 @@ def _fix_control_flow_node(node: dict[str, Any]) -> dict[str, Any]:
     shape pass through unchanged.
     """
     ntype = node.get("type")
+    props = node.get("props")
+    if ntype == "each" and isinstance(props, dict):
+        # Ripple ignores loop fields inside props, so the loop renders
+        # nothing. Lift them; a node-level value wins and the props copy goes.
+        misplaced = [k for k in _EACH_NODE_FIELDS if k in props]
+        if misplaced:
+            node = {**node, "props": {k: v for k, v in props.items() if k not in misplaced}}
+            for key in misplaced:
+                node.setdefault(key, props[key])
+            log.info("ripple_normalizer: lifted each props %s to node level", misplaced)
     if ntype == "each" and "items" not in node:
         # `bind: "todos"` → `items: "todos"` (renderer accepts bare paths
         # and `{state.foo}` templates equivalently — the resolver strips

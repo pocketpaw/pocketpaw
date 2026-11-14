@@ -2,19 +2,14 @@
 # from shipped websites, for grounding generated UI in evidence rather than
 # model defaults.
 #
-# Updated: 2026-09-27 (feat/sites-visual-research) — ``get_screen_image`` reads
-# a screen's screenshot through ``refero_get_screen_image`` (an MCP image block,
-# not JSON) and ``IMAGE_HOSTS`` names where style previews live, so the EE
-# server's ``view_reference`` can hand the agent the picture instead of a URL it
-# cannot open.
-#
-# Created: 2026-09-15 (feat/refero-design-research). Paw Sites' anti-slop
-# surface is built almost entirely from PROHIBITIONS — the 2026-09-12 audit
-# counted 32 of them, concentrated in one skill embedded on the create path
-# only. A prohibition list bounds how bad output gets; a reference sets what
-# good looks like. Refero supplies the reference: a style carries colour ROLES,
-# a type scale, spacing, elevation and explicit do/don't rules extracted from a
-# page that actually shipped.
+# A prohibition list bounds how bad output gets; a reference sets what good
+# looks like. A Refero style carries colour ROLES, a type scale, spacing,
+# elevation and explicit do/don't rules extracted from a page that actually
+# shipped. ``get_screen_image`` reads a screen's screenshot through
+# ``refero_get_screen_image`` (an MCP image block, not JSON) and ``IMAGE_HOSTS``
+# names where style previews live, so the EE server's ``view_reference`` can
+# hand the agent the picture instead of a URL it cannot open. The method for
+# using these results on /sites lives in the bundled `sites-references` skill.
 #
 # SHAPE: this module is the single code path, surfaced two ways — the
 # ``ReferoStylesTool`` / ``ReferoScreensTool`` BaseTools here for the non-SDK

@@ -98,18 +98,26 @@ def test_inline_prompt_does_not_forbid_buttons():
     assert "do not include button" not in p
 
 
-def test_inline_prompt_composes_shared_design_language():
-    """The inline prompt splices in the shared widget catalog and
-    use-the-widget rule from ``pocketpaw.ripple._design`` rather than a
-    hand-maintained subset. A regression here (e.g. a broken ``_design``
-    import) would otherwise only surface as a runtime ImportError."""
-    from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
+def test_chat_prompt_composes_the_paw_bar_widget_block():
+    """The chat prompt wraps core's chat-only head and tail around the widget
+    block the Paw Bar concierge generates from the manifest, rather than a
+    hand-maintained catalog. A broken import surfaces here, not at runtime."""
+    from pocketpaw_ee.cloud.chat.agent_service import chat_ripple_prompt
+    from pocketpaw_ee.paw_bar import widget_relevance
+    from pocketpaw_ee.paw_bar.chat_profile import CHAT_PROFILE
+    from pocketpaw_ee.paw_bar.concierge_runtime import ripple_rules
 
-    p = INLINE_RIPPLE_SYSTEM_PROMPT
-    assert "# WIDGET CATALOG" in p
-    assert "# USE-THE-WIDGET RULE" in p
-    assert WIDGET_CATALOG in p
-    assert USE_THE_WIDGET_RULE in p
+    from pocketpaw.ripple._inline import INLINE_RIPPLE_PROMPT_HEAD, INLINE_RIPPLE_PROMPT_TAIL
+
+    p = chat_ripple_prompt()
+    assert p.startswith(INLINE_RIPPLE_PROMPT_HEAD)
+    assert p.endswith(INLINE_RIPPLE_PROMPT_TAIL)
+    block = "\n".join([*widget_relevance.core_lines(), *widget_relevance.index_lines()])
+    assert "\n".join(widget_relevance.core_lines()) in p
+    assert "\n".join(widget_relevance.index_lines()) in p
+    assert block
+    assert "\n".join(ripple_rules(CHAT_PROFILE)) in p
+    assert "# WIDGET CATALOG" not in INLINE_RIPPLE_SYSTEM_PROMPT
 
 
 def test_inline_prompt_requires_widget_help_before_emit():

@@ -33,6 +33,7 @@ from pocketpaw_ee.sites.transfer import (
     STEP_FINALIZE,
     STEP_OWNERSHIP,
     STEP_RECORDS,
+    STEP_SECRETS,
     TRANSFER_STEPS,
     TransferRefused,
     TransferStepFailed,
@@ -73,12 +74,16 @@ class _Site:
 class _Deps:
     """The side effects, recorded in call order so the ordering can be asserted."""
 
-    def __init__(self, *, fail_on: str | None = None, records_moved: bool = True):
+    def __init__(
+        self, *, fail_on: str | None = None, records_moved: bool = True, secrets_moved: int = 2
+    ):
         self.calls: list[str] = []
         self.fail_on = fail_on
         self.records_moved = records_moved
+        self.secrets_moved = secrets_moved
         self.pocket_moves: list[tuple[str, str, str]] = []
         self.record_moves: list[tuple[str, str, str]] = []
+        self.secret_moves: list[tuple[str, str]] = []
 
     def now(self):
         return datetime(2026, 9, 12, tzinfo=UTC)
@@ -98,6 +103,13 @@ class _Deps:
         self.calls.append("move_records")
         self.record_moves.append((site_id, source_workspace_id, destination_workspace_id))
         return self.records_moved
+
+    async def move_secrets(self, *, pocket_id, destination_workspace_id):
+        if self.fail_on == "move_secrets":
+            raise RuntimeError("mongo said no")
+        self.calls.append("move_secrets")
+        self.secret_moves.append((pocket_id, destination_workspace_id))
+        return self.secrets_moved
 
 
 def _saver(saves):
@@ -385,7 +397,7 @@ async def test_ownership_moves_before_the_customers_data():
         deps=deps,
         save=_saver([]),
     )
-    assert deps.calls == ["move_pocket", "move_records"]
+    assert deps.calls == ["move_pocket", "move_records", "move_secrets"]
 
 
 async def test_leads_are_moved_from_the_minting_workspace():
@@ -475,7 +487,7 @@ async def test_the_ledger_is_persisted_after_every_step():
         save=_saver(saves),
     )
     assert len(saves) == len(TRANSFER_STEPS)
-    assert [len(s) for s in saves] == [1, 2, 3, 4]
+    assert [len(s) for s in saves] == [1, 2, 3, 4, 5]
 
 
 async def test_a_failure_stops_at_that_step_and_keeps_what_ran():
@@ -510,7 +522,68 @@ async def test_a_resumed_transfer_skips_what_the_ledger_records():
         save=_saver([]),
     )
     assert deps.pocket_moves == []
-    assert deps.calls == ["move_records"]
+    assert deps.calls == ["move_records", "move_secrets"]
+
+
+async def test_the_sites_secrets_move_to_the_destination_after_ownership():
+    """Per-site secrets are keyed by the pocket's workspace. Left behind, the next
+    publish in the destination deploys with none of them and the rows sit orphaned
+    in a tenant that no longer owns the site.
+
+    Mutation that must break this: drop ``STEP_SECRETS`` from ``TRANSFER_STEPS``.
+    """
+    site = _offered()
+    deps = _Deps()
+    await run_transfer(
+        site=site,
+        destination_workspace_id="ws-dest",
+        accepting_user_id="user-recipient",
+        deps=deps,
+        save=_saver([]),
+    )
+    assert deps.secret_moves == [("pk-1", "ws-dest")]
+    assert site.transfer_ledger[STEP_SECRETS] == OUTCOME_DONE
+    assert deps.calls.index("move_secrets") > deps.calls.index("move_pocket")
+
+
+async def test_no_secrets_is_recorded_as_nothing_to_do():
+    site = _offered()
+    await run_transfer(
+        site=site,
+        destination_workspace_id="ws-dest",
+        accepting_user_id="user-recipient",
+        deps=_Deps(secrets_moved=0),
+        save=_saver([]),
+    )
+    assert site.transfer_ledger[STEP_SECRETS] == OUTCOME_SKIPPED
+
+
+async def test_a_failed_secret_move_stops_the_transfer_and_resumes_there():
+    """The transfer does not finish (no ``finalize``) with the secrets still in the
+    source, and a re-accept moves them without redoing the earlier steps."""
+    site = _offered()
+    with pytest.raises(TransferStepFailed) as exc:
+        await run_transfer(
+            site=site,
+            destination_workspace_id="ws-dest",
+            accepting_user_id="user-recipient",
+            deps=_Deps(fail_on="move_secrets"),
+            save=_saver([]),
+        )
+    assert exc.value.reason == "secrets:runtimeerror"
+    assert STEP_SECRETS not in site.transfer_ledger
+    assert STEP_FINALIZE not in site.transfer_ledger
+
+    second = _Deps()
+    await run_transfer(
+        site=site,
+        destination_workspace_id="ws-dest",
+        accepting_user_id="user-recipient",
+        deps=second,
+        save=_saver([]),
+    )
+    assert second.calls == ["move_secrets"]
+    assert site.transfer_status == STATUS_NONE
 
 
 async def test_the_failure_cause_is_a_token_not_provider_text():

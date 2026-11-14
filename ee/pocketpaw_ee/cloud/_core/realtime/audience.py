@@ -302,6 +302,8 @@ class AudienceResolver:
         # panel needs to light up for the receiver and clear for everyone on
         # end. Notes posting also fans out so peer tabs can scroll to the
         # newly-created meeting-notes message without a manual refetch.
+        # assistant_state is Ask Paw's per-question state; every member sees
+        # who asked and what Paw is doing, since the answer is spoken to all.
         # participant_joined / participant_left keep the pre-join roster chip
         # ("who's already in the call") honest for members who haven't joined
         # yet. The joiner is NOT excluded: their own tab needs the roster too,
@@ -310,6 +312,7 @@ class AudienceResolver:
         if t in {
             "call.started",
             "call.ended",
+            "call.assistant_state",
             "call.notes_posted",
             "call.participant_joined",
             "call.participant_left",
@@ -453,6 +456,10 @@ class AudienceResolver:
         # and purpose are the owner's business, not workspace news.
         if t in {"site.secret_requested", "site.secret_updated", "site.integration_changed"}:
             return list(dict.fromkeys(u for u in (d.get("owner"), d.get("user_id")) if u))
+
+        # --- Site AI budget threshold crossed: the site owner only ---------------
+        if t == "site.ai_budget":
+            return [d["owner"]] if d.get("owner") else []
 
         # --- Site templates (user-saved; private, workspace or public) ----------
         # One recipient, named by the service in ``user_id`` (the owner, or the

@@ -5,8 +5,9 @@
 # ``model_validate``s at entry; Response models are the wire dicts the service
 # returns. ``command_refusal`` is the factory's argv[0] allowlist for charter
 # checks/recipes (the develop station re-checks it before exec). Covers mandate
-# create/read (charter incl. checks + recipes, the ``upstream`` patrol's
-# pinned-dependency watch list, and the crew roster), the crew route, feedback
+# create/read (charter incl. checks + recipes and the line's Claude ``model``, the
+# ``upstream`` patrol's pinned-dependency watch list, and the crew roster), the
+# narrow charter patch (model + two budget caps), the crew route, feedback
 # intake + sightings, the shift trigger, plan resolution, pawprints, the
 # autopilot toggle, and the digest query.
 
@@ -17,14 +18,16 @@ import re
 import shlex
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pocketpaw_ee.cloud.mandates.domain import (
     Cadence,
+    CharterModel,
     CrewRole,
     CrewSetup,
     KpiDirection,
     MandateStatus,
+    RunKind,
     ShiftState,
 )
 
@@ -92,6 +95,13 @@ class CharterRequest(BaseModel):
     recipes: dict[str, str] = Field(default_factory=dict)
     # The GitHub ``issues`` patrol takes an open issue carrying one of these.
     issue_labels: list[str] = Field(default_factory=list, max_length=20)
+    # ``feature-lead``: one lead run per line of free feature issues, no foreman, no
+    # human plan gate (``lead_planner``). ``task`` keeps the foreman.
+    run_kind: RunKind = "task"
+    # The Claude model the line's cloud sessions start on; unset = the CLI default.
+    model: CharterModel | None = None
+    # A lead line plans no ``p3`` issue (out of the beta).
+    beta_only: bool = False
 
     @field_validator("checks")
     @classmethod
@@ -108,6 +118,44 @@ class CharterRequest(BaseModel):
                 raise ValueError("recipe names must be non-empty")
             _require_argv(cmd)
         return v
+
+
+class PatchBudgetRequest(BaseModel):
+    """The two budget caps ``PATCH .../charter`` may change; an omitted one stays.
+    ``max_in_flight: null`` clears it (reads as ``max_tasks_per_shift``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_tasks_per_shift: int | None = Field(default=None, ge=1, le=20)
+    max_in_flight: int | None = Field(default=None, ge=1, le=20)
+
+    @field_validator("max_tasks_per_shift")
+    @classmethod
+    def _shift_cap_set(cls, v: int | None) -> int:
+        if v is None:
+            raise ValueError("max_tasks_per_shift cannot be cleared")
+        return v
+
+
+class PatchCharterRequest(BaseModel):
+    """Body for ``PATCH /belt/mandates/{id}/charter``: the line's ``model``,
+    two budget caps and ``beta_only``, nothing else. Only the fields sent change
+    (``model: null`` clears it); an empty body or any other field is refused."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: CharterModel | None = None
+    budget: PatchBudgetRequest | None = None
+    beta_only: bool = False
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> PatchCharterRequest:
+        if not self.model_fields_set or (
+            self.model_fields_set == {"budget"}
+            and (self.budget is None or not self.budget.model_fields_set)
+        ):
+            raise ValueError("nothing to change: send model, budget caps and/or beta_only")
+        return self
 
 
 def _require_argv(cmd: str) -> None:
@@ -434,6 +482,8 @@ __all__ = [
     "MandateHealth",
     "MandateListResponse",
     "MandateSummaryResponse",
+    "PatchBudgetRequest",
+    "PatchCharterRequest",
     "PlanDecision",
     "PawprintResponse",
     "PawprintsListResponse",

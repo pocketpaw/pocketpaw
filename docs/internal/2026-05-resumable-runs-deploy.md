@@ -153,12 +153,32 @@ Two-step rollback, web-first:
 Rollback is independent of any data migration: the `chat_runs` collection
 schema is identical between tiers, and the Redis Stream layout is unchanged.
 
-## Crash policy
+## Shutdown and crash policy
 
-`WorkerSettings.max_tries = 1` — no auto-retry. A job that raises lands as
-`failed` (or `interrupted` if killed mid-execution). LLM token streams cannot
-be resumed mid-generation, so silently re-running would double-bill and risk
-emitting a partial duplicate. The user decides via Retry.
+**SIGTERM drains.** The worker supervisor stops every lane from claiming new jobs
+and waits for running ones to finish, up to `POCKETPAW_WORKER_DRAIN_SECONDS`
+(default 300; `0` cancels at once). The container's stop grace period must be
+longer than that, or Docker SIGKILLs mid-drain: set `stop_grace_period: 6m` on
+the `worker` service in the Coolify compose. While it drains, no other worker
+is consuming, so new messages wait in the queue; that is why the default is
+short of the 30-minute job timeout.
+
+**One retry for a run the worker killed.** A chat run still going when the
+drain window ends is cancelled. If it called no tools and is on its first
+attempt, it goes back to `queued` (`attempt` 2, `requeued_at` stamped, no
+partial message saved) and its stream gets a non-terminal `retrying` frame
+(`reason: "system_restart"`). `execute_run_job` allows arq two tries, so the
+next worker re-runs it from the top; that try skips the run-start gates that
+spend (guest turn, daily turns, early-access reservation) because attempt 1
+already paid them, and the run is billed once, for the attempt that finished.
+A client should drop the text it shows when it sees `retrying`.
+
+**Everything else is not retried.** `WorkerSettings.max_tries = 1` for every
+other job. A run killed by its own `job_timeout`, a run that already called a
+tool (re-running could repeat a side effect), and a run on its second attempt
+end `interrupted` with their partial saved. A run that raises lands as
+`failed`. LLM token streams cannot be resumed mid-generation, so the user
+decides via Retry.
 
 ## Operational notes
 
@@ -174,7 +194,8 @@ emitting a partial duplicate. The user decides via Retry.
   `POCKETPAW_CLOUD_RUN_HEARTBEAT_SECONDS` while it drives a run, so a long but
   healthy run is never swept. The sweep writes conditionally, so it can't
   overwrite a run the worker has just finished, and a queued run it interrupts
-  is not driven later (`mark_running` only claims `queued` runs).
+  is not driven later (`mark_running` only claims `queued` runs). A requeued
+  run is timed from `requeued_at`, not `createdAt`.
 - A run that ends `failed`, `cancelled` or `interrupted` (including arq's
   `job_timeout`) saves the text it had already streamed as an assistant
   message with `run_status` set, and the run's `assistant_message_id` points

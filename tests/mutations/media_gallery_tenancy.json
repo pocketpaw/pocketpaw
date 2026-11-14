@@ -38,7 +38,7 @@
   {
     "label": "show every workspace's file in the listing",
     "file": "ee/pocketpaw_ee/cloud/media/storage.py",
-    "find": "    owner = owner_of(name)\n    if owner is None:\n        return True  # legacy, untagged — see the note above\n    return workspace_id is not None and owner == capture_owner_token(workspace_id)",
+    "find": "    owner = owner_of(name)\n    if owner is None or not workspace_id:\n        return False\n    return owner == capture_owner_token(workspace_id)",
     "replace": "    return True",
     "tests": [
       "tests/cloud/test_media_gallery_tenancy.py"
@@ -58,6 +58,33 @@
     "file": "ee/pocketpaw_ee/cloud/media/router.py",
     "find": "        if not storage.visible_to(f.name, workspace_id):\n            continue",
     "replace": "        pass",
+    "tests": [
+      "tests/cloud/test_media_gallery_tenancy.py"
+    ]
+  },
+  {
+    "label": "list untagged legacy files to every workspace, the UX-6 leak",
+    "file": "ee/pocketpaw_ee/cloud/media/storage.py",
+    "find": "    if owner is None or not workspace_id:\n        return False",
+    "replace": "    if owner is None:\n        return True\n    if not workspace_id:\n        return False",
+    "tests": [
+      "tests/cloud/test_media_gallery_tenancy.py"
+    ]
+  },
+  {
+    "label": "stop stamping the owner onto a generated file",
+    "file": "ee/pocketpaw_ee/cloud/media/storage.py",
+    "find": "    prefix = capture_name_prefix(workspace_id) if capture else owned_name_prefix(workspace_id)",
+    "replace": "    prefix = capture_name_prefix(workspace_id) if capture else \"\"",
+    "tests": [
+      "tests/cloud/test_media_gallery_tenancy.py"
+    ]
+  },
+  {
+    "label": "accept a generated write with no owner",
+    "file": "ee/pocketpaw_ee/cloud/media/storage.py",
+    "find": "    if not workspace_id:\n        raise ValueError(\"save_generated needs the owning workspace_id\")\n",
+    "replace": "",
     "tests": [
       "tests/cloud/test_media_gallery_tenancy.py"
     ]

@@ -1,38 +1,47 @@
 # src/pocketpaw/skills/materialize.py
-# Created: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) —
-# per-run materialization of a NAMED subset of installed skills into a
-# throwaway Claude Code *local plugin* directory. This is the keystone that
-# makes ``SurfaceProfile.skill_names`` LIVE for the claude_agent_sdk backend.
+# Per-run materialization of a NAMED subset of skills into a throwaway Claude
+# Code *local plugin* directory. This is what makes ``SurfaceProfile.skill_names``
+# a real allowlist for the claude_agent_sdk backend.
 #
 # Why a local plugin (not ``~/.claude/skills`` and not the SDK ``skills=``
 # option): the SDK backend launches with ``setting_sources=[]`` for persona
 # isolation, which DISABLES filesystem skill discovery AND the ``skills=``
-# option. A local plugin dir (a dir carrying ``.claude-plugin/plugin.json`` +
-# ``skills/<slug>/SKILL.md``) is the ONLY channel that survives that isolation,
-# exactly as the bundled-skills plugin does. We build a FRESH plugin per run so
-# only the entity's named skills are surfaced — never the full installed set.
+# option. A local plugin dir (``.claude-plugin/plugin.json`` +
+# ``skills/<slug>/SKILL.md``) is the ONLY channel that survives that isolation.
+# Only the entity's named skills are copied in, so only they surface.
 #
-# Modified: 2026-07-25 (feat/bundled-skills-per-surface) — named-skill
-# resolution gained a BUNDLED fallback. ``SkillLoader.SKILL_PATHS`` scans
-# ``~/.agents``, ``~/.claude`` and ``~/.pocketpaw`` but NOT the packaged
-# ``_bundled/skills/``, so a surface could only name a bundled skill when the
-# boot-time ~/.claude/skills mirror happened to be on
-# (``POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS`` turns it off). ``_bundled_skill_dirs``
-# reads the package directly as a source of LAST resort — an installed skill of
-# the same name still shadows it, so a user override keeps winning. This is
-# what lets the SDK backend stop loading the bundled plugin wholesale whenever
-# a surface names skills (see ``ClaudeSDKBackend._should_load_bundled_plugin``),
-# which is what finally makes ``SurfaceProfile.skill_names`` a real allowlist
-# instead of an advisory one.
+# Lifetime: a plugin dir is CONTENT-ADDRESSED and shared. Its path is
+# ``<tmp>/paw-run-skills-p<pid>/paw-run-skills-<fingerprint>``, where the
+# fingerprint covers the matched skills' names and files, so every caller in
+# this process asking for the same skills gets the same stable path. It is
+# built in a sibling staging dir and renamed into place, and reference-counted:
+# ``materialize_run_skills`` takes a reference, ``cleanup_run_skills`` drops
+# one, and the dir is removed only when the last reference goes. A warm Claude
+# CLI is bound to the path it connected with, so every in-flight run holds a
+# reference and the SDK backend's warm-client cache holds one more
+# (``retain_run_skills``). The first use in a process sweeps stores left by
+# dead processes and stale staging dirs.
+#
+# Name resolution: an installed skill (``SkillLoader.SKILL_PATHS``) wins; the
+# packaged ``_bundled/skills/`` dir is a last-resort fallback so a surface can
+# name a bundled skill even when the boot-time ~/.claude/skills mirror is off.
+#
+# Invariants: every path component written here is filesystem-safe on every
+# OS (skill slugs are validated, unsafe ones skipped; dir names are hex). The
+# store root is per process, so the in-process reference counts are the whole
+# truth about who uses a dir. ``fs_safe_component`` stays exported for callers
+# that fold a session key into a path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import tempfile
+import threading
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -46,6 +55,42 @@ logger = logging.getLogger(__name__)
 _SLUG_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 _TMP_PREFIX = "paw-run-skills-"
+
+# Default cap for ``fs_safe_component``. Keeps deep temp roots well clear of
+# Windows MAX_PATH once skill paths are appended underneath.
+_RUN_ID_MAX_LEN = 48
+
+# Reference counts for the materialized plugin dirs this process handed out.
+# One lock guards counts AND filesystem build/removal, so a release that drops
+# a dir to zero can never race an acquire that is about to reuse it.
+_REFS: dict[Path, int] = {}
+_REFS_LOCK = threading.Lock()
+
+# Store dirs are ``paw-run-skills-p<pid>``; anything else is not ours to sweep.
+_STORE_RE = re.compile(r"^paw-run-skills-p(\d+)$")
+# Set once the first-use sweep of stale stores has run in this process.
+_SWEPT = False
+
+_UNSAFE_FS_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_DASH_RUN_RE = re.compile(r"-{2,}")
+
+
+def fs_safe_component(value: str, *, max_len: int = _RUN_ID_MAX_LEN) -> str:
+    """Reduce ``value`` to a single path component legal on every OS.
+
+    Any run of characters outside ``[A-Za-z0-9._-]`` (``:``, ``/``, backslash,
+    ``*``, ``?``, quotes, ``<>|``, spaces, non-ASCII) becomes one ``-``; leading
+    and trailing ``-``/``.`` are trimmed (Windows rejects a trailing dot, and
+    ``.``/``..`` collapse to empty). A result longer than ``max_len`` is cut and
+    suffixed with 8 hex chars of the FULL value's sha256, so two long ids that
+    share a prefix still map to different names. May return ``""``.
+    """
+    safe = _DASH_RUN_RE.sub("-", _UNSAFE_FS_CHARS_RE.sub("-", value)).strip("-.")
+    if len(safe) <= max_len:
+        return safe
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+    head = safe[: max(max_len - len(digest) - 1, 0)].rstrip("-.")
+    return f"{head}-{digest}" if head else digest
 
 
 def _ignore_symlinks(src: str, names: list[str]) -> set[str]:
@@ -109,27 +154,32 @@ def materialize_run_skills(
     skill_names: Iterable[str],
     run_id: str | None = None,
 ) -> Path | None:
-    """Materialize the NAMED installed skills into a throwaway local-plugin dir.
+    """Materialize the NAMED installed skills into a shared local-plugin dir.
 
     Filters ``get_skill_loader().get_all()`` to the requested ``skill_names``,
     copies each matched skill's WHOLE directory (``Skill.path.parent`` — the dir
-    holding ``SKILL.md`` plus any assets) into ``<tmproot>/skills/<slug>/``, and
-    writes a minimal ``<tmproot>/.claude-plugin/plugin.json`` so the directory is
+    holding ``SKILL.md`` plus any assets) into ``<root>/skills/<slug>/``, and
+    writes a minimal ``<root>/.claude-plugin/plugin.json`` so the directory is
     a valid Claude Code local plugin.
+
+    The dir is content-addressed (see the module header): the same skills give
+    the same path, built once and reused while anyone holds a reference. Each
+    call takes ONE reference.
 
     Args:
         skill_names: the entity's requested skill names (from the resolved
             ``SurfaceProfile.skill_names``). Unknown names are skipped with a
             log line — a typo in one name never fails the whole run.
-        run_id: optional run identifier folded into the temp-dir prefix purely
-            for log/debug legibility.
+        run_id: optional run identifier (usually the session key), used only
+            in log lines. It never reaches the path, which is shared.
 
     Returns:
         The plugin ROOT directory (pass to the SDK as
         ``{"type": "local", "path": str(root)}``), or ``None`` when no requested
         name matched an installed skill (caller then skips the ``plugins=``
-        wiring entirely). The caller OWNS the returned dir and MUST clean it up
-        via :func:`cleanup_run_skills` after the run.
+        wiring entirely). Every non-None return MUST be released exactly once
+        via :func:`cleanup_run_skills`, and not before every client connected
+        with the path is gone.
     """
     requested = {n for n in skill_names if n}
     if not requested:
@@ -171,8 +221,109 @@ def materialize_run_skills(
         logger.info("materialize_run_skills: no requested skill matched an installed skill")
         return None
 
-    prefix = f"{_TMP_PREFIX}{run_id + '-' if run_id else ''}"
-    root = Path(tempfile.mkdtemp(prefix=prefix))
+    fingerprint = _fingerprint(matched)
+    with _REFS_LOCK:
+        store = _store_root()
+        root = store / f"{_TMP_PREFIX}{fingerprint}"
+        if not _is_plugin_dir(root):
+            if root.exists():
+                # Half-built or partly reaped by a tmp cleaner: rebuild it. Any
+                # client still pointing here gets the same content back.
+                shutil.rmtree(root, ignore_errors=True)
+            staged = _build_plugin(store, matched)
+            if staged is None:
+                return None
+            try:
+                os.replace(staged, root)
+            except OSError as exc:
+                shutil.rmtree(staged, ignore_errors=True)
+                if not _is_plugin_dir(root):
+                    logger.warning(
+                        "materialize_run_skills: could not publish plugin dir %s: %s", root, exc
+                    )
+                    return None
+            logger.info(
+                "materialize_run_skills: materialized %s into %s (run %s)",
+                [slug for slug, _ in matched],
+                root,
+                run_id or "-",
+            )
+        _REFS[root] = _REFS.get(root, 0) + 1
+    return root
+
+
+def retain_run_skills(root: Path) -> None:
+    """Take one more reference to a dir ``materialize_run_skills`` returned, for
+    a holder that outlives the caller's own reference (the SDK backend's warm
+    client cache). Release it with :func:`cleanup_run_skills`."""
+    with _REFS_LOCK:
+        root = Path(root)
+        _REFS[root] = _REFS.get(root, 0) + 1
+
+
+def _store_root() -> Path:
+    """Per-process parent of every materialized plugin dir. Call under
+    ``_REFS_LOCK``: the first call sweeps stale stores."""
+    global _SWEPT
+    store = Path(tempfile.gettempdir()) / f"{_TMP_PREFIX}p{os.getpid()}"
+    if not _SWEPT:
+        _SWEPT = True
+        _sweep_stale_stores(store)
+    return store
+
+
+def _sweep_stale_stores(store: Path) -> None:
+    """Best effort: remove stores of processes that no longer exist, and staging
+    dirs a crashed build left in this process's own store. A store whose pid is
+    alive (or cannot be checked) is left alone."""
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - psutil is a core dependency
+        psutil = None
+    try:
+        if psutil is not None:
+            for d in store.parent.iterdir():
+                m = _STORE_RE.match(d.name)
+                if not m or d == store or not d.is_dir():
+                    continue
+                if not psutil.pid_exists(int(m.group(1))):
+                    shutil.rmtree(d, ignore_errors=True)
+        if store.is_dir():
+            for staged in store.glob(".staging-*"):
+                shutil.rmtree(staged, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001 - a sweep must never fail a run
+        logger.debug("materialize_run_skills: stale store sweep failed: %s", exc)
+
+
+def _fingerprint(matched: list[tuple[str, Path]]) -> str:
+    """Hash of the matched skills: slug, source dir, and each file's relative
+    path, size and mtime. Changed skill files give a new dir; unchanged ones
+    the same dir."""
+    h = hashlib.sha256()
+    for slug, src_dir in sorted(matched):
+        h.update(f"\0{slug}\0{src_dir}\0".encode("utf-8", "replace"))
+        try:
+            files = sorted(p for p in src_dir.rglob("*") if not p.is_symlink() and p.is_file())
+        except OSError:
+            files = []
+        for f in files:
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            rel = f.relative_to(src_dir).as_posix()
+            h.update(f"{rel}\0{st.st_size}\0{st.st_mtime_ns}\0".encode("utf-8", "replace"))
+    return h.hexdigest()[:16]
+
+
+def _is_plugin_dir(root: Path) -> bool:
+    return (root / ".claude-plugin" / "plugin.json").is_file()
+
+
+def _build_plugin(store: Path, matched: list[tuple[str, Path]]) -> Path | None:
+    """Build the plugin in a staging dir under ``store``; None if nothing copied."""
+    store.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix=".staging-", dir=store))
     skills_dir = root / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
 
@@ -193,7 +344,7 @@ def materialize_run_skills(
 
     if not copied:
         # Every copy failed — leave nothing half-built behind.
-        cleanup_run_skills(root)
+        shutil.rmtree(root, ignore_errors=True)
         logger.warning("materialize_run_skills: all skill copies failed — no plugin produced")
         return None
 
@@ -218,29 +369,36 @@ def materialize_run_skills(
         ),
         encoding="utf-8",
     )
-
-    logger.info(
-        "materialize_run_skills: materialized %d skill(s) %s into %s",
-        len(copied),
-        copied,
-        root,
-    )
     return root
 
 
 def cleanup_run_skills(root: Path | None) -> None:
-    """Remove a per-run materialized-skills plugin dir. Best-effort, never raises.
+    """Release one reference to a materialized plugin dir. Best-effort, never raises.
 
-    Safe to call with ``None`` (the no-skills path) and idempotent. The caller
-    invokes this in a ``finally`` after the SDK run so a throwaway plugin never
-    leaks into the temp dir across runs.
+    The dir is removed only when its last reference is released, so a holder
+    that still has a client connected with the path keeps it on disk. Safe to
+    call with ``None`` (the no-skills path); a path with no references left
+    (or one this process never handed out) is simply removed, so a repeat call
+    is harmless.
     """
     if root is None:
         return
+    root = Path(root)
     try:
-        shutil.rmtree(root, ignore_errors=True)
+        with _REFS_LOCK:
+            count = _REFS.get(root, 0)
+            if count > 1:
+                _REFS[root] = count - 1
+                return
+            _REFS.pop(root, None)
+            shutil.rmtree(root, ignore_errors=True)
     except Exception as exc:  # noqa: BLE001 — cleanup must never break a run
         logger.debug("cleanup_run_skills: failed to remove %s: %s", root, exc)
 
 
-__all__ = ["cleanup_run_skills", "materialize_run_skills"]
+__all__ = [
+    "cleanup_run_skills",
+    "fs_safe_component",
+    "materialize_run_skills",
+    "retain_run_skills",
+]

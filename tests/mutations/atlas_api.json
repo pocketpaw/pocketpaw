@@ -1,7 +1,7 @@
 [
   {
     "label": "atlas api: anonymous callers let through (scope check dropped)",
-    "file": "src/pocketpaw/api/v1/atlas.py",
+    "file": "src/pocketpaw/api/deps.py",
     "find": "    await _chat_scope(request)",
     "replace": "    return None",
     "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]
@@ -43,7 +43,7 @@
   },
   {
     "label": "atlas api: inactive users let through (active-user check dropped)",
-    "file": "src/pocketpaw/api/v1/atlas.py",
+    "file": "src/pocketpaw/api/deps.py",
     "find": "getattr(state, \"user_id\", None) and getattr(state, \"ee_user_authenticated\", False)",
     "replace": "getattr(state, \"user_id\", None)",
     "tests": ["tests/v1/test_api_v1_atlas.py", "tests/ee/agent/test_atlas_api_roles.py"]

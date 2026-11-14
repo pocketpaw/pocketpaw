@@ -1,16 +1,22 @@
 # ee/pocketpaw_ee/cloud/leads/router.py — the leads routes.
 #
-# Public ingest (no auth dependency; the per-site signed key is the credential):
+# Public ingest (no auth dependency; the per-site signed key is the credential).
+# ``site_id`` / ``paw_site_id`` is ``domain.lead_site_id``: a built site's
+# script_name, or a CONNECTED site's object id (``intake.find_capture_site``).
 #   * POST /sites/{site_id}/capture — JSON capture (the edge Queue drains here).
-#   * POST /capture/form — native-form capture for IMPORTED sites (urlencoded,
-#     hidden paw_site_id / paw_key / paw_page / paw_redirect / paw_form_type),
-#     answered with a 303 back to the site. Final URL {captureApiBase}/capture/form.
+#   * POST /capture/form — native-form capture for imported and outside pages
+#     (urlencoded, hidden paw_site_id / paw_key / paw_page / paw_redirect /
+#     paw_form_type), answered with a 303 back to the site. Final URL
+#     {captureApiBase}/capture/form.
 #   Both: site exists -> origin gate (only when ``Site.enforce_origin``) ->
-#   constant-time key compare -> payload size cap -> ``leads_service.capture``.
+#   constant-time key compare (a revoked key never matches) -> payload size cap
+#   -> ``leads_service.capture``.
 #   The origin is otherwise RECORDED on the lead (``origin_unrecognized`` judged
-#   against ``_effective_origins``: the allowlist plus the site's own url host and
-#   custom domains). The pin guarded a key that is public in page source and only
-#   bound browsers, so as a default gate it mostly 403'd real visitors.
+#   against ``intake.resolve_origins``, resolved once per request: for a built
+#   site the allowlist, url host and custom domains; for a connected site its
+#   verified hosts; plus the owner's extra hosts either way). The pin guarded a
+#   key that is public in page source and only bound browsers, so as a default
+#   gate it mostly 403'd real visitors.
 #
 # Owner routes ("sites" plan feature; reads need ``fabric.read``, writes
 # ``fabric.write`` like the sites router's mutations; workspace-scoped, another
@@ -19,10 +25,18 @@
 #   * PATCH /sites/{site_id}/leads/{lead_id}  {status?, read?}
 #   * POST  /sites/{site_id}/leads/read-all   -> {updated}
 #
+# Collect leads settings (``notifications.manage``, ADMIN, like lead-notifications;
+# ``site_id`` is the object id or the script_name; built and connected sites;
+# logic in ``leads.intake``):
+#   * GET /sites/{site_id}/lead-intake   -> key, site_kind, capture URLs, origin
+#     sets, honeypot_field
+#   * PUT /sites/{site_id}/lead-intake   {extra_origins, enforce_origin}
+#
 # Invariants: the per-IP limiter key is derived from the connection
 # (``_rate_key``), never the body; ``_redirect_base`` never emits a host the caller
-# chose, and on a site with no url ``_safe_relative_redirect`` is the ONLY lock on
-# the 303 Location, so its ``//`` and ``://`` rejections must stay.
+# chose (an allowlisted Origin, the site url, a connected site's verified host),
+# and when none exists ``_safe_relative_redirect`` is the ONLY lock on the 303
+# Location, so its ``//`` and ``://`` rejections must stay.
 
 from __future__ import annotations
 
@@ -31,11 +45,17 @@ import json
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field
 
 from pocketpaw.sites_capture.ingest import origin_allowed
 from pocketpaw.sites_capture.models import MAX_PAYLOAD_BYTES
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
-from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
+from pocketpaw_ee.cloud._core.deps import (
+    current_workspace_id,
+    require_action_any_workspace,
+    require_plan_feature,
+)
+from pocketpaw_ee.cloud.leads import intake
 from pocketpaw_ee.cloud.leads import service as leads_service
 from pocketpaw_ee.cloud.leads.dto import (
     CaptureRequest,
@@ -66,9 +86,10 @@ def _origin_of(request: Request) -> str:
     return (request.headers.get("origin") or "").strip()
 
 
-def _effective_origins(site: _SiteDoc) -> list[str]:
+async def _effective_origins(site: _SiteDoc) -> list[str]:
     """The hosts a submission may legitimately come FROM, derived rather than only
-    read off ``allowed_origins``.
+    read off ``allowed_origins``. Resolved ONCE per request and passed to the
+    gate, the 303 base and the lead's flag, so the three cannot disagree.
 
     ``allowed_origins`` is STAMPED at publish (``_with_deployed_host``) and grown by
     ``add_domain``, which means it is only as good as the write paths that maintain
@@ -88,22 +109,18 @@ def _effective_origins(site: _SiteDoc) -> list[str]:
     So the site's canonical ``url`` host and every attached custom ``domains``
     hostname are folded in here. Both are values WE wrote from a deploy we
     performed, never caller input, so this widens the set only to hosts the site
-    demonstrably owns.
+    demonstrably owns. On top of those come the hosts the owner added in the
+    Collect leads settings (``Site.lead_intake_origins``). The derivation lives in
+    ``leads.intake`` so the settings view and this gate cannot disagree.
+
+    A CONNECTED site (``foreign_origin``) has no url or domains of ours; its own
+    hosts are the ``allowed_origins`` entries the workspace proved it controls
+    (``intake.verified_hosts``), so an unproved entry never counts as its own.
     """
-    hosts = list(site.allowed_origins)
-    candidates = [site.url or ""]
-    candidates.extend(d.hostname for d in (site.domains or []) if d.hostname)
-    for candidate in candidates:
-        host = candidate.strip().lower()
-        if "://" in host:
-            host = host.split("://", 1)[1]
-        host = host.split("/", 1)[0].split(":", 1)[0]
-        if host and host not in hosts:
-            hosts.append(host)
-    return hosts
+    return await intake.resolve_origins(site)
 
 
-def _origin_gate(site: _SiteDoc, origin: str) -> None:
+def _origin_gate(site: _SiteDoc, origin: str, known: list[str]) -> None:
     """Enforce the origin pin ONLY for a site that opted into it.
 
     Formspree posture (see ``Site.enforce_origin`` for the full reasoning): by
@@ -116,11 +133,11 @@ def _origin_gate(site: _SiteDoc, origin: str) -> None:
     A site that flips ``enforce_origin`` gets the old fail-closed behaviour back
     verbatim, including on an empty allowlist and a missing header.
     """
-    if site.enforce_origin and not origin_allowed(_effective_origins(site), origin or None):
+    if site.enforce_origin and not origin_allowed(known, origin or None):
         raise HTTPException(403, "Origin not allowed for this site")
 
 
-def _redirect_base(site: _SiteDoc, origin: str) -> str:
+async def _redirect_base(site: _SiteDoc, origin: str, known: list[str]) -> str:
     """Absolute prefix for the native-form 303, chosen so it can NEVER be an
     attacker-controlled host.
 
@@ -134,31 +151,46 @@ def _redirect_base(site: _SiteDoc, origin: str) -> str:
          are actually browsing rather than bouncing them to a workers.dev URL;
       2. the site's own canonical ``url`` — correct whenever the origin is absent,
          unrecognized, or forged;
-      3. "" — a relative Location, when the site has no url yet (a draft, or an
-         async build whose worker has not filled it in).
+      3. for a CONNECTED site (never a url), ``https://`` + its first verified host
+         (``intake.verified_hosts``), never an owner-typed extra;
+      4. "" — a relative Location, when there is none of those (a draft, an
+         async build whose worker has not filled the url in, a connected site
+         with no verified host).
 
     Every branch is a value WE control or have already validated, so an unvalidated
     origin cannot reach the ``Location`` header under any input.
     """
-    if origin and origin_allowed(_effective_origins(site), origin):
+    if origin and origin_allowed(known, origin):
         return origin.rstrip("/")
-    return (site.url or "").rstrip("/")
+    if site.url or not site.foreign_origin:
+        return (site.url or "").rstrip("/")
+    verified = await intake.verified_hosts(site)
+    return f"https://{verified[0]}" if verified else ""
+
+
+def _key_matches(site: _SiteDoc, key: str) -> bool:
+    """Constant-time key check. A keyless row never matches (not even an empty
+    key), and neither does a ``revoked`` one: that flag is the embed key's kill
+    switch, and on a connected site the capture key IS the Paw Bar key."""
+    if not site.signed_key or getattr(site, "revoked", False):
+        return False
+    return secrets.compare_digest(key, site.signed_key)
 
 
 @router.post("/sites/{site_id}/capture", response_model=CaptureResponse)
 async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> CaptureResponse:
     """Public ingest. Order: site exists → origin pinned → signed key → payload
     size cap → delegate to the service (honeypot/rate/injection screen/mapping)."""
-    # global-read: public ingest is keyed by site, not by a workspace session.
-    site = await _SiteDoc.find_one({"script_name": site_id})
+    site = await intake.find_capture_site(site_id)
     if site is None:
         raise HTTPException(404, "Site not found")
 
     origin = _origin_of(request)
-    _origin_gate(site, origin)
+    known = await _effective_origins(site)
+    _origin_gate(site, origin, known)
 
     # H1: constant-time compare so the key check can't be probed via timing.
-    if not secrets.compare_digest(body.signed_key, site.signed_key):
+    if not _key_matches(site, body.signed_key):
         raise HTTPException(401, "Invalid signed key")
 
     # C1: reject oversized payloads before the service touches Mongo. This runs
@@ -174,7 +206,7 @@ async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> 
         submitter_ref=body.submitter_ref or "anon",
         rate_key=_rate_key(request),  # server-derived; the real per-IP limiter key
         origin=origin,
-        known_origins=_effective_origins(site),
+        known_origins=known,
     )
     if lead is None:
         return CaptureResponse(ok=False, reason="dropped")
@@ -205,8 +237,9 @@ def _safe_relative_redirect(path: str) -> bool:
 
 @router.post("/capture/form")
 async def capture_form(request: Request) -> Response:
-    """Native-form ingest for IMPORTED sites (SI-4). The imported page's <form>s
-    are rewired to POST application/x-www-form-urlencoded here with hidden fields:
+    """Native-form ingest for IMPORTED sites (SI-4) and for forms an owner points
+    here from an outside page (a connected site's own HTML). The forms POST
+    application/x-www-form-urlencoded here with hidden fields:
     ``paw_site_id`` (the site), ``paw_key`` (the per-site signed key), ``paw_page``
     (provenance label), ``paw_redirect`` (relative post-submit path), and optional
     ``paw_form_type`` (event-mapping key; defaults to "lead" — the mapping every
@@ -227,16 +260,16 @@ async def capture_form(request: Request) -> Response:
     redirect = str(form.get("paw_redirect") or "") or "/"
     form_type = str(form.get("paw_form_type") or "lead")
 
-    # global-read: public ingest is keyed by site, not by a workspace session.
-    site = await _SiteDoc.find_one({"script_name": site_id}) if site_id else None
+    site = await intake.find_capture_site(site_id)
     if site is None:
         raise HTTPException(404, "Site not found")
 
     origin = _origin_of(request)
-    _origin_gate(site, origin)
+    known = await _effective_origins(site)
+    _origin_gate(site, origin, known)
 
     # H1 (same as the JSON path): constant-time compare — no timing side channel.
-    if not secrets.compare_digest(key, site.signed_key):
+    if not _key_matches(site, key):
         raise HTTPException(401, "Invalid signed key")
 
     # Open-redirect guard BEFORE any write: a bad redirect fails the whole submit.
@@ -263,14 +296,14 @@ async def capture_form(request: Request) -> Response:
         submitter_ref=f"form:{page}"[:256] if page else "form",
         rate_key=_rate_key(request),  # server-derived; the real per-IP limiter key
         origin=origin,
-        known_origins=_effective_origins(site),
+        known_origins=known,
     )
 
     # 303 back to the site. The base is resolved by ``_redirect_base`` — an
-    # allowlisted Origin, else the site's own canonical url, else relative — so the
-    # Location is never a host the caller chose. The redirect path itself already
-    # passed ``_safe_relative_redirect`` above.
-    location = f"{_redirect_base(site, origin)}{redirect}"
+    # allowlisted Origin, else the site's own canonical url, else a connected site's
+    # verified host, else relative — so the Location is never a host the caller
+    # chose. The redirect path itself already passed ``_safe_relative_redirect``.
+    location = f"{await _redirect_base(site, origin, known)}{redirect}"
     return Response(status_code=303, headers={"Location": location})
 
 
@@ -333,3 +366,44 @@ async def read_all_leads(
 ) -> ReadAllResponse:
     """Mark every unread lead on this site read."""
     return ReadAllResponse(updated=await leads_service.mark_all_read(ctx.workspace_id, site_id))
+
+
+# Collect leads settings. Same gate as the lead-notifications routes
+# (``notifications.manage``, ADMIN): the response carries the signed key and the
+# write changes who may post leads.
+_INTAKE_MANAGE = require_action_any_workspace("notifications.manage")
+
+
+class LeadIntakeUpdate(BaseModel):
+    """Full replace of the owner's extra hosts plus the strict pin. Raw entries
+    may be URLs; the server reduces each to a bare hostname and caps the
+    deduplicated list at ``intake.MAX_EXTRA_ORIGINS``."""
+
+    # Both required: a full replace that silently defaulted the pin to off would
+    # be a way to drop strict mode by sending a partial body.
+    extra_origins: list[str] = Field(max_length=100)
+    enforce_origin: bool
+
+
+@router.get("/sites/{site_id}/lead-intake")
+async def get_lead_intake(
+    site_id: str,
+    _user=Depends(_INTAKE_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await intake.get_intake(workspace_id, site_id)
+
+
+@router.put("/sites/{site_id}/lead-intake")
+async def put_lead_intake(
+    site_id: str,
+    body: LeadIntakeUpdate,
+    _user=Depends(_INTAKE_MANAGE),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await intake.update_intake(
+        workspace_id,
+        site_id,
+        extra_origins=body.extra_origins,
+        enforce_origin=body.enforce_origin,
+    )

@@ -478,6 +478,16 @@ async def execute_approved_plan(
         )
 
     try:
+        # Unpaid early-access workspace: the shift's runs spend off the credit
+        # ledger, so the plan is refused here, the one chokepoint every approve
+        # path (tray, bulk, Mission Control) reaches.
+        from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+        denied = await early_access_denial(workspace_id)
+        if denied is not None:
+            await _fail(denied.message, error_class=denied.code)
+            return
+
         if blob.get("schema") != BELT_PLAN_SCHEMA:
             await _fail(
                 "belt_plan schema mismatch — the plan blob is from an incompatible "

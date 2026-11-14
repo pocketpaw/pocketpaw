@@ -1196,7 +1196,7 @@ class PydanticAIBackend:
                 "pip_spec": "pocketpaw[pydantic-ai]",
                 "verify_import": "pydantic_ai",
             },
-            beta=True,
+            # Not beta: this is the cloud chat default path.
         )
 
     def __init__(self, settings: Settings, policy: ToolPolicy | None = None) -> None:
@@ -2691,6 +2691,13 @@ class PydanticAIBackend:
         # builtins below the MCP layer are dropped too, because no MCP allow set
         # reaches them and a deny list cannot enumerate them. In the cache key.
         exclusive_tools: bool = False,
+        # An isolated run (a side completion for a site's AI API). Honoured by
+        # construction: this backend adds nothing to the system prompt the pool
+        # assembled (no soul, skills or agent layers of its own; skills only ride
+        # as a tool, which ``tools_enabled=False`` drops), so there is nothing to
+        # switch off. Declared so the pool forwards it and ``side_completion``
+        # knows this backend is safe to run isolated.
+        isolated: bool = False,
         # Accepted and deliberately unused — each is Claude-SDK plumbing with no
         # analogue here, and each is safe to drop:
         #   ``session_handle`` /  native CLI-session resume and warm-client
@@ -2710,6 +2717,17 @@ class PydanticAIBackend:
         session_handle: Any = None,  # noqa: ARG002
         warm_client: Any = None,  # noqa: ARG002
         on_client_built: Any = None,  # noqa: ARG002
+        # Per-run usage limits (the cloud's platform-funded free run).
+        # ``max_requests`` can only lower ``pydantic_ai_max_turns``;
+        # ``total_tokens_limit`` stops the run once its tokens pass it. The pool
+        # refuses a limited run on a backend that does not declare these.
+        max_requests: int | None = None,
+        total_tokens_limit: int | None = None,
+        # A surface's turn-cap override (a Sites app build): None keeps
+        # ``pydantic_ai_max_turns``, 0 lifts the request limit, N > 0 can only
+        # RAISE it (never limit an unlimited 0). ``max_requests`` is applied
+        # after it, so a free run keeps its bound either way.
+        max_turns: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
         if not self._sdk_available:
             yield AgentEvent(
@@ -2852,11 +2870,22 @@ class PydanticAIBackend:
                 # instructions at all, so this is the only system prompt on the
                 # wire — and it is THIS turn's. See ``_get_or_create_agent``.
             }
-            max_turns = self.settings.pydantic_ai_max_turns
-            if max_turns and max_turns > 0:
+            request_cap = self.settings.pydantic_ai_max_turns
+            if max_turns == 0:
+                request_cap = 0
+            elif max_turns and request_cap > 0 and max_turns > request_cap:
+                request_cap = max_turns
+            if max_requests is not None and max_requests > 0:
+                request_cap = min(request_cap, max_requests) if request_cap > 0 else max_requests
+            limits: dict[str, int] = {}
+            if request_cap and request_cap > 0:
+                limits["request_limit"] = request_cap
+            if total_tokens_limit is not None:
+                limits["total_tokens_limit"] = max(total_tokens_limit, 0)
+            if limits:
                 from pydantic_ai.usage import UsageLimits
 
-                kwargs["usage_limits"] = UsageLimits(request_limit=max_turns)
+                kwargs["usage_limits"] = UsageLimits(**limits)
 
             # Per-RUN like ``usage_limits`` above, and for the same reason: the
             # cached agent is shared across runs, while these are properties of
@@ -2956,7 +2985,10 @@ class PydanticAIBackend:
             snapshot = _usage_snapshot()
             if snapshot is not None:
                 yield snapshot
-            yield AgentEvent(type="error", content=self._explain_error(exc))
+            per_run_limit = max_requests is not None or total_tokens_limit is not None
+            yield AgentEvent(
+                type="error", content=self._explain_error(exc, per_run_limit=per_run_limit)
+            )
             yield AgentEvent(type="done", content="")
             return
         finally:
@@ -2969,7 +3001,7 @@ class PydanticAIBackend:
             yield snapshot
         yield AgentEvent(type="done", content="")
 
-    def _explain_error(self, exc: Exception) -> str:
+    def _explain_error(self, exc: Exception, *, per_run_limit: bool = False) -> str:
         """Turn a provider error into something that names the actual problem.
 
         A proxy auth failure is the single most confusing error on this path,
@@ -2980,7 +3012,16 @@ class PydanticAIBackend:
         "my key is wrong", which sends you to change the one thing that works.
 
         This cost real time to diagnose by hand, so the backend says it now.
+
+        A run the caller limited (``per_run_limit``, the cloud's free run) that
+        hits a usage limit gets a plain sentence. Any other run keeps the raw
+        text, which names the setting to raise (``request_limit of N``).
         """
+        from pydantic_ai.exceptions import UsageLimitExceeded
+
+        if per_run_limit and isinstance(exc, UsageLimitExceeded):
+            # A run limit, not a fault: say so plainly, without token counts.
+            return "This reply reached its usage limit for one run and stopped."
         text = str(exc)
         raw = f"Pydantic AI error: {text}"
 

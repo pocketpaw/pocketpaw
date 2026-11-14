@@ -1,24 +1,18 @@
 ---
-# Updated 2026-09-27 (feat/sites-visual-research): dropped the pointer to
-# design-taste's removed layout rules; composition comes from the references.
 name: sites-conversion-structure
 description: |
-  The STRATEGY layer for a Paw Site — what the page argues, in what order, and
+  The STRATEGY layer for a Paw Site: what the page argues, in what order, and
   what single action it drives. Invoke it BEFORE writing any section markup on a
   marketing / landing site: "build a dentist landing page", "a page for my SaaS",
   "why is this page not converting", "what sections should this have". It decides
   the one offer / one audience / one action, runs the intake, SELECTS the
   sections this particular page needs, orders the argument, writes headline +
-  CTA + benefit copy, handles objections, sets index / noindex + schema.
-  It does NOT choose colors, type, or layout composition — `pocketpaw-design-taste`
+  CTA + benefit copy, handles objections, sets index / noindex + schema. On
+  refine, load it when an edit rewrites copy, adds a section or reorders the
+  page. It does NOT choose colors, type, or layout composition; `pocketpaw-design-taste`
   owns all of that and governs every visual decision. This skill owns the ARGUMENT;
   design-taste owns the LOOK. Use them together: structure first, then taste.
 ---
-
-<!-- New file 2026-09-08: adapted from elayadesign/ai-design-skills (landing-page-design,
-     Part A) into a Paw Sites strategy skill. Part B (its visual system) is deliberately
-     NOT ported - pocketpaw-design-taste already governs the visual layer and the two
-     disagree on several concrete values. See VENDORED.md for the divergence list. -->
 
 # Sites: conversion structure
 
@@ -40,11 +34,13 @@ the look to `pocketpaw-design-taste`, which governs every visual value.
 | index / noindex, title, meta, FAQ schema | **this skill** |
 | Palette, type, spacing, radius, materiality, motion | `pocketpaw-design-taste` |
 | Layout composition and section-shape diversification | `pocketpaw-design-taste` |
-| Anti-slop copy rules (no em-dash, organic metrics, no filler verbs) | `pocketpaw-design-taste` MODULE 4 |
+| Generated-copy tells and invented proof, by id | `sites-check` SC-COPY, SC-HONEST |
 
-Where this skill and design-taste appear to disagree on a visual value,
-**design-taste wins** and this skill's version is out of scope. Where the user's
-explicit brief disagrees with either, the user wins.
+This file holds the positive method: how to write the words well. The list of
+what generated copy looks like lives once, in `sites-check`, and runs in FIX
+mode before the draft is shown. Precedence is stated once, in
+`pocketpaw-design-taste`: the user's material wins over every skill, and on a
+visual value design-taste wins over this one.
 
 ## 1. Intake
 
@@ -70,20 +66,25 @@ ONE batch, never one question at a time.
 
 **Constraints**
 - Brand voice, existing brand assets, mobile priority.
+- Words this owner never uses: the ones their trade would not say, or that they
+  dislike. A dentist does not "curate", a law firm does not "vibe". Keep the
+  list for the whole build; `sites-check` SC-COPY-07 checks the page against it.
 
 If the user cannot answer, **make a reasonable assumption, state it in one line,
 and continue.** Do not stall the build on intake. On the /sites surface prefer the
 `ask_user` chips for this rather than a wall of prose questions.
 
-**Research the real business first.** Before assuming, use WebSearch / WebFetch on
-the actual business. Real services, real neighbourhood, real hours and real
-differentiators beat any invented intake answer, and they are what stops the page
-reading as generic. Never fabricate a specific verifiable fact (an address, a
-price, a named testimonial) - use an obvious placeholder and flag it.
+**Research the real business only when it is identified.** If the user named
+the business AND gave a URL or location that pins it down, WebSearch / WebFetch it:
+real services, hours and differentiators beat any invented intake answer. Cite the
+source of each fact in your reply and ask the owner to confirm it. Otherwise, or if
+the match is uncertain, use an obvious placeholder; never borrow the details of a
+same-named business. Never fabricate a specific verifiable fact (an address, a
+price, a named testimonial).
 
 ## 2. Page shape
 
-The shape follows the offer. Settle it before the section list — this choice,
+The shape follows the offer. Settle it before the section list: this choice,
 not the section count, is what makes two sites argue differently. It is a
 working decision you hold in your head, never a label you read out to the user.
 
@@ -99,6 +100,12 @@ reflex, so it is the one to justify hardest. A narrow offer wants the minimal
 page, and a hero-led page over the top of it is padding: a waitlist page does
 not need a benefits grid, a how-it-works and a twelve-question FAQ. It needs the
 offer, one proof signal, and the field.
+
+**An About page** answers who is behind this, what they do and for whom, how
+they work, and what to do next. Lead with the people or the place, give one real
+story or fact the owner supplied, and end on the same action as the rest of the
+site. No mission-statement paragraph, no values grid, no timeline the owner did
+not hand you.
 
 ## 3. The argument
 
@@ -158,12 +165,13 @@ comes from the references opened in research (`pocketpaw-design-taste` 3.A).
 - **One label per intent.** "Get in touch" + "Contact us" + "Let's talk" on one page
   is a failure. Pick one and use it in the nav, the hero and the footer.
 
-## 5. Copy formulas
+## 5. Headline, subheadline, CTA, bullets
 
-**Headline**
-- `{Outcome} without {pain}`
-- `The {category} for {audience}`
-- `{Result} in {time}`
+**Headline: the plainest true shape.** Say what this business does for this
+visitor, in the words the visitor would use, as plainly as it can be said. Draft
+it, then strip every word that is there to sound like a headline. A fill-in
+template produces the same sentence on every page, so there is none here: the
+sentence comes from this offer.
 
 Two lines at desktop, maximum. The headline carries the outcome; the subheadline
 carries the qualifier. Do not stack both jobs into one sentence.
@@ -173,11 +181,13 @@ carries the qualifier. Do not stack both jobs into one sentence.
 **CTA.** A verb plus what they get. Never "Learn more", never "Submit".
 "Start free trial", "Book a consultation", "Get the checklist".
 
-**Benefit bullets.** Bold the benefit, then the proof or the mechanism:
-**Faster iteration** - three layout variants from one brief.
+**Benefit bullets.** Plain sentences in sentence case, each one a whole thought:
+"Three layout variants come back from one brief." No bolded label in front of
+each line, no title-cased fragments; the bullet says the benefit and its proof
+in one go.
 
-All of `pocketpaw-design-taste` MODULE 4 applies to every string written here:
-zero em-dashes, organic metrics, no filler verbs, no "John Doe", no "Acme".
+Zero em dashes in anything you write, and no number, name or quote the brief did
+not supply (`pocketpaw-design-taste` MODULE 4 and MODULE 0).
 
 ## 6. Copy craft
 
@@ -185,12 +195,16 @@ Section 5 gives the shapes. This is how the words inside them get written. All o
 it applies to every visible string, including alt text, form labels, error text
 and the footer.
 
-**The order is Clarity, then Respect, then Character — always that way round.**
+**Voice applies to the marketing sections only.** Legal text, booking and
+checkout steps, form labels, policy pages and error messages stay standard and
+plain whatever the brand voice is. A playful privacy policy is a liability.
+
+**The order is Clarity, then Respect, then Character, always that way round.**
 Without clarity copy fails; without respect it irritates; without character it is
 merely forgotten. Most bad brand voice starts at character and never gets back to
 clarity, which is why so many pages sound confident and say nothing.
 
-**Dead words vs living words.** Dead copy is abstract, safe and interchangeable —
+**Dead words vs living words.** Dead copy is abstract, safe and interchangeable;
 the signal is that it could sit on a thousand other sites unchanged.
 
 | Dead | Living |
@@ -202,34 +216,25 @@ the signal is that it could sit on a thousand other sites unchanged.
 
 The test: **if a word can be removed without changing the meaning, it was dead.**
 
-**When a block feels empty, one of these six is missing** — context (where the
+**When a block feels empty, one of these six is missing:** context (where the
 reader is), the job they are trying to do, what you offer, what changes for them,
 the conditions or limits, and the next step. Check them in order before rewriting
 by feel.
 
 **Info-style.** Facts beat adjectives: "fast" becomes "in 10 seconds". Verbs beat
 nouns: "configuration" becomes "set up". One sentence carries one idea. And
-**the higher the stakes, the calmer the tone** — payments, deletion, security and
+**the higher the stakes, the calmer the tone.** Payments, deletion, security and
 anything irreversible get plainer language, not more reassurance.
 
 **Write scenes, not claims.** People remember images, not abstractions. "A better
 workflow for teams" is a claim. "At 10:03 the PM drops a task. At 10:07 the
 designer has real references and a draft" is a scene. The shape is *who + where +
-what happens + what changes*. Use it where a benefit is hard to make concrete —
+what happens + what changes*. Use it where a benefit is hard to make concrete,
 but never invent a customer, a name or a number to build one.
 
-**Rhythm.** Flat rhythm loses attention: vary sentence length every line or two,
-and let one paragraph land one punch.
-
-> Fewer clicks.
-> Clearer decisions.
-> Less arguing in Slack.
-
-**Give the page one quotable line.** Every page worth building has at least one
-line that survives being screenshotted out of context. If nothing on the page is
-quotable, nothing about it is memorable. Shapes that work: "Not another X.
-Finally Y.", "Less noise. More decisions." One per page — a page where every line
-strains to be the sticky one is exhausting.
+**Rhythm.** Flat rhythm loses attention: vary sentence length every line or two.
+Vary it inside full sentences, not with runs of fragments or slogans built to be
+quoted; say the concrete thing once, in a whole sentence.
 
 **Headings describe, they do not aspire.** This is the most common failure in
 section headings and in any dashboard or status UI a dynamic site renders.
@@ -242,8 +247,8 @@ section headings and in any dashboard or status UI a dynamic site renders.
 
 The test: **if someone scans only the headings, labels and numbers, do they
 understand the page?** If not, the headings are decoration. Marketing warmth has
-four legitimate homes — an empty state, onboarding, an upgrade prompt and a
-success moment — and even there it is one line, then back to function.
+four legitimate homes (an empty state, onboarding, an upgrade prompt and a
+success moment), and even there it is one line, then back to function.
 
 **Errors say what happened, why if it helps, and what to do next.** Three rungs,
 and most pages ship the first:
@@ -254,29 +259,12 @@ and most pages ship the first:
 | Better | "Couldn't save. Check your connection and try again." |
 | Best | "You're offline. Reconnect to save changes." |
 
-**Words that are banned outright**, because each one is a claim with no content
-behind it. `pocketpaw-design-taste` MODULE 4 carries a short version of this list
-and is in your context unconditionally; that one is the floor and this is the
-full catalogue, so they extend each other rather than compete:
-
--   **Hype** — revolutionary, seamless, cutting-edge, best-in-class,
-    next-generation, world-class, game-changing, disruptive, state-of-the-art,
-    groundbreaking, and *innovative* / *powerful* / *robust* whenever no specific
-    follows.
--   **Filler** — very, really, just, actually, basically, literally, simply,
-    easily, highly, incredibly, extremely, absolutely, truly, totally.
--   **Corporate zombie** — leverage, synergy, ecosystem, paradigm, holistic,
-    end-to-end, mission-critical, value proposition, stakeholder, thought leader,
-    empower, unlock (metaphorical), drive (as in "drive growth"), and
-    optimize / streamline without a number attached.
--   **AI openers**, which are the loudest tell of all — "In today's fast-paced
-    world...", "In an era of...", "Look no further", "Say goodbye to...",
-    "Introducing the future of...", "Reimagine...", "Supercharge your...",
-    "Elevate your...", "Take your X to the next level", "Harness the power
-    of...".
+**Check structure before vocabulary.** A sentence built on a generated shape
+stays generated after its words are swapped. Rewrite around the concrete point,
+then run `sites-check` over the copy for the word-level tells.
 
 **Then cut.** Read the finished page and ask whether 30% could come out without
-losing meaning. If it could, it should — and if cutting 30% *improves* the page,
+losing meaning. If it could, it should, and if cutting 30% *improves* the page,
 keep cutting. A stranger should get the offer in about three seconds, find one
 concrete detail, see the limits stated honestly, and know the next step without
 looking for it.

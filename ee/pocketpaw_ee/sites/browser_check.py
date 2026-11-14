@@ -24,8 +24,13 @@
 # nothing.
 #
 # THE SANDBOX IS NEVER SNAPSHOTTED (daytona_runner's invariant). The standalone path
-# deletes in a ``finally`` with Daytona's auto-delete as the backstop, exactly like
-# ``run_build``.
+# tears down exactly like ``run_build``: a ``finally`` deletes by id, a create that
+# raised is deleted by name, one cancelled mid-create is deleted once the create
+# finishes in the background (``admission.create_admitted``), the box carries
+# ``paw_lane=site-verify`` plus the caller's labels, and Daytona's auto-delete plus the
+# reaper cron are the backstops. It is admitted the same way too: an
+# ``admission.memory_lease`` held from before create until after the delete, and one
+# idle-workspace-VM eviction plus retry on a capacity refusal.
 from __future__ import annotations
 
 import json
@@ -33,15 +38,27 @@ import logging
 import math
 import os
 import shlex
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from pocketpaw_ee.sites.admission import create_admitted, memory_lease
+from pocketpaw_ee.sites.sandbox_reaper import (
+    JOB_LABEL,
+    delete_job_leftovers,
+    lane_labels,
+    unique_sandbox_name,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pocketpaw_ee.cloud.daytona.client import DaytonaClient
 
 logger = logging.getLogger(__name__)
+
+#: The ``paw_lane`` label value on the standalone verify sandbox.
+VERIFY_LANE = "site-verify"
+#: Memory the standalone verify sandbox asks for, and the lease it holds.
+VERIFY_MEMORY_GIB = 2
 
 #: Where the harness lives inside the sandbox. A sibling of the build project, never
 #: inside it, so the build's include-list tar cannot pick it up.
@@ -274,11 +291,13 @@ async def run_standalone(
     client: DaytonaClient | None = None,
     budget_seconds: int = BROWSER_CHECK_BUDGET_SECONDS,
     harness: dict[str, bytes] | None = None,
+    labels: dict[str, str] | None = None,
 ) -> BrowserCheckResult:
     """Open a sandbox, upload a site tree, run the harness over it, tear it down (html).
 
     RAISES when the sandbox cannot be created at all — the same contract
     ``daytona_runner.run_build`` keeps, so the job can report ``sandbox_unavailable``.
+    ``labels`` are merged over ``{"paw_lane": "site-verify"}``, as in ``run_build``.
     """
     if client is None:
         from pocketpaw_ee.cloud.daytona.client import get_daytona_client
@@ -289,10 +308,11 @@ async def run_standalone(
                 "Daytona is not configured (DAYTONA_API_URL / DAYTONA_API_KEY unset)"
             )
 
+    name = unique_sandbox_name("paw-verify-")
     create_kwargs: dict[str, Any] = {
-        "name": f"paw-verify-{int(time.time() * 1000)}",
+        "name": name,
         "cpu": 1,
-        "memory": 2,
+        "memory": VERIFY_MEMORY_GIB,
         "disk": 5,
         "auto_stop_interval": math.ceil(budget_seconds / 60) + 10,
         # Backstop for this process dying; the explicit delete below is the teardown.
@@ -301,9 +321,17 @@ async def run_standalone(
     image = verify_image()
     if image:
         create_kwargs["image"] = image
+    create_kwargs["labels"] = lane_labels(VERIFY_LANE, labels)
+    await delete_job_leftovers(client, create_kwargs["labels"])
+    # Held from before create until after the delete, like ``run_build``.
+    lease = memory_lease(VERIFY_MEMORY_GIB, wait_tag=create_kwargs["labels"].get(JOB_LABEL))
+    await lease.__aenter__()
     sandbox_id: str | None = None
     try:
-        info = await client.create_sandbox(**create_kwargs)
+        # A create that timed out or was cancelled may have registered the box already;
+        # it is deleted by name (shielded) before re-raising. A capacity refusal stops
+        # idle workspace VMs once and retries.
+        info = await create_admitted(client, create_kwargs)
         sandbox_id = info.id
         await client.wait_for_sandbox(sandbox_id, target_state="started")
         await client.bulk_upload(
@@ -323,11 +351,14 @@ async def run_standalone(
             client, sandbox_id, static_dir=static_dir, budget_seconds=budget_seconds, files=harness
         )
     finally:
-        if sandbox_id is not None:
-            try:
-                await client.delete_sandbox(sandbox_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("browser_check: delete of %s failed (%s)", sandbox_id, exc)
+        try:
+            if sandbox_id is not None:
+                try:
+                    await client.delete_sandbox(sandbox_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("browser_check: delete of %s failed (%s)", sandbox_id, exc)
+        finally:
+            await lease.__aexit__(None, None, None)
 
 
 __all__ = [

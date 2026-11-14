@@ -322,12 +322,26 @@ async def rate_limit_slug_check(ctx: RequestContext = Depends(request_context)) 
         )
 
 
+# 5 early-access waitlist joins per hour per IP, burst 5. The route is
+# unauthenticated (signups are paused, so there is no account to key on) and
+# each join is a row, so this bounds row spam from one address.
+_early_access_waitlist_limiter = RateLimiter(rate=5.0 / 3600.0, capacity=5)
+
+rate_limit_early_access_waitlist = per_ip_limit(
+    _early_access_waitlist_limiter,
+    prefix="early-access-waitlist",
+    code="early_access.waitlist_rate_limited",
+    message="Too many requests - wait a moment and try again.",
+)
+
+
 __all__ = [
     "client_ip",
     "consume_invite_create_tokens",
     "rate_limit_ai_check_public",
     "rate_limit_discover_public",
     "rate_limit_discover_report",
+    "rate_limit_early_access_waitlist",
     "rate_limit_invite_create",
     "rate_limit_invite_resend",
     "rate_limit_meeting_knock",

@@ -54,7 +54,7 @@ from standardwebhooks import Webhook
 
 from pocketpaw.fabric.journal_store import FabricJournalStore
 
-pytestmark = pytest.mark.asyncio
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("payments_open")]
 
 SECRET = "whsec_" + base64.b64encode(b"billing-test-secret-key-32bytes!").decode()
 USD_PRODUCT = "prod_credits_usd"
@@ -360,6 +360,31 @@ async def test_an_open_link_is_handed_back_not_minted_twice(mongo_db, store) -> 
     assert again.checkout_url == out.checkout_url
     assert len(prov.calls) == 1
     assert len((await Site.get(site_id)).partner_payments) == 1
+
+
+async def test_payments_closed_refuses_even_an_open_link(mongo_db, store, monkeypatch) -> None:
+    """While payments are closed no pay link is handed out, not even one minted earlier."""
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud.billing import service as billing_service
+
+    import pocketpaw.config as config
+
+    wid = await _partner("closed-shop")
+    prov = FakeProvider()
+    _, site_id = await _link(wid, store, provider=prov)
+    client_id = (await Site.get(site_id)).partner_payments[0].client_id
+
+    closed = config.get_settings().model_copy(update={"payments_open": False})
+    monkeypatch.setattr(billing_service, "get_settings", lambda *a, **k: closed)
+    with pytest.raises(Forbidden) as exc:
+        await service.create_pay_link(
+            _ctx(wid),
+            body={"client_id": client_id, "site_id": site_id, "sku": "staff_year"},
+            store=store,
+            provider=prov,
+        )
+    assert exc.value.code == "payments.closed"
+    assert len(prov.calls) == 1
 
 
 async def test_pay_link_refusals(mongo_db, store) -> None:

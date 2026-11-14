@@ -1,70 +1,48 @@
-"""Enterprise agent chat — ``POST /cloud/chat/{scope}/{scope_id}/agent``.
+"""Enterprise agent chat: ``POST /cloud/chat/{scope}/{scope_id}/agent``.
 
 Streams a typed SSE sequence in the response body while persisting the user
-message, submitting a ``Run`` to the configured executor, and tailing the
-run's Redis Stream so durability sits underneath the wire shape the
-frontend already speaks.
+message, submitting a ``Run`` to the configured executor, and tailing the run's
+Redis Stream, so durability sits underneath the wire shape the frontend speaks.
 
-Changes: 2026-10-01 (CN-3, fix/canon-daily-caps) — ``_run_start_gates`` no
-longer inlines ``billing_enforced`` + ``check_balance`` + ``check_quota``; it
-gathers ``credits.guards.assert_within_billing`` (the one billing gate run_core
-already uses) beside the guest and turn checks. Balance-before-quota precedence
-is kept inside that one coroutine. One drift, inherited from the guard: an
-empty workspace is not billed-checked (the route rejects an empty workspace
-upstream, so no live change). The daily turn pre-check now reads the shared
-``metering`` daily counter instead of ``turn_budget``.
+This is the single chokepoint that starts a chat run. ``scope_workspace_id``
+comes from ``resolve_scope_context``, which is handed the authenticated
+``workspace_id`` as ``expected_workspace_id`` (a scope doc whose workspace
+disagrees is rejected). Then ``_run_start_gates`` runs the read-only run-start
+checks BEFORE any DB write, so a refused turn leaves no run and no message:
 
-Changes: 2026-09-01 (feat/byok-guest-backend) — ``post_agent_chat`` gained a
-CHECK-ONLY guest turn gate beside the billing fast-reject: a guest at their
-daily turn cap (or with no usable stored key) gets a clean pre-stream 402
-whose body carries the frozen top-level ``code``/``kind`` contract. The
-executor owns the single atomic spend (``run_core._reject_if_guest_over_limit``).
+* who pays (``credits.guards.resolve_payer`` and ``billing_source``), then
+  the credit gate (``assert_within_billing``: balance, then monthly quota, 402
+  ``credits.insufficient`` / ``credits.quota_exceeded``, and 429
+  ``credits.run_in_progress`` for an unpaid early-access workspace that already
+  has a chat run active). A no-op unless
+  ``billing_enforced`` or ``credits_enforced``, and skipped for a turn on the
+  workspace's own key when the serving backend spends it. The surface is
+  resolved before these gates, because a deny-by-default surface changes
+  which backend serves the turn.
+* the guest turn gate (check-only; the executor owns the atomic spend).
+* the workspace daily turn ceiling (check-only, fails open).
 
-Changes: 2026-06-30 (feat/billing-quota-enforcement, chunk 3) — the run-start
-credit gate now also enforces the MONTHLY QUOTA. Beside the existing BC-4
-``check_balance`` call (inside the same ``if get_settings().billing_enforced:``
-block, before ``create_run``/submit), ``post_agent_chat`` now also
-``await credits_service.check_quota(workspace_id)`` so a workspace that has spent
-up to its monthly ceiling gets a clean 402 ``credits.quota_exceeded`` with NO DB
-trace — the same universal cap the executor enforces in
-``run_core.execute_run``, mirrored here for the synchronous HTTP path.
-``check_balance`` is unchanged and stays FIRST (balance <= 0 is the secondary
-guard). Both are no-ops when the flag is OFF.
+The executor (``run_core.execute_run``) repeats these on every path into it
+(HTTP, WebSocket, queued, resumed) and is the enforcement; this route answers a
+clean pre-stream error. In-flight runs are never affected.
 
-Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``post_agent_chat``
-threads the authenticated ``workspace_id`` into ``resolve_scope_context`` via
-``expected_workspace_id``, matching the run worker. The HTTP route already
-validates the workspace (the ``current_workspace_id`` dependency rejects an
-empty one with 400); passing it lets the resolver fall back to it when a scope
-doc's ``workspace`` field is empty and reject a scope whose non-empty doc
-workspace disagrees with the caller's (cross-tenant guard). Keeps the
-synchronous request path consistent with the worker that actually attaches the
-run identity.
+On the sites edit/refine surface only, ``_window_history_for_surface`` caps the
+history fed to the agent to the last ``SITES_REFINE_HISTORY_TURNS`` turns; every
+other surface gets the full history.
 
-Changes: 2026-06-24 (BC-4, integration/billing-credits) — credit hard-block at
-run-start. This module is the SINGLE chokepoint that starts a new chat run
-(``create_run`` + executor submit), so the credit gate sits here, right after
-scope resolution and BEFORE any DB write. When ``settings.billing_enforced`` is
-on, a workspace at balance <= 0 gets 402 (``credits.insufficient``) and NO run /
-user message is persisted; in-flight runs (already past this point) are never
-affected. The flag is OFF by default so OSS / self-host (no ledger) are
-unaffected. See ``credits.service.check_balance``.
+A new message supersedes the scope's active run: it requests the cancel, then
+waits up to ``SUPERSEDE_WAIT_SECONDS`` for that run to reach a terminal status
+before loading history, so the cancelled run's partial reply is in the history
+and the two runs never overlap on the scope. A timeout logs and goes ahead.
 
-Changes: 2026-06-18 (PERF-6, feat/sites-minimal-context) — window the history
-fed to the agent on the SITES EDIT/REFINE surface only. The sites builder got
-progressively slower per edit because ``load_history_for_scope`` loads the FULL
-accumulating scope history every turn, so the LLM re-processed ever-more context
-per refine. ``_window_history_for_surface`` now caps the loaded history to the
-last ``SITES_REFINE_HISTORY_TURNS`` turns (kept for pronoun referents like "make
-it bigger") when ``_is_sites_refine_surface`` matches (kind=sites + a refine
-``pocket_id`` in the surface meta — the same discriminator the sites preamble /
-profile resolver use). Every other surface (general pocket/dm/group chat, the
-sites-create gallery, legacy clients with no surface hint) keeps the FULL
-history — the windowing is a strict no-op off the sites-refine surface. The
-``<pocket-summary>`` block already carries the pocket's current state to the
-agent, so injecting the raw component source is intentionally left out of this
-change (it would add a build/DB read on the shared chat path); the windowing is
-the core latency win.
+``/agent/stop`` cancels the scope's active run and also leaves a pending-stop
+token on the transport (``PENDING_STOP_TTL_SECONDS``). ``post_agent_chat`` reads
+that token when the request arrives and again right after ``create_run``; a
+changed token means the user hit stop while this run was still being created,
+so the run is cancelled before the executor starts it. Stop writes the token
+BEFORE it looks for the run, so one side always sees the other. The caller may
+stop a run they own, or any run in a scope they can open
+(``resolve_scope_context``, the same check that admits a message).
 """
 
 from __future__ import annotations
@@ -97,6 +75,7 @@ from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 from pocketpaw_ee.cloud.surface import (
     SurfaceContext,
     SurfaceKind,
+    resolve_profile,
     resolve_surface_context,
 )
 
@@ -116,6 +95,19 @@ Scope = Literal["dm", "group", "pocket", "session"]
 # the window size is tunable in one place.
 SITES_REFINE_HISTORY_TURNS = 2
 _SITES_REFINE_HISTORY_ROWS = 2 * SITES_REFINE_HISTORY_TURNS
+
+# How long a new message waits for the run it supersedes to wind down. The
+# worker polls the cancel flag about once a second, then persists the partial
+# reply and the terminal status; past this bound the new turn starts anyway.
+SUPERSEDE_WAIT_SECONDS = 5.0
+
+# How long a stop that found no run stays pending for a run still being created.
+# Only requests already in flight when the stop landed can match it.
+PENDING_STOP_TTL_SECONDS = 30
+
+
+def _scope_stop_key(workspace_id: str, scope: str, scope_id: str) -> str:
+    return f"{workspace_id}:{scope}:{scope_id}"
 
 
 async def _assert_under_daily_turns(workspace_id: str) -> None:
@@ -145,7 +137,15 @@ async def _assert_under_daily_turns(workspace_id: str) -> None:
         raise DailyTurnLimitError(cap)
 
 
-async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: str) -> None:
+async def _run_start_gates(
+    workspace_id: str,
+    user_id: str,
+    scope_workspace_id: str,
+    *,
+    agent_id: str | None = None,
+    exclusive_tools: bool = False,
+    model_override: str | None = None,
+) -> None:
     """The read-only run-start checks, run concurrently, first failure wins.
 
     Precedence is the declared order, the order these ran in when they were
@@ -156,7 +156,18 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
     an earlier one failed has no side effect.
 
     * Balance + quota (BC-4 / chunk 3): ``credits.guards.assert_within_billing``,
-      a no-op unless ``billing_enforced``; balance before quota inside it.
+      a no-op unless ``billing_enforced`` or ``credits_enforced``; balance
+      before quota inside it. When neither flag is on the leg returns before
+      resolving anything. Otherwise who pays is resolved first
+      (``credits.guards.resolve_payer`` then ``billing_source``): a turn on the
+      workspace's own key skips the wallet only when ``agent_id``'s backend
+      (or a deny-by-default ``exclusive_tools`` run) spends that key, a
+      resolver failure is gated as platform, and a gateway address the egress
+      guard rejects raises its 422. An unpaid early-access workspace with a
+      chat run already active gets 429 ``credits.run_in_progress``, and a
+      model it may not use on early access credits (per-send, else the
+      agent's own, plus the deployment default) gets 400 ``model.not_allowed``.
+      The executor checks the same list again and is the enforcement.
     * Guest turn gate (feat/byok-guest-backend): the frozen
       ``guest_limit_reached`` / ``guest_key_required`` 402 the signup prompt
       keys on. Does NOT increment; ``run_core._reject_if_guest_over_limit``
@@ -167,11 +178,26 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
       be right.
     """
     from pocketpaw_ee.cloud.auth.guest_gates import assert_guest_turn_allowed
-    from pocketpaw_ee.cloud.credits.guards import assert_within_billing
+    from pocketpaw_ee.cloud.credits import guards
+
+    async def _billing() -> None:
+        # Advisory here: the executor resolves again on its own ctx and that
+        # answer is the one that gates and bills the run. Billing off means
+        # nothing to gate, so skip the key read, decrypt and egress check.
+        settings = guards.get_settings()
+        if not (settings.billing_enforced or settings.credits_enforced):
+            return
+        payer = await guards.resolve_payer(workspace_id)
+        source = await guards.billing_source(payer, agent_id, exclusive_tools=exclusive_tools)
+        await guards.assert_within_billing(workspace_id, source, one_active_run=True)
+        refusal = await guards.free_model_refusal(workspace_id, source, agent_id, model_override)
+        if refusal is not None:
+            raise refusal
 
     checks = [
-        # Flag-gated no-op unless billing_enforced; balance then quota inside.
-        assert_within_billing(workspace_id),
+        # Flag-gated no-op unless billing_enforced or credits_enforced;
+        # balance then quota inside, skipped for a BYOK turn.
+        _billing(),
         assert_guest_turn_allowed(user_id, scope_workspace_id),
         _assert_under_daily_turns(scope_workspace_id),
     ]
@@ -179,6 +205,23 @@ async def _run_start_gates(workspace_id: str, user_id: str, scope_workspace_id: 
     for outcome in await asyncio.gather(*checks, return_exceptions=True):
         if isinstance(outcome, BaseException):
             raise outcome
+
+
+def _surface_is_exclusive(surface_context: SurfaceContext | None) -> bool:
+    """Whether the surface's base profile is deny-by-default (``exclusive_tools``).
+
+    The base profile only: a pocket-entity override that turns exclusivity on is
+    folded in by the executor, not here, so for that rare turn the route can
+    gate a stored key as platform where the executor would not. A lookup error
+    answers True, the lenient side, since the executor gates again.
+    """
+    if surface_context is None:
+        return False
+    try:
+        return bool(resolve_profile(surface_context.kind, surface_context.meta).exclusive_tools)
+    except Exception:
+        logger.debug("surface profile lookup failed; treating as exclusive", exc_info=True)
+        return True
 
 
 async def _assert_own_key_if_kiosk_requires_it(ctx: Any) -> None:
@@ -271,6 +314,8 @@ async def post_agent_chat(
     user_id: str = Depends(current_user_id),
     workspace_id: str = Depends(current_workspace_id),
 ) -> StreamingResponse:
+    transport = get_stream_transport()
+
     try:
         # Thread the authenticated workspace (fix/worker-trusts-spec-workspace).
         # The HTTP route already validated it via ``current_workspace_id``; the
@@ -309,22 +354,29 @@ async def post_agent_chat(
     # They are independent, so ``_run_start_gates`` runs them concurrently and
     # raises the FIRST failure in that declared order. A turn failing several
     # checks gets the same error it always did.
-    await _run_start_gates(workspace_id, user_id, ctx.workspace_id)
-
-    transport = get_stream_transport()
-    # Resolve the surface-aware context preamble AFTER scope is resolved
-    # (so we have ``workspace_id`` / ``user_id`` confirmed) and BEFORE any
-    # other prompt assembly. The resolver never raises — failures fall
-    # back to a GENERIC context with an empty preamble, which
-    # ``build_dynamic_context`` then treats as the legacy three-line
-    # shape. Older clients that send neither ``surface`` nor
-    # ``surface_meta`` land here as ``{surface: None, meta: {}}`` and
-    # produce a GENERIC context with a placeholder preamble that the
-    # router still attaches; the chat continues to work either way.
+    #
+    # The surface is resolved first, because a deny-by-default surface (the
+    # concierge) is served by pydantic_ai and so spends a stored key whatever
+    # the bound agent's backend is; the billing leg needs that answer.
+    #
+    # Surface: resolved AFTER scope (so ``workspace_id`` / ``user_id`` are
+    # confirmed) and BEFORE any prompt assembly. The resolver never raises:
+    # failures fall back to a GENERIC context with an empty preamble, which
+    # ``build_dynamic_context`` treats as the legacy three-line shape. Older
+    # clients that send neither ``surface`` nor ``surface_meta`` land here as
+    # ``{surface: None, meta: {}}`` and get a GENERIC context.
     ctx.surface_context = await resolve_surface_context(
         ctx.workspace_id,
         user_id,
         {"surface": body.surface, "meta": body.surface_meta or {}},
+    )
+    await _run_start_gates(
+        workspace_id,
+        user_id,
+        ctx.workspace_id,
+        agent_id=ctx.target_agent_id,
+        exclusive_tools=_surface_is_exclusive(ctx.surface_context),
+        model_override=body.model,
     )
 
     # Kiosk BYOK fast-reject (2026-09-12). UX ONLY — see the docstring.
@@ -337,13 +389,32 @@ async def post_agent_chat(
     # server-resolved context. Never move the gate here and delete that one.
     await _assert_own_key_if_kiosk_requires_it(ctx)
 
+    # Snapshot the scope's stop token once the turn has passed every fast-reject
+    # gate (those must answer without touching Redis). A stop that lands before
+    # ``create_run`` (nothing to cancel yet) changes it; see the check after
+    # ``create_run``.
+    stop_key = _scope_stop_key(workspace_id, scope, scope_id)
+    stop_token_at_start = await transport.scope_stop_token(stop_key)
+
     # Supersede any prior in-flight run for this scope. ``request_cancel``
     # writes the cancel flag in Redis so a worker in another process notices.
+    # The worker only polls that flag, so wait for the run to finish winding
+    # down: it persists its partial reply before its terminal status, and the
+    # history loaded below must include that reply. A re-POST of the same
+    # ``client_message_id`` is the same turn, not a new one, so it is left alone.
     prior = await run_service.find_active_run_for_scope(
         workspace_id=workspace_id, context_type=scope, scope_id=scope_id
     )
-    if prior is not None:
+    if prior is not None and not (
+        body.client_message_id and prior.client_message_id == body.client_message_id
+    ):
         await transport.request_cancel(prior.run_id)
+        if not await run_service.wait_until_terminal(prior.run_id, timeout=SUPERSEDE_WAIT_SECONDS):
+            logger.warning(
+                "superseded run %s still active after %.1fs; starting the new turn anyway",
+                prior.run_id,
+                SUPERSEDE_WAIT_SECONDS,
+            )
 
     # Load history BEFORE persisting the new user message so it excludes this turn.
     history = await load_history_for_scope(ctx)
@@ -404,6 +475,12 @@ async def post_agent_chat(
     if run.run_id != spec.run_id:
         spec = spec.model_copy(update={"run_id": run.run_id})
     run_id = run.run_id
+    # A stop that arrived while this request was still creating the run found
+    # nothing to cancel; it left a new token instead. Cancel before the executor
+    # starts so the run ends at its first cancel check, before any model call.
+    if await transport.scope_stop_token(stop_key) != stop_token_at_start:
+        logger.info("stop landed before run %s existed; cancelling it", run_id)
+        await transport.request_cancel(run_id)
     await get_executor().submit(spec)
 
     async def gen() -> AsyncIterator[bytes]:
@@ -455,18 +532,54 @@ async def post_agent_chat(
 async def post_agent_chat_stop(
     scope: Scope,
     scope_id: str,
-    user_id: str = Depends(current_user_id),  # noqa: ARG001
+    user_id: str = Depends(current_user_id),
     workspace_id: str = Depends(current_workspace_id),
 ) -> dict[str, Any]:
     """Cancel the active run for this scope. Idempotent — returns ``ok`` even
     when no run is in flight so the frontend's fire-and-forget stop button
-    doesn't surface a 404 toast."""
-    prior = await run_service.find_active_run_for_scope(
-        workspace_id=workspace_id, context_type=scope, scope_id=scope_id
+    doesn't surface a 404 toast.
+
+    The caller must own the run or be able to open the scope; otherwise the
+    scope resolver's own 403/404 is returned and nothing is cancelled. The
+    pending-stop token is written before the run lookup: a run created after
+    the lookup sees the token, a run created before it is found here.
+    """
+    transport = get_stream_transport()
+    find = run_service.find_active_run_for_scope
+    run = await find(workspace_id=workspace_id, context_type=scope, scope_id=scope_id)
+    scope_checked = False
+    if run is None or run.user_id != user_id:
+        await _assert_scope_access(scope, scope_id, user_id, workspace_id)
+        scope_checked = True
+
+    await transport.request_scope_stop(
+        _scope_stop_key(workspace_id, scope, scope_id), PENDING_STOP_TTL_SECONDS
     )
-    if prior is not None:
-        await get_stream_transport().request_cancel(prior.run_id)
+    run = await find(workspace_id=workspace_id, context_type=scope, scope_id=scope_id)
+    if run is not None:
+        if run.user_id != user_id and not scope_checked:
+            await _assert_scope_access(scope, scope_id, user_id, workspace_id)
+        await transport.request_cancel(run.run_id)
     return {"status": "ok"}
+
+
+async def _assert_scope_access(scope: str, scope_id: str, user_id: str, workspace_id: str) -> None:
+    """Raise unless ``user_id`` may open this scope, by the same resolver that
+    admits a message to it. A 400 from that resolver is an agent-selection
+    problem raised after its membership checks passed, so it is not a denial."""
+    try:
+        await resolve_scope_context(
+            scope=scope,
+            scope_id=scope_id,
+            user_id=user_id,
+            agent_id_hint=None,
+            expected_workspace_id=workspace_id,
+        )
+    except InvalidScope:
+        raise CloudError(400, "scope.invalid", "Invalid scope") from None
+    except CloudError as exc:
+        if exc.status_code != 400:
+            raise
 
 
 async def _ensure_scope_session(ctx: ScopeContext) -> str | None:

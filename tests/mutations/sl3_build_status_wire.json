@@ -66,8 +66,8 @@
   {
     "label": "SL-3: build_reason is dropped from SiteResponse, so the field a client reads to explain a failure does not exist on the wire at all",
     "file": "ee/pocketpaw_ee/sites/dto.py",
-    "find": "    build_reason: str | None = None\n    # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,",
-    "replace": "    # SI-4: the persisted import summary for an IMPORTED site — {pages: [{path,",
+    "find": "    build_reason: str | None = None\n    # Is the agent run that CREATED this site still working on it? ``generating`` |",
+    "replace": "    # Is the agent run that CREATED this site still working on it? ``generating`` |",
     "tests": [
       "tests/ee/sites/test_build_status_on_the_wire.py::TestTheDtoDeclaresTheContract"
     ]

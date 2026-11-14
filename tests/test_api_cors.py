@@ -75,3 +75,30 @@ class TestCORSConfig:
         # Default should be empty list
         s = Settings()
         assert s.api_cors_allowed_origins == []
+
+
+class TestExposedHeaders:
+    def test_content_disposition_is_exposed_to_cross_origin_callers(self):
+        """The Tauri app calls the backend cross-origin and reads an export's
+        filename from Content-Disposition, which a browser hides unless it is in
+        Access-Control-Expose-Headers."""
+        from fastapi import FastAPI
+        from fastapi.responses import PlainTextResponse
+        from fastapi.testclient import TestClient
+
+        from pocketpaw.api.cors import install_cors
+
+        app = FastAPI()
+
+        @app.get("/file")
+        def _file():
+            return PlainTextResponse(
+                "a,b", headers={"Content-Disposition": 'attachment; filename="t.csv"'}
+            )
+
+        install_cors(app)
+        resp = TestClient(app).get("/file", headers={"Origin": "tauri://localhost"})
+        exposed = [
+            h.strip().lower() for h in resp.headers["access-control-expose-headers"].split(",")
+        ]
+        assert "content-disposition" in exposed

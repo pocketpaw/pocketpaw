@@ -307,6 +307,9 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.automations_status.router import (
         router as automations_status_router,
     )
+    from pocketpaw_ee.cloud.billing.checkout_return import (
+        router as billing_checkout_return_router,
+    )
     from pocketpaw_ee.cloud.billing.router import router as billing_router
     from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.byok.router import router as byok_router
@@ -324,6 +327,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
     from pocketpaw_ee.cloud.discover.router import router as discover_router
     from pocketpaw_ee.cloud.discovery.router import router as discovery_router
+    from pocketpaw_ee.cloud.early_access.router import router as early_access_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.herdr_cockpit.router import router as herdr_cockpit_router
@@ -367,6 +371,8 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(partners_router, prefix="/api/v1")
     # Find a Pro: the public, no-sign-in face of partners (directory, profile, apply).
     app.include_router(pros_router, prefix="/api/v1")
+    # Early access: the public waitlist a visitor joins while signups are paused.
+    app.include_router(early_access_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
     # Web Cursor sandbox registry (WC-1) — the (workspace, user, repo) -> sandbox
     # tenancy/auth oracle every later Web Cursor slice authorizes against.
@@ -422,6 +428,10 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(billing_router, prefix="/api/v1")
     app.include_router(byok_router, prefix="/api/v1")
     app.include_router(billing_webhooks_router, prefix="/api/v1")
+    # The post-checkout return hop (GET|POST /billing/checkout/return/{outcome}):
+    # public like the webhook, since the gateway returns the buyer with a
+    # cross-site navigation (Razorpay uses a form POST). Redirect-only, no state.
+    app.include_router(billing_checkout_return_router, prefix="/api/v1")
     # Entitlements (BC-6, the Entitlement primitive) — the workspace-scoped
     # resolver (GET /entitlements -> the workspace's plan + features + monthly
     # credit allotment). The plan CATALOG read (GET /billing/plans) is on the
@@ -552,6 +562,8 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.paw_bar.catalog_routes import router as paw_bar_catalog_router
     from pocketpaw_ee.paw_bar.knowledge_routes import router as paw_bar_knowledge_router
     from pocketpaw_ee.paw_bar.router import router as paw_bar_router
+    from pocketpaw_ee.site_ai.router import public_router as site_ai_public_router
+    from pocketpaw_ee.site_ai.router import router as site_ai_router
     from pocketpaw_ee.sites.files_router import router as site_files_router
     from pocketpaw_ee.sites.router import router as sites_router
     from pocketpaw_ee.sites.secrets_router import router as site_secrets_router
@@ -631,6 +643,10 @@ def mount_cloud(app: FastAPI) -> None:
     # its own credential. See ``pocketpaw_ee.integrations.router``.
     app.include_router(integrations_router, prefix="/api/v1")
     app.include_router(integrations_public_router, prefix="/api/v1")
+    # Site AI apps: owner settings/presets/budget/usage (session + sites.ai_manage).
+    app.include_router(site_ai_router, prefix="/api/v1")
+    # Site AI apps: the site-facing API (site gates, no session). See site_ai/chat.py.
+    app.include_router(site_ai_public_router, prefix="/api/v1")
     # A project site's files (list / read / write / patch / delete) for the builder's
     # Code view; the same service functions the agent's project file tools call.
     app.include_router(site_files_router, prefix="/api/v1")

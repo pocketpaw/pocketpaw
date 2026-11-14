@@ -157,6 +157,17 @@ draft.
   carries the edit bridge and, when the paw-sites toolchain is available on the API
   host, the same `data-uid` stamping `/html-armed-source` uses.
 
+## Agent screenshots and play-tests
+
+`preview_site` (Browser Rendering REST screenshots) and `play_test_site` (Browser Run
+over CDP) both load the draft from Cloudflare's browsers, never from the API host, so
+the preview origin must be reachable from the public internet. Both use
+`PAW_CF_ACCOUNT_ID` / `PAW_CF_API_TOKEN` and need the token's `Browser Rendering - Edit`
+permission; nothing else is configured for play-tests. To confirm the token has it,
+check that `preview_site` returns a picture on that deployment, or list the token's
+policies with `GET /client/v4/user/tokens/verify` and the token's page in the
+Cloudflare dashboard.
+
 ## Draft Workers (server code in drafts)
 
 Off by default. With `PAW_SITES_DRAFT_WORKERS=1` and the account project deploy

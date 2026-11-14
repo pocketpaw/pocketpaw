@@ -8,8 +8,9 @@
 #     time, and a refresh token ending in ``revoked`` raises InvalidGrant
 #   * actions: ``echo`` (public read) returns its args, ``record`` (public write)
 #     stores them in ``IntegrationDemoRecord``
-#   * settings: ``note`` (text) and ``board_url`` (readonly link, server-set) so
-#     the settings validation and ``site_setup`` seams have a fixture
+#   * settings: ``note`` (text), ``board_url`` (readonly link, server-set) and
+#     ``board`` (a remote select whose ``field_options`` are ``DEMO_BOARDS``) so
+#     the settings validation, ``site_setup`` and remote-options seams have a fixture
 #   * webhooks: body signed with HMAC-SHA256 in ``X-Demo-Signature`` using
 #     ``POCKETPAW_INTEGRATIONS_DEMO_WEBHOOK_SECRET``. No default: without the demo
 #     switch AND an explicit secret every webhook is refused.
@@ -37,7 +38,9 @@ from pocketpaw_ee.integrations.providers.base import (
     InvalidGrant,
     NormalizedEvent,
     ProviderError,
+    SettingOption,
     SettingsField,
+    SetupContext,
     TokenGrant,
 )
 
@@ -61,6 +64,13 @@ def sign(body: bytes) -> str:
     if not secret:
         raise ValueError(f"{WEBHOOK_SECRET_ENV} is not set")
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+DEMO_BOARDS = (
+    SettingOption(value="brd_launch", label="Launch plan"),
+    SettingOption(value="brd_roadmap", label="Roadmap"),
+    SettingOption(value="brd_support", label="Support queue"),
+)
 
 
 def _s256(verifier: str) -> str:
@@ -117,6 +127,7 @@ class DemoProvider(BaseProvider):
     settings_fields = (
         SettingsField(key="note", label="Note", type="text", max_length=120),
         SettingsField(key="board_url", label="Board", type="link", readonly=True),
+        SettingsField(key="board", label="Board to use", type="select", options_source="remote"),
     )
     actions = {
         "echo": ActionSpec(
@@ -163,6 +174,19 @@ class DemoProvider(BaseProvider):
         if not refresh_token or refresh_token.endswith("revoked"):
             raise InvalidGrant("demo: invalid_grant")
         return _grant()
+
+    async def field_options(
+        self,
+        binding: Any,  # noqa: ARG002
+        ctx: SetupContext,
+        key: str,
+    ) -> list[SettingOption]:
+        if key != "board":
+            return []
+        # Proves the hook can reach a live token, like a real provider listing boards.
+        if ctx.get_token is not None:
+            await ctx.get_token()
+        return list(DEMO_BOARDS)
 
     def verify_webhook(self, body: bytes, headers: Mapping[str, str]) -> NormalizedEvent | None:
         if not demo_enabled() or not webhook_secret():

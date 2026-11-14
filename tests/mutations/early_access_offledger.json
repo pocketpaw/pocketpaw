@@ -1,0 +1,146 @@
+[
+  {
+    "label": "the deny ignores who pays, so paid workspaces are refused too",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if not await is_platform_funded_free(workspace_id):\n        return None\n\n    from pocketpaw_ee.cloud._core.errors import EarlyAccessNotAvailable\n",
+    "replace": "\n    from pocketpaw_ee.cloud._core.errors import EarlyAccessNotAvailable\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "the deny ignores the credit flags, so it fires at deploy",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if not (settings.billing_enforced or settings.credits_enforced) or not workspace_id:\n        return None\n    if not await is_platform_funded_free",
+    "replace": "    if not workspace_id:\n        return None\n    if not await is_platform_funded_free",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "the dependency never raises",
+    "file": "ee/pocketpaw_ee/cloud/_core/deps.py",
+    "find": "    await assert_early_access_allowed(workspace_id)\n",
+    "replace": "    return None\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "belt router loses the deny",
+    "file": "ee/pocketpaw_ee/cloud/belt/router.py",
+    "find": "    dependencies=[Depends(require_license), Depends(require_paid_or_early_access_allowed)],\n",
+    "replace": "    dependencies=[Depends(require_license)],\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "mandates router loses the deny",
+    "file": "ee/pocketpaw_ee/cloud/mandates/router.py",
+    "find": "    dependencies=[Depends(require_license), Depends(require_paid_or_early_access_allowed)],\n",
+    "replace": "    dependencies=[Depends(require_license)],\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "studio generate loses the deny",
+    "file": "ee/pocketpaw_ee/cloud/studio/router.py",
+    "find": "    \"/generate\",\n    response_model=schemas.Generation,\n    dependencies=[Depends(require_paid_or_early_access_allowed)],\n",
+    "replace": "    \"/generate\",\n    response_model=schemas.Generation,\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "foresight scenario run loses the deny",
+    "file": "ee/pocketpaw_ee/cloud/foresight/service.py",
+    "find": "    # the chat agent's run_scenario tool hits the same check.\n    await assert_early_access_allowed(workspace_id)\n",
+    "replace": "    # the chat agent's run_scenario tool hits the same check.\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "foresight LLM insights run for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/foresight/service.py",
+    "find": "    if config_view.synthesizer == \"llm\" and await early_access_denial(workspace_id) is None:\n",
+    "replace": "    if config_view.synthesizer == \"llm\":\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "concierge answers an unpaid workspace",
+    "file": "ee/pocketpaw_ee/paw_bar/concierge_runtime.py",
+    "find": "    if await early_access_denial(workspace_id) is not None:\n        async for frame in degrade_reply(widget, \"early_access\"):\n",
+    "replace": "    if False:\n        async for frame in degrade_reply(widget, \"early_access\"):\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "media tools never refuse",
+    "file": "ee/pocketpaw_ee/agent/mcp_servers/media.py",
+    "find": "    if await early_access_denial(workspace_id) is None:\n        return None\n    return _error_response(EARLY_ACCESS_REFUSAL)\n",
+    "replace": "    return None\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "livekit spawns the notes bot for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/livekit/service.py",
+    "find": "        if notes_on and group_id not in _active_agents:\n",
+    "replace": "        if group_id not in _active_agents:\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "instinct approve skips the early-access check on Belt actions",
+    "file": "ee/pocketpaw_ee/instinct/router.py",
+    "find": "    from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed\n\n    await assert_early_access_allowed(workspace_id)\n",
+    "replace": "    return\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "mandate plan executor dispatches for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/mandates/executor.py",
+    "find": "        denied = await early_access_denial(workspace_id)\n",
+    "replace": "        denied = None\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "belt executor applies for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/belt/executor.py",
+    "find": "    denied = await early_access_denial(workspace_id)\n",
+    "replace": "    denied = None\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "trigger_shift calls the foreman for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/mandates/service.py",
+    "find": "    await assert_early_access_allowed(workspace_id)\n\n    doc = await _fetch_mandate(workspace_id, mandate_id)\n    if doc.status != \"active\":\n",
+    "replace": "    doc = await _fetch_mandate(workspace_id, mandate_id)\n    if doc.status != \"active\":\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  },
+  {
+    "label": "autopilot cycle runs personas for unpaid",
+    "file": "ee/pocketpaw_ee/cloud/mandates/autopilot.py",
+    "find": "    if await early_access_denial(workspace_id) is not None:\n",
+    "replace": "    if False:\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_offledger.py"
+    ]
+  }
+]

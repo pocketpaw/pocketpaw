@@ -1,0 +1,65 @@
+[
+  {
+    "label": "the chat card skips the gate",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    spec = _gate_chat_card(spec)\n",
+    "replace": "    spec = spec\n",
+    "tests": [
+      "tests/cloud/test_chat_card_gate.py"
+    ]
+  },
+  {
+    "label": "a refused chat card is dropped instead of shipped",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            logger.info(\"ripple_chat_card.refused\", extra={\"reason\": reason})\n            return spec\n",
+    "replace": "            logger.info(\"ripple_chat_card.refused\", extra={\"reason\": reason})\n            return {**spec, \"ui\": {}}\n",
+    "tests": [
+      "tests/cloud/test_chat_card_gate.py"
+    ]
+  },
+  {
+    "label": "a gate error raises into the run",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "        logger.warning(\"ripple_chat_card.gate_failed\", exc_info=True)\n        return spec\n",
+    "replace": "        logger.warning(\"ripple_chat_card.gate_failed\", exc_info=True)\n        raise\n",
+    "tests": [
+      "tests/cloud/test_chat_card_gate.py"
+    ]
+  },
+  {
+    "label": "a broken ui-spec fence is not repaired",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "            candidate = _repair_fence_json(match.group(1))\n",
+    "replace": "            candidate = None\n",
+    "tests": [
+      "tests/cloud/test_chat_card_gate.py"
+    ]
+  },
+  {
+    "label": "chat.send is not an emittable event on the chat profile",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    extra = tuple(e for e in (profile.host_events if profile else ()) if e not in wired)\n",
+    "replace": "    extra = ()\n",
+    "tests": [
+      "tests/cloud/test_chat_card_gate.py"
+    ]
+  },
+  {
+    "label": "a server-wired event becomes model-emittable",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "    extra = tuple(e for e in (profile.host_events if profile else ()) if e not in wired)\n",
+    "replace": "    extra = tuple(profile.host_events if profile else ())\n",
+    "tests": [
+      "tests/cloud/test_chat_card_gate.py"
+    ]
+  },
+  {
+    "label": "the chat profile lifts no flat props",
+    "file": "ee/pocketpaw_ee/paw_bar/card_spec.py",
+    "find": "        _LIFTABLE if profile.manifest is RIPPLE_MANIFEST else {}\n",
+    "replace": "        {}\n",
+    "tests": [
+      "tests/cloud/test_chat_card_gate.py"
+    ]
+  }
+]

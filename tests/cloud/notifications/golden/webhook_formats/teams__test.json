@@ -1,0 +1,37 @@
+{
+  "attachments": [
+    {
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "actions": [
+          {
+            "title": "Open in Paw",
+            "type": "Action.OpenUrl",
+            "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+          }
+        ],
+        "body": [
+          {
+            "size": "Medium",
+            "text": "Test notification",
+            "type": "TextBlock",
+            "weight": "Bolder",
+            "wrap": true
+          },
+          {
+            "isSubtle": true,
+            "spacing": "None",
+            "text": "Bright Smile",
+            "type": "TextBlock",
+            "wrap": true
+          }
+        ],
+        "type": "AdaptiveCard",
+        "version": "1.4"
+      },
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null
+    }
+  ],
+  "type": "message"
+}

@@ -90,6 +90,9 @@ class _StubTransport:
     async def request_cancel(self, run_id: str) -> None:
         self.cancelled.append(run_id)
 
+    async def scope_stop_token(self, scope_key: str) -> str | None:  # noqa: ARG002
+        return None
+
     def read_events(self, run_id: str, *, after: str = "0", block_ms: int = 15000) -> AsyncIterator:  # noqa: ARG002
         async def _gen() -> AsyncIterator:
             from pocketpaw_ee.cloud.chat.runs.transport import StreamEvent
@@ -104,10 +107,20 @@ class _StubTransport:
 
 
 def _enforce(monkeypatch, mod, *, on: bool) -> None:
-    """Point the billing guard's ``get_settings`` at a stub carrying the flag."""
+    """Point the billing guard's ``get_settings`` at a stub carrying the flag,
+    plus the launch model pair the free-model check reads on every gated turn."""
     from pocketpaw_ee.cloud.credits import guards
 
-    monkeypatch.setattr(guards, "get_settings", lambda: SimpleNamespace(billing_enforced=on))
+    monkeypatch.setattr(
+        guards,
+        "get_settings",
+        lambda: SimpleNamespace(
+            billing_enforced=on,
+            credits_enforced=False,
+            pydantic_ai_model="litellm:claude-haiku-4-5",
+            free_model_allowlist=["claude-haiku-4-5"],
+        ),
+    )
 
 
 def _patch_run_internals(mod):

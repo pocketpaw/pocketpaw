@@ -16,6 +16,10 @@ Invariants a reader must not break:
 - ``run_status`` marks an assistant row a failed / cancelled / interrupted run cut
   off; ``steps`` / ``steps_omitted`` carry the reply's thinking and tool calls via
   ``steps_wire_fields``. Both wire keys appear only when set.
+- ``ask_user`` holds the question an agent reply asked through the ``ask_user``
+  tool; ``persist_user_message_for_scope`` marks it answered on the user's next
+  message in that scope. The ``askUser`` wire key appears only when set.
+  ``ask_states_for_messages`` is the batched read of which replies asked, and answered.
 - Per-member fan-out on send is batched or bounded: notifications (message and
   mention kinds) go through ``notifications_service.create_many`` (one
   ``insert_many``, external webhook delivery in a background task), and the
@@ -427,6 +431,8 @@ def _message_response(msg: _MessageDoc, *, parent: _MessageDoc | None = None) ->
     out.update(
         steps_wire_fields(getattr(msg, "steps", None), getattr(msg, "steps_omitted", 0) or 0)
     )
+    if getattr(msg, "ask_user", None) is not None:
+        out["askUser"] = msg.ask_user.to_wire()
     return out
 
 
@@ -802,14 +808,24 @@ async def patch_ui_state(
       * ``group``  — caller must be a group member.
       * ``pocket`` / ``session`` — caller must own the linked Session.
 
-    Last-write-wins on the entire ``spec_id`` (no field-level merge);
-    Ripple's ``onStateChange`` always carries the full state snapshot.
+    ``spec_id`` picks the target: ``spec_<n>`` splices into the n-th content
+    fence, ``att_<n>`` merges into ``meta["state"]`` of the n-th ripple
+    attachment (agent replies store their spec there, fence stripped).
+    A ``spec_<n>`` with no matching fence falls back to ``att_<n>``: a live
+    stream still shows the fence client-side after the server stripped it.
+    Patch keys are shallow-merged over the stored state. Known limit: a reply
+    with 2+ fences keeps the later ones in content, so ``spec_0`` there still
+    hits a content fence rather than the attachment.
 
     Emits ``message.ui_state.updated`` with routing keys (``group_id`` for
     group messages, ``user_id`` for pocket/session messages) so other tabs /
-    members of the room re-fetch / re-render content via the WS bridge.
+    members of the room re-fetch / re-render content via the WS bridge. For
+    ``att_`` patches the payload also carries the full updated ``attachments``.
     """
-    from pocketpaw_ee.cloud.chat.ripple_content_patcher import patch_content_with_state
+    from pocketpaw_ee.cloud.chat.ripple_content_patcher import (
+        patch_attachments_with_state,
+        patch_content_with_state,
+    )
 
     # Treat malformed ids (e.g. ``m<timestamp>`` placeholders the FE assigns
     # before the cloud ObjectId arrives) as 404 — InvalidId would otherwise
@@ -845,28 +861,48 @@ async def patch_ui_state(
     else:
         raise NotFound("message", message_id)
 
-    new_content = patch_content_with_state(msg.content or "", spec_id, state)
-    if new_content is None:
-        # Fence not found / malformed JSON — surface a 404 so the FE can
-        # fall back to in-memory state rather than silently dropping the
-        # patch. (A 500 would be wrong: nothing crashed, the target just
-        # doesn't exist in the document we have.)
+    # Where the spec lives decides where the state is written: ``att_<n>`` is
+    # a ripple attachment (the run pipeline strips agent fences into one),
+    # ``spec_<n>`` is a fence still inside the content.
+    new_attachments = None
+    new_content: str | None
+    if spec_id.startswith("att_"):
+        new_attachments = patch_attachments_with_state(msg.attachments, spec_id, state)
+        new_content = msg.content or ""
+    else:
+        new_content = patch_content_with_state(msg.content or "", spec_id, state)
+        if new_content is None and spec_id.startswith("spec_"):
+            # During a live run the client still renders the extracted spec as
+            # a fence in the streaming bubble, so a click before any reload
+            # sends ``spec_<n>``. The server already moved that fence into the
+            # ripple attachment, so retry there with the same index.
+            new_attachments = patch_attachments_with_state(
+                msg.attachments, "att_" + spec_id[len("spec_") :], state
+            )
+            if new_attachments is not None:
+                new_content = msg.content or ""
+    if new_content is None or (spec_id.startswith("att_") and new_attachments is None):
+        # Spec not found / malformed — surface a 404 so the FE can fall back
+        # to in-memory state rather than silently dropping the patch. (A 500
+        # would be wrong: nothing crashed, the target just doesn't exist in
+        # the document we have.)
         raise NotFound("ui_spec", f"{message_id}/{spec_id}")
 
-    msg.content = new_content
+    data: dict = {
+        "message_id": message_id,
+        "spec_id": spec_id,
+        "state": state,
+        "content": new_content,
+    }
+    if new_attachments is not None:
+        # Reassign the whole list so Beanie sees the change and writes it.
+        msg.attachments = [_AttachmentDoc(**a) for a in new_attachments]
+        data["attachments"] = [a.model_dump(mode="json") for a in msg.attachments]
+    else:
+        msg.content = new_content
     await msg.save()
 
-    await emit(
-        MessageUiStateUpdated(
-            data={
-                "message_id": message_id,
-                "spec_id": spec_id,
-                "state": state,
-                "content": new_content,
-                **route_key,
-            }
-        )
-    )
+    await emit(MessageUiStateUpdated(data={**data, **route_key}))
     return {"ok": True}
 
 
@@ -1405,7 +1441,59 @@ async def persist_user_message_for_scope(
             workspace_id=workspace_id,
         )
     await msg.insert()
+    await _answer_pending_ask(kind, scope_id, session_key, content)
     return str(msg.id)
+
+
+async def _answer_pending_ask(kind: str, scope_id: str, session_key: str, content: str) -> None:
+    """Mark the scope's pending ``ask_user`` question answered by ``content``.
+
+    Only the newest agent reply can hold a pending ask (the client offers chips
+    on the latest reply alone), so this reads that one row through the
+    ``(session_key|group, createdAt)`` index. Any reply answers it, a clicked
+    chip or typed text, so the chips never come back after a reload once the
+    user has moved on. Best-effort: a failure here must never fail the send.
+    """
+    if kind in ("pocket", "session"):
+        query: dict = {"session_key": session_key, "role": "assistant"}
+    else:
+        query = {"group": scope_id, "sender_type": "agent"}
+    try:
+        latest = await _MessageDoc.find(query).sort("-createdAt").limit(1).to_list()
+        ask = latest[0].ask_user if latest else None
+        if ask is None or ask.answered:
+            return
+        await _MessageDoc.get_pymongo_collection().update_one(
+            {"_id": latest[0].id},
+            {"$set": {"ask_user.answered": True, "ask_user.answer": content}},
+        )
+    except Exception:
+        logger.warning("marking the pending ask answered failed for %s", scope_id, exc_info=True)
+
+
+async def ask_states_for_messages(message_ids: list[str]) -> dict[str, bool]:
+    """``{message_id: answered}`` for each of ``message_ids`` that carries an ``ask_user``.
+
+    One ``_id $in`` read projected to the answered flag, for the sites
+    ``generation`` flag: absent = the reply asked nothing, False = the question is
+    still open, True = the user answered (their next run may not exist yet). Ids
+    that are not valid ObjectIds are skipped.
+    """
+    oids: list[PydanticObjectId] = []
+    for mid in message_ids:
+        try:
+            oids.append(PydanticObjectId(mid))
+        except Exception:  # noqa: BLE001 — a malformed id simply has no ask
+            continue
+    if not oids:
+        return {}
+    cursor = _MessageDoc.get_pymongo_collection().find(
+        {"_id": {"$in": oids}, "ask_user": {"$ne": None}},
+        {"_id": 1, "ask_user.answered": 1},
+    )
+    return {
+        str(row["_id"]): bool((row.get("ask_user") or {}).get("answered")) async for row in cursor
+    }
 
 
 async def persist_assistant_message_for_scope(
@@ -1421,6 +1509,7 @@ async def persist_assistant_message_for_scope(
     run_status: str | None = None,
     steps: list[dict] | None = None,
     steps_omitted: int = 0,
+    ask_user: dict | None = None,
 ) -> _MessageDoc:
     """Persist an agent's reply in an agent-stream context.
 
@@ -1433,6 +1522,9 @@ async def persist_assistant_message_for_scope(
 
     ``steps`` / ``steps_omitted`` are the thinking blocks and tool calls the
     reply streamed (see ``chat/runs/steps.py``); display-only.
+
+    ``ask_user`` is the ``MessageAskUser`` dict when the reply asked the user a
+    question through the ``ask_user`` tool; display-only.
     """
     att_models = [_AttachmentDoc(**a) if isinstance(a, dict) else a for a in (attachments or [])]
     if kind == "concierge":
@@ -1479,6 +1571,7 @@ async def persist_assistant_message_for_scope(
             run_status=run_status,
             steps=steps or [],
             steps_omitted=steps_omitted,
+            ask_user=ask_user,
         )
     else:
         msg = _MessageDoc(
@@ -1493,6 +1586,7 @@ async def persist_assistant_message_for_scope(
             run_status=run_status,
             steps=steps or [],
             steps_omitted=steps_omitted,
+            ask_user=ask_user,
         )
     await msg.insert()
     return msg

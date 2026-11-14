@@ -63,5 +63,32 @@
     "tests": [
       "tests/ee/sites/test_project_engine.py::test_host_builds_are_refused"
     ]
+  },
+  {
+    "label": "the build history is never written, so the builds list only shows the latest",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "        store.write(\n            pocket_id, verify_store.BUILD_HISTORY_KEY, {\"builds\": _fold_history(builds, record)}\n        )\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_builds_list_newest_first_with_trigger_times_and_hash"
+    ]
+  },
+  {
+    "label": "a finished build never gets its finish time",
+    "file": "ee/pocketpaw_ee/sites/project_build.py",
+    "find": "        prev[\"finished_at\"] = now\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_builds_list_newest_first_with_trigger_times_and_hash"
+    ]
+  },
+  {
+    "label": "the builds list reads another pocket's job ids",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await _project_pocket(workspace_id, user_id, pocket_id)\n    records = _records if _records is not None else verify_store.default_verify_store()\n    builds = [\n",
+    "replace": "    records = _records if _records is not None else verify_store.default_verify_store()\n    builds = [\n",
+    "tests": [
+      "tests/ee/sites/test_project_engine.py::test_builds_list_is_scoped_to_the_workspace_and_the_pocket"
+    ]
   }
 ]

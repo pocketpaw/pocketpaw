@@ -18,6 +18,9 @@ persists it) when ``active_workspace`` is unset, so a joined member is never
 locked out. ``require_plan_feature`` gates a route on the workspace's plan
 tier; its plan read is memoised per GET/HEAD request (``request_memo``) and
 shared with ``entitlements.service.resolve_entitlements``.
+``require_paid_or_early_access_allowed`` refuses an unpaid early-access
+workspace (403 ``early_access.not_available``) on routes whose spend the credit
+ledger does not meter; the decision lives in ``credits.guards``.
 """
 
 from __future__ import annotations
@@ -230,6 +233,20 @@ def require_plan_feature(feature: str) -> Callable[..., Coroutine[Any, Any, None
     return _guard
 
 
+async def require_paid_or_early_access_allowed(
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    """FastAPI dependency: 403 ``early_access.not_available`` for an unpaid
+    early-access workspace while the credit gate is on; a no-op otherwise.
+
+    For routes that spend off the credit ledger (Belt, mandates, Studio
+    generation). Attach it beside ``require_plan_feature``.
+    """
+    from pocketpaw_ee.cloud.credits.guards import assert_early_access_allowed
+
+    await assert_early_access_allowed(workspace_id)
+
+
 __all__ = [
     "current_user",
     "current_user_id",
@@ -238,5 +255,6 @@ __all__ = [
     "require_action",
     "require_action_any_workspace",
     "require_membership",
+    "require_paid_or_early_access_allowed",
     "require_plan_feature",
 ]

@@ -726,22 +726,36 @@ async def test_audit_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypatch
 @pytest.mark.asyncio
 async def test_revert_by_pocket_creates_draft(beanie_test_db, monkeypatch):
     """POST .../versions/{n}/revert returns 200 with a NEW draft whose content is a
-    snapshot of version n — the normal review/publish flow then applies."""
+    snapshot of version n, and puts the site's source back to it."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.versions import service as versions
 
+    one, two = {"index.html": "<h1>one</h1>\n"}, {"index.html": "<h1>two</h1>\n"}
+    _view, pk_rev, err = await pockets_service.agent_create(
+        workspace_id="ws_owner",
+        owner_id="user-test-1",
+        name="Rev",
+        type_="site",
+        pattern="landing",
+        ripple_spec=None,
+        engine="html",
+        source=dict(two),
+        trusted=True,
+    )
+    assert err is None, err
     v1 = await versions.write_draft(
-        scope_type="pocket", scope_id="pk_rev", workspace_id="ws_owner", content={"v": "one"}
+        scope_type="pocket", scope_id=pk_rev, workspace_id="ws_owner", content=dict(one)
     )
     await versions.publish(
-        scope_type="pocket", scope_id="pk_rev", workspace_id="ws_owner", version_id=str(v1.id)
+        scope_type="pocket", scope_id=pk_rev, workspace_id="ws_owner", version_id=str(v1.id)
     )
     await versions.write_draft(
-        scope_type="pocket", scope_id="pk_rev", workspace_id="ws_owner", content={"v": "two"}
+        scope_type="pocket", scope_id=pk_rev, workspace_id="ws_owner", content=dict(two)
     )
 
     app = _build_app("ws_owner")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        resp = await c.post(f"/api/v1/sites/by-pocket/pk_rev/versions/{v1.version_no}/revert")
+        resp = await c.post(f"/api/v1/sites/by-pocket/{pk_rev}/versions/{v1.version_no}/revert")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     # A new draft row, forward of v1, labelled as a revert.
@@ -750,10 +764,11 @@ async def test_revert_by_pocket_creates_draft(beanie_test_db, monkeypatch):
     assert body["label"] == f"Revert to v{v1.version_no}"
 
     # The new draft carries v1's content (verified through the versions spine).
-    draft = await versions.get_draft(scope_type="pocket", scope_id="pk_rev")
+    draft = await versions.get_draft(scope_type="pocket", scope_id=pk_rev)
     assert draft is not None
     assert str(draft.id) == body["id"]
-    assert draft.content == {"v": "one"}
+    assert draft.content == one
+    assert (await pockets_service.get(pk_rev, "user-test-1"))["source"] == one
 
 
 @pytest.mark.asyncio

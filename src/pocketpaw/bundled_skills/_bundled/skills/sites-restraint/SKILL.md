@@ -14,13 +14,6 @@ description: |
   brutalist, atmospheric or high-energy - restraint is a direction, not a default.
 ---
 
-<!-- New file 2026-09-08: adapted from ericzakariasson/scandinavian-design into a Paw
-     Sites restraint direction. Its recon/review/prototype invocation modes and its
-     browser-verification harness are NOT ported - /sites denies Read/Bash/Glob, so a
-     source-inspection workflow cannot run there. What is ported is the measured colour
-     system, the dark inversion math, and the do-not-neutralize judgment rules, which
-     are values and prose rather than tooling. See VENDORED.md. -->
-
 # Sites: restraint
 
 Calm, functional, refined, intentionally simple. A neutral foundation, natural
@@ -43,12 +36,15 @@ the rules and report the aggregate as an improvement by default.
 ## The ink ladder
 
 Build intermediate tones with **alpha black over the canvas**, never with warm or
-cool grey hexes. Light-canvas defaults:
+cool grey hexes. Pure `#FFFFFF` and `#000000` belong only to an explicitly
+monochrome direction. Otherwise the canvas and primary ink are design-taste's
+tinted off-white and off-black (one grey family, leaning toward the accent's hue),
+and the alpha steps below sit on top of them unchanged. Light-canvas values:
 
 | Role | Value |
 | --- | --- |
-| Canvas / surface | `#FFFFFF` |
-| Primary ink | `#000000` (or design-taste's tuned off-black) |
+| Canvas / surface | tinted off-white (`#FFFFFF` only when monochrome) |
+| Primary ink | design-taste's tuned off-black (`#000000` only when monochrome) |
 | Secondary ink | `rgb(0 0 0 / 64%)` |
 | Tertiary ink | `rgb(0 0 0 / 44%)` |
 | Border | `rgb(0 0 0 / 10%)` |
@@ -95,7 +91,7 @@ and chrome *louder*, which is the opposite of the intent.
 | Role | Dark value | Note |
 | --- | --- | --- |
 | Canvas | `#0A0A0A` | near-black, not `#000` |
-| Primary ink | `#FFFFFF` | |
+| Primary ink | `#FFFFFF` | a tinted off-white unless the direction is monochrome |
 | Secondary ink | `rgb(255 255 255 / 56%)` | not 64% |
 | Tertiary ink | `rgb(255 255 255 / 36%)` | not 44% |
 | Border | `rgb(255 255 255 / 10-12%)` | borders invert almost exactly |

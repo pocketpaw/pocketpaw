@@ -294,6 +294,13 @@ def test_hydration_accepts_catalog_dicts_as_well_as_models():
     assert out["ui"]["props"]["items"][0]["name"] == "Tea"
 
 
+def test_a_catalog_item_with_no_price_reaches_the_card_without_one():
+    # price_cents 0 is "no listed price": paw-bar shows no price when the key is
+    # absent, and "$0.00" when it is 0, which would be a claim the site never made.
+    out = _vh({"ui": _pc("jazz")}, catalog=[{"id": "jazz", "name": "Jazz", "price_cents": 0}])
+    assert "price_cents" not in out["ui"]["props"]["items"][0]
+
+
 def test_an_empty_product_card_is_dropped_from_its_parent():
     hi = {"type": "text", "props": {"text": "Hi"}}
     out = _vh({"ui": {"type": "flex", "children": [hi, _pc("ghost")]}})

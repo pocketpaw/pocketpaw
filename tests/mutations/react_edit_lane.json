@@ -142,8 +142,8 @@
   {
     "label": "the write stops emitting PocketUpdated, so the search index / soul memory / ripple invalidation desync (cloud rule 9)",
     "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
-    "find": "    updated[component_path] = new_source\n    doc.source = updated\n    await doc.save()\n    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
-    "replace": "    updated[component_path] = new_source\n    doc.source = updated\n    await doc.save()\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
+    "find": "    updated[component_path] = new_source\n    await _commit_fields(doc, {\"source\": updated})\n    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
+    "replace": "    updated[component_path] = new_source\n    await _commit_fields(doc, {\"source\": updated})\n    # Branch primitive (BP-3): a source-map edit ALSO writes a draft",
     "tests": [
       "tests/ee/sites/test_react_component_edit.py::test_pockets_service_emits_pocket_updated"
     ]
@@ -151,7 +151,7 @@
   {
     "label": "the MCP handler skips the Sites plan gate, so a workspace without the plan keeps editing a site its own /sites list 403s",
     "file": "ee/pocketpaw_ee/agent/mcp_servers/sites_create.py",
-    "find": "    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:\n        return gate\n\n    from pocketpaw_ee.cloud._core.errors import CloudError\n    from pocketpaw_ee.sites import service as sites_service\n\n    try:\n        result = await sites_service.edit_react_component(",
+    "find": "    if (\n        gate := await _require_sites_plan_or_error(workspace_id, tool=\"edit_react_component\")\n    ) is not None:\n        return gate\n\n    from pocketpaw_ee.cloud._core.errors import CloudError\n    from pocketpaw_ee.sites import service as sites_service\n\n    try:\n        result = await sites_service.edit_react_component(",
     "replace": "    from pocketpaw_ee.cloud._core.errors import CloudError\n    from pocketpaw_ee.sites import service as sites_service\n\n    try:\n        result = await sites_service.edit_react_component(",
     "tests": [
       "tests/ee/agent/test_sites_mcp_server/test_edit_react_component.py::TestEditHandler::test_plan_gate_denies_a_workspace_without_sites"
@@ -275,15 +275,6 @@
     "replace": "    doc = await _SiteDoc.find_one({\"pocket_id\": pocket_id})  # global-read: mutation\n    state = build_wire_state(doc)",
     "tests": [
       "tests/ee/sites/test_agent_build_visibility.py::test_status_is_tenant_scoped"
-    ]
-  },
-  {
-    "label": "the react create step stops naming the edit tool, so a follow-up change goes back to a second create_react_site and a second site pocket",
-    "file": "ee/pocketpaw_ee/cloud/surface/handlers/sites.py",
-    "find": "            \"`mcp__pocketpaw_sites_manager__edit_react_component` with the SAME \"",
-    "replace": "            \"`create_react_site` again with the SAME \"",
-    "tests": [
-      "tests/cloud/surface/test_sites_handler.py::test_react_create_step_routes_follow_up_changes_to_the_edit_tool"
     ]
   },
   {

@@ -2134,7 +2134,7 @@ async def test_a_restricted_run_does_not_reuse_the_unrestricted_agent():
 async def test_the_real_sites_deny_set_removes_the_ripple_fallback():
     """Pinned to the LIVE ``/sites`` profile, not a hand-written double.
 
-    ``/sites`` svelte-create denies ``pocket_specialist__create`` so the agent
+    ``/sites`` new-site create denies ``pocket_specialist__create`` so the agent
     cannot fall back to building a rippleSpec landing page — prose-only "do not
     call the ripple tool" routing was proven to fail (claude_sdk:1865). On this
     backend that same capability is the bridged ``create_pocket``, so matching
@@ -2145,7 +2145,7 @@ async def test_the_real_sites_deny_set_removes_the_ripple_fallback():
     registry = pytest.importorskip(
         "pocketpaw_ee.cloud.surface.surface_registry", reason="pocketpaw-ee not installed"
     )
-    deny = registry._SITES_SVELTE_CREATE_DENY | registry._SITES_BUILTIN_DENY
+    deny = registry._SITES_LEGACY_AUTHORING_DENY | registry._SITES_BUILTIN_DENY
 
     backend = _backend_with_model(TestModel())
     backend._custom_tools = _bridged("create_pocket", "shell", "read_file", "web_search")
@@ -3861,3 +3861,121 @@ async def test_a_tool_returning_images_keeps_them_and_reports_text_only():
     assert [(img.data, img.media_type) for img in images] == [(png, "image/png")]
     result = next(e for e in events if e.type == "tool_result")
     assert result.content == "Captured the draft. [+1 image]"
+
+
+# --------------------------------------------------------------------------
+# per-run usage limits (the early-access free-run bounds)
+# --------------------------------------------------------------------------
+
+
+def _record_usage_limits(monkeypatch) -> list[dict]:
+    """Spy on the ``UsageLimits`` the run builds, keeping the real class."""
+    import pydantic_ai.usage as usage_mod
+
+    seen: list[dict] = []
+    real = usage_mod.UsageLimits
+
+    def _spy(**kwargs):
+        seen.append(kwargs)
+        return real(**kwargs)
+
+    monkeypatch.setattr(usage_mod, "UsageLimits", _spy)
+    return seen
+
+
+async def test_per_run_limits_reach_usage_limits(monkeypatch):
+    """``max_requests`` tightens the deployment turn cap (never loosens it) and
+    ``total_tokens_limit`` rides beside it.
+
+    Mutation: ignore either kwarg, or let ``max_requests`` raise the cap.
+    """
+    seen = _record_usage_limits(monkeypatch)
+    backend = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=100)
+    await _collect(backend, "hi", max_requests=20, total_tokens_limit=5_000)
+    assert seen[-1] == {"request_limit": 20, "total_tokens_limit": 5_000}
+
+    await _collect(backend, "hi", max_requests=500)
+    assert seen[-1] == {"request_limit": 100}
+
+    await _collect(backend, "hi")
+    assert seen[-1] == {"request_limit": 100}
+
+
+async def test_a_surface_turn_cap_raises_a_paid_run_but_never_a_free_one(monkeypatch):
+    """``max_turns`` (a Sites app build's raised cap) can only raise
+    ``pydantic_ai_max_turns``, never lower it or limit an unlimited 0, and a free
+    run's ``max_requests`` is applied after it, so the free run stays at 20.
+
+    Mutation: apply ``max_requests`` before the raise, or let ``max_turns`` lower.
+    """
+    seen = _record_usage_limits(monkeypatch)
+    backend = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=100)
+    await _collect(backend, "hi", max_turns=300)
+    assert seen[-1] == {"request_limit": 300}
+
+    await _collect(backend, "hi", max_turns=20)
+    assert seen[-1] == {"request_limit": 100}
+
+    await _collect(backend, "hi", max_turns=300, max_requests=20, total_tokens_limit=5_000)
+    assert seen[-1] == {"request_limit": 20, "total_tokens_limit": 5_000}
+
+    seen.clear()
+    unlimited = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=0)
+    await _collect(unlimited, "hi", max_turns=300)
+    assert all("request_limit" not in limits for limits in seen)
+
+
+async def test_an_uncapped_app_build_has_no_request_limit_unless_free(monkeypatch):
+    """``max_turns=0`` is a Sites app build with no turn cap: a paid run gets no
+    ``request_limit`` at all, while a free run's ``max_requests`` still bounds it
+    at 20. ``None`` stays "no override" (the deployment's own cap).
+
+    Mutation: treat 0 as no override (the run stops at 100), or let the lift
+    skip a free run's bound.
+    """
+    seen = _record_usage_limits(monkeypatch)
+    backend = _backend_with_model(TestModel(custom_output_text="ok"), pydantic_ai_max_turns=100)
+
+    seen.clear()
+    await _collect(backend, "hi", max_turns=0)
+    assert all("request_limit" not in limits for limits in seen)
+
+    await _collect(backend, "hi", max_turns=0, max_requests=20, total_tokens_limit=5_000)
+    assert seen[-1] == {"request_limit": 20, "total_tokens_limit": 5_000}
+
+    await _collect(backend, "hi", max_turns=None)
+    assert seen[-1] == {"request_limit": 100}
+
+
+async def test_a_token_limit_the_run_exceeds_stops_it_with_usage_first():
+    """A run over its token limit ends in an error, and its usage still reaches
+    the caller first so the tokens it did spend are billed."""
+    backend = _backend_with_model(TestModel(custom_output_text="hello world"))
+    events = await _collect(backend, "hi", total_tokens_limit=1)
+
+    kinds = [e.type for e in events]
+    assert "error" in kinds, kinds
+    assert "token_usage" in kinds[: kinds.index("error")], kinds
+    error = next(e for e in events if e.type == "error")
+    assert "limit" in error.content.lower()
+
+
+def test_only_a_caller_limited_run_gets_the_plain_usage_limit_text():
+    """A self-hosted or paid run that hits ``pydantic_ai_max_turns`` keeps the
+    raw text naming the limit to raise; only a run the caller limited gets the
+    plain sentence.
+
+    Mutation: return the plain sentence for every ``UsageLimitExceeded``.
+    """
+    from pydantic_ai.exceptions import UsageLimitExceeded
+
+    backend = _backend_with_model(TestModel(custom_output_text="ok"))
+    exc = UsageLimitExceeded("The next request would exceed the request_limit of 25")
+
+    raw = backend._explain_error(exc)
+    assert raw.startswith("Pydantic AI error:")
+    assert "request_limit of 25" in raw
+
+    plain = backend._explain_error(exc, per_run_limit=True)
+    assert "request_limit" not in plain
+    assert "usage limit" in plain

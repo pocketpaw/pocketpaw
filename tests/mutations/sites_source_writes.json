@@ -1,0 +1,125 @@
+[
+  {
+    "label": "revert records the row but never writes pocket.source, so publish ships the un-reverted site",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "    await pockets_service.restore_version_content(\n        pocket_id,\n",
+    "replace": "    0 and pockets_service.restore_version_content(\n        pocket_id,\n",
+    "tests": [
+      "tests/ee/sites/test_revert_writes_source.py::test_revert_writes_the_target_content_into_the_source",
+      "tests/ee/sites/test_revert_writes_source.py::test_publish_deploys_the_reverted_source",
+      "tests/ee/sites/test_revert_writes_source.py::test_native_artifact_builds_the_reverted_source"
+    ]
+  },
+  {
+    "label": "a reader without edit access reverts the owner's site because the revert edit check is gone",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    _check_domain_edit_access(_pocket_to_domain(doc), user_id)\n    field = \"source\" if is_source_engine",
+    "replace": "    field = \"source\" if is_source_engine",
+    "tests": [
+      "tests/ee/sites/test_revert_writes_source.py::test_revert_needs_edit_access"
+    ]
+  },
+  {
+    "label": "a revert overwrites an edit that landed while it was reading because the expected-content check is gone",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if (current or None) != (expected or None):\n        raise conflict",
+    "replace": "    if False:\n        raise conflict",
+    "tests": [
+      "tests/ee/sites/test_revert_writes_source.py::test_an_edit_landing_mid_revert_wins_and_the_revert_is_a_409",
+      "tests/ee/sites/test_revert_writes_source.py::test_the_revert_route_answers_409_on_a_conflict"
+    ]
+  },
+  {
+    "label": "a project reverted to its live content stays in the published view, so the builder never builds the reverted draft",
+    "file": "ee/pocketpaw_ee/sites/service.py",
+    "find": "        await _reopen_reverted_draft(pocket_id, content)",
+    "replace": "        pass",
+    "tests": [
+      "tests/ee/sites/test_revert_writes_source.py::test_reverting_to_the_live_content_leaves_the_published_view"
+    ]
+  },
+  {
+    "label": "a ripple revert writes the spec into source and leaves rippleSpec un-reverted",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    field = \"source\" if is_source_engine(getattr(doc, \"engine\", \"ripple\")) else \"rippleSpec\"",
+    "replace": "    field = \"source\"",
+    "tests": [
+      "tests/ee/sites/test_revert_writes_source.py::test_revert_of_a_ripple_site_writes_the_spec"
+    ]
+  },
+  {
+    "label": "the source write is unconditional again, so two writers on different files lose one edit",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        {\"_id\": doc.id, guard_field: getattr(doc, guard_field)},",
+    "replace": "        {\"_id\": doc.id},",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_two_project_writers_on_different_files_both_land",
+      "tests/ee/sites/test_source_write_race.py::test_two_html_writers_on_different_files_both_land"
+    ]
+  },
+  {
+    "label": "a raced source write gives up instead of re-reading and re-applying, so a concurrent edit 409s",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "            except _SourceRaced:\n                continue",
+    "replace": "            except _SourceRaced:\n                break",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_two_project_writers_on_different_files_both_land",
+      "tests/ee/sites/test_source_write_race.py::test_two_html_writers_on_different_files_both_land"
+    ]
+  },
+  {
+    "label": "the project writer is not retried, so the loser of a race 409s instead of keeping both files",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "@_retry_source_race\nasync def set_project_source(",
+    "replace": "async def set_project_source(",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_two_project_writers_on_different_files_both_land"
+    ]
+  },
+  {
+    "label": "the html writer saves the whole document again, so a concurrent edit to another file vanishes",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    updated[file_path] = new_source\n    await _commit_fields(doc, {\"source\": updated})",
+    "replace": "    updated[file_path] = new_source\n    doc.source = updated\n    await doc.save()",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_two_html_writers_on_different_files_both_land"
+    ]
+  },
+  {
+    "label": "a retry skips the base-hash guard, so a racing write to the same file is overwritten",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "    if guard is not None:\n        guard(dict(doc.source))",
+    "replace": "    if guard is not None and not getattr(guard, '_ran', False):\n        guard(dict(doc.source))\n        guard._ran = True",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_a_retry_reruns_the_guard_and_never_overwrites_a_moved_file"
+    ]
+  },
+  {
+    "label": "a non-source save resends every field it read, so a rename puts back a stale source over an agent edit",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        if state is not None and key in state and state[key] == value:\n            continue\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_a_rename_racing_an_agent_source_write_keeps_both",
+      "tests/ee/sites/test_source_write_race.py::test_a_share_change_racing_an_agent_source_write_keeps_both"
+    ]
+  },
+  {
+    "label": "a changed rippleSpec is saved unconditionally, so a concurrent spec write is lost",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "        if state is not None and key in _CONTENT_FIELDS:\n            query[key] = state.get(key)\n",
+    "replace": "",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_two_ripple_spec_writers_both_land"
+    ]
+  },
+  {
+    "label": "merge_spec is not retried, so the loser of a spec race fails instead of re-applying",
+    "file": "ee/pocketpaw_ee/cloud/pockets/service.py",
+    "find": "@_retry_source_race\nasync def merge_spec(",
+    "replace": "async def merge_spec(",
+    "tests": [
+      "tests/ee/sites/test_source_write_race.py::test_two_ripple_spec_writers_both_land"
+    ]
+  }
+]

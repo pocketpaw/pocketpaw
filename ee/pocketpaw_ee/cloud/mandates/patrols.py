@@ -25,9 +25,14 @@
 #                    ``open_pr_closes`` (each issue an OPEN PR closes),
 #                    ``open_issues`` (also Clef's duplicate check), and
 #                    ``open_dependencies``: an issue whose live body names a
-#                    ``Depends on`` issue still open is blocked (fail safe).
+#                    ``Depends on`` issue still open is blocked (fail safe);
+#                    every comma item of the line counts, a ref in a note or
+#                    after ``none`` does not. A ref's state comes off the
+#                    ``--state all`` list, else one GraphQL batch for all the
+#                    refs that list misses (``_ref_states``), else a view.
 #                    ``flag_needs_spec`` comments on a ``github:`` source issue
-#                    and labels it ``needs-spec`` (once) for the auto plan gate.
+#                    and labels it ``needs-spec`` (once) for the auto plan gate;
+#                    ``flag_needs_human`` does the same with ``needs-human``.
 #   * ``upstream`` — commits on a pinned GitHub dependency since the pin: the
 #                    ``rev`` comes from a TOML pin file in the bound repo, the
 #                    delta from ``gh api repos/<repo>/compare/<pin>...HEAD``.
@@ -522,6 +527,9 @@ async def _departures(
 _ISSUE_STATES: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _OPEN_PRS: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _OPEN_ISSUES: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# Per charter label, its open issues' bodies: an old issue past the open list's
+# limit still has its ``Depends on:`` read.
+_LABELLED_BODIES: dict[str, dict[str, tuple[float, list[dict[str, Any]]]]] = {}
 _GH_ROWS_TTL = 60.0
 _GH_STATE_LIMIT = "500"
 _GH_PR_LIMIT = "200"
@@ -586,14 +594,33 @@ async def closed_issues(repo_id: str, gh: GhFn | None = None) -> set[str]:
 # An issue's ``Depends on`` section: the line (``**Depends on:** #4``, ``Depends
 # on #412``, a ``## Depends on`` heading) and the lines under it, up to a blank
 # line or a heading; a heading with no reference may sit a blank line above its
-# list. A reference is ``#N`` (the issue's own repo), ``owner/repo#N`` or an
-# issue / PR URL; the first ``_DEPENDS_REFS_CAP`` count.
+# list. A reference is ``#N`` (the issue's own repo), ``owner/repo#N``,
+# ``core#N`` (``_core_repo``) or an issue / PR URL; the first
+# ``_DEPENDS_REFS_CAP`` count. A line's `` - `` note (after its list bullet) is
+# dropped, then each comma item counts its refs outside a parenthetical note
+# (``#12 (see #763)``: #12), else the ones inside it (``foundation (#777)``:
+# #777). A line that says ``none`` names no dependency, its note and the lines
+# under it included.
 _DEPENDS_HEAD = re.compile(r"^[\s>*_#-]*depends\s+on\b[\s*_:]*(.*)$", re.IGNORECASE)
 _DEPENDS_REF = re.compile(
-    r"(?:github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/|([\w.-]+/[\w.-]+)?#)(\d+)"
+    r"(?:github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/|([\w.-]+/[\w.-]+|\bcore)?#)(\d+)"
 )
 _SECTION_END = re.compile(r"^(?:#{1,6}\s|\*\*[^*]+\*\*:?$)")
 _DEPENDS_REFS_CAP = 10
+_BULLET = re.compile(r"^[\s>*_+-]+")
+_NOTE = re.compile(r"\s-\s")
+# A parenthetical note (after a space, so a markdown link's URL is no note) and
+# an item separator outside parentheses.
+_PAREN = re.compile(r"\s\(([^)]*)\)?")
+_ITEM = re.compile(r"[,;\n](?![^(]*\))")
+
+
+def _core_repo(slug: str) -> str:
+    """``core#N``'s repo: the bound repo's ``-core`` sibling
+    (``qbtrix/creative-apps`` -> ``qbtrix/creative-core``).
+    ponytail: one alias, the factory's apps/core pair; a map when a second appears."""
+    owner, _, name = slug.partition("/")
+    return f"{owner}/{name.rsplit('-', 1)[0]}-core"
 
 
 def depends_on_refs(body: str, slug: str) -> list[str]:
@@ -605,6 +632,8 @@ def depends_on_refs(body: str, slug: str) -> list[str]:
         head = _DEPENDS_HEAD.match(line)
         if not head:
             continue
+        if re.match(r"none\b", _NOTE.split(head[1], 1)[0].strip(" *_."), re.IGNORECASE):
+            continue
         section, rest = [head[1]], lines[i + 1 :]
         if not _DEPENDS_REF.search(head[1]):
             while rest and not rest[0].strip():
@@ -613,34 +642,47 @@ def depends_on_refs(body: str, slug: str) -> list[str]:
             if not nxt.strip() or _SECTION_END.match(nxt.strip()) or _DEPENDS_HEAD.match(nxt):
                 break
             section.append(nxt)
-        for m in _DEPENDS_REF.finditer("\n".join(section)):
-            refs.append(f"{(m[1] or m[2] or slug).lower()}#{m[3]}")
+        section = [_NOTE.split(_BULLET.sub("", s), 1)[0] for s in section]
+        for item in _ITEM.split("\n".join(section)):
+            found = list(_DEPENDS_REF.finditer(_PAREN.sub(" ", item)))
+            for m in found or _DEPENDS_REF.finditer(" ".join(_PAREN.findall(item))):
+                repo = _core_repo(slug) if m[2] == "core" else m[1] or m[2] or slug
+                refs.append(f"{repo.lower()}#{m[3]}")
     return list(dict.fromkeys(refs))[:_DEPENDS_REFS_CAP]
 
 
 async def open_dependencies(
-    repo_id: str, sources: list[str], gh: GhFn | None = None
+    repo_id: str, sources: list[str], gh: GhFn | None = None, labels: tuple[str, ...] = ()
 ) -> dict[str, list[str]]:
     """``{source: refs}`` for each ``github:<owner>/<repo>#<n>`` in ``sources``
     whose LIVE issue body names a ``Depends on`` issue that is not closed yet.
 
-    The body comes off the bound repo's cached open-issue list, else one cached
-    ``gh issue view``; a bound-repo ref's state off the cached ``--state all``
-    list, else a view (a cross-repo ref always). Empty when the bound repo is
-    not on GitHub. Fail safe: an unreadable body blocks as ``["?"]`` and an
-    unknown ref state counts as open. Never raises."""
+    The body comes off the bound repo's cached open-issue list or the cached
+    ``--label`` list of each of ``labels`` (the charter's, which reach issues past
+    the open list's limit), else one cached ``gh issue view``. A bound-repo
+    ref's state comes off the cached ``--state all`` list, else ONE GraphQL
+    batch over every ref that list misses (``_ref_states``: a repo past
+    ``_GH_STATE_LIMIT`` issues depends on old ones, and a view per ref spent
+    the budget by the twentieth and blocked the rest), else a view (a
+    cross-repo ref always). Empty when the bound repo is not on GitHub. Fail
+    safe: an unreadable body blocks as ``["?"]`` and an unknown ref state
+    counts as open. Never raises."""
     runner = gh or _default_gh
     bound, states = await _slug_states(repo_id, runner)
     bound = bound.lower()
     if not bound:
         return {}
+    rows = await open_issues(repo_id, runner)
+    for label in dict.fromkeys(lb.strip() for lb in labels if lb.strip()):
+        argv = ["gh", "issue", "list", "--state", "open", "--label", label]
+        argv += ["--limit", _GH_STATE_LIMIT, "--json", "number,body"]
+        rows += (await _gh_rows(_LABELLED_BODIES.setdefault(label, {}), repo_id, argv, runner))[1]
     bodies = {
-        r["number"]: str(r.get("body") or "")
-        for r in await open_issues(repo_id, runner)
-        if isinstance(r.get("number"), int)
+        r["number"]: str(r.get("body") or "") for r in rows if isinstance(r.get("number"), int)
     }
     budget = [_MAX_ISSUE_VIEWS]
     blocked: dict[str, list[str]] = {}
+    refs_of: dict[str, list[str]] = {}
     for source in dict.fromkeys(sources):
         found = _SPEC_SOURCE.match(source)
         if not found:
@@ -653,8 +695,19 @@ async def open_dependencies(
         if body is None:
             blocked[source] = ["?"]
             continue
+        refs_of[source] = depends_on_refs(body, slug)
+    unlisted = sorted(
+        {
+            int(ref.rsplit("#", 1)[1])
+            for refs in refs_of.values()
+            for ref in refs
+            if ref.rsplit("#", 1)[0] == bound and int(ref.rsplit("#", 1)[1]) not in states
+        }
+    )
+    states = {**states, **await _ref_states(bound, unlisted, runner)}
+    for source, refs in refs_of.items():
         waiting = []
-        for ref in depends_on_refs(body, slug):
+        for ref in refs:
             ref_slug, ref_n = ref.rsplit("#", 1)
             state = states.get(int(ref_n)) if ref_slug == bound else None
             if state is None:
@@ -667,13 +720,72 @@ async def open_dependencies(
     return blocked
 
 
+# Issue states GraphQL answers per call: one alias per number.
+_GQL_BATCH = 100
+
+
+async def _ref_states(slug: str, numbers: list[int], gh: GhFn) -> dict[int, str]:
+    """``{number: "open"|"closed"|"merged"}`` for ``numbers`` on ``slug``
+    (issues and PRs alike), one ``gh api graphql`` per ``_GQL_BATCH`` of them,
+    the repo passed as query variables. A failed call, a null node (no such
+    number) or a stateless one is left out: the caller views it. Never
+    raises."""
+    owner, _, name = slug.partition("/")
+    out: dict[int, str] = {}
+    for start in range(0, len(numbers), _GQL_BATCH):
+        fields = " ".join(
+            f"i{n}: issueOrPullRequest(number: {n}) "
+            "{ ... on Issue { state } ... on PullRequest { state } }"
+            for n in numbers[start : start + _GQL_BATCH]
+        )
+        query = (
+            "query($owner: String!, $name: String!) "
+            f"{{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+        )
+        argv = ["gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}"]
+        try:
+            # gh exits 1 on a partial error (one missing number) and still
+            # prints the data, so the body is read whatever the exit code.
+            _, raw, _ = await gh([*argv, "-F", f"name={name}"])
+            nodes = ((json.loads(raw) if raw else {}).get("data") or {}).get("repository") or {}
+        except Exception:  # noqa: BLE001 — an unread batch leaves the refs to the views
+            logger.warning("mandate: gh api graphql states failed for %s", slug, exc_info=True)
+            nodes = {}
+        for key, node in nodes.items():
+            state = str((node or {}).get("state") or "").lower() if isinstance(node, dict) else ""
+            if key[:1] == "i" and key[1:].isdigit() and state:
+                out[int(key[1:])] = state
+    return out
+
+
 async def open_issues(repo_id: str, gh: GhFn | None = None) -> list[dict[str, Any]]:
-    """The bound repo's OPEN GitHub issues (``number``, ``title``, ``body``): the
-    candidates Clef checks a Belt finding against for a duplicate. [] when the
-    repo is not on GitHub or gh fails. Never raises."""
+    """The bound repo's OPEN GitHub issues (``number``, ``title``, ``body``,
+    ``labels``): the candidates Clef checks a Belt finding against for a
+    duplicate, and the live labels the lead planner reads. [] when the repo is
+    not on GitHub or gh fails. Never raises."""
     argv = ["gh", "issue", "list", "--state", "open", "--limit", _GH_PR_LIMIT]
-    _, rows = await _gh_rows(_OPEN_ISSUES, repo_id, [*argv, "--json", "number,title,body"], gh)
+    fields = "number,title,body,labels"
+    _, rows = await _gh_rows(_OPEN_ISSUES, repo_id, [*argv, "--json", fields], gh)
     return rows
+
+
+async def labelled_issues(
+    repo_id: str, labels: list[str], gh: GhFn | None = None
+) -> dict[int, list[str]]:
+    """``{number: label names}`` for each OPEN issue on the bound repo carrying
+    one of ``labels``: one ``gh issue list --label`` per label, read fresh (never
+    cached), so the lead planner sees ``needs-human`` the moment it lands and an
+    old issue past the open list's limit still has live labels. Empty off GitHub;
+    a gh failure reads no rows for that label. Never raises."""
+    out: dict[int, list[str]] = {}
+    for label in dict.fromkeys(lb.strip() for lb in labels if lb.strip()):
+        argv = ["gh", "issue", "list", "--state", "open", "--label", label]
+        argv += ["--limit", _GH_STATE_LIMIT, "--json", "number,labels"]
+        _, rows = await _gh_rows({}, repo_id, argv, gh)
+        for r in rows:
+            if isinstance(r.get("number"), int) and isinstance(r.get("labels"), list):
+                out[r["number"]] = [str(lb.get("name") or "") for lb in r["labels"]]
+    return out
 
 
 async def open_pr_closes(repo_id: str, gh: GhFn | None = None) -> dict[str, int]:
@@ -716,6 +828,7 @@ _AREA_PREFIX = re.compile(r"^([A-Za-z0-9][\w.\-/ ]{0,30}?):\s")
 
 
 NEEDS_SPEC = "needs-spec"
+NEEDS_HUMAN = "needs-human"
 _SPEC_SOURCE = re.compile(r"^github:([\w.-]+/[\w.-]+)#(\d+)$")
 
 
@@ -724,29 +837,43 @@ async def flag_needs_spec(source: str, reason: str, gh: GhFn | None = None) -> b
     names and label it ``needs-spec``, so a human or a later spec pass rewrites
     it. Once per issue: one already labelled is left alone. True when it
     commented; never raises."""
+    return await _flag(source, reason, NEEDS_SPEC, "fbca04", gh) in {"labelled", "commented"}
+
+
+async def flag_needs_human(source: str, reason: str, gh: GhFn | None = None) -> bool:
+    """``flag_needs_spec`` with ``needs-human``: True when the label is on the
+    issue afterwards (put there now, or already there)."""
+    return await _flag(source, reason, NEEDS_HUMAN, "d93f0b", gh) in {"labelled", "already"}
+
+
+async def _flag(source: str, reason: str, label: str, color: str, gh: GhFn | None) -> str:
+    """Comment ``reason`` and add ``label`` once: "labelled", "commented" (the
+    label write failed), "already" (labelled before) or "" (nothing done)."""
     found = _SPEC_SOURCE.match(source or "")
     if not found or any(p in {".", ".."} or p.startswith("-") for p in found[1].split("/")):
-        return False
+        return ""
     slug, number = found.groups()
     runner = gh or _default_gh
     try:
         code, out, _ = await runner(["gh", "issue", "view", number, "-R", slug, "--json", "labels"])
         labels = json.loads(out).get("labels") if code == 0 else None
-        if not isinstance(labels, list) or NEEDS_SPEC in {lb.get("name") for lb in labels}:
-            return False
+        if not isinstance(labels, list):
+            return ""
+        if label in {lb.get("name") for lb in labels}:
+            return "already"
         # Creating a label that exists fails harmlessly.
-        await runner(["gh", "label", "create", NEEDS_SPEC, "-R", slug, "--color", "fbca04"])
+        await runner(["gh", "label", "create", label, "-R", slug, "--color", color])
         code, _, err = await runner(
             ["gh", "issue", "comment", number, "-R", slug, "--body", reason]
         )
         if code != 0:
-            logger.warning("needs-spec: comment on %s#%s failed: %s", slug, number, err[-200:])
-            return False
-        await runner(["gh", "issue", "edit", number, "-R", slug, "--add-label", NEEDS_SPEC])
-        return True
-    except Exception:  # noqa: BLE001 — a missed flag never fails the gate
-        logger.warning("needs-spec: flagging %s failed", source, exc_info=True)
-        return False
+            logger.warning("%s: comment on %s#%s failed: %s", label, slug, number, err[-200:])
+            return ""
+        code, _, _ = await runner(["gh", "issue", "edit", number, "-R", slug, "--add-label", label])
+        return "labelled" if code == 0 else "commented"
+    except Exception:  # noqa: BLE001 — a missed flag never fails the gate or the shift
+        logger.warning("%s: flagging %s failed", label, source, exc_info=True)
+        return ""
 
 
 async def _default_gh(argv: list[str]) -> tuple[int, str, str]:

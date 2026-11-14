@@ -305,6 +305,52 @@ async def test_persistent_client_reuse():
     assert client2 is client1
 
 
+async def test_an_ordinary_turn_keeps_its_warm_key_and_an_uncapped_one_does_not():
+    """An ordinary chat's options carry ``claude_sdk_max_turns`` (100) and key
+    exactly as they did before the per-run turn override existed. A Sites app
+    build with no turn cap (``max_turns=None`` in its options while the setting
+    is 100) keys apart, so it never reuses a 100-turn client, and an options
+    object that does not echo the setting (a MagicMock) still keys as before.
+    """
+    sdk = _make_sdk(_make_settings(claude_sdk_max_turns=100))
+
+    def _opts(**turns):
+        options = MagicMock()
+        options.model = "claude-sonnet-4-5-20250929"
+        options.allowed_tools = ["Bash"]
+        options.cwd = "/jail/ws"
+        options.mcp_servers = {}
+        for name, value in turns.items():
+            setattr(options, name, value)
+        return options
+
+    def _key(options):
+        return sdk._client_cache_key(
+            options, session_key="s1", turn_cap=sdk._raised_turn_cap(options)
+        )
+
+    ordinary = _opts(max_turns=100)
+    assert _key(ordinary) == sdk._client_cache_key(ordinary, session_key="s1")
+    unechoed = _opts()
+    assert _key(unechoed) == sdk._client_cache_key(unechoed, session_key="s1")
+    uncapped = _opts(max_turns=None)
+    assert _key(uncapped) != _key(ordinary)
+
+    clients_created = []
+
+    def _client_factory(**kwargs):
+        c = _FakeSDKClient()
+        clients_created.append(c)
+        return c
+
+    sdk._ClaudeSDKClient = _client_factory
+    first = await sdk._get_or_create_client(ordinary, session_key="s1")
+    again = await sdk._get_or_create_client(_opts(max_turns=100), session_key="s1")
+    assert again is first and len(clients_created) == 1
+    app_build = await sdk._get_or_create_client(uncapped, session_key="s1")
+    assert app_build is not first and len(clients_created) == 2
+
+
 async def test_persistent_client_reconnects_on_model_change():
     """Changing the model should disconnect old client and create a new one."""
     sdk = _make_sdk()

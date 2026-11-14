@@ -33,16 +33,34 @@ migrations) and `CloudflareClient.upload_assets` / `put_worker(modules=...)` in
 
 ## Project builds
 
-A `project` pocket's source map is the whole repo. It builds **only** in a Daytona
-sandbox (`ee/pocketpaw_ee/sites/project_build.py`):
+A `project` pocket's source map is the whole repo (`ee/pocketpaw_ee/sites/project_build.py`).
+
+**No-build projects** skip the sandbox. A tree whose `paw.template.json` says
+`"build": "none"` (the `static` starter), or one with no template manifest, no
+`package.json` and a root `index.html`, is its own output. The preview lane and
+`run_site_build` stage it in-process and answer `built` with `preview_mode: "full"`
+straight away: the files minus dotfiles / dot-dirs, `node_modules` and the root tooling
+files (`AGENTS.md`, `paw.template.json`, `paw-build.json`, `paw.recipes.json`,
+`package.json`, lockfiles, `wrangler.*`), the same rule as paw-sites'
+`excludedFromStaticOutput`, under `.paw/static` with an assets-only `paw-build.json`
+(`workerModules: []`). Publish re-stages from the current source with the live site
+config (no stored draft needed) and deploys an assets-only Worker through the bundle
+path below. No generator is needed, except for paw.js (below).
+
+Every other project builds **only** in a Daytona sandbox:
 
 1. The source map is uploaded as the project tree, with the vendored generator
-   (`dist/` + `package.json` from `PAW_SITES_GEN_DIR`, default `/opt/paw-sites`) beside
-   it at `/tmp/paw-sites-gen`. A host without the generator fails the build as
-   `sandbox_unavailable:generator_missing`.
+   (`dist/` + `package.json` from `PAW_SITES_GEN_DIR`, default `/opt/paw-sites`, plus
+   `templates/_paw/paw.js` when present) beside it at `/tmp/paw-sites-gen`. A host
+   without the generator fails the build as `sandbox_unavailable:generator_missing`.
 2. `paw-sites-gen project-build --dir <project> --out <project>/paw-build.json --json`
    installs, builds and (worker targets) runs the project's own wrangler dry-run. The
-   project brings its own wrangler as a devDependency.
+   project brings its own wrangler as a devDependency. A site config that still
+   carries the site's signed key is uploaded to `/tmp/paw-site-config.json` and passed
+   with `--site-config` when the vendored generator knows the flag (paw-sites#79;
+   detected from `dist/cli.js`); an older generator builds exactly as before. Queued
+   builds never carry the key (`build_job.scrub_build_input` blanks it before Redis
+   and the sandbox), so in practice a sandbox-built site gets paw.js at publish (below).
 3. A stage step copies `paw-build.json` and the files it names into `.paw/out`, which
    the build wrapper tars. Paths that leave the project, and an `assetsDir` at the
    project root, are refused.
@@ -53,8 +71,18 @@ sandbox (`ee/pocketpaw_ee/sites/project_build.py`):
 The build budget is `PAW_SITES_BUILD_TIMEOUT_SEC_PROJECT` (else the shared knob, else
 600s). Supersede, single-flight and the artifact caps are the preview lane's.
 
-Publishing needs a finished build of the pocket's **current** files; otherwise it is a
-`409 sites.project_build_required`. A first publish inserts the Site document
+Publishing needs a finished build of the pocket's **current** files (a no-build tree
+excepted); otherwise it is a `409 sites.project_build_required`.
+
+**paw.js.** The draft content hash is the source alone, so a draft keeps whatever
+paw.js it was built with. Publish then (re)applies paw.js to the bundle's static pages
+with the live identity (capture base, site id, signed key, Turnstile sitekey), the
+same rule as paw-sites' `applyPawClientToAssets`: only when the authored source uses
+the client (`data-paw-checkout` / `data-paw-subscribe`, `Paw.call` / `checkout` /
+`subscribe`, `paw:result`, a `/_paw/paw.js` tag; `AGENTS.md`, `README.md` and
+`CLAUDE.md` are not scanned). The tag is idempotent over pages the generator already
+tagged. Pages a Worker renders on request are untouched; they import the client
+through the `paw-integrations` recipe. A first publish inserts the Site document
 (undeployed) before anything is provisioned, so the D1, KV and R2 it creates are
 recorded on it. Before the deploy the plan gate runs
 (captain decision 2026-10-07): a free site may ship static output, and a worker that
@@ -699,7 +727,13 @@ or the sandbox: the build only names secrets.
 
 - **Every set secret binds**, requested or not, as
   `{"type": "secret_text", "name": NAME, "text": value}` in the upload metadata. The
-  Worker reads it as `env.NAME`. `sites.service.deploy_bundle`'s provision step loads
+  Worker reads it as `env.NAME`. An assets-only bundle (no worker modules) binds no
+  secrets, since nothing could read them; its pages reach the integrations gateway
+  from the browser (paw.js and the public site key).
+- **Gateway token.** Before every bundle deploy (live or draft) a site with any linked
+  integration is made sure to have `PAW_GATEWAY_TOKEN`
+  (`integrations.bindings.ensure_gateway_token_if_linked`), so a link made before the
+  token existed, or whose mint failed, still deploys with it. `sites.service.deploy_bundle`'s provision step loads
   them (`site_secrets.secrets_for_deploy`, the only code that decrypts) after the KV /
   R2 provisioning and before the first upload.
 - **Required secrets.** A `secret` binding request with `required: true` (what

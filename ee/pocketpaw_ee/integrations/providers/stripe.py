@@ -1,11 +1,22 @@
 # ee/pocketpaw_ee/integrations/providers/stripe.py: the ``stripe`` payments provider.
 #
-# Stripe Connect with Account Links, not OAuth. The platform key
-# (``POCKETPAW_STRIPE_SECRET_KEY``) creates a connected account per owner
-# (controller properties: full Stripe dashboard, the account pays Stripe's fees,
-# Stripe owns losses) and an ``account_onboarding`` link back to our callback with
-# ``code=<acct id>``. No token is stored: the grant's ``access_token`` is the
-# account id, the one value checkout needs (``Stripe-Account`` header).
+# Stripe Connect with Accounts v2 and Account Links, not OAuth. The platform key
+# (``POCKETPAW_STRIPE_SECRET_KEY``) creates one connected account per owner with
+# ``POST /v2/core/accounts`` (merchant configuration requesting card_payments, full
+# Stripe dashboard, fees_collector + losses_collector ``stripe``, and the required
+# ``identity.country``, fixed once created) and a v2 ``account_onboarding`` link
+# back to our callback with ``code=<acct id>``.
+#
+# COUNTRY. The owner picks it before Connect (connect param ``country``, a select
+# of ``CONNECT_COUNTRIES``: the countries where Stripe takes direct business
+# signups, per stripe.com/global, checked 2026-10-23; India and Indonesia are
+# preview-only and left out). A value outside that list is refused before Stripe
+# is called. Left empty, it is the workspace's partner country, else
+# ``POCKETPAW_STRIPE_DEFAULT_COUNTRY``, default US, each only when supported. New
+# platforms can't create v1 accounts, so nothing here calls ``POST /v1/accounts``.
+# /v2 calls send JSON and ``V2_STRIPE_VERSION``; /v1 calls stay form-encoded on
+# ``STRIPE_VERSION``. No token is stored: the grant's ``access_token`` is the
+# account id (``acct_``), the one value checkout needs (``Stripe-Account``).
 #
 # BINDING. The account id is bound server-side to the flow: authorize_url /
 # resume_url store ``acct`` under the flow's PKCE challenge (the verifier lives in
@@ -13,20 +24,36 @@
 # equals the bound id. The query-string ``code`` is never trusted alone. An owner
 # who restarts connect, or whose callback came back after the 2 h flow expired,
 # gets their pending account back (keyed per workspace + user; reused whatever its
-# onboarding state while no connection holds it). Accounts carry metadata
+# onboarding state while no connection holds it, unless the owner now picked a
+# different country, which makes a new account). Accounts carry metadata
 # {workspace_id, user_id}, checked on reuse and in ``complete``.
+#
+# STATUS. Connection meta is ``charges_enabled`` / ``details_submitted`` /
+# ``requirements_due_count``, read from the v2 account (``_v2_meta``: card_payments
+# capability ``active``; user-actionable requirements currently or past due) or a
+# v1 ``account.updated`` snapshot (``_meta``), which Stripe still sends for v2
+# accounts on the Connect (connected accounts) endpoint. Thin v2 account events
+# (``v2.core.account[...]``, platform scope, optional second signing secret
+# ``POCKETPAW_STRIPE_ACCOUNTS_WEBHOOK_SECRET``) refetch the account in
+# ``expand_event``. Either way the webhook layer's ``as_of`` guard drops older state.
 #
 # ``create_checkout {product_ref, qty}`` prices server-side from the site's Paw
 # Bar catalog (``PawBarStore`` rows of the site pocket's widgets), in ISO 4217 minor
 # units; success/cancel URLs are the site's own origin + the owner's paths. The
 # platform fee is ``PLATFORM_FEE_BPS`` (0: off).
 #
-# Webhooks (Connect endpoint, ``POCKETPAW_STRIPE_CONNECT_WEBHOOK_SECRET``): the
-# ``Stripe-Signature`` header is checked (HMAC-SHA256, 5 min tolerance) before
-# anything is read. Orders are keyed by PaymentIntent id so refunds and failures
-# land on the order checkout created; a refund never creates one (one that arrives
-# first is redelivered until it can apply). ``account.updated`` becomes
-# ``connection.updated`` with fresh meta.
+# ``refund_payment`` refunds part or all of an order: ``POST /v1/refunds`` on the
+# connected account with the order's PaymentIntent, the amount in minor units and
+# our refund id as ``Idempotency-Key``. A 4xx other than 409 / 429 is a refusal
+# (``RefundRefused``); anything else is an unknown outcome.
+#
+# Webhooks: the ``Stripe-Signature`` header is checked (HMAC-SHA256, 5 min
+# tolerance) before anything is read. Orders are keyed by PaymentIntent id so
+# refunds and failures land on the order checkout created; a refund never creates
+# one (one that arrives first is redelivered until it can apply). Every
+# ``charge.refunded`` carries the charge's cumulative ``amount_refunded``, which
+# the ingest records (partial or full). A platform with no Connect signup is
+# logged as a WARNING naming the misconfiguration.
 
 from __future__ import annotations
 
@@ -34,6 +61,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 from collections.abc import Mapping
@@ -56,17 +84,44 @@ from pocketpaw_ee.integrations.providers.base import (
     ActionSpec,
     Availability,
     BaseProvider,
+    ConnectParam,
     NormalizedEvent,
     ProviderError,
+    RefundRefused,
     SettingOption,
     SettingsField,
     TokenGrant,
 )
 
+logger = logging.getLogger(__name__)
+
 SECRET_KEY_ENV = "POCKETPAW_STRIPE_SECRET_KEY"
 WEBHOOK_SECRET_ENV = "POCKETPAW_STRIPE_CONNECT_WEBHOOK_SECRET"
+# Optional: the signing secret of a thin-event destination ("Your account" scope)
+# carrying ``v2.core.account[...]`` events to the same URL.
+ACCOUNTS_WEBHOOK_SECRET_ENV = "POCKETPAW_STRIPE_ACCOUNTS_WEBHOOK_SECRET"
+# ISO 3166-1 alpha-2 country for new accounts when the workspace has none.
+DEFAULT_COUNTRY_ENV = "POCKETPAW_STRIPE_DEFAULT_COUNTRY"
 API_BASE = "https://api.stripe.com"
 STRIPE_VERSION = "2025-08-27.basil"
+V2_STRIPE_VERSION = "2026-09-30.endive"
+# What a v2 account read includes; ``metadata`` comes back without asking.
+ACCOUNT_INCLUDE = ("configuration.merchant", "requirements", "identity", "defaults")
+# Thin events that can move charges / requirements on a merchant account.
+ACCOUNT_THIN_EVENTS = frozenset(
+    {
+        "v2.core.account.updated",
+        "v2.core.account[requirements].updated",
+        "v2.core.account[configuration.merchant].updated",
+        "v2.core.account[configuration.merchant].capability_status_updated",
+        "v2.core.account[identity].updated",
+    }
+)
+ACCOUNT_REFRESH = "stripe.account_refresh"
+# Stripe's answers when the platform itself never signed up for Connect.
+_NO_CONNECT_CODES = frozenset(
+    {"platform_registration_required", "non_connect_platform_accounts_v2_access_blocked"}
+)
 TIMEOUT_SECONDS = 15.0
 SIGNATURE_TOLERANCE_SECONDS = 300
 # Basis points of each checkout the platform keeps. 0 = no application fee.
@@ -89,12 +144,66 @@ CURRENCIES = tuple(
 )
 
 
+# Where Stripe takes direct business signups (stripe.com/global, 2026-10-23), the
+# countries a connected account's ``identity.country`` may be. Code -> name.
+CONNECT_COUNTRIES: dict[str, str] = {
+    "AU": "Australia",
+    "AT": "Austria",
+    "BE": "Belgium",
+    "BR": "Brazil",
+    "BG": "Bulgaria",
+    "CA": "Canada",
+    "HR": "Croatia",
+    "CY": "Cyprus",
+    "CZ": "Czech Republic",
+    "DK": "Denmark",
+    "EE": "Estonia",
+    "FI": "Finland",
+    "FR": "France",
+    "DE": "Germany",
+    "GI": "Gibraltar",
+    "GR": "Greece",
+    "HK": "Hong Kong",
+    "HU": "Hungary",
+    "IE": "Ireland",
+    "IT": "Italy",
+    "JP": "Japan",
+    "LV": "Latvia",
+    "LI": "Liechtenstein",
+    "LT": "Lithuania",
+    "LU": "Luxembourg",
+    "MY": "Malaysia",
+    "MT": "Malta",
+    "MX": "Mexico",
+    "NL": "Netherlands",
+    "NZ": "New Zealand",
+    "NO": "Norway",
+    "PL": "Poland",
+    "PT": "Portugal",
+    "RO": "Romania",
+    "SG": "Singapore",
+    "SK": "Slovakia",
+    "SI": "Slovenia",
+    "ES": "Spain",
+    "SE": "Sweden",
+    "CH": "Switzerland",
+    "TH": "Thailand",
+    "AE": "United Arab Emirates",
+    "GB": "United Kingdom",
+    "US": "United States",
+}
+
+
 def secret_key() -> str:
     return os.environ.get(SECRET_KEY_ENV, "").strip()
 
 
 def webhook_secret() -> str:
     return os.environ.get(WEBHOOK_SECRET_ENV, "").strip()
+
+
+def accounts_webhook_secret() -> str:
+    return os.environ.get(ACCOUNTS_WEBHOOK_SECRET_ENV, "").strip()
 
 
 def _client() -> httpx.AsyncClient:
@@ -131,17 +240,31 @@ async def _stripe(
     *,
     account: str = "",
     missing_ok: bool = False,
+    query: Mapping[str, Any] | None = None,
+    idempotency_key: str = "",
 ) -> dict[str, Any] | None:
+    """One Stripe call. /v2 paths send JSON on ``V2_STRIPE_VERSION``; /v1 paths
+    send Stripe's form encoding on ``STRIPE_VERSION``. A refused call raises
+    ``ProviderError`` with ``status_code`` set."""
     key = secret_key()
     if not key:
         raise ProviderError("stripe is not configured")
-    headers = {"Authorization": f"Bearer {key}", "Stripe-Version": STRIPE_VERSION}
+    v2 = path.startswith("/v2/")
+    version = V2_STRIPE_VERSION if v2 else STRIPE_VERSION
+    headers = {"Authorization": f"Bearer {key}", "Stripe-Version": version}
     if account:
         headers["Stripe-Account"] = account
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     body = None
-    if data is not None:
+    if data is not None and v2:
+        headers["Content-Type"] = "application/json"
+        body = json.dumps(data)
+    elif data is not None:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         body = urlencode(_flatten(data))
+    if query:
+        path = f"{path}?{urlencode(_flatten(query))}"
     try:
         async with _client() as client:
             resp = await client.request(method, path, content=body, headers=headers)
@@ -155,9 +278,25 @@ async def _stripe(
         payload = {}
     if resp.status_code >= 400 or not isinstance(payload, dict):
         err = payload.get("error") if isinstance(payload, dict) else None
-        code = (err or {}).get("code") or (err or {}).get("type") or "error"
-        raise ProviderError(f"stripe {resp.status_code} {str(code)[:60]}")
+        err = err if isinstance(err, Mapping) else {}
+        code = err.get("code") or err.get("type") or "error"
+        if _no_connect(str(code), str(err.get("message") or "")):
+            logger.warning(
+                "stripe: the platform account behind %s is not signed up for Connect, so it "
+                "can't create connected accounts. Enable Connect in the Stripe Dashboard "
+                "for this key's account (test and live mode are separate).",
+                SECRET_KEY_ENV,
+            )
+        error = ProviderError(f"stripe {resp.status_code} {str(code)[:60]}")
+        error.status_code = resp.status_code  # type: ignore[attr-defined]
+        raise error
     return payload
+
+
+def _no_connect(code: str, message: str) -> bool:
+    """Stripe's "this platform never signed up for Connect" answer (v1 has only the
+    message, v2 a code). Never logs the message itself."""
+    return code in _NO_CONNECT_CODES or "signed up for connect" in message.lower()
 
 
 # ------------------------------------------------------------- flow binding
@@ -229,29 +368,86 @@ async def _has_connection(account_id: str) -> bool:
     return row is not None
 
 
-async def _pending_account(workspace_id: str, user_id: str) -> str:
+async def _pending_account(workspace_id: str, user_id: str, country: str = "") -> str:
     """The caller's account from an earlier connect that never became a connection
     (abandoned, or onboarded but its callback came back too late), else "". Its
-    onboarding state does not matter: a verified account is still theirs."""
+    onboarding state does not matter: a verified account is still theirs. With a
+    ``country`` picked, only an account in that country (it can't be changed)."""
     account_id = str(await _redis().get(_pending_key(workspace_id, user_id)) or "")
     if not account_id.startswith("acct_") or await _has_connection(account_id):
         return ""
-    account = await _stripe("GET", f"/v1/accounts/{account_id}", missing_ok=True)
+    account = await _get_account(account_id, missing_ok=True)
     if not account or not _owned_by(account, workspace_id, user_id):
+        return ""
+    if country and _iso2((account.get("identity") or {}).get("country")) != country:
         return ""
     return account_id
 
 
-async def _create_account(workspace_id: str, user_id: str) -> str:
+async def _get_account(account_id: str, *, missing_ok: bool = False) -> dict[str, Any] | None:
+    """The v2 account with what status and label need (``ACCOUNT_INCLUDE``)."""
+    return await _stripe(
+        "GET",
+        f"/v2/core/accounts/{account_id}",
+        missing_ok=missing_ok,
+        query={"include": list(ACCOUNT_INCLUDE)},
+    )
+
+
+def _iso2(value: Any) -> str:
+    """``value`` as an ISO 3166-1 alpha-2 code (two uppercase ASCII letters), else ""."""
+    code = str(value or "").strip().upper()
+    return code if len(code) == 2 and code.isascii() and code.isalpha() else ""
+
+
+def supported_country(value: Any) -> str:
+    """``value`` as a country Stripe takes connected accounts in, else ""."""
+    code = _iso2(value)
+    return code if code in CONNECT_COUNTRIES else ""
+
+
+async def _account_country(workspace_id: str, chosen: str = "") -> str:
+    """``identity.country`` for a new account, which Stripe needs before the merchant
+    configuration and which can't change afterwards: the owner's pick, else the
+    workspace's own country (today only a partner profile carries one), else
+    ``DEFAULT_COUNTRY_ENV``; each only when Stripe supports it."""
+    if code := supported_country(chosen):
+        return code
+    from beanie import PydanticObjectId
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        workspace = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 - an unreadable id or lookup falls back to the default
+        workspace = None
+    partner = getattr(workspace, "partner", None)
+    for value in (getattr(partner, "country", None), getattr(partner, "billing_country", None)):
+        if code := supported_country(value):
+            return code
+    raw = os.environ.get(DEFAULT_COUNTRY_ENV, "").strip() or "US"
+    code = supported_country(raw)
+    if not code:
+        logger.warning("stripe: %s is not a Stripe-supported country code", DEFAULT_COUNTRY_ENV)
+        raise ProviderError("stripe default country is invalid")
+    return code
+
+
+async def _create_account(workspace_id: str, user_id: str, chosen: str = "") -> str:
+    """A v2 merchant account: card payments, the full Stripe dashboard, Stripe
+    collects its fees from the account and owns negative balances (so Stripe also
+    collects the requirements, through its hosted onboarding). ``identity.country``
+    is required before the merchant configuration."""
+    country = await _account_country(workspace_id, chosen)
     account = await _stripe(
         "POST",
-        "/v1/accounts",
+        "/v2/core/accounts",
         {
-            "controller": {
-                "stripe_dashboard": {"type": "full"},
-                "fees": {"payer": "account"},
-                "losses": {"payments": "stripe"},
-                "requirement_collection": "stripe",
+            "dashboard": "full",
+            "identity": {"country": country},
+            "configuration": {"merchant": {"capabilities": {"card_payments": {"requested": True}}}},
+            "defaults": {
+                "responsibilities": {"fees_collector": "stripe", "losses_collector": "stripe"}
             },
             "metadata": {"workspace_id": workspace_id, "user_id": user_id},
         },
@@ -266,14 +462,19 @@ async def _account_link(account_id: str, state: str, redirect_uri: str) -> str:
     sep = "&" if "?" in redirect_uri else "?"
     link = await _stripe(
         "POST",
-        "/v1/account_links",
+        "/v2/core/account_links",
         {
             "account": account_id,
-            "type": "account_onboarding",
-            "return_url": f"{redirect_uri}{sep}" + urlencode({"state": state, "code": account_id}),
-            # An expired link lands on our callback with no code: the popup reports
-            # it and the owner's next connect reuses this same pending account.
-            "refresh_url": f"{redirect_uri}{sep}" + urlencode({"state": state}),
+            "use_case": {
+                "type": "account_onboarding",
+                "account_onboarding": {
+                    "return_url": f"{redirect_uri}{sep}"
+                    + urlencode({"state": state, "code": account_id}),
+                    # An expired link lands on our callback with no code: the popup
+                    # reports it and the owner's next connect reuses this account.
+                    "refresh_url": f"{redirect_uri}{sep}" + urlencode({"state": state}),
+                },
+            },
         },
     )
     url = str((link or {}).get("url") or "")
@@ -283,6 +484,7 @@ async def _account_link(account_id: str, state: str, redirect_uri: str) -> str:
 
 
 def _meta(account: Mapping[str, Any]) -> dict[str, Any]:
+    """Meta from a v1 account snapshot (the ``account.updated`` event)."""
     reqs = account.get("requirements") or {}
     due = reqs.get("currently_due") if isinstance(reqs, Mapping) else None
     return {
@@ -292,10 +494,40 @@ def _meta(account: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _v2_meta(account: Mapping[str, Any]) -> dict[str, Any]:
+    """The same meta keys from a v2 account. charges_enabled: the merchant
+    card_payments capability is ``active``. requirements_due_count: entries the
+    owner must act on (``awaiting_action_from: user``) that are currently or past
+    due, what v1 lists in ``currently_due``. details_submitted: requirements came
+    back and none of them waits on the owner (v2 has no such flag)."""
+    merchant = (account.get("configuration") or {}).get("merchant") or {}
+    card = (merchant.get("capabilities") or {}).get("card_payments") or {}
+    reqs = account.get("requirements")
+    entries = reqs.get("entries") if isinstance(reqs, Mapping) else None
+    due = 0
+    for entry in entries if isinstance(entries, list) else ():
+        if not isinstance(entry, Mapping) or entry.get("awaiting_action_from") != "user":
+            continue
+        deadline = entry.get("minimum_deadline") or {}
+        if deadline.get("status") in ("currently_due", "past_due"):
+            due += 1
+    return {
+        "charges_enabled": card.get("status") == "active",
+        "details_submitted": isinstance(reqs, Mapping) and due == 0,
+        "requirements_due_count": due,
+    }
+
+
 def _label(account: Mapping[str, Any]) -> str:
-    profile = account.get("business_profile") or {}
-    dashboard = (account.get("settings") or {}).get("dashboard") or {}
-    for value in (profile.get("name"), dashboard.get("display_name"), account.get("email")):
+    """A v2 account's name for the connections list."""
+    business = (account.get("identity") or {}).get("business_details") or {}
+    profile = (account.get("defaults") or {}).get("profile") or {}
+    for value in (
+        account.get("display_name"),
+        profile.get("doing_business_as"),
+        business.get("registered_name"),
+        account.get("contact_email"),
+    ):
         if isinstance(value, str) and value.strip():
             return value.strip()[:120]
     return str(account.get("id") or "Stripe account")
@@ -432,17 +664,61 @@ def _session_order(obj: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fully_refunded(charge: Mapping[str, Any]) -> bool:
-    """Only a full refund settles an order as refunded; a partial one leaves it paid."""
-    amount, refunded = charge.get("amount"), charge.get("amount_refunded")
-    if not isinstance(amount, int) or not isinstance(refunded, int):
-        return False
-    return amount > 0 and refunded >= amount
+def _amount_refunded(charge: Mapping[str, Any]) -> int:
+    """The charge's cumulative refunded amount (minor units), 0 when unreadable."""
+    refunded = charge.get("amount_refunded")
+    if not isinstance(refunded, int) or isinstance(refunded, bool):
+        return 0
+    return max(refunded, 0)
+
+
+_REFUND_STATUS = {
+    "succeeded": "succeeded",
+    "pending": "pending",
+    "requires_action": "pending",
+    "failed": "failed",
+    "canceled": "failed",
+}
+
+
+async def _refund_payment(order: Any, amount_minor: int, key: str, get_token: Any):
+    account_id = await get_token()
+    if not account_id.startswith("acct_"):
+        raise ProviderError("stripe connection has no account")
+    intent = str(order.external_id or "")
+    if not intent.startswith("pi_"):
+        raise RefundRefused("stripe order has no payment intent")
+    try:
+        refund = await _stripe(
+            "POST",
+            "/v1/refunds",
+            {
+                "payment_intent": intent,
+                "amount": int(amount_minor),
+                "metadata": {"paw_refund": key, "site_id": order.site_id or ""},
+            },
+            account=account_id,
+            idempotency_key=key,
+        )
+    except ProviderError as exc:
+        code = getattr(exc, "status_code", 0) or 0
+        if 400 <= code < 500 and code not in (409, 429):
+            raise RefundRefused(str(exc)) from None
+        raise
+    refund = refund or {}
+    status = _REFUND_STATUS.get(str(refund.get("status") or ""), "pending")
+    return status, str(refund.get("id") or "")
 
 
 def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]:
     """(our type, data, site_id) for a verified Stripe event."""
     kind = str(event.get("type") or "")
+    if event.get("object") == "v2.core.event":
+        # A thin event names the account, not its state: ``expand_event`` fetches it.
+        related = event.get("related_object") or {}
+        if kind in ACCOUNT_THIN_EVENTS and related.get("type") == "v2.core.account":
+            return ACCOUNT_REFRESH, {}, ""
+        return "ignored", {}, ""
     obj = (event.get("data") or {}).get("object") or {}
     if not isinstance(obj, Mapping):
         return "ignored", {}, ""
@@ -467,9 +743,13 @@ def normalize_event(event: Mapping[str, Any]) -> tuple[str, dict[str, Any], str]
             {"order_id": str(obj.get("id") or ""), "only_if_exists": True},
             (site_id),
         )
-    if kind == "charge.refunded" and obj.get("payment_intent") and _fully_refunded(obj):
+    if kind == "charge.refunded" and obj.get("payment_intent") and _amount_refunded(obj):
         # No site_id on a charge is fine: the ingest finds the order by its id.
-        data = {"order_id": str(obj["payment_intent"]), "only_if_exists": True}
+        data = {
+            "order_id": str(obj["payment_intent"]),
+            "only_if_exists": True,
+            "refunded_minor": _amount_refunded(obj),
+        }
         return "order.refunded", data, site_id
     return "ignored", {}, ""
 
@@ -485,6 +765,20 @@ class StripeProvider(BaseProvider):
     plan = "site"
     supports_pkce = True
     state_ttl_seconds = FLOW_TTL_SECONDS
+    connect_params = (
+        ConnectParam(
+            key="country",
+            label="country your business is based in",
+            type="select",
+            options=tuple(
+                SettingOption(code, name)
+                for code, name in sorted(CONNECT_COUNTRIES.items(), key=lambda kv: kv[1])
+            ),
+            required=False,
+            max_length=2,
+            help="Stripe sets this once; it can't be changed after the account is made.",
+        ),
+    )
     actions = {
         "create_checkout": ActionSpec(
             args=CheckoutArgs,
@@ -520,13 +814,20 @@ class StripeProvider(BaseProvider):
         return "available" if secret_key() else "unconfigured"
 
     async def authorize_url(  # type: ignore[override]
-        self, state: str, redirect_uri: str, code_challenge: str | None = None
+        self,
+        state: str,
+        redirect_uri: str,
+        code_challenge: str | None = None,
+        *,
+        params: Mapping[str, Any] | None = None,
     ) -> str:
         flow = await _flow(state)
         workspace_id, user_id = str(flow["workspace_id"]), str(flow["user_id"])
-        account_id = await _pending_account(workspace_id, user_id)
+        # ``params`` were checked against ``connect_params`` at connect; re-check.
+        chosen = supported_country((params or {}).get("country"))
+        account_id = await _pending_account(workspace_id, user_id, chosen)
         if not account_id:
-            account_id = await _create_account(workspace_id, user_id)
+            account_id = await _create_account(workspace_id, user_id, chosen)
             await _redis().setex(
                 _pending_key(workspace_id, user_id), PENDING_TTL_SECONDS, account_id
             )
@@ -534,7 +835,12 @@ class StripeProvider(BaseProvider):
         return await _account_link(account_id, state, redirect_uri)
 
     async def complete(
-        self, code: str, redirect_uri: str, code_verifier: str | None = None
+        self,
+        code: str,
+        redirect_uri: str,
+        code_verifier: str | None = None,
+        *,
+        params: Mapping[str, Any] | None = None,  # noqa: ARG002 - the account holds it
     ) -> TokenGrant:
         if not code_verifier:
             raise ProviderError("stripe flow has no verifier")
@@ -542,8 +848,7 @@ class StripeProvider(BaseProvider):
         bound = binding.get("account", "")
         if not bound or not hmac.compare_digest(bound.encode(), (code or "").encode()):
             raise ProviderError("stripe account does not match this flow")
-        account = await _stripe("GET", f"/v1/accounts/{bound}")
-        account = account or {}
+        account = await _get_account(bound) or {}
         if account.get("id") != bound:
             raise ProviderError("stripe returned another account")
         if not _owned_by(account, binding.get("workspace_id", ""), binding.get("user_id", "")):
@@ -553,7 +858,7 @@ class StripeProvider(BaseProvider):
             account_ref=bound,
             account_label=_label(account),
             token_type="stripe_account",
-            meta=_meta(account),
+            meta=_v2_meta(account),
         )
 
     async def resume_url(self, connection: Any, state: str, redirect_uri: str) -> str | None:
@@ -569,6 +874,11 @@ class StripeProvider(BaseProvider):
         await _bind(flow, account_id, owner=str(connection.created_by or ""))
         return await _account_link(account_id, state, redirect_uri)
 
+    async def refund_payment(
+        self, order: Any, amount_minor: int, key: str, get_token: Any
+    ) -> tuple[str, str]:
+        return await _refund_payment(order, amount_minor, key, get_token)
+
     def connection_attention(self, connection: Any) -> str | None:
         meta = connection.meta or {}
         if not meta.get("charges_enabled"):
@@ -583,7 +893,9 @@ class StripeProvider(BaseProvider):
         return None
 
     def verify_webhook(self, body: bytes, headers: Mapping[str, str]) -> NormalizedEvent | None:
-        if not verify_signature(body, headers.get("stripe-signature", ""), webhook_secret()):
+        header = headers.get("stripe-signature", "")
+        connect = verify_signature(body, header, webhook_secret())
+        if not connect and not verify_signature(body, header, accounts_webhook_secret()):
             return None
         try:
             event = json.loads(body)
@@ -592,11 +904,32 @@ class StripeProvider(BaseProvider):
         if not isinstance(event, dict) or not event.get("id"):
             return None
         kind, data, site_id = normalize_event(event)
+        account_ref = str(event.get("account") or "")
+        if kind == ACCOUNT_REFRESH:
+            account_ref = str((event.get("related_object") or {}).get("id") or "")
         return NormalizedEvent(
             id=str(event["id"]),
             type=kind,
             provider=self.id,
             data=data,
             site_id=site_id,
-            account_ref=str(event.get("account") or ""),
+            account_ref=account_ref,
+        )
+
+    async def expand_event(self, event: NormalizedEvent) -> NormalizedEvent:
+        """A thin account event becomes ``connection.updated`` with the account's
+        current state, stamped with the fetch time so an older snapshot event that
+        arrives later can't undo it. A ProviderError here is retried by Stripe."""
+        if event.type != ACCOUNT_REFRESH:
+            return event
+        account_id = event.account_ref
+        account = await _get_account(account_id, missing_ok=True) if account_id else None
+        if not account or account.get("id") != account_id:
+            return NormalizedEvent(id=event.id, type="ignored", provider=self.id)
+        return NormalizedEvent(
+            id=event.id,
+            type="connection.updated",
+            provider=self.id,
+            data={"meta": _v2_meta(account), "as_of": int(time.time())},
+            account_ref=account_id,
         )

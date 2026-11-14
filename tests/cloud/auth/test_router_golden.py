@@ -74,6 +74,9 @@ async def test_get_me_returns_dto_shape(app_client) -> None:
         "is_guest",
         # 2026-09-14 (feat/platform-authority-axis) — see test_dto.py.
         "platform_role",
+        # Early access stamps, see test_dto.py.
+        "early_access_granted_at",
+        "notify_plans_at",
     }
     assert body["id"] == str(user_doc.id)
     assert body["name"] == "Alice"
@@ -85,6 +88,8 @@ async def test_get_me_returns_dto_shape(app_client) -> None:
     # needs to tell "no platform access" apart from "this server is too old to
     # have the field".
     assert body["platform_role"] is None
+    assert body["early_access_granted_at"] is None
+    assert body["notify_plans_at"] is None
 
 
 async def test_patch_me_updates_full_name(app_client) -> None:

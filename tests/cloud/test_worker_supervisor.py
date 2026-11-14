@@ -272,3 +272,147 @@ async def test_a_lane_without_its_own_queue_is_named_after_arqs_default():
 
     assert sup.lane_name(type("WorkerSettings", (), {})) == default_queue_name
     assert sup.lane_name(_settings("arq:queue:sites")) == "arq:queue:sites"
+
+
+# --- SIGTERM drains in-flight jobs before stopping --------------------------
+#
+# A deploy recreates the worker container. Docker sends SIGTERM, and before the drain
+# existed the supervisor went straight to ``Worker.close()``, whose ``handle_sig``
+# cancels every running job on the spot: each in-flight chat run ended ``interrupted``
+# mid-reply on every deploy. The fakes below behave like arq on the two points that
+# matter: ``close()`` cancels whatever is still in ``tasks``, and ``allow_pick_jobs`` is
+# the switch that stops the poll loop claiming new work.
+
+
+class _ArqLikeWorker(_FakeWorker):
+    """A lane with one in-flight job, closed the way arq closes: cancel what is left."""
+
+    def __init__(self, job) -> None:
+        super().__init__(_forever)
+        self.allow_pick_jobs = True
+        self.tasks: dict[str, asyncio.Task] = {}
+        self._job = job
+
+    async def async_run(self) -> None:
+        self.tasks["job-1"] = asyncio.create_task(self._job(self))
+        await _forever()
+
+    async def close(self) -> None:
+        self.closed = True
+        for task in self.tasks.values():
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+
+
+def _stop_soon(monkeypatch, delay: float = 0.05) -> None:
+    def _install(stop: asyncio.Event) -> None:
+        asyncio.get_running_loop().call_later(delay, stop.set)
+
+    monkeypatch.setattr(sup, "_install_stop_handlers", _install)
+
+
+@pytest.fixture
+def _shutdown_flag():
+    from pocketpaw_ee.cloud._core import shutdown
+
+    shutdown.reset()
+    yield shutdown
+    shutdown.reset()
+
+
+async def test_a_stop_signal_lets_the_in_flight_job_finish(monkeypatch, _shutdown_flag):
+    """The deploy bug: SIGTERM cancelled a running chat reply instead of waiting for it."""
+    monkeypatch.setenv("POCKETPAW_WORKER_DRAIN_SECONDS", "5")
+    outcome: list[str] = []
+
+    async def job(worker) -> None:  # noqa: ARG001
+        try:
+            await asyncio.sleep(0.3)
+            outcome.append("finished")
+        except asyncio.CancelledError:
+            outcome.append("cancelled")
+            raise
+
+    _stop_soon(monkeypatch)
+    worker = _ArqLikeWorker(job)
+    _patch_workers(monkeypatch, [worker])
+
+    code = await _run([_settings("a")])
+
+    assert outcome == ["finished"], "SIGTERM cancelled the in-flight job instead of draining it"
+    assert code == 0
+    assert worker.closed is True
+
+
+async def test_a_draining_lane_stops_taking_new_jobs(monkeypatch, _shutdown_flag):
+    """Draining only helps if the lane stops claiming work it would then have to abandon."""
+    monkeypatch.setenv("POCKETPAW_WORKER_DRAIN_SECONDS", "5")
+    seen: list[bool] = []
+
+    async def job(worker) -> None:
+        await asyncio.sleep(0.3)
+        seen.append(worker.allow_pick_jobs)
+
+    _stop_soon(monkeypatch)
+    _patch_workers(monkeypatch, [_ArqLikeWorker(job)])
+
+    await _run([_settings("a")])
+
+    assert seen == [False]
+
+
+async def test_the_drain_is_bounded_and_flags_the_shutdown(monkeypatch, _shutdown_flag):
+    """A job that outlives the grace window is cancelled, and it can tell why.
+
+    The run's cancel cleanup reads the flag to tell "the worker is going away, retry me"
+    from "my own job_timeout fired, give up", so it must be set before the cancel lands.
+    """
+    monkeypatch.setenv("POCKETPAW_WORKER_DRAIN_SECONDS", "0.2")
+    flagged_at_cancel: list[bool] = []
+
+    async def job(worker) -> None:  # noqa: ARG001
+        try:
+            await _forever()
+        except asyncio.CancelledError:
+            flagged_at_cancel.append(_shutdown_flag.is_stopping())
+            raise
+
+    _stop_soon(monkeypatch)
+    _patch_workers(monkeypatch, [_ArqLikeWorker(job)])
+
+    code = await _run([_settings("a")])
+
+    assert code == 0
+    assert flagged_at_cancel == [True]
+
+
+async def test_a_zero_drain_window_cancels_at_once(monkeypatch, _shutdown_flag):
+    """``0`` keeps the old instant stop for anyone who wants it (local dev)."""
+    monkeypatch.setenv("POCKETPAW_WORKER_DRAIN_SECONDS", "0")
+    outcome: list[str] = []
+
+    async def job(worker) -> None:  # noqa: ARG001
+        try:
+            await asyncio.sleep(2)
+            outcome.append("finished")
+        except asyncio.CancelledError:
+            outcome.append("cancelled")
+            raise
+
+    _stop_soon(monkeypatch)
+    _patch_workers(monkeypatch, [_ArqLikeWorker(job)])
+
+    await _run([_settings("a")])
+
+    assert outcome == ["cancelled"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("", 300.0), ("120", 120.0), ("0", 0.0), ("-5", 300.0), ("soon", 300.0)],
+)
+async def test_the_drain_window_reads_its_env_fail_soft(monkeypatch, raw, expected):
+    monkeypatch.setenv("POCKETPAW_WORKER_DRAIN_SECONDS", raw)
+
+    assert sup.drain_seconds() == expected

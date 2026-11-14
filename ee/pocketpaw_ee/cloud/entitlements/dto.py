@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from pocketpaw.config import get_settings
 from pocketpaw_ee.cloud.billing.plans import PlanTier
 from pocketpaw_ee.cloud.billing.site_plans import SitePlanTier
 from pocketpaw_ee.cloud.entitlements.domain import Entitlements
@@ -104,6 +105,12 @@ class EntitlementsResponse(BaseModel):
     # own tier. Per-pocket visibility is ``sourceVisible`` on the pocket wire dict,
     # which is what a client should gate a Code tab on.
     site_source_visible: bool | None = None
+    # Deployment-wide early-access posture, from settings. ``payments_open``
+    # false means the client renders no upgrade, pricing or top-up surface;
+    # ``free_model_allowlist`` is what a model picker offers a free workspace.
+    # Both are display only: the server gates every refusal itself.
+    payments_open: bool = False
+    free_model_allowlist: list[str] = Field(default_factory=list)
 
 
 def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:
@@ -141,6 +148,8 @@ def entitlements_to_dto(ent: Entitlements) -> EntitlementsResponse:
         max_storage_bytes=ent.max_storage_bytes,
         included_sites=ent.included_sites,
         site_source_visible=ent.site_source_visible,
+        payments_open=get_settings().payments_open,
+        free_model_allowlist=list(get_settings().free_model_allowlist),
     )
 
 

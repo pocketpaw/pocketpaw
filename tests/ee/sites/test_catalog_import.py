@@ -5,7 +5,8 @@
 # Shopify and WooCommerce paged up to the catalog cap.
 #
 # Two halves. The PURE parsers get payloads straight (Shopify /products.json, the
-# WooCommerce Store API, JSON-LD, OpenGraph, platform detection, sitemaps). The
+# WooCommerce Store API, JSON-LD, OpenGraph, platform detection, and the shared
+# ``sites.sitemap`` parser). The
 # ORCHESTRATOR runs against a mocked origin (httpx.MockTransport + a dict-backed
 # resolver, the test_foreign_grounding harness): nothing opens a socket.
 #
@@ -20,12 +21,14 @@ import asyncio
 import json
 import time
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 from pocketpaw_ee.cloud.models.site_origin_claim import SiteOriginClaim
 from pocketpaw_ee.paw_bar import catalog_import as ci
+from pocketpaw_ee.sites.sitemap import sitemap_locs, sitemap_urls
 
 _WS = "ws-alpha"
 _HOST = "shop.example"
@@ -469,9 +472,9 @@ def test_a_sitemap_with_a_dtd_is_refused_before_parsing():
         b'<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol">]>'
         b"<urlset><url><loc>&lol;</loc></url></urlset>"
     )
-    assert ci._sitemap_locs(bomb) == (False, [])
+    assert sitemap_locs(bomb) == (False, [])
     ok = b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://a/p/1?x=1&amp;y=2</loc></url></urlset>'
-    assert ci._sitemap_locs(ok) == (False, ["https://a/p/1?x=1&y=2"])
+    assert sitemap_locs(ok) == (False, ["https://a/p/1?x=1&y=2"])
 
 
 _LAUGHS = (
@@ -497,7 +500,7 @@ _LAUGHS = (
 )
 def test_an_entity_bomb_is_refused_in_any_encoding_without_expanding(body):
     started = time.monotonic()
-    assert ci._sitemap_locs(body) == (False, [])
+    assert sitemap_locs(body) == (False, [])
     assert time.monotonic() - started < 0.5
 
 
@@ -506,12 +509,28 @@ def test_a_sitemap_declaring_a_non_utf8_encoding_is_refused():
         b'<?xml version="1.0" encoding="UTF-16"?>'
         b"<urlset><url><loc>https://a/p/1</loc></url></urlset>"
     )
-    assert ci._sitemap_locs(body) == (False, [])
+    assert sitemap_locs(body) == (False, [])
+
+
+async def test_rehoming_keeps_only_the_path_and_query_on_the_crawl_host():
+    body = (
+        b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        b"<url><loc>https://u:pw@evil.example:8443/p/1?x=1#top</loc></url>"
+        b"<url><loc>ftp://evil.example/p/2</loc></url></urlset>"
+    )
+    fallback = f"https://{_HOST}/sitemap.xml"
+
+    async def get(url: str) -> SimpleNamespace:
+        assert url == fallback
+        return SimpleNamespace(status=200, body=body)
+
+    assert await sitemap_urls(get, [], _HOST, fallback) == []
+    assert await sitemap_urls(get, [], _HOST, fallback, rehome=True) == [f"https://{_HOST}/p/1?x=1"]
 
 
 def test_the_parser_itself_refuses_a_doctype_with_no_entities():
     body = b'<!DOCTYPE urlset SYSTEM "https://evil.example/x.dtd"><urlset><url><loc>https://a/p/1</loc></url></urlset>'
-    assert ci._sitemap_locs(body) == (False, [])
+    assert sitemap_locs(body) == (False, [])
 
 
 def test_a_utf8_bom_and_a_utf8_declaration_are_accepted():
@@ -521,7 +540,7 @@ def test_a_utf8_bom_and_a_utf8_declaration_are_accepted():
         b'<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
         b"<sitemap><loc>https://a/s1.xml</loc></sitemap></sitemapindex>"
     )
-    assert ci._sitemap_locs(body) == (True, ["https://a/s1.xml"])
+    assert sitemap_locs(body) == (True, ["https://a/s1.xml"])
 
 
 # --------------------------------------------------------------------------- #
@@ -892,3 +911,139 @@ async def test_unreadable_product_pages_make_the_preview_partial(beanie_test_db)
     assert preview.status == "partial"
     assert "pages_failed:1" in preview.warnings
     assert [i.name for i in preview.items] == ["Kettle"]
+
+
+# --------------------------------------------------------------------------- #
+# Events: schema.org Event and its subtypes read like products
+# --------------------------------------------------------------------------- #
+
+_EVENT_PAGE = f"https://{_HOST}/events/jazz-night"
+
+
+def _event(kind: str = "Event", *, offers: Any = None, **ov: Any) -> dict:
+    node = {
+        "@context": "https://schema.org",
+        "@type": kind,
+        "name": "Jazz Night",
+        "url": _EVENT_PAGE,
+        "image": f"https://{_HOST}/img/jazz.jpg",
+        "description": "Live quartet in the garden.",
+        "startDate": "2026-11-12T19:30:00+05:30",
+        "location": {"@type": "Place", "name": "Grand Hall"},
+    }
+    if offers is not None:
+        node["offers"] = offers
+    node.update(ov)
+    return node
+
+
+def test_a_jsonld_event_with_offers_is_imported_with_its_price_and_facts():
+    offers = {"@type": "Offer", "price": "25.00", "priceCurrency": "USD"}
+    [jazz] = ci.parse_jsonld_products(
+        _ld(json.dumps(_event(offers=offers))), _EVENT_PAGE, _HOST
+    ).items
+    assert (jazz.name, jazz.price_cents, jazz.currency) == ("Jazz Night", 2500, "USD")
+    assert jazz.url == "/events/jazz-night"
+    assert jazz.image_url == f"https://{_HOST}/img/jazz.jpg"
+    assert "Live quartet in the garden." in jazz.description
+    assert "12 Nov 2026" in jazz.description and "Grand Hall" in jazz.description
+    assert "Free" not in jazz.description
+
+
+@pytest.mark.parametrize("kind", ["MusicEvent", "EducationEvent", "Festival", "Hackathon"])
+def test_a_jsonld_event_subtype_is_imported(kind: str):
+    offers = {"@type": "Offer", "price": "10", "priceCurrency": "USD"}
+    parsed = ci.parse_jsonld_products(
+        _ld(json.dumps(_event(kind, offers=offers))), _EVENT_PAGE, _HOST
+    )
+    assert [i.name for i in parsed.items] == ["Jazz Night"]
+
+
+def test_a_jsonld_event_with_no_offers_is_imported_without_a_price():
+    # Application-only: no offers at all. Kept, never counted as skipped.
+    parsed = ci.parse_jsonld_products(_ld(json.dumps(_event())), _EVENT_PAGE, _HOST)
+    [jazz] = parsed.items
+    assert parsed.skipped_no_price == 0
+    assert jazz.price_cents == 0  # 0 = no listed price; renderers show none
+    assert "Free" not in jazz.description  # never implied
+
+
+def test_an_explicitly_free_event_says_free():
+    for node in (
+        _event(isAccessibleForFree=True),
+        _event(offers={"@type": "Offer", "price": "0", "priceCurrency": "USD"}),
+    ):
+        [item] = ci.parse_jsonld_products(_ld(json.dumps(node)), _EVENT_PAGE, _HOST).items
+        assert item.price_cents == 0
+        assert item.description.startswith("Free")
+
+
+def test_a_product_with_no_price_is_still_skipped():
+    # Regression guard: only events may go without a price.
+    node = {"@type": "Product", "name": "Kettle", "url": "/products/kettle"}
+    parsed = ci.parse_jsonld_products(_ld(json.dumps(node)), _PAGE, _HOST)
+    assert parsed.items == [] and parsed.skipped_no_price == 1
+
+
+async def test_an_events_site_with_no_sitemap_is_read_from_its_homepage_links(beanie_test_db):
+    await _claim()
+    seen: list[httpx.Request] = []
+    home = (
+        '<html><body><a href="/events/jazz-night">Jazz</a>'
+        '<a href="/events/pottery-workshop">Pottery</a><a href="/about">About</a></body></html>'
+    )
+    pottery = _event("EducationEvent", name="Pottery Workshop", url="/events/pottery-workshop")
+    preview = await _preview(
+        {
+            "/": _html(home),
+            "/events/jazz-night": _html(_ld(json.dumps(_event("MusicEvent")))),
+            "/events/pottery-workshop": _html(_ld(json.dumps(pottery))),
+        },
+        seen,
+    )
+    assert (preview.status, preview.source) == ("ok", "jsonld")
+    assert sorted(i.name for i in preview.items) == ["Jazz Night", "Pottery Workshop"]
+    assert not any(w.startswith("skipped_no_price") for w in preview.warnings)
+    assert "/about" not in _paths(seen)
+
+
+async def test_a_sitemap_naming_another_host_is_read_on_the_verified_origin(beanie_test_db):
+    # A staging site whose robots.txt and sitemap still name the production host,
+    # with products under /boutique/<category>/<slug> and the homepage linking
+    # only to the listings. The sitemap's paths are read on the verified origin;
+    # the other host is never asked for anything.
+    await _claim()
+    seen: list[httpx.Request] = []
+    locs = "".join(
+        f"<url><loc>https://evil.example{p}</loc></url>"
+        for p in (
+            "/",
+            "/about",
+            "/boutique",
+            "/boutique/jewelry/gold-chain",
+            "/events",
+            "/events/masquerade-manor",
+        )
+    )
+    sitemap = f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{locs}</urlset>'
+    home = '<html><body><a href="/boutique">Boutique</a><a href="/events">Events</a></body></html>'
+    masquerade = _event(name="Masquerade at the Manor", url="/events/masquerade-manor")
+    preview = await _preview(
+        {
+            "/robots.txt": _text("User-agent: *\nSitemap: https://evil.example/sitemap.xml\n"),
+            "/": _html(home),
+            "/sitemap.xml": _text(sitemap, "application/xml"),
+            "/boutique": _html(home),
+            "/events": _html(home),
+            "/boutique/jewelry/gold-chain": _html(_jsonld_page("Gold Chain", "30", currency="USD")),
+            "/events/masquerade-manor": _html(_ld(json.dumps(masquerade))),
+        },
+        seen,
+    )
+    assert (preview.status, preview.source) == ("ok", "jsonld")
+    by_name = {i.name: i for i in preview.items}
+    assert sorted(by_name) == ["Gold Chain", "Masquerade at the Manor"]
+    assert by_name["Gold Chain"].url == "/boutique/jewelry/gold-chain"
+    assert by_name["Masquerade at the Manor"].url == "/events/masquerade-manor"
+    assert all(r.headers["host"] == _HOST for r in seen)
+    assert "/about" not in _paths(seen)

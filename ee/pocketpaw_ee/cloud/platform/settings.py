@@ -83,6 +83,11 @@ _ENV_PREFIX = "POCKETPAW_"
 # design doc §6.5.
 _CATALOG_LOCKED_FIELDS: frozenset[str] = frozenset({"litellm_api_base", "litellm_api_key"})
 
+# Early-access launch switches. Env only: a write here could open payments
+# (which turns off every early-access guard) or flip credit enforcement
+# without touching the deploy environment. Locked regardless of provenance.
+_ENV_ONLY_FIELDS: frozenset[str] = frozenset({"credits_enforced", "payments_open"})
+
 # Curated groups (design doc §4.4). "Limits and thresholds" is deliberately
 # NOT built here: the design doc's own §9 open questions call its membership
 # "a judgement call over roughly 300 candidates" that wants an operator pass
@@ -391,6 +396,9 @@ def _build_field(
         locked_reason = (
             "read directly from the environment by the model catalog; change the environment"
         )
+    elif name in _ENV_ONLY_FIELDS:
+        editable = False
+        locked_reason = f"launch switch; set {_ENV_PREFIX}{name.upper()} in the environment"
     elif provenance == "env":
         editable = False
         locked_reason = (
@@ -606,6 +614,11 @@ async def update_platform_settings(
                 "platform.settings.catalog_locked_field",
                 f"{name} is read directly from the environment by the model catalog "
                 "and cannot be changed here",
+            )
+        if name in _ENV_ONLY_FIELDS:
+            raise Forbidden(
+                "platform.settings.env_only_field",
+                f"{name} can only be set by {_ENV_PREFIX}{name.upper()} in the environment",
             )
         if _is_env_set(name):
             raise ConflictError(

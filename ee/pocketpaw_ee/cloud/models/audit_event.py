@@ -7,7 +7,8 @@ captures *workspace-governance* writes for the admin-visible audit
 surface.
 
 The 1-year TTL keeps the collection bounded; ``workspace + at`` is the
-primary read path for cursor-paginated listing.
+primary read path for cursor-paginated listing, and ``workspace + target`` serves
+one target's history.
 """
 
 from __future__ import annotations
@@ -34,5 +35,7 @@ class AuditEvent(Document):
         name = "audit_events"
         indexes = [
             IndexModel([("workspace", 1), ("at", -1)]),
+            # One target's history (a Sites Data row): ``list_target_events``.
+            IndexModel([("workspace", 1), ("target_type", 1), ("target_id", 1), ("at", -1)]),
             IndexModel("at", expireAfterSeconds=86400 * 365),
         ]

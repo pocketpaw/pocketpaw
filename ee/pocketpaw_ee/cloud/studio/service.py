@@ -605,13 +605,10 @@ async def tracked_generation_filenames() -> set[str]:
     /media file list). Agent-side generated files (media MCP) are NOT tracked here
     and therefore still surface through /media.
 
-    # global-read: deliberately spans every workspace, and narrowing it would be a
-    # LEAK, not a fix. A generated file's name carries no owner (media_key is a flat
-    # ``generated/<name>``; only /browser captures get an owner prefix), so
-    # ``media.storage.visible_to`` returns True for one — "legacy, untagged". This
-    # global set is therefore the only thing keeping one tenant's studio output off
-    # another tenant's /media listing. Scope it per workspace and those files stop
-    # being excluded and start being shown.
+    # global-read: deliberately spans every workspace. This set only EXCLUDES
+    # names from a listing that ``media.storage.visible_to`` has already scoped
+    # to the caller's owner token, so reading it globally cannot expose another
+    # tenant's file; it just keeps a generation from showing as two tiles.
     """
     names: set[str] = set()
     # PROJECTION, not find_all(): this runs on every GET /api/v1/media, and the
@@ -974,12 +971,15 @@ async def _proxy_generate_image(
 
 
 async def _save_image_bytes(
-    image_bytes: bytes, *, mime: str = "image/png", ext: str = "png"
+    image_bytes: bytes, *, workspace_id: str, mime: str = "image/png", ext: str = "png"
 ) -> str:
-    """Persist one generated image through the media storage adapter and return
+    """Persist one generated asset through the media storage adapter and return
     its backend-relative URL (the /media router serves it). Shared with the
-    agent-side media MCP so every generated asset lands on the same storage."""
-    return await media_storage.save_generated(image_bytes, mime=mime, ext=ext)
+    agent-side media MCP so every generated asset lands on the same storage, and
+    stamped with ``workspace_id`` so the /media listing can scope it."""
+    return await media_storage.save_generated(
+        image_bytes, mime=mime, ext=ext, workspace_id=workspace_id
+    )
 
 
 def _find_style(style_id: str | None) -> dict[str, Any] | None:
@@ -1213,7 +1213,7 @@ async def generate(req: schemas.GenerateRequest, *, workspace_id: str) -> schema
         assets.append(
             {
                 "id": _seq_id("asset"),
-                "url": await _save_image_bytes(image_bytes),
+                "url": await _save_image_bytes(image_bytes, workspace_id=workspace_id),
                 "mime": "image/png",
             }
         )
@@ -1274,7 +1274,9 @@ async def _generate_curated_image(
 
     assets: list[dict[str, Any]] = []
     for data, mime in results:
-        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        url = await _save_image_bytes(
+            data, mime=mime, ext=fal_edit.mime_to_ext(mime), workspace_id=workspace_id
+        )
         assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
 
     params: dict[str, Any] = {
@@ -1341,7 +1343,9 @@ async def _generate_image_edit(
 
     assets: list[dict[str, Any]] = []
     for data, mime in results:
-        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        url = await _save_image_bytes(
+            data, mime=mime, ext=fal_edit.mime_to_ext(mime), workspace_id=workspace_id
+        )
         assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
 
     params: dict[str, Any] = {
@@ -1411,7 +1415,7 @@ async def generate_music(req: schemas.MusicRequest, *, workspace_id: str) -> sch
 
     mime = audio_mime or "audio/mpeg"
     ext = _MUSIC_EXT_BY_MIME.get(mime, "mp3")
-    url = await _save_image_bytes(audio_bytes, mime=mime, ext=ext)
+    url = await _save_image_bytes(audio_bytes, mime=mime, ext=ext, workspace_id=workspace_id)
     assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": url, "mime": mime}]
 
     model = (req.model or "").strip() or fal_music.MUSIC_MODELS[fal_music.DEFAULT_MUSIC_MODEL]["id"]
@@ -1536,12 +1540,17 @@ async def _generate_video(req: schemas.GenerateRequest, *, workspace_id: str) ->
         raise StudioUpstreamError("fal video generation returned no data")
 
     mime = video_mime or "video/mp4"
-    video_url = await _save_image_bytes(video_bytes, mime=mime, ext=_video_ext(mime))
+    video_url = await _save_image_bytes(
+        video_bytes, mime=mime, ext=_video_ext(mime), workspace_id=workspace_id
+    )
     assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": video_url, "mime": mime}]
     if poster_bytes:
         poster_mime_val = poster_mime or "image/jpeg"
         poster_url = await _save_image_bytes(
-            poster_bytes, mime=poster_mime_val, ext=_video_poster_ext(poster_mime_val)
+            poster_bytes,
+            mime=poster_mime_val,
+            ext=_video_poster_ext(poster_mime_val),
+            workspace_id=workspace_id,
         )
         assets[0]["posterUrl"] = poster_url
 
@@ -1825,7 +1834,9 @@ async def edit(req: schemas.EditRequest, *, workspace_id: str) -> schemas.Genera
 
     assets: list[dict[str, Any]] = []
     for data, mime in results:
-        url = await _save_image_bytes(data, mime=mime, ext=fal_edit.mime_to_ext(mime))
+        url = await _save_image_bytes(
+            data, mime=mime, ext=fal_edit.mime_to_ext(mime), workspace_id=workspace_id
+        )
         assets.append({"id": _seq_id("asset"), "url": url, "mime": mime})
 
     model = model_id or fal_edit.DEFAULT_EDIT_MODELS[op]
@@ -1913,12 +1924,17 @@ async def generate_video_elements(
         raise StudioUpstreamError("fal elements returned no video data")
 
     mime = video_mime or "video/mp4"
-    video_url_out = await _save_image_bytes(video_bytes, mime=mime, ext=_video_ext(mime))
+    video_url_out = await _save_image_bytes(
+        video_bytes, mime=mime, ext=_video_ext(mime), workspace_id=workspace_id
+    )
     assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": video_url_out, "mime": mime}]
     if poster_bytes:
         poster_mime_val = poster_mime or "image/jpeg"
         poster_url_out = await _save_image_bytes(
-            poster_bytes, mime=poster_mime_val, ext=_video_poster_ext(poster_mime_val)
+            poster_bytes,
+            mime=poster_mime_val,
+            ext=_video_poster_ext(poster_mime_val),
+            workspace_id=workspace_id,
         )
         assets[0]["posterUrl"] = poster_url_out
 
@@ -2003,12 +2019,17 @@ async def generate_video_motion(
         raise StudioUpstreamError("fal motion-control returned no video data")
 
     mime = video_mime or "video/mp4"
-    video_url_out = await _save_image_bytes(video_bytes, mime=mime, ext=_video_ext(mime))
+    video_url_out = await _save_image_bytes(
+        video_bytes, mime=mime, ext=_video_ext(mime), workspace_id=workspace_id
+    )
     assets: list[dict[str, Any]] = [{"id": _seq_id("asset"), "url": video_url_out, "mime": mime}]
     if poster_bytes:
         poster_mime_val = poster_mime or "image/jpeg"
         poster_url_out = await _save_image_bytes(
-            poster_bytes, mime=poster_mime_val, ext=_video_poster_ext(poster_mime_val)
+            poster_bytes,
+            mime=poster_mime_val,
+            ext=_video_poster_ext(poster_mime_val),
+            workspace_id=workspace_id,
         )
         assets[0]["posterUrl"] = poster_url_out
 

@@ -218,8 +218,21 @@ class TestArtifactChangeDispatch:
         client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
         calls: dict = {}
 
-        async def _fake_merge(action, *, human_event_id=None):
+        async def _fake_merge(
+            action,
+            *,
+            human_event_id=None,
+            confirm_destructive=False,
+            confirm_placeholders=False,
+            confirm_findings_digest=None,
+            gated_hash=None,
+        ):
             calls["merge"] = action.id
+            # The approve route ran the publish gate before approving.
+            calls["gated_hash"] = gated_hash
+            # A plain approve never says "publish anyway".
+            calls["confirm_placeholders"] = confirm_placeholders
+            calls["confirm_destructive"] = confirm_destructive
 
         monkeypatch.setattr(
             "pocketpaw_ee.versions.instinct_executor.execute_approved_change", _fake_merge
@@ -234,8 +247,10 @@ class TestArtifactChangeDispatch:
             resp = client.post(f"/instinct/actions/{action_id}/approve")
             assert resp.status_code == 200, resp.text
             assert resp.json()["action"]["status"] == "approved"
-            # The MERGE executor fired for this action.
+            # The MERGE executor fired for this action, as a single deliberate approve.
             assert calls.get("merge") == action_id
+            assert calls.get("confirm_destructive") is True
+            assert calls.get("confirm_placeholders") is False
 
     def test_same_workspace_reject_dispatches_discard(
         self, router_store: InstinctStore, monkeypatch

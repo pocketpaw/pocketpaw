@@ -96,6 +96,12 @@ def origin_allowed(origin: str, origins: list[str]) -> bool:
     return "*" in origins or origin in origins or _ORIGIN_RE.fullmatch(origin) is not None
 
 
+#: Response headers a cross-origin caller may read. ``Content-Disposition``
+#: carries a download's filename (the Sites Data CSV export), and the Tauri app
+#: calls the backend cross-origin.
+EXPOSE_HEADERS = ("Content-Disposition",)
+
+
 def install_cors(app: FastAPI) -> None:
     """Add ``CORSMiddleware`` and the CORS-aware unhandled-error handler.
 
@@ -123,6 +129,7 @@ def install_cors(app: FastAPI) -> None:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=list(EXPOSE_HEADERS),
     )
     add_cors_aware_error_handler(app, origins)
     for middleware_cls in getattr(app.state, "outermost_middleware", ()):

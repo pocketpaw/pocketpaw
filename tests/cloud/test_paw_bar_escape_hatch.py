@@ -1121,7 +1121,7 @@ async def test_a_sibling_tenants_owner_is_never_notified(mongo_db, store, fabric
 async def test_the_preamble_teaches_the_escape_hatch_when_a_widget_is_bound():
     from pocketpaw_ee.cloud.surface.handlers import concierge as concierge_handler
 
-    preamble = await concierge_handler.build_preamble("w", "u", _concierge_meta())
+    preamble = (await concierge_handler.build_preamble("w", "u", _concierge_meta())).text
 
     assert "pawbar_request_human" in preamble
     assert "ALWAYS honored" in preamble
@@ -1135,7 +1135,9 @@ async def test_the_preamble_omits_it_when_no_widget_is_bound():
     from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
     from pocketpaw_ee.cloud.surface.handlers import concierge as concierge_handler
 
-    preamble = await concierge_handler.build_preamble("w", "u", SurfaceMeta(route_path="/paw-bar"))
+    preamble = (
+        await concierge_handler.build_preamble("w", "u", SurfaceMeta(route_path="/paw-bar"))
+    ).text
 
     assert "pawbar_request_human" not in preamble
     # The rest of the guardrails are untouched.

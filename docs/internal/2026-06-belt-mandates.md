@@ -1,6 +1,6 @@
 <!-- docs/internal/2026-06-belt-mandates.md — the MANDATE primitive and the
      craft factory built on it: anatomy, charter (cadence, checks, recipes,
-     issue labels), Pulley blocks installed through recipes, patrols (incl.
+     issue labels, model), Pulley blocks installed through recipes, patrols (incl.
      upstream and GitHub issues), the crew (cloud Agents as workers: roster,
      seat rule, per-worker model, instructions and setup; the tester), the
      headless develop station (strict and owner Claude setups, the trust
@@ -149,10 +149,32 @@ MANDATE  (charter: goal, KPIs, says_no, boundaries, budget, cadence, checks,
   line's `capacity`. With 8 lines and the 60 s tick, a tick can start up to 8
   shifts, one per line, each within its own headroom; the cap, not the tick,
   bounds the runs in flight.
+- **One shift plans at a time per line.** Shifts overlap in time, never in
+  planning: `trigger_shift` claims the mandate's `shift_lock` (`{token,
+  expires_at}`) with one `find_one_and_update` before it reads the line, and
+  frees it when the shift returns or raises. A second shift for the same
+  mandate meanwhile, from the route, the scheduler or a restart, is refused
+  (`409 mandate.shift_planning`, "No action: a shift is already planning") and
+  opens no shift row. The lock expires after 15 minutes, so a shift that
+  crashed holding it frees the line on its own. `shift_lock` lives off the
+  Beanie model, so a `MandateDoc.save()` from a charter edit never clears it.
+  Without the lock, two shifts 0.4 s apart both read the line before either
+  filed its runs and gave each feature two leads (2026-10-17). Under the lock,
+  `_backlog` also counts in flight every `github:` issue a PENDING run of the
+  mandate owns, read off the store with no runs window
+  (`service._owned_issues`): a lead's `lead.issues` or `lead.issue`, or the
+  issues its task names before the station launched it.
 - **`issue_labels`** (optional, at most 20) scopes the `issues` patrol on a
   GitHub-bound repo: an open issue is sighted when it carries one of these
   labels, compared case-insensitively (see *The `issues` patrol on GitHub*).
   Empty means the GitHub patrol takes nothing.
+- **`model`** (optional: `fable`, `opus` or `sonnet`) is the Claude model the
+  line's cloud sessions start on. Set, every cloud launch of the line's runs
+  (worker, lead, fixer, reviewer, tester, relaunch) is `claude --model <model>
+  --cloud "<brief>"`; unset, the argv is unchanged and the session takes the
+  CLI's default. A cloud session keeps the model it was created with: a nudge
+  (`claude -p --cloud <session id>`) only posts a message and carries no model.
+  A change applies to the next launch, never to a session already running.
 - **`checks`** are commands that must pass before a headless diff is attached,
   e.g. `["uv run pytest -q", "uv run ruff check ."]`.
 - **`recipes`** map a name to a deterministic command, e.g.
@@ -578,6 +600,7 @@ the lane merges that PR no run lands, and its sighting stays open and plannable
 | GET | `/belt/mandates` | `belt.read` | `{mandates}` + health (last shift state, open gate count, sighting count) |
 | GET | `/belt/mandates/digest?since=<iso>` | `belt.read` | The workspace digest since `since` (default 24 hours ago); see *Digest* below |
 | GET | `/belt/mandates/{id}` | `belt.read` | Bare detail: charter, patrols, upstream, crew, recent shifts (each with `approved_by`, the plan Action's approver such as a user id or `system:belt-policy`, and `policy`, the auto gate's `{decision, reason}`; both `null` when they do not apply), sightings-by-patrol, and the `line` block (see *The line: one branch per mandate*; the `{mandate}` that create, crew and autopilot return carries it too) |
+| PATCH | `/belt/mandates/{id}/charter` | `belt.manage` | Change only the line's `model` (`fable\|opus\|sonnet`, `null` clears it) and `budget.max_in_flight` (`null` clears it) / `budget.max_tasks_per_shift`, and `beta_only` (a lead line plans no `p3` issue; off by default): `{model?, budget?: {max_in_flight?, max_tasks_per_shift?}, beta_only?}` → `{mandate}`. Fields left out stay; any other field, an empty body or a value out of range is `422 mandate.charter_invalid`. Emits `mandate.charter_changed` |
 | PUT | `/belt/mandates/{id}/crew` | `belt.manage` | Replace the crew roster: `{crew: [{agent_id, role: dev\|reviewer\|foreman\|tester, concurrency (1-8), setup?: owner\|strict}]}` → `{mandate}`; see *The crew* below |
 | POST | `/belt/mandates/{id}/feedback` | `belt.manage` | Intake patrol → Sighting. TWO shapes, discriminated on `kind`: general `{text, severity?, source}` → sighting dict (autopilot keeps using this); teaching `{kind: reject\|edit\|plan, reason, shift_no?, task_title?}` → `{ok: true}` (the gate UI's channel) |
 | GET | `/belt/mandates/{id}/sightings` | `belt.read` | `{sightings}`, newest-first |
@@ -696,7 +719,8 @@ GitLab path.
   lines file there. They must be filed on creative-core.
 
 Enable it with `"issues"` in `patrols` and `issue_labels` on the charter. No
-route edits an existing mandate's charter or patrols yet, so a live mandate gets
+route edits an existing mandate's patrols or issue labels yet (`PATCH
+.../charter` covers only the model, two budget caps and `beta_only`), so a live mandate gets
 them through a new mandate or a direct database edit.
 
 ## Plan-feature gating posture
@@ -1003,6 +1027,29 @@ launch (`cloud.launched_at`, or the last relaunch; a resumed run without
    flight and its sighting stays open (only a landed task resolves one), so the
    next shift re-plans it.
 
+**Stopping a released session.** Every release (no PR, a stale base, a lead's
+timeout or last stall rung, a superseded lead) first stops the run's newest
+cloud session. No CLI command stops or archives a cloud session (`claude stop`
+and `claude rm` only manage local `--bg` sessions; archive is the web sidebar),
+so Belt queues one message the way it nudges: `claude -p --cloud <session id>
+"Belt released this run. Stop now: end your turn, push nothing more, open no
+PRs."`. The session reads it at its next turn. It is sent once per session (a
+`stop` request on `requests`) and kept on the blob as `stopped`
+(`{session_url, at, error?}`). A failed send is logged and kept as `error`; it
+never holds the release. A lead a human rejects in Instinct is stopped the same
+way at its tracker's next poll (factory lesson 182).
+
+**Slices done before a lead.** Before a feature lead launches (or relaunches),
+Belt reads the shared lead read for its issues and PRs. A slice counts as done
+when the issue has a `Belt-Slice-Done: <slice>` line from before the run, or a
+merged PR of another run carries `Feature: <feature>` and `Slice: <slice>`. Done
+slices leave `slice_ids` (kept on `done_before`, and the brief says to skip
+them); a feature with none left leaves the run. A run with none left is
+released without a launch, and each of its issues gets a note (post the contact
+sheet, or re-cut the slices) and `needs-human`, since the planner would
+otherwise re-plan the issue every shift. The lead brief exempts a message that
+starts `Belt released this run.` from its "never stop for a chat message" rule.
+
 The run timeout is checked before the no-PR timeout, so a run whose overall
 timeout has also passed (a resume long after launch) still ends with the usual
 `headless_error`.
@@ -1213,7 +1260,13 @@ on `fixes`, and each entry records the head it was launched on, so a resumed
 tracker does not start a second fixer on that head. Relaunches carry over on
 `relaunches`, so a resumed run never gets more than
 `POCKETPAW_FACTORY_CLOUD_RELAUNCHES`, and its no-PR clock counts from the last
-relaunch. A run that adopted a PR (`adopted_pr`) polls it by number. A released run is rejected, so it is never resumed. A landed run is
+relaunch. A run that adopted a PR (`adopted_pr`) polls it by number. A released run is rejected, so it is never resumed. A feature
+lead is never resumed beside a newer pending lead on the same repo and feature
+issue (a launched one, newer by `created_at`, then by action id, because SQLite
+stamps `created_at` to the second and two shifts can file in the same one): it
+is released instead, so one
+feature never gets two leads on its `lead/<feature>` branch, and the release
+is not a failed attempt for the issue's breaker. A landed run is
 no longer pending, so its tester is never relaunched; with the tester on, its
 PR tracker is resumed when `tester.state` is `open` or unknown (no PR seen yet)
 and `tester.at` is inside the run timeout (the newest 200 executed runs per
@@ -1670,6 +1723,65 @@ base branch's tip, so a model changed there after the run maps the run's
 files by the new model; recording the run's start sha on the blob would pin
 it.
 
+### The app blueprint
+
+A repo's planned apps, read off `docs/blueprints/<app>/` on `origin/dev`
+(`c4-planned.json` and `features/<feature>.wave.json`) and joined to GitHub
+issues, merged `feature-done` PRs, dev CI, lead branches and the workspace's
+lead runs. Design: workspace `docs/design/drafts/2026-10-15-belt-blueprint-line-view.md`
+(sections 1 and 5 hold the status rules and the full wire shape). Code:
+`belt/app_blueprint.py` derives, `belt/app_blueprint_read.py` reads and caches.
+
+`GET /api/v1/belt/blueprints?repo=<path>` (`belt.read`) returns the graph:
+
+| Field | Shape |
+|---|---|
+| `repo`, `slug`, `sha` | the resolved clone, its GitHub `owner/repo` (`""` off GitHub), the `origin/dev` sha read |
+| `stale`, `read_at` | `stale: true` when the last refresh failed and this is the previous graph |
+| `dev_ci` | `{sha, state: green\|red\|pending, url}` of dev's latest run, or `null` |
+| `layers` | the band order: `tests, app, shell, model, engine, other` |
+| `apps` | `[{id, title, counts: {total, done, built, building, stuck, filed, planned, gap}, journeys: {named, existing, passing}}]`; `title` is the first `# ` heading of `docs/blueprints/<app>.md` less a trailing "blueprint", else the id |
+| `features` | `[{id: "<app>/<feature>", app, title, wave, order, status, claimed, issue: {number, state, labels} \| null, waits_on: [{ref, state}], depends, run: {action_id, stage, next, record_at} \| null, tasks, layers, components, journeys, gaps}]`; an issue gh did not list has `state: "unknown"`, `labels: []`; `record_at` is `null` for now |
+| `components` | `[{id: "<app>/<component>", container, layer, status: built\|partial\|planned, present, total, features}]` |
+| `journeys` | `[{id, test, file, state: named\|existing\|passing, features}]`; `test` is the `func test...` after the `///` id, else `null` |
+| `in_flight` | this workspace's unsettled runs on the repo: `[{action_id, kind: lead\|task, feature, layers}]` |
+| `gaps` | `[{kind, ref, text}]`, kinds `claimed_ahead`, `issue_closed_not_done`, `feature_no_owned`, `component_missing`, `component_unowned` (not built, no feature owns it), `journey_no_test`; `text` is one plain sentence per kind |
+
+`GET /api/v1/belt/blueprints/c4?repo=<path>&app=<app>` (`belt.read`) returns
+`{app, model: {scope, model}, status}`. `model` has the shape of the run
+blueprint's `model` above, so the same adapters draw it. `status` maps each
+component id (bare, as in the model) to `failed` when a stuck feature owns it,
+`changing` when a building one does, `landed` when every path is on dev, else
+`planned`. Every `paths` entry of the app's own components is a key too:
+`landed` when it is in `origin/dev`'s tree (a path ending in `/` once any file
+sits under it), else `planned`, so a partial component can mark each file.
+
+`GET /api/v1/belt/blueprints/suite-map?repo=<path>` (`belt.read`) returns the
+suite feature map, `docs/blueprints/suite/feature-map.json` on `origin/dev`,
+joined to the graph's feature statuses: `{repo, slug, sha, stale, read_at,
+layers: [{id, name}], apps: [{id, name}], features, counts}`. Each feature is
+`{id, name, layer, app, c4, packet, status, adopters: [{app, packet, status}]}`.
+A feature's or adopter's `status` comes only from its `packet` (an
+`<app>/<feature>` id): that feature's graph status when the graph has it,
+`writing` when it doesn't (the wave.json isn't on dev yet), `new` with no
+packet. `counts` has every status, features only. The map is read with the
+graph and served off the same cache entry; a missing or unparsable map is 404
+`belt.suite_map_not_found` and never fails the graph read.
+
+The reads are cached for 60 s per (workspace, repo) behind one lock; a read
+inside the window makes no git or gh call. A failed refresh (git ref lock, gh
+rate limit, or an unexpected error, which is logged) serves the last graph with
+`stale: true`. Feature issues come from `gh issue list --label feature-lead
+--state all`; `waits_on` states come from one unlabelled list per repo a ref
+names. A journey is named when its id appears anywhere in a feature's wave.json
+(real files keep them in `note`) or in the Journeys section of
+`docs/blueprints/<app>.md`. Errors carry the cloud
+envelope plus `detail`: 404 `belt.repo_not_found` for a repo outside the
+allowlist, 404 `belt.app_not_found` for an app with no `c4-planned.json`, 422
+for an `app` that is not `^[a-z0-9][a-z0-9-]*$` (checked before anything is
+read), and 503 `belt.blueprint_unavailable` when the first read fails. Files
+are parsed as data and capped at 1 MB; nothing from the repo runs.
+
 ### Runs read model
 
 `GET /api/v1/belt/runs` and `GET /api/v1/belt/runs/{id}` rows carry, besides
@@ -1903,7 +2015,7 @@ uv run python scripts/factory_digest.py --base http://localhost:8893 \
 | `POCKETPAW_FACTORY_DEVELOP` | unset | `claude` wires the develop station (needs `POCKETPAW_MANDATE_DISPATCHER=headless`); `cloud` wires the cloud develop station instead (see *The cloud develop station*) |
 | `POCKETPAW_FACTORY_CLOUD_LAUNCH_DIR` | unset | Cloud mode only, and required there: an existing git clone, already trusted by the claude CLI, that cloud sessions launch from; its origin is re-pointed to each bound repo per launch |
 | `POCKETPAW_FACTORY_CLOUD_PR_LABEL` | `fast-lane` | The label the cloud brief tells the session to put on its PR |
-| `POCKETPAW_FACTORY_CLOUD_POLL` | `60` | Seconds between `gh` polls of a cloud run's PR |
+| `POCKETPAW_FACTORY_CLOUD_POLL` | `60` | Seconds between `gh` polls of a cloud run's PR. Feature leads on one repo share one aliased GraphQL read (their issues, comments, RECORD.md blobs and the newest 100 PRs, 1 point), refetched at most every half poll. A rate-limited read sleeps to the `X-RateLimit-Reset` its response headers give |
 | `POCKETPAW_FACTORY_CLOUD_TIMEOUT` | `14400` | Seconds a cloud run waits for its PR to merge or be refused before it fails back to queued |
 | `POCKETPAW_FACTORY_CLOUD_FIX_GRACE` | `300` | Seconds a cloud run's PR must stay conflicting or red before a fixer session launches |
 | `POCKETPAW_FACTORY_CLOUD_FIX_ATTEMPTS` | `2` | Fixer sessions per cloud run; past it a still-stuck PR escalates to the per-diff gate |

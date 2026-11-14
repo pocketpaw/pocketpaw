@@ -1,286 +1,39 @@
-# sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
-# create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
+# sites_create.py — the per-engine Paw Site tools on the ``pocketpaw_sites_manager``
+# MCP server, plus the engine-neutral secrets and integrations tools.
 #
-# Updated: 2026-09-27 (feat/sites-visual-research) — NEW ``preview_site`` tool: a
-# screenshot of the site's current DRAFT, returned as image blocks the agent can
-# look at (desktop or phone width, full page, tiled). ``verify_site`` answers
-# "does it build and load"; nothing answered "does it look right", so drafts went
-# to the user unseen. The draft document comes from the same places the editor
-# and the card capture read (``draft_markup`` for html / an already-built tree,
-# the cached preview render for svelte and react), and Cloudflare Browser
-# Rendering takes the picture. Nothing is stored.
+# Old-engine create tools: ``create_landing_site`` (ripple: copy in, structure
+# assembled in code by ``landing_assembler``), ``create_dynamic_site`` (ripple spec
+# with D1 bindings), ``create_svelte_site``, ``create_react_site`` and
+# ``create_html_site`` (the agent authors a ``{path: contents}`` source map). Their
+# edit tools are ``edit_svelte_component``, ``edit_react_component`` and
+# ``edit_html_file``; ``read_site_source`` is their reader. New sites no longer use
+# any of these: the /sites create profile denies them and routes every new site to
+# the project tools (``sites_project.py``) and the ``pocketpaw-site`` skill. They
+# stay registered for refining sites that already exist on those engines.
 #
-# Updated: 2026-09-24 (docs/sites-packages-and-verify-guidance, PP-3) — tool
-# descriptions caught up with PP-1/PP-2: the "no way to add a dependency" /
-# "react + vite and NOTHING else" claims are gone, each source-engine create/edit
-# names ``set_site_dependencies`` (and where to import client-only packages), and
-# each appends ``VERIFY_CONTRACT`` so the agent calls a draft ready only on
-# ``verification.status == passed``. edit_svelte_component's ok=false text now
-# describes the rolled_back verdict and the staged browser-layer failure.
-# Updated: 2026-09-24 (feat/sites-verify-pipeline, PP-2) — every create_{svelte,react,
-# html}_site, edit_{svelte,react}_component, edit_html_file and set_site_dependencies
-# result carries ``verification`` (contract §5). Creates and ``verify_site`` wait for
-# the full verdict under a hard deadline (``_verification_for``); EDITS run only the
-# static check synchronously (``_edit_verification`` → ``verify.verify_edit``), enqueue
-# the build + browser layers, and get that verdict back on the NEXT edit-tool or
-# ``preview_site`` result as ``previous_verification`` (``_with_previous_verification``).
-# An unreferenced ``create=true`` half step skips verification. ripple creates return
-# ``unverified``/``engine_not_verifiable`` honestly. ``edit_svelte_component`` reports
-# a failed STATIC check as data (``ok: false``, ``status: rolled_back``, the verdict)
-# and has no preview_url (no local preview deploy). Every edit tool call logs its
-# elapsed ms (``sites.edit_tool:``). A create with live-data bindings refuses npm packages
-# (``engine_unsupported``) — dynamic svelte cannot carry them yet.
+# Shared by every engine: ``verify_site`` / ``preview_site`` (the three-layer
+# verdict and a screenshot of the draft; ``play_test_site`` in sites_play_test.py
+# reuses the preview target helpers and ``compare_site_to_reference`` in
+# sites_reference.py reuses ``_capture_draft``), ``set_site_dependencies`` (the only writer
+# of ``paw.dependencies.json``), ``list_site_assets``, ``request_site_secret`` /
+# ``list_site_secrets`` (names and status only, never values), and
+# ``list_site_integrations`` / ``connect_site_integration`` (one-click Connect: the
+# owner taps Connect on a chat card; no tool takes or returns a credential).
 #
-# Updated: 2026-09-24 (feat/sites-author-dependencies, PP-1) — authors can declare
-# npm packages. New tool ``set_site_dependencies`` (add ``[{name, range?}]`` /
-# remove ``[name]``) resolves each request against the npm registry (any public
-# package, version, range or dist-tag since 2026-10-07) and writes the result as the
-# reserved ``paw.dependencies.json``; it is the only writer of that file.
-# ``create_{svelte,react,html}_site`` gained an optional
-# ``dependencies`` param that runs the same resolver before the pocket is persisted:
-# a rejected package lands in ``rejected`` with its reason and the create still
-# succeeds without it. A ``source`` map that hand-writes the manifest is refused;
-# package.json / vite.config.* / svelte.config.js / bunfig.toml / .npmrc are
-# author-writable (the generator merges them with its toolchain).
-# ``edit_svelte_component`` on a pocket
-# that declares packages persists the draft without the local preview build and says
-# so (``site`` is null) — installing those packages is sandbox-only.
-#
-# Updated: 2026-09-11 (feat/sites-svelte-edit-create, SC-1) — ``edit_svelte_component``
-# gained ``create``, closing the last hole of the set RX-3 and HE-10 closed for react
-# and html. It was the FIRST edit lane to ship and the last to be able to mint a file:
-# its ``component_path`` had to already exist, so "add an about page" to a live svelte
-# site had no reachable tool on this server. Two things made that worse than a missing
-# feature. Its description was also the only one of the three WITHOUT the "NEVER call
-# `create_<engine>_site` again" warning, so the blocked agent's next move was a second
-# ``create_svelte_site`` — a second pocket at a second url, leaving the site the user
-# was looking at untouched — and the /sites surface denies the file built-ins, so there
-# was no fallback. The description now also teaches the shape unique to this track: a
-# SvelteKit page is TWO files (``+page.svelte`` plus the ``+page.ts`` carrying its own
-# prerender flag, which the root page's page-level flag does not cascade to), so adding
-# one is three calls counting the link. Path policy lives in ``sites/svelte_paths.py``.
-#
-# Updated: 2026-09-01 (fix/sites-html-orphan-create) — ``edit_html_file`` carries the
-# same ``unreferenced`` key and its own warning, naming the wiring step this track
-# actually has: a LINK from an existing page, not an import.
-#
-# Updated: 2026-09-01 (fix/sites-react-orphan-create — a create that renders nothing
-# stopped narrating as a finished change). ``edit_react_component``'s success body now
-# carries ``unreferenced`` and, when it is true, a ``message`` that LEADS with the
-# outstanding second call and forbids reporting the section as added. The skill already
-# taught the two-call contract in prose; what was missing was feedback inside the loop,
-# so an agent that made call 1 and stopped read an unqualified "Saved to the site's
-# draft" and had no reason to make call 2. Advice, not an error: ``ok`` stays true and
-# the file really was written, so the agent must not retry the create.
-#
-# Updated: 2026-08-19 (fix/sites-read-source-tool — the edit lane could write but not
-# read) — added ``read_site_source`` + ``_read_site_source_handler``, the READ half the
-# three edit tools in this file were written against and never had. Each of them prefers
-# an ``edits`` diff whose ``old_string`` must be copied VERBATIM from the current file,
-# and each told the agent to "read it first" while naming no tool that could: /sites
-# filters out ``get_pocket`` (wrong server, hard whitelist) and drops the file/shell
-# built-ins. So the only reachable form was a blind ``new_source`` rewrite — the shape
-# that silently drops a capture form's hidden ``paw_*`` inputs. All three descriptions
-# now name ``read_site_source`` and spell out the read → copy → ``edits`` flow, because
-# a description is the only prompt real estate this surface has. Two modes: a manifest
-# (paths + sizes), or a batch read (``file_paths``) that returns a JSON metadata block
-# plus one plain-text block per file with the contents verbatim, never JSON-escaped, so
-# a large file is not inflated past Claude Code's MCP output cap.
-#
-# Updated: 2026-08-11 (RX-3 — the react track gets an EDIT lane) — added a SEVENTH
-# tool ``edit_react_component`` plus its handler, mirroring
-# ``make_edit_svelte_component_tool``'s shape (identity → record_tool_call →
-# input validation → plan gate → service → draft-framed success body). It closes a
-# hole this file was half of: ``edit_svelte_component`` was the ONLY edit tool
-# registered, so on a react site the agent's only move for "shorten the hero
-# headline" was to call ``create_react_site`` again, minting a SECOND site pocket.
-# Three things about it differ from the svelte edit tool, all deliberate:
-#   * DRAFT-ONLY, with no ``SmokeGateFailed`` branch to map. Nothing is built, so
-#     nothing can fail a smoke gate — and a react publish enqueues its build and
-#     returns before any outcome exists, so there would be nothing to roll back to
-#     anyway. The success body says draft and publishing stays the user's call.
-#   * A ``create`` flag, because ``set_react_source_file`` (like its svelte peer)
-#     refuses a path that is not already in the map, and "add a testimonials
-#     section" needs a NEW file plus an ``src/App.tsx`` edit. It requires
-#     ``new_source`` and requires the path to be ABSENT, so it cannot overwrite a
-#     real component.
-#   * It runs ``_require_sites_plan_or_error``. ``edit_svelte_component`` does not,
-#     which is an asymmetry in that tool rather than a precedent for this one.
-# The reserved-path guard is the load-bearing part: without the same normalization
-# create uses, an edit could shadow the prerender shell (index.html,
-# paw-prerender.mjs, ``src/paw/``) or hand-write paw.dependencies.json. So the policy
-# lives in ``pocketpaw_ee.sites.react_paths`` and both writers call it — the
-# constants below are re-exports.
-#
-# Updated: 2026-08-07 (RX-2 — the agent can select the react engine) — added a
-# FIFTH create tool ``create_react_site`` for the Paw Sites "react track" (the
-# engine RX-1 registered). It mirrors ``create_html_site`` (the agent IS the
-# author; a {relative_path: file_contents} source MAP is persisted verbatim via
-# ``agent_create(engine="react", source=<map>, type_="site", pattern="landing",
-# ripple_spec=None, trusted=True)`` — no ``assemble_*`` step, no rippleSpec, no
-# catalog gate) with two react-specific differences:
-#
-#   * VALIDATION is two-sided. The required key is the ``src/App.tsx``
-#     composition root (both generated entries import it by that exact path), and
-#     the map is ALSO rejected when it writes a generator-owned path — the build
-#     shell (index.html / package.json / vite.config.ts / paw-prerender.mjs) or
-#     the ``src/paw/`` namespace. paw-sites' react-scaffold.ts throws on the same
-#     collision; checking here turns a build-time throw far from the authoring
-#     turn into an actionable create error.
-#   * There is an ``interactive`` argument, the react spelling of MT-1's
-#     per-site ``keeps_client_bundle``. Edited (feat/sites-js-by-default): it is
-#     now TRI-STATE. Omitting it persists ``None`` — no declaration — and publish
-#     resolves that from ``sites_keep_client_bundle_default`` (True by default),
-#     so an unflagged interactive component now HYDRATES instead of silently
-#     doing nothing. It is still forwarded explicitly when the agent passes it,
-#     because an explicit True/False beats the setting in both directions and
-#     ``False`` is the only way to ship a page with no bundle at all. Coercing
-#     the omitted case to ``False`` here (the pre-edit behaviour) would record a
-#     decision the agent never made and hold every react site out of the default.
-#
-# This is OPT-IN like html was: the description steers the agent here ONLY on an
-# explicit React request or a genuine interactivity need; the default create stays
-# create_html_site. The authoring brain is the bundled
-# ``pocketpaw-create-react-site`` skill, which composes with (never restates)
-# ``pocketpaw-design-taste``.
-#
-# Updated: 2026-07-17 (fix/sites-draft-visible — a DRAFT lists in the gallery) —
-# every create handler (landing / svelte / html / dynamic) now mints a DRAFT Site
-# doc right after the pocket is persisted, via the shared best-effort helper
-# ``_mint_draft_site`` → ``sites.service.create_draft_site``. Draft-first create
-# (pocketpaw#1744) persisted the site POCKET but no Site doc, and the /sites gallery
-# lists Site docs — so a plain create appeared in neither the All nor the Draft
-# filter until a publish first minted one. Minting the draft doc (``deployed=False``
-# — a draft, NOT a deploy, NO build, NO billing) keyed on the stable per-pocket id
-# publish upserts makes the draft list immediately and flip live in place on a later
-# publish (one doc per pocket). Best-effort: the pocket already exists (the primary
-# contract), so a mint failure logs and returns rather than failing the create.
-#
-# Updated 2026-06-14 (feat/dynamic-sites-authoring — Paw Sites "Dynamic track",
-# RFC 12 A2) — added the create tool ``create_dynamic_site``. It mirrors
-# ``create_svelte_site`` (the agent IS the author; the payload is persisted
-# verbatim via ``agent_create`` with ``trusted=True`` and the post-create
-# session-bind + SSE side effects on the SAME ``pocketpaw_sites_manager`` server;
-# it also runs the same identity → record_tool_call → validate →
-# _require_sites_plan_or_error plan gate the other create handlers do) but the
-# payload is a rippleSpec carrying the DYNAMIC blocks (``objects`` / ``sources`` /
-# ``actions`` / ``auth``) that back the published site with the customer's own live
-# Cloudflare D1. There is no ``assemble_*`` step. It persists via
-# ``agent_create(type_="site", pattern="dynamic", ripple_spec=<spec>,
-# engine="ripple", trusted=True)``: a dynamic site IS a ripple-engine site whose
-# spec carries the dynamic declarations as sibling keys, so publish_pocket carries
-# them through generator_client.build() unchanged and the paw-sites generator
-# scaffolds the D1 migration + read/write remote functions off the same spec.
-# ``_validate_dynamic_spec`` fails the create CLOSED on a spec that isn't actually
-# dynamic (no objects, or no sources/actions/auth) so the agent fixes it instead
-# of persisting a static page through the dynamic tool.
-#
-# Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — create_svelte_site
-# now accepts a DYNAMIC svelte site. The ``source`` envelope may carry live-data
-# bindings (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the
-# {path: contents} file map: the per-value string check now EXEMPTS those binding
-# keys (their values are lists/bools), the JSON schema's ``source`` is loosened to
-# ``additionalProperties: true``, and the handler stamps ``pattern="dynamic"`` when
-# any binding is present (else ``pattern="landing"`` for a static marketing site —
-# unchanged). The generator (generator_client._split_svelte_source) peels the
-# bindings out of ``source`` at publish and passes them as flat siblings on the
-# DSV-1 GenerateInput. Required-file validation is untouched — binding keys never
-# satisfy a §4.3 required FILE key, so they are simply ignored by the missing-keys
-# check.
-#
-# Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — the create handlers now
-# call _require_sites_plan_or_error(workspace_id) right after input validation,
-# delegating to the shared sites.service.require_sites_plan gate. Sites is the
-# "sites" plan feature (go+); these create tools reach agent_create directly and
-# bypassed the REST router's require_plan_feature("sites") gate, so a free-plan
-# workspace could create + (then publish) a live site that GET /sites 403'd. On a
-# disallowed plan the handler now returns the plan.feature_denied MCP error
-# ("Sites requires the Go plan — upgrade, or switch workspace") so the chat
-# agent surfaces the upgrade message instead of a phantom-created site.
-# Updated: 2026-06-25 (decouple-sites-from-fabric) — the gate moved off the
-# overloaded "fabric" flag onto the dedicated "sites" flag (go+); the Fabric
-# ontology keeps "fabric" (enterprise-only).
-#
-# Updated: 2026-06-04 (feat/sites-svelte-engine) — added the SECOND deterministic
-# create tool ``create_svelte_site`` for the Paw Sites "Svelte track". It mirrors
-# ``create_landing_site`` (same direct ``agent_create`` persistence, same
-# session-bind + SSE side effects, same one server) but the payload is a
-# hand-written SvelteKit ``source`` MAP ``{relative_path: file_contents}`` (the
-# pocketpaw-create-svelte-site skill authors it via the design skills) instead of
-# a ``content`` copy object. There is no ``assemble_*`` step — the agent IS the
-# author — so the tool persists ``source`` verbatim via ``agent_create(
-# engine="svelte", source=<map>, type_="site", pattern="landing",
-# ripple_spec=None, trusted=True)``. ``trusted=True`` is correct here for a
-# different reason than the landing tool: there is NO rippleSpec to gate at all
-# (the catalog walk only runs on a non-null spec), so the source files pass
-# straight through to persistence and the generator materializes them at publish.
-#
-# Updated: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added a THIRD
-# tool ``edit_svelte_component`` for targeted edits of a PUBLISHED svelte site.
-# It takes ``pocket_id`` + ``component_path`` + the FULL ``new_source`` for one
-# file, and delegates to ``sites_service.edit_svelte_component`` (persist the one
-# file via the pockets service, then republish; roll back + leave the prior
-# deploy if the rebuild's smoke gate fails). It registers on the SAME
-# ``pocketpaw_sites_manager`` server as create + publish (see sites.py) so the
-# create → publish → edit hops sit side by side for the chat agent.
-#
-# Updated: 2026-06-18 (fix/sites-edit-draft-not-publish, BUG 2) — an edit now
-# stages a DRAFT PREVIEW, not a live publish, so the success result no longer
-# narrates "published"/"republished"/"live at". ``_edit_svelte_component_handler``
-# returns ``{ok, status:"draft", is_live:false, site:{..., preview_url, deployed},
-# component_path, message}`` with a message that says the change is a draft preview
-# (not live), the url is a PREVIEW (not the published site), and the user must click
-# "Submit for review" to publish. The tool docstring the agent reads was reworded to
-# match. The create + publish tools are unchanged (publish is a real live deploy).
-#
-# Updated: 2026-06-18 (feat/sites-diff-edit, P3) — ``edit_svelte_component`` now
-# accepts a TARGETED diff: ``edits=[{old_string, new_string}, ...]`` (search/replace
-# blocks like the built-in Edit tool) as an ALTERNATIVE to the full ``new_source``,
-# so the agent emits ONLY the change for a small edit instead of regenerating the
-# whole file (the dominant edit-latency cost). Exactly one of ``edits`` /
-# ``new_source`` is required (``new_source`` dropped from the schema's ``required``).
-# The handler validates the diff SHAPE (a non-empty list of string {old_string,
-# new_string} dicts) and forwards both fields to ``sites_service.edit_svelte_component``,
-# which applies the blocks to the pocket's CURRENT source (apply_edits) — a 0/>1
-# match raises ValidationError, relayed to the agent by code so it can retry. The
-# tool description steers the agent to PREFER ``edits`` for small changes and reserve
-# ``new_source`` for large rewrites.
-#
-# This is the decisive bypass of the dashboard-built ``pocket_specialist``
-# create machinery. The agent-mode pocket_specialist path (draft kit / plan kit /
-# subagent delegation + the validate-redraft loop) kept downgrading landing
-# sites to generic hero+grid+card widgets no matter what the prompt whitelisted,
-# because the LLM owned the page STRUCTURE. Here, the LLM provides COPY ONLY and
-# this tool assembles the marketing-widget structure in code (``landing_assembler
-# .assemble_landing_spec``), then persists it DIRECTLY through the pockets
-# service's ``agent_create`` — NO pocket_specialist, NO validate/redraft loop, NO
-# subagent. The structure cannot be downgraded.
-#
-# Mirrors the sibling ``sites.py`` (publish) server: ``create_sdk_mcp_server``
-# with an SDK import-guard, ``SERVER_NAME`` / ``*_TOOL_ID`` allowlist constants,
-# and ContextVar-sourced identity (the same ``current_workspace_id`` /
-# ``current_user_id`` accessors in ``ee.cloud.chat.agent_service`` the publish +
-# pocket-specialist servers read). Tool id namespaces under the SAME
-# ``pocketpaw_sites_manager`` server (``mcp__pocketpaw_sites_manager__
-# create_landing_site``) so the create + publish hops sit side by side for the
-# chat agent — the SKILL produces copy → create_landing_site → publish.
-#
-# Updated: 2026-07-12 (feat/sites-html-create-tool, HE-6) — added a FOURTH create
-# tool ``create_html_site`` for the Paw Sites "html track". It mirrors
-# ``create_svelte_site`` (the agent IS the author; a raw {relative_path:
-# file_contents} source MAP is persisted verbatim via ``agent_create(
-# engine="html", source=<map>, type_="site", pattern="landing", ripple_spec=None,
-# trusted=True)`` — no ``assemble_*`` step, no rippleSpec, no catalog gate) but the
-# map is plain HTML/CSS/JS with NO SvelteKit scaffold and NO bundler. Validation is
-# lighter than svelte's §4.3: the only required key is the entry ``index.html`` (the
-# edge serves it at the root); ``_missing_html_keys`` fails the create CLOSED
-# without it. html has NO live-data binding siblings (that is the svelte/ripple
-# dynamic track), so the whole map is {path: str} and every value must be a content
-# string — no exemption list. Publishing an html site skips the Node build entirely
-# (generator_client.needs_node_build("html") is False). This is OPT-IN: the tool
-# description steers the agent to it ONLY on an explicit raw/plain-HTML request; the
-# default marketing brain stays create_landing_site (ripple). The default flip is
-# HE-12, gated behind HE-11.
+# Invariants:
+#   * every handler resolves identity from the chat ContextVars, records the call,
+#     and runs ``_require_sites_plan_or_error`` (the same ``sites`` plan gate the
+#     publish path and the REST router use) before it writes; the refusal says what
+#     the call did not do (create / edit / read) in plain words a user can read;
+#   * creates persist a DRAFT and mint a draft Site doc (``_mint_draft_site``); they
+#     never publish. That mint is the only place a site is stamped
+#     ``generation="generating"`` (with the run's chat session). Edits stage a
+#     draft too, and report ``verification`` per the verify contract (static check
+#     now, build and browser verdict on the next call);
+#   * ``_INTEGRATION_NEXT_STEPS`` has one wiring line per registered provider, in
+#     client (paw.js / ``Paw.call``) and server (``pawCall`` with
+#     ``env.PAW_GATEWAY_TOKEN``) form where both exist. A provider added to the
+#     registry without a line fails ``test_integration_next_steps_cover_every_provider``.
 """Agent-side MCP surface for DETERMINISTIC Paw Site landing-page creation.
 
 A landing site is built from an LLM ``content`` copy object. This tool:
@@ -308,6 +61,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -372,6 +126,12 @@ VERIFY_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__verify_site"
 
 # Screenshot the current draft so the agent can see what it built. Same server.
 PREVIEW_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__preview_site"
+# Play the draft in a remote browser (sites_play_test.py). Same server.
+PLAY_TEST_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__play_test_site"
+# Store a design the owner supplied on the pocket, and compare the draft against it
+# (sites_reference.py). Same server.
+SAVE_SITE_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__save_site_reference"
+COMPARE_SITE_TO_REFERENCE_TOOL_ID = f"mcp__{SERVER_NAME}__compare_site_to_reference"
 
 # Site secrets: ask the owner for one by name, list names + status. No values.
 REQUEST_SITE_SECRET_TOOL_ID = f"mcp__{SERVER_NAME}__request_site_secret"
@@ -394,6 +154,9 @@ SITES_CREATE_TOOL_IDS = (
     SET_SITE_DEPENDENCIES_TOOL_ID,
     VERIFY_SITE_TOOL_ID,
     PREVIEW_SITE_TOOL_ID,
+    PLAY_TEST_SITE_TOOL_ID,
+    SAVE_SITE_REFERENCE_TOOL_ID,
+    COMPARE_SITE_TO_REFERENCE_TOOL_ID,
     REQUEST_SITE_SECRET_TOOL_ID,
     LIST_SITE_SECRETS_TOOL_ID,
     LIST_SITE_INTEGRATIONS_TOOL_ID,
@@ -931,7 +694,27 @@ def _identity() -> tuple[str | None, str | None]:
         return None, None
 
 
-async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
+#: What a refused call did NOT do, by kind of tool. Tool results can show in the
+#: chat's activity feed, so this is a plain sentence for the user; how the agent
+#: must react (one sentence, then stop) lives in the /sites preamble's blocked rule.
+_PLAN_REFUSAL_OUTCOME = {
+    "create": "Nothing was created.",
+    "edit": "Nothing was changed.",
+    "read": "",
+}
+
+
+def _plan_refusal_op(tool: str) -> str:
+    """``create`` / ``edit`` / ``read`` for a tool name, so the refusal never claims
+    a create on a read or an edit."""
+    if tool.startswith("create_") or tool == "start_site_from_template":
+        return "create"
+    if tool.startswith(("list_", "read_", "get_", "verify_", "preview_", "play_test_")):
+        return "read"
+    return "edit"
+
+
+async def _require_sites_plan_or_error(workspace_id: str, tool: str = "") -> dict | None:
     """Gate the create on the workspace's plan. Returns an MCP ``_error_response``
     when the plan lacks the Sites ("sites") feature (so the agent surfaces the
     upgrade message instead of a phantom-created site), or ``None`` when the plan
@@ -941,7 +724,10 @@ async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
     the in-process create path is gated by the SAME plan check + feature table as
     the publish path and the HTTP ``require_plan_feature("sites")`` dependency. A
     free-plan workspace was the bug: create + publish ran in-process and bypassed
-    the router gate, deploying a live site that GET /sites then 403'd."""
+    the router gate, deploying a live site that GET /sites then 403'd.
+
+    ``tool`` is the calling tool's name; it picks the outcome sentence (nothing
+    created / nothing changed / none for a read). Unnamed reads as an edit."""
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites.service import require_sites_plan
 
@@ -949,9 +735,10 @@ async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
         await require_sites_plan(workspace_id)
     except CloudError as exc:
         # Forbidden('plan.feature_denied') / NotFound('workspace'). Relay the
-        # code + message so the agent tells the user to upgrade / switch
-        # workspace, not "site created".
-        return _error_response(f"{exc.code}: {exc.message}")
+        # code + message (it names the upgrade path) so the agent tells the user
+        # to upgrade / switch workspace, not "site created".
+        outcome = _PLAN_REFUSAL_OUTCOME[_plan_refusal_op(tool)]
+        return _error_response(f"{exc.code}: {exc.message} {outcome}".rstrip())
     return None
 
 
@@ -996,12 +783,29 @@ async def _mint_draft_site(workspace_id: str, user_id: str, pocket_id: str, name
     (one doc per pocket). Best-effort: the pocket already exists in Mongo (the primary
     contract), so a mint failure logs and returns rather than undoing a successful
     create — the site is simply not yet listable (the prior behaviour), never a hard
-    error. The plan gate already ran before ``agent_create``, so this adds no gate."""
+    error. The plan gate already ran before ``agent_create``, so this adds no gate.
+
+    Only the create tools call this, so it is the one place that marks a site as
+    being generated: the chat session of the current run rides along and the fresh
+    draft starts as ``generation="generating"`` (``sites.generation``), which lets a
+    reload mid-build show the build. No session (or a failure reading it) just
+    leaves the flag unset; it never fails the create."""
+    generation_session_id: str | None = None
+    try:
+        from pocketpaw_ee.cloud.chat import agent_service
+
+        generation_session_id = agent_service.current_session_mongo_id() or None
+    except Exception:  # noqa: BLE001 — the generation flag is best-effort
+        logger.debug("create-site: no chat session for the generation flag", exc_info=True)
     try:
         from pocketpaw_ee.sites.service import create_draft_site
 
         await create_draft_site(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, name=name
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            name=name,
+            generation_session_id=generation_session_id,
         )
     except Exception:  # noqa: BLE001 — draft-doc mint is best-effort, never fails a create
         logger.warning(
@@ -1051,7 +855,9 @@ async def _create_landing_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_landing_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -1260,7 +1066,9 @@ async def _create_dynamic_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_dynamic_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -1482,7 +1290,9 @@ async def _create_svelte_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_svelte_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -1732,7 +1542,9 @@ async def _create_html_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_html_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -1984,7 +1796,9 @@ async def _create_react_site_handler(args: dict) -> dict:
 
     # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
     # create can't bypass the router's require_plan_feature("sites") gate.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="create_react_site")
+    ) is not None:
         return gate
 
     name_raw = args.get("name")
@@ -2642,7 +2456,9 @@ async def _edit_react_component_handler(args: dict) -> dict:
     # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
     # the same feature the create tools are. Without this a workspace that lost the
     # plan could keep editing a site its own /sites list 403s.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="edit_react_component")
+    ) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -2926,7 +2742,9 @@ async def _read_site_source_handler(args: dict) -> dict:
             "strings (relative file paths). Omit it to list the site's files instead."
         )
 
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="read_site_source")
+    ) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -3085,7 +2903,9 @@ async def _edit_html_file_handler(args: dict) -> dict:
     # Plan gate (Sites = "sites"): an edit mutates a site pocket, so it is gated on
     # the same feature the create tools are. Without this a workspace that lost the
     # plan could keep editing a site its own /sites list 403s.
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="edit_html_file")
+    ) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -3200,7 +3020,9 @@ async def _set_site_dependencies_handler(args: dict) -> dict:
             "(package names to drop)."
         )
 
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="set_site_dependencies")
+    ) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -3316,7 +3138,7 @@ async def _verify_site_handler(args: dict) -> dict:
             "verify_site requires a `pocket_id` — the id of the site pocket to check."
         )
 
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (gate := await _require_sites_plan_or_error(workspace_id, tool="verify_site")) is not None:
         return gate
 
     from pocketpaw_ee.cloud._core.errors import CloudError
@@ -3347,11 +3169,12 @@ def make_verify_site_tool(tool: Any) -> Any:
             "works: a static check of the source, a real build in the isolated build "
             "sandbox, and a headless-browser load of the built pages. Returns "
             "{ok, verification: {status: passed|failed|unverified, layers, errors, "
-            "warnings}}. Edits return only the static check and build in the "
-            "background, so call this ONCE at the end of a turn's edits (it waits for "
-            "the build and browser check), after a fix, or when a previous result was "
-            "`unverified` with reason `timeout` (the build keeps running, and this "
-            "attaches to it). "
+            "warnings, checks}}; `checks.warnings` are warn-only page checks with "
+            "sites-check ids that never change the status. Edits return only the "
+            "static check and build in the background, so call this ONCE at the end "
+            "of a turn's edits (it waits for the build and browser check), after a "
+            "fix, or when a previous result was `unverified` with reason `timeout` "
+            "(the build keeps running, and this attaches to it). "
             "`errors` name file, line and message — fix them and verify again. Only "
             "`passed` means the site works; `unverified` means it could not be checked."
         ),
@@ -3386,6 +3209,16 @@ _PREVIEW_MAX_TILES = 3
 #: Browser Rendering's wait. ``load`` fires once the document and its assets are in;
 #: ``networkidle0`` also waited out analytics and font polling for nothing.
 _PREVIEW_WAIT_UNTIL = "load"
+#: A page photographed at its URL runs its own scripts, and an app (a game, a three.js
+#: scene, a client router) often draws after ``load``. This pause (ms) before the
+#: shutter lets it settle; ``wait_ms`` overrides it, up to ``_PREVIEW_MAX_WAIT_MS``.
+_PREVIEW_URL_SETTLE_MS = 1_500
+_PREVIEW_MAX_WAIT_MS = 8_000
+#: A ``path`` is one route on the draft's own origin: a single leading slash, then
+#: no whitespace, backslash or fragment. ``//``, ``..`` and a scheme are refused
+#: separately so the capture can never be pointed at another host.
+_PREVIEW_PATH_RE = re.compile(r"/[^\s\\#]{0,511}")
+_PREVIEW_BUILD_PENDING = frozenset({"queued", "building", "running", "pending"})
 
 
 def _native_document(body_html: str, css: str) -> str:
@@ -3398,41 +3231,215 @@ def _native_document(body_html: str, css: str) -> str:
     )
 
 
-async def _draft_document(
-    *, workspace_id: str, user_id: str, pocket_id: str, pocket: dict[str, Any]
+def _preview_path(raw: Any) -> tuple[str, str]:
+    """``(path, "")`` for a usable route on the draft (``""`` when none was given), or
+    ``("", reason)``. Only a same-origin path is allowed: the capture must never be
+    steered to another host."""
+    if raw is None or raw == "":
+        return "", ""
+    if (
+        not isinstance(raw, str)
+        or not _PREVIEW_PATH_RE.fullmatch(raw)
+        or raw.startswith("//")
+        or "://" in raw
+        or ".." in raw.split("?", 1)[0].split("/")
+    ):
+        return "", (
+            "`path` must be one route on the draft, starting with a single `/` (like "
+            "`/play` or `/about`), with no scheme, host, `//`, backslash or `..`; got "
+            f"{raw!r}."
+        )
+    return raw, ""
+
+
+def _preview_wait_ms(raw: Any) -> tuple[int | None, str]:
+    """``(ms, "")`` clamped to 0..``_PREVIEW_MAX_WAIT_MS`` (``None`` when not given),
+    or ``(None, reason)`` for a value that is not a whole number."""
+    if raw is None:
+        return None, ""
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, int | float)
+        or (isinstance(raw, float) and not raw.is_integer())
+    ):
+        return None, f"`wait_ms` must be a whole number of milliseconds; got {raw!r}."
+    return max(0, min(int(raw), _PREVIEW_MAX_WAIT_MS)), ""
+
+
+def _project_preview_target(
+    artifact: dict[str, Any], tool: str = "preview_site"
 ) -> tuple[str, str]:
-    """The draft as one self-contained HTML document, or ``("", reason)``.
+    """A project draft's page address, or ``("", reason)``.
 
-    html sites (and any pocket already built on this host) come from ``draft_markup``,
-    the card capture's source. svelte and react fall back to the cached preview
-    render: a cache miss queues that build and answers "building", so the agent
-    verifies first and asks again instead of photographing nothing.
-    """
-    from types import SimpleNamespace
+    The draft is served from its preview origin (``preview_origin.py``): the real
+    page, root-absolute assets and scripts included. A published site whose drafts
+    were purged answers with its live URL. Without an address the reason says why
+    and what to do (call ``tool`` again after the build), and never that the site
+    is broken."""
+    url = artifact.get("preview_url")
+    if isinstance(url, str) and url.startswith(("https://", "http://")):
+        return url, ""
+    mode = artifact.get("preview_mode")
+    status = artifact.get("build_status") or "none"
+    if mode == "server_only":
+        return "", (
+            "this site's draft is server-only: there is no static draft page to "
+            "photograph before publish. Do not describe the page as visually checked; "
+            "say it was not. This does not mean the site is broken."
+        )
+    if status == "failed":
+        return "", (
+            "the draft's last build failed, so there is no page to photograph. Read the "
+            f"build log, fix, call run_site_build again, then call {tool} again."
+        )
+    if status in _PREVIEW_BUILD_PENDING or mode is None:
+        return "", (
+            f"the draft has no built page yet (build {status}). Call run_site_build and "
+            f"wait for `built`, then call {tool} again. This does not mean the "
+            "site is broken."
+        )
+    return "", (
+        "this deployment has no draft preview address, so there is no page to "
+        "photograph. Say the page was not visually checked. This does not mean the "
+        "site is broken."
+    )
 
-    from pocketpaw_ee.sites.draft_markup import build_draft_markup
-    from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
 
-    stub = SimpleNamespace(pocket_id=pocket_id, owner=user_id, id=pocket_id, name="")
-    markup = await build_draft_markup(stub, pocket=pocket)
-    if markup:
-        return markup, ""
+def _join_preview_url(base: str, path: str) -> str:
+    """``base`` (an origin root) with ``path`` appended; ``base`` alone for no path."""
+    if not path:
+        return base
+    return base.split("?", 1)[0].split("#", 1)[0].rstrip("/") + path
 
-    if not has_native_edit_lane(normalize_engine(pocket.get("engine"))):
-        return "", "this site has no rendered draft to photograph yet."
 
+async def _project_draft_url(
+    *, workspace_id: str, user_id: str, pocket_id: str, tool: str = "preview_site"
+) -> tuple[str, str]:
+    """A project pocket's draft address (``(url, "")``) or ``("", reason)``: the only
+    page ``preview_site`` and ``play_test_site`` ever open."""
     from pocketpaw_ee.sites import service as sites_service
 
     artifact = await sites_service.get_native_artifact(
         workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
     )
-    if artifact.get("body_html"):
-        return _native_document(artifact["body_html"], artifact.get("css") or ""), ""
-    status = artifact.get("build_status") or "building"
-    return "", (
-        f"the draft's render is not ready (build {status}). Call verify_site to wait for "
-        "the build, then call preview_site again."
+    return _project_preview_target(artifact, tool)
+
+
+async def _draft_document(
+    *, workspace_id: str, user_id: str, pocket_id: str, pocket: dict[str, Any]
+) -> tuple[str, str, str]:
+    """What to photograph: ``(html, url, "")`` with exactly one of the two set, or
+    ``("", "", reason)``.
+
+    A ``project`` pocket (every new site) is photographed at its preview URL. html
+    sites (and any pocket already built on this host) come from ``draft_markup``, the
+    card capture's source. svelte and react fall back to the cached preview render: a
+    cache miss queues that build and answers "building", so the agent verifies first
+    and asks again instead of photographing nothing.
+    """
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.sites import service as sites_service
+    from pocketpaw_ee.sites.draft_markup import build_draft_markup
+    from pocketpaw_ee.sites.engines import has_native_edit_lane, normalize_engine
+
+    engine = normalize_engine(pocket.get("engine"))
+    if engine == "project":
+        url, reason = await _project_draft_url(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        )
+        return "", url, reason
+
+    stub = SimpleNamespace(pocket_id=pocket_id, owner=user_id, id=pocket_id, name="")
+    markup = await build_draft_markup(stub, pocket=pocket)
+    if markup:
+        return markup, "", ""
+
+    if not has_native_edit_lane(engine):
+        return "", "", "this site has no rendered draft to photograph yet."
+
+    artifact = await sites_service.get_native_artifact(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
     )
+    if artifact.get("body_html"):
+        return _native_document(artifact["body_html"], artifact.get("css") or ""), "", ""
+    status = artifact.get("build_status") or "building"
+    return (
+        "",
+        "",
+        f"the draft's render is not ready (build {status}). Call verify_site to wait for "
+        "the build, then call preview_site again.",
+    )
+
+
+async def _capture_draft(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    viewport: dict[str, int],
+    path: str = "",
+    wait_ms: int | None = None,
+    log_tag: str = "preview_site",
+) -> tuple[bytes, str, dict[str, Any] | None]:
+    """Photograph a pocket's current draft with Browser Rendering at ``viewport``.
+
+    Returns ``(png, url, None)`` (``url`` is the draft address for a template-built
+    site, ``""`` for one rendered from markup), or ``(b"", "", error_response)``
+    saying why there is no picture. Shared by ``preview_site`` and
+    ``compare_site_to_reference`` so both photograph the same draft the same way.
+    """
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except CloudError as exc:
+        return b"", "", _error_response(f"{exc.code}: {exc.message}")
+
+    try:
+        document, url, reason = await _draft_document(
+            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, pocket=pocket
+        )
+    except Exception as exc:  # noqa: BLE001 — a preview is never a gate on the build
+        logger.warning("sites.%s: draft assembly failed", log_tag, exc_info=True)
+        return b"", "", _error_response(f"could not assemble the draft: {exc}")
+    if not document and not url:
+        return b"", "", _error_response(reason)
+
+    # A url capture runs the page's own scripts, so it waits for them to settle; an
+    # html capture keeps the plain ``load`` unless the agent asked for a pause.
+    if url:
+        target: dict[str, Any] = {"url": _join_preview_url(url, path)}
+        settle = _PREVIEW_URL_SETTLE_MS if wait_ms is None else wait_ms
+    else:
+        target = {"html": document}
+        settle = wait_ms or 0
+    try:
+        from pocketpaw_ee.sites.service import _cf_client
+
+        image = await _cf_client().capture_screenshot(
+            **target,
+            viewport=viewport,
+            goto_options={"waitUntil": _PREVIEW_WAIT_UNTIL, "timeout": 20_000},
+            screenshot_options={"fullPage": True},
+            wait_for_timeout=settle,
+        )
+    except CloudError as exc:
+        return (
+            b"",
+            "",
+            _error_response(
+                f"screenshots are unavailable on this deployment ({exc.message}). Rely on "
+                "verify_site and re-read your source against the design instead."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sites.%s: capture failed", log_tag, exc_info=True)
+        return b"", "", _error_response(f"the screenshot failed: {exc}")
+    if not image:
+        return b"", "", _error_response("the screenshot came back empty.")
+    return image, url, None
 
 
 @_with_previous_verification("preview_site", timed=False)
@@ -3464,48 +3471,29 @@ async def _preview_site_handler(args: dict) -> dict:
             "preview_site requires a `pocket_id` — the id of the site pocket to look at."
         )
     device = args.get("device") if args.get("device") in _PREVIEW_VIEWPORTS else "desktop"
+    path, bad = _preview_path(args.get("path"))
+    if bad:
+        return _error_response(bad)
+    wait_ms, bad = _preview_wait_ms(args.get("wait_ms"))
+    if bad:
+        return _error_response(bad)
 
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (gate := await _require_sites_plan_or_error(workspace_id, tool="preview_site")) is not None:
         return gate
 
     from pocketpaw.tools.builtin import reference_images
-    from pocketpaw_ee.cloud._core.errors import CloudError
-    from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    try:
-        pocket = await pockets_service.get(pocket_id, user_id)
-    except CloudError as exc:
-        return _error_response(f"{exc.code}: {exc.message}")
-
-    try:
-        document, reason = await _draft_document(
-            workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id, pocket=pocket
-        )
-    except Exception as exc:  # noqa: BLE001 — a preview is never a gate on the build
-        logger.warning("sites.preview_site: draft assembly failed", exc_info=True)
-        return _error_response(f"could not assemble the draft: {exc}")
-    if not document:
-        return _error_response(reason)
-
-    try:
-        from pocketpaw_ee.sites.service import _cf_client
-
-        image = await _cf_client().capture_screenshot(
-            html=document,
-            viewport=dict(_PREVIEW_VIEWPORTS[device]),
-            goto_options={"waitUntil": _PREVIEW_WAIT_UNTIL, "timeout": 20_000},
-            screenshot_options={"fullPage": True},
-        )
-    except CloudError as exc:
-        return _error_response(
-            f"screenshots are unavailable on this deployment ({exc.message}). Rely on "
-            "verify_site and re-read your source against the design instead."
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("sites.preview_site: capture failed", exc_info=True)
-        return _error_response(f"the screenshot failed: {exc}")
-    if not image:
-        return _error_response("the screenshot came back empty.")
+    image, url, failure = await _capture_draft(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        viewport=dict(_PREVIEW_VIEWPORTS[device]),
+        path=path,
+        wait_ms=wait_ms,
+        log_tag="preview_site",
+    )
+    if failure is not None:
+        return failure
 
     try:
         tiles = reference_images.to_tiles(
@@ -3516,12 +3504,20 @@ async def _preview_site_handler(args: dict) -> dict:
     except reference_images.ReferenceImageError as exc:
         return _error_response(str(exc))
 
+    where = f" at {path}" if path and url else ""
     note = (
-        f"Draft of {pocket_id} at {device} width: {len(tiles)} image(s), top of the page "
-        "first. Look at it as the visitor will: does the fold carry the offer and the "
+        f"Draft of {pocket_id}{where} at {device} width: {len(tiles)} image(s), top of the "
+        "page first. Look at it as the visitor will: does the fold carry the offer and the "
         "product, does anything overlap, crop or crowd, does it match the references you "
         "locked? Fix what is off, then look again."
     )
+    if path and not url:
+        note += f" `path` {path} was ignored: this site's draft is one page."
+    if url:
+        note += (
+            " A blank or half-drawn canvas may only need longer to render: look again "
+            "with a higher `wait_ms` before you treat it as a bug."
+        )
     return {"content": [*reference_images.image_blocks(tiles), {"type": "text", "text": note}]}
 
 
@@ -3533,13 +3529,19 @@ def make_preview_site_tool(tool: Any) -> Any:
         "preview_site",
         (
             "LOOK at a Paw Site's current DRAFT: returns a full-page screenshot as "
-            "images you can see. Args: `pocket_id` (required), optional `device`: "
-            "`desktop` (default, 1280px) or `mobile` (390px). Call it after a create or "
-            "a layout-moving edit once verify_site returns `passed`, and look "
-            "before you tell the user the page is ready: a page that builds cleanly can "
-            "still look wrong. Fix what you see and look again; one or two rounds is "
-            "normal. An error means no picture could be taken; it never means the site "
-            "is broken."
+            "images you can see. Works on every site, template-built apps included: "
+            "those are photographed at their draft preview URL with their own scripts "
+            "running. Args: `pocket_id` (required); optional `device`: `desktop` "
+            "(default, 1280px) or `mobile` (390px); `path`: a route on the draft such "
+            "as `/play` or `/about` (starts with one `/`; template-built sites only, "
+            "ignored on a one-page draft); `wait_ms`: extra milliseconds before the "
+            "shot (0-8000, default 1500 on template-built sites) for 3D, canvas or "
+            "animated scenes. Look after each milestone (every successful "
+            "run_site_build, or once verify_site returns `passed`), not only at the "
+            "end, and before you tell the user the page is ready: a page that builds "
+            "cleanly can still look wrong. Fix what you see and look again; one or two "
+            "rounds is normal. An error means no picture could be taken; it never means "
+            "the site is broken, but then do not describe the page as visually checked."
         ),
         {
             "type": "object",
@@ -3552,6 +3554,20 @@ def make_preview_site_tool(tool: Any) -> Any:
                     "type": "string",
                     "enum": ["desktop", "mobile"],
                     "description": "Viewport width to render at (default desktop).",
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Route on the draft to photograph, e.g. `/play` (default the "
+                        "home page). Template-built sites only."
+                    ),
+                },
+                "wait_ms": {
+                    "type": "integer",
+                    "description": (
+                        "Milliseconds to wait after load before the shot, for 3D or "
+                        "animated pages (clamped to 0-8000)."
+                    ),
                 },
             },
             "required": ["pocket_id"],
@@ -3835,9 +3851,14 @@ async def _request_site_secret_handler(args: dict) -> dict:
     workspace_id, user_id, err = _secret_tool_identity("request_site_secret", pocket_id)
     if err is not None:
         return err
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="request_site_secret")
+    ) is not None:
         return gate
     pocket_id = pocket_id.strip()
+    name = str(args.get("name") or "").strip()
+    if site_secrets.is_platform_managed(name):
+        return await _refuse_platform_secret(workspace_id, user_id, pocket_id, name)
     try:
         view = await site_secrets.request_secret(
             workspace_id=workspace_id,
@@ -3873,6 +3894,40 @@ async def _request_site_secret_handler(args: dict) -> dict:
     )
 
 
+async def _refuse_platform_secret(
+    workspace_id: str, user_id: str, pocket_id: str, name: str
+) -> dict:
+    """``request_site_secret`` for a name the platform sets itself: no card, no
+    pending row. A signing secret is minted on the spot (publish would mint it
+    anyway), so the agent can go on as if it were set."""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import site_secrets
+
+    base = name.removesuffix(site_secrets.DRAFT_SUFFIX)
+    if base == site_secrets.GATEWAY_TOKEN_SECRET:
+        return _error_response(
+            f"{name} is set automatically by Paw when the owner links an integration. "
+            "Do not ask the owner for it. If the site needs a provider, call "
+            "connect_site_integration instead."
+        )
+    try:
+        # The same access rule as a request: edit access to a pocket in this workspace.
+        await site_secrets._require_edit(workspace_id, user_id, pocket_id)
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    try:
+        await site_secrets.ensure_signing_secrets(
+            workspace_id=workspace_id, pocket_id=pocket_id, names=[base]
+        )
+    except Exception:  # noqa: BLE001 - publish mints it again; the answer is the same
+        logger.warning("request_site_secret: could not mint %s now", base, exc_info=True)
+    return _error_response(
+        f"{name} is a signing secret that Paw creates automatically for every site "
+        f"(drafts get their own). Do not ask the owner for it and never mention it to "
+        f"them. Read it in the Worker as env.{base}; publishing binds it."
+    )
+
+
 def _push_secret_request_sse(pocket_id: str, view: Any) -> None:
     """Per-run SSE so the chat that asked can render the input card inline. Best
     effort, names only; the bus event ``site.secret_requested`` reaches the builder."""
@@ -3896,7 +3951,9 @@ async def _list_site_secrets_handler(args: dict) -> dict:
     workspace_id, user_id, err = _secret_tool_identity("list_site_secrets", pocket_id)
     if err is not None:
         return err
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="list_site_secrets")
+    ) is not None:
         return gate
     try:
         listing = await site_secrets.list_secrets(
@@ -3927,8 +3984,11 @@ def make_request_site_secret_tool(tool: Any) -> Any:
             "in the builder's secure input; you NEVER receive, write or ask for the "
             "value, and must not put one in source, .dev.vars or chat. `name` is the "
             "env var the Worker reads (UPPER_SNAKE_CASE, max 64 chars, e.g. "
-            "STRIPE_SECRET_KEY); `description` tells the owner what it is and where to "
-            "get it. Publishing binds every set secret as env.<NAME>."
+            "STRIPE_SECRET_KEY); `description` tells the owner, in plain words, what it is "
+            "and where to get it. Publishing binds every set secret as env.<NAME>. Never "
+            "for signing secrets (BETTER_AUTH_SECRET, SESSION_SECRET, AUTH_SECRET) or "
+            "PAW_GATEWAY_TOKEN: Paw creates those itself and refuses the "
+            "request. Only ask for what the owner really has to choose or bring."
         ),
         {
             "type": "object",
@@ -3991,6 +4051,123 @@ _INTEGRATION_WIRING = (
     "with env.PAW_GATEWAY_TOKEN."
 )
 
+#: The server half every gateway provider shares: framework templates call the same
+#: action from server code through the paw-integrations recipe's ``pawCall``.
+_SERVER_CALL = (
+    " Server code (framework templates): apply the paw-integrations recipe and call "
+    "pawCall(env, {call}) per request{then}; the platform sets env.PAW_GATEWAY_TOKEN, so "
+    "never request it or write it into a file."
+)
+
+
+def _gateway_wiring(client: str, call: str, then: str = "") -> str:
+    """A provider's wiring line: the paw.js form, then the same call server-side."""
+    return (
+        "Client (paw.js is injected into any page that uses it): "
+        + client
+        + (_SERVER_CALL.format(call=call, then=then))
+    )
+
+
+#: The wiring line ``connect_site_integration`` returns for each provider, so the
+#: per-provider detail lives here and not in a skill. One entry per registered
+#: provider (``test_integration_next_steps_cover_every_provider``); the action names
+#: and args are the providers' own ``ActionSpec`` models, not prose.
+_INTEGRATION_NEXT_STEPS = {
+    "newsletter": _gateway_wiring(
+        '<form data-paw-subscribe> with an <input type="email" name="email">, or '
+        "Paw.call('newsletter', 'subscribe', {email}).",
+        "'newsletter', 'subscribe', { email }",
+    ),
+    "stripe": _gateway_wiring(
+        'a buy button is <button data-paw-checkout="<catalog product id>"> (add '
+        'data-qty="2" for a fixed quantity). The price is read from the catalog at '
+        "checkout, so a printed price is display only: never put a price or currency "
+        "in the button.",
+        "'stripe', 'create_checkout', { product_ref, qty }",
+        " and redirect to result.url",
+    ),
+    "razorpay": _gateway_wiring(
+        "data-paw-checkout is Stripe only, so the buy button runs "
+        "Paw.call('razorpay', 'create_checkout', {product_ref, qty}) and opens "
+        "result.url. Send the catalog product id, never a price.",
+        "'razorpay', 'create_checkout', { product_ref, qty }",
+        " and redirect to result.url",
+    ),
+    "shopify": _gateway_wiring(
+        "a product grid renders Paw.call('shopify', 'list_products', {limit, cursor}) "
+        "(prices are in minor units); a buy button runs Paw.call('shopify', "
+        "'create_cart_checkout', {variant_id, qty}) and opens result.url.",
+        "'shopify', 'list_products' | 'create_cart_checkout', args",
+    ),
+    "google_sheets": _gateway_wiring(
+        "the form submits Paw.call('google_sheets', 'append_row', {fields}) with "
+        "string values; each key becomes a column.",
+        "'google_sheets', 'append_row', { fields }",
+    ),
+    "hubspot": _gateway_wiring(
+        "the lead form submits Paw.call('hubspot', 'create_contact', {email, "
+        "firstname, lastname, phone, company, message}).",
+        "'hubspot', 'create_contact', args",
+    ),
+    "zoho_crm": _gateway_wiring(
+        "the lead form submits Paw.call('zoho_crm', 'create_lead', {email, "
+        "first_name, last_name, phone, company, message}).",
+        "'zoho_crm', 'create_lead', args",
+    ),
+    "airtable": _gateway_wiring(
+        "the form submits Paw.call('airtable', 'create_record', {fields}); keys must "
+        "match the table's text field names.",
+        "'airtable', 'create_record', { fields }",
+    ),
+    "mailchimp": _gateway_wiring(
+        "the signup form submits Paw.call('mailchimp', 'subscribe', {email, "
+        "first_name, last_name}).",
+        "'mailchimp', 'subscribe', args",
+    ),
+    "brevo": _gateway_wiring(
+        "the signup form submits Paw.call('brevo', 'subscribe', {email, first_name, last_name}).",
+        "'brevo', 'subscribe', args",
+    ),
+    "notion": _gateway_wiring(
+        "a blog or news list renders Paw.call('notion', 'list_entries', {limit, "
+        "cursor}) and an entry page Paw.call('notion', 'get_entry', {id}); set text "
+        "with textContent, never innerHTML.",
+        "'notion', 'list_entries' | 'get_entry', args",
+    ),
+    "supabase": "Once the owner picks a project, its URL and publishable key are "
+    "provisioned as the SUPABASE_URL and SUPABASE_ANON_KEY site secrets; apply the "
+    "supabase recipe and skip its step that requests them. SUPABASE_SERVICE_ROLE_KEY "
+    "is off by default: only if an admin job needs it, ask the owner to turn on Admin "
+    "access for Supabase in Connections.",
+    "resend": "Nothing to write in the site: Resend is the owner's own sender for "
+    "this site's lead notifications (new lead, handoff, booking). Once connected, ask "
+    "the owner to set 'Send from' to an address on a domain they verified in Resend; "
+    "until then the site reads setup_required and mail goes out from Paw. Visitors "
+    "can't send mail through it, and it never replaces a contact form's own handling.",
+    "figma": "Nothing to write in the site, and never link Figma to a site: it is the "
+    "owner's workspace connection that lets you READ a design they paste in this chat. "
+    "A site never calls it. If the owner wants a design rebuilt, ask them to connect "
+    "Figma in Integrations and paste the figma.com/design link.",
+    "calendly": "Search the web for Calendly's current inline embed snippet and use "
+    "it with the owner's link: in the page HTML on static, in a page component on a "
+    "framework template. There are no gateway calls.",
+    "cal_com": "Search the web for Cal.com's current inline embed snippet and use it "
+    "with the owner's link: in the page HTML on static, in a page component on a "
+    "framework template. There are no gateway calls.",
+    "turnstile": "Nothing to write: paw.js shows the challenge itself when a write "
+    "call (data-paw-checkout, data-paw-subscribe, Paw.call) needs one, and server "
+    "calls with env.PAW_GATEWAY_TOKEN skip it. The widget is made for the site's "
+    "address, so after a FIRST publish, publish once more to put it on the live page.",
+    "social_login": "Visitor sign-in with Google or GitHub, framework templates "
+    "only: apply the better-auth, paw-integrations and paw-social-login recipes "
+    "(site plan). The buttons are plain links, "
+    '<a href="/api/paw-auth/start?provider=google&callbackURL=/account">, one per '
+    "provider the owner turned on (list_site_integrations, settings.providers). No "
+    "OAuth client id or secret goes anywhere. On a static site, say sign-in needs a "
+    "framework template.",
+}
+
 
 async def _list_site_integrations_handler(args: dict) -> dict:
     """MCP handler for ``list_site_integrations``: bindings + the provider catalog."""
@@ -4001,7 +4178,9 @@ async def _list_site_integrations_handler(args: dict) -> dict:
     workspace_id, user_id, err = _secret_tool_identity("list_site_integrations", pocket_id)
     if err is not None:
         return err
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="list_site_integrations")
+    ) is not None:
         return gate
     try:
         linked = await bindings.list_for_pocket(
@@ -4038,7 +4217,9 @@ async def _connect_site_integration_handler(args: dict) -> dict:
     workspace_id, user_id, err = _secret_tool_identity("connect_site_integration", pocket_id)
     if err is not None:
         return err
-    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+    if (
+        gate := await _require_sites_plan_or_error(workspace_id, tool="connect_site_integration")
+    ) is not None:
         return gate
     pocket_id = pocket_id.strip()
     provider_id = str(args.get("provider") or "").strip().lower()
@@ -4070,16 +4251,18 @@ async def _connect_site_integration_handler(args: dict) -> dict:
                 "list_site_integrations shows it as settings.url once set. "
             )
             + f"Put {provider.name}'s standard inline embed markup in the page with that "
-            "link. Never invent a link."
-        )
+            "link. Never invent a link. " + _INTEGRATION_NEXT_STEPS.get(provider.id, "")
+        ).strip()
     elif view.status == "connected":
-        message = f"{provider.name} is ready on this site. " + _INTEGRATION_WIRING
+        wiring = _INTEGRATION_NEXT_STEPS.get(provider.id, _INTEGRATION_WIRING)
+        message = f"{provider.name} is ready on this site. " + wiring
     else:
+        wiring = _INTEGRATION_NEXT_STEPS.get(provider.id, _INTEGRATION_WIRING)
         message = (
             f"Asked the owner to connect {provider.name}: they tap Connect on the card in "
             "chat and approve on the provider's page. You never see or ask for "
             "credentials or API keys. Keep building; calls answer `not_connected` until "
-            "they finish. " + _INTEGRATION_WIRING
+            "they finish. " + wiring
         )
     return _success_response(
         {
@@ -4180,6 +4363,9 @@ __all__ = [
     "HTML_REQUIRED_KEYS",
     "LIST_SITE_INTEGRATIONS_TOOL_ID",
     "LIST_SITE_SECRETS_TOOL_ID",
+    "PLAY_TEST_SITE_TOOL_ID",
+    "SAVE_SITE_REFERENCE_TOOL_ID",
+    "COMPARE_SITE_TO_REFERENCE_TOOL_ID",
     "REACT_REQUIRED_KEYS",
     "REACT_RESERVED_FILES",
     "REACT_RESERVED_PREFIX",

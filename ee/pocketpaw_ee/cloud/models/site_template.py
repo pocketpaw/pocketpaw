@@ -23,13 +23,16 @@
 #
 # ``kind`` and ``audiences`` are source-owned Discover fields the owner sets;
 # ``live_url`` is the source site's deployed URL, stamped by the service on save
-# and update (``None`` when the site is not deployed). Defaults keep old rows valid.
+# and update (``None`` when the site is not deployed). ``tags`` (``_core.tags``
+# dialect) and ``show_creator`` (the owner's name and picture on the public
+# Discover card) are owner-set Discover fields too; ``show_creator`` defaults
+# to ``False`` here so a row saved before the field existed stays anonymous
+# (the save request, not this model, turns it on for new templates). ``remixed_from_template_id``
+# is stamped at save from the source pocket's own ``template_id``: the template
+# the saved site was itself made from, or ``None``. Defaults keep old rows valid.
 #
 # Only ``ee.cloud.site_templates.service`` and ``service_admin`` import this doc
 # (import-linter "SiteTemplates" contract).
-#
-# Updated 2026-10-01 (feat/discover-index): added ``kind``, ``audiences`` and
-# ``live_url`` for the Discover index.
 
 from __future__ import annotations
 
@@ -60,6 +63,9 @@ class SiteTemplate(TimestampedDocument):
     kind: Literal["site", "tool", "game"] = "site"
     audiences: list[Literal["shop", "design", "everyone", "fun"]] = Field(default_factory=list)
     live_url: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    show_creator: bool = False
+    remixed_from_template_id: str | None = None
 
     class Settings(TimestampedDocument.Settings):
         name = "site_templates"

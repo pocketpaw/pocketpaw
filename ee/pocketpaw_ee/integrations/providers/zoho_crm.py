@@ -32,7 +32,8 @@
 # (search index lag) fills that lead only if its primary Email matches too.
 # Zoho requires Last_Name (default: the email's local part) and many orgs require
 # Company (default ``Website visitor``); defaults never fill an existing lead.
-# ``message`` goes to Description. A 401 refreshes once; 429 is ``rate_limited``;
+# ``message`` goes to Description. Every outcome answers ``accepted()``. A 401
+# refreshes once; 429 is ``rate_limited``;
 # mandatory-field / invalid-data errors are ``invalid_args``.
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ from pocketpaw_ee.integrations.providers.base import (
     BaseProvider,
     ProviderError,
     TokenGrant,
+    accepted,
 )
 from pocketpaw_ee.integrations.providers.newsletter import _EMAIL_RE
 
@@ -215,7 +217,7 @@ async def _fill_empty(
 ) -> dict[str, Any]:
     empty = {k: v for k, v in supplied.items() if not str(record.get(k) or "").strip()}
     if not empty:
-        return {"status": "exists"}
+        return accepted()
     lead_url = f"{api}/Leads/{quote(str(record['id']), safe='')}"
     updated = await _call(ctx, "PUT", lead_url, json={"data": [empty]})
     _refuse_for(updated, "update lead")
@@ -224,7 +226,7 @@ async def _fill_empty(
         if _codes({"data": [result]}) & _INVALID:
             raise ActionRefused("invalid_args", "Zoho CRM didn't accept those lead details.")
         raise ProviderError("zoho_crm: update lead was not accepted")
-    return {"status": "updated"}
+    return accepted()
 
 
 async def _create_lead(ctx: ActionContext, args: CreateLeadArgs) -> dict[str, Any]:
@@ -253,7 +255,7 @@ async def _create_lead(ctx: ActionContext, args: CreateLeadArgs) -> dict[str, An
     result = _first(body)
     code = str(result.get("code") or "")
     if code == "SUCCESS" and created.status_code < 400:
-        return {"status": "created"}
+        return accepted()
     if code == "DUPLICATE_DATA":
         # The search index lagged behind a lead created moments ago.
         details = result.get("details") if isinstance(result.get("details"), dict) else {}
@@ -271,7 +273,7 @@ async def _create_lead(ctx: ActionContext, args: CreateLeadArgs) -> dict[str, An
         record = {**_first(oauth_http.body_of(stored)), "id": dup_id}
         if not _same_email(record, args.email):
             # The duplicate is on another unique field: never write to that lead.
-            return {"status": "exists"}
+            return accepted()
         return await _fill_empty(ctx, api, record, supplied)
     _refuse_for(created, "create lead")
     if code in _INVALID:

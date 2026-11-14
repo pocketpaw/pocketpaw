@@ -1,0 +1,37 @@
+[
+  {
+    "label": "feature stages: route guard dropped (anonymous callers get the list)",
+    "file": "src/pocketpaw/api/v1/health.py",
+    "find": "@router.get(\"/config/features\", dependencies=[Depends(require_signed_in)])",
+    "replace": "@router.get(\"/config/features\")",
+    "tests": ["tests/test_feature_stages.py"]
+  },
+  {
+    "label": "feature stages: beta backends no longer folded into alpha",
+    "file": "src/pocketpaw/feature_stages.py",
+    "find": "\"alpha\": sorted(ALPHA | beta_backend_ids()),",
+    "replace": "\"alpha\": sorted(ALPHA),",
+    "tests": ["tests/test_feature_stages.py"]
+  },
+  {
+    "label": "feature stages: pydantic_ai marked beta again",
+    "file": "src/pocketpaw/agents/pydantic_ai.py",
+    "find": "            # Not beta: this is the cloud chat default path.",
+    "replace": "            beta=True,",
+    "tests": ["tests/test_feature_stages.py"]
+  },
+  {
+    "label": "feature stages: /belt-next hidden as well as preview",
+    "file": "src/pocketpaw/feature_stages.py",
+    "find": "        \"/belt\",\n",
+    "replace": "        \"/belt\",\n        \"/belt-next\",\n",
+    "tests": ["tests/test_feature_stages.py"]
+  },
+  {
+    "label": "feature stages: inactive cloud users let through",
+    "file": "src/pocketpaw/api/deps.py",
+    "find": "getattr(state, \"user_id\", None) and getattr(state, \"ee_user_authenticated\", False)",
+    "replace": "getattr(state, \"user_id\", None)",
+    "tests": ["tests/test_feature_stages.py"]
+  }
+]

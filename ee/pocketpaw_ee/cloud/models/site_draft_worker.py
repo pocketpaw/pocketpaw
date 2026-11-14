@@ -11,7 +11,8 @@
 # ``state`` is ``live`` (a draft may be deployed; ``deployed_hash`` names the content
 # it runs, "" when none), ``deleting`` (a purge is pending; nothing proxies to it) or
 # ``purged`` (nothing left on Cloudflare; the row keeps ``published_hash`` /
-# ``published_url`` so the builder shows the live site instead of rebuilding a draft).
+# ``published_url`` so the builder shows the live site instead of rebuilding a draft,
+# unless ``reopened_hash`` equals ``published_hash``: the owner opened a draft of it).
 # ``auth_secret_enc`` and ``draft_key_enc`` (the guard key the proxy sends) are
 # ``cloud._core.crypto`` Fernet tokens, never logged. ``version`` is bumped by every
 # write; a deploy writes only by compare-and-set on it, so a purge always wins.
@@ -51,6 +52,12 @@ class SiteDraftWorker(TimestampedDocument):
     retry_after: datetime | None = None
     published_hash: str = ""
     published_url: str = ""
+    # Set to ``published_hash`` when the owner opens a draft of the published content;
+    # the next publish clears it.
+    reopened_hash: str = ""
+    # When that reopen happened (keys the builder's preview retry; a publish clears
+    # only an older reopen).
+    reopened_at: datetime | None = None
     # Bumped by every write; a deploy writes only by compare-and-set on it.
     version: int = 0
 

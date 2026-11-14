@@ -32,6 +32,13 @@ from pocketpaw_ee.cloud.media.router import router as media_router
 from pocketpaw.uploads.adapter import StorageAdapter, StorageItem, StoredObject
 from pocketpaw.uploads.local import LocalStorageAdapter
 
+# Gallery files are listed only to the workspace whose token is in the name, so
+# the fixtures' files carry ws-1's prefix (the fixture client's workspace).
+_WS1 = storage.owned_name_prefix("ws-1")
+_GEN = f"{_WS1}gen-uuid.png"
+_AAAA = f"{_WS1}1700000000000-aaaa.png"
+_BBBB = f"{_WS1}1699999999000-bbbb.png"
+
 
 @pytest.fixture
 def client(tmp_path, monkeypatch) -> TestClient:
@@ -42,7 +49,7 @@ def client(tmp_path, monkeypatch) -> TestClient:
     monkeypatch.setattr(
         media_module,
         "tracked_generation_filenames",
-        AsyncMock(return_value={"gen-uuid.png"}),
+        AsyncMock(return_value={_GEN}),
     )
     app = FastAPI()
     app.include_router(media_router, prefix="/api/v1")
@@ -66,8 +73,11 @@ def generated(client, tmp_path) -> Path:
 
 
 def test_list_media_excludes_generation_tracked_files(client, generated) -> None:
-    (generated / "gen-uuid.png").write_bytes(b"png-bytes")
-    (generated / "agent-uuid.png").write_bytes(b"agent-bytes")
+    agent = f"{_WS1}agent-uuid.png"
+    (generated / _GEN).write_bytes(b"png-bytes")
+    (generated / agent).write_bytes(b"agent-bytes")
+    (generated / "legacy-uuid.png").write_bytes(b"untagged")
+    (generated / f"{storage.owned_name_prefix('ws-2')}theirs.png").write_bytes(b"theirs")
     (generated / "note.txt").write_text("not media")
 
     resp = client.get("/api/v1/media")
@@ -75,9 +85,10 @@ def test_list_media_excludes_generation_tracked_files(client, generated) -> None
     media = resp.json()["media"]
     names = [m["name"] for m in media]
     # The tracked generation file is excluded; the agent-side file is not.
-    assert names == ["agent-uuid.png"]
+    # Excluded: the tracked generation, the untagged legacy file, ws-2's file.
+    assert names == [agent]
     item = media[0]
-    assert item["url"] == "/api/v1/media/agent-uuid.png"
+    assert item["url"] == f"/api/v1/media/{agent}"
     assert item["mime"] == "image/png"
 
 
@@ -168,8 +179,10 @@ class _FakeRemoteAdapter(StorageAdapter):
 
     def __init__(self) -> None:
         self.store: dict[str, bytes] = {
-            "generated/1700000000000-aaaa.png": b"gen-bytes",
-            "generated/1699999999000-bbbb.png": b"older-gen-bytes",
+            f"generated/{_AAAA}": b"gen-bytes",
+            f"generated/{_BBBB}": b"older-gen-bytes",
+            # Untagged legacy key: still serves, never listed.
+            "generated/1700000000001-legacy.png": b"legacy-bytes",
         }
         self.put_calls: list[tuple[str, bytes]] = []
         self.modified: dict[str, int] = {}
@@ -220,7 +233,7 @@ def remote_client(remote_adapter, monkeypatch) -> TestClient:
     monkeypatch.setattr(
         media_module,
         "tracked_generation_filenames",
-        AsyncMock(return_value={"1699999999000-bbbb.png"}),
+        AsyncMock(return_value={_BBBB}),
     )
     app = FastAPI()
     app.include_router(media_router, prefix="/api/v1")
@@ -238,8 +251,8 @@ def test_remote_list_uses_browse_and_timestamp_modified(remote_client, remote_ad
     resp = remote_client.get("/api/v1/media")
     assert resp.status_code == 200
     media = resp.json()["media"]
-    # bbbb is tracked (excluded); only aaaa remains.
-    assert [m["name"] for m in media] == ["1700000000000-aaaa.png"]
+    # bbbb is tracked and legacy is untagged (both excluded); only aaaa remains.
+    assert [m["name"] for m in media] == [_AAAA]
     assert media[0]["modified"] == 1700000000000
 
 
@@ -252,12 +265,12 @@ def test_remote_list_dates_an_upload_by_its_storage_time(remote_client, remote_a
 
     media = remote_client.get("/api/v1/media").json()["media"]
 
-    assert [m["name"] for m in media] == [upload, "1700000000000-aaaa.png"]
+    assert [m["name"] for m in media] == [upload, _AAAA]
     assert media[0]["modified"] == 1800000000000
 
 
 def test_remote_serve_streams_bytes(remote_client, remote_adapter) -> None:
-    resp = remote_client.get("/api/v1/media/1700000000000-aaaa.png")
+    resp = remote_client.get(f"/api/v1/media/{_AAAA}")
     assert resp.status_code == 200
     assert resp.content == b"gen-bytes"
     assert resp.headers["content-type"].startswith("image/png")

@@ -829,3 +829,126 @@ def test_read_replication_is_opt_in_at_create(monkeypatch):
     assert "read_replication" not in _create_body(
         monkeypatch, {"PAW_SITES_D1_READ_REPLICATION": "0"}
     )
+
+
+# --------------------------------------------------------------------------- D1 Time Travel
+
+_D1 = "/client/v4/accounts/acct_1/d1/database/db-1"
+
+
+@pytest.mark.asyncio
+async def test_d1_info_gets_the_database_and_returns_its_version():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(
+            200, json={"success": True, "result": {"uuid": "db-1", "version": "production"}}
+        )
+
+    info = await _client(handler).d1_info("db-1")
+    assert seen == {"method": "GET", "path": _D1}
+    assert info["version"] == "production"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timestamp", [None, "2026-10-27T10:00:00Z"])
+async def test_d1_bookmark_reads_the_time_travel_bookmark(timestamp):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"success": True, "result": {"bookmark": "00000085-ab"}})
+
+    assert await _client(handler).d1_bookmark("db-1", timestamp) == "00000085-ab"
+    assert seen["method"] == "GET"
+    assert seen["path"] == _D1 + "/time_travel/bookmark"
+    assert seen["params"] == ({"timestamp": timestamp} if timestamp else {})
+
+
+@pytest.mark.asyncio
+async def test_d1_bookmark_without_one_fails_closed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": True, "result": {}})
+
+    with pytest.raises(Exception) as exc:
+        await _client(handler).d1_bookmark("db-1")
+    assert getattr(exc.value, "code", "") == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kw", "params"),
+    [
+        ({"timestamp": "2026-10-27T10:00:00Z"}, {"timestamp": "2026-10-27T10:00:00Z"}),
+        ({"bookmark": "00000085-ab"}, {"bookmark": "00000085-ab"}),
+    ],
+)
+async def test_d1_restore_posts_one_target_and_returns_the_undo_bookmark(kw, params):
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"], seen["path"] = request.method, request.url.path
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "result": {"bookmark": "b-new", "previous_bookmark": "b-old", "message": "ok"},
+            },
+        )
+
+    out = await _client(handler).d1_restore("db-1", **kw)
+    assert seen == {"method": "POST", "path": _D1 + "/time_travel/restore", "params": params}
+    assert out == {"bookmark": "b-new", "previous_bookmark": "b-old", "message": "ok"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw", [{}, {"bookmark": "a", "timestamp": "2026-10-27T10:00:00Z"}])
+async def test_d1_restore_needs_exactly_one_target(kw):
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("no request should be made")
+
+    with pytest.raises(Exception) as exc:
+        await _client(handler).d1_restore("db-1", **kw)
+    assert getattr(exc.value, "code", "") == "sites.cloudflare_error"
+
+
+@pytest.mark.asyncio
+async def test_d1_restore_refusal_fails_closed():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"success": False, "errors": [{"code": 7500, "message": "too many"}]}
+        )
+
+    with pytest.raises(Exception) as exc:
+        await _client(handler).d1_restore("db-1", timestamp="2026-10-27T10:00:00Z")
+    assert "too many" in str(getattr(exc.value, "message", exc.value))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda c: c.d1_bookmark("db-1", "2020-01-01T00:00:00Z"),
+        lambda c: c.d1_restore("db-1", timestamp="2020-01-01T00:00:00Z"),
+    ],
+)
+async def test_a_timestamp_before_the_database_is_out_of_window(call):
+    """Live D1 answers 400 code 7400 for a moment before the database existed or
+    past retention; that is the owner's choice of time, not a Cloudflare fault."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "success": False,
+                "errors": [{"code": 7400, "message": "Provided timestamp is too old"}],
+            },
+        )
+
+    with pytest.raises(Exception) as exc:
+        await call(_client(handler))
+    assert getattr(exc.value, "code", "") == "sites.data_restore_out_of_window"
+    assert getattr(exc.value, "status_code", 0) == 422

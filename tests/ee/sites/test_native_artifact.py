@@ -66,6 +66,7 @@ import pytest
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
 from pocketpaw_ee.cloud.pockets import service as pockets_service
 from pocketpaw_ee.sites import service as sites_service
+from pocketpaw_ee.sites.engines import site_capabilities
 
 _HERO_V1 = "<section class='hero'><h1>Bright Smile</h1></section>"
 _SVELTE_SOURCE = {
@@ -480,6 +481,8 @@ async def test_native_artifact_store_hit_skips_build(beanie_test_db):
         "build_job_id": None,
         # A body/css-only store holds no draft files, so there is no preview URL.
         "preview_url": None,
+        # Every engine's answer carries the site's capability flags.
+        "capabilities": site_capabilities("svelte", has_database=False),
     }
     assert store.writes == 0, "a cache hit must not re-store"
     assert pool.calls == [], "a cache hit must not queue a sandbox"

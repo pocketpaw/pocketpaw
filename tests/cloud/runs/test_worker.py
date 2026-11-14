@@ -141,7 +141,10 @@ async def test_startup_skips_sweep_when_gate_off(mongo_db, monkeypatch):  # noqa
 
 
 async def test_worker_settings_exposes_execute_run_job():
-    assert worker.execute_run_job in worker.WorkerSettings.functions
+    chat = [
+        f for f in worker.WorkerSettings.functions if getattr(f, "name", "") == "execute_run_job"
+    ]
+    assert [f.coroutine for f in chat] == [worker.execute_run_job]
     assert worker.WorkerSettings.max_tries == 1
     assert worker.WorkerSettings.on_startup is worker._startup
     assert worker.WorkerSettings.on_shutdown is worker._shutdown

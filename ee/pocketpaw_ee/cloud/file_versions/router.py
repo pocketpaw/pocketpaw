@@ -38,7 +38,10 @@
 #   BILLING gate (``credits.guards.assert_within_billing``) as their FIRST
 #   statement, before the local try/except and before ``pool.run``. An over-budget
 #   tenant (empty wallet or over monthly ceiling) gets a clean 402 with no model
-#   call; flag-gated no-op unless ``billing_enforced``.
+#   call; flag-gated no-op unless ``billing_enforced`` or ``credits_enforced``.
+#   Under the same flags an unpaid early-access workspace then gets 403
+#   ``early_access.not_available`` (``assert_early_access_allowed``): these runs
+#   are not billed, so the wallet cannot bound them.
 """FileVersions router — file-version write + history API."""
 
 from __future__ import annotations
@@ -238,10 +241,16 @@ async def ai_edit_file(
     # Run-start BILLING gate — raise BEFORE the try/except below so an over-budget
     # tenant gets a clean 402 (mapped by _core.http) instead of the generic 500
     # this handler's ``except Exception`` would otherwise return, and BEFORE any
-    # model call via ``pool.run``. Flag-gated no-op unless ``billing_enforced``.
-    from pocketpaw_ee.cloud.credits.guards import assert_within_billing
+    # model call via ``pool.run``. Flag-gated no-op unless ``billing_enforced``
+    # or ``credits_enforced``.
+    from pocketpaw_ee.cloud.credits.guards import (
+        assert_early_access_allowed,
+        assert_within_billing,
+    )
 
     await assert_within_billing(workspace_id)
+    # Document edits are not billed, so an unpaid early-access workspace is refused.
+    await assert_early_access_allowed(workspace_id)
 
     try:
         doc = json.loads(body.content) if body.content and body.content.strip() else {}
@@ -383,10 +392,16 @@ async def spreadsheet_ai_edit(
 ) -> JSONResponse:
     """Run an AI agent to edit spreadsheet content. Returns the final snapshot."""
     # Run-start BILLING gate — raise BEFORE the try/except (clean 402, not a 500)
-    # and BEFORE any model call. Flag-gated no-op unless ``billing_enforced``.
-    from pocketpaw_ee.cloud.credits.guards import assert_within_billing
+    # and BEFORE any model call. Flag-gated no-op unless ``billing_enforced``
+    # or ``credits_enforced``.
+    from pocketpaw_ee.cloud.credits.guards import (
+        assert_early_access_allowed,
+        assert_within_billing,
+    )
 
     await assert_within_billing(workspace_id)
+    # Spreadsheet edits are not billed, so an unpaid early-access workspace is refused.
+    await assert_early_access_allowed(workspace_id)
 
     try:
         snapshot = json.loads(body.content) if body.content and body.content.strip() else {}
@@ -535,10 +550,16 @@ async def slides_ai_edit(
 ) -> JSONResponse:
     """Run an AI agent to edit slides content. Returns the final deck."""
     # Run-start BILLING gate — raise BEFORE the try/except (clean 402, not a 500)
-    # and BEFORE any model call. Flag-gated no-op unless ``billing_enforced``.
-    from pocketpaw_ee.cloud.credits.guards import assert_within_billing
+    # and BEFORE any model call. Flag-gated no-op unless ``billing_enforced``
+    # or ``credits_enforced``.
+    from pocketpaw_ee.cloud.credits.guards import (
+        assert_early_access_allowed,
+        assert_within_billing,
+    )
 
     await assert_within_billing(workspace_id)
+    # Slides edits are not billed, so an unpaid early-access workspace is refused.
+    await assert_early_access_allowed(workspace_id)
 
     deck: dict = body.content if isinstance(body.content, dict) else {}
     deck = json.loads(json.dumps(deck))

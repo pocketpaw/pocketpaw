@@ -1,18 +1,18 @@
 # Site templates — cross-tenant reads for the Discover index.
 #
-# Created 2026-10-01 (feat/discover-index): the Discover index (``cloud.discover``)
-# mirrors every public, unhidden template as one listing. It reads templates
-# through these two functions, never through the SiteTemplate model, and these
-# are the only template reads that skip the workspace filter. They return the
-# metadata Discover needs (never the snapshot) with the REAL ``workspace`` and
-# ``owner``: Discover stores both and keeps them off its public wire.
+# The Discover index (``cloud.discover``) mirrors every public template as one
+# listing. It reads templates through these functions, never through the
+# SiteTemplate model, and these are the only template reads that skip the
+# workspace filter. They return the metadata Discover needs (never the snapshot)
+# with the REAL ``workspace`` and ``owner``: Discover stores both and keeps them
+# off its public wire. Rows also carry ``tags``, ``show_creator`` and
+# ``remixed_from_template_id``.
 #
 # Every function carries ``# admin-cross-tenant: <reason>`` (adoption-plan rule).
 #
-# Updated 2026-10-02 (feat/discover-index, hardening): a Discover row's
-# ``public`` now means ``visibility == "public"`` and ``hidden`` rides alongside,
-# so Discover keeps a hidden template as a HIDDEN listing (staff can unhide it)
-# instead of deleting it; ``iter_public_for_discover`` includes hidden ones.
+# A row's ``public`` means ``visibility == "public"`` and ``hidden`` rides
+# alongside, so Discover keeps a hidden template as a HIDDEN listing (staff can
+# unhide it); ``iter_public_for_discover`` includes hidden ones.
 # ``set_hidden_from_discover`` lets a Discover hide / unhide reach the template,
 # so making it private and public again can't launder a hide.
 # ``refresh_live_url`` re-reads the source site's URL (Discover's reindex calls
@@ -48,6 +48,9 @@ class _Row(BaseModel):
     preview_image_url: str | None = None
     live_url: str | None = None
     source_pocket_id: str = ""
+    tags: list[str] = Field(default_factory=list)
+    show_creator: bool = False
+    remixed_from_template_id: str | None = None
 
 
 def _discover_row(doc: _Row) -> dict[str, Any]:
@@ -61,6 +64,9 @@ def _discover_row(doc: _Row) -> dict[str, Any]:
         "audiences": list(doc.audiences),
         "preview_image_url": doc.preview_image_url,
         "live_url": doc.live_url,
+        "tags": list(doc.tags),
+        "show_creator": doc.show_creator,
+        "remixed_from_template_id": doc.remixed_from_template_id,
         "public": doc.visibility == "public",
         "hidden": doc.hidden,
     }

@@ -8,11 +8,23 @@ the lifecycle fields it carries:
 - ``billed``: True once the run's compute cost hit the wallet. The ledger's
   ``run:{run_id}`` key is the real exactly-once guard; this flag keeps the sweep
   bounded.
+- ``credential_source``: who paid the provider for this run, ``platform`` (our
+  key, debited from the wallet) or ``byok`` (the workspace's own key, never
+  debited). Stamped by ``execute_run`` before its credit gate; legacy docs and
+  any run that was not stamped read ``platform``, so they bill as before.
+- ``early_access_reserved_credits`` / ``early_access_reserved_day``: what a
+  free run reserved against the daily early-access ceiling and the UTC day it
+  was counted on. ``bill_run`` claims the pair once (zeroing it) and reconciles
+  the meter to the real spend. 0 / ``""`` means nothing is held.
 - ``user_text``: the anonymous concierge visitor's own line (they have no
   Message row). PERSONAL DATA: written only when the site keeps transcripts,
   length-capped by the writer.
 - ``last_heartbeat_at``: the worker's liveness stamp; the stale-run sweeper
   judges running runs by it.
+- ``attempt`` / ``requeued_at``: which drive of the run this is, and when a
+  worker shutdown last put it back to ``queued`` for one automatic retry
+  (``domain.MAX_RUN_ATTEMPTS``). The sweeper times a requeued run from
+  ``requeued_at``, not ``createdAt``.
 - ``card_audits``: the browser's audit counts per chat card, keyed by the
   stream's card id. Integers and widget type names only, never spec or text.
 - ``card_breaches``: chat cards that streamed past the prompt's card ceiling,
@@ -63,6 +75,11 @@ class ChatRunDoc(Document):
     # exactly-once guard; this flag is the cheap "skip already-billed" filter that
     # keeps each sweep bounded.
     billed: bool = False
+    # Who paid the provider: ``bill_run`` debits 0 for ``byok``. The default is
+    # the safe side, a doc nobody stamped is charged as platform spend.
+    credential_source: Literal["platform", "byok"] = "platform"
+    early_access_reserved_credits: int = 0
+    early_access_reserved_day: str = ""
     # The user's OWN message text, stored on the run itself. Empty on every surface
     # that persists the user turn as a real Message document (``user_message_id``
     # points at it there) — this exists for the CONCIERGE surface, whose visitor is
@@ -86,6 +103,9 @@ class ChatRunDoc(Document):
     # anything. ``None`` until the run is marked running (and on legacy docs).
     last_heartbeat_at: datetime | None = None
     ended_at: datetime | None = None
+    # 1 for the first drive; 2 once a worker shutdown requeued it for its one retry.
+    attempt: int = 1
+    requeued_at: datetime | None = None
 
     class Settings:
         name = "chat_runs"

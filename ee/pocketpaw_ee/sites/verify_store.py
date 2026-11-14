@@ -12,15 +12,21 @@
 #   * ``verdict-<hash>`` — written by ``verify.verify_site``: the full §5 verdict. Read
 #     back as the cache hit for an unchanged source, and summarised (counts only) by
 #     ``/sites/by-pocket/{id}/status``.
+#   * ``forms-<hash>`` — written by ``play_test_site`` when it submits test data to the
+#     draft's forms: the failed forms per path, merged into the page checks (SC-FORM-01)
+#     and read by the publish gate.
 #   * a ``pending`` verdict — the in-flight marker ``/status`` reports as ``pending``.
 #     It carries its start time and goes stale after :data:`PENDING_STALE_SECONDS`, so a
 #     crashed verify cannot pin a site in "pending" forever.
 #
-# Three per-pocket POINTER records sit beside them, one each, overwritten in place and
+# Five per-pocket POINTER records sit beside them, one each, overwritten in place and
 # exempt from eviction: ``latest`` (the last edit's enqueued sandbox job, read back by
 # ``verify.settled_verdict``), ``view-origin`` (the builder origin the editor last
-# viewed the draft with, read by ``service.resolve_armed_builder_origin``) and
-# ``latest-build`` (a project pocket's newest build job, ``project_build``). The project
+# viewed the draft with, read by ``service.resolve_armed_builder_origin``),
+# ``latest-build`` (a project pocket's newest build job, ``project_build``),
+# ``build-history`` (its recent builds without logs, the builds list route) and
+# ``edit-session`` (until when a project draft is being visually edited) and
+# ``publish-gate`` (the content hash that last passed the publish gate). The project
 # lane's per-job build logs are ordinary ``build-<job id>`` records.
 #
 # THE BACKEND FOLLOWS THE ARTIFACT STORE'S. The worker writes and the web process reads,
@@ -66,8 +72,28 @@ VIEW_ORIGIN_KEY = "view-origin"
 #: The pocket's newest project-engine build (``project_build``): job id + status.
 LATEST_BUILD_KEY = "latest-build"
 
+#: A project pocket's recent builds, newest first, without logs (``project_build``).
+BUILD_HISTORY_KEY = "build-history"
+
+#: Until when someone is visually editing a project pocket's draft (``project_build``).
+EDIT_SESSION_KEY = "edit-session"
+#: The content hash that last passed the publish gate or was confirmed (``publish_gate``).
+PUBLISH_GATE_KEY = "publish-gate"
+#: The async build lane's last publish-gate refusal for the pocket (``publish_gate``).
+PUBLISH_BLOCKED_KEY = "publish-blocked"
+
 #: Pointer records: one per pocket, never evicted to make room for hash records.
-_POINTER_KEYS = frozenset({LATEST_KEY, VIEW_ORIGIN_KEY, LATEST_BUILD_KEY})
+_POINTER_KEYS = frozenset(
+    {
+        LATEST_KEY,
+        VIEW_ORIGIN_KEY,
+        LATEST_BUILD_KEY,
+        BUILD_HISTORY_KEY,
+        EDIT_SESSION_KEY,
+        PUBLISH_GATE_KEY,
+        PUBLISH_BLOCKED_KEY,
+    }
+)
 
 
 def sandbox_key(content_hash: str) -> str:
@@ -76,6 +102,11 @@ def sandbox_key(content_hash: str) -> str:
 
 def verdict_key(content_hash: str) -> str:
     return f"verdict-{content_hash}"
+
+
+def forms_key(content_hash: str) -> str:
+    """The form-exercise record ``play_test_site`` writes for this content."""
+    return f"forms-{content_hash}"
 
 
 def _safe(segment: str) -> bool:
@@ -196,6 +227,8 @@ def default_verify_store() -> Any:
 
 
 __all__ = [
+    "forms_key",
+    "EDIT_SESSION_KEY",
     "KEEP_PER_POCKET",
     "LATEST_KEY",
     "PENDING_STALE_SECONDS",

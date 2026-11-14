@@ -37,3 +37,14 @@ def test_modified_from_name(name, expected) -> None:
 async def test_bytes_stream_yields_the_payload() -> None:
     chunks = [c async for c in storage.bytes_stream(b"hello")]
     assert chunks == [b"hello"]
+
+
+def test_modified_from_name_reads_past_an_owner_prefix() -> None:
+    """``save_generated`` names are "ws-<token>-<ms>-<uuid>.png" (or a capture's
+    "browser-<token>-…"); the timestamp still dates them on a remote listing."""
+    owned = f"{storage.owned_name_prefix('ws-1')}1700000000000-abcdef.png"
+    capture = f"{storage.capture_name_prefix('ws-1')}1700000000000-abcdef.png"
+    upload = f"{storage.owned_name_prefix('ws-1')}edited.png"
+    assert storage.modified_from_name(owned) == 1700000000000
+    assert storage.modified_from_name(capture) == 1700000000000
+    assert storage.modified_from_name(upload) == 0

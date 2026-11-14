@@ -1,0 +1,92 @@
+[
+  {
+    "label": "the price check is dropped, so an allowlisted unpriced model runs free",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if bare(model) in allowed - {\"\"} and _output_usd_per_million(bare(model)):\n",
+    "replace": "    if bare(model) in allowed - {\"\"}:\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "the provider prefix is not stripped, so the launch default litellm:claude-haiku-4-5 is refused",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "        return (tail if sep and head.lower() in _KNOWN_PROVIDERS else name).strip().lower()\n",
+    "replace": "        return name.strip().lower()\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "only the requested model is checked, so a forced run spends on a default that is not allowed",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    return [asked] if backend == \"pydantic_ai\" else [asked, default]\n",
+    "replace": "    return [asked]\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "the HTTP check ignores who is unpaid, so a paid workspace is refused Opus",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "            return exc if await is_platform_funded_free(workspace_id) else None\n",
+    "replace": "            return exc\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "the HTTP check applies to BYOK turns, so a user's own key is refused Opus",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if source != \"platform\" or not (settings.billing_enforced or settings.credits_enforced):\n",
+    "replace": "    if not (settings.billing_enforced or settings.credits_enforced):\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "the executor never checks the model, so Opus on agent config runs on our credits",
+    "file": "ee/pocketpaw_ee/cloud/chat/runs/run_core.py",
+    "find": "    if ctx.free_run_bounds is not None:\n        for model in await _guards.free_run_models(",
+    "replace": "    if False:\n        for model in await _guards.free_run_models(",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "the chat HTTP seam never checks the per-send model",
+    "file": "ee/pocketpaw_ee/cloud/chat/agent_router.py",
+    "find": "        if refusal is not None:\n            raise refusal\n",
+    "replace": "        if False:\n            raise refusal\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "the allowlist applies before the launch flag flips",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    if source != \"platform\" or not (settings.billing_enforced or settings.credits_enforced):\n",
+    "replace": "    if source != \"platform\":\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "the HTTP check reads only the per-send model, so an agent stored on Opus opens a stream",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "    for model in await free_run_models(agent_id, model_override):\n        exc = free_model_denial(model)\n",
+    "replace": "    for model in [model_override] if model_override else []:\n        exc = free_model_denial(model)\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  },
+  {
+    "label": "any prefix chain is stripped, so foo:bar:claude-haiku-4-5 passes as haiku",
+    "file": "ee/pocketpaw_ee/cloud/credits/guards.py",
+    "find": "        return (tail if sep and head.lower() in _KNOWN_PROVIDERS else name).strip().lower()\n",
+    "replace": "        return name.rpartition(\":\")[2].strip().lower()\n",
+    "tests": [
+      "tests/cloud/credits/test_early_access_model_allowlist.py"
+    ]
+  }
+]

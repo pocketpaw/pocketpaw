@@ -421,6 +421,16 @@ class SurfaceProfile:
     # ...) are not MCP tools and still answer to ``deny_mcp_tool_ids`` alone.
     # For a PUBLIC surface, where listing everything to deny cannot keep up.
     exclusive_tools: bool = False
+    # This run's tool-turn override. Three distinct values, and 0 is NOT "unset":
+    #   None  = no override, the backend keeps its own cap (every ordinary chat);
+    #   0     = no cap at all for this run;
+    #   N > 0 = raise the backend's cap to N (never lowers it).
+    # Set by run_core on a /sites project turn whose PLAN.md has unticked
+    # milestones (0, or an operator's ``sites_app_build_max_turns``), so an
+    # approved app plan is built through every milestone in one turn. A free run's
+    # bound (``max_requests``) still wins on pydantic_ai. Check it with
+    # ``is not None``, never truthiness. Never set from a per-entity override.
+    max_turns: int | None = None
 
 
 class PocketSurfaceProfile(BaseModel):

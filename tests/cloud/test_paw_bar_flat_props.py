@@ -1,11 +1,13 @@
-# tests/cloud/test_paw_bar_flat_props.py: a ripple node's props written flat on the node.
+# tests/cloud/test_paw_bar_flat_props.py: a card node's props written flat on the node.
 #
-# Haiku sometimes writes a node's props beside its ``type`` instead of under
-# ``props`` (``FLAT_BILL`` is a live one). On the strict profile ``_lift_flat_props``
-# moves each top-level key the vendored manifest declares as that widget's prop into
-# ``props`` (never a structural or handler key, never an undeclared one, never over a
-# key ``props`` already holds), at any depth and in every flow step, and the full
-# checks then run on the lifted card, which is the one sent (``card.final``).
+# Models sometimes write a node's props beside its ``type`` instead of under
+# ``props`` (``FLAT_BILL`` on ripple and ``FLAT_EVENTS`` on pawbar are live ones).
+# ``_lift_flat_props`` moves each top-level key the profile's own manifest declares as
+# that widget's prop into ``props`` (never a structural or handler key, never an
+# undeclared one, never over a key ``props`` already holds). On ripple that is at any
+# depth and in every flow step; on pawbar only down children, as paw-bar holds nodes.
+# The full checks then run on the lifted card, which is the one sent (``card.final``
+# on ripple, the fence text on pawbar) and the one ``card_ids`` and ``has_lead_form`` read.
 # Mutation plan: tests/mutations/concierge_flat_props.json.
 
 from __future__ import annotations
@@ -24,6 +26,15 @@ FLAT_BILL = (
     '{"id":"p1","name":"Guest 1","extras":0},{"id":"p2","name":"Guest 2","extras":12},'
     '{"id":"p3","name":"Guest 3","extras":0},{"id":"p4","name":"Guest 4","extras":8}],'
     '"note":"Drinks are split only between the people who had them."},"state":{}}'
+)
+# A live pawbar-profile card (a client staging site, trimmed to one row): every
+# node's props flat, which drew empty bars before the lift ran on this profile.
+FLAT_EVENTS = (
+    '{"ui":{"type":"flex","direction":"column","gap":"8px","children":['
+    '{"type":"heading","text":"Forthcoming Salons 2026","level":3},'
+    '{"type":"flex","direction":"row","gap":"8px","align":"center","children":['
+    '{"type":"text","text":"Masquerade at the Manor"},{"type":"text","text":"Tue, Nov 3"},'
+    '{"type":"badge","text":"Open Event","variant":"success"}]}]}}'
 )
 _DATA_CARDS = Path(__file__).parents[1] / "fixtures" / "ripple_data_widget_cards.json"
 _BILL_PROPS = ("title", "subtotal", "currency", "tip_percent", "tip_options", "extras_label")
@@ -193,12 +204,57 @@ def test_nested_children_and_flow_steps_are_lifted():
     assert card["ui"]["chain"]["ui"]["props"]["subtotal"] == 186.40
 
 
-def test_the_pawbar_profile_does_not_lift():
-    from pocketpaw_ee.paw_bar.card_spec import render_card
+def _pawbar_card(chunks: list[str]) -> dict:
+    """The one card a pawbar-profile FenceFilter (the runner's, no streaming)
+    lets through to the visitor, parsed."""
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE
+    from pocketpaw_ee.paw_bar.concierge_runtime import FenceFilter
 
-    flat = {"ui": {"type": "text", "text": "hi"}}
-    out = render_card(json.dumps(flat), [])
-    assert out is not None and '"props"' not in out
+    f = FenceFilter(profile=PAWBAR_PROFILE)
+    text = "".join(str(p) for c in chunks for p in f.feed(c)) + "".join(map(str, f.close()))
+    body = text.split("```pawbar-card\n", 1)[1].split("```", 1)[0]
+    return json.loads(body)
+
+
+def _nodes(node: dict) -> list[dict]:
+    return [node, *(n for kid in node.get("children", []) for n in _nodes(kid))]
+
+
+def test_the_live_flat_pawbar_card_reaches_the_visitor_nested():
+    card = _pawbar_card(["Here are the salons:\n\n", _fence(FLAT_EVENTS + "\n"), "\n"])
+    nodes = _nodes(card["ui"])
+    assert len(nodes) == 6
+    for node in nodes:
+        assert set(node) <= {"type", "props", "children"}, node
+    texts = [n["props"]["text"] for n in nodes if n["type"] in ("text", "heading", "badge")]
+    assert texts == [
+        "Forthcoming Salons 2026",
+        "Masquerade at the Manor",
+        "Tue, Nov 3",
+        "Open Event",
+    ]
+    assert nodes[0]["props"]["direction"] == "column"
+    assert nodes[1]["props"]["level"] == 3
+    assert nodes[-1]["props"]["variant"] == "success"
+
+
+def test_the_pawbar_profile_lifts_only_its_own_widgets_props():
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, _lift_flat_props
+
+    # Ripple's text declares size; paw-bar's text declares only text.
+    node = {"type": "text", "text": "hi", "size": "lg"}
+    out, moved = _lift_flat_props(node, PAWBAR_PROFILE)
+    assert (moved, out) == (1, {"type": "text", "size": "lg", "props": {"text": "hi"}})
+
+
+def test_a_pawbar_form_field_is_never_read_as_a_node():
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, _lift_flat_props
+
+    # paw-bar holds nodes only in children: a field typed "text" is not a text widget.
+    field = {"type": "text", "name": "note", "label": "Note", "text": "x"}
+    node = {"type": "form", "props": {"verb": "send_to_team", "fields": [field]}}
+    out, moved = _lift_flat_props(json.loads(json.dumps(node)), PAWBAR_PROFILE)
+    assert (moved, out) == (0, node)
 
 
 def _known_good() -> list[tuple[str, dict]]:
@@ -230,3 +286,54 @@ def test_props_that_look_like_a_flat_widget_are_not_lifted():
     node = {"type": "input", "bind": "email", "props": {"type": "text", "size": "sm"}}
     out, moved = _lift_flat_props(json.loads(json.dumps(node)), RIPPLE_PROFILE)
     assert (moved, out) == (0, node)
+
+
+_FLAT_LEAD = {
+    "ui": {
+        "type": "form",
+        "verb": "send_to_team",
+        "title": "Ask the team",
+        "fields": [{"name": "email", "type": "email", "label": "Email"}],
+    }
+}
+
+
+def test_a_flat_lead_form_is_held_to_the_lead_rules_and_noted():
+    from pocketpaw_ee.paw_bar.card_spec import has_lead_form, render_card
+
+    body = json.dumps(_FLAT_LEAD)
+    assert render_card(body, []) is None  # lead capture off
+    out = render_card(body, [], lead_capture=True)
+    assert out is not None and '"verb":"send_to_team"' in out.replace(" ", "")
+    assert has_lead_form(body)
+
+
+def test_card_ids_reads_a_flat_product_card():
+    from pocketpaw_ee.paw_bar.card_spec import card_ids
+
+    assert card_ids(json.dumps({"ui": {"type": "product-card", "ids": ["p1", "p2"]}})) == [
+        "p1",
+        "p2",
+    ]
+
+
+def _parity_cards() -> list[tuple[str, dict]]:
+    cases = Path(__file__).parents[1] / "fixtures" / "card_parity" / "cases.json"
+    out = []
+    for case in json.loads(cases.read_text(encoding="utf-8")):
+        try:
+            raw = json.loads(case["body"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(raw, dict) and isinstance(raw.get("ui"), dict):
+            out.append((case["name"], raw))
+    return out
+
+
+@pytest.mark.parametrize(("name", "spec"), _parity_cards(), ids=[n for n, _ in _parity_cards()])
+def test_a_nested_pawbar_parity_card_is_left_exactly_as_it_was(name, spec):
+    from pocketpaw_ee.paw_bar.card_spec import PAWBAR_PROFILE, _lift_flat_props
+
+    ui = json.loads(json.dumps(spec["ui"]))
+    out, moved = _lift_flat_props(ui, PAWBAR_PROFILE)
+    assert (moved, out) == (0, spec["ui"]), name

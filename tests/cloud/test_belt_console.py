@@ -23,6 +23,11 @@
 #     reject / executed / failed) on the WORKSPACE REALTIME BUS (captured via the
 #     conftest recording_bus) with an additional per-stream SSE push; the
 #     audience resolver fans belt_run_updated out to workspace members.
+#   * GET /belt/blueprints, /belt/blueprints/c4 and /belt/blueprints/suite-map — a
+#     member reads the app blueprint graph, one app's C4 view and the suite
+#     feature map over B3's fake git and gh; 404
+#     outside the allowlist, 422 on a bad app id, a status per component and
+#     per component path, stale passed through, 503 with no graph yet.
 #
 # `pocketpaw_ee` is import-skipped on an OSS-only install. The Mongo-backed
 # add-repo persistence rides the conftest ``mongo_db`` fixture (mongomock-motor
@@ -966,3 +971,140 @@ async def test_executor_emits_failed_on_apply_conflict(monkeypatch, recording_bu
     failed = [e for e in _bus_belt_events(recording_bus) if e["status"] == "failed"]
     assert failed and failed[0]["stage"] == "done"
     assert failed[0]["workspace_id"] == "w1"
+
+
+# ---------------------------------------------------------------------------
+# GET /belt/blueprints, /belt/blueprints/c4 — the app blueprint reads
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def bp(settings_allowlist, monkeypatch):
+    """B3's fake git and gh behind the real reader, on an allowlisted repo."""
+    from pocketpaw_ee.cloud.belt import app_blueprint_read as abr
+
+    from tests.cloud.test_belt_app_blueprint_read import Fake
+
+    for name in ("_CACHE", "_LOCKS", "_BLOBS"):
+        monkeypatch.setattr(abr, name, {})
+    fake = Fake((settings_allowlist / "acme-api").resolve())
+    monkeypatch.setattr(abr, "_git", lambda path: fake.git)
+    monkeypatch.setattr("pocketpaw_ee.cloud.mandates.patrols._default_gh", fake.gh)
+    monkeypatch.setattr(abr, "_lead_runs", fake.runs)
+    monkeypatch.setattr(abr, "_touched", fake.touched)
+    return fake
+
+
+def _bp_get(path: str, fake, **params):
+    with TestClient(_build_app(role="member")) as client:
+        return client.get(f"/api/v1/belt/{path}", params={"repo": str(fake.repo), **params})
+
+
+def test_member_reads_the_blueprint_graph(bp):
+    res = _bp_get("blueprints", bp)
+    assert res.status_code == 200, res.text
+    g = res.json()
+    assert (g["slug"], g["sha"], g["stale"]) == ("qbtrix/creative-apps", "62a8577", False)
+    assert {f["id"]: f["status"] for f in g["features"]}["halo/layer-keys"] == "building"
+
+
+def test_blueprint_repo_outside_the_allowlist_is_404(bp, tmp_path):
+    _make_repo(tmp_path / "elsewhere")
+    for path, extra in (("blueprints", {}), ("blueprints/c4", {"app": "halo"})):
+        with TestClient(_build_app(role="member")) as client:
+            q = {"repo": str(tmp_path / "elsewhere"), **extra}
+            res = client.get(f"/api/v1/belt/{path}", params=q)
+        assert res.status_code == 404, res.text
+        assert res.json()["error"]["code"] == "belt.repo_not_found"
+    assert bp.calls == []
+
+
+def test_blueprint_c4_rejects_a_bad_app_id(bp):
+    for app in ("../x", "Halo", "-x", ""):
+        assert _bp_get("blueprints/c4", bp, app=app).status_code == 422, app
+    assert bp.calls == []
+
+
+def test_blueprint_c4_returns_the_model_and_a_status_per_component(bp):
+    res = _bp_get("blueprints/c4", bp, app="halo")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["app"] == "halo"
+    assert body["model"]["scope"] == "creative-apps/halo (planned)"
+    assert body["model"]["model"]["systems"]
+    status = body["status"]
+    assert status["halo-window"] == "changing"  # owned by building halo/layer-keys
+    assert status["halo-project"] == "landed"  # every path on dev
+    assert status["halo-frames"] == "planned"  # partial
+    assert status["halo-text"] == "planned"
+    assert set(status.values()) <= {"planned", "landed", "changing", "failed"}
+    missing = _bp_get("blueprints/c4", bp, app="nope")
+    assert missing.status_code == 404 and missing.json()["error"]["code"] == "belt.app_not_found"
+
+
+def test_blueprint_c4_marks_each_path_of_a_partial_component(bp):
+    status = _bp_get("blueprints/c4", bp, app="halo").json()["status"]
+    assert status["halo-frames"] == "planned"  # partial: one of two files on dev
+    assert status["Sources/HaloModel/FrameRenderer.swift"] == "landed"
+    assert status["Sources/HaloModel/HaloRenderFrame.swift"] == "planned"
+
+
+def test_blueprint_c4_paints_a_stuck_owner_failed(bp, monkeypatch):
+    async def gh(argv):
+        code, out, err = await bp.gh(argv)
+        if argv[1:3] == ["issue", "list"] and "qbtrix/creative-apps" in argv:
+            out = out.replace('"feature-lead"', '"needs-human"')
+        return code, out, err
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.mandates.patrols._default_gh", gh)
+    status = _bp_get("blueprints/c4", bp, app="halo").json()["status"]
+    assert status["halo-window"] == "failed"
+    assert status["halo-project"] == "landed"
+
+
+def test_blueprint_failed_refresh_passes_stale_through(bp, monkeypatch):
+    from pocketpaw_ee.cloud.belt import app_blueprint_read as abr
+
+    monkeypatch.setattr(abr, "TTL", 0.0)
+    with TestClient(_build_app(role="member")) as client:
+        q = {"repo": str(bp.repo)}
+        assert client.get("/api/v1/belt/blueprints", params=q).json()["stale"] is False
+        bp.limited = True
+        res = client.get("/api/v1/belt/blueprints", params=q)
+        c4 = client.get("/api/v1/belt/blueprints/c4", params={**q, "app": "halo"})
+    assert res.status_code == 200 and res.json()["stale"] is True
+    assert c4.status_code == 200 and c4.json()["status"]["halo-window"] == "changing"
+
+
+def test_member_reads_the_suite_map(bp):
+    from tests.cloud.test_belt_app_blueprint_read import MAP, suite_map
+
+    bp.files[MAP] = suite_map([("keys", "halo/layer-keys"), ("new", None)])
+    bp.tree()
+    res = _bp_get("blueprints/suite-map", bp)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [f["status"] for f in body["features"]] == ["building", "new"]
+    assert body["layers"] == [{"id": "kernel", "name": "SuiteKernel"}]
+
+
+def test_suite_map_without_a_map_file_is_404(bp):
+    res = _bp_get("blueprints/suite-map", bp)
+    assert res.status_code == 404, res.text
+    assert res.json()["error"]["code"] == "belt.suite_map_not_found"
+
+
+def test_suite_map_repo_outside_the_allowlist_is_404(bp, tmp_path):
+    _make_repo(tmp_path / "elsewhere")
+    with TestClient(_build_app(role="member")) as client:
+        q = {"repo": str(tmp_path / "elsewhere")}
+        res = client.get("/api/v1/belt/blueprints/suite-map", params=q)
+    assert res.status_code == 404 and res.json()["error"]["code"] == "belt.repo_not_found"
+    assert bp.calls == []
+
+
+def test_blueprint_with_no_graph_yet_is_503(bp):
+    bp.limited = True
+    res = _bp_get("blueprints", bp)
+    assert res.status_code == 503, res.text
+    assert res.json()["error"]["code"] == "belt.blueprint_unavailable"

@@ -30,6 +30,16 @@
 # (no authored code to check). A DYNAMIC svelte site's browser layer only loads its
 # prerendered shell, which the verdict says in ``note``.
 #
+# PAGE CHECKS (``verify_checks``): :func:`verify_pocket` attaches ``checks`` (entries
+# with ``sites-check`` ids over the served pages: the html source, the svelte / react
+# draft files, a project's bundle for its current files) AFTER the status is decided,
+# off the event loop, so they never change it or block it. Failed form exercises that
+# ``play_test_site`` recorded for the same content (:func:`record_form_results`, SC-FORM-01)
+# lead them. :func:`publish_checks` is the same read for the publish gate
+# (``publish_gate``), which refuses a live publish on the ``level: "error"`` entries.
+# A project site's layers stay ``unverified`` (``run_site_build`` is its build check);
+# its verdict exists for the checks.
+#
 # DIAGNOSTICS ARE AGENT-ONLY: ``verify_diagnostics.finalize`` redacts and caps them, and
 # :func:`status_summary` (the ``/status`` view) returns counts, never a message.
 #
@@ -66,6 +76,12 @@ DEFAULT_WAIT_SECONDS = 90
 WAIT_ENV = "PAW_SITES_VERIFY_WAIT_SEC"
 
 WORKER_RENDERED_NOTE = "worker-rendered site: browser layer checked the prerendered shell only"
+
+PROJECT_CHECKS_NOTE = (
+    "project sites are built and checked by run_site_build; this verdict carries only "
+    "the page checks, read from the build of the current files (none until "
+    "run_site_build has finished one)"
+)
 
 
 def verify_wait_seconds() -> float:
@@ -320,10 +336,10 @@ async def _sandbox_layers(
                 [],
                 [],
             )
-        except Exception:
-            # The job raised: for this lane that means no sandbox could be created.
+        except Exception as exc:
+            # The job raised: name what it raised (no sandbox, arq's limit, our crash).
             logger.warning("sites.verify: build job for %s raised", pocket_id, exc_info=True)
-            reason = "sandbox_unavailable"
+            reason = build_job.raised_job_reason(exc)
             return (
                 [_layer("build", "unverified", reason), _layer("browser", "unverified", reason)],
                 [],
@@ -339,18 +355,29 @@ async def _sandbox_layers(
 
 
 async def _timeout_reason(pool: Any, job_id: str) -> str:
-    """``waiting_for_capacity`` when the job we gave up waiting on is parked for a
-    Daytona slot, else ``timeout``. Never raises."""
+    """Why the wait raised ``TimeoutError``. ``waiting_for_capacity`` when the job is
+    parked for a Daytona slot. When the job already FINISHED by raising, the timeout was
+    its own stored exception re-raised by ``Job.result()`` (arq's limit), so the job's
+    raise is named (``build_job.raised_job_reason``: ``timed_out:job_timeout``,
+    ``job_crashed:*``, …). Otherwise our wait ran out: ``timeout``. Never raises."""
     from arq.jobs import Job, JobStatus
 
     from pocketpaw_ee.sites import build_job
     from pocketpaw_ee.sites.capacity import WAITING_REASON
 
     try:
-        status = await Job(job_id, pool, _queue_name=build_job.SITE_BUILD_QUEUE_NAME).status()
+        job = Job(job_id, pool, _queue_name=build_job.SITE_BUILD_QUEUE_NAME)
+        status = await job.status()
+        if status is JobStatus.deferred:
+            return WAITING_REASON
+        if status is JobStatus.complete:
+            info = await job.result_info()
+            if info is not None and not info.success:
+                superseded = await build_job._result_superseded(pool, job_id, info)
+                return build_job.raised_job_reason(info.result, superseded=superseded)
     except Exception:  # noqa: BLE001
         return "timeout"
-    return WAITING_REASON if status is JobStatus.deferred else "timeout"
+    return "timeout"
 
 
 def _report_layers(
@@ -479,6 +506,194 @@ def _save(store: Any, pocket_id: str, content_hash: str, verdict: dict[str, Any]
         logger.warning("sites.verify: could not store the verdict for %s", pocket_id)
 
 
+def _served_files(
+    pocket: dict[str, Any], pocket_id: str, content_hash: str, artifacts: Any
+) -> tuple[dict[str, Any] | None, bool, str]:
+    """``(files, server_routes, skipped_reason)``: the tree a visitor is served for this
+    draft. html: its source map. svelte / react: the draft files the preview build
+    stored under ``content_hash``. project: the assets of the bundle built for
+    ``content_hash`` (the current files), or a no-build project's own served files.
+    Blocking (an artifact-store read); :func:`_with_checks` runs it off the loop."""
+    from pocketpaw_ee.sites import preview_origin, project_build
+    from pocketpaw_ee.sites.engines import manifest_has_worker, normalize_engine
+
+    engine = normalize_engine(pocket.get("engine"))
+    source = pocket.get("source")
+    if not isinstance(source, dict):
+        return None, False, "no_source"
+    if engine == "html":
+        return {k: v for k, v in source.items() if isinstance(v, str)}, False, ""
+    if engine == "project" and project_build.is_no_build(source):
+        files = project_build.project_files(source)
+        served = {
+            k: v for k, v in files.items() if not project_build.excluded_from_static_output(k)
+        }
+        return served, False, ""
+    if artifacts is None:
+        from pocketpaw_ee.sites import service as sites_service
+
+        artifacts = sites_service._default_artifact_store()
+    read_dist = getattr(artifacts, "read_dist", None)
+    if not callable(read_dist):
+        return None, False, "no_built_output"
+    if engine == "project":
+        data = read_dist(pocket_id, project_build.bundle_key(content_hash))
+        if not data:
+            return None, False, "no_built_output"
+        manifest, files = project_build.read_bundle(data)
+        return project_build.preview_files(manifest, files), manifest_has_worker(manifest), ""
+    data = read_dist(pocket_id, content_hash)
+    if not data:
+        return None, False, "no_built_output"
+    return preview_origin.unpack_files(data), False, ""
+
+
+def record_form_results(
+    pocket_id: str,
+    content_hash: str,
+    path: str,
+    entries: list[dict[str, Any]],
+    *,
+    store: Any = None,
+) -> None:
+    """Remember which forms failed when ``play_test_site`` submitted test data on
+    ``path`` of this content (``[]`` clears that path: they all worked)."""
+    if not content_hash:
+        return
+    store = store if store is not None else verify_store.default_verify_store()
+    key = verify_store.forms_key(content_hash)
+    try:
+        record = store.read(pocket_id, key) or {}
+        paths = dict(record.get("paths") or {})
+        paths[path or "/"] = entries
+        store.write(pocket_id, key, {"paths": paths, "at": _now_iso()})
+    except Exception:  # noqa: BLE001 — a lost record costs a re-test
+        logger.warning("sites.verify: could not store form results for %s", pocket_id)
+
+
+def stored_form_findings(pocket_id: str, content_hash: str, *, store: Any = None) -> list:
+    """The SC-FORM-01 entries recorded for this content, newest run per path."""
+    if not content_hash:
+        return []
+    store = store if store is not None else verify_store.default_verify_store()
+    try:
+        record = store.read(pocket_id, verify_store.forms_key(content_hash)) or {}
+    except Exception:  # noqa: BLE001
+        return []
+    paths = record.get("paths") if isinstance(record, dict) else None
+    if not isinstance(paths, dict):
+        return []
+    return [e for entries in paths.values() if isinstance(entries, list) for e in entries]
+
+
+def _page_checks(
+    pocket: dict[str, Any],
+    pocket_id: str,
+    content_hash: str,
+    artifacts: Any,
+    store: Any = None,
+) -> dict[str, Any]:
+    """The ``checks`` value for this draft, with any failed form exercise for the same
+    content leading it. Blocking; never raises."""
+    from pocketpaw_ee.sites import verify_checks
+    from pocketpaw_ee.sites.engines import normalize_engine
+
+    try:
+        files, server_routes, reason = _served_files(pocket, pocket_id, content_hash, artifacts)
+        if files is None:
+            checks = verify_checks.skipped(reason)
+        else:
+            checks = verify_checks.run_checks(
+                files,
+                engine=normalize_engine(pocket.get("engine")),
+                server_routes=server_routes,
+            )
+    except Exception:  # noqa: BLE001 — a page check never breaks a verify
+        logger.warning("sites.verify: page checks failed for %s", pocket_id, exc_info=True)
+        checks = verify_checks.skipped("check_crashed")
+    if forms := stored_form_findings(pocket_id, content_hash, store=store):
+        checks = {**checks, "warnings": [*forms, *checks["warnings"]]}
+    return checks
+
+
+def publish_content_hash(pocket: dict[str, Any]) -> str:
+    """The content hash the publish gate reads the draft's build and records under:
+    a project's current files, the svelte / react armed hash at the default builder
+    origin, a digest of an html source map (``""`` for anything else)."""
+    from pocketpaw_ee.sites import project_build
+    from pocketpaw_ee.sites.engines import normalize_engine
+
+    engine = normalize_engine(pocket.get("engine"))
+    source = pocket.get("source")
+    if engine == "project":
+        return project_build.project_content_hash(source) if isinstance(source, dict) else ""
+    if engine in ("svelte", "react"):
+        inputs = render_inputs(pocket)
+        return inputs.content_hash if inputs is not None else ""
+    if engine == "html" and isinstance(source, dict):
+        import hashlib
+        import json
+
+        blob = json.dumps(source, sort_keys=True, default=str).encode("utf-8")
+        return "html-" + hashlib.sha256(blob).hexdigest()[:32]
+    return ""
+
+
+def publish_checks(
+    pocket: dict[str, Any], pocket_id: str, *, artifacts: Any = None, store: Any = None
+) -> dict[str, Any]:
+    """The page checks of the draft about to go live, from what is already stored (the
+    html / no-build source, or the stored build of the current content). Never builds.
+    Blocking: ``publish_gate`` runs it in a worker thread."""
+    return _page_checks(pocket, pocket_id, publish_content_hash(pocket), artifacts, store)
+
+
+async def _with_checks(
+    verdict: dict[str, Any],
+    pocket: dict[str, Any],
+    *,
+    pocket_id: str,
+    content_hash: str,
+    artifacts: Any = None,
+    store: Any = None,
+) -> dict[str, Any]:
+    """``verdict`` plus its page ``checks``, read and parsed in a worker thread so a
+    large tree never blocks the event loop. The status is never read or written here.
+    Never raises: a check that could not run is ``skipped``."""
+    import asyncio
+
+    started = time.monotonic()
+    checks = await asyncio.to_thread(
+        _page_checks, pocket, pocket_id, content_hash, artifacts, store
+    )
+    logger.info(
+        "sites.verify: layer=page_checks pocket=%s warnings=%d elapsed_ms=%d",
+        pocket_id,
+        len(checks["warnings"]) + checks["omitted"],
+        (time.monotonic() - started) * 1000,
+    )
+    return {**verdict, "checks": checks}
+
+
+async def _project_verdict(
+    pocket: dict[str, Any], *, pocket_id: str, artifacts: Any = None, store: Any = None
+) -> dict[str, Any]:
+    """A project site's verify: its layers stay ``unverified`` (``run_site_build`` is
+    the build check) and the verdict carries the page checks of its last build."""
+    from pocketpaw_ee.sites import project_build
+
+    source = pocket.get("source")
+    content_hash = project_build.project_content_hash(source) if isinstance(source, dict) else ""
+    return await _with_checks(
+        unverifiable("engine_not_verifiable", content_hash=content_hash, note=PROJECT_CHECKS_NOTE),
+        pocket,
+        pocket_id=pocket_id,
+        content_hash=content_hash,
+        artifacts=artifacts,
+        store=store,
+    )
+
+
 async def verify_pocket(
     pocket: dict[str, Any],
     *,
@@ -490,10 +705,17 @@ async def verify_pocket(
     _pool: Any = None,
     _check: Any = None,
     _wait: Any = None,
+    _artifacts: Any = None,
 ) -> dict[str, Any]:
     """Verify an already-read pocket wire dict. See :func:`verify_site`."""
+    from pocketpaw_ee.sites.engines import normalize_engine
+
     inputs = render_inputs(pocket, builder_origin=builder_origin)
     if inputs is None:
+        if normalize_engine(pocket.get("engine")) == "project":
+            return await _project_verdict(
+                pocket, pocket_id=pocket_id, artifacts=_artifacts, store=_store
+            )
         return unverifiable("engine_not_verifiable")
     store = _store if _store is not None else verify_store.default_verify_store()
     budget = wait_seconds if wait_seconds is not None else verify_wait_seconds()
@@ -502,6 +724,18 @@ async def verify_pocket(
     if not force and (
         hit := _cached(store.read(pocket_id, verify_store.verdict_key(inputs.content_hash)))
     ):
+        if "checks" not in hit:
+            # A verdict cached before the page checks existed: add them once, and
+            # store the upgraded verdict so the next hit does not recompute them.
+            hit = await _with_checks(
+                hit,
+                pocket,
+                pocket_id=pocket_id,
+                content_hash=inputs.content_hash,
+                artifacts=_artifacts,
+                store=store,
+            )
+            _save(store, pocket_id, inputs.content_hash, hit)
         return {**hit, "cached": True}
 
     note = WORKER_RENDERED_NOTE if inputs.dynamic else ""
@@ -535,6 +769,14 @@ async def verify_pocket(
             warnings=warnings,
             note=note,
         )
+        verdict = await _with_checks(
+            verdict,
+            pocket,
+            pocket_id=pocket_id,
+            content_hash=inputs.content_hash,
+            artifacts=_artifacts,
+            store=store,
+        )
         _save(store, pocket_id, inputs.content_hash, verdict)
         return verdict
 
@@ -554,6 +796,14 @@ async def verify_pocket(
         errors=[*errors, *sb_errors],
         warnings=[*warnings, *sb_warnings],
         note=note,
+    )
+    verdict = await _with_checks(
+        verdict,
+        pocket,
+        pocket_id=pocket_id,
+        content_hash=inputs.content_hash,
+        artifacts=_artifacts,
+        store=store,
     )
     _save(store, pocket_id, inputs.content_hash, verdict)
     # An explicit verify of the source the last edit enqueued answers that edit too, so
@@ -898,6 +1148,7 @@ async def verify_site(
     _pool: Any = None,
     _check: Any = None,
     _wait: Any = None,
+    _artifacts: Any = None,
 ) -> dict[str, Any]:
     """Run the three-layer verification for a site pocket and return the §5 verdict.
 
@@ -924,6 +1175,7 @@ async def verify_site(
         _pool=_pool,
         _check=_check,
         _wait=_wait,
+        _artifacts=_artifacts,
     )
 
 
@@ -999,6 +1251,7 @@ async def status_summary(
 
 __all__ = [
     "DEFAULT_WAIT_SECONDS",
+    "PROJECT_CHECKS_NOTE",
     "VERIFIABLE_ENGINES",
     "VERIFY_PIPELINE_VERSION",
     "WORKER_RENDERED_NOTE",

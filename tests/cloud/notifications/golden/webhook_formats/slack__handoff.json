@@ -1,0 +1,54 @@
+{
+  "blocks": [
+    {
+      "text": {
+        "text": "A visitor asked for a person",
+        "type": "plain_text"
+      },
+      "type": "header"
+    },
+    {
+      "fields": [
+        {
+          "text": "*Name*\nPriya Sharma",
+          "type": "mrkdwn"
+        },
+        {
+          "text": "*Email*\npriya@example.com",
+          "type": "mrkdwn"
+        }
+      ],
+      "type": "section"
+    },
+    {
+      "text": {
+        "text": "*Message*\nCan I talk to someone about a bulk order before Friday?",
+        "type": "mrkdwn"
+      },
+      "type": "section"
+    },
+    {
+      "elements": [
+        {
+          "text": "Bright Smile · Paw",
+          "type": "mrkdwn"
+        }
+      ],
+      "type": "context"
+    },
+    {
+      "elements": [
+        {
+          "text": {
+            "text": "Open in Paw",
+            "type": "plain_text"
+          },
+          "type": "button",
+          "url": "https://app.paw.example/sites/s1?view=leads&lead=l1"
+        }
+      ],
+      "type": "actions"
+    }
+  ],
+  "text": "A visitor asked for a person · Bright Smile"
+}

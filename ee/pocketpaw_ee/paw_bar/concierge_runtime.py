@@ -19,17 +19,23 @@
 # (``knowledge_chars``, ``select_knowledge``): pinned FAQs, the visitor's page
 # article (or, when a hit off that page carries the message's own words, that
 # page first: ``_with_page_siblings``), then KB hits, each cut to what is left.
+# KB hits for the message alone lead; the page title and earlier turns only
+# fill the rest (``_retrieve_for_turn``), so neither outvotes a new topic.
 # ``resolve_page`` accepts the request's page only on an allowed origin; <catalog>
 # comes per turn from ``catalog_for_turn`` (small catalogs whole, else FTS hits).
 #
-# Output passes ``FenceFilter``: a ```pawbar-card is validated and hydrated
+# Output first passes ``ThinkFilter``: a reasoning model's chain of thought (a
+# <think> block, or a reply that opens mid-thought and only closes it) is
+# dropped, and a reply that is all thinking ends as ``unavailable``.
+# It then passes ``FenceFilter``: a ```pawbar-card is validated and hydrated
 # (``card_spec.render_card``); any other code fence becomes ``CODE_REPLACEMENT``
 # unless doc code is allowed and ``is_grounded_code`` finds it in this turn's
 # knowledge; the first ```pawbar-action goes through ``action_spec.render_action``.
 # A reply cut off at ``pawbar_concierge_max_tokens`` keeps what streamed; a visitor
 # asking for a person always gets a route to the team (``contact_route``); a
-# transient failure before any text is retried once; an unanswerable turn (spend
-# cap, quota, provider error) ends with ``degrade_reply``. A site's
+# transient failure before any text is retried once; an unanswerable turn (an
+# unpaid early-access owner workspace, spend cap, quota, provider error) ends with
+# ``degrade_reply``. A site's
 # ``concierge_daily_spend_cap`` only lowers the global cap, except on an ops site
 # (``is_ops_site``: ``pawbar_ops_site_ids``), where it replaces it.
 #
@@ -37,6 +43,8 @@
 # site. It uses ``card_spec.RIPPLE_PROFILE``, raises the reply cap to
 # ``_RIPPLE_MAX_TOKENS``, always writes the Ripple cards paragraph, streams each card
 # as ``card.*`` frames (``FenceFilter(stream_cards=True)``) and uses ``FRAME_DEMO``.
+# When the checks refuse a streamed card and none passed, one repair call (on the
+# same history and usage ledger) feeds the refusal back; only its card is shown.
 # A ripple site with a ``concierge_store_url`` gets its store read once per turn
 # (``storefront_for_turn``, ``concierge_store``, cached per site) alongside
 # retrieval: its menu becomes <store-menu> and the same data fills menu-order,
@@ -52,7 +60,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -338,6 +346,17 @@ _MAX_TOKENS = 2_000
 # The output cap for a site on the "ripple" card profile: a full-catalog spec
 # runs to thousands of tokens.
 _RIPPLE_MAX_TOKENS = 8_000
+# The one repair turn after a streamed card the checks refused: the refusal goes
+# back to the model with the turn so far, and only its card reaches the visitor.
+_REPAIR_NOTE = (
+    "Your ```pawbar-card was refused: {reason}. Write only the corrected "
+    "```pawbar-card block, with no text before or after it."
+)
+# Why a card refused mid-stream (``card_spec.PartialScan``) was refused.
+_PARTIAL_REASON = (
+    "a string value the card rules refuse (a URL, markup or an expression where it "
+    "is not allowed, or a key repeated in one object)"
+)
 # The provider's per-request timeout (ModelSettings ``timeout``). A stalled
 # provider becomes the ``unavailable`` frame instead of a widget spinning forever.
 _PROVIDER_TIMEOUT_S = 30.0
@@ -968,6 +987,49 @@ def _retrieval_query(
     return "\n".join(p.strip() for p in parts if p and p.strip())
 
 
+async def _retrieve_for_turn(
+    site: Any,
+    message: str,
+    query: str,
+    page: PageContext | None,
+    *,
+    agent_id: str | None,
+    k: int,
+) -> list[KnowledgeItem]:
+    """``retrieve`` with the current message leading. The joined query
+    (``_retrieval_query``) weighs the visitor's earlier turns like the new
+    message, so after a change of topic ("how can I apply", then "what events
+    are coming up") the old topic's articles filled every slot, and the page
+    title pulled toward the visitor's page (events listed from /events only). So
+    the message is also searched alone, the same search on every page: those
+    hits come first, and the joined query's hits only fill what is left of
+    ``k``, which keeps "how much is this?" answerable from the page and the
+    turns before it. Pinned FAQs stay first, once; scores are re-ranked per
+    scope in the merged order."""
+    lead_query = (message or "").strip()
+    if lead_query == query:
+        return await retrieve(site, query, agent_id=agent_id, k=k)
+    own, joined = await asyncio.gather(
+        retrieve(site, lead_query, agent_id=agent_id, k=k),
+        retrieve(site, query, agent_id=agent_id, k=k),
+    )
+    pinned = [i for i in own if i.source == "faq"]
+    seen: set[tuple[str, str]] = set()
+    hits: list[KnowledgeItem] = []
+    for item in own + joined:
+        key = (item.source, item.id)
+        if item.source == "faq" or key in seen:
+            continue
+        seen.add(key)
+        hits.append(item)
+    ranks: dict[str, int] = {}
+    ranked = []
+    for item in hits[:k]:
+        rank = ranks[item.source] = ranks.get(item.source, -1) + 1
+        ranked.append(replace(item, score=1.0 / (rank + 1)))
+    return pinned + ranked
+
+
 def _source_items(
     items: Sequence[KnowledgeItem], site: Any, page: PageContext | None
 ) -> list[dict[str, str]]:
@@ -1496,9 +1558,10 @@ _RIPPLE_RULES = (
         "number an edit feeds. Seed each kept number with exactly what its expression "
         "gives for the seeded list.",
     ),
-    "   - Expressions: state paths, + - * / % with parentheses, comparisons, || and ??, "
-    "and a ternary only as the whole expression. There is no exponent operator (no ** "
-    "or ^) and no Math functions: write compound growth as repeated multiplication. "
+    "   - Expressions: one brace pair holds the whole expression, e.g. an if "
+    "condition \"{state.cycle === 'yearly'}\". State paths, + - * / % with parentheses, "
+    "comparisons, || and ??, a ternary only as the whole expression; no exponent "
+    "operator (** or ^) and no Math: write growth as repeated multiplication. "
     "Division by zero gives 0.",
     _craft(
         "numbers-in-stat",
@@ -1529,7 +1592,7 @@ _RIPPLE_RULES = (
     "widget also "
     "takes title? (a recipe: name), subtitle?, verdict? {text, status?: "
     "good|warn|bad|info|neutral} (the answer in one sentence, at most 140 chars, "
-    "shown first) and, with money, currency? (an ISO code; never a symbol in a "
+    "shown first) and, with money, currency? (the ask's ISO code, e.g. EUR; never a symbol in a "
     "number). Never write on_checkout or on_book, or an image. "
     "Notes or jotting down is a notes card, never inputs and buttons; music or focus "
     "sounds, a music-player of its preset sounds. "
@@ -1581,17 +1644,84 @@ _RIPPLE_RULES = (
     "   - When a small picture helps explain (how something works), add an illustration. "
     "Put SVG attributes in single quotes (no JSON escaping): "
     "<svg viewBox='0 0 200 120'>...</svg>. Keep it compact: fewer than about 40 "
-    "elements, short path data, no decorative extras; a long drawing gets cut off. "
-    "Every dur 0.5s or more. No {expressions}; a gradient is fill='url(#id)'. The card "
-    "may be dark or light: write text with fill='currentColor', never dark or black. "
+    "elements, short path data, no decorative extras. "
+    "Every dur 0.5s or more. No {expressions}; a gradient is fill='url(#id)'. On a "
+    "dark or light card, text is fill='currentColor'. "
     "Reuse a shape with use href='#id' (plain href, never xlink:href), at most 40 uses, "
     "none pointing at a use. Up to 8 annotations [{id, label (at most 40 chars), note "
     "(at most 280), target}] number notes on parts of the drawing: give each drawing "
-    "part an id and point at it; keep each note to one short sentence. Put on_select "
+    "part an id and point at it; one short sentence per note. Put on_select "
     "on the node beside props, never inside props.",
     "   - A good summary card (copy its shape, never its data): "
     + json.dumps(_RIPPLE_EXAMPLE, separators=(",", ":")),
 )
+
+
+# The chat variant swaps the Paw Bar-only parts of _RIPPLE_RULES, found by their
+# opening words: the real-actions rule names the profile's host events, the ask
+# example emits chat.send, match-the-card loses the store-backed menu and booking
+# text, and the flow-cards rule goes (chat guides with start_flow). Every other
+# rule is shared as is. A part the Paw Bar text no longer holds fails at import.
+_CHAT_STORE_TEXT = (
+    "A menu or an order is a menu-order: items by product_id from the store-menu "
+    "block (and name); the server fills the rest. A booking is a booking. For a "
+    "table leave out services and days (the server fills them); for any other "
+    "booking (a dentist, a haircut) write its services and a few days of slots. ",
+    "Never write on_checkout or on_book, or an image. ",
+)
+_CHAT_ASK = {**_RIPPLE_ASK, "target": "chat.send", "value": _RIPPLE_ASK["value"]["text"]}
+
+
+def _rule(start: str) -> str:
+    """The one _RIPPLE_RULES entry that opens with ``start``."""
+    (found,) = (r for r in _RIPPLE_RULES if r.startswith(start))
+    return found
+
+
+def _chat_rules(host_events: Sequence[str]) -> tuple[str, ...]:
+    match = _rule("   - Match the card to the answer.")
+    for part in _CHAT_STORE_TEXT:
+        assert part in match, part
+    booking = "A booking is a booking with its services and a few days of slots. "
+    chat_match = match.replace(_CHAT_STORE_TEXT[0], booking).replace(_CHAT_STORE_TEXT[1], "")
+    ask = _rule("   - A click can send a follow-up as the visitor:")
+    ask_json = json.dumps(_RIPPLE_ASK, separators=(",", ":"))
+    assert ask_json in ask
+    swaps = {
+        _rule(f"   - {CRAFT_RULES['real-actions']}"): _craft(
+            "real-actions",
+            "They are set, toggle, push, remove, open, toast, validate, flow (steps run "
+            "in order), branch (if, then, else), navigate (an in-app path) and api (only "
+            f"where a rule below names it), and emit of {', '.join(host_events)}. There "
+            "is no add_to_cart, checkout, confirm, delay or other emit or action; one "
+            "drops the card, even as a step. A handler may be a list of actions.",
+        ),
+        match: chat_match,
+        ask: ask.replace(ask_json, json.dumps(_CHAT_ASK, separators=(",", ":"))).replace(
+            "as the visitor", "as the user"
+        ),
+        _rule("   - Flow cards:"): "",
+    }
+    rules = (swaps.get(r, r) for r in _RIPPLE_RULES if swaps.get(r, r))
+    return tuple(r.replace(_PRIMITIVES_SIZE, _CHAT_PRIMITIVES_SIZE) for r in rules)
+
+
+# Chat checks for a purpose-built widget before it composes, so its node budget
+# applies only to a card built from primitives.
+_PRIMITIVES_SIZE = "Aim for about 25 to 90 nodes when building from primitives"
+_CHAT_PRIMITIVES_SIZE = (
+    "Only when no purpose-built widget fits and you build from primitives, aim for "
+    "about 25 to 90 nodes"
+)
+
+
+def ripple_rules(profile: Any = None) -> tuple[str, ...]:
+    """The ripple authoring rules for ``profile``: _RIPPLE_RULES unchanged for the
+    Paw Bar profiles, the chat variant when the profile's host events are chat's."""
+    host_events = tuple(getattr(profile, "host_events", ()))
+    if "chat.send" not in host_events:
+        return _RIPPLE_RULES
+    return _chat_rules(host_events)
 
 
 # The ripple landing's chat message when a visitor confirms a slot on a booking
@@ -1665,7 +1795,7 @@ def _cards_paragraph(
             "   Every widget by category (those this message likely needs are listed "
             "with their props at the end):",
             *(f"   {line}" for line in widget_relevance.index_lines()),
-            *_RIPPLE_RULES,
+            *ripple_rules(profile),
             *_form_lines(declared, lead_capture),
         ]
         # The per-turn part goes last, so everything above stays byte-stable.
@@ -2312,6 +2442,95 @@ def _card_object(fence: str | None) -> dict[str, Any] | None:
     return card if isinstance(card, dict) and "ui" in card else None
 
 
+# A reasoning model can write its chain of thought into the reply text. Some
+# provider templates put the opening <think> in the PROMPT, so the reply starts
+# mid-thought and only the closer arrives; that thought quotes the frame and the
+# owner's settings. A reply whose head is one of these starts is held until a
+# closer and dropped; any other reply streams as it comes.
+_THINK_OPENERS = ("<think>", "<thinking>")
+_THINK_CLOSERS = ("</think>", "</thinking>")
+_THINK_HEADS = (*_THINK_OPENERS, "Thinking Process", "Thinking process")
+_THINK_TAGS = (*_THINK_OPENERS, *_THINK_CLOSERS)
+
+
+class ThinkingOnlyReply(RuntimeError):
+    """The model's whole reply was thinking: it never closed, so nothing can show."""
+
+
+class ThinkFilter:
+    """Drops a reasoning model's chain of thought from streamed reply text.
+
+    ``feed`` returns the visible text for each delta. The reply's head is held
+    only until it can be told apart from a thinking start (``_THINK_HEADS``, at
+    most 16 chars); a thinking head is then held, never shown, until a closer,
+    and the text after it is judged as a new head. Mid-reply, a ``<think>``
+    block is dropped and a stray closer is cut. ``close`` returns any held text
+    and sets ``unclosed`` when the reply ended inside its thinking.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._mode = "head"  # "head" | "thinking" | "text"
+        self.unclosed = False
+
+    def feed(self, chunk: str) -> str:
+        self._buf += chunk
+        out: list[str] = []
+        while True:
+            if self._mode == "head":
+                head = self._buf.lstrip()
+                if any(h.startswith(head) and h != head for h in _THINK_HEADS):
+                    return "".join(out)  # empty, or still a possible thinking start
+                self._buf = head
+                if any(head.startswith(h) for h in _THINK_HEADS):
+                    self._mode = "thinking"
+                else:
+                    self._mode = "text"
+            elif self._mode == "thinking":
+                at, tag = _first_tag(self._buf, _THINK_CLOSERS)
+                if at < 0:
+                    # Keep only what could still be the start of a closer.
+                    self._buf = self._buf[-(max(map(len, _THINK_CLOSERS)) - 1) :]
+                    return "".join(out)
+                self._buf = self._buf[at + len(tag) :]
+                self._mode = "head"
+            else:
+                at, tag = _first_tag(self._buf, _THINK_TAGS)
+                if at < 0:
+                    keep = _partial_tag_tail(self._buf)
+                    out.append(self._buf[: len(self._buf) - keep])
+                    self._buf = self._buf[len(self._buf) - keep :]
+                    return "".join(out)
+                out.append(self._buf[:at])
+                self._buf = self._buf[at + len(tag) :]
+                if tag in _THINK_OPENERS:
+                    self._mode = "thinking"
+                else:
+                    logger.warning("concierge v2: dropped a stray %s from a reply", tag)
+
+    def close(self) -> str:
+        held, self._buf = self._buf, ""
+        if self._mode == "thinking":
+            self.unclosed = True
+            return ""
+        return held
+
+
+def _first_tag(text: str, tags: Sequence[str]) -> tuple[int, str]:
+    """The earliest of ``tags`` in ``text`` as (index, tag), or (-1, "")."""
+    hits = [(text.find(t), t) for t in tags if t in text]
+    return min(hits) if hits else (-1, "")
+
+
+def _partial_tag_tail(text: str) -> int:
+    """How many trailing chars of ``text`` could begin a think tag."""
+    start = text.rfind("<")
+    if start < 0:
+        return 0
+    tail = text[start:]
+    return len(tail) if any(t.startswith(tail) and t != tail for t in _THINK_TAGS) else 0
+
+
 class FenceFilter:
     """Holds every ``` fence in a streamed reply until it closes, then decides.
 
@@ -2385,6 +2604,10 @@ class FenceFilter:
         self._size = 0  # their total length
         # Every streamed card's body length so far, by card id (``ceiling_breaches``).
         self.card_chars: dict[str, int] = {}
+        # Streamed cards that passed, and why the last refused one was refused
+        # ("" for none): the runner's one repair turn reads both.
+        self.passed = 0
+        self.rejected = ""
         self._partial: Any = None  # its card_spec.PartialScan
         self._swallow = False  # a rejected card's fence is still open
         self._in_str = self._esc = False  # the open card's body is mid JSON string
@@ -2560,6 +2783,11 @@ class FenceFilter:
         self.card_chars[card_id] = self._size
         if self._size > self._profile.max_chars or self._partial.feed(piece):
             self._card_id, self._swallow, self._parts = "", True, []
+            self.rejected = (
+                f"it is longer than {self._profile.max_chars} characters"
+                if self._size > self._profile.max_chars
+                else _PARTIAL_REASON
+            )
             return CardEvent("card.rejected", {"card_id": card_id, "reason": "invalid"})
         self._parts.append(piece)
         self._track_strings(piece)
@@ -2614,7 +2842,13 @@ class FenceFilter:
             return self._noted(body, card)
         obj = _card_object(card)
         if obj is None:
+            from pocketpaw_ee.paw_bar.card_spec import rejection_reason
+
+            self.rejected = rejection_reason(
+                body, verbs=self._verbs, lead_capture=self._lead_capture, profile=self._profile
+            )
             return CardEvent("card.rejected", {"card_id": card_id, "reason": "invalid"})
+        self.passed += 1
         fence = self._noted(body, card)
         return CardEvent("card.final", {"card_id": card_id, "card": obj}, fence)
 
@@ -2757,9 +2991,10 @@ def _fence_filter_for(
 
 # Why a turn was not answered. Logged and written to the run doc; the visitor
 # only sees the coarse ``unavailable`` reason each one maps to.
-DEGRADE_REASONS = ("spend_cap", "quota", "provider_timeout", "provider_error")
+DEGRADE_REASONS = ("spend_cap", "quota", "early_access", "provider_timeout", "provider_error")
 _UNAVAILABLE_REASON = {
     "spend_cap": "limit",
+    "early_access": "limit",
     "quota": "limit",
     "provider_timeout": "temporary",
     "provider_error": "temporary",
@@ -2953,7 +3188,8 @@ async def run_concierge_v2(
     route is also added to a contact turn the model answered without a valid
     lead card. A site at its daily spend cap gets ``degrade_reply``
     alone (reason "limit"), with no run doc and no model call, and its owner is
-    told once that UTC day.
+    told once that UTC day. An unpaid early-access owner workspace gets the same
+    frame, with no owner note (``credits.guards.early_access_denial``).
     """
     from pydantic_ai import Agent
 
@@ -2964,6 +3200,15 @@ async def run_concierge_v2(
 
     settings = _settings()
     profile = ui_profile(site, settings)
+    # An unpaid early-access owner workspace gets no concierge: its spend is
+    # billed after the fact, so nothing would bound it. Checked before the cap,
+    # with no run doc, no model call and no owner note.
+    from pocketpaw_ee.cloud.credits.guards import early_access_denial
+
+    if await early_access_denial(workspace_id) is not None:
+        async for frame in degrade_reply(widget, "early_access"):
+            yield frame
+        return
     if await _over_spend_cap(settings, workspace_id, pocket_id, site):
         from pocketpaw_ee.paw_bar.notify import notify_spend_cap_reached
 
@@ -3023,6 +3268,8 @@ async def run_concierge_v2(
     # Whether the visitor has seen anything (text or a card frame): no retry after.
     shown = False
     fences: FenceFilter | None = None
+    # The first reply's messages and usage, for the one card repair turn.
+    repair_from: tuple[Any, Any] | None = None
     # The site and widget ride the usage the meter prices, whatever the outcome.
     spend_tags = {"site_id": site_id, "widget_id": widget_id}
     usage: dict[str, Any] = {"backend": _BACKEND, **spend_tags}
@@ -3042,7 +3289,9 @@ async def run_concierge_v2(
         # The model the owner picked on the concierge agent rides along (memoized).
         # The ripple store (menu, services, slots) rides along, cached per site.
         retrieved, page_ctx, catalog, model_spec, storefront = await asyncio.gather(
-            retrieve(site, query, agent_id=agent_id or None, k=_top_k(budget)),
+            _retrieve_for_turn(
+                site, message, query, page_ctx, agent_id=agent_id or None, k=_top_k(budget)
+            ),
             _with_page_article(page_ctx, site, query=query, budget=budget),
             catalog_for_turn(store, widget, query, page_ctx),
             _turn_model_spec(settings, widget, site, workspace_id),
@@ -3112,14 +3361,28 @@ async def run_concierge_v2(
         # text came back, and this agent has no tools to cut off mid-call.
         for attempt in (1, 2):
             fences = _new_fences()
+            # A reasoning model's chain of thought never reaches the fences, the
+            # visitor or the transcript (``ThinkFilter``).
+            think = ThinkFilter()
             try:
                 async with agent.run_stream(prompt, model_settings=model_settings) as result:
                     async for delta in result.stream_text(delta=True, debounce_by=None):
-                        for piece in await fences.afeed(delta or ""):
+                        for piece in await fences.afeed(think.feed(delta or "")):
                             text, frame = _piece_frame(piece)
                             full_text, shown = full_text + text, True
                             yield frame
+                    for piece in await fences.afeed(think.close()):
+                        text, frame = _piece_frame(piece)
+                        full_text, shown = full_text + text, True
+                        yield frame
+                    if think.unclosed and not shown:
+                        raise ThinkingOnlyReply("the reply was all thinking")
                     usage = {**_usage(settings, result, model_spec), **spend_tags}
+                    run_usage = result.usage
+                    repair_from = (
+                        result.all_messages(),
+                        run_usage() if callable(run_usage) else run_usage,
+                    )
                 break
             except Exception as exc:
                 if attempt > 1 or shown or not _is_transient(exc):
@@ -3147,6 +3410,32 @@ async def run_concierge_v2(
             text, frame = _piece_frame(piece)
             full_text += text
             yield frame
+        # One repair turn, exactly one: a streamed card the checks refused, with
+        # none passed, goes back to the model with the refusal. Its usage adds to
+        # the first call's (pydantic_ai accumulates into the ledger it is handed),
+        # so the turn is metered as one. Only its card frames are shown: the
+        # visitor already read this turn's text. A failure here keeps the reply.
+        if fences.rejected and not fences.passed and repair_from is not None:
+            try:
+                async with agent.run_stream(
+                    _REPAIR_NOTE.format(reason=fences.rejected),
+                    message_history=repair_from[0],
+                    model_settings=model_settings,
+                    usage=repair_from[1],
+                ) as result:
+                    repair_think = ThinkFilter()
+                    async for delta in result.stream_text(delta=True, debounce_by=None):
+                        for event in await fences.afeed(repair_think.feed(delta or "")):
+                            if isinstance(event, CardEvent):
+                                text, frame = _piece_frame(event)
+                                full_text += text
+                                yield frame
+                    usage = _usage(settings, result, model_spec) | spend_tags
+            except Exception:  # noqa: BLE001 — the first reply already stands
+                logger.warning("concierge v2: card repair failed for run %s", run_id, exc_info=True)
+            for piece in fences.close():
+                if isinstance(piece, CardEvent):
+                    yield _piece_frame(piece)[1]
         if contact and not fences.lead_card:
             for piece in contact_reply(
                 lead_capture=lead_capture_on(site), said_something=bool(full_text.strip())

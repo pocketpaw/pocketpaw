@@ -119,7 +119,7 @@ def _wire_common(monkeypatch, transport, *, enforced: bool) -> dict[str, bool]:
 
     from pocketpaw_ee.cloud.credits import guards
 
-    stub_settings = SimpleNamespace(billing_enforced=enforced)
+    stub_settings = SimpleNamespace(billing_enforced=enforced, credits_enforced=False)
     monkeypatch.setattr(guards, "get_settings", lambda: stub_settings)
 
     # The shared gate now runs check_balance BEFORE check_quota. Default it to a
@@ -129,6 +129,17 @@ def _wire_common(monkeypatch, transport, *, enforced: bool) -> dict[str, bool]:
         return None
 
     monkeypatch.setattr("pocketpaw_ee.cloud.credits.service.check_balance", _balance_ok)
+
+    # The early-access one-run check and free-run bounds read Mongo; this
+    # harness has none. No other active run, and not an early-access run.
+    async def _no_active_runs(**_k):
+        return []
+
+    async def _unbounded(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(run_core.run_service, "find_active_runs_for_workspace", _no_active_runs)
+    monkeypatch.setattr(guards, "free_run_bounds", _unbounded)
     return called
 
 
