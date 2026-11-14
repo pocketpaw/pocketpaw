@@ -355,6 +355,11 @@ _DASHES = ("\u2014", "\u2013")  # em dash, en dash
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
 
 
+def has_dash(text: str) -> bool:
+    """True when ``text`` holds an em or en dash."""
+    return any(d in text for d in _DASHES)
+
+
 def check_draft(idea: GeneratedIdea, source_text: str) -> list[str]:
     """Why this draft breaks the hard rules; empty when it is fine.
 
@@ -366,7 +371,7 @@ def check_draft(idea: GeneratedIdea, source_text: str) -> list[str]:
     """
     parts = [idea.hook, idea.caption, idea.on_screen_text, *idea.script, *idea.hashtags]
     reasons: list[str] = []
-    if any(d in part for part in parts for d in _DASHES):
+    if any(has_dash(part) for part in parts):
         reasons.append("uses an em or en dash")
     for part in parts:
         for token in _NUMBER_RE.findall(part):
@@ -606,6 +611,7 @@ __all__ = [
     "agent_generate_ideas",
     "build_ideas_prompt",
     "check_draft",
+    "has_dash",
     "parse_ideas_response",
     "resolve_ideas_fn",
     "set_production_ideas_fn",

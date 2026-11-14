@@ -342,7 +342,9 @@ from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.site_redirect import SiteRedirect
 from pocketpaw_ee.cloud.models.site_secret import SiteSecret
 from pocketpaw_ee.cloud.models.site_template import SiteTemplate
+from pocketpaw_ee.cloud.models.social_experiment import SocialExperiment
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea
+from pocketpaw_ee.cloud.models.social_learning import SocialLearning
 from pocketpaw_ee.cloud.models.social_link import SocialLink
 from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg
@@ -788,6 +790,10 @@ def get_all_documents():
         # Tracked short links behind /api/v1/go/{code}; counts only, nothing
         # about the requester. Same import boundary.
         SocialLink,
+        # The learning loop's experiments and founder-approved learnings; same
+        # import boundary.
+        SocialExperiment,
+        SocialLearning,
         ReplyDraft,
         PushSubscription,
         VapidKeypair,

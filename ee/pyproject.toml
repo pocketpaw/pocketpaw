@@ -1196,6 +1196,8 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.social.links",
     "pocketpaw_ee.cloud.growth.social.links_router",
     "pocketpaw_ee.cloud.growth.social.replies",
+    "pocketpaw_ee.cloud.growth.social.review",
+    "pocketpaw_ee.cloud.growth.social.learnings",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",
@@ -1210,6 +1212,8 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.social_post_metric",
     "pocketpaw_ee.cloud.models.social_link",
     "pocketpaw_ee.cloud.models.reply_draft",
+    "pocketpaw_ee.cloud.models.social_experiment",
+    "pocketpaw_ee.cloud.models.social_learning",
 ]
 
 [[tool.importlinter.contracts]]

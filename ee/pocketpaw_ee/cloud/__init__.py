@@ -1059,6 +1059,13 @@ def mount_cloud(app: FastAPI) -> None:
 
     set_production_reply_draft_fn(agent_draft_replies)
 
+    from pocketpaw_ee.cloud.growth.social.learnings import (
+        agent_propose_learnings,
+        set_production_learnings_fn,
+    )
+
+    set_production_learnings_fn(agent_propose_learnings)
+
     from pocketpaw_ee.cloud.growth.social.memes import (
         agent_draw_character,
         agent_make_meme,

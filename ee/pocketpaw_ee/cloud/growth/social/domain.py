@@ -20,7 +20,10 @@
 # a published X post is taken at. Reply cards: ``ReplyCandidate`` is an X post
 # found to reply to, ``GeneratedReply`` a drafted reply, ``ReplyCard`` the stored
 # card (never posted by the server); the ``REPLY_*`` / ``MAX_REPLY_*`` constants
-# bound a profile's reply settings.
+# bound a profile's reply settings. The learning loop: ideas carry ``pillar`` /
+# ``hook_type`` tags (``clean_tag``, 40 characters); an experiment tests one
+# ``ExperimentVariable`` on one ``ExperimentMetric``; ``GeneratedLearning`` is a
+# model-proposed rule before it is checked and stored.
 
 from __future__ import annotations
 
@@ -58,6 +61,10 @@ Platform = Literal["x", "reddit"]
 IdeaStatus = Literal["new", "approved", "skipped"]
 IdeaSource = Literal["manual", "daily"]
 ReplyStatus = Literal["new", "posted", "skipped"]
+ExperimentVariable = Literal["format", "pillar", "hook_type"]
+ExperimentMetric = Literal["clicks_per_1k_views", "engagement_rate", "repo_uniques_week"]
+ExperimentVerdict = Literal["running", "keep_a", "keep_b", "no_difference", "stopped"]
+LearningStatus = Literal["proposed", "approved", "retired"]
 
 IDEA_FORMATS: tuple[str, ...] = get_args(IdeaFormat)
 PLATFORMS: tuple[str, ...] = get_args(Platform)
@@ -156,6 +163,16 @@ MAX_REPLY_CHARS = 280
 MAX_IDEA_COUNT = 12
 # Idea tags (``pillar``, ``hook_type``): short free text the weekly review averages over.
 MAX_TAG_CHARS = 40
+
+
+# The learning loop. An experiment runs ``EXPERIMENT_DAYS`` unless told otherwise;
+# at most ``MAX_APPROVED_LEARNINGS`` approved rules (newest first) reach the prompt.
+EXPERIMENT_DAYS = 28
+MIN_POSTS_PER_ARM_DEFAULT = 6
+MAX_LEARNING_CHARS = 300
+MAX_EVIDENCE_CHARS = 1000
+MAX_APPROVED_LEARNINGS = 10
+MAX_PROPOSED_LEARNINGS = 3
 
 
 def clean_tag(value: object) -> str:
@@ -270,6 +287,14 @@ class GeneratedIdea:
     subreddit: str = ""
     pillar: str = ""
     hook_type: str = ""
+
+
+@dataclass(frozen=True)
+class GeneratedLearning:
+    """One learning as the review model proposed it, before it is checked and stored."""
+
+    text: str
+    evidence: str = ""
 
 
 @dataclass(frozen=True)

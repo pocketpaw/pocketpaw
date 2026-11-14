@@ -73,6 +73,10 @@
 # days through the capped, read-only ``x_api`` reader. Nothing here writes to X.
 # Reply cards: ``run_reply_drafts`` (05:45 UTC cron) and ``draft_replies`` draft X
 # replies via ``replies``; a person posts each by hand from its intent link.
+# Learning loop: one running experiment per profile (409 otherwise; its fields are
+# fixed at create, only a close moves the verdict); daily drafts alternate its arms
+# and are stamped. ``get_review`` is a read-only weekly review. Learnings reach
+# the ideas prompt only once approved (newest 10); nothing tunes itself.
 #
 # Tracked links: when a post names an idea and its body holds a URL, the first
 # URL becomes a SocialLink (reused per idea + URL), leaves the body, and goes out
@@ -106,12 +110,18 @@ from pocketpaw_ee.cloud._core.errors import (
 )
 from pocketpaw_ee.cloud._core.public_url import public_base_url
 from pocketpaw_ee.cloud._core.time import iso_utc
+from pocketpaw_ee.cloud.growth.social import review
 from pocketpaw_ee.cloud.growth.social.changes import Change, changes_text, resolve_changes_fn
 from pocketpaw_ee.cloud.growth.social.domain import (
     CHANNEL_PLATFORMS,
     DAILY_DRAFTS_PER_DAY,
     DAILY_SLOT_HOURS_UTC,
     DESCRIPTION_FIELDS,
+    EXPERIMENT_DAYS,
+    MAX_APPROVED_LEARNINGS,
+    MAX_EVIDENCE_CHARS,
+    MAX_LEARNING_CHARS,
+    MAX_PROPOSED_LEARNINGS,
     MEDIA_EXTENSIONS,
     METRIC_AGE_BUCKETS,
     POSTABLE_PLATFORMS,
@@ -136,9 +146,12 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     CharacterResponse,
     CheckTelegramRequest,
     CheckTelegramResponse,
+    CloseExperimentRequest,
+    CloseExperimentResponse,
     ConnectSocialAccountRequest,
     ConnectSocialAccountResponse,
     CreateCharacterRequest,
+    CreateExperimentRequest,
     CreateSocialPostRequest,
     CreateSocialPostResponse,
     DescriptionResponse,
@@ -159,8 +172,12 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialAnalysisResponse,
     SocialChannelListResponse,
     SocialChannelResponse,
+    SocialExperimentListResponse,
+    SocialExperimentResponse,
     SocialIdeaListResponse,
     SocialIdeaResponse,
+    SocialLearningListResponse,
+    SocialLearningResponse,
     SocialMediaResponse,
     SocialPostCreated,
     SocialPostListResponse,
@@ -168,8 +185,10 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialProfileListResponse,
     SocialProfileResponse,
     SocialPulseResponse,
+    SocialReviewResponse,
     TelegramConnectCode,
     UpdateIdeaRequest,
+    UpdateLearningRequest,
     UpdateReplyRequest,
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
@@ -196,7 +215,9 @@ from pocketpaw_ee.cloud.growth.social.repo_metrics import (
 )
 from pocketpaw_ee.cloud.models.reply_draft import ReplyDraft as _ReplyDoc
 from pocketpaw_ee.cloud.models.repo_metric import RepoMetric as _RepoMetricDoc
+from pocketpaw_ee.cloud.models.social_experiment import SocialExperiment as _ExperimentDoc
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as _IdeaDoc
+from pocketpaw_ee.cloud.models.social_learning import SocialLearning as _LearningDoc
 from pocketpaw_ee.cloud.models.social_link import SocialLink as _LinkDoc
 from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric as _MetricDoc
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as _PostizOrgDoc
@@ -625,6 +646,9 @@ async def generate_ideas(
 
     profile = _profile_to_domain(doc)
     profile_key = str(doc.id)
+    # Only passed when there are some, so an IdeasFn without the kwarg keeps working.
+    rules = await _approved_learnings(workspace_id, profile_key)
+    extra: dict[str, Any] = {"learnings": rules} if rules else {}
     try:
         generated = await ideas_fn(
             profile,
@@ -632,6 +656,7 @@ async def generate_ideas(
             await _recent_hooks(workspace_id, profile_key),
             platform=body.platform,
             pulse=await _pulse_themes(workspace_id, profile_key),
+            **extra,
         )
     except ResearchUnavailable as exc:
         raise CloudError(502, "social.ideas_failed", f"Idea generation failed: {exc}") from exc
@@ -773,6 +798,15 @@ async def _draft_daily(
     source_text = changes_text(changes)
     hooks = await _recent_hooks(workspace_id, profile_key)
     pulse = await _pulse_themes(workspace_id, profile_key)
+    # The learning loop's two optional inputs, passed only when set (see generate_ideas).
+    extra: dict[str, Any] = {}
+    rules = await _approved_learnings(workspace_id, profile_key)
+    if rules:
+        extra["learnings"] = rules
+    exp = await _running_experiment(workspace_id, profile_key, _aware(now))
+    arm = await _next_arm(exp) if exp is not None else ""
+    if exp is not None:
+        extra["experiment_arm"] = (exp.variable, arm)
     kept: list[GeneratedIdea] = []
     reasons: list[str] = []
     dropped = 0
@@ -786,6 +820,7 @@ async def _draft_daily(
             pulse=pulse,
             changes=changes,
             retry_note=retry_note,
+            **extra,
         )
         for idea in generated:
             problems = social_ideas.check_draft(idea, source_text)
@@ -820,6 +855,9 @@ async def _draft_daily(
             source="daily",
             suggested_at=slot,
         )
+        if exp is not None:  # stamp the arm the draft was written for
+            setattr(idea_doc, exp.variable, arm)
+            idea_doc.experiment_id = str(exp.id)
         await idea_doc.insert()
         docs.append(idea_doc)
     return docs, dropped
@@ -1001,6 +1039,467 @@ async def draft_daily(ctx: RequestContext, profile_id: str | None = None) -> Soc
         raise CloudError(502, "social.ideas_failed", "The drafting run failed") from exc
     # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
     return SocialIdeaListResponse(items=[_idea_to_response(i) for i in made])
+
+
+# ---------------------------------------------------------------------------
+# Learning loop: experiments, the weekly review and founder-approved learnings
+# ---------------------------------------------------------------------------
+
+_VARIABLE_LABELS = {"format": "format", "pillar": "pillar", "hook_type": "hook type"}
+LEARNING_LIST_LIMIT = 200
+EXPERIMENT_LIST_LIMIT = 100
+
+
+async def _fetch_in_workspace(doc_cls: Any, workspace_id: str, doc_id: str, kind: str) -> Any:
+    try:
+        oid = PydanticObjectId(doc_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound(kind, doc_id) from exc
+    doc = await doc_cls.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise NotFound(kind, doc_id)
+    return doc
+
+
+def _experiment_response(doc: _ExperimentDoc) -> SocialExperimentResponse:
+    return SocialExperimentResponse(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        profile_id=doc.profile,
+        hypothesis=doc.hypothesis,
+        variable=doc.variable,
+        arm_a=doc.arm_a,
+        arm_b=doc.arm_b,
+        metric=doc.metric,
+        keep_rule=doc.keep_rule,
+        keep_threshold=doc.keep_threshold,
+        min_posts_per_arm=doc.min_posts_per_arm,
+        start=iso_utc(doc.start),
+        end=iso_utc(doc.end),
+        verdict=doc.verdict,
+        closed_at=iso_utc(doc.closed_at),
+        created_at=iso_utc(doc.createdAt),
+    )
+
+
+def _learning_response(doc: _LearningDoc) -> SocialLearningResponse:
+    return SocialLearningResponse(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        profile_id=doc.profile,
+        text=doc.text,
+        source_experiment=doc.source_experiment,
+        evidence=doc.evidence,
+        status=doc.status,
+        approved_at=iso_utc(doc.approved_at),
+        retired_at=iso_utc(doc.retired_at),
+        created_at=iso_utc(doc.createdAt),
+        updated_at=iso_utc(doc.updatedAt),
+    )
+
+
+async def _approved_learnings(workspace_id: str, profile: str) -> list[str]:
+    """The newest approved learnings' texts: the only learnings any prompt ever sees."""
+    docs = (
+        await _LearningDoc.find(
+            {"workspace": workspace_id, "profile": profile, "status": "approved"}
+        )
+        .sort([("approved_at", -1), ("_id", -1)])
+        .limit(MAX_APPROVED_LEARNINGS)
+        .to_list()
+    )
+    return [d.text for d in docs]
+
+
+async def _running_experiment(
+    workspace_id: str, profile: str, now: datetime
+) -> _ExperimentDoc | None:
+    """The profile's running experiment while ``now`` is inside its window."""
+    doc = await _ExperimentDoc.find_one(
+        {"workspace": workspace_id, "profile": profile, "verdict": "running"}
+    )
+    if doc is None or not _aware(doc.start) <= now < _aware(doc.end):
+        return None
+    return doc
+
+
+async def _next_arm(exp: _ExperimentDoc) -> str:
+    """The arm with fewer of this experiment's daily drafts since its start; A on a tie."""
+    query = {
+        "workspace": exp.workspace,
+        "profile": exp.profile,
+        "experiment_id": str(exp.id),
+        "source": "daily",
+        "createdAt": {"$gte": exp.start},
+    }
+    count_a = await _IdeaDoc.find({**query, exp.variable: exp.arm_a}).count()
+    count_b = await _IdeaDoc.find({**query, exp.variable: exp.arm_b}).count()
+    return exp.arm_b if count_b < count_a else exp.arm_a
+
+
+async def create_experiment(
+    ctx: RequestContext, body: CreateExperimentRequest, profile_id: str | None = None
+) -> SocialExperimentResponse:
+    """Start an experiment. 404 without a profile, 409 while another one is running."""
+    body = CreateExperimentRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    profile = await _require_profile_doc(workspace_id, profile_id)
+    profile_key = str(profile.id)
+    running = await _ExperimentDoc.find_one(
+        {"workspace": workspace_id, "profile": profile_key, "verdict": "running"}
+    )
+    if running is not None:
+        raise ConflictError(
+            "social.experiment_running", "Close the running experiment before starting another"
+        )
+    start = body.start or datetime.now(UTC)
+    end = body.end or start + timedelta(days=EXPERIMENT_DAYS)
+    if end <= start:
+        raise ValidationError("social.experiment_window", "The experiment must end after it starts")
+    doc = _ExperimentDoc(
+        workspace=workspace_id,
+        profile=profile_key,
+        hypothesis=body.hypothesis,
+        variable=body.variable,
+        arm_a=body.arm_a,
+        arm_b=body.arm_b,
+        metric=body.metric,
+        keep_rule=body.keep_rule,
+        keep_threshold=body.keep_threshold,
+        min_posts_per_arm=body.min_posts_per_arm,
+        start=start,
+        end=end,
+    )
+    await doc.insert()
+    # no-event: Growth › Social has no realtime subscriber; the dashboard re-fetches.
+    return _experiment_response(doc)
+
+
+async def list_experiments(
+    ctx: RequestContext, profile_id: str | None = None
+) -> SocialExperimentListResponse:
+    workspace_id = _require_workspace(ctx)
+    profile = await _profile_doc(workspace_id, profile_id)
+    if profile is None:
+        return SocialExperimentListResponse(items=[])
+    docs = (
+        await _ExperimentDoc.find({"workspace": workspace_id, "profile": str(profile.id)})
+        .sort([("start", -1), ("_id", -1)])
+        .limit(EXPERIMENT_LIST_LIMIT)
+        .to_list()
+    )
+    return SocialExperimentListResponse(items=[_experiment_response(d) for d in docs])
+
+
+def _fmt(value: float | None) -> str:
+    return "no data" if value is None else f"{value:.2f}"
+
+
+def _close_learning(
+    doc: _ExperimentDoc, arms: list[dict[str, Any]], min_posts_met: bool
+) -> tuple[str, str]:
+    """The text and evidence of the learning a keep / no-difference close proposes."""
+    label = _VARIABLE_LABELS.get(doc.variable, doc.variable)
+    a, b = arms
+    if doc.verdict == "no_difference":
+        text = (
+            f'{label.capitalize()} "{doc.arm_a}" and "{doc.arm_b}" made no clear difference '
+            f"to {doc.metric} ({_fmt(a['metric_average'])} vs {_fmt(b['metric_average'])})."
+        )
+    else:
+        win, lose = (a, b) if doc.verdict == "keep_a" else (b, a)
+        text = (
+            f'Prefer {label} "{win["value"]}" over "{lose["value"]}": {doc.metric} '
+            f"{_fmt(win['metric_average'])} vs {_fmt(lose['metric_average'])}."
+        )
+    evidence = (
+        f"Experiment: {doc.hypothesis} Arm A {doc.arm_a}: {a['posts']} posts, average "
+        f"{_fmt(a['metric_average'])}. Arm B {doc.arm_b}: {b['posts']} posts, average "
+        f"{_fmt(b['metric_average'])}. Minimum {doc.min_posts_per_arm} posts per arm "
+        f"{'met' if min_posts_met else 'not met'}. Keep rule: {doc.keep_rule or 'none'} "
+        f"(threshold {doc.keep_threshold:g})."
+    )
+    return text[:MAX_LEARNING_CHARS], evidence[:MAX_EVIDENCE_CHARS]
+
+
+async def close_experiment(
+    ctx: RequestContext, experiment_id: str, body: CloseExperimentRequest
+) -> CloseExperimentResponse:
+    """Close a running experiment with a verdict. A keep or no-difference verdict proposes
+    one learning stating the result and its evidence; it is only ``proposed``."""
+    body = CloseExperimentRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_in_workspace(
+        _ExperimentDoc, workspace_id, experiment_id, "social_experiment"
+    )
+    if doc.verdict != "running":
+        raise ConflictError("social.experiment_closed", "This experiment is already closed")
+    doc.verdict = body.verdict
+    doc.closed_at = datetime.now(UTC)
+    await doc.save()
+    learning = None
+    if body.verdict != "stopped":
+        arms, met = await _experiment_arms(workspace_id, doc)
+        text, evidence = _close_learning(doc, arms, met)
+        learning = _LearningDoc(
+            workspace=workspace_id,
+            profile=doc.profile,
+            text=text,
+            evidence=evidence,
+            source_experiment=str(doc.id),
+        )
+        await learning.insert()
+    # no-event: Growth › Social has no realtime subscriber; the dashboard re-fetches.
+    return CloseExperimentResponse(
+        experiment=_experiment_response(doc),
+        learning=_learning_response(learning) if learning else None,
+    )
+
+
+# --- the weekly review ------------------------------------------------------------------
+
+
+async def _post_rows(
+    workspace_id: str, profile: _ProfileDoc, ideas: list[_IdeaDoc]
+) -> list[dict[str, Any]]:
+    """Review rows for published ideas: snapshot, clicks, rates and repo uniques."""
+    if not ideas:
+        return []
+    ids = [str(d.id) for d in ideas]
+    snaps: dict[str, list[PostMetrics]] = {}
+    for m in await _MetricDoc.find({"workspace": workspace_id, "idea": {"$in": ids}}).to_list():
+        snaps.setdefault(m.idea, []).append(
+            PostMetrics(
+                workspace_id=m.workspace,
+                idea_id=m.idea,
+                x_post_id=m.x_post_id,
+                age_bucket=m.age_bucket,
+                captured_at=_aware(m.captured_at),
+                **{k: getattr(m, k) for k in METRIC_FIELDS},
+            )
+        )
+    clicks = await link_clicks(workspace_id, ids)
+    days = [_aware(d.published_at).date() for d in ideas if d.published_at]
+    day_uniques: dict[str, int] = {}
+    repos = [r for r in profile.github_repos or () if is_repo_slug(r)]
+    if repos and days:
+        for row in await _RepoMetricDoc.find(
+            {
+                "workspace": workspace_id,
+                "repo": {"$in": repos},
+                "day": {
+                    "$gte": min(days).isoformat(),
+                    "$lt": (max(days) + timedelta(days=7)).isoformat(),
+                },
+            }
+        ).to_list():
+            day_uniques[row.day] = day_uniques.get(row.day, 0) + row.uniques
+    rows = []
+    for d in ideas:
+        idea_id = str(d.id)
+        published = _aware(d.published_at) if d.published_at else None
+        info = {
+            "idea_id": idea_id,
+            "hook": d.hook,
+            "format": d.format,
+            "pillar": d.pillar,
+            "hook_type": d.hook_type,
+            "experiment_id": d.experiment_id,
+            "published_url": d.published_url,
+            "published_at": iso_utc(published),
+        }
+        uniques = review.uniques_after(day_uniques, published.date()) if published else 0
+        rows.append(
+            review.post_row(
+                info, review.pick_snapshot(snaps.get(idea_id, [])), clicks.get(idea_id, 0), uniques
+            )
+        )
+    return rows
+
+
+async def _experiment_arms(
+    workspace_id: str, exp: _ExperimentDoc
+) -> tuple[list[dict[str, Any]], bool]:
+    profile = await _require_profile_doc(workspace_id, exp.profile)
+    ideas = await _IdeaDoc.find(
+        {
+            "workspace": workspace_id,
+            "profile": exp.profile,
+            "experiment_id": str(exp.id),
+            "published_at": {"$ne": None},
+        }
+    ).to_list()
+    rows = await _post_rows(workspace_id, profile, ideas)
+    return review.arm_table(
+        rows,
+        variable=exp.variable,
+        arm_a=exp.arm_a,
+        arm_b=exp.arm_b,
+        metric=exp.metric,
+        min_posts_per_arm=exp.min_posts_per_arm,
+    )
+
+
+async def get_review(
+    ctx: RequestContext, profile_id: str | None = None, week: str | None = None
+) -> SocialReviewResponse:
+    """One ISO week (UTC) of a profile's published X posts, read on request. Pure read."""
+    workspace_id = _require_workspace(ctx)
+    try:
+        monday = review.parse_week(week, datetime.now(UTC).date())
+    except ValueError as exc:
+        raise ValidationError("social.week_invalid", str(exc)) from exc
+    profile = await _profile_doc(workspace_id, profile_id)
+    if profile is None:
+        raise NotFound("social_profile")
+    profile_key = str(profile.id)
+    start = datetime.combine(monday, datetime.min.time(), tzinfo=UTC)
+    end = start + timedelta(days=7)
+    ideas = (
+        await _IdeaDoc.find(
+            {
+                "workspace": workspace_id,
+                "profile": profile_key,
+                "published_at": {"$gte": start, "$lt": end},
+            }
+        )
+        .sort([("published_at", 1), ("_id", 1)])
+        .to_list()
+    )
+    rows = await _post_rows(workspace_id, profile, ideas)
+    exp = await _ExperimentDoc.find_one(
+        {"workspace": workspace_id, "profile": profile_key, "verdict": "running"}
+    )
+    if exp is None:
+        exp = (
+            await _ExperimentDoc.find({"workspace": workspace_id, "profile": profile_key})
+            .sort([("start", -1), ("_id", -1)])
+            .first_or_none()
+        )
+    experiment = None
+    if exp is not None:
+        arms, met = await _experiment_arms(workspace_id, exp)
+        experiment = {"experiment": _experiment_response(exp), "arms": arms, "min_posts_met": met}
+    repos = [r for r in profile.github_repos or () if is_repo_slug(r)]
+    repo_rows = []
+    if repos:
+        repo_rows = [
+            (r.repo, r.day, r.stars, r.uniques)
+            for r in await _RepoMetricDoc.find(
+                {
+                    "workspace": workspace_id,
+                    "repo": {"$in": repos},
+                    "day": {
+                        "$gte": (monday - timedelta(days=7)).isoformat(),
+                        "$lt": (monday + timedelta(days=7)).isoformat(),
+                    },
+                }
+            ).to_list()
+        ]
+    return SocialReviewResponse.model_validate(
+        {
+            "profile_id": profile_key,
+            "week": review.week_label(monday),
+            "start": iso_utc(start),
+            "end": iso_utc(end),
+            "posts": rows,
+            "tags": review.tag_averages(rows),
+            "experiment": experiment,
+            "repos": review.repo_weeks(repo_rows, monday),
+        }
+    )
+
+
+# --- learnings ---------------------------------------------------------------------------
+
+
+async def list_learnings(
+    ctx: RequestContext, profile_id: str | None = None, status: str | None = None
+) -> SocialLearningListResponse:
+    workspace_id = _require_workspace(ctx)
+    profile = await _profile_doc(workspace_id, profile_id)
+    if profile is None:
+        return SocialLearningListResponse(items=[])
+    query: dict[str, Any] = {"workspace": workspace_id, "profile": str(profile.id)}
+    if status is not None:
+        query["status"] = status
+    docs = (
+        await _LearningDoc.find(query)
+        .sort([("createdAt", -1), ("_id", -1)])
+        .limit(LEARNING_LIST_LIMIT)
+        .to_list()
+    )
+    return SocialLearningListResponse(items=[_learning_response(d) for d in docs])
+
+
+_LEARNING_MOVES = {("proposed", "approved"), ("proposed", "retired"), ("approved", "retired")}
+
+
+async def update_learning(
+    ctx: RequestContext, learning_id: str, body: UpdateLearningRequest
+) -> SocialLearningResponse:
+    """Edit a proposed or approved learning's text, and/or approve, reject or retire it.
+    Status only moves forward; 409 otherwise, and on any edit of a retired learning."""
+    body = UpdateLearningRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_in_workspace(_LearningDoc, workspace_id, learning_id, "social_learning")
+    if doc.status == "retired":
+        raise ConflictError("social.learning_retired", "A retired learning cannot change")
+    if body.status is not None and body.status != doc.status:
+        if (doc.status, body.status) not in _LEARNING_MOVES:
+            raise ConflictError(
+                "social.learning_transition", f"A {doc.status} learning cannot become {body.status}"
+            )
+        doc.status = body.status
+        now = datetime.now(UTC)
+        if body.status == "approved":
+            doc.approved_at = now
+        else:
+            doc.retired_at = now
+    if body.text is not None:
+        doc.text = body.text
+    await doc.save()
+    # no-event: Growth › Social has no realtime subscriber; the dashboard re-fetches.
+    return _learning_response(doc)
+
+
+async def propose_learnings(
+    ctx: RequestContext, profile_id: str | None = None, week: str | None = None
+) -> SocialLearningListResponse:
+    """One model call over the week's review: at most three learnings stored as
+    ``proposed``. Any with an em or en dash is dropped. 503 with no ``LearningsFn``."""
+    from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
+    from pocketpaw_ee.cloud.growth.social import learnings as social_learnings
+    from pocketpaw_ee.cloud.growth.social.ideas import has_dash
+
+    workspace_id = _require_workspace(ctx)
+    learnings_fn = social_learnings.resolve_learnings_fn()
+    if learnings_fn is None:
+        raise CloudError(
+            503, "social.learnings_unavailable", "Learnings are not configured on this deployment"
+        )
+    data = await get_review(ctx, profile_id, week)
+    profile = await _require_profile_doc(workspace_id, data.profile_id)
+    try:
+        proposed = await learnings_fn(_profile_to_domain(profile), data.model_dump())
+    except ResearchUnavailable as exc:
+        raise CloudError(502, "social.learnings_failed", f"Learnings failed: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("growth social: learnings run failed ws=%s", workspace_id, exc_info=True)
+        raise CloudError(502, "social.learnings_failed", "The learnings run failed") from exc
+    docs: list[_LearningDoc] = []
+    for item in list(proposed)[:MAX_PROPOSED_LEARNINGS]:
+        text = item.text.strip()[:MAX_LEARNING_CHARS]
+        evidence = item.evidence.strip()[:MAX_EVIDENCE_CHARS]
+        if not text or has_dash(text) or has_dash(evidence):
+            continue
+        doc = _LearningDoc(
+            workspace=workspace_id, profile=data.profile_id, text=text, evidence=evidence
+        )
+        await doc.insert()
+        docs.append(doc)
+    # no-event: Growth › Social has no realtime subscriber; the dashboard re-fetches.
+    return SocialLearningListResponse(items=[_learning_response(d) for d in docs])
 
 
 # ---------------------------------------------------------------------------
@@ -2666,6 +3165,13 @@ async def latest_metrics(workspace_id: str, idea_ids: list[str]) -> dict[str, Po
 
 
 __all__ = [
+    "close_experiment",
+    "create_experiment",
+    "get_review",
+    "list_experiments",
+    "list_learnings",
+    "propose_learnings",
+    "update_learning",
     "create_tracked_link",
     "link_base_url",
     "link_clicks",
