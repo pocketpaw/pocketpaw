@@ -151,5 +151,68 @@
     "tests": [
       "tests/cloud/growth/social/test_draft_check.py"
     ]
+  },
+  {
+    "label": "daily drafts: the weekly quota is ignored",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    left_week = doc.weekly_post_quota - await _daily_count(",
+    "replace": "    left_week = 99 - await _daily_count(",
+    "tests": [
+      "tests/cloud/growth/social/test_daily_drafts.py"
+    ]
+  },
+  {
+    "label": "daily drafts: the two-a-day cap is lifted",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    left_today = DAILY_DRAFTS_PER_DAY - await _daily_count(",
+    "replace": "    left_today = 21 - await _daily_count(",
+    "tests": [
+      "tests/cloud/growth/social/test_daily_drafts.py"
+    ]
+  },
+  {
+    "label": "daily drafts: the sweep drafts for inactive products",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        {\"active\": True, \"onboarding_completed_at\": {\"$ne\": None}}",
+    "replace": "        {\"onboarding_completed_at\": {\"$ne\": None}}",
+    "tests": [
+      "tests/cloud/growth/social/test_daily_drafts.py"
+    ]
+  },
+  {
+    "label": "daily drafts: the quota count reads another workspace's rows",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            \"workspace\": workspace_id,\n            \"profile\": profile,\n            \"source\": \"daily\",\n            \"createdAt\": {\"$gte\": since},",
+    "replace": "            \"profile\": profile,\n            \"source\": \"daily\",\n            \"createdAt\": {\"$gte\": since},",
+    "tests": [
+      "tests/cloud/growth/social/test_daily_drafts.py"
+    ]
+  },
+  {
+    "label": "daily drafts: check_draft's verdict is ignored",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            problems = social_ideas.check_draft(idea, source_text)",
+    "replace": "            problems: list[str] = []",
+    "tests": [
+      "tests/cloud/growth/social/test_daily_drafts.py"
+    ]
+  },
+  {
+    "label": "daily drafts: drafts are stored approved, not new",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "            platform=\"x\",\n            status=\"new\",\n            source=\"daily\",",
+    "replace": "            platform=\"x\",\n            status=\"approved\",\n            source=\"daily\",",
+    "tests": [
+      "tests/cloud/growth/social/test_daily_drafts.py"
+    ]
+  },
+  {
+    "label": "daily drafts: no retry after dropped drafts",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    for _attempt in range(2):  # the first call, then at most one retry",
+    "replace": "    for _attempt in range(1):  # the first call, then at most one retry",
+    "tests": [
+      "tests/cloud/growth/social/test_daily_drafts.py"
+    ]
   }
 ]
