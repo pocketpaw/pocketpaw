@@ -367,5 +367,23 @@
     "tests": [
       "tests/cloud/growth/social/test_replies.py"
     ]
+  },
+  {
+    "label": "reply cards: replies.py imports the publishing client",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
+    "find": "from pocketpaw_ee.cloud.growth.social.x_api import resolve_x_read_fn\n",
+    "replace": "from pocketpaw_ee.cloud.growth.social.x_api import resolve_x_read_fn\nfrom pocketpaw_ee.cloud.growth.social.postiz import PostizClient  # noqa: F401\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: x_api grows a public write function",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/x_api.py",
+    "find": "_X_READ_FN: XReadFn | None = None\n",
+    "replace": "def x_write() -> None:\n    return None\n\n\n_X_READ_FN: XReadFn | None = None\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
   }
 ]

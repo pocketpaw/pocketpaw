@@ -156,7 +156,7 @@ async def find_candidates(
     own = {h.lower() for h in own_handles if h}
     seen = set(skip_ids)
     out: list[ReplyCandidate] = []
-    for query in [*handle_queries(handles), *(q + _NO_REPOSTS for q in queries)]:
+    for query in [*handle_queries(handles), *(f"({q}){_NO_REPOSTS}" for q in queries)]:
         for c in _parse_search(await read(workspace_id, SEARCH_PATH, {**base, "query": query})):
             if c.post_id in seen or c.author.lower() in own:
                 continue

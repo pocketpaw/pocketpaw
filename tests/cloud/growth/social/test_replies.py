@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import ast
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -161,12 +161,23 @@ def _ast_names(path: str) -> tuple[set[str], set[str]]:
     return modules, names
 
 
-_WRITE_NAMES = {"post", "put", "patch", "delete", "create_post", "PostizClient", "resolve_postiz"}
+_WRITE_NAMES = {
+    "post",
+    "put",
+    "patch",
+    "delete",
+    "request",
+    "send",
+    "create_post",
+    "PostizClient",
+    "resolve_postiz",
+}
+_HTTP_MODULES = ("postiz", "httpx", "requests", "aiohttp", "urllib.request", "http.client")
 
 
 def test_replies_module_imports_no_posting_client():
     modules, names = _ast_names(social_replies.__file__)
-    assert not [m for m in modules if "postiz" in m or "httpx" in m or m.endswith("service")]
+    assert not [m for m in modules if any(h in m for h in _HTTP_MODULES) or m.endswith("service")]
     assert not names & _WRITE_NAMES
     assert "postiz" not in Path(social_replies.__file__).read_text().lower()
 
@@ -174,11 +185,9 @@ def test_replies_module_imports_no_posting_client():
 def test_x_api_exposes_no_write_function():
     _, names = _ast_names(x_api.__file__)
     assert not names & _WRITE_NAMES
-    public = {n for n in dir(x_api) if callable(getattr(x_api, n)) and not n.startswith("_")}
-    assert public - {"XReadFn", "x_read", "set_x_read_fn", "resolve_x_read_fn"} <= {
-        "Awaitable",
-        "Callable",
-    } | {n for n in public if getattr(getattr(x_api, n), "__module__", "") != x_api.__name__}
+    tree = ast.parse(Path(x_api.__file__).read_text())
+    defs = {n.name for n in tree.body if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)}
+    assert defs == {"x_read", "set_x_read_fn", "resolve_x_read_fn"}
 
 
 # --- the sweep ----------------------------------------------------------------------------
@@ -195,7 +204,7 @@ async def test_sweep_drafts_cards_from_one_batched_handle_read_plus_each_query(w
     queries = [c[2]["query"] for c in x.calls]
     assert queries == [
         "(from:alice OR from:bob OR from:carol) -is:retweet",
-        "csv export -is:retweet",
+        "(csv export) -is:retweet",
     ]
     assert all(c[0] == "w1" and c[1] == "/2/tweets/search/recent" for c in x.calls)
     assert x.calls[0][2]["start_time"].endswith("Z")
@@ -497,4 +506,3 @@ async def test_worker_job_installs_the_production_fns_when_missing(monkeypatch):
     assert await worker.social_reply_drafts({}) == {"profiles": 0}
     assert seen["drafts"] is social_replies.agent_draft_replies
     assert seen["changes"] is social_changes.github_changes
-    assert datetime.now(UTC)  # keeps UTC import meaningful for fake_run's signature
