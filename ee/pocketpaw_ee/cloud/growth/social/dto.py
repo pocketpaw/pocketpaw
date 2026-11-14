@@ -13,7 +13,11 @@
 # anything that is not then an http(s) URL with a host is a 422. ``category``
 # is free text up to 60 characters. ``active`` / ``weekly_post_quota`` (0..21) /
 # ``github_repos`` (at most 5 ``owner/name`` slugs, trimmed and deduped in
-# order) reset to their defaults on an explicit ``null``. Idea edits need at
+# order) reset to their defaults on an explicit ``null``; so do the reply-card
+# settings: ``reply_watch_handles`` (at most 30 X handles, leading ``@`` dropped,
+# deduped ignoring case), ``reply_queries`` (at most 5, each trimmed and at most
+# 200 characters) and ``reply_cards_per_day`` (1..25, default 15). A reply edit
+# needs ``draft_text`` (at most 280 characters) and/or ``status``. Idea edits need at
 # least one field; script beats and hashtags are trimmed and capped. A post
 # names 1–10 distinct accounts and trimmed, non-empty content of at most 10000
 # characters, plus up to 25 thread parts held to the same rule and up to 4
@@ -35,6 +39,11 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     DEFAULT_IDEA_COUNT,
     MAX_IDEA_COUNT,
     MAX_POST_IMAGES,
+    MAX_REPLY_CARDS_PER_DAY,
+    MAX_REPLY_CHARS,
+    MAX_REPLY_QUERIES,
+    MAX_REPLY_QUERY_CHARS,
+    MAX_REPLY_WATCH_HANDLES,
     AnalysisStatus,
     BusinessModel,
     IdeaFormat,
@@ -42,6 +51,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     IdeaStatus,
     MonthlyRevenue,
     Platform,
+    ReplyStatus,
     SocialRole,
     TeamSize,
 )
@@ -53,6 +63,7 @@ MAX_GITHUB_REPOS = 5
 MAX_WEEKLY_POST_QUOTA = 21
 SCHEDULE_SKEW = timedelta(minutes=1)
 _GITHUB_REPO = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
+_X_HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 
 _AnalysisItem = Annotated[str, StringConstraints(max_length=300)]
 _AnalysisList = Annotated[list[_AnalysisItem], Field(max_length=MAX_ANALYSIS_ITEMS)]
@@ -141,6 +152,9 @@ class UpsertProfileRequest(BaseModel):
     active: bool | None = None
     weekly_post_quota: int | None = Field(default=None, ge=0, le=MAX_WEEKLY_POST_QUOTA)
     github_repos: list[str] | None = None
+    reply_watch_handles: list[str] | None = None
+    reply_queries: list[str] | None = None
+    reply_cards_per_day: int | None = Field(default=None, ge=1, le=MAX_REPLY_CARDS_PER_DAY)
 
     @field_validator("github_repos")
     @classmethod
@@ -156,6 +170,38 @@ class UpsertProfileRequest(BaseModel):
                 out.append(slug)
         if len(out) > MAX_GITHUB_REPOS:
             raise ValueError(f"at most {MAX_GITHUB_REPOS} github_repos")
+        return out
+
+    @field_validator("reply_watch_handles")
+    @classmethod
+    def _handles(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        out: list[str] = []
+        for raw in v:
+            handle = raw.strip().lstrip("@")
+            if not _X_HANDLE.match(handle):
+                raise ValueError("reply_watch_handles items must be X handles (A-Z, 0-9, _)")
+            if handle.lower() not in {h.lower() for h in out}:
+                out.append(handle)
+        if len(out) > MAX_REPLY_WATCH_HANDLES:
+            raise ValueError(f"at most {MAX_REPLY_WATCH_HANDLES} reply_watch_handles")
+        return out
+
+    @field_validator("reply_queries")
+    @classmethod
+    def _queries(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        out: list[str] = []
+        for raw in v:
+            query = raw.strip()
+            if len(query) > MAX_REPLY_QUERY_CHARS:
+                raise ValueError(f"reply_queries items are at most {MAX_REPLY_QUERY_CHARS} chars")
+            if query and query not in out:
+                out.append(query)
+        if len(out) > MAX_REPLY_QUERIES:
+            raise ValueError(f"at most {MAX_REPLY_QUERIES} reply_queries")
         return out
 
     @field_validator("website")
@@ -224,6 +270,9 @@ class SocialProfileResponse(BaseModel):
     active: bool
     weekly_post_quota: int
     github_repos: list[str]
+    reply_watch_handles: list[str]
+    reply_queries: list[str]
+    reply_cards_per_day: int
 
 
 class GenerateIdeasRequest(BaseModel):
@@ -303,6 +352,47 @@ class SocialIdeaResponse(BaseModel):
 
 class SocialIdeaListResponse(BaseModel):
     items: list[SocialIdeaResponse]
+
+
+class ReplyDraftResponse(BaseModel):
+    id: str
+    workspace_id: str
+    profile_id: str
+    platform: Literal["x"]
+    target_post_id: str
+    target_url: str
+    author: str
+    context: str
+    draft_text: str
+    intent_url: str
+    why: str
+    status: ReplyStatus
+    created_at: str | None
+    updated_at: str | None
+
+
+class ReplyDraftListResponse(BaseModel):
+    items: list[ReplyDraftResponse]
+
+
+class UpdateReplyRequest(BaseModel):
+    """Edit a reply card's text and/or record what was done with it."""
+
+    draft_text: str | None = Field(default=None, min_length=1, max_length=MAX_REPLY_CHARS)
+    status: ReplyStatus | None = None
+
+    @field_validator("draft_text")
+    @classmethod
+    def _strip_text(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("draft_text must not be blank")
+        return v.strip() if v is not None else v
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> UpdateReplyRequest:
+        if self.draft_text is None and self.status is None:
+            raise ValueError("provide draft_text and/or status")
+        return self
 
 
 class SocialProfileListResponse(BaseModel):

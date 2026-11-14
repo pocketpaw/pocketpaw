@@ -1042,6 +1042,9 @@ class TestGrowthRouteRbac:
             ("POST", "/growth/social/media"): "growth.manage",
             ("POST", "/growth/social/posts"): "growth.manage",
             ("GET", "/growth/social/posts"): "growth.read",
+            ("GET", "/growth/social/replies"): "growth.read",
+            ("POST", "/growth/social/replies/draft"): "growth.write",
+            ("PATCH", "/growth/social/replies/{reply_id}"): "growth.write",
         }
 
         seen: dict[tuple[str, str], str] = {}
