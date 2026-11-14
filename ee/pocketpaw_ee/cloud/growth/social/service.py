@@ -1,8 +1,8 @@
 # ee/pocketpaw_ee/cloud/growth/social/service.py — the Growth › Social service
 # and the SOLE owner of the SocialProfile, SocialIdea, SocialPulse,
-# SocialPostizOrg, SocialPostMetric and SocialLink doc writes (service-is-repo;
-# the import-linter "Growth" contract keeps the routers, DTOs, domain, the
-# agents and the Postiz client off the doc classes).
+# SocialPostizOrg, SocialPostMetric, RepoMetric, ReplyDraft and SocialLink doc
+# writes (service-is-repo; the import-linter "Growth" contract keeps the routers,
+# DTOs, domain, the agents and the Postiz client off the doc classes).
 #
 # Tenancy: every read filters on ``workspace``; malformed, missing and
 # cross-tenant profile and idea ids raise the same NotFound so existence never
@@ -40,6 +40,13 @@
 # dropped. Survivors are stored ``new`` with ``source="daily"`` and a
 # ``suggested_at`` slot from ``DAILY_SLOT_HOURS_UTC``. Nothing here posts.
 #
+# Repo metrics: ``run_repo_metrics`` (the 06:30 UTC cron, a cross-workspace read)
+# stores one ``RepoMetric`` per (workspace, repo, yesterday UTC) for every active
+# profile's valid ``github_repos``, reading each repo once per run. A rerun the same
+# day refreshes that day's row in place, never a second row, and keeps traffic
+# an earlier run stored when its own traffic read failed. ``repo_metrics`` reads
+# one workspace's rows back.
+#
 # Accounts: each profile's social accounts live in its own Postiz org, created
 # on the first connect and never on a read. Its API key is stored encrypted, and
 # the key is checked before Postiz is called, because org creation is not
@@ -64,6 +71,9 @@
 # Post metrics: ``run_post_metrics`` (the 07:00 UTC cron) records each X idea's
 # live post from Postiz, then stores append-only X metric snapshots at 1/3/7/28
 # days through the capped, read-only ``x_api`` reader. Nothing here writes to X.
+# Reply cards: ``run_reply_drafts`` (05:45 UTC cron) and ``draft_replies`` draft X
+# replies via ``replies``; a person posts each by hand from its intent link.
+#
 # Tracked links: when a post names an idea and its body holds a URL, the first
 # URL becomes a SocialLink (reused per idea + URL), leaves the body, and goes out
 # as a ``Link: <base>/<code>`` thread part appended after the others (a post that
@@ -79,7 +89,7 @@ import hashlib
 import logging
 import re
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -105,12 +115,14 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     MEDIA_EXTENSIONS,
     METRIC_AGE_BUCKETS,
     POSTABLE_PLATFORMS,
+    REPLY_CARDS_PER_DAY_DEFAULT,
     SOCIAL_ACCOUNT_PLATFORMS,
     VIDEO_PLATFORMS,
     AnalysisOutcome,
     AnalysisRequest,
     GeneratedIdea,
     PostMetrics,
+    ReplyCard,
     SocialAnalysis,
     SocialIdea,
     SocialProfile,
@@ -138,6 +150,8 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     PulseSourceModel,
     PulseThemeResponse,
     RefreshPulseRequest,
+    ReplyDraftListResponse,
+    ReplyDraftResponse,
     ScheduleIdeasRequest,
     SocialAccountListResponse,
     SocialAccountPlatformResponse,
@@ -156,6 +170,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     SocialPulseResponse,
     TelegramConnectCode,
     UpdateIdeaRequest,
+    UpdateReplyRequest,
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
 )
@@ -174,6 +189,13 @@ from pocketpaw_ee.cloud.growth.social.postiz import (
     resolve_postiz,
     resolve_telegram_updates,
 )
+from pocketpaw_ee.cloud.growth.social.repo_metrics import (
+    RepoSnapshot,
+    is_repo_slug,
+    resolve_repo_metrics_fn,
+)
+from pocketpaw_ee.cloud.models.reply_draft import ReplyDraft as _ReplyDoc
+from pocketpaw_ee.cloud.models.repo_metric import RepoMetric as _RepoMetricDoc
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as _IdeaDoc
 from pocketpaw_ee.cloud.models.social_link import SocialLink as _LinkDoc
 from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric as _MetricDoc
@@ -258,6 +280,9 @@ def _profile_to_domain(doc: _ProfileDoc) -> SocialProfile:
         active=doc.active,
         weekly_post_quota=doc.weekly_post_quota,
         github_repos=tuple(doc.github_repos or ()),
+        reply_watch_handles=tuple(doc.reply_watch_handles or ()),
+        reply_queries=tuple(doc.reply_queries or ()),
+        reply_cards_per_day=doc.reply_cards_per_day,
     )
 
 
@@ -288,6 +313,9 @@ def _profile_to_response(p: SocialProfile) -> SocialProfileResponse:
         active=p.active,
         weekly_post_quota=p.weekly_post_quota,
         github_repos=list(p.github_repos),
+        reply_watch_handles=list(p.reply_watch_handles),
+        reply_queries=list(p.reply_queries),
+        reply_cards_per_day=p.reply_cards_per_day,
     )
 
 
@@ -426,6 +454,13 @@ def _apply_upsert(doc: _ProfileDoc, body: UpsertProfileRequest) -> None:
         doc.weekly_post_quota = 5 if body.weekly_post_quota is None else body.weekly_post_quota
     if "github_repos" in sent:
         doc.github_repos = list(body.github_repos or [])
+    if "reply_watch_handles" in sent:
+        doc.reply_watch_handles = list(body.reply_watch_handles or [])
+    if "reply_queries" in sent:
+        doc.reply_queries = list(body.reply_queries or [])
+    if "reply_cards_per_day" in sent:
+        per_day = body.reply_cards_per_day
+        doc.reply_cards_per_day = REPLY_CARDS_PER_DAY_DEFAULT if per_day is None else per_day
 
 
 def _apply_analysis_edit(doc: _ProfileDoc, patch: AnalysisPatch) -> None:
@@ -826,6 +861,102 @@ async def run_daily_drafts(now: datetime | None = None) -> dict[str, int]:
     return counts
 
 
+_SNAPSHOT_FIELDS = (
+    "stars",
+    "forks",
+    "views",
+    "uniques",
+    "clones",
+    "clone_uniques",
+    "traffic_available",
+)
+
+
+async def _store_metric(workspace_id: str, snap: RepoSnapshot, now: datetime) -> None:
+    """Write the day's row, or refresh it in place when a rerun finds one. A rerun that
+    could not read traffic keeps the traffic an earlier run stored and refreshes the rest."""
+    fields: dict[str, Any] = {k: getattr(snap, k) for k in _SNAPSHOT_FIELDS}
+    fields["referrers"] = [dict(r) for r in snap.referrers]
+    fields["captured_at"] = now
+    key = {"workspace": workspace_id, "repo": snap.repo, "day": snap.day}
+    doc = await _RepoMetricDoc.find_one(key)
+    if doc is None:
+        try:
+            await _RepoMetricDoc(**key, **fields).insert()
+            return
+        except DuplicateKeyError:  # a parallel run inserted it first
+            doc = await _RepoMetricDoc.find_one(key)
+            if doc is None:
+                raise
+    if doc.traffic_available and not snap.traffic_available:
+        fields = {k: fields[k] for k in ("stars", "forks", "captured_at")}
+    for k, v in fields.items():
+        setattr(doc, k, v)
+    await doc.save()
+
+
+async def run_repo_metrics(now: datetime | None = None) -> dict[str, int]:
+    """Store yesterday's (UTC) stars, forks and traffic for every active profile's repos.
+
+    One row per (workspace, repo, day); a rerun refreshes it. Each repo is read once per run
+    and one failing repo never stops the rest. Runs from the growth worker's cron."""
+    now = _aware(now or datetime.now(UTC))
+    counts = {"repos": 0, "stored": 0, "failed": 0}
+    metrics_fn = resolve_repo_metrics_fn()
+    if metrics_fn is None:
+        return counts
+    day = (now - timedelta(days=1)).date().isoformat()
+    # global-read: the sweep runs for every workspace; each doc carries its own tenant.
+    docs = await _ProfileDoc.find({"active": True}).to_list()
+    pairs: set[tuple[str, str]] = set()
+    for doc in docs:
+        for repo in doc.github_repos or ():
+            if is_repo_slug(repo):
+                pairs.add((doc.workspace, repo))
+            else:
+                logger.warning("repo metrics: skipping invalid repo slug %r", repo)
+    counts["repos"] = len(pairs)
+    snaps: dict[str, RepoSnapshot] = {}
+    for workspace_id, repo in sorted(pairs):
+        try:
+            if repo not in snaps:
+                snaps[repo] = await metrics_fn(repo, day=day)
+            await _store_metric(workspace_id, snaps[repo], now)
+            counts["stored"] += 1
+        except Exception:  # noqa: BLE001
+            counts["failed"] += 1
+            logger.warning("repo metrics: %s failed", repo, exc_info=True)
+    logger.info(
+        "repo metrics: day=%s repos=%d stored=%d failed=%d",
+        day,
+        counts["repos"],
+        counts["stored"],
+        counts["failed"],
+    )
+    # no-event: Growth › Social has no realtime subscriber; readers re-fetch.
+    return counts
+
+
+async def repo_metrics(workspace_id: str, repo: str, since: date) -> list[RepoSnapshot]:
+    """This workspace's stored days for one repo from ``since`` (inclusive), oldest first."""
+    docs = (
+        await _RepoMetricDoc.find(
+            {"workspace": workspace_id, "repo": repo, "day": {"$gte": since.isoformat()}}
+        )
+        .sort("day")
+        .to_list()
+    )
+    return [
+        RepoSnapshot(
+            repo=d.repo,
+            day=d.day,
+            referrers=tuple(d.referrers),
+            **{k: getattr(d, k) for k in _SNAPSHOT_FIELDS},
+        )
+        for d in docs
+    ]
+
+
 async def draft_daily(ctx: RequestContext, profile_id: str | None = None) -> SocialIdeaListResponse:
     """Run today's X drafting for one profile now. 503 with no ideas writer, 409 before
     onboarding or while the profile is inactive, 502 when the run fails; an empty list when
@@ -860,6 +991,292 @@ async def draft_daily(ctx: RequestContext, profile_id: str | None = None) -> Soc
         raise CloudError(502, "social.ideas_failed", "The drafting run failed") from exc
     # no-event: Growth › Social has no realtime subscriber; Blitz re-fetches.
     return SocialIdeaListResponse(items=[_idea_to_response(i) for i in made])
+
+
+# ---------------------------------------------------------------------------
+# Reply cards (X): drafted only; a person posts each by hand from its intent link
+# ---------------------------------------------------------------------------
+
+REPLY_LIST_LIMIT = 200
+# Cards made this recently block their post from a second card before any insert
+# (the posts read are at most 24 h old); the unique index is the backstop.
+REPLY_SEEN_WINDOW = timedelta(days=2)
+
+
+def _reply_to_domain(doc: _ReplyDoc) -> ReplyCard:
+    return ReplyCard(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        profile_id=doc.profile,
+        target_post_id=doc.target_post_id,
+        platform=doc.platform,
+        target_url=doc.target_url,
+        author=doc.author,
+        context=doc.context,
+        draft_text=doc.draft_text,
+        intent_url=doc.intent_url,
+        why=doc.why,
+        status=doc.status,
+        created_at=doc.createdAt,
+        updated_at=doc.updatedAt,
+    )
+
+
+def _reply_to_response(r: ReplyCard) -> ReplyDraftResponse:
+    return ReplyDraftResponse(
+        id=r.id,
+        workspace_id=r.workspace_id,
+        profile_id=r.profile_id,
+        platform=r.platform,
+        target_post_id=r.target_post_id,
+        target_url=r.target_url,
+        author=r.author,
+        context=r.context,
+        draft_text=r.draft_text,
+        intent_url=r.intent_url,
+        why=r.why,
+        status=r.status,
+        created_at=iso_utc(r.created_at),
+        updated_at=iso_utc(r.updated_at),
+    )
+
+
+async def _own_x_handles(workspace_id: str, profile: str) -> set[str]:
+    """The profile's connected X usernames (a read of its Postiz org), lowercased, so
+    its own posts get no card. Empty when Postiz is off or the read fails."""
+    postiz = resolve_postiz()
+    if postiz is None:
+        return set()
+    try:
+        org = await _postiz_org(workspace_id, profile)
+        rows = await postiz.list_integrations(decrypt(org.api_key_enc)) if org else []
+    except Exception:  # noqa: BLE001
+        logger.warning("reply drafts: reading connected accounts failed", exc_info=True)
+        return set()
+    return {
+        str(r["profile"]).lstrip("@").lower()
+        for r in rows
+        if isinstance(r, dict) and r.get("identifier") == "x" and r.get("profile")
+    }
+
+
+async def _draft_replies(
+    workspace_id: str, profile_id: str, now: datetime
+) -> tuple[list[_ReplyDoc], int]:
+    """The reply cards this profile is owed right now, and how many drafts were dropped."""
+    from pocketpaw_ee.cloud.growth.social import replies as social_replies
+
+    draft_fn = social_replies.resolve_reply_draft_fn()
+    doc = await _require_profile_doc(workspace_id, profile_id)
+    handles = list(doc.reply_watch_handles or ())
+    queries = list(doc.reply_queries or ())
+    if draft_fn is None or not doc.active or doc.onboarding_completed_at is None:
+        return [], 0
+    if not (handles or queries):
+        return [], 0
+    profile_key = str(doc.id)
+    scope = {"workspace": workspace_id, "profile": profile_key}
+    left = (
+        doc.reply_cards_per_day
+        - await _ReplyDoc.find({**scope, "createdAt": {"$gte": _day_start(now)}}).count()
+    )
+    if left <= 0:
+        return [], 0
+    since_seen = now - REPLY_SEEN_WINDOW
+    recent = await _ReplyDoc.find({**scope, "createdAt": {"$gte": since_seen}}).to_list()
+    candidates = await social_replies.find_candidates(
+        workspace_id,
+        handles,
+        queries,
+        now=now,
+        own_handles=await _own_x_handles(workspace_id, profile_key),
+        skip_ids={d.target_post_id for d in recent},
+        limit=left,
+    )
+    if not candidates:
+        return [], 0
+
+    changes = await _gather_changes(list(doc.github_repos or ()), now - timedelta(hours=24))
+    generated = await draft_fn(_profile_to_domain(doc), candidates, changes=changes)
+    targets = {c.post_id: c for c in candidates}
+    docs: list[_ReplyDoc] = []
+    dropped = 0
+    for reply in generated:
+        target = targets.pop(reply.post_id, None)
+        if target is None:
+            continue
+        source = social_replies.reply_source_text(target.text, changes)
+        if social_replies.check_reply(reply.text, source):
+            dropped += 1
+            continue
+        card = _ReplyDoc(
+            workspace=workspace_id,
+            profile=profile_key,
+            platform="x",
+            target_post_id=target.post_id,
+            target_url=target.url,
+            author=target.author,
+            context=target.text,
+            draft_text=reply.text,
+            intent_url=social_replies.intent_url(target.post_id, reply.text),
+            why=reply.why,
+            status="new",
+            source_text=source,
+        )
+        try:
+            await card.insert()
+        except DuplicateKeyError:
+            continue  # another run carded this post first; a post never gets two cards
+        docs.append(card)
+    if dropped:
+        logger.info("reply drafts: dropped %d draft(s) for profile=%s", dropped, profile_key)
+    return docs, dropped
+
+
+async def draft_replies_for_profile(
+    workspace_id: str, profile_id: str, *, now: datetime | None = None
+) -> list[ReplyCard]:
+    """Draft this profile's reply cards now, within its ``reply_cards_per_day``.
+
+    Skips (returns []) an inactive or not-yet-onboarded profile and one with no watch
+    handle or query. Drafts that break ``replies.check_reply`` are dropped. Every card
+    is stored as ``new``: nothing here posts."""
+    docs, _ = await _draft_replies(workspace_id, profile_id, now or datetime.now(UTC))
+    # no-event: Growth › Social has no realtime subscriber; the reply list re-fetches.
+    return [_reply_to_domain(d) for d in docs]
+
+
+async def run_reply_drafts(now: datetime | None = None) -> dict[str, int]:
+    """Draft reply cards for every active, onboarded profile with a watch handle or query.
+    One failing profile never stops the rest. Runs from the growth worker's cron."""
+    from pocketpaw_ee.cloud.growth.social import replies as social_replies
+
+    now = now or datetime.now(UTC)
+    counts = {"profiles": 0, "drafted": 0, "dropped": 0, "failed": 0}
+    if social_replies.resolve_reply_draft_fn() is None:
+        return counts
+    # global-read: the sweep runs for every workspace; each doc carries its own tenant.
+    docs = await _ProfileDoc.find(
+        {
+            "active": True,
+            "onboarding_completed_at": {"$ne": None},
+            "$or": [
+                {"reply_watch_handles.0": {"$exists": True}},
+                {"reply_queries.0": {"$exists": True}},
+            ],
+        }
+    ).to_list()
+    counts["profiles"] = len(docs)
+    for doc in docs:
+        try:
+            made, dropped = await _draft_replies(doc.workspace, str(doc.id), now)
+            counts["drafted"] += len(made)
+            counts["dropped"] += dropped
+        except Exception:  # noqa: BLE001
+            counts["failed"] += 1
+            logger.warning("reply drafts: profile=%s failed", doc.id, exc_info=True)
+    logger.info(
+        "reply drafts: profiles=%d drafted=%d dropped=%d failed=%d",
+        counts["profiles"],
+        counts["drafted"],
+        counts["dropped"],
+        counts["failed"],
+    )
+    # no-event: Growth › Social has no realtime subscriber; the reply list re-fetches.
+    return counts
+
+
+async def draft_replies(
+    ctx: RequestContext, profile_id: str | None = None
+) -> ReplyDraftListResponse:
+    """Draft this product's reply cards now. 503 with no reply drafter, 404 with no
+    profile, 409 before onboarding, while inactive or with nothing to watch, 502 when
+    the run fails; an empty list once today's cards are used up."""
+    from pocketpaw_ee.cloud.growth.researcher import ResearchUnavailable
+    from pocketpaw_ee.cloud.growth.social import replies as social_replies
+
+    workspace_id = _require_workspace(ctx)
+    if social_replies.resolve_reply_draft_fn() is None:
+        raise CloudError(
+            503, "social.replies_unavailable", "Reply drafting is not configured on this deployment"
+        )
+    doc = await _require_profile_doc(workspace_id, profile_id)
+    if doc.onboarding_completed_at is None:
+        raise ConflictError(
+            "social.onboarding_incomplete", "Finish the Social setup before drafting replies"
+        )
+    if not doc.active:
+        raise ConflictError(
+            "social.profile_inactive", "Turn this product on before drafting its replies"
+        )
+    if not (doc.reply_watch_handles or doc.reply_queries):
+        raise ConflictError(
+            "social.no_reply_sources", "Add an X handle to watch or a search to draft replies"
+        )
+    try:
+        made = await draft_replies_for_profile(workspace_id, str(doc.id))
+    except ResearchUnavailable as exc:
+        raise CloudError(502, "social.replies_failed", f"Reply drafting failed: {exc}") from exc
+    except CloudError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reply drafts: run failed for ws=%s", workspace_id, exc_info=True)
+        raise CloudError(502, "social.replies_failed", "The reply drafting run failed") from exc
+    # no-event: Growth › Social has no realtime subscriber; the reply list re-fetches.
+    return ReplyDraftListResponse(items=[_reply_to_response(r) for r in made])
+
+
+async def list_replies(
+    ctx: RequestContext, *, profile_id: str | None = None, status: str | None = None
+) -> ReplyDraftListResponse:
+    """One profile's reply cards, newest first, optionally one status."""
+    workspace_id = _require_workspace(ctx)
+    doc = await _profile_doc(workspace_id, profile_id)
+    if doc is None:
+        return ReplyDraftListResponse(items=[])
+    reply_query: dict[str, Any] = {"workspace": workspace_id, "profile": str(doc.id)}
+    if status is not None:
+        reply_query["status"] = status
+    docs = (
+        await _ReplyDoc.find(reply_query)
+        .sort([("createdAt", -1), ("_id", -1)])
+        .limit(REPLY_LIST_LIMIT)
+        .to_list()
+    )
+    return ReplyDraftListResponse(items=[_reply_to_response(_reply_to_domain(d)) for d in docs])
+
+
+async def update_reply(
+    ctx: RequestContext, reply_id: str, body: UpdateReplyRequest
+) -> ReplyDraftResponse:
+    """Edit a card's text (re-checked, intent link rebuilt; 422 with the reasons when it
+    breaks the rules) and/or set its status. A malformed or foreign id is a 404."""
+    from pocketpaw_ee.cloud.growth.social import replies as social_replies
+
+    body = UpdateReplyRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+    try:
+        oid = PydanticObjectId(reply_id)
+    except Exception as exc:  # noqa: BLE001
+        raise NotFound("social_reply", reply_id) from exc
+    doc = await _ReplyDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise NotFound("social_reply", reply_id)
+    if body.draft_text is not None:
+        reasons = social_replies.check_reply(body.draft_text, doc.source_text or doc.context)
+        if reasons:
+            raise ValidationError(
+                "social.reply_rejected",
+                "That reply breaks the drafting rules: " + "; ".join(reasons),
+                {"reasons": reasons},
+            )
+        doc.draft_text = body.draft_text
+        doc.intent_url = social_replies.intent_url(doc.target_post_id, body.draft_text)
+    if body.status is not None:
+        doc.status = body.status
+    await doc.save()
+    # no-event: Growth › Social has no realtime subscriber; the reply list re-fetches.
+    return _reply_to_response(_reply_to_domain(doc))
 
 
 async def update_idea(
@@ -2266,6 +2683,8 @@ __all__ = [
     "draft_daily",
     "draft_daily_for_profile",
     "run_daily_drafts",
+    "run_repo_metrics",
+    "repo_metrics",
     "get_profile",
     "list_ideas",
     "update_idea",

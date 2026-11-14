@@ -306,6 +306,132 @@
     ]
   },
   {
+    "label": "repo metrics: the read drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "{\"workspace\": workspace_id, \"repo\": repo, \"day\": {\"$gte\": since.isoformat()}}",
+    "replace": "{\"repo\": repo, \"day\": {\"$gte\": since.isoformat()}}",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
+  },
+  {
+    "label": "repo metrics: the sweep reads inactive profiles too",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "await _ProfileDoc.find({\"active\": True}).to_list()",
+    "replace": "await _ProfileDoc.find({}).to_list()",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
+  },
+  {
+    "label": "repo metrics: the sweep stores today's partial day, not yesterday",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "day = (now - timedelta(days=1)).date().isoformat()",
+    "replace": "day = now.date().isoformat()",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
+  },
+  {
+    "label": "repo metrics: traffic picks the first entry up to the day, not that day's",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/repo_metrics.py",
+    "find": "str(row.get(\"timestamp\") or \"\")[:10] == day",
+    "replace": "str(row.get(\"timestamp\") or \"\")[:10] <= day",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
+  },
+  {
+    "label": "repo metrics: a traffic 403 fails the repo instead of keeping stars",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/repo_metrics.py",
+    "find": "except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:",
+    "replace": "except (ValueError, TypeError, AttributeError) as exc:",
+    "tests": [
+      "tests/cloud/growth/social/test_repo_metrics.py"
+    ]
+  },
+  {
+    "label": "reply cards: drafts skip check_draft (dashes and invented numbers stored)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        if social_replies.check_reply(reply.text, source):\n",
+    "replace": "        if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: the per-day card cap is ignored",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        limit=left,\n",
+    "replace": "        limit=100,\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: the list drops its tenant filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    reply_query: dict[str, Any] = {\"workspace\": workspace_id, \"profile\": str(doc.id)}\n",
+    "replace": "    reply_query: dict[str, Any] = {}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: a card patch reads across workspaces",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    doc = await _ReplyDoc.find_one({\"_id\": oid, \"workspace\": workspace_id})\n",
+    "replace": "    doc = await _ReplyDoc.find_one({\"_id\": oid})\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: a hand edit skips the drafting rules",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "        reasons = social_replies.check_reply(body.draft_text, doc.source_text or doc.context)\n",
+    "replace": "        reasons = []\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: the intent link text is not url-encoded",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
+    "find": "quote(text[:MAX_REPLY_CHARS], safe='')",
+    "replace": "text[:MAX_REPLY_CHARS]",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: our own posts get cards",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
+    "find": "            if c.post_id in seen or c.author.lower() in own:\n",
+    "replace": "            if c.post_id in seen:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: replies.py imports the publishing client",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/replies.py",
+    "find": "from pocketpaw_ee.cloud.growth.social.x_api import resolve_x_read_fn\n",
+    "replace": "from pocketpaw_ee.cloud.growth.social.x_api import resolve_x_read_fn\nfrom pocketpaw_ee.cloud.growth.social.postiz import PostizClient  # noqa: F401\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
+    "label": "reply cards: x_api grows a public write function",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/x_api.py",
+    "find": "_X_READ_FN: XReadFn | None = None\n",
+    "replace": "def x_write() -> None:\n    return None\n\n\n_X_READ_FN: XReadFn | None = None\n",
+    "tests": [
+      "tests/cloud/growth/social/test_replies.py"
+    ]
+  },
+  {
     "label": "tracked links: the preview-bot filter is removed (bot fetches count as clicks)",
     "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
     "find": "    if not is_preview_bot(user_agent):\n",
