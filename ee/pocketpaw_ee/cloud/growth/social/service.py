@@ -1,8 +1,8 @@
 # ee/pocketpaw_ee/cloud/growth/social/service.py — the Growth › Social service
-# and the SOLE owner of the SocialProfile, SocialIdea, SocialPulse and
-# SocialPostizOrg doc writes (service-is-repo; the import-linter "Growth"
-# contract keeps the router, DTOs, domain, the agents and the Postiz client off
-# the doc classes).
+# and the SOLE owner of the SocialProfile, SocialIdea, SocialPulse,
+# SocialPostizOrg, SocialPostMetric and SocialLink doc writes (service-is-repo;
+# the import-linter "Growth" contract keeps the routers, DTOs, domain, the
+# agents and the Postiz client off the doc classes).
 #
 # Tenancy: every read filters on ``workspace``; malformed, missing and
 # cross-tenant profile and idea ids raise the same NotFound so existence never
@@ -64,6 +64,14 @@
 # Post metrics: ``run_post_metrics`` (the 07:00 UTC cron) records each X idea's
 # live post from Postiz, then stores append-only X metric snapshots at 1/3/7/28
 # days through the capped, read-only ``x_api`` reader. Nothing here writes to X.
+# Tracked links: when a post names an idea and its body holds a URL, the first
+# URL becomes a SocialLink (reused per idea + URL), leaves the body, and goes out
+# as a ``Link: <base>/<code>`` thread part appended after the others (a post that
+# is only the URL keeps the tracked link in its body). Postiz posts parts as
+# replies (X and Slack both have ``comment()`` at v2.25.0). Posts with no idea
+# or no URL are sent unchanged. ``record_click`` (the public ``/go/{code}``)
+# checks the code pattern before reading, ``$inc``s the total and the UTC day
+# bucket unless a preview bot asked, and stores nothing about the requester.
 
 from __future__ import annotations
 
