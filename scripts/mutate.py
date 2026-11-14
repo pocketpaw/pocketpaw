@@ -27,7 +27,9 @@ test did not care. This script makes that a command instead of a habit.
 WHAT IT DOES. Applies each mutation in a plan, runs the named tests, restores
 the file, and reports CAUGHT (tests failed — good) or ESCAPED (tests passed —
 the mutation is a bug your suite would ship). Exit code is non-zero if anything
-escaped, so it works in CI.
+escaped or pytest could not run, so it works in CI. Each distinct test-target
+list must pass on the original code before any mutation is applied. Only pytest
+exit code 1 counts as caught; other non-zero exits abort with pytest's output.
 
     uv run python scripts/mutate.py --plan tests/mutations/entity_rows.json
     uv run python scripts/mutate.py --plan <plan> --only "positional"
@@ -95,6 +97,8 @@ PLAN FORMAT — a JSON list of objects:
 ``find`` must appear EXACTLY ONCE in the file. An anchor that matches twice is
 rejected rather than guessed at, because replacing the wrong one produces a
 meaningless result that still looks like a pass.
+``tests`` must be a non-empty list of non-blank strings, including for a single
+test target. ``--validate`` checks this shape without collecting or running tests.
 """
 
 from __future__ import annotations
@@ -271,6 +275,13 @@ class Mutation:
         self.file: Path = REPO_ROOT / raw["file"]
         self.find: str = raw["find"]
         self.replace: str = raw["replace"]
+        tests = raw["tests"]
+        if (
+            not isinstance(tests, list)
+            or not tests
+            or any(not isinstance(target, str) or not target.strip() for target in tests)
+        ):
+            raise SystemExit(f"{self.label}: tests must be a non-empty list of non-blank strings")
         self.tests: list[str] = list(raw["tests"])
 
 
@@ -435,14 +446,20 @@ def _load_plan(path: Path) -> list[Mutation]:
     return [Mutation(item, i) for i, item in enumerate(raw)]
 
 
-def _run_tests(targets: list[str]) -> bool:
-    """True when the tests PASS. Mutation testing wants this to be False."""
+def _run_tests(targets: list[str], *, label: str, baseline: bool = False) -> bool:
+    """Return pass/fail only for valid runs; a baseline must pass."""
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", *targets, "-q", "--no-header", "-p", "no:cacheprovider"],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
     )
+    if proc.returncode not in (0, 1) or (baseline and proc.returncode != 0):
+        phase = "baseline" if baseline else "mutation"
+        raise SystemExit(
+            f"{label}: {phase} pytest exited with code {proc.returncode}; "
+            f"aborting without a mutation verdict.\n{proc.stdout}\n{proc.stderr}"
+        )
     return proc.returncode == 0
 
 
@@ -677,13 +694,20 @@ def main() -> int:
 
     escaped: list[str] = []
     try:
+        checked_targets: set[tuple[str, ...]] = set()
+        for m in mutations:
+            targets = tuple(m.tests)
+            if targets not in checked_targets:
+                _run_tests(m.tests, label=m.label, baseline=True)
+                checked_targets.add(targets)
+
         for m in mutations:
             original = originals[m.file]
             mutated = original.decode("utf-8").replace(m.find, m.replace, 1)
             _write_marker(args.plan, f"{m.label}  [{m.file.relative_to(REPO_ROOT)}]")
             try:
                 m.file.write_bytes(mutated.encode("utf-8"))
-                passed = _run_tests(m.tests)
+                passed = _run_tests(m.tests, label=m.label)
             finally:
                 m.file.write_bytes(original)
 
