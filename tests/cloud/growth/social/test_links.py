@@ -337,23 +337,29 @@ async def test_a_refused_post_mints_no_link(w1, postiz, link_base):
     assert postiz.posted == []
 
 
-async def test_the_mounted_app_redirects_anonymously_and_logs_nothing(mongo_db):
-    """Through mount_cloud's real middleware stack (CSRF, request log, auth bridge):
-    no session needed, and the request log, which keeps IP and UA, skips /go."""
-    from pocketpaw_ee.cloud import mount_cloud
-    from pocketpaw_ee.cloud._core.request_log import shutdown_request_log
+async def test_the_cloud_middleware_lets_it_through_and_logs_nothing(mongo_db):
+    """Through mount_cloud's middleware stack (CSRF, request log, auth bridge, in
+    its order): no session needed, and the request log, which keeps IP and UA,
+    skips /go. mount_cloud itself is not called: it installs global agent seams."""
+    from pocketpaw_ee.cloud._core.csrf import CSRFMiddleware
+    from pocketpaw_ee.cloud._core.ee_auth_bridge import EEAuthBridgeMiddleware
+    from pocketpaw_ee.cloud._core.request_log import RequestLogMiddleware, shutdown_request_log
 
     app = FastAPI()
-    mount_cloud(app)
+    app.include_router(links_router.router, prefix="/api/v1")
+    app.add_api_route("/api/v1/ping", lambda: {"ok": True})
+    app.add_middleware(EEAuthBridgeMiddleware)
+    app.add_middleware(RequestLogMiddleware)
+    app.add_middleware(CSRFMiddleware)
     link = await _link()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
         resp = await client.get(f"/api/v1/go/{link.code}", headers=HUMAN)
         assert resp.status_code == 302
         assert resp.headers["location"] == TARGET
-        # Control: an ordinary API request IS logged, so an empty log means skipped.
-        await client.get(f"{BASE}/profiles", headers=HUMAN)
+        # Control: an ordinary API request IS logged, so a missing row means skipped.
+        assert (await client.get("/api/v1/ping", headers=HUMAN)).status_code == 200
     await shutdown_request_log()
     paths = [row["path"] async for row in mongo_db["request_logs"].find({})]
-    assert paths and not [p for p in paths if p.startswith("/api/v1/go")], paths
+    assert paths == ["/api/v1/ping"]
     assert (await SocialLink.get(link.id)).clicks == 1
