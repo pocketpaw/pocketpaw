@@ -534,6 +534,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
     from pocketpaw_ee.cloud.fabric_ingest.router import router as fabric_ingest_router
     from pocketpaw_ee.cloud.growth.router import router as growth_router
+    from pocketpaw_ee.cloud.growth.social.links_router import router as growth_links_router
     from pocketpaw_ee.cloud.growth.social.router import router as growth_social_router
     from pocketpaw_ee.cloud.growth.webhooks import router as growth_webhooks_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
@@ -632,6 +633,11 @@ def mount_cloud(app: FastAPI) -> None:
     # ``prospect.opted_in`` and unlock business-initiated sends to a number
     # that never consented.
     app.include_router(growth_webhooks_router, prefix="/api/v1")
+    # Growth › Social tracked links — GET /api/v1/go/{code}, the 302 behind the
+    # link posted in the reply under each post. Public on purpose (the clicker
+    # has no session): strict code pattern before any DB read, redirects only to
+    # the stored URL, bare 404 otherwise, nothing about the requester stored.
+    app.include_router(growth_links_router, prefix="/api/v1")
     # Sites control plane — RFC 12 Task 3.5. POST /sites/publish (compile +
     # smoke-gate + WfP deploy), GET /sites, and the custom-domain pair
     # (Cloudflare for SaaS) the Domains panel drives.

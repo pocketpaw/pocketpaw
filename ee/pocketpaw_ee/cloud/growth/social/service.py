@@ -1,8 +1,8 @@
 # ee/pocketpaw_ee/cloud/growth/social/service.py — the Growth › Social service
 # and the SOLE owner of the SocialProfile, SocialIdea, SocialPulse,
-# SocialPostizOrg and RepoMetric doc writes (service-is-repo; the import-linter "Growth"
-# contract keeps the router, DTOs, domain, the agents and the Postiz client off
-# the doc classes).
+# SocialPostizOrg, SocialPostMetric, RepoMetric, ReplyDraft and SocialLink doc
+# writes (service-is-repo; the import-linter "Growth" contract keeps the routers,
+# DTOs, domain, the agents and the Postiz client off the doc classes).
 #
 # Tenancy: every read filters on ``workspace``; malformed, missing and
 # cross-tenant profile and idea ids raise the same NotFound so existence never
@@ -73,6 +73,15 @@
 # days through the capped, read-only ``x_api`` reader. Nothing here writes to X.
 # Reply cards: ``run_reply_drafts`` (05:45 UTC cron) and ``draft_replies`` draft X
 # replies via ``replies``; a person posts each by hand from its intent link.
+#
+# Tracked links: when a post names an idea and its body holds a URL, the first
+# URL becomes a SocialLink (reused per idea + URL), leaves the body, and goes out
+# as a ``Link: <base>/<code>`` thread part appended after the others (a post that
+# is only the URL keeps the tracked link in its body). Postiz posts parts as
+# replies (X and Slack both have ``comment()`` at v2.25.0). Posts with no idea
+# or no URL are sent unchanged. ``record_click`` (the public ``/go/{code}``)
+# checks the code pattern before reading, ``$inc``s the total and the UTC day
+# bucket unless a preview bot asked, and stores nothing about the requester.
 
 from __future__ import annotations
 
@@ -95,6 +104,7 @@ from pocketpaw_ee.cloud._core.errors import (
     NotFound,
     ValidationError,
 )
+from pocketpaw_ee.cloud._core.public_url import public_base_url
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.growth.social.changes import Change, changes_text, resolve_changes_fn
 from pocketpaw_ee.cloud.growth.social.domain import (
@@ -164,6 +174,13 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     UpsertProfileRequest,
     UsePulseSuggestionRequest,
 )
+from pocketpaw_ee.cloud.growth.social.links import (
+    extract_urls,
+    is_preview_bot,
+    is_web_url,
+    new_code,
+    valid_code,
+)
 from pocketpaw_ee.cloud.growth.social.metrics import METRIC_FIELDS
 from pocketpaw_ee.cloud.growth.social.postiz import (
     PostizClient,
@@ -180,6 +197,7 @@ from pocketpaw_ee.cloud.growth.social.repo_metrics import (
 from pocketpaw_ee.cloud.models.reply_draft import ReplyDraft as _ReplyDoc
 from pocketpaw_ee.cloud.models.repo_metric import RepoMetric as _RepoMetricDoc
 from pocketpaw_ee.cloud.models.social_idea import SocialIdea as _IdeaDoc
+from pocketpaw_ee.cloud.models.social_link import SocialLink as _LinkDoc
 from pocketpaw_ee.cloud.models.social_post_metric import SocialPostMetric as _MetricDoc
 from pocketpaw_ee.cloud.models.social_postiz_org import SocialPostizOrg as _PostizOrgDoc
 from pocketpaw_ee.cloud.models.social_profile import SocialProfile as _ProfileDoc
@@ -2212,6 +2230,91 @@ def _check_post_media(body: CreateSocialPostRequest) -> bool:
     return "video" in kinds
 
 
+LINK_ROUTE = "/api/v1/go"
+_LINE_SPACES = re.compile(r"[ \t]+")
+
+
+def link_base_url() -> str:
+    """``POCKETPAW_GROWTH_LINK_BASE_URL``, else the public base + the mounted route."""
+    from pocketpaw.config import get_settings
+
+    base = (get_settings().growth_link_base_url or "").strip().rstrip("/")
+    return base or f"{public_base_url()}{LINK_ROUTE}"
+
+
+async def create_tracked_link(
+    workspace_id: str, profile: str, idea: str, target_url: str
+) -> _LinkDoc:
+    """The idea's tracked link for ``target_url``, reused when it already exists."""
+    if not is_web_url(target_url):
+        raise ValidationError("social.link_url_invalid", "Only http(s) links can be tracked.")
+    found = await _LinkDoc.find_one(
+        {"workspace": workspace_id, "idea": idea, "target_url": target_url}
+    )
+    if found is not None:
+        return found
+    for _ in range(5):
+        try:
+            # no-event: Growth › Social has no realtime subscriber; links are read with ideas.
+            return await _LinkDoc(
+                code=new_code(),
+                workspace=workspace_id,
+                profile=profile,
+                idea=idea,
+                target_url=target_url,
+            ).insert()
+        except DuplicateKeyError:
+            continue
+    raise ConflictError("social.link_code_taken", "Could not mint a short link, try again.")
+
+
+async def record_click(
+    code: str, user_agent: str | None, now: datetime | None = None
+) -> str | None:
+    """The stored target for ``code`` (None when unknown). Counts the click unless a
+    preview bot made it. Nothing about the requester is stored."""
+    if not valid_code(code):
+        return None
+    # global-read: the public short code is the only key a click carries; it names one link.
+    doc = await _LinkDoc.find_one({"code": code})
+    if doc is None:
+        return None
+    if not is_preview_bot(user_agent):
+        day = (now or datetime.now(UTC)).astimezone(UTC).strftime("%Y-%m-%d")
+        # no-event: a click counter; nothing subscribes.
+        await _LinkDoc.find_one({"_id": doc.id}).update(
+            {"$inc": {"clicks": 1, f"clicks_by_day.{day}": 1}}
+        )
+    return doc.target_url
+
+
+async def link_clicks(workspace_id: str, idea_ids: list[str]) -> dict[str, int]:
+    """Total tracked-link clicks per idea, within ``workspace_id`` only."""
+    totals: dict[str, int] = {}
+    for link in await _LinkDoc.find(
+        {"workspace": workspace_id, "idea": {"$in": idea_ids}}
+    ).to_list():
+        totals[link.idea] = totals.get(link.idea, 0) + link.clicks
+    return totals
+
+
+async def _track_first_link(
+    workspace_id: str, profile: str, idea: str, content: str, parts: list[str]
+) -> tuple[str, list[str]]:
+    """Swap the post's first URL for a tracked link posted as a reply part."""
+    urls = extract_urls(content)
+    if not urls:
+        return content, parts
+    link = await create_tracked_link(workspace_id, profile, idea, urls[0])
+    tracked = f"{link_base_url()}/{link.code}"
+    lines = content.replace(urls[0], "", 1).split("\n")
+    text = "\n".join(_LINE_SPACES.sub(" ", line).strip() for line in lines).strip()
+    if not text:
+        # The post was only the link: keep it in the body, tracked.
+        return tracked, parts
+    return text, [*parts, f"Link: {tracked}"]
+
+
 async def create_post(
     ctx: RequestContext, profile_id: str | None, body: CreateSocialPostRequest
 ) -> CreateSocialPostResponse:
@@ -2242,8 +2345,13 @@ async def create_post(
                 f"Pick a channel to post to in {_platform_label(platform)}.",
             )
         platforms[target.account_id] = platform
+    content, parts = body.content, list(body.parts)
+    if idea is not None:
+        content, parts = await _track_first_link(
+            workspace_id, str(profile.id), str(idea.id), content, parts
+        )
     media = [{"id": m.id, "path": m.path} for m in body.media]
-    thread = [{"content": part, "image": []} for part in body.parts]
+    thread = [{"content": part, "image": []} for part in parts]
     skipped = {a for a, p in platforms.items() if has_video and p not in VIDEO_PLATFORMS}
     posts = []
     for target in body.targets:
@@ -2251,7 +2359,7 @@ async def create_post(
         settings: dict[str, Any] = {"__type": platform, **POST_SETTINGS.get(platform, {})}
         if target.channel:
             settings["channel"] = target.channel
-        first = {"content": body.content, "image": [] if target.account_id in skipped else media}
+        first = {"content": content, "image": [] if target.account_id in skipped else media}
         posts.append(
             {
                 "integration": {"id": target.account_id},
@@ -2538,6 +2646,10 @@ async def latest_metrics(workspace_id: str, idea_ids: list[str]) -> dict[str, Po
 
 
 __all__ = [
+    "create_tracked_link",
+    "link_base_url",
+    "link_clicks",
+    "record_click",
     "latest_metrics",
     "run_post_metrics",
     "check_telegram",

@@ -10696,6 +10696,47 @@ local (`127.0.0.1` URLs) or Cloudflare R2 only.
 | 404 | `social_profile.not_found` | No profile (or an unknown `profile_id`). |
 | 502 | `social.accounts_upstream` | Postiz failed or answered something unexpected. |
 
+#### Tracked links — `GET /api/v1/go/{code}`
+
+Clicks per 1k views is the learning signal, so a post's link is counted with
+our own short redirect. When a post names an `idea_id` and its `content`
+holds an http(s) URL, the first URL is turned into a tracked link
+(`<base>/<code>`, one per idea and URL, reused on repost), taken out of the
+post body, and sent as an extra thread part, `Link: <base>/<code>`, after any
+other parts. If the post was nothing but the URL, the tracked link stays in the
+body instead. A post with no `idea_id`, or no URL, is sent exactly as before.
+
+`<base>` is `POCKETPAW_GROWTH_LINK_BASE_URL` when set (it must reach the route
+below, e.g. `https://api.example.com/api/v1/go`, or a short host proxied
+there); otherwise `POCKETPAW_PUBLIC_BASE_URL` + `/api/v1/go`.
+
+`GET /api/v1/go/{code}` is public: no session, no license gate, no RBAC.
+
+- The code must match `^[A-Za-z0-9_-]{7,8}$` before anything is read; codes
+  are 8 url-safe characters from `secrets`.
+- A known code answers `302` to the URL stored with it, `Cache-Control:
+  no-store`. The request's query string is never passed on, and nothing but a
+  stored URL is ever a redirect target.
+- An unknown or malformed code is a bare `404` with no body.
+- A click adds 1 to the link's `clicks` and to that UTC day's
+  `clicks_by_day["YYYY-MM-DD"]`, atomically. Link-preview bots and crawlers
+  (Twitterbot, facebookexternalhit, LinkedInBot, Slackbot, Discordbot,
+  TelegramBot, WhatsApp, Googlebot, bingbot, Applebot, or any user agent
+  containing `bot`, `crawler`, `spider` or `preview`) and requests with no user
+  agent are redirected but not counted.
+- Nothing about the requester is stored: no IP, user agent or referrer.
+- Rate limiting is left to the proxy in front (Traefik on Coolify).
+
+Why a reply works: at Postiz v2.25.0, `POST /public/v1/posts` stores every
+`value` entry after the first as a child post (`posts.repository.ts`,
+`createOrUpdatePost`), and the post workflow (`post.workflow.v1.1.2.ts`) posts
+the children as comments when the provider has `comment()`
+(`post.activity.ts`, `isCommentable`). The X provider's `comment()` posts each
+one as a reply (`in_reply_to_tweet_id`); Slack's posts a thread reply. Two
+settings keep the link intact: we send `shortLink: false`, so Postiz does not
+rewrite it, and Postiz must run without `STRIP_LINKS_FROM_X_POSTS`, which would
+strip links from X replies too.
+
 ## Growth — the agent surface (`pocketpaw_growth` MCP)
 
 The chat agent on the `/growth` rail reaches the same service layer through

@@ -1193,6 +1193,8 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.social.postiz",
     "pocketpaw_ee.cloud.growth.social.x_api",
     "pocketpaw_ee.cloud.growth.social.metrics",
+    "pocketpaw_ee.cloud.growth.social.links",
+    "pocketpaw_ee.cloud.growth.social.links_router",
     "pocketpaw_ee.cloud.growth.social.replies",
 ]
 forbidden_modules = [
@@ -1206,6 +1208,7 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.social_postiz_org",
     "pocketpaw_ee.cloud.models.repo_metric",
     "pocketpaw_ee.cloud.models.social_post_metric",
+    "pocketpaw_ee.cloud.models.social_link",
     "pocketpaw_ee.cloud.models.reply_draft",
 ]
 

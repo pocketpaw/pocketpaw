@@ -430,5 +430,59 @@
     "tests": [
       "tests/cloud/growth/social/test_replies.py"
     ]
+  },
+  {
+    "label": "tracked links: the preview-bot filter is removed (bot fetches count as clicks)",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    if not is_preview_bot(user_agent):\n",
+    "replace": "    if True:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_links.py"
+    ]
+  },
+  {
+    "label": "tracked links: link_clicks drops its workspace filter",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    for link in await _LinkDoc.find(\n        {\"workspace\": workspace_id, \"idea\": {\"$in\": idea_ids}}\n",
+    "replace": "    for link in await _LinkDoc.find(\n        {\"idea\": {\"$in\": idea_ids}}\n",
+    "tests": [
+      "tests/cloud/growth/social/test_links.py"
+    ]
+  },
+  {
+    "label": "tracked links: the redirect passes the request's query string on",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/links_router.py",
+    "find": "    return RedirectResponse(target, status_code=302,",
+    "replace": "    if request.url.query:\n        target = f\"{target}&{request.url.query}\"\n    return RedirectResponse(target, status_code=302,",
+    "tests": [
+      "tests/cloud/growth/social/test_links.py"
+    ]
+  },
+  {
+    "label": "tracked links: an unknown code redirects instead of 404",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    doc = await _LinkDoc.find_one({\"code\": code})\n    if doc is None:\n        return None\n",
+    "replace": "    doc = await _LinkDoc.find_one({\"code\": code})\n    if doc is None:\n        return \"https://paw.test/\"\n",
+    "tests": [
+      "tests/cloud/growth/social/test_links.py"
+    ]
+  },
+  {
+    "label": "tracked links: a malformed code reaches the DB read",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/service.py",
+    "find": "    if not valid_code(code):\n        return None\n",
+    "replace": "",
+    "tests": [
+      "tests/cloud/growth/social/test_links.py"
+    ]
+  },
+  {
+    "label": "tracked links: the request log stops skipping /go (stores clickers' IP and UA)",
+    "file": "ee/pocketpaw_ee/cloud/_core/request_log.py",
+    "find": "_SKIP_PREFIXES = (\"/static/\", \"/uploads/\", \"/assets/\", \"/api/v1/go/\")",
+    "replace": "_SKIP_PREFIXES = (\"/static/\", \"/uploads/\", \"/assets/\")",
+    "tests": [
+      "tests/cloud/growth/social/test_links.py"
+    ]
   }
 ]

@@ -117,6 +117,8 @@ ROUTER_MODULES = [
     # Growth › Social, mounted beside the growth router. Every route carries
     # require_action_any_workspace("growth.*") and request_context.
     ("growth_social", "pocketpaw_ee.cloud.growth.social.router"),
+    # The public tracked-link redirect, GET /go/{code}; on the allowlist below.
+    ("growth_links", "pocketpaw_ee.cloud.growth.social.links_router"),
     # Added 2026-09-08. Both mounted while the coverage pin was being
     # written against an older base, so dev merged at 50 unaudited
     # routers against a pin of 48. Every route on both carries a session
@@ -229,6 +231,11 @@ ALLOWED_WITHOUT_ROUTE_GUARD: dict[str, str] = {
     # The gateway returns the buyer cross-site with no session (Razorpay POSTs).
     # Redirect-only, no state change; `to` is held to the CORS allowlist.
     "GET /billing/checkout/return/{outcome}": "post-checkout redirect to an allowlisted app",
+    "GET /go/{code}": (
+        "tracked-link redirect clicked by people with no session; code checked against "
+        "a strict pattern before any DB read, 302 only to the URL stored with the code, "
+        "bare 404 otherwise, nothing about the requester stored"
+    ),
     "POST /billing/checkout/return/{outcome}": "same, for gateways that return with a form POST",
     "GET /agents/backends": "static list of backend names",
     "GET /pockets/builtin-widgets": "static widget catalogue",
