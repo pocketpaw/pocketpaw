@@ -7,7 +7,9 @@
 # the network or a model.
 #
 # Covers: profile 404 then PUT upsert and partial update (omit leaves, null
-# clears, description merges, hand-edited analysis); enum and website 422s;
+# clears, description merges, hand-edited analysis); the product registry
+# fields (active, weekly_post_quota, github_repos) round-trip, survive an
+# omitting PUT and reset on null; enum, website and registry 422s;
 # analyze success / failure / raise / description-only / 422 with neither /
 # 404 / 503; complete 422 then success; ideas generate (409 before complete,
 # 503 with no writer, 502 on failure), list by status, patch status and copy;
@@ -271,11 +273,64 @@ async def test_put_creates_then_partially_updates(w1):
         {"analysis": {"hooks": ["h"] * 21}},
         {"analysis": {"benefits": ["x" * 301]}},
         {"analysis": {"summary": "x" * 2001}},
+        {"github_repos": ["not a slug"]},
+        {"github_repos": ["acme"]},
+        {"github_repos": [f"acme/r{i}" for i in range(6)]},
+        {"weekly_post_quota": 22},
+        {"weekly_post_quota": -1},
     ],
 )
 async def test_bad_values_are_422(w1, payload):
     resp = await w1.put(PROFILE, json=payload)
     assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_registry_fields_round_trip_and_survive_an_omitting_put(w1):
+    # Defaults on a fresh profile: never drafting by surprise.
+    fresh = (await w1.put(PROFILE, json={"company_name": "Acme"})).json()
+    assert (fresh["active"], fresh["weekly_post_quota"], fresh["github_repos"]) == (False, 5, [])
+
+    # Non-default values, including the falsy quota 0, a padded and a repeated repo.
+    resp = await w1.put(
+        PROFILE,
+        json={
+            "active": True,
+            "weekly_post_quota": 0,
+            "github_repos": [" acme/web ", "acme/api.v2", "acme/web"],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["active"] is True
+    assert body["weekly_post_quota"] == 0
+    assert body["github_repos"] == ["acme/web", "acme/api.v2"]
+    assert (await w1.get(PROFILE)).json() == body
+
+    # Omitting the fields leaves them as stored.
+    after = (await w1.put(PROFILE, json={"company_name": "Acme Two"})).json()
+    assert after["active"] is True
+    assert after["weekly_post_quota"] == 0
+    assert after["github_repos"] == ["acme/web", "acme/api.v2"]
+
+    # False is a value, not a clear; null resets to the default.
+    off = (await w1.put(PROFILE, json={"active": False, "weekly_post_quota": 21})).json()
+    assert (off["active"], off["weekly_post_quota"]) == (False, 21)
+    reset = (await w1.put(PROFILE, json={"weekly_post_quota": None, "github_repos": None})).json()
+    assert (reset["weekly_post_quota"], reset["github_repos"]) == (5, [])
+
+
+def test_profile_mappers_carry_the_registry_fields():
+    from pocketpaw_ee.cloud.growth.social import service as social_service
+    from pocketpaw_ee.cloud.models.social_profile import SocialProfile as ProfileDoc
+
+    doc = ProfileDoc(
+        workspace="w1", active=True, weekly_post_quota=12, github_repos=["acme/web", "acme/api"]
+    )
+    out = social_service._profile_to_response(social_service._profile_to_domain(doc))
+    assert out.active is True
+    assert out.weekly_post_quota == 12
+    assert out.github_repos == ["acme/web", "acme/api"]
 
 
 @pytest.mark.asyncio
