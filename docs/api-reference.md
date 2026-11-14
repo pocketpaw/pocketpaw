@@ -10232,6 +10232,9 @@ route `growth.write` (MEMBER).
 | `POST /api/v1/growth/social/profile/complete` | Finish onboarding: stamps `onboarding_completed_at`. |
 | `POST /api/v1/growth/social/ideas/generate` | Generate new post ideas (below). |
 | `POST /api/v1/growth/social/ideas/daily` | Run today's daily X drafting for one product now (below). |
+| `GET /api/v1/growth/social/replies` | One product's reply cards (`?profile_id=`, optional `status=new\|posted\|skipped`), newest first (below). |
+| `POST /api/v1/growth/social/replies/draft` | Draft this product's reply cards now (below). Never posts. |
+| `PATCH /api/v1/growth/social/replies/{reply_id}` | Edit a card's `draft_text` and/or set its `status` (below). |
 | `GET /api/v1/growth/social/ideas` | `{items}`, newest first. Optional `status=new\|approved\|skipped`, `platform=x\|reddit` and `source=manual\|daily`; omitted returns every idea. Any other value is a 422. Ideas stored before `source` existed count as `manual`. |
 | `PATCH /api/v1/growth/social/ideas/{idea_id}` | Review or edit one idea (below). `media_choice` (`poster` or `reel`) picks which media goes with the post when it has both. |
 | `POST /api/v1/growth/social/ideas/schedule` | `{items: [{idea_id, scheduled_at}], timezone?, duration_minutes?}`: date approved ideas and give each a `/calendar` event (calendar `growth-social`); rescheduling moves the same event. `409 social.idea_not_approved` if any is not approved. Nothing is posted. |
@@ -10290,7 +10293,10 @@ route `growth.write` (MEMBER).
   "characters": [],
   "active": false,
   "weekly_post_quota": 5,
-  "github_repos": ["acme/web"]
+  "github_repos": ["acme/web"],
+  "reply_watch_handles": ["somefounder"],
+  "reply_queries": ["csv export"],
+  "reply_cards_per_day": 15
 }
 ```
 
@@ -10298,7 +10304,9 @@ route `growth.write` (MEMBER).
 daily drafting job reads: a profile drafts only while `active` is `true`
 (default `false`, so an existing profile never starts drafting on its own),
 up to `weekly_post_quota` posts a week (default `5`), with `github_repos`
-(`owner/name`) as source material.
+(`owner/name`) as source material. `reply_watch_handles`, `reply_queries` and
+`reply_cards_per_day` drive the reply cards (below): whose X posts and which X
+searches to draft replies for, and at most how many cards a UTC day.
 
 Enums: `team_size` is `solo | 2_10 | 11_50 | 51_200 | 200_plus`;
 `monthly_revenue` is `pre_revenue | under_1k | 1k_10k | 10k_50k | 50k_250k |
@@ -10325,6 +10333,13 @@ inclusive. `github_repos` is a list of GitHub slugs (`owner/name`, matching
 dropped keeping the first, and more than 5 left after that is a 422, as is
 a malformed slug or a quota outside 0 to 21. An explicit `null` on any of
 the three resets it to its default (`false`, `5`, `[]`).
+
+`reply_watch_handles` is a list of X handles: each is trimmed, a leading `@`
+is dropped, it must match `^[A-Za-z0-9_]{1,15}$`, duplicates are dropped
+ignoring case, and more than 30 is a 422. `reply_queries` is a list of X
+search queries: each is trimmed (blank ones dropped, duplicates dropped), at
+most 200 characters, at most 5. `reply_cards_per_day` is an integer from 1 to
+25 (default `15`). An explicit `null` resets them to `[]`, `[]` and `15`.
 
 `analysis` is a hand edit from the Brand page, in the same shape as the
 response's `analysis`. Only the editable fields you send are replaced
@@ -10505,6 +10520,72 @@ per batch. `POCKETPAW_GROWTH_X_DAILY_READ_CAP` (default `100`, `0` disables) cap
 those reads per workspace per UTC day on the `growth_x_reads` daily meter; at
 the cap the remaining posts wait for the next run. One failing workspace never
 stops the others.
+
+### Reply cards — `/api/v1/growth/social/replies`
+
+Reply cards are drafted replies to other people's recent X posts. **They never
+post: a card's only output is an `intent_url`**
+(`https://x.com/intent/tweet?in_reply_to=<post id>&text=<urlencoded text>`) that
+a person opens and posts by hand. Nothing in this flow calls an X or Postiz
+write endpoint; a test walks `social/replies.py` and fails if a publishing
+client or an HTTP write appears there.
+
+```json
+{
+  "id": "66f0c0ffee0000000000abcd",
+  "workspace_id": "w1",
+  "profile_id": "66f0c0ffee0000000000a1b2",
+  "platform": "x",
+  "target_post_id": "1850000000000000000",
+  "target_url": "https://x.com/somefounder/status/1850000000000000000",
+  "author": "somefounder",
+  "context": "How do people export CSV from their dashboards?",
+  "draft_text": "Most tools hide it under Share, worth checking there first",
+  "intent_url": "https://x.com/intent/tweet?in_reply_to=1850000000000000000&text=Most%20tools...",
+  "why": "Answers the question directly.",
+  "status": "new",
+  "created_at": "2026-11-14T05:45:10+00:00",
+  "updated_at": "2026-11-14T05:45:10+00:00"
+}
+```
+
+`status` is `new | posted | skipped`. `context` is the target post's text, at
+most 500 characters. A post never gets two cards (unique per workspace,
+profile and post).
+
+**How candidates are found.** Only through the capped, read-only X reader
+(`POCKETPAW_GROWTH_X_BEARER_TOKEN`, `POCKETPAW_GROWTH_X_DAILY_READ_CAP`). The
+watch handles are packed into `(from:a OR from:b ...) -is:retweet` queries of at
+most 512 characters on `/2/tweets/search/recent`, so 30 handles cost two reads;
+each saved query is one more read. Reads cover the last 24 hours and stop once
+the day's card budget is filled. Posts that already have a card and posts by
+the product's own connected X account are skipped. Mentions of the connected
+account are not read yet (its X user id is not stored). A refused read (no
+token, the cap, an error) simply yields no cards.
+
+**How drafts are made.** One agent run drafts the batch (short, specific,
+helpful, not salesy, no links unless asked, no claimed numbers; it mentions the
+company only when that truly answers the post). Each draft must be at most 280
+characters and pass the same check as the daily drafts: no em or en dash, and no
+number that is not in the target post or the product's last 24 hours of GitHub
+changes. Drafts that fail are dropped.
+
+`POST /replies/draft?profile_id=` drafts now and returns the new cards: 503
+`social.replies_unavailable` with no drafter configured, 404 with no profile,
+409 `social.onboarding_incomplete`, `social.profile_inactive` or
+`social.no_reply_sources` (no watch handle or query), 502
+`social.replies_failed` when the run fails, and an empty list once today's
+`reply_cards_per_day` is used.
+
+`PATCH /replies/{reply_id}` takes `{draft_text?, status?}` (at least one).
+A new `draft_text` (at most 280 characters) is re-checked against the same
+source text the draft was made from; a dash or a new number is
+`422 social.reply_rejected` with `details.reasons`. On success the
+`intent_url` is rebuilt from the new text. A malformed or foreign id is a 404.
+
+The growth worker's `growth.social_reply_drafts` job runs the same drafting
+daily at 05:45 UTC for every active, onboarded product with a watch handle or
+query. One failing product never stops the others.
 
 ### `PATCH /api/v1/growth/social/ideas/{idea_id}`
 

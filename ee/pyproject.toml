@@ -1193,6 +1193,7 @@ source_modules = [
     "pocketpaw_ee.cloud.growth.social.postiz",
     "pocketpaw_ee.cloud.growth.social.x_api",
     "pocketpaw_ee.cloud.growth.social.metrics",
+    "pocketpaw_ee.cloud.growth.social.replies",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.prospect",
@@ -1205,6 +1206,7 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.social_postiz_org",
     "pocketpaw_ee.cloud.models.repo_metric",
     "pocketpaw_ee.cloud.models.social_post_metric",
+    "pocketpaw_ee.cloud.models.reply_draft",
 ]
 
 [[tool.importlinter.contracts]]

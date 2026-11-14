@@ -160,6 +160,8 @@ GROWTH_PULSE_SWEEP_JOB_NAME = "growth.pulse_sweep"
 GROWTH_SOCIAL_REPO_METRICS_JOB_NAME = "growth.social_repo_metrics"
 # The daily sweep that records published X posts and snapshots their metrics (reads only).
 GROWTH_SOCIAL_POST_METRICS_JOB_NAME = "growth.social_post_metrics"
+# The morning sweep that drafts X reply cards (drafts only; people post them by hand).
+GROWTH_SOCIAL_REPLY_DRAFTS_JOB_NAME = "growth.social_reply_drafts"
 # The morning X drafting sweep for every active Growth › Social product.
 GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME = "growth.social_daily_drafts"
 
@@ -426,6 +428,7 @@ __all__ = [
     "GROWTH_PULSE_SWEEP_JOB_NAME",
     "GROWTH_SOCIAL_REPO_METRICS_JOB_NAME",
     "GROWTH_SOCIAL_POST_METRICS_JOB_NAME",
+    "GROWTH_SOCIAL_REPLY_DRAFTS_JOB_NAME",
     "GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME",
     "GROWTH_DISPATCH_JOB_NAME",
     "GROWTH_QUEUE_NAME",

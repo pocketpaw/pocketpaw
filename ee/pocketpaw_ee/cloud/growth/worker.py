@@ -1,18 +1,19 @@
 # ee/pocketpaw_ee/cloud/growth/worker.py — arq worker for the dedicated
 # ``growth`` queue.
 #
-# One job and six crons. ``growth.dispatch`` delivers a draft whose
+# One job and seven crons. ``growth.dispatch`` delivers a draft whose
 # ``_growth_send`` proposal a human approved (the approval is the only producer
 # of the job): email through ``email_dispatch``, WhatsApp through ``whatsapp``
 # (hard opt-in guard and hourly cap), LinkedIn stays manual and only logs. The
 # crons, all ``unique=True`` so a scaled fleet runs each tick once, in UTC:
 # 05:00 the Pulse refresh, 05:30 the Growth › Social daily X drafts (drafts
-# only, never posts), 06:00 discovery, 06:30 the daily copy of each product
-# repo's stars and traffic, 07:00 the Growth › Social post metrics (reads
-# Postiz and X, never writes to X), 13:00 the follow-up sweep (proposes, never
-# sends). The worker process never runs ``cloud.__init__``'s wiring, so the
-# Pulse, daily-drafts, repo-metrics and post-metrics jobs install their
-# production fns when missing.
+# only, never posts), 05:45 the Growth › Social reply cards (drafts only,
+# people post them by hand from an intent link), 06:00 discovery, 06:30 the
+# daily copy of each product repo's stars and traffic, 07:00 the Growth › Social
+# post metrics (reads Postiz and X, never writes to X), 13:00 the follow-up
+# sweep (proposes, never sends). The worker process never runs
+# ``cloud.__init__``'s wiring, so the Pulse, daily-drafts, reply-drafts,
+# repo-metrics and post-metrics jobs install their production fns when missing.
 #
 # Growth gets its OWN queue and worker process so a burst of outbound work can
 # never starve interactive chat runs. Enqueue with
@@ -50,6 +51,7 @@ from pocketpaw_ee.cloud.growth.domain import (
     GROWTH_QUEUE_NAME,
     GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME,
     GROWTH_SOCIAL_POST_METRICS_JOB_NAME,
+    GROWTH_SOCIAL_REPLY_DRAFTS_JOB_NAME,
     GROWTH_SOCIAL_REPO_METRICS_JOB_NAME,
 )
 from pocketpaw_ee.cloud.growth.followups import (
@@ -84,6 +86,21 @@ async def social_daily_drafts(ctx: dict[str, Any]) -> dict[str, int]:
     if changes.resolve_changes_fn() is None:
         changes.set_production_changes_fn(changes.github_changes)
     return await run_daily_drafts()
+
+
+async def social_reply_drafts(ctx: dict[str, Any]) -> dict[str, int]:
+    """Draft X reply cards for every Growth › Social product watching handles or searches.
+    Drafts only: a person posts each card by hand from its intent link.
+
+    Installs the production reply drafter and GitHub changes fns when missing."""
+    from pocketpaw_ee.cloud.growth.social import changes, replies
+    from pocketpaw_ee.cloud.growth.social.service import run_reply_drafts
+
+    if replies.resolve_reply_draft_fn() is None:
+        replies.set_production_reply_draft_fn(replies.agent_draft_replies)
+    if changes.resolve_changes_fn() is None:
+        changes.set_production_changes_fn(changes.github_changes)
+    return await run_reply_drafts()
 
 
 async def social_repo_metrics(ctx: dict[str, Any]) -> dict[str, int]:
@@ -307,6 +324,15 @@ class WorkerSettings:
             name=GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME,
             hour=5,
             minute=30,
+            unique=True,
+            run_at_startup=False,
+        ),
+        # Reply cards at 05:45 UTC: drafts replies to watched X posts; never posts.
+        cron(
+            social_reply_drafts,
+            name=GROWTH_SOCIAL_REPLY_DRAFTS_JOB_NAME,
+            hour=5,
+            minute=45,
             unique=True,
             run_at_startup=False,
         ),

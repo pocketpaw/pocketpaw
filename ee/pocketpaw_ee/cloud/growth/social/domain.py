@@ -17,7 +17,10 @@
 # drafting sweep; an idea's ``source`` says whether a person or that sweep
 # asked for it, and its ``post_ids`` are the Postiz posts made from it.
 # ``METRIC_AGE_BUCKETS`` are the post ages (days) a ``PostMetrics`` snapshot of
-# a published X post is taken at.
+# a published X post is taken at. Reply cards: ``ReplyCandidate`` is an X post
+# found to reply to, ``GeneratedReply`` a drafted reply, ``ReplyCard`` the stored
+# card (never posted by the server); the ``REPLY_*`` / ``MAX_REPLY_*`` constants
+# bound a profile's reply settings.
 
 from __future__ import annotations
 
@@ -54,6 +57,7 @@ IdeaFormat = Literal[
 Platform = Literal["x", "reddit"]
 IdeaStatus = Literal["new", "approved", "skipped"]
 IdeaSource = Literal["manual", "daily"]
+ReplyStatus = Literal["new", "posted", "skipped"]
 
 IDEA_FORMATS: tuple[str, ...] = get_args(IdeaFormat)
 PLATFORMS: tuple[str, ...] = get_args(Platform)
@@ -142,6 +146,13 @@ DEFAULT_IDEA_COUNT = 6
 DAILY_SLOT_HOURS_UTC: tuple[int, ...] = (14, 17)
 DAILY_DRAFTS_PER_DAY = 2
 METRIC_AGE_BUCKETS: tuple[int, ...] = (1, 3, 7, 28)
+# Reply cards: per-profile settings bounds and the X post length.
+REPLY_CARDS_PER_DAY_DEFAULT = 15
+MAX_REPLY_CARDS_PER_DAY = 25
+MAX_REPLY_WATCH_HANDLES = 30
+MAX_REPLY_QUERIES = 5
+MAX_REPLY_QUERY_CHARS = 200
+MAX_REPLY_CHARS = 280
 MAX_IDEA_COUNT = 12
 
 
@@ -189,6 +200,9 @@ class SocialProfile:
     active: bool = False
     weekly_post_quota: int = 5
     github_repos: tuple[str, ...] = ()
+    reply_watch_handles: tuple[str, ...] = ()
+    reply_queries: tuple[str, ...] = ()
+    reply_cards_per_day: int = REPLY_CARDS_PER_DAY_DEFAULT
 
     def has_description(self) -> bool:
         return any((self.description.get(key) or "").strip() for key in DESCRIPTION_FIELDS)
@@ -279,3 +293,42 @@ class PostMetrics:
     quotes: int = 0
     bookmarks: int = 0
     captured_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class ReplyCandidate:
+    """A recent X post someone might reply to, as read from X."""
+
+    post_id: str
+    author: str
+    text: str
+    url: str
+
+
+@dataclass(frozen=True)
+class GeneratedReply:
+    """One reply as the drafting agent proposed it, before it is checked and stored."""
+
+    post_id: str
+    text: str
+    why: str = ""
+
+
+@dataclass(frozen=True)
+class ReplyCard:
+    """A stored reply card. A person posts it by hand from ``intent_url``, or skips it."""
+
+    id: str
+    workspace_id: str
+    profile_id: str
+    target_post_id: str
+    platform: str = "x"
+    target_url: str = ""
+    author: str = ""
+    context: str = ""
+    draft_text: str = ""
+    intent_url: str = ""
+    why: str = ""
+    status: str = "new"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
