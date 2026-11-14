@@ -115,5 +115,41 @@
     "tests": [
       "tests/cloud/growth/social/test_accounts.py"
     ]
+  },
+  {
+    "label": "draft-check: an en dash slips through",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
+    "find": "_DASHES = (\"\\u2014\", \"\\u2013\")",
+    "replace": "_DASHES = (\"\\u2014\",)",
+    "tests": [
+      "tests/cloud/growth/social/test_draft_check.py"
+    ]
+  },
+  {
+    "label": "draft-check: an invented number passes",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/ideas.py",
+    "find": "            if not re.search(rf\"(?<!\\d){re.escape(token)}(?!\\d)\", source_text):\n",
+    "replace": "            if False:\n",
+    "tests": [
+      "tests/cloud/growth/social/test_draft_check.py"
+    ]
+  },
+  {
+    "label": "draft-check: a PR outside the merged window is kept",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/changes.py",
+    "find": "if isinstance(pr, dict) and _at_or_after(pr.get(\"merged_at\"), since):",
+    "replace": "if isinstance(pr, dict):",
+    "tests": [
+      "tests/cloud/growth/social/test_draft_check.py"
+    ]
+  },
+  {
+    "label": "draft-check: a draft release is kept",
+    "file": "ee/pocketpaw_ee/cloud/growth/social/changes.py",
+    "find": "if isinstance(rel, dict) and not rel.get(\"draft\"):",
+    "replace": "if isinstance(rel, dict):",
+    "tests": [
+      "tests/cloud/growth/social/test_draft_check.py"
+    ]
   }
 ]
