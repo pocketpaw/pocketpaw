@@ -337,20 +337,22 @@ async def test_a_refused_post_mints_no_link(w1, postiz, link_base):
     assert postiz.posted == []
 
 
-async def test_the_cloud_middleware_lets_it_through_and_logs_nothing(mongo_db):
+async def test_the_cloud_middleware_lets_it_through_and_logs_nothing(mongo_db, monkeypatch):
     """Through mount_cloud's middleware stack (CSRF, request log, auth bridge, in
     its order): no session needed, and the request log, which keeps IP and UA,
     skips /go. mount_cloud itself is not called: it installs global agent seams."""
+    from pocketpaw_ee.cloud._core import request_log
     from pocketpaw_ee.cloud._core.csrf import CSRFMiddleware
     from pocketpaw_ee.cloud._core.ee_auth_bridge import EEAuthBridgeMiddleware
-    from pocketpaw_ee.cloud._core.request_log import RequestLogMiddleware, shutdown_request_log
 
     app = FastAPI()
     app.include_router(links_router.router, prefix="/api/v1")
     app.add_api_route("/api/v1/ping", lambda: {"ok": True})
     app.add_middleware(EEAuthBridgeMiddleware)
-    app.add_middleware(RequestLogMiddleware)
+    app.add_middleware(request_log.RequestLogMiddleware)
     app.add_middleware(CSRFMiddleware)
+    logged: list[dict[str, Any]] = []
+    monkeypatch.setattr(request_log, "_log_request", lambda **entry: logged.append(entry))
     link = await _link()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
@@ -359,7 +361,5 @@ async def test_the_cloud_middleware_lets_it_through_and_logs_nothing(mongo_db):
         assert resp.headers["location"] == TARGET
         # Control: an ordinary API request IS logged, so a missing row means skipped.
         assert (await client.get("/api/v1/ping", headers=HUMAN)).status_code == 200
-    await shutdown_request_log()
-    paths = [row["path"] async for row in mongo_db["request_logs"].find({})]
-    assert paths == ["/api/v1/ping"]
+    assert [e["path"] for e in logged] == ["/api/v1/ping"]
     assert (await SocialLink.get(link.id)).clicks == 1
