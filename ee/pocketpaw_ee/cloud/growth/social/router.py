@@ -10,6 +10,7 @@
 # (the same code the growth worker's morning cron runs); it only drafts.
 # ``/replies`` lists reply cards, ``PATCH /replies/{id}`` edits one or records what
 # was done with it, and ``POST /replies/draft`` drafts them now; nothing posts.
+# ``GET /metrics/summary`` is the Today strip's pure read of stored metrics.
 # ``/experiments`` (create, list, close; no update route), ``/review`` (read-only)
 # and ``/learnings`` (list, propose, PATCH) are the learning loop; reads are
 # growth.read, writes growth.write. The
@@ -49,6 +50,7 @@ from pocketpaw_ee.cloud.growth.social.dto import (
     MakeMediaRequest,
     MakeMemeRequest,
     MemeFormatListResponse,
+    MetricsSummaryResponse,
     RefreshPulseRequest,
     ReplyDraftListResponse,
     ReplyDraftResponse,
@@ -587,6 +589,18 @@ async def list_posts(
 ) -> SocialPostListResponse:
     """Posts from the last 7 days, newest first; ``ids`` narrows to those post ids."""
     return await social_service.list_posts(ctx, profile_id, ids)
+
+
+@router.get(
+    "/metrics/summary",
+    response_model=MetricsSummaryResponse,
+    dependencies=[Depends(require_action_any_workspace("growth.read"))],
+)
+async def metrics_summary(
+    profile_id: str | None = _PROFILE_ID, ctx: RequestContext = Depends(request_context)
+) -> MetricsSummaryResponse:
+    """The Today strip: yesterday's X posts with their numbers, and the repos' last 14 days."""
+    return await social_service.metrics_summary(ctx, profile_id)
 
 
 @router.get(
