@@ -344,6 +344,9 @@ def _idea_to_domain(doc: _IdeaDoc) -> SocialIdea:
         published_url=doc.published_url,
         published_at=doc.published_at,
         x_post_id=doc.x_post_id,
+        pillar=doc.pillar,
+        hook_type=doc.hook_type,
+        experiment_id=doc.experiment_id,
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
     )
@@ -374,6 +377,9 @@ def _idea_to_response(i: SocialIdea) -> SocialIdeaResponse:
         published_url=i.published_url,
         published_at=iso_utc(i.published_at),
         x_post_id=i.x_post_id,
+        pillar=i.pillar,
+        hook_type=i.hook_type,
+        experiment_id=i.experiment_id,
         created_at=iso_utc(i.created_at),
         updated_at=iso_utc(i.updated_at),
     )
@@ -647,6 +653,8 @@ async def generate_ideas(
             hashtags=list(item.hashtags),
             platform=item.platform,
             subreddit=item.subreddit,
+            pillar=item.pillar,
+            hook_type=item.hook_type,
             status="new",
         )
         await idea.insert()
@@ -806,6 +814,8 @@ async def _draft_daily(
             script=list(item.script),
             hashtags=list(item.hashtags),
             platform="x",
+            pillar=item.pillar,
+            hook_type=item.hook_type,
             status="new",
             source="daily",
             suggested_at=slot,
@@ -1295,7 +1305,17 @@ async def update_idea(
         if not poster:
             raise ValidationError("social.poster_invalid", "That poster is not a usable SVG")
         doc.poster_svg = poster
-    fields = ("status", "hook", "on_screen_text", "caption", "script", "hashtags", "media_choice")
+    fields = (
+        "status",
+        "hook",
+        "on_screen_text",
+        "caption",
+        "script",
+        "hashtags",
+        "media_choice",
+        "pillar",
+        "hook_type",
+    )
     for name in fields:
         value = getattr(body, name)
         if value is not None:

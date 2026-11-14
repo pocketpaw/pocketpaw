@@ -18,7 +18,8 @@
 # deduped ignoring case), ``reply_queries`` (at most 5, each trimmed and at most
 # 200 characters) and ``reply_cards_per_day`` (1..25, default 15). A reply edit
 # needs ``draft_text`` (at most 280 characters) and/or ``status``. Idea edits need at
-# least one field; script beats and hashtags are trimmed and capped. A post
+# least one field; script beats and hashtags are trimmed and capped, and the
+# ``pillar`` / ``hook_type`` tags are trimmed and cut to 40 characters. A post
 # names 1–10 distinct accounts and trimmed, non-empty content of at most 10000
 # characters, plus up to 25 thread parts held to the same rule and up to 4
 # media items; whether the media is public and unmixed is the service's check,
@@ -54,6 +55,7 @@ from pocketpaw_ee.cloud.growth.social.domain import (
     ReplyStatus,
     SocialRole,
     TeamSize,
+    clean_tag,
 )
 
 MAX_SCRIPT_BEATS = 12
@@ -292,6 +294,13 @@ class UpdateIdeaRequest(BaseModel):
     hashtags: list[str] | None = Field(default=None, max_length=50)
     poster_svg: str | None = Field(default=None, min_length=1, max_length=2_000_000)
     media_choice: Literal["poster", "reel"] | None = None
+    pillar: str | None = Field(default=None, max_length=200)
+    hook_type: str | None = Field(default=None, max_length=200)
+
+    @field_validator("pillar", "hook_type")
+    @classmethod
+    def _tag(cls, v: str | None) -> str | None:
+        return clean_tag(v) if v is not None else v
 
     @field_validator("hook")
     @classmethod
@@ -317,7 +326,7 @@ class UpdateIdeaRequest(BaseModel):
         ):
             raise ValueError(
                 "provide at least one of status / hook / on_screen_text / caption / "
-                "script / hashtags"
+                "script / hashtags / pillar / hook_type"
             )
         return self
 
@@ -346,6 +355,9 @@ class SocialIdeaResponse(BaseModel):
     published_url: str
     published_at: str | None
     x_post_id: str
+    pillar: str = ""
+    hook_type: str = ""
+    experiment_id: str = ""
     created_at: str | None
     updated_at: str | None
 

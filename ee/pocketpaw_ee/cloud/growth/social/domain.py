@@ -154,6 +154,13 @@ MAX_REPLY_QUERIES = 5
 MAX_REPLY_QUERY_CHARS = 200
 MAX_REPLY_CHARS = 280
 MAX_IDEA_COUNT = 12
+# Idea tags (``pillar``, ``hook_type``): short free text the weekly review averages over.
+MAX_TAG_CHARS = 40
+
+
+def clean_tag(value: object) -> str:
+    """A tag trimmed, inner whitespace squashed, capped at ``MAX_TAG_CHARS``."""
+    return " ".join(value.split())[:MAX_TAG_CHARS] if isinstance(value, str) else ""
 
 
 @dataclass(frozen=True)
@@ -241,6 +248,9 @@ class SocialIdea:
     published_url: str = ""
     published_at: datetime | None = None
     x_post_id: str = ""
+    pillar: str = ""
+    hook_type: str = ""
+    experiment_id: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -258,6 +268,8 @@ class GeneratedIdea:
     hashtags: tuple[str, ...] = ()
     platform: str = ""
     subreddit: str = ""
+    pillar: str = ""
+    hook_type: str = ""
 
 
 @dataclass(frozen=True)
