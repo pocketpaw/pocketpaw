@@ -156,6 +156,8 @@ MAX_ICP_MAX_PER_RUN = 100
 GROWTH_DISCOVERY_SWEEP_JOB_NAME = "growth.discovery_sweep"
 # The daily Pulse refresh (Growth › Social and hunt market pulses someone used this week).
 GROWTH_PULSE_SWEEP_JOB_NAME = "growth.pulse_sweep"
+# The daily copy of each Growth › Social product repo's stars, forks and traffic.
+GROWTH_SOCIAL_REPO_METRICS_JOB_NAME = "growth.social_repo_metrics"
 # The daily sweep that records published X posts and snapshots their metrics (reads only).
 GROWTH_SOCIAL_POST_METRICS_JOB_NAME = "growth.social_post_metrics"
 # The morning sweep that drafts X reply cards (drafts only; people post them by hand).
@@ -424,6 +426,7 @@ __all__ = [
     "GATE_OWNED_TARGETS",
     "GROWTH_DISCOVERY_SWEEP_JOB_NAME",
     "GROWTH_PULSE_SWEEP_JOB_NAME",
+    "GROWTH_SOCIAL_REPO_METRICS_JOB_NAME",
     "GROWTH_SOCIAL_POST_METRICS_JOB_NAME",
     "GROWTH_SOCIAL_REPLY_DRAFTS_JOB_NAME",
     "GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME",

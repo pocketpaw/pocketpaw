@@ -1,18 +1,19 @@
 # ee/pocketpaw_ee/cloud/growth/worker.py — arq worker for the dedicated
 # ``growth`` queue.
 #
-# One job and six crons. ``growth.dispatch`` delivers a draft whose
+# One job and seven crons. ``growth.dispatch`` delivers a draft whose
 # ``_growth_send`` proposal a human approved (the approval is the only producer
 # of the job): email through ``email_dispatch``, WhatsApp through ``whatsapp``
 # (hard opt-in guard and hourly cap), LinkedIn stays manual and only logs. The
 # crons, all ``unique=True`` so a scaled fleet runs each tick once, in UTC:
 # 05:00 the Pulse refresh, 05:30 the Growth › Social daily X drafts (drafts
-# only, never posts), 05:45 the Growth › Social reply cards (drafts only, people
-# post them by hand from an intent link), 06:00 discovery, 07:00 the Growth › Social post metrics
-# (reads Postiz and X, never writes to X), 13:00 the follow-up sweep (proposes,
-# never sends). The worker process never runs ``cloud.__init__``'s wiring, so
-# the Pulse, daily-drafts, reply-drafts and post-metrics jobs install their production fns
-# when missing.
+# only, never posts), 05:45 the Growth › Social reply cards (drafts only,
+# people post them by hand from an intent link), 06:00 discovery, 06:30 the
+# daily copy of each product repo's stars and traffic, 07:00 the Growth › Social
+# post metrics (reads Postiz and X, never writes to X), 13:00 the follow-up
+# sweep (proposes, never sends). The worker process never runs
+# ``cloud.__init__``'s wiring, so the Pulse, daily-drafts, reply-drafts,
+# repo-metrics and post-metrics jobs install their production fns when missing.
 #
 # Growth gets its OWN queue and worker process so a burst of outbound work can
 # never starve interactive chat runs. Enqueue with
@@ -51,6 +52,7 @@ from pocketpaw_ee.cloud.growth.domain import (
     GROWTH_SOCIAL_DAILY_DRAFTS_JOB_NAME,
     GROWTH_SOCIAL_POST_METRICS_JOB_NAME,
     GROWTH_SOCIAL_REPLY_DRAFTS_JOB_NAME,
+    GROWTH_SOCIAL_REPO_METRICS_JOB_NAME,
 )
 from pocketpaw_ee.cloud.growth.followups import (
     GROWTH_FOLLOWUP_SWEEP_JOB_NAME,
@@ -99,6 +101,18 @@ async def social_reply_drafts(ctx: dict[str, Any]) -> dict[str, int]:
     if changes.resolve_changes_fn() is None:
         changes.set_production_changes_fn(changes.github_changes)
     return await run_reply_drafts()
+
+
+async def social_repo_metrics(ctx: dict[str, Any]) -> dict[str, int]:
+    """Store yesterday's stars, forks and traffic for every active product's repos.
+
+    Installs the production GitHub reader when missing, like ``pulse_sweep``."""
+    from pocketpaw_ee.cloud.growth.social import repo_metrics
+    from pocketpaw_ee.cloud.growth.social.service import run_repo_metrics
+
+    if repo_metrics.resolve_repo_metrics_fn() is None:
+        repo_metrics.set_production_repo_metrics_fn(repo_metrics.github_repo_metrics)
+    return await run_repo_metrics()
 
 
 async def social_post_metrics(ctx: dict[str, Any]) -> dict[str, int]:
@@ -283,6 +297,15 @@ class WorkerSettings:
             name=GROWTH_PULSE_SWEEP_JOB_NAME,
             hour=5,
             minute=0,
+            unique=True,
+            run_at_startup=False,
+        ),
+        # Yesterday's repo stars and traffic at 06:30 UTC (GitHub keeps traffic 14 days only).
+        cron(
+            social_repo_metrics,
+            name=GROWTH_SOCIAL_REPO_METRICS_JOB_NAME,
+            hour=6,
+            minute=30,
             unique=True,
             run_at_startup=False,
         ),

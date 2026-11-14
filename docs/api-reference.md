@@ -10475,6 +10475,29 @@ refresh, so drafts read a fresh Pulse. It needs the growth worker
 (`POCKETPAW_GROWTH_WORKER_ENABLED`); one failing product never stops the
 others.
 
+#### Daily repo metrics
+
+GitHub keeps repo traffic for 14 days only, so the growth worker keeps its own
+copy. Every day at 06:30 UTC (`growth.social_repo_metrics`) it reads each
+`github_repos` slug of every `active` product and stores one row per workspace,
+repo and day in `growth_social_repo_metrics`:
+
+- `day` is yesterday in UTC (`YYYY-MM-DD`), the last complete day.
+- `stars` and `forks` are read at capture time.
+- `views`, `uniques`, `clones` and `clone_uniques` are that day's traffic, 0 when
+  GitHub lists no entry for it.
+- `referrers` is GitHub's rolling 14-day top list (`referrer`, `count`,
+  `uniques`) as of capture, not a per-day figure.
+- `traffic_available` is false when traffic could not be read. Traffic needs
+  `POCKETPAW_GROWTH_GITHUB_TOKEN` with push access to the repo; without it,
+  stars and forks are still stored and the traffic fields are 0.
+
+Each repo is read once per run. A rerun on the same day refreshes that day's row
+instead of adding one. If the rerun cannot read traffic, the traffic an earlier run
+stored is kept. A repo that cannot be read is skipped (no row) and the
+others still run. There is no route yet; the rows feed the Today strip and the
+weekly review later.
+
 #### Post metrics (07:00 UTC cron)
 
 The growth worker's `growth.social_post_metrics` job runs daily at 07:00 UTC.
