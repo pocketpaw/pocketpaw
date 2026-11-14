@@ -394,7 +394,10 @@ async def test_unpublished_or_non_x_ideas_are_left_alone(mongo_db: Any):
 
 
 @pytest.mark.asyncio
-async def test_without_postiz_the_sweep_still_snapshots_known_posts(mongo_db: Any):
+async def test_without_postiz_the_sweep_still_snapshots_known_posts(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(social_service, "resolve_postiz", lambda: None)
     now = _now()
     await _idea(post_ids=["p-x"])  # needs Postiz to be found; skipped quietly
     await _published("w1", "555", timedelta(days=7, hours=1), now)
