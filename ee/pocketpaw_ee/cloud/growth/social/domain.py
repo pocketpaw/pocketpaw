@@ -120,6 +120,9 @@ class SocialProfile:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     characters: tuple[dict[str, str], ...] = ()
+    active: bool = False
+    weekly_post_quota: int = 5
+    github_repos: tuple[str, ...] = ()
 
     def has_description(self) -> bool:
         return any((self.description.get(key) or "").strip() for key in DESCRIPTION_FIELDS)

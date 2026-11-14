@@ -10283,9 +10283,19 @@ other route `growth.write` (both MEMBER).
   "analyzed_at": "2026-10-06T10:00:00+00:00",
   "onboarding_completed_at": null,
   "created_at": "2026-10-06T09:58:00+00:00",
-  "updated_at": "2026-10-06T10:00:00+00:00"
+  "updated_at": "2026-10-06T10:00:00+00:00",
+  "characters": [],
+  "active": false,
+  "weekly_post_quota": 5,
+  "github_repos": ["acme/web"]
 }
 ```
+
+`active`, `weekly_post_quota` and `github_repos` are the product registry the
+daily drafting job reads: a profile drafts only while `active` is `true`
+(default `false`, so an existing profile never starts drafting on its own),
+up to `weekly_post_quota` posts a week (default `5`), with `github_repos`
+(`owner/name`) as source material.
 
 Enums: `team_size` is `solo | 2_10 | 11_50 | 51_200 | 200_plus`;
 `monthly_revenue` is `pre_revenue | under_1k | 1k_10k | 10k_50k | 50k_250k |
@@ -10305,6 +10315,13 @@ description field is at most 2000 characters, the names 120, `category` 60.
 `website` is trimmed and gets `https://` when typed bare (`acme.com` →
 `https://acme.com`); anything that is still not an `http(s)` address with a
 dotted host is a 422. An enum value outside the lists above is a 422.
+
+`active` is a boolean. `weekly_post_quota` is an integer from 0 to 21
+inclusive. `github_repos` is a list of GitHub slugs (`owner/name`, matching
+`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`); each item is trimmed, duplicates are
+dropped keeping the first, and more than 5 left after that is a 422, as is
+a malformed slug or a quota outside 0 to 21. An explicit `null` on any of
+the three resets it to its default (`false`, `5`, `[]`).
 
 `analysis` is a hand edit from the Brand page, in the same shape as the
 response's `analysis`. Only the editable fields you send are replaced

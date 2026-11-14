@@ -11,11 +11,14 @@
 # ``logo_url``, with lists capped at 20 items of 300 characters and strings
 # at 2000. ``website`` is trimmed and gets ``https://`` when typed bare;
 # anything that is not then an http(s) URL with a host is a 422. ``category``
-# is free text up to 60 characters. Idea edits need at least one field; script
-# beats and hashtags are trimmed and capped.
+# is free text up to 60 characters. ``active`` / ``weekly_post_quota`` (0..21) /
+# ``github_repos`` (at most 5 ``owner/name`` slugs, trimmed and deduped in
+# order) reset to their defaults on an explicit ``null``. Idea edits need at
+# least one field; script beats and hashtags are trimmed and capped.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -38,6 +41,9 @@ from pocketpaw_ee.cloud.growth.social.domain import (
 MAX_SCRIPT_BEATS = 12
 MAX_HASHTAGS = 15
 MAX_ANALYSIS_ITEMS = 20
+MAX_GITHUB_REPOS = 5
+MAX_WEEKLY_POST_QUOTA = 21
+_GITHUB_REPO = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 
 _AnalysisItem = Annotated[str, StringConstraints(max_length=300)]
 _AnalysisList = Annotated[list[_AnalysisItem], Field(max_length=MAX_ANALYSIS_ITEMS)]
@@ -110,7 +116,8 @@ class AnalysisPatch(BaseModel):
 class UpsertProfileRequest(BaseModel):
     """Partial upsert of the typed profile fields. Omitted means "leave as-is";
     an explicit ``null`` clears a nullable field (``owner_name`` /
-    ``company_name`` clear to ``""``)."""
+    ``company_name`` clear to ``""``; ``active``, ``weekly_post_quota`` and
+    ``github_repos`` reset to ``False`` / ``5`` / ``[]``)."""
 
     owner_name: str | None = Field(default=None, max_length=120)
     company_name: str | None = Field(default=None, max_length=120)
@@ -122,6 +129,25 @@ class UpsertProfileRequest(BaseModel):
     business_model: BusinessModel | None = None
     category: str | None = Field(default=None, max_length=60)
     analysis: AnalysisPatch | None = None
+    active: bool | None = None
+    weekly_post_quota: int | None = Field(default=None, ge=0, le=MAX_WEEKLY_POST_QUOTA)
+    github_repos: list[str] | None = None
+
+    @field_validator("github_repos")
+    @classmethod
+    def _repos(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        out: list[str] = []
+        for raw in v:
+            slug = raw.strip()
+            if not _GITHUB_REPO.match(slug):
+                raise ValueError("github_repos items must look like owner/name")
+            if slug not in out:
+                out.append(slug)
+        if len(out) > MAX_GITHUB_REPOS:
+            raise ValueError(f"at most {MAX_GITHUB_REPOS} github_repos")
+        return out
 
     @field_validator("website")
     @classmethod
@@ -186,6 +212,9 @@ class SocialProfileResponse(BaseModel):
     created_at: str | None
     updated_at: str | None
     characters: list[CharacterResponse] = Field(default_factory=list)
+    active: bool
+    weekly_post_quota: int
+    github_repos: list[str]
 
 
 class GenerateIdeasRequest(BaseModel):

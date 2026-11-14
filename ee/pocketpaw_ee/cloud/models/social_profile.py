@@ -2,7 +2,10 @@
 # profile. A workspace may hold several (one per brand it posts for), each
 # holding what the
 # setup wizard typed (owner, company, website, the six description fields, the
-# business-shape enums) and the latest website analysis.
+# business-shape enums) and the latest website analysis. ``active``,
+# ``weekly_post_quota`` and ``github_repos`` are the product registry the daily
+# drafting job reads: which profiles draft, how many posts a week, and which
+# repos feed them. ``active`` defaults off so no profile starts drafting unasked.
 #
 # ``description`` and ``analysis`` are plain dicts, shaped and validated by
 # ``growth.social.dto`` on the way in and out. Only ``ee.cloud.growth.social.
@@ -36,6 +39,9 @@ class SocialProfile(TimestampedDocument):
     analyzed_at: datetime | None = None
     onboarding_completed_at: datetime | None = None
     characters: list[dict] = Field(default_factory=list)
+    active: bool = False
+    weekly_post_quota: int = 5
+    github_repos: list[str] = Field(default_factory=list)
 
     class Settings:
         name = "growth_social_brands"

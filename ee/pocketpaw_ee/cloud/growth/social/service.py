@@ -12,7 +12,9 @@
 #
 # A PUT may carry a hand-edited ``analysis``: only the editable fields sent are
 # replaced (``pages_read`` / ``logo_url`` stay server-owned), ``analyzed_at`` is
-# untouched, and a ``none`` / ``failed`` status becomes ``ready``.
+# untouched, and a ``none`` / ``failed`` status becomes ``ready``. The product
+# registry fields (``active``, ``weekly_post_quota``, ``github_repos``) are set
+# only when sent; an explicit ``null`` resets one to its default.
 #
 # Analysis runs in-request, like ``growth.service.preview_icp``: 503 when no
 # ``AnalyzeFn`` is installed, then 404 (no profile), then 422 (neither website
@@ -156,6 +158,9 @@ def _profile_to_domain(doc: _ProfileDoc) -> SocialProfile:
         created_at=doc.createdAt,
         updated_at=doc.updatedAt,
         characters=tuple(dict(c) for c in (doc.characters or [])),
+        active=doc.active,
+        weekly_post_quota=doc.weekly_post_quota,
+        github_repos=tuple(doc.github_repos or ()),
     )
 
 
@@ -183,6 +188,9 @@ def _profile_to_response(p: SocialProfile) -> SocialProfileResponse:
         created_at=iso_utc(p.created_at),
         updated_at=iso_utc(p.updated_at),
         characters=[CharacterResponse(**c) for c in p.characters],
+        active=p.active,
+        weekly_post_quota=p.weekly_post_quota,
+        github_repos=list(p.github_repos),
     )
 
 
@@ -302,6 +310,13 @@ def _apply_upsert(doc: _ProfileDoc, body: UpsertProfileRequest) -> None:
         doc.description = merged
     if "analysis" in sent and body.analysis is not None:
         _apply_analysis_edit(doc, body.analysis)
+    # Not in the loops above: ``False`` / ``0`` are real values, not "clear".
+    if "active" in sent:
+        doc.active = bool(body.active)
+    if "weekly_post_quota" in sent:
+        doc.weekly_post_quota = 5 if body.weekly_post_quota is None else body.weekly_post_quota
+    if "github_repos" in sent:
+        doc.github_repos = list(body.github_repos or [])
 
 
 def _apply_analysis_edit(doc: _ProfileDoc, patch: AnalysisPatch) -> None:
