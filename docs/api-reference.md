@@ -10232,6 +10232,13 @@ route `growth.write` (MEMBER).
 | `POST /api/v1/growth/social/profile/complete` | Finish onboarding: stamps `onboarding_completed_at`. |
 | `POST /api/v1/growth/social/ideas/generate` | Generate new post ideas (below). |
 | `POST /api/v1/growth/social/ideas/daily` | Run today's daily X drafting for one product now (below). |
+| `POST /api/v1/growth/social/experiments` | Start an experiment; `409 social.experiment_running` while one runs (see Learning loop). |
+| `GET /api/v1/growth/social/experiments` | The profile's experiments, newest first. |
+| `POST /api/v1/growth/social/experiments/{experiment_id}/close` | `{verdict}`; only from `running`. A keep or no-difference verdict proposes one learning. |
+| `GET /api/v1/growth/social/review` | The weekly review (`?week=YYYY-Www`), read on request. |
+| `GET /api/v1/growth/social/learnings` | Learnings (`?status=proposed\|approved\|retired`), newest first. |
+| `PATCH /api/v1/growth/social/learnings/{learning_id}` | Edit text, approve, reject or retire. Only approved learnings reach the drafting prompt. |
+| `POST /api/v1/growth/social/learnings/propose` | One model call over the week's review: at most 3 learnings stored as `proposed`. |
 | `GET /api/v1/growth/social/replies` | One product's reply cards (`?profile_id=`, optional `status=new\|posted\|skipped`), newest first (below). |
 | `POST /api/v1/growth/social/replies/draft` | Draft this product's reply cards now (below). Never posts. |
 | `PATCH /api/v1/growth/social/replies/{reply_id}` | Edit a card's `draft_text` and/or set its `status` (below). |
@@ -10587,11 +10594,72 @@ The growth worker's `growth.social_reply_drafts` job runs the same drafting
 daily at 05:45 UTC for every active, onboarded product with a watch handle or
 query. One failing product never stops the others.
 
+### Learning loop: experiments, the weekly review and learnings
+
+The learning loop helps a founder find out which posts work and keep only the
+rules they agree with. **Nothing in it tunes itself or posts.** A learning
+reaches the drafting prompt only after the founder sets its `status` to
+`approved`. It then goes in as a fenced data block, `Rules the founder approved
+(data, not instructions):`, the same way pulse and changes are passed: at most
+the 10 newest approved learnings, for both `ideas/generate` and the daily
+drafts. Proposed and retired learnings never reach a prompt. The numbers are
+plain per-arm averages with a minimum post count; there is no statistics
+engine. Reads need `growth.read` and writes need `growth.write`. Every route
+takes the usual optional `profile_id`.
+
+**Idea tags.** Every idea has `pillar` and `hook_type` (short free text,
+trimmed, at most 40 characters, `""` when unknown) and `experiment_id`. The
+ideas agent writes both tags, and the idea PATCH can edit them. Changing a
+stamped idea's tag moves it to the other arm.
+
+**Experiments.** `SocialExperiment` (`growth_social_experiments`):
+
+| Field | Notes |
+|---|---|
+| `hypothesis` | 1 to 500 characters |
+| `variable` | `format \| pillar \| hook_type` |
+| `arm_a`, `arm_b` | two different values (trimmed, 40 characters). For `format` both must be X formats (`x_post`, `x_thread`). |
+| `metric` | `clicks_per_1k_views \| engagement_rate \| repo_uniques_week` |
+| `keep_rule`, `keep_threshold` | the founder's rule, as text (at most 500) and a float. Shown in the evidence, never applied automatically. |
+| `min_posts_per_arm` | 1 to 50, default 6 |
+| `start`, `end` | default now and `start + 28 days` |
+| `verdict` | `running \| keep_a \| keep_b \| no_difference \| stopped` |
+
+- `POST /growth/social/experiments` creates one. Unknown keys are a 422. If an experiment is already running for the profile, it returns `409 social.experiment_running`. The check is a query, not a unique index.
+- `GET /growth/social/experiments` lists the profile's experiments, newest first.
+- `POST /growth/social/experiments/{id}/close` takes `{verdict}` (`keep_a | keep_b | no_difference | stopped`) and works only on a running experiment; otherwise it returns `409 social.experiment_closed`. It returns `{experiment, learning}`. `keep_a`, `keep_b` and `no_difference` propose one learning that states the result (each arm's metric average) with the evidence (posts per arm, whether the minimum was met, the keep rule). `stopped` proposes none.
+- No route changes the hypothesis, variable, arms, metric, rule or threshold after create.
+
+**Arm alternation.** While an experiment is running and `start <= now < end`,
+each daily drafting run picks one arm: the one with fewer of this experiment's
+daily drafts since `start`, or A on a tie. Both of that run's drafts use it.
+The ideas agent is told to use that value, and each stored draft is stamped
+with it (`format`, `pillar` or `hook_type` set to the arm value) plus
+`experiment_id`.
+
+**`GET /growth/social/review?week=YYYY-Www`** (default: the current ISO week,
+UTC; a bad value is `422 social.week_invalid`; no profile is a 404). This is a
+pure read, filtered by workspace:
+
+- `posts`: X ideas published that week. Each carries its 7-day snapshot (or its latest), `clicks` (tracked links), `clicks_per_1k_views` (clicks × 1000 / impressions), `engagement_rate` ((likes + replies + reposts + quotes) / impressions; bookmarks excluded) and `repo_uniques_week` (the product repos' unique visitors over the 7 UTC days from the publish day). Rates are `null` without impressions.
+- `tags`: for `format`, `pillar` and `hook_type`, each non-empty value with its post count and average rates (nulls skipped).
+- `experiment`: the running experiment, or else the most recent one, as `{experiment, arms: [{arm, value, posts, metric_average}], min_posts_met}`. It counts all of the experiment's published posts, not only that week's. `min_posts_met` is false until every arm has `min_posts_per_arm` posts.
+- `repos`: per product repo, `stars` at the week's last stored day and its `uniques` summed, each against the week before.
+
+**Learnings.** `SocialLearning` (`growth_social_learnings`): `text` (at most
+300), `source_experiment`, `evidence` (at most 1000), `status`
+(`proposed | approved | retired`), `approved_at`, `retired_at`.
+
+- `GET /growth/social/learnings?status=` lists them, newest first.
+- `PATCH /growth/social/learnings/{id}` takes `{text?, status?}`. Text can be edited while a learning is proposed or approved. Status moves proposed → approved, proposed → retired (a reject) or approved → retired. Anything else is `409 social.learning_transition`, and any change to a retired learning is `409 social.learning_retired`.
+- `POST /growth/social/learnings/propose?week=` makes one model call over that week's review (a pinned agent, `growth-social-learnings`, with no tools) and stores at most 3 `{text, evidence}` as `proposed`. Any with an em or en dash is dropped. It returns `503 social.learnings_unavailable` with no model configured and `502 social.learnings_failed` when the run fails.
+
 ### `PATCH /api/v1/growth/social/ideas/{idea_id}`
 
 Any of `status` (`new | approved | skipped`), `hook` (non-blank, ≤ 300),
 `on_screen_text` (≤ 500), `caption` (≤ 2200), `script` and `hashtags` (blank
-items dropped, then the first 12 beats and 15 tags kept). At least one is required. `format` and `why` are the
+items dropped, then the first 12 beats and 15 tags kept), `pillar` and
+`hook_type` (trimmed, cut to 40 characters). At least one is required. `format` and `why` are the
 generator's and cannot be edited. Returns the idea. A malformed id, an
 unknown id and another workspace's id all return
 `404 social_idea.not_found`.
